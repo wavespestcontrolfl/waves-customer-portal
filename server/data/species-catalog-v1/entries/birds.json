@@ -1,0 +1,336 @@
+[
+  {
+    "slug": "muscovy-duck",
+    "kind": "organism",
+    "common_name": "Muscovy Duck",
+    "aka": [],
+    "aliases": [
+      "muscovy duck",
+      "muscovy ducks",
+      "cairina moschata"
+    ],
+    "scientific_name": "Cairina moschata",
+    "rank": "species",
+    "group": "birds",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large duck, males up to 15 pounds, mostly black with an iridescent green sheen and bold white wing patches",
+      "Bare, warty red-and-black facial skin with a fleshy knob at the base of the bill",
+      "Waddles boldly around ponds, parking lots and yards, often approaching people looking for food",
+      "Leaves behind large, wet droppings on patios, docks and pool decks"
+    ],
+    "look_alikes": [
+      {
+        "slug": "burrowing-owl",
+        "difference": "Muscovy duck is large, black-and-white, found near ponds; burrowing owl is small, mottled brown, stands at a burrow entrance in dry, open ground",
+        "next_photo": "From a safe distance, zoom in on the setting (near water vs. a dry open burrow) plus overall size and color.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "pool-water"
+    ],
+    "looks": [
+      "bird"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Males can be territorial and may hiss, chase or peck if crowded, especially near a nest; give them space rather than cornering or feeding them.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Florida's feral Muscovy ducks are not a native species, and a population that's grown used to being fed around a pond can become a mess-and-territory nuisance rather than a safety issue. Not feeding them is the single best way to keep numbers manageable; a wildlife professional can help with persistent nuisance flocks.",
+      "fact": "The wild ancestor of this duck is from Central and South America; the all-black, muscled birds now seen around Florida ponds descend from domesticated stock that went feral."
+    },
+    "tech_notes": "Not a protected native waterfowl in Florida; nuisance removal/egg-and-nest management is permitted outside its native range. Advise against feeding as the primary long-term fix.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Muscovy_duck"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "No genuinely similar-looking bird exists elsewhere in this 239-entry catalog (only 3 bird slugs total, all owned by this worker), so the required look-alike pairs it with burrowing owl on setting/size/color rather than close visual resemblance; flagging this catalog gap for the owner. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "57a826d4cc9c9bd2182c34a0d0dc082dfa8676fd56fba8cc8f028e73fa7b14f0"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "woodpecker-damage",
+    "kind": "sign",
+    "common_name": "Woodpecker Damage",
+    "aka": [],
+    "aliases": [
+      "woodpecker damage",
+      "woodpecker holes",
+      "woodpecker hole"
+    ],
+    "scientific_name": "Picidae (sign)",
+    "rank": "group",
+    "group": "birds",
+    "subgroup": "protected-bird-damage",
+    "site_category": "Wildlife neighbors",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Round to oval holes, often in a neat row or cluster, drilled into wood siding, eaves, fascia boards or trim",
+      "Fresh holes show light, unweathered wood at the edges, with wood chips or sawdust sometimes scattered below",
+      "Loud, rhythmic drumming or tapping against the house, especially around dawn, often noticed before the damage is",
+      "Damage concentrates on wood siding, cedar shakes, or trim, often on the sunniest or highest side of the house"
+    ],
+    "look_alikes": [
+      {
+        "slug": "rodent-gnaw-marks",
+        "difference": "Woodpecker holes are round, drilled straight in, often high in a row; rodent gnaw marks are irregular gouges with tooth grooves, usually low",
+        "next_photo": "From a safe distance, zoom in on the hole shape (round/drilled vs. an irregular gouge) and its height/location on the structure.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "carpenter-bee",
+        "difference": "Carpenter bee holes are a single, round, pencil-width hole with a dark stain below; woodpecker holes are larger, rougher-edged and often clustered in a row.",
+        "next_photo": "From a safe distance, zoom in on one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "garage-storage"
+    ],
+    "looks": [
+      "sign",
+      "bird"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": true,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Woodpeckers are protected by federal law; the birds themselves can't be trapped or killed, so fixing this is about repair and deterrence, not removing the bird.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Repair & Deterrence",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Woodpeckers drum on houses for insects, nesting sites, or simply to mark territory, and repeated drumming in the same spot can add up to real repair costs over time. Since the bird itself is protected, the practical fix is a mix of repairing damaged wood and using visual or physical deterrents on the spot it favors.",
+      "fact": "The same spot often gets targeted again and again because the sound the wood makes, or an insect problem behind it, is what attracted the bird there in the first place."
+    },
+    "tech_notes": "Federally protected under the Migratory Bird Treaty Act; do not attempt to trap, harm, or remove active nests. Address any underlying wood-boring insect issue and use reflective or textured deterrents on favored drumming spots alongside repair.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Woodpecker",
+      "https://www.fws.gov/media/list-birds-protected-migratory-bird-treaty-act-2023",
+      "https://www.fws.gov/law/migratory-bird-treaty-act-1918"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "No standalone woodpecker organism slug exists anywhere in the 239-entry master list, only this damage sign, so sign_of self-references this slug; flagging for the owner in case a woodpecker organism entry should exist (audit item 56, acceptable for now). Federal protection confirmed directly: USFWS's official 2023 list of birds protected under the Migratory Bird Treaty Act (50 CFR 10.13) includes the woodpecker family Picidae; USFWS's own MBTA summary page confirms the Act prohibits take/possession without a permit. Per audit item 36: added a look-alike to carpenter-bee (A entry) since woodpeckers sometimes drill right at a bee hole to reach the larvae inside, a real and common confusion; A-side (carpenter-bee) should add the reciprocal look-alike. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "4aa54a67da9d99bfc6d93502e1c121aacc19dc7ffe3cca0aa37a6bf033ca3526"
+    },
+    "role": "protected_wildlife",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "burrowing-owl",
+    "kind": "organism",
+    "common_name": "Florida Burrowing Owl",
+    "aka": [],
+    "aliases": [
+      "florida burrowing owl",
+      "burrowing owl",
+      "athene cunicularia"
+    ],
+    "scientific_name": "Athene cunicularia floridana",
+    "rank": "subspecies",
+    "group": "birds",
+    "subgroup": "protected-ground-birds",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small owl, about the size of a robin, brown with white spotting on the head and wings and a pale, barred chest",
+      "Unusually long legs for an owl; often stands upright right at the mouth of its ground burrow during the day",
+      "Bobs its head and bounces on its legs when alert or alarmed",
+      "Nests in a burrow dug in open, dry, sparsely vegetated ground, often on vacant lots or open turf"
+    ],
+    "look_alikes": [
+      {
+        "slug": "muscovy-duck",
+        "difference": "Burrowing owl is small, mottled brown, and stands at a burrow entrance in dry, open ground; Muscovy duck is large, black-and-white, and found near ponds",
+        "next_photo": "From a safe distance, zoom in on the setting (near water vs. a dry open burrow) plus overall size and color.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "bird"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": true,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "This owl is a state-listed threatened species in Florida; its burrow and a protective area around it are legally protected, and it's illegal to disturb, cover, or fill in an active burrow.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Protected Species - Leave Alone",
+      "inspection_first": false,
+      "referral": "protected_leave_alone"
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A protected native owl that nests right in the ground, which makes its burrow easy to accidentally damage with mowing, digging or construction. If you spot a burrow, the right move is to mark the area and leave it undisturbed rather than filling it in or working around it.",
+      "fact": "Cape Coral is home to one of the largest urban populations of this owl anywhere in Florida, with many burrows right in ordinary residential lots and vacant parcels."
+    },
+    "tech_notes": "Never fill, mow over, or disturb an active burrow; if a burrow is in the way of planned work, this requires coordination with the state wildlife agency rather than DIY relocation.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Burrowing_owl"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Range marked 'occasional' since the known concentrations (Cape Coral, Marco Island, and other specific open lots) are geographically clustered rather than spread evenly across all five SWFL counties; within those specific areas it is closer to 'common.' Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c41a481768712a51acb025546f63e7464a737aa83b95d22ea453c7af589d5bb4"
+    },
+    "role": "protected_wildlife",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  }
+]

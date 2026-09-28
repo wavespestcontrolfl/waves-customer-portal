@@ -1,0 +1,458 @@
+[
+  {
+    "slug": "florida-bark-scorpion",
+    "kind": "organism",
+    "common_name": "Florida Bark Scorpion",
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "florida bark scorpion",
+      "centruroides gracilis"
+    ],
+    "scientific_name": "Centruroides gracilis",
+    "rank": "species",
+    "group": "scorpions-arachnids",
+    "subgroup": "stinging-scorpions",
+    "site_category": "Stingers",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender scorpion, often 3 to 4 inches long, noticeably larger than most other Florida scorpions",
+      "Color varies a lot: reddish-brown, dark brown with yellowish legs, or nearly black with reddish pincers",
+      "Long, thin tail curved up over the back, ending in a narrow stinger",
+      "Found under loose bark, in woodpiles, and sometimes climbing walls or hiding in cluttered garages"
+    ],
+    "look_alikes": [
+      {
+        "slug": "hentz-striped-scorpion",
+        "difference": "Bark scorpion is larger with variable solid coloring; Hentz striped scorpion is small, light mottled brown, with a yellow stripe down the back",
+        "next_photo": "From a safe distance, zoom in on overall size and whether a pale yellow center stripe is present.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "tailless-whip-scorpion",
+        "difference": "Bark scorpion has a long tail ending in a stinger and short front pincers; tailless whip scorpion has no tail at all and very long, thin whip-like front legs",
+        "next_photo": "A photo of the whole animal from a safe distance from above, showing whether there is a curved tail with a stinger",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "garage-storage",
+      "attic-walls",
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The sting is painful with local swelling; call 911 if someone has trouble breathing, and see a doctor for chest pain or a strong reaction, especially in a child or someone with allergies.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Florida's largest common scorpion, usually found under bark, in woodpiles or in cluttered garages and sheds. Its sting is painful but rarely dangerous for a healthy adult, and clearing clutter plus routine pest control both help keep it out of the house.",
+      "fact": "Its color can vary so much between individuals, even from the same litter, that two bark scorpions can look almost nothing alike."
+    },
+    "tech_notes": "Clear clutter/woodpiles near structure; treat cracks/crevices and exterior harborage per label. Note higher size/venom concern than most FL scorpions, especially for children/allergic individuals.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Centruroides_gracilis"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "f114c7b9493826162e14396a69db3f6bdf724733a843ed5ba06c7082554818e4"
+    }
+  },
+  {
+    "slug": "hentz-striped-scorpion",
+    "kind": "organism",
+    "common_name": "Hentz Striped Scorpion",
+    "role": "stinging_pest",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "hentz striped scorpion",
+      "striped scorpion",
+      "centruroides hentzi"
+    ],
+    "scientific_name": "Centruroides hentzi",
+    "rank": "species",
+    "group": "scorpions-arachnids",
+    "subgroup": "allergy-risk-scorpions",
+    "site_category": "Stingers",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small scorpion, usually under 1.5 inches long",
+      "Light mottled brown with a pale yellow stripe running down the center of the back",
+      "Marbled brown pattern on the pincers and legs, with plain pale undersides",
+      "Found under logs, loose bark, mulch and leaf litter rather than out in the open"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-bark-scorpion",
+        "difference": "Hentz striped scorpion is small with a pale yellow center stripe; Florida bark scorpion is larger with variable solid coloring and no stripe",
+        "next_photo": "From a safe distance, zoom in on overall size and whether a pale yellow center stripe is present.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "garage-storage",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The sting is painful, similar to a bee sting, but not medically dangerous for most people; see a doctor if you have a strong allergic reaction.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A small, common scorpion that hides under logs, bark and mulch and preys on roaches, termites and crickets around the yard. Its sting hurts but causes no lasting harm for most people, so it is usually more a nuisance than a real danger.",
+      "fact": "It helps itself to some of the same pests homeowners least want, including roaches and termites, making it an accidental ally outdoors."
+    },
+    "tech_notes": "Mild sting risk, similar to other Centruroides species but generally considered the least medically significant scorpion sting in the area. Reduce mulch/log/leaf litter harborage near structure; treat per label if indoor entry is frequent.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Centruroides_hentzi"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "11c3a074582f5bf6d7a7dbdc15e9d330f63519ec75bce373fbea0ef7c17a4535"
+    }
+  },
+  {
+    "slug": "harvestman",
+    "kind": "organism",
+    "common_name": "Harvestman (daddy longlegs)",
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "daddy longlegs",
+      "daddy long legs"
+    ],
+    "aliases": [
+      "harvestman",
+      "harvestmen",
+      "daddy longlegs",
+      "daddy long legs",
+      "opiliones"
+    ],
+    "scientific_name": "Opiliones",
+    "rank": "order",
+    "group": "scorpions-arachnids",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "One single oval-looking body with no visible narrow waist between the front and back sections",
+      "Extremely long, thin legs compared to the small body",
+      "A single pair of eyes on top of the body, unlike spiders which usually have several pairs",
+      "Walks slowly across walls, patios and garden edges instead of building a web or hunting fast"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cellar-spider",
+        "difference": "Harvestman has one fused, oval-looking body and no web; cellar spider has a small, clearly two-part body and hangs in a messy web",
+        "next_photo": "From a safe distance, photograph whether the body looks like one oval blob or two separate parts, and whether there is a web.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Not a spider at all, and harmless to people: it has no venom glands and its small claws pose no real bite risk to a person. It is a normal part of the yard that helps clean up small insects, dead organic matter and even fungi.",
+      "fact": "Despite a popular myth confusing it with cellar spiders, it has no venom at all, so the old \"world's most venomous\" story has nothing to do with this animal."
+    },
+    "tech_notes": "Not a spider (Opiliones, not Araneae); no venom glands and cannot break human skin. Harmless; no control action needed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Opiliones"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "94e3bee2679b34fb53c7febf8576212221283d7a92de1802425a6959b6a7f764"
+    }
+  },
+  {
+    "slug": "tailless-whip-scorpion",
+    "kind": "organism",
+    "common_name": "Tailless Whip Scorpion",
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "whip spider"
+    ],
+    "aliases": [
+      "tailless whip scorpion",
+      "whip spider",
+      "phrynus marginemaculatus"
+    ],
+    "scientific_name": "Phrynus marginemaculatus",
+    "rank": "species",
+    "group": "scorpions-arachnids",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Flat, crab-like body with no tail or stinger at all",
+      "A pair of extremely long, thin front legs held out like feelers, far longer than the body",
+      "Short, spiny, arm-like pincers (pedipalps) used to grab prey, not to sting",
+      "Moves sideways like a crab and hides in dark cracks, bark or under debris by day"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-bark-scorpion",
+        "difference": "Tailless whip scorpion has no tail at all and very long, thin front legs; Florida bark scorpion has a curved tail ending in a stinger and short front pincers",
+        "next_photo": "A photo of the whole animal from a safe distance from above, showing whether there is a curved tail with a stinger",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "garage-storage",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler",
+      "spider"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A strange-looking but harmless nocturnal hunter, easy to mistake for a scorpion because of its flat, crab-like shape, even though it has no stinger and no venom at all. It hides in bark, cracks and dark corners by day and helps control small insects at night.",
+      "fact": "Those extremely long front legs are not for walking; it uses them like feelers to sense its surroundings and find prey in the dark."
+    },
+    "tech_notes": "No venom; grasping pedipalps only, not a sting/bite risk to people. Harmless nocturnal predator; no control action needed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Phrynus_marginemaculatus"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "296082eef73f94f09479bdff18def71e401f3a47143ff8b0da3fd534ba1553e9"
+    }
+  }
+]

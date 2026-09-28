@@ -20,8 +20,12 @@ function completeAddress(row) {
     && /^\d+[A-Za-z-]*\s+\S/.test(row.address_line1.trim());
 }
 
+function normalizedAddressValue(value) {
+  return String(value || '');
+}
+
 function sameAddress(a, b) {
-  return ADDRESS_FIELDS.every(field => String(a?.[field] || '') === String(b?.[field] || ''));
+  return ADDRESS_FIELDS.every(field => normalizedAddressValue(a?.[field]) === normalizedAddressValue(b?.[field]));
 }
 
 function reviewAddressPatch(input) {
@@ -46,7 +50,7 @@ function pinsMatch(left, right) {
 
 function reviewAddressMatchesCustomer(customer, review) {
   return Array.isArray(review?.address_snapshot)
-    && ADDRESS_FIELDS.every((field, index) => (customer?.[field] ?? null) === (review.address_snapshot[index] ?? null));
+    && ADDRESS_FIELDS.every((field, index) => normalizedAddressValue(customer?.[field]) === normalizedAddressValue(review.address_snapshot[index]));
 }
 
 function rejectedPrimaryPin(customer, primary, storedReview) {

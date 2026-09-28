@@ -1,16 +1,22 @@
 // ============================================================
 // public-ranges.js — Agent-readable public price ranges
 // ============================================================
-// Computes a per-service low/high price range by sweeping the live
-// pricing engine across realistic residential inputs. Consumed by
-// GET /api/public/pricing-ranges (and, from there, the Astro build's
+// Computes a per-service low/high price range for a TYPICAL residential job
+// at LIST price — standard scheduling, before WaveGuard bundle discounts,
+// recurring-customer perks, and advertised waivers — by sweeping the live
+// pricing engine across realistic typical-home inputs. This is NOT an
+// envelope of every possible quote: larger or more complex properties,
+// heavier infestations, bigger scopes, and emergency/after-hours service
+// can and do quote above the published high. Consumed by GET
+// /api/public/pricing-ranges (and, from there, the Astro build's
 // /pricing.md agent-readable surface).
 //
 // Ranges are DERIVED, never hand-typed: the engine constants this module
 // reads are synced from the DB-authoritative pricing_config by db-bridge,
 // so a pricing change in /admin propagates here without a code change.
-// Owner ruling 2026-08-06: publish ranges for ALL residential services;
-// per-property exact quotes stay behind the quote calculator.
+// Owner ruling 2026-09-27: publish the range for a TYPICAL residential job
+// at LIST price, not an envelope of every possible quote. Per-property
+// exact quotes stay behind the quote calculator.
 //
 // Copy rules enforced here (owner directives):
 // - unit is "per application", never "per visit" — the only per-month
@@ -19,24 +25,28 @@
 // - commercial is custom-quoted and excluded from the sweep.
 const constants = require('./constants');
 const sp = require('./service-pricing');
+const { calculatePerimeter } = require('./property-calculator');
 
-// Base span plus every LIVE pest bracket boundary (and one past the last)
-// so admin bracket edits propagate into the sweep automatically.
-const FOOTPRINTS_BASE = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000];
-function footprintsFromBrackets() {
-  const boundaries = (constants.PEST.footprintBrackets || [])
-    .map((b) => Number(b.sqft)).filter((v) => Number.isFinite(v) && v > 0);
-  const last = boundaries.length ? Math.max(...boundaries) : 0;
-  return [...new Set([...FOOTPRINTS_BASE, ...boundaries, ...(last ? [last + 500] : [])])];
-}
-// NOTE: computed per sweep (inside buildRows / bundle pass), never at
-// module load — a post-sync bracket edit must reshape the sample grid.
-const LOTS_SQFT = [5000, 8000, 12000, 20000, 30000];
-// Confirmed measured turf above the 20,000 sq ft table maximum still
-// prices (extrapolated, provenance review only) — sweep through 30,000.
-// The public quote route accepts lots to 200,000 sq ft, so inferred turf
-// can run far past the table — sweep the extrapolated span too.
-const LAWNS_SQFT = [2000, 4000, 6000, 8000, 12000, 16000, 20000, 30000, 40000, 80000, 150000];
+// Typical SW Florida residential property, as measured by the estimator's own
+// property lookups: the 10th/25th/50th/75th/90th percentiles of the 1,022
+// residential homes in property_lookups.enriched_snapshot (2026-06-12 to
+// 2026-09-26, mostly Manatee and Sarasota) — the middle 80% of the homes we
+// quote. Owner ruling 2026-09-27: size ranges to the homes we service.
+// Re-derive these from property_lookups if the service area shifts.
+const TYPICAL_HOMES = [1450, 1750, 2150, 2750, 3450]; // homeSqFt (total living area)
+// Footprint-priced services take the building footprint, which the estimator
+// derives as homeSqFt / stories (calculateFootprint) — percentiles of that
+// per-home value, not homeSqFt (77% of the homes are one story, 22% two).
+const TYPICAL_FOOTPRINTS = [1085, 1475, 1865, 2425, 3070];
+const MEDIAN_FOOTPRINT = 1865;
+const TYPICAL_LOTS = [5400, 7000, 8900, 12700, 22500]; // lotSqFt
+const TYPICAL_TURF = [1200, 2200, 3450, 5500, 11500]; // estimatedTurfSf
+// ~95% of those homes have light or moderate shrubs, trees, and landscaping
+// (heavy is 5-12%); 43% have a pool cage.
+const TYPICAL_LANDSCAPES = [
+  { shrubs: 'light', trees: 'light', complexity: 'simple' },
+  { shrubs: 'moderate', trees: 'moderate', complexity: 'moderate' },
+];
 
 function sweepValues(inputs, fn, pick) {
   const values = [];
@@ -49,25 +59,7 @@ function sweepValues(inputs, fn, pick) {
   return values.filter((v) => Number.isFinite(v) && v > 0);
 }
 
-// Engine-wide recurring-customer one-time perk: the discount engine is the
-// authority on which service keys are eligible (excluded keys return 0%).
-// Rows passing oneTimePerkKey publish the customer-paid floor alongside
-// list prices.
-function oneTimePerkRate(engineServiceKey) {
-  const { getEffectiveDiscount } = require('./discount-engine');
-  const d = getEffectiveDiscount(engineServiceKey, 'bronze', { isRecurringCustomer: true, isOneTimeService: true });
-  return (d && d.effectiveDiscount) || 0;
-}
-
-function rangeRow({ key, name, unit, values, notes = null, decimals = 0, oneTimePerkKey = null }) {
-  if (oneTimePerkKey) {
-    const rate = oneTimePerkRate(oneTimePerkKey);
-    // Perk floors: only pricers WITHOUT internal recurring-customer handling
-    // carry a perk key — their lines are discounted at the estimate level
-    // with no floor re-check, so the plain multiplication matches the
-    // engine-charged amount.
-    if (rate) values = values.concat(values.filter((v) => v > 0).map((v) => v * (1 - rate)));
-  }
+function rangeRow({ key, name, unit, values, notes = null, decimals = 0 }) {
   values = values.filter((v) => Number.isFinite(v) && v >= 0);
   if (!values.length) throw new Error(`No priced values for ${key}`);
   // Round outward (floor the low, ceil the high) so a valid exact engine
@@ -83,115 +75,19 @@ function rangeRow({ key, name, unit, values, notes = null, decimals = 0, oneTime
   };
 }
 
-// Customer-PAID recurring values: generateEstimate applies the WaveGuard
-// tier discount (up to 20% at platinum) to qualifying recurring lines after
-// the whole bundle is known — the individual pricers never see it, so the
-// published lows must include these post-discount amounts.
-// Live rodent ladder sample points: each configured bracket's inclusive
-// max plus every extension step to the public 20,000 sf cap (codex #3591
-// r9/r15). Computed per call — a post-sync bracket edit reshapes the grid.
-const RODENT_PUBLIC_MAX_SQFT = 20000;
-function rodentBaitSweepFootprints() {
-  const brackets = Array.isArray(constants.RODENT.baitBrackets) ? constants.RODENT.baitBrackets : [];
-  const ext = constants.RODENT.baitBracketExtension || {};
-  // Only boundaries a residential public quote can reach (public-quote clamps
-  // homes to 20,000 sf — codex #3591 r26 P2); the cap itself is always sampled.
-  const points = brackets.map((b) => Number(b.maxSqFt))
-    .filter((n) => Number.isFinite(n) && n > 0 && n <= RODENT_PUBLIC_MAX_SQFT);
-  const top = points.length ? Math.max(...points) : 0;
-  const step = Number(ext.perSqFt) > 0 ? Number(ext.perSqFt) : 1000;
-  // The extension is monotonic (+stations/+$ per step), so its extrema are
-  // the FIRST step past the top bracket and the public cap — never every
-  // increment (a tiny per_sq_ft would otherwise enumerate tens of thousands
-  // of engine runs per sweep — codex #3591 r25 P2).
-  if (top + step < RODENT_PUBLIC_MAX_SQFT) points.push(top + step);
-  points.push(RODENT_PUBLIC_MAX_SQFT);
-  return [...new Set(points)];
-}
-
-function waveGuardBundleValues() {
-  const { generateEstimate } = require('./estimate-engine');
-  const FOOTPRINTS_SQFT = footprintsFromBrackets();
-  const out = { pest: [], mosquito: [], treeShrub: [], lawn: [], palm: [], rodentBait: [] };
-  // Rodent's DISCOUNTED values must come from the same live ladder points
-  // the raw sweep uses (codex #3591 r15 P2): an operator-added narrow
-  // bracket absent from the pest-derived grid would otherwise price a real
-  // Silver–Platinum per-application charge below the published low.
-  for (const footprint of rodentBaitSweepFootprints()) {
-    if (FOOTPRINTS_SQFT.includes(footprint)) continue;
-    for (const mix of [
-      { pest: { frequency: 'quarterly' } },
-      { pest: { frequency: 'quarterly' }, lawn: {}, mosquito: {}, treeShrub: {} },
-    ]) {
-      const est = generateEstimate({
-        propertyType: 'single_family',
-        footprint,
-        lotSqFt: 8000,
-        lawnSqFt: 6000,
-        features: { shrubs: 'light', complexity: 'simple' },
-        services: { ...mix, rodentBait: {} },
-      });
-      for (const li of est.lineItems || []) {
-        if (li.service !== 'rodent_bait' || !Number.isFinite(li.perApp)) continue;
-        const ratio = li.annualBeforeDiscount > 0 && Number.isFinite(li.annualAfterDiscount)
-          ? li.annualAfterDiscount / li.annualBeforeDiscount
-          : 1;
-        out.rodentBait.push(li.perApp * ratio);
-      }
-    }
-  }
-  for (const footprint of FOOTPRINTS_SQFT) {
-    for (const lotSqFt of [5000, 8000, 20000]) {
-      for (const propertyType of ['single_family', 'condo_upper']) {
-        for (const frequency of ['quarterly', 'monthly']) {
-      // Dimensions are TOP-LEVEL generateEstimate inputs (a nested
-      // property object is ignored by the profile builder). Two option
-      // sets: defaults, and the cheapest selectable lawn/tree-shrub combo.
-      for (const optionSet of [
-        { lawnSqFt: 6000, lawn: {}, treeShrub: {} },
-        // Cheapest selectable T&S tier is now Standard (6x) — Light/4x is
-        // retired for new sales (owner directive 2026-09-24) and must not
-        // shape the published minimum via this "cheapest combo" sweep.
-        { lawnSqFt: 1500, lawn: { track: 'bahia', tier: 'premium' }, treeShrub: { tier: 'standard' } },
-      ]) {
-      const est = generateEstimate({
-        propertyType,
-        footprint,
-        lotSqFt,
-        lawnSqFt: optionSet.lawnSqFt,
-        features: { shrubs: 'light', complexity: 'simple' },
-        services: { lawn: optionSet.lawn, pest: { frequency }, mosquito: {}, treeShrub: optionSet.treeShrub, termiteBait: {}, rodentBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
-      });
-      for (const li of est.lineItems || []) {
-        const ratio = li.annualBeforeDiscount > 0 && Number.isFinite(li.annualAfterDiscount)
-          ? li.annualAfterDiscount / li.annualBeforeDiscount
-          : 1;
-        if (li.service === 'pest_control' && Number.isFinite(li.perApp)) out.pest.push(li.perApp * ratio);
-        if (li.service === 'lawn_care' && Number.isFinite(li.perApp)) out.lawn.push(li.perApp * ratio);
-        if (li.service === 'mosquito' && Number.isFinite(li.visits) && li.visits > 0 && Number.isFinite(li.annualAfterDiscount)) {
-          out.mosquito.push(li.annualAfterDiscount / li.visits);
-        }
-        if (li.service === 'tree_shrub' && Number.isFinite(li.monthlyAfterDiscount)) out.treeShrub.push(li.monthlyAfterDiscount);
-        // Rodent bait takes the tier % since 2026-08-29 — the published low
-        // must include the discounted per-application rate (codex #3591 r4).
-        if (li.service === 'rodent_bait' && Number.isFinite(li.perApp)) out.rodentBait.push(li.perApp * ratio);
-        if (li.service === 'palm_injection' && Number.isFinite(li.perVisit) && li.palmCount > 0
-          && li.annualBeforeCredits > 0 && Number.isFinite(li.annualAfterCredits)) {
-          // perVisit already carries the per-visit minimum; apply the credit
-          // ratio to the actually-charged amount, not the raw catalog rate.
-          out.palm.push((li.perVisit / li.palmCount) * (li.annualAfterCredits / li.annualBeforeCredits));
-        }
-      }
-        }
-      }
-      }
-    }
-  }
-  return out;
+// Rows the feed publishes only while a purchase gate is on, keyed to that
+// gate. The ONE list: the sweep below reads it, the cache signature reads
+// it, and consumers that freeze keys into content (the blog price card)
+// exclude these rows, since a frozen key outlives a gate flip.
+const PURCHASE_GATED_ROWS = Object.freeze({
+  termite_station_rental: 'GATE_TERMITE_STATION_RENTAL',
+  termite_bond: 'GATE_TERMITE_BOND_OPTION',
+});
+function purchaseGateOn(key) {
+  return ['1', 'true', 'on'].includes(String(process.env[PURCHASE_GATED_ROWS[key]] || '').toLowerCase());
 }
 
 function buildRows() {
-  const FOOTPRINTS_SQFT = footprintsFromBrackets();
   const rows = [];
   const errors = [];
   const add = (key, build) => {
@@ -218,72 +114,38 @@ function buildRows() {
   const rodentBundleTerms = `Package discount (live terms): trapping+sanitation ${Math.round(((b.trapSanitation || {}).discount || 0) * 100)}% (floor $${Math.round((b.trapSanitation || {}).floor || 0)}); other combinations are quoted at booking.`;
   const maxWaveGuardPct = Math.round(
     Math.max(...Object.values(constants.WAVEGUARD.tiers).map((t) => t.discount || 0)) * 100);
-  let bundleMemo = null;
-  const bundle = (key) => {
-    if (!bundleMemo) bundleMemo = waveGuardBundleValues();
-    return bundleMemo[key] || [];
-  };
 
-  // Bare and complex residential profiles — the pest pricer adds charges for
-  // heavy shrubs/trees, complex landscaping, indoor treatment, pool cages,
-  // attached garages, and home-age adjustments, all valid auto-priced inputs.
-  const PEST_PROFILES = [
-    { property: {}, options: {} },
-    // Light shrubs + simple landscaping subtract from the base price.
-    { property: { features: { shrubs: 'light', complexity: 'simple' } }, options: {} },
-    {
-      property: {
-        attachedGarage: true,
-        nearWater: true,
-        features: { shrubs: 'heavy', trees: 'heavy', complexity: 'complex', indoor: true, poolCage: true, poolCageSize: 'oversized', attachedGarage: true, nearWater: true },
-      },
-      // Pre-1970 homes carry the $20 age adjustment property lookup forwards.
-      options: { modifiers: { pestAgeAdj: 20 } },
-    },
-  ];
+  // Typical landscaping, with and without a pool cage.
+  const PEST_PROFILES = TYPICAL_LANDSCAPES
+    .flatMap((features) => [features, { ...features, poolCage: true }])
+    .map((features) => ({ property: { features } }));
   add('general_pest_quarterly', () => rangeRow({
     key: 'general_pest_quarterly',
     name: 'General Pest Control (WaveGuard recurring)',
     unit: 'per application',
     // Sweep every supported cadence via the engine's tiers array — monthly
     // per-application prices sit below quarterly, so quarterly-only would
-    // overstate the low end of an advertised option — and every residential
-    // property type (condo/townhome adjustments lower the floor).
+    // overstate the low end of an advertised option.
     values: sweepValues(
-      FOOTPRINTS_SQFT.flatMap((f) =>
-        PEST_PROFILES.flatMap((p) =>
-          Object.keys(constants.PROPERTY_TYPE_ADJ).map((propertyType) => ({ f, p, propertyType })))),
-      ({ f, p, propertyType }) => sp.pricePestControl({ footprint: f, propertyType, ...p.property }, { frequency: 'quarterly', ...p.options }),
-      (r) => (r.tiers || []).map((t) => t.perApp)).concat(bundle('pest')),
-    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features; WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
+      TYPICAL_FOOTPRINTS.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
+      ({ f, p }) => sp.pricePestControl({ footprint: f, propertyType: 'single_family', ...p.property }, { frequency: 'quarterly' }),
+      (r) => (r.tiers || []).map((t) => t.perApp)),
+    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features — larger, more complex homes price higher. WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
   }));
 
   add('cockroach_treatment', () => rangeRow({
     key: 'cockroach_treatment',
-    oneTimePerkKey: 'pest_initial_roach',
     name: 'Cockroach Treatment (native / palmetto / German knockdown)',
     unit: 'per treatment',
     // Standalone and recurring-plan-attached knockdowns, regular and German
-    // scales — the estimate path adds the non-standalone charge when a
-    // recurring plan carries a roach type.
-    // Sample points include this pricer's OWN live bracket boundaries
-    // (regular/german/standalone arrays), which admins edit independently
-    // of the general pest brackets.
+    // scales, on typical homes.
     values: sweepValues(
-      [...new Set([
-        ...FOOTPRINTS_SQFT,
-        ...Object.values((constants.PEST.pestInitialRoach || {}))
-          .filter(Array.isArray)
-          .flatMap((arr) => arr.map((b) => Number(b.sqft)).filter((v) => Number.isFinite(v) && v > 0))
-          // v-1 guarantees a sample below each (exclusive) boundary even
-          // if an admin lowers the first one beneath the base grid.
-          .flatMap((v) => [v - 1, v, v + 1]).filter((v) => v > 0),
-      ])].flatMap((f) =>
+      TYPICAL_FOOTPRINTS.flatMap((f) =>
         ['regular', 'german'].flatMap((roachType) =>
           [true, false].map((standalone) => ({ f, roachType, standalone })))),
       ({ f, roachType, standalone }) => sp.pricePestInitialRoach({ footprint: f }, { roachType, standalone }),
       (r) => r.price),
-    notes: 'Standalone treatment, or added to a recurring plan at a lower rate; multi-visit German infestation cleanouts use the cleanout program.',
+    notes: 'Standalone treatment, or added to a recurring plan at a lower rate; multi-visit German infestation cleanouts use the cleanout program. Larger homes price higher.',
   }));
 
   add('one_time_pest', () => rangeRow({
@@ -292,24 +154,18 @@ function buildRows() {
     unit: 'per treatment',
     // Derives from the quarterly baseline, so it sweeps the same profiles.
     values: sweepValues(
-      FOOTPRINTS_SQFT.flatMap((f) =>
-        PEST_PROFILES.flatMap((p) =>
-          Object.keys(constants.PROPERTY_TYPE_ADJ).flatMap((propertyType) =>
-            // The pricer applies the recurring-customer perk INTERNALLY and
-            // then reapplies its floor/clamp — never multiply externally.
-            [false, true].map((isRecurringCustomer) => ({ f, p, propertyType, isRecurringCustomer }))))),
-      ({ f, p, propertyType, isRecurringCustomer }) => sp.priceOneTimePest({ footprint: f, propertyType, ...p.property }, { ...p.options, isRecurringCustomer }),
+      TYPICAL_FOOTPRINTS.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
+      ({ f, p }) => sp.priceOneTimePest({ footprint: f, propertyType: 'single_family', ...p.property }, { isRecurringCustomer: false }),
       (r) => r.price),
-    notes: 'Single knockdown visit; recurring plans price lower per application.',
+    notes: 'Single knockdown visit; larger or more complex homes price higher. A recurring plan prices lower per application.',
   }));
 
   add('german_roach_cleanout', () => rangeRow({
     key: 'german_roach_cleanout',
-    oneTimePerkKey: 'german_roach',
     name: 'German Roach Cleanout Service',
     unit: 'per program',
     values: sweepValues(
-      ['light', 'moderate', 'heavy'].flatMap((severity) => FOOTPRINTS_SQFT.map((f) => ({ f, severity }))),
+      ['light', 'moderate', 'heavy'].flatMap((severity) => TYPICAL_FOOTPRINTS.map((f) => ({ f, severity }))),
       ({ f, severity }) => sp.priceGermanRoach({ footprint: f }, { severity }),
       (r) => r.total ?? r.price),
     notes: 'Multi-visit program; visits vary by severity.',
@@ -319,10 +175,9 @@ function buildRows() {
     key: 'german_roach_initial',
     name: 'German Roach Initial Service (3-Visit)',
     unit: 'per program',
-    // Agent-selectable initial series; the pricer applies the
-    // recurring-customer perk INTERNALLY (excluded from the generic pass),
-    // so sweep the flag rather than using oneTimePerkKey.
-    values: sweepValues([false, true],
+    // Agent-selectable initial series at list price; the pricer applies the
+    // recurring-customer perk internally, so it is never swept.
+    values: sweepValues([false],
       (isRecurringCustomer) => sp.priceGermanRoachInitial({ isRecurringCustomer }),
       (r) => r.price),
     notes: 'One program price covering the 3-visit initial series for German roach activity within a recurring plan; heavy infestations use the cleanout program.',
@@ -330,151 +185,72 @@ function buildRows() {
 
   add('bed_bug_treatment', () => rangeRow({
     key: 'bed_bug_treatment',
-    oneTimePerkKey: 'bed_bug',
     name: 'Bed Bug Treatment Service',
     unit: 'per treatment program',
-    // Footprint and story count carry ordinary size/story multipliers on
-    // auto-priced homes — not custom-quote territory — so both are swept.
+    // Typical scope: 1-3 rooms, light/moderate severity, chemical method,
+    // ready prep, single-family occupancy — the auto-priced typical job.
     values: sweepValues(
-      [1500, 2200, 3000, 4000, 6000, 10000, 15000].flatMap((footprint) =>
-        [1, 2, 3].flatMap((stories) =>
-          [1, 2, 4, 7, 10].flatMap((rooms) =>
-            ['light', 'moderate', 'heavy'].flatMap((severity) =>
-              Object.keys(constants.BED_BUG.prepStatus).flatMap((prepStatus) =>
-                ['singleFamily', 'apartment'].flatMap((occupancyType) =>
-                  // In-house heat/hybrid auto-price for non-severe, prepared
-                  // jobs; chemical ignores equipment. Subcontracted equipment
-                  // and quote-required combos fall out via the filter.
-                  // Method/equipment/scope combos derived from the LIVE
-                  // allowlists so any admin-disabled value drops out of the
-                  // sweep instead of throwing the row.
-                  [
-                    { method: 'CHEMICAL' },
-                    // SUBCONTRACT requires an operator-entered pass-through
-                    // cost (inherently custom-quoted) — only in-house heat
-                    // sweeps, and only while the allowlist permits it.
-                    ...['HEAT', 'HYBRID'].flatMap((method) =>
-                      (constants.BED_BUG.heat.allowedEquipment || []).filter((e) => e === 'INHOUSE').flatMap((equipment) =>
-                        ((constants.BED_BUG.heat.heatScope && constants.BED_BUG.heat.heatScope.allowed) || []).map((heatScope) => ({ method, equipment, heatScope })))),
-                  ].filter((m) => (constants.BED_BUG.allowedMethods || []).includes(m.method))
-                    .map((m) => ({ footprint, stories, rooms, severity, prepStatus, occupancyType, ...m })))))))),
-      ({ footprint, stories, rooms, severity, prepStatus, occupancyType, method, equipment, heatScope }) => sp.priceBedBugTreatment(
-        { footprint, stories },
-        { rooms, method, severity, prepStatus, occupancyType, equipment, heatScope }),
+      TYPICAL_FOOTPRINTS.flatMap((footprint) =>
+        [1, 2, 3].flatMap((rooms) =>
+          ['light', 'moderate'].map((severity) => ({ footprint, rooms, severity })))),
+      ({ footprint, rooms, severity }) => sp.priceBedBugTreatment(
+        { footprint, stories: 1 },
+        { rooms, method: 'CHEMICAL', severity, prepStatus: 'ready', occupancyType: 'singleFamily' }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.total ?? r.price))),
-    notes: '1-10 rooms; priced by rooms, severity, home size, stories, occupancy, and method (chemical, or in-house heat/hybrid where eligible) — larger homes extend beyond this range at the same per-sq-ft heat rates. Severe or under-prepared jobs are quoted after inspection.',
+    notes: '1-3 rooms; priced by rooms, severity, and home size. More rooms, heavier infestations, larger or multi-story homes, in-house heat/hybrid treatment, apartment occupancy, and under-prepared jobs price higher or are quoted after inspection.',
   }));
 
-  // Low- and high-pressure residential feature sets — the pricer's pressure
-  // multiplier (trees, landscaping complexity, pool, nearby water,
-  // irrigation) raises per-application prices well above a bare-lot sweep.
+  // Base and heavier-pressure residential feature sets — the pricer's
+  // pressure multiplier (trees, pool, irrigation) raises per-application
+  // prices above a bare-lot sweep on a typical home.
   const MOSQUITO_PROFILES = [
-    { features: {}, options: {} },
-    // Waterfront worst case: binary features plus the graduated water
-    // modifier the live estimate path forwards — reaches the pricer's
-    // pressure cap, which a feature-only profile cannot.
-    {
-      features: { trees: 'heavy', complexity: 'complex', pool: true, nearWater: true, irrigation: true },
-      options: { modifiers: { mosquitoWaterMult: 2.0 } },
-      // Largest non-review add-on counts, amortized into per-application.
-      addOns: { stationCount: 5, dunkCount: 9 },
-    },
+    { trees: 'light' },
+    { trees: 'moderate', pool: true, irrigation: true },
   ];
+  // 82% of looked-up homes have no water, a neighborhood retention pond, or
+  // an adjacent lake — the property lookup's graduated water multipliers for
+  // those (calcMosquitoWaterMult in routes/property-lookup-v2.js). Pond,
+  // canal, and wetland frontage price higher.
+  const TYPICAL_MOSQUITO_WATER_MULTS = [1.0, 1.25, 1.3];
   add('mosquito_program', () => rangeRow({
     key: 'mosquito_program',
     name: 'Mosquito Program',
     unit: 'per application',
     values: sweepValues(
-      // Lot spans derive from the LIVE category boundaries (each category's
-      // max and the first sq ft of the next), so admin boundary edits
-      // propagate; the trailing entries cover the open-ended top category.
-      [...new Set([
-        ...(constants.MOSQUITO.lotCategories || [])
-          .flatMap((cat) => (Number.isFinite(cat.maxSqFt) ? [cat.maxSqFt + 2000, cat.maxSqFt + 2001] : []))
-          .map((treatable) => treatable), // + footprint 2000 passed below
-        ...LOTS_SQFT, 45560, 62000,
-        // Deep terminal-anchor sample: the open-ended top category continues
-        // stepping by priceStepSqFt, so sweep well past the last boundary.
-        62000 + (Number(constants.MOSQUITO.priceStepSqFt) || 500) * 40,
-      ])].flatMap((lotSqFt) => MOSQUITO_PROFILES.map((p) => ({ lotSqFt, p }))),
-      ({ lotSqFt, p }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features: p.features }, { ...p.options, ...p.addOns }),
-      // Per-application amount including any station/dunk add-ons amortized
-      // across the program's applications (add-ons bill annually).
-      (r) => (r.tiers || []).map((t) => t.perVisit + ((r.addOns && r.addOns.annualAddOns) || 0) / t.visits)).concat(bundle('mosquito')),
-    notes: `Seasonal (${Number((constants.MOSQUITO.tierVisits || {}).seasonal9) || 9} applications/yr) or monthly (${Number((constants.MOSQUITO.tierVisits || {}).monthly12) || 12} applications/yr) program; priced by treatable area and mosquito pressure; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%. Optional add-ons bill annually per unit: mosquito stations $${Math.round(constants.MOSQUITO.addOns.in2CareStation.price)} each, Bti dunks $${Math.round(constants.MOSQUITO.addOns.dunkTablet.price)} each — larger counts extend beyond this range at those rates.`,
+      TYPICAL_LOTS.flatMap((lotSqFt) => MOSQUITO_PROFILES.flatMap((features) =>
+        TYPICAL_MOSQUITO_WATER_MULTS.map((mosquitoWaterMult) => ({ lotSqFt, features, mosquitoWaterMult })))),
+      ({ lotSqFt, features, mosquitoWaterMult }) => sp.priceMosquito(
+        { footprint: MEDIAN_FOOTPRINT, lotSqFt, features },
+        { modifiers: { mosquitoWaterMult } }),
+      (r) => (r.tiers || []).map((t) => t.perVisit)),
+    notes: `Seasonal (${Number((constants.MOSQUITO.tierVisits || {}).seasonal9) || 9} applications/yr) or monthly (${Number((constants.MOSQUITO.tierVisits || {}).monthly12) || 12} applications/yr) program; priced by treatable area and mosquito pressure — larger lots and heavier pressure (trees, pool, irrigation, waterfront) price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%. Optional add-ons bill annually per unit: mosquito stations $${Math.round(constants.MOSQUITO.addOns.in2CareStation.price)} each, Bti dunks $${Math.round(constants.MOSQUITO.addOns.dunkTablet.price)} each.`,
   }));
 
   add('wasp_hornet_removal', () => rangeRow({
     key: 'wasp_hornet_removal',
-    oneTimePerkKey: 'stinging_insect_v2',
     name: 'Wasp / Hornet / Stinging Insect Removal',
     unit: 'per job',
     // priceStingingInsect is the pricer the exact estimate branch uses —
-    // sweep its scope dimensions (species, difficulty tier, removal,
-    // aggressiveness, height, confined access) at standard scheduling.
+    // typical scope: common species, the two lower difficulty tiers, no or
+    // small removal, standard access.
     values: sweepValues(
-      ['PAPER_WASP', 'YJ_AERIAL', 'YJ_GROUND', 'MUD_DAUBER', 'BALDFACED', 'CARPENTER'].flatMap((species) =>
-        [1, 2, 3, 4].flatMap((tier) =>
-          ['NONE', 'SMALL', 'LARGE', 'HONEYCOMB', 'RELOCATE'].flatMap((removal) =>
-            [
-              {},
-              { aggressive: 'HIGH', height: 'HIGH', confined: 'YES' },
-              { aggressive: 'EXTREME', height: 'HIGH', confined: 'YES' },
-            ].map((mods) => ({ species, tier, removal, ...mods }))))),
+      ['PAPER_WASP', 'YJ_AERIAL', 'YJ_GROUND', 'MUD_DAUBER'].flatMap((species) =>
+        [1, 2].flatMap((tier) =>
+          ['NONE', 'SMALL'].map((removal) => ({ species, tier, removal })))),
       (opts) => sp.priceStingingInsect(opts),
-      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price))
-      // Bundled inclusion: tier-1 paper-wasp/mud-dauber nests with an active
-      // recurring pest plan price at $0 — publish that floor explicitly.
-      .concat(sp.priceStingingInsect({ species: 'PAPER_WASP', tier: 1, removal: 'NONE', hasRecurringPest: true }).price === 0 ? [0] : []),
-    notes: 'Priced by species, nest difficulty, removal scope, aggressiveness, height, and access. Tier-1 paper wasp and mud dauber nests are included at $0 with an active recurring pest plan.',
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
+    notes: 'Priced by species, nest difficulty, removal scope, aggressiveness, height, and access — a harder-to-reach or more aggressive nest, larger removal scope, or a less common species prices higher. Tier-1 paper wasp and mud dauber nests are included at no charge with an active recurring pest plan.',
   }));
 
-  // Base, worst-case (heavy infestation, dense landscaping, priced exterior
-  // add-on), and recurring-customer (discounted low) flea profiles — all
-  // auto-priced by the live estimate path.
-  const FLEA_PROFILES = [
-    {},
-    ...((constants.SPECIALTY.flea.exterior || {}).enabled === false ? [] : [{
-      infestationComplexity: 'heavy',
-      features: { trees: 'heavy', complexity: 'complex' },
-      fleaExterior: true,
-      fleaExteriorAreaSqFt: 4000,
-    }]),
-    // Exterior profiles only while the add-on is enabled in live config —
-    // one profile per configured tier boundary (tiers price independently,
-    // so an intermediate tier can be the most expensive) plus the ceiling.
-    ...((constants.SPECIALTY.flea.exterior || {}).enabled === false ? [] : [
-      ...[...new Set([
-        ...(((constants.SPECIALTY.flea.exterior || {}).tiers) || [])
-          .map((t) => Number(t.maxSqFt)).filter((v) => Number.isFinite(v) && v > 0),
-        Number((constants.SPECIALTY.flea.exterior || {}).maxSqFt) || 20000,
-      ])].map((fleaExteriorAreaSqFt) => ({
-        infestationComplexity: 'heavy',
-        features: { trees: 'heavy', complexity: 'complex' },
-        fleaExterior: true,
-        fleaExteriorAreaSqFt,
-      })),
-    ]),
-    // The pricer applies the recurring-customer perk INTERNALLY (respecting
-    // its package floor) — swept via the flag, never multiplied externally.
-    { isRecurringCustomer: true },
-  ];
   add('flea_elimination', () => rangeRow({
     key: 'flea_elimination',
     name: 'Flea Treatment',
     unit: 'per program',
-    // Home sizes derive from the LIVE footprint-adjustment brackets (each
-    // bracket boundary + one past the last) plus the shared span.
     values: sweepValues(
-      [...new Set([
-        ...FOOTPRINTS_SQFT,
-        ...(((constants.SPECIALTY.flea.footprintAdjustments || {}).initial) || []).map((b) => b.at),
-        ...(((constants.SPECIALTY.flea.footprintAdjustments || {}).followUp) || []).map((b) => b.at),
-        (((((constants.SPECIALTY.flea.footprintAdjustments || {}).initial) || []).slice(-1)[0] || {}).at || 4000) + 2000,
-      ])].flatMap((f) => FLEA_PROFILES.map((p) => ({ f, p }))),
-      ({ f, p }) => sp.priceFlea({ footprint: f, ...p }),
+      TYPICAL_FOOTPRINTS,
+      (f) => sp.priceFlea({ footprint: f }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.total)),
-    notes: '2-visit elimination package; priced by home size, infestation severity, and optional exterior treatment area.',
+    notes: '2-visit elimination package; priced by home size. Heavier infestation severity and an optional exterior treatment area price higher.',
   }));
 
   const formatSetupFee = (v) => {
@@ -487,25 +263,13 @@ function buildRows() {
     unit: 'per application',
     // Footprint brackets (owner 2026-08-29): lot size, roof type, and the
     // retired post-exclusion modifier no longer move the price — one sweep
-    // over the footprint axis covers the full ladder. The pest-derived
-    // FOOTPRINTS_SQFT tops out at 6,000 sf, but public residential quotes
-    // accept up to 20,000 sf and the ladder EXTENDS above 6,750 (codex
-    // #3591 r3 P2) — sweep the bracket boundaries and the supported upper
-    // footprint too so the published high matches the largest exact quote.
-    // Sample points come from the LIVE ladder (codex #3591 r9 P2): each
-    // configured bracket's inclusive max (every bracket is flat inside, so
-    // its boundary IS its price) plus every extension step up to the public
-    // 20,000 sf cap — an operator-edited/added bracket is always sampled,
-    // never a second hardcoded ladder here.
+    // over the footprint axis covers a typical home's span.
     values: sweepValues(
-      [...new Set([...FOOTPRINTS_SQFT, ...rodentBaitSweepFootprints()])].map((f) => ({ f })),
-      ({ f }) => sp.priceRodentBait({ footprint: f }, {}),
-      // Tier-discounted customer-paid values (rodent takes the WaveGuard %
-      // since 2026-08-29) widen the low — same pattern as pest/lawn.
-      (r) => r.perVisit).concat(bundle('rodentBait')),
+      TYPICAL_FOOTPRINTS,
+      (f) => sp.priceRodentBait({ footprint: f }, {}),
+      (r) => r.perVisit),
     // Setup copy tracks the LIVE value to the cent and disappears when the
-    // fee is disabled (0) — the public surface must match the live charge
-    // (codex #3591 r10 P2).
+    // fee is disabled (0) — the public surface must match the live charge.
     notes: `Billed per application (quarterly — ${Number(constants.RODENT.baitVisitsPerYear) || 4} applications per year) with a station allowance by home size${
       Number(constants.RODENT.baitSetupFee) > 0
         ? `; a one-time $${formatSetupFee(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`
@@ -515,7 +279,6 @@ function buildRows() {
 
   add('rodent_trapping', () => rangeRow({
     key: 'rodent_trapping',
-    oneTimePerkKey: 'rodent_trapping',
     name: 'Rodent Trapping',
     unit: 'per program',
     // Standard is the only plan (owner 2026-08-26): flat program fee
@@ -530,84 +293,62 @@ function buildRows() {
 
   add('rodent_sanitation', () => rangeRow({
     key: 'rodent_sanitation',
-    oneTimePerkKey: 'rodent_sanitation',
     name: 'Rodent Sanitation',
     unit: 'per job',
-    // Affected area × debris removal × access type — the live path passes
-    // insulationRemovalCuFt and heavy-tier crawlspace/tight access, all
-    // directly priced.
+    // The two lightest tiers by LIVE base price — a typical job's scope;
+    // a heavier tier, larger debris removal, or harder access price above
+    // this range.
     values: sweepValues(
-      Object.keys(constants.RODENT.sanitation)
-        .filter((tier) => constants.RODENT.sanitation[tier] && typeof constants.RODENT.sanitation[tier] === 'object' && 'base' in constants.RODENT.sanitation[tier])
-        .flatMap((tier) => [250, 500, 1500, 4000, 10000].flatMap((affectedSqFt) =>
-          [0, 50, 100].flatMap((insulationRemovalCuFt) =>
-            ['normal', 'crawlspace', 'tight'].map((accessType) => ({ tier, affectedSqFt, insulationRemovalCuFt, accessType }))))),
-      ({ tier, affectedSqFt, insulationRemovalCuFt, accessType }) =>
-        sp.priceSanitation({ tier, affectedSqFt, insulationRemovalCuFt, accessType }),
-      // customQuoteRecommended is routing-only; the numeric line is retained
-      // by the estimate path — publish it.
+      (() => {
+        const tiers = Object.keys(constants.RODENT.sanitation)
+          .filter((t) => constants.RODENT.sanitation[t] && typeof constants.RODENT.sanitation[t] === 'object' && 'base' in constants.RODENT.sanitation[t])
+          .sort((a, c) => constants.RODENT.sanitation[a].base - constants.RODENT.sanitation[c].base)
+          .slice(0, 2);
+        return tiers.flatMap((tier) => [250, 500, 1000].map((affectedSqFt) => ({ tier, affectedSqFt })));
+      })(),
+      ({ tier, affectedSqFt }) =>
+        sp.priceSanitation({ tier, affectedSqFt, insulationRemovalCuFt: 0, accessType: 'normal' }),
       (r) => r.price),
-    notes: `Priced by affected area, debris removal volume (per cu ft beyond the included allowance), and access; larger scopes extend beyond this range at the same per-unit rates. ${rodentBundleTerms}`,
+    notes: `Priced by affected area and access; the heavy tier, debris removal beyond the included allowance, and crawlspace/tight access price higher. ${rodentBundleTerms}`,
   }));
 
   add('rodent_exclusion', () => rangeRow({
     key: 'rodent_exclusion',
-    oneTimePerkKey: 'rodent_exclusion',
     name: 'Rodent Exclusion',
     unit: 'per job',
-    // Every component type the exact estimate path forwards: standard and
-    // advanced wire-mesh points, bird boxes (incl. tile-high), soft and
-    // concrete linear mesh.
+    // Typical wire-mesh scopes with the inspection included (not waived),
+    // plus the size-tier price the website's /estimate/rodent-exclusion/
+    // page gets for a typical home (public-quote sends only homeSqFt and
+    // stories, so the estimate engine prices it through priceExclusion) —
+    // the published range must hold what that page actually quotes.
     values: sweepValues(
       [
-        { standardWireMeshPoints: 0 },
         { standardWireMeshPoints: 5, meshSoftLF: 20 },
         { standardWireMeshPoints: 10, meshSoftLF: 50 },
-        // Inspection-waived configurations (service opt-in / qualifying total).
-        { standardWireMeshPoints: 10, meshSoftLF: 50, waiveInspection: true },
-        { standardWireMeshPoints: 5, meshSoftLF: 20, waiveInspection: true, hasServiceOptIn: true },
-        // Floor-bound small scope with the inspection waived (true low).
-        { standardWireMeshPoints: 0, waiveInspection: true, hasServiceOptIn: true },
-        { standardWireMeshPoints: 20, meshSoftLF: 50 },
-        { advancedWireMeshPoints: 10, meshConcreteLF: 50 },
-        { standardWireMeshPoints: 10, advancedWireMeshPoints: 10, standardBirdBoxes: 2, tileHighBirdBoxes: 2, customBirdBoxes: 2, meshSoftLF: 30, meshConcreteLF: 30 },
-        // Larger recorded scopes stay directly priced (no quote boundary).
-        { advancedWireMeshPoints: 50 },
       ],
       (opts) => sp.priceRodentExclusionV2(opts),
       (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price)))
-      // The public quote path estimates full exclusion via
-      // calculateExclusionPrice(sqft) — merge its span too.
-      .concat(sweepValues(FOOTPRINTS_SQFT,
-        (sqft) => sp.calculateExclusionPrice({ sqft }),
+      .concat(sweepValues(TYPICAL_HOMES,
+        (homeSqFt) => sp.priceExclusion({ homeSqFt, stories: 1 }),
         (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : r.price))),
-    notes: `Scope set by inspection findings; components price per unit (standard point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.standard)}, advanced/roof point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.advancedRoofHigh)}, soft mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.softRatePerLF)}/LF, concrete mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.hardRatePerLF)}/LF), so larger scopes extend beyond this range at those rates. The low end reflects small jobs with the inspection fee waived (service opt-in or qualifying totals); otherwise the rodent inspection fee is included. ${rodentBundleTerms}`,
+    notes: `Scope set by inspection findings; components price per unit (standard point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.standard)}, advanced/roof point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.advancedRoofHigh)}, soft mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.softRatePerLF)}/LF, concrete mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.hardRatePerLF)}/LF), so larger scopes price higher at those rates; the rodent inspection fee is included. ${rodentBundleTerms}`,
   }));
 
-  // Simple and complex-perimeter/structural profiles — the exact path
-  // forwards complexity plus derived construction/foundation modifiers.
+  // Bare and complex-perimeter/structural profiles — a typical home's
+  // structural complexity range.
   const TERMITE_BAIT_PROFILES = [
     {},
-    { complexity: 'complex', modifiers: { termiteConstructionMult: 1.3, termiteFoundationAdj: 150 } },
-    // Measured perimeter override — provenance review flag only; the exact
-    // branch still publishes the priced line. Perimeter is unbounded; the
-    // sweep covers the residential span and larger overrides scale by
-    // station count.
-    { perimeterLF: 1000 },
-    { perimeterLF: 2000 },
-    // Measured perimeter COMBINED with the structural-modifier profile —
-    // the exact path always passes derived modifiers alongside overrides.
-    { perimeterLF: 2000, complexity: 'complex', modifiers: { termiteConstructionMult: 1.3, termiteFoundationAdj: 150 } },
+    { complexity: 'complex' },
   ];
   add('termite_bait_install', () => rangeRow({
     key: 'termite_bait_install',
     name: 'Termite Bait System Installation (Trelona)',
     unit: 'per installation',
     values: sweepValues(
-      FOOTPRINTS_SQFT.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
-      ({ f, opts }) => sp.priceTermiteBait({ footprint: f }, opts),
+      TYPICAL_FOOTPRINTS,
+      (f) => sp.priceTermiteBait({ footprint: f }, {}),
       (r) => (r.quoteRequired ? NaN : r.installation && r.installation.price)),
-    notes: 'Priced by home perimeter and structural complexity — larger measured perimeters extend beyond this range by station count.',
+    notes: 'Priced by home size; larger, more complex homes or a measured perimeter override price higher.',
   }));
 
   add('termite_bait_monitoring', () => rangeRow({
@@ -615,31 +356,24 @@ function buildRows() {
     name: 'Termite Bait Monitoring',
     unit: 'per application',
     values: sweepValues(
-      FOOTPRINTS_SQFT.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
+      TYPICAL_FOOTPRINTS.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
       ({ f, opts }) => sp.priceTermiteBait({ footprint: f }, opts),
-      // Bait monitoring is WaveGuard %-discount eligible — include the
-      // max-tier customer-paid floor.
-      (r) => {
-        if (r.quoteRequired) return NaN;
-        const maxDiscount = Math.max(...Object.values(constants.WAVEGUARD.tiers).map((t) => t.discount || 0));
-        return [r.perApp, r.perApp * (1 - maxDiscount)];
-      }),
-    notes: `Quarterly station-check applications; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+      (r) => (r.quoteRequired ? NaN : r.perApp)),
+    notes: `Quarterly station-check applications; priced by home size and structural complexity. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
   // Station rental publishes only while its purchase gate is on — the
   // estimate flow's GATE_TERMITE_STATION_RENTAL is the choke point
   // (predicate mirrors estimate-engine.js). Rental rides the install price,
   // so the sweep derives per-application rental from the bait installs.
-  const rentalGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
-  if (rentalGateOn) {
+  if (purchaseGateOn('termite_station_rental')) {
     add('termite_station_rental', () => rangeRow({
       key: 'termite_station_rental',
       name: 'Termite Bait Station Rental',
       unit: 'per application',
       values: sweepValues(
-        FOOTPRINTS_SQFT.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
-        ({ f, opts }) => sp.priceTermiteStationRental(sp.priceTermiteBait({ footprint: f }, opts).installation?.price),
+        TYPICAL_FOOTPRINTS,
+        (f) => sp.priceTermiteStationRental(sp.priceTermiteBait({ footprint: f }, {}).installation?.price),
         (r) => r && r.perApp),
       notes: 'Rented-station alternative to the upfront installation; rides quarterly applications.',
     }));
@@ -649,8 +383,7 @@ function buildRows() {
   // flow's GATE_TERMITE_BOND_OPTION is the single choke point (predicate
   // mirrors estimate-engine.js), and advertising an option the exact-quote
   // flow refuses to offer would mislead agents.
-  const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
-  if (bondGateOn) {
+  if (purchaseGateOn('termite_bond')) {
     add('termite_bond', () => rangeRow({
       key: 'termite_bond',
       name: 'Termite Bond',
@@ -662,84 +395,61 @@ function buildRows() {
 
   add('bora_care', () => rangeRow({
     key: 'bora_care',
-    oneTimePerkKey: 'bora_care',
     name: 'Bora-Care Wood Treatment Service',
     unit: 'per job',
     values: sweepValues(
       [
-        { atticSqFt: 500 }, { atticSqFt: 1000 }, { atticSqFt: 2000 }, { atticSqFt: 4500 },
-        { surfaceLinearFt: 50, surfaceHeightFt: 2 }, { surfaceLinearFt: 150, surfaceHeightFt: 4 },
-        { atticSqFt: 2000, surfaceLinearFt: 150, surfaceHeightFt: 4 },
-        // Multi-day jobs stay directly priced (the flag is scheduling
-        // provenance, not a quote refusal) — sweep through them.
-        { atticSqFt: 8000, surfaceLinearFt: 200, surfaceHeightFt: 4 },
-        { atticSqFt: 12000, surfaceLinearFt: 200, surfaceHeightFt: 4 },
-        { atticSqFt: 20000, surfaceLinearFt: 300, surfaceHeightFt: 4 },
+        { atticSqFt: 1000 },
+        { atticSqFt: 2000 },
+        { surfaceLinearFt: 50, surfaceHeightFt: 2 },
       ],
-      (opts) => sp.priceBoraCare({ footprint: 2500 }, opts),
+      (opts) => sp.priceBoraCare({ footprint: MEDIAN_FOOTPRINT }, opts),
       (r) => (r.quoteRequired ? NaN : r.price)),
-    notes: 'Borate treatment for exposed wood; priced by treated attic and surface area — larger areas extend beyond this range at the same per-area rates.',
+    notes: 'Borate treatment for exposed wood; priced by treated attic and surface area — larger areas price higher at the same per-area rates.',
   }));
 
   add('termite_trenching', () => rangeRow({
     key: 'termite_trenching',
-    oneTimePerkKey: 'trenching',
     name: 'Termite Trenching (liquid barrier)',
     unit: 'per job',
-    // Perimeter x product x application rate x depth x warranty x concrete
-    // share — ordinary configuration fields the exact estimate flow passes;
-    // manual-review configurations are excluded.
+    // Typical homes' perimeters (the engine's own footprint-to-perimeter
+    // estimate at typical landscape complexity) x every product, at
+    // standard scheduling.
     values: sweepValues(
-      // Measured overrides above 400 LF stay directly priced (provenance
-      // review only) — sweep through 1,000 LF.
-      [150, 250, 400, 700, 1000].flatMap((perimeterLF) =>
-        Object.keys(constants.SPECIALTY.trenching.products).flatMap((productKey) =>
-          ['standard', 'high'].flatMap((applicationRate) =>
-            [0.5, 1, 1.5].flatMap((trenchDepthFt) =>
-              ['none', 'one_year_retreat', 'five_year_repair_retreat'].flatMap((warrantyTier) =>
-                [0.2, 0.6].map((concretePct) => ({ perimeterLF, productKey, applicationRate, trenchDepthFt, warrantyTier, concretePct }))))))),
-      (opts) => sp.priceTrenching({ footprint: 2500 }, { ...opts, labelConfirmed: true }),
-      // Explicit perimeter input always flags measurement-provenance review
-      // reasons; that's about verifying footage on site, not a refusal to
-      // quote — exclude only configurations the engine won't price.
+      TYPICAL_FOOTPRINTS.flatMap((footprint) =>
+        TYPICAL_LANDSCAPES.flatMap(({ complexity }) =>
+          Object.keys(constants.SPECIALTY.trenching.products).map((productKey) => ({ footprint, complexity, productKey })))),
+      ({ footprint, complexity, productKey }) => sp.priceTrenching({ footprint }, {
+        perimeterLF: calculatePerimeter(footprint, complexity),
+        productKey, applicationRate: 'standard', trenchDepthFt: 1, warrantyTier: 'none', concretePct: 0.2, labelConfirmed: true,
+      }),
       (r) => (r.quoteRequired || !Number.isFinite(r.price) ? NaN : r.price)),
-    notes: 'Priced by treated perimeter, product, application rate, trench depth, warranty term, and concrete share — longer measured perimeters extend beyond this range at the same per-foot rates; exact footage measured on site.',
+    notes: 'Priced by treated perimeter and product; longer measured perimeters, deeper trenching, a higher application rate, added warranty terms, and greater concrete coverage price higher; exact footage measured on site.',
   }));
 
   add('pre_slab_termiticide', () => rangeRow({
     key: 'pre_slab_termiticide',
-    oneTimePerkKey: 'pre_slab_termiticide',
     name: 'Pre-Slab Termiticide Treatment',
     unit: 'per job',
-    // Through the full auto-priced residential span — the public quote route
-    // accepts slab measurements well past 4,000 sq ft with no quote boundary.
-    // Slab area x product x job context x volume discount x extended
-    // warranty — the selectable options the exact estimate branch forwards.
+    // Typical slab area x every product, standalone scheduling, no volume
+    // discount, no extended warranty.
     values: sweepValues(
-      [500, 1000, 2000, 4000, 6000, 8000, 12000, 20000, 30000].flatMap((slabSqFt) =>
-        Object.keys(constants.SPECIALTY.preSlabTermiticide.products).flatMap((productKey) =>
-          ['standalone', 'builderBatch', 'sameTripAddOn'].flatMap((jobContext) =>
-            ['none', '5plus', '10plus'].flatMap((volumeDiscount) =>
-              [false, true].map((includeWarrantyExtended) => ({ slabSqFt, productKey, jobContext, volumeDiscount, includeWarrantyExtended })))))),
-      ({ slabSqFt, ...opts }) => sp.pricePreSlabTermiticide({ slabSqFt }, { ...opts, labelConfirmed: true }),
+      [1500, 2500, 3500].flatMap((slabSqFt) =>
+        Object.keys(constants.SPECIALTY.preSlabTermiticide.products).map((productKey) => ({ slabSqFt, productKey }))),
+      ({ slabSqFt, productKey }) => sp.pricePreSlabTermiticide({ slabSqFt }, {
+        productKey, jobContext: 'standalone', volumeDiscount: 'none', includeWarrantyExtended: false, labelConfirmed: true,
+      }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.treatmentPrice))),
-    notes: 'New-construction slab pre-treatment priced by slab area — larger slabs extend beyond this range by the same usage-step formula. The low end reflects discounted builder-batch and same-trip add-on scheduling; standalone one-off jobs price higher. Volume discounts available.',
+    notes: 'New-construction slab pre-treatment priced by slab area and product for a standalone job — larger slabs price higher by the same usage-step formula. Builder-batch or same-trip scheduling and volume discounts can lower the price; extended warranty adds cost.',
   }));
 
+  // Owner-set display range (ruling 2026-09-27): live engine prices are
+  // merged so a price change outside it still widens the row.
   add('wdo_inspection', () => rangeRow({
     key: 'wdo_inspection',
-    oneTimePerkKey: 'wdo_inspection',
     name: 'WDO Inspection',
     unit: 'per inspection',
-    // Footprints derive from the LIVE bracket boundaries so an added
-    // higher-priced bracket sweeps automatically.
-    values: sweepValues(
-      [...new Set([
-        ...(constants.SPECIALTY.wdo.brackets || [])
-          .flatMap((b) => (Number.isFinite(b.maxSqFt) ? [b.maxSqFt, b.maxSqFt + 1] : [])),
-        1000, 3000, 6000, 12000,
-      ])],
-      (f) => sp.priceWDO(f), (r) => r.price),
+    values: [150, 350].concat(sweepValues(TYPICAL_FOOTPRINTS, (f) => sp.priceWDO(f), (r) => r.price)),
     notes: 'Wood-destroying organism inspection with official FDACS report.',
   }));
 
@@ -748,37 +458,26 @@ function buildRows() {
     name: 'Lawn Care Program',
     unit: 'per application',
     values: sweepValues(
-      LAWNS_SQFT.flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
           LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
-      (r) => r.perApp).concat(sweepValues(
-      // Cost-floor property factors (matter when useLawnCostFloor is armed;
-      // harmless pass-through while the floor is disarmed).
-      [16000, 30000, 40000].flatMap((sq) =>
-        LAWN_TIER_KEYS.map((tier) => ({ sq, tier }))),
-      ({ sq, tier }) => sp.priceLawnCare(
-        { lawnSqFt: sq, features: { complexity: 'complex', shrubs: 'heavy', privacyFence: true, condition: 'poor', pestPressure: 'heavy' } },
-        { track: 'zoysia', tier }),
-      (r) => r.perApp)).concat(bundle('lawn')),
-    notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+      (r) => r.perApp),
+    notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area — larger or more complex lawns price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
   add('one_time_lawn', () => rangeRow({
     key: 'one_time_lawn',
     name: 'One-Time Lawn Treatment',
     unit: 'per treatment',
-    // Track and tier feed the recurring baseline this pricer derives from,
-    // so both are swept alongside treatment type.
     values: sweepValues(
-      LAWNS_SQFT.flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         ['weed', 'fungicide', 'pest', 'fert'].flatMap((treatmentType) =>
           Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-            LAWN_TIER_KEYS.flatMap((tier) =>
-              [false, true].map((isRecurringCustomer) => ({ sq, treatmentType, track, tier, isRecurringCustomer })))))),
-      ({ sq, treatmentType, track, tier, isRecurringCustomer }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, tier, isRecurringCustomer }),
+            LAWN_TIER_KEYS.map((tier) => ({ sq, treatmentType, track, tier }))))),
+      ({ sq, treatmentType, track, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, tier, isRecurringCustomer: false }),
       (r) => r.price),
-    notes: 'Priced by treatment type, grass type, and turf area.',
+    notes: 'Priced by treatment type, grass type, and turf area. A recurring lawn plan prices lower.',
   }));
 
   add('lawn_pest_knockdown', () => rangeRow({
@@ -789,62 +488,51 @@ function buildRows() {
     // turf-pest treatment (chinch bugs, sod webworms, armyworms, grubs)
     // priced via the one-time lawn 'pest' multiplier as its own line.
     values: sweepValues(
-      LAWNS_SQFT.flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-          LAWN_TIER_KEYS.flatMap((tier) =>
-            [false, true].map((isRecurringCustomer) => ({ sq, track, tier, isRecurringCustomer }))))),
-      ({ sq, track, tier, isRecurringCustomer }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'pest', track, tier, isRecurringCustomer }),
+          LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
+      ({ sq, track, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'pest', track, tier, isRecurringCustomer: false }),
       (r) => r.price),
     notes: 'Standalone turf-pest treatment (chinch bugs, sod webworms, armyworms, grubs); can be combined with a weed treatment.',
   }));
 
   add('dethatching', () => rangeRow({
     key: 'dethatching',
-    oneTimePerkKey: 'dethatching',
     name: 'Lawn Dethatching Service',
     unit: 'per job',
-    // Bermuda/Zoysia lawns under 10,000 sq ft with recorded thatch depth
-    // auto-price; St. Augustine and heavy-cleanup jobs stay review-gated
-    // and are excluded by the quote-required filter.
+    // Bermuda/Zoysia lawns with easy access and none/light cleanup — the
+    // typical auto-priced job; St. Augustine, heavier cleanup, and harder
+    // access price higher or are review-gated.
     values: sweepValues(
-      [2000, 4000, 6000, 9000, 9999].flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         ['bermuda', 'zoysia'].flatMap((grassType) =>
-          ['none', 'light', 'moderate', 'heavy'].flatMap((cleanupLevel) =>
-            ['easy', 'moderate'].map((access) => ({ sq, grassType, cleanupLevel, access }))))),
-      ({ sq, grassType, cleanupLevel, access }) =>
-        sp.priceDethatching(sq, { grassType, cleanupLevel, thatchDepthInches: 1, access }),
+          ['none', 'light'].map((cleanupLevel) => ({ sq, grassType, cleanupLevel })))),
+      ({ sq, grassType, cleanupLevel }) =>
+        sp.priceDethatching(sq, { grassType, cleanupLevel, thatchDepthInches: 1, access: 'easy' }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.estimatedPrice))),
-    notes: 'Bermuda and Zoysia lawns (heavy cleanup priced directly on smaller lawns); St. Augustine and large heavy-debris jobs are quoted after inspection.',
+    notes: 'Bermuda and Zoysia lawns with easy access; moderate/heavy cleanup and harder access price higher. St. Augustine and large heavy-debris jobs are quoted after inspection.',
   }));
 
   add('one_time_mosquito', () => rangeRow({
     key: 'one_time_mosquito',
     name: 'One-Time Mosquito Treatment',
     unit: 'per treatment',
-    // Station/dunk add-ons raise the high; the recurring-customer discount
-    // lowers the low — both forwarded by the exact estimate path.
     values: sweepValues(
-      // Through the one-acre (43,560 treatable sq ft) direct-price boundary;
-      // 5 stations / 9 dunks are the largest non-review add-on counts.
-      // Over-acre treatable areas stay numerically priced (review is
-      // routing only) — sweep through 60,000 treatable sq ft.
-      [...LOTS_SQFT, 45560, 62000].flatMap((lotSqFt) =>
-        [{}, { stationCount: 5, dunkCount: 9 }, { isRecurringCustomer: true }].map((opts) => ({ lotSqFt, opts }))),
-      ({ lotSqFt, opts }) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, opts),
+      TYPICAL_LOTS,
+      (lotSqFt) => sp.priceOneTimeMosquito({ footprint: MEDIAN_FOOTPRINT, lotSqFt }, {}),
       (r) => (r.quoteRequired ? NaN : r.price)),
-    notes: `Priced by treatable area — larger properties extend beyond this range by area increment. One-time add-ons per unit: mosquito stations $${Math.round(constants.ONE_TIME.mosquito.stationAddOn)} each, Bti dunks $${Math.round(constants.ONE_TIME.mosquito.dunkAddOn)} each, at any count.`,
+    notes: `Priced by treatable area — larger properties price higher by area increment. One-time add-ons per unit: mosquito stations $${Math.round(constants.ONE_TIME.mosquito.stationAddOn)} each, Bti dunks $${Math.round(constants.ONE_TIME.mosquito.dunkAddOn)} each. A recurring mosquito plan prices lower.`,
   }));
 
   add('lawn_plugging', () => rangeRow({
     key: 'lawn_plugging',
-    oneTimePerkKey: 'plugging',
     name: 'Lawn Plugging Service',
     unit: 'per sq ft',
     decimals: 2,
     // Effective per-sq-ft rate varies with treated area because of the job
     // floor, so areas are swept alongside spacing (standard scheduling).
     values: sweepValues(
-      [500, 1000, 3000, 6000].flatMap((area) => [6, 9, 12].map((spacing) => ({ area, spacing }))),
+      [500, 1000, 3000].flatMap((area) => [6, 9, 12].map((spacing) => ({ area, spacing }))),
       ({ area, spacing }) => sp.pricePlugging(area, spacing),
       (r) => r.perSf),
     notes: 'Rate depends on plug spacing (6", 9", or 12") and treated area; small jobs carry a minimum.',
@@ -852,33 +540,23 @@ function buildRows() {
 
   add('top_dressing', () => rangeRow({
     key: 'top_dressing',
-    oneTimePerkKey: 'top_dressing',
     name: 'Lawn Top Dressing Service',
     unit: 'per job',
     // Both pricing modes: estimated area (65% reduction) and exact-area
-    // (measured, or recurring-lawn customers) — the live estimate path uses
-    // exact-area for measured jobs, which prices above the estimated mode.
+    // (measured, or recurring-lawn customers) on typical turf areas.
     values: sweepValues(
-      [...LAWNS_SQFT, 40000].flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         ['eighth', 'quarter'].flatMap((depth) => [false, true].map((exactArea) => ({ sq, depth, exactArea })))),
       ({ sq, depth, exactArea }) => sp.priceTopDressing(sq, depth, exactArea),
       (r) => r.price),
-    notes: 'Recurring-plan customers receive a discounted rate; larger measured areas extend beyond this range at the same per-area rates.',
+    notes: 'Recurring-plan customers receive a discounted rate; larger measured areas price higher at the same per-area rates.',
   }));
 
-  // Auto-priced residential shapes only: bare lots plus planted/treed
-  // properties (bed area + tree count + access) that stay below the pricer's
-  // manual-review thresholds; reviewed results are excluded.
+  // Auto-priced residential shapes: a bare lot and a planted/treed property
+  // (bed area + tree count + access) at a typical scope.
   const TREE_SHRUB_PROFILES = [
-    { property: { footprint: 2000 }, options: {} },
-    { property: { footprint: 2000, bedArea: 4000 }, options: { treeCount: 6, access: 'moderate' } },
-    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 14, access: 'moderate' } },
-    // High tree counts stay numerically priced — the review flag only
-    // routes the estimate; the priced line is still published.
-    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 20, access: 'moderate' } },
-    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 40, access: 'moderate' } },
-    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 14, access: 'difficult' } },
-    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 40, access: 'difficult' } },
+    { property: { footprint: MEDIAN_FOOTPRINT }, options: {} },
+    { property: { footprint: MEDIAN_FOOTPRINT, bedArea: 4000 }, options: { treeCount: 6, access: 'moderate' } },
   ];
   add('tree_shrub_care', () => rangeRow({
     key: 'tree_shrub_care',
@@ -886,15 +564,14 @@ function buildRows() {
     unit: 'per month',
     // 'light' (4x/quarterly) is hidden:true — retired for new sales (owner
     // directive 2026-09-24: stop offering quarterly tree & shrub care) — so
-    // it no longer shapes the published range, mirroring how the lawn range
-    // above dropped its retired 6x column.
+    // it is never swept here.
     values: sweepValues(
-      LOTS_SQFT.flatMap((lot) =>
+      TYPICAL_LOTS.flatMap((lot) =>
         ['standard', 'enhanced'].flatMap((tier) =>
           TREE_SHRUB_PROFILES.map((p) => ({ lot, tier, p })))),
       ({ lot, tier, p }) => sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }),
-      (r) => r.monthly).concat(bundle('treeShrub')),
-    notes: `Monthly-billed program; 6 or 9 applications per year by tier; priced by planting beds and tree count (larger counts extend beyond this range); WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+      (r) => r.monthly),
+    notes: `Monthly-billed program; 6 or 9 applications per year by tier; priced by planting beds and tree count — larger counts price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
   // rodent_plugging (calculatePluggingPrice) is deliberately NOT published:
@@ -907,37 +584,33 @@ function buildRows() {
 
   add('rodent_wire_mesh', () => rangeRow({
     key: 'rodent_wire_mesh',
-    oneTimePerkKey: 'rodent_wire_mesh',
     name: 'Rodent Wire Mesh Exclusion Service',
     unit: 'per job',
     values: sweepValues(
-      [0, 30, 60, 120, 200, 400].flatMap((meshLinearFeet) =>
+      [30, 60, 120].flatMap((meshLinearFeet) =>
         Object.keys(constants.RODENT.wireMesh.substrates).map((meshSubstrate) => ({ meshLinearFeet, meshSubstrate }))),
       (opts) => sp.priceRodentWireMesh(opts),
-      // customQuoteRecommended only adds a review warning; the priced line
-      // is retained by the estimate path — publish it.
       (r) => (r ? r.price : NaN)),
-    notes: 'Priced per linear foot by substrate, with a job minimum; longer measured runs extend beyond this range at the same per-LF rates.',
+    notes: 'Priced per linear foot by substrate, with a job minimum; longer measured runs price higher at the same per-LF rates.',
   }));
 
   add('rodent_bird_boxes', () => rangeRow({
     key: 'rodent_bird_boxes',
-    oneTimePerkKey: 'rodent_bird_boxes',
     name: 'Roof-Entry Covers / Bird Boxes',
     unit: 'per job',
     values: sweepValues(
-      ['small_bird_box', 'standard_bird_box', 'large_bird_box', 'oversized_complex_custom'].flatMap((birdBoxType) =>
-        [1, 2, 4, 8].map((birdBoxQuantity) => ({ birdBoxType, birdBoxQuantity }))),
+      ['small_bird_box', 'standard_bird_box'].flatMap((birdBoxType) =>
+        [1, 2, 4].map((birdBoxQuantity) => ({ birdBoxType, birdBoxQuantity }))),
       (opts) => sp.priceRodentBirdBoxes(opts),
       (r) => (r ? r.price : NaN)),
     // Quantity is unbounded and strictly additive per unit — disclose the
-    // live per-cover rates so any count is quotable beyond the range.
-    notes: `Priced per cover: small $${Math.round(constants.RODENT.birdBoxes.small_bird_box)}, standard $${Math.round(constants.RODENT.birdBoxes.standard_bird_box)} (same-visit additional $${Math.round(constants.RODENT.birdBoxes.additional_standard_same_visit)}), large $${Math.round(constants.RODENT.birdBoxes.large_bird_box)}, oversized/custom $${Math.round(constants.RODENT.birdBoxes.oversized_complex_custom)}; larger quantities extend beyond this range at those rates.`,
+    // live per-cover rates so any count or box type is quotable beyond the
+    // range.
+    notes: `Priced per cover: small $${Math.round(constants.RODENT.birdBoxes.small_bird_box)}, standard $${Math.round(constants.RODENT.birdBoxes.standard_bird_box)} (same-visit additional $${Math.round(constants.RODENT.birdBoxes.additional_standard_same_visit)}), large $${Math.round(constants.RODENT.birdBoxes.large_bird_box)}, oversized/custom $${Math.round(constants.RODENT.birdBoxes.oversized_complex_custom)}; larger boxes or quantities price higher at those rates.`,
   }));
 
   add('rodent_inspection', () => rangeRow({
     key: 'rodent_inspection',
-    oneTimePerkKey: 'rodent_inspection',
     name: 'Rodent Inspection',
     unit: 'per inspection',
     values: [sp.priceRodentInspection({}).price].filter((v) => Number.isFinite(v) && v > 0),
@@ -950,23 +623,19 @@ function buildRows() {
     unit: 'per program',
     // Renewable guarantee premium by property tier; eligibility (completed
     // trapping/exclusion/sanitation) is a customer-state flag, not pricing.
-    // Tier derives from home size / stories / roof — sweep the property
-    // shapes rather than naming tiers directly.
+    // Two typical property shapes — smaller/simpler and larger/complex.
     values: sweepValues(
       [
         { homeSqFt: 1500, stories: 1, roofType: 'shingle' },
         { homeSqFt: 3000, stories: 2, roofType: 'tile' },
-        { homeSqFt: 5000, stories: 2, roofType: 'tile', sealedPoints: 20, totalLinearMeshLF: 60 },
-        { homeSqFt: 7000, stories: 3, roofType: 'tile', sealedPoints: 40, totalLinearMeshLF: 120 },
       ],
       (opts) => sp.priceRodentGuarantee(opts),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
-    notes: 'Renewable 12-month rodent-free guarantee; eligibility requires completed trapping, completed exclusion, sanitation completed (or photo baseline), and no activity after the final trap check. Priced by property tier.',
+    notes: 'Renewable 12-month rodent-free guarantee; eligibility requires completed trapping, completed exclusion, sanitation completed (or photo baseline), and no activity after the final trap check. Priced by property tier — larger, more complex properties price higher.',
   }));
 
   add('trap_only_retainer', () => rangeRow({
     key: 'trap_only_retainer',
-    oneTimePerkKey: 'trap_only_retainer',
     name: 'Trap-Only Rodent Monitoring Retainer',
     unit: 'per month',
     // Both billing modes, annual prepay normalized to per-month.
@@ -996,12 +665,11 @@ function buildRows() {
 
   add('foam_drill', () => rangeRow({
     key: 'foam_drill',
-    oneTimePerkKey: 'foam_drill',
     name: 'Termite Foam Service',
     unit: 'per job',
     // Distinct from the termite_foam spot treatment: this is the tiered
     // drill-and-foam service the estimate path prices via priceFoamDrill.
-    values: sweepValues([5, 10, 15, 20],
+    values: sweepValues([5, 10, 15],
       (points) => sp.priceFoamDrill(points, {}),
       (r) => r.price),
     notes: 'Tiered by drill-point count; standard scheduling.',
@@ -1020,14 +688,12 @@ function buildRows() {
         { treatmentType: 'nutrition' },
         { treatmentType: 'treeAge', dbhInches: 8 },
         { treatmentType: 'treeAge', dbhInches: 16 },
-        // 20" is the largest auto-priced Tree-Age tier; bigger palms are quote-based.
-        { treatmentType: 'treeAge', dbhInches: 20 },
-      ].flatMap((opts) => [1, 5, 10].map((palmCount) => ({ ...opts, palmCount }))),
+      ].flatMap((opts) => [3, 5, 10].map((palmCount) => ({ ...opts, palmCount }))),
       (opts) => sp.pricePalmInjection({}, opts),
       // Actually-charged per palm per treatment — the per-visit minimum
       // raises small palm counts above the raw catalog rate.
-      (r, { palmCount }) => r.perVisit / palmCount).concat(bundle('palm')),
-    notes: 'Nutrition, insecticide, combo, and TREE-age treatments. Fungal and lethal-bronzing work is diagnosed and quoted on site.',
+      (r, { palmCount }) => r.perVisit / palmCount),
+    notes: 'Nutrition, insecticide, combo, and TREE-age treatments. Larger or older palms and smaller palm counts price higher per palm. Fungal and lethal-bronzing work is diagnosed and quoted on site.',
   }));
 
   return { rows, errors };
@@ -1049,7 +715,7 @@ function lastComputeUnstable() {
 }
 
 function gateSignature() {
-  return `${getLastSyncAt()}|${process.env.GATE_TERMITE_BOND_OPTION || ''}|${process.env.GATE_TERMITE_STATION_RENTAL || ''}`;
+  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || '')].join('|');
 }
 
 function computePublicPricingRanges({ refresh = false } = {}) {
@@ -1077,7 +743,7 @@ function computePublicPricingRanges({ refresh = false } = {}) {
   cached = {
     generatedAt: new Date().toISOString(),
     currency: 'USD',
-    disclaimer: 'Typical ranges for residential properties in our SW Florida service area under standard scheduling. Low ends may reflect recurring-customer discounts, bundle pricing, and advertised waivers. Emergency, urgent, or after-hours service carries surcharges quoted at booking. Your exact price depends on property size and conditions — get an instant quote at https://www.wavespestcontrol.com/pest-control-calculator/. Commercial properties are custom-quoted.',
+    disclaimer: 'Typical ranges for a typical single-family home in our SW Florida service area, at list price under standard scheduling. WaveGuard bundles and recurring-customer discounts can lower the price. Larger or more complex properties, heavier infestations, bigger scopes, and emergency, urgent, or after-hours service price higher. Get an instant quote at https://www.wavespestcontrol.com/pest-control-calculator/. Commercial properties are custom-quoted.',
     services: rows,
     errors,
   };
@@ -1096,4 +762,4 @@ function computePublicPricingRanges({ refresh = false } = {}) {
   return cached;
 }
 
-module.exports = { computePublicPricingRanges, lastComputeUnstable, _internals: { buildRows } };
+module.exports = { computePublicPricingRanges, lastComputeUnstable, PURCHASE_GATED_ROWS, _internals: { buildRows } };

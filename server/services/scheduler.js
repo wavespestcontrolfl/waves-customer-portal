@@ -13,6 +13,14 @@ const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = req
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+// Required HERE, at scheduler init (= process boot), not lazily inside the
+// cron tick below (codex r3 P1): the module's own MODULE_LOAD_AT — the
+// anchor its first-ever activation boundary falls back to — must be this
+// process's actual boot time. A lazy require deferred that capture to
+// whenever the first tick happened to fire, 5 minutes later, defeating the
+// whole point of the fix (a call landing in that gap still read as
+// pre_activation). Mirrors this file's own PROCESS_BOOT_AT convention above.
+const callBookingLinkText = require('./call-booking-link-text');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -21,7 +29,7 @@ const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
 const SCHEDULED_ESTIMATE_RETRY_DELAY_MS = 5 * 60 * 1000;
-const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
+const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'astro_only', 'astro_changed_since_sync', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
 const CONTENT_REGISTRY_LIVE_LIMIT = 300;
 
 function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}) {
@@ -143,10 +151,19 @@ async function scheduledDepositReceiptAllowed(msg) {
 //                    row on the bounded retry rail so the handoff reruns.
 function classifyDepositReplayFallback(fb = {}) {
   if (fb.sent === true || fb.reason === 'receipt_opted_out') return 'handled';
-  if (['email_opted_out', 'no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref'].includes(fb.reason)) {
+  if (['no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref'].includes(fb.reason)) {
     return 'sms_fallback';
   }
   return 'retry';
+}
+
+// Whether the inventory agent's own summary line is worth logging: any
+// outcome for a person to see, INCLUDING a run where every line is still
+// retrying (2026-09-27 review — a run that only bumped attempt counts, e.g.
+// every line hit a transient LLM failure, used to log nothing at all). A
+// truly silent tick is one where nothing happened in any of these buckets.
+function shouldLogInventoryAgentSummary(agentResult) {
+  return Boolean(agentResult.logged || agentResult.held || agentResult.ignored || agentResult.stillPending || agentResult.errors);
 }
 
 function scheduledSmsAttemptSql() {
@@ -341,8 +358,25 @@ async function claimDueScheduledSms(now) {
       SELECT id
       FROM sms_log
       WHERE status = 'scheduled'
-        AND scheduled_for IS NOT NULL
-        AND scheduled_for <= ?
+        AND (
+          (scheduled_for IS NOT NULL AND scheduled_for <= ?)
+          -- Owner ruling 2026-09-28: the 8am-8pm window no longer fences the
+          -- voicemail text-back at all (missed_call_text_back /
+          -- voicemail_lead_sms are CUSTOMER_ACTION_ENTRY_POINTS), so a row
+          -- queued only because that window was closed
+          -- (original_block_code QUIET_HOURS_HOLD) is due NOW — whether it
+          -- was queued before this code shipped, or by an old instance
+          -- still running mid-deploy. Every OTHER voicemail_lead_sms_deferred
+          -- retry reason (suppression retry, an in-flight dedupe wait, …)
+          -- keeps its own scheduled_for. Only a row never claimed yet
+          -- (no scheduled_sms_attempts) is pulled forward: original_block_code
+          -- survives retries, so once the first accelerated attempt has run,
+          -- a failure's backoff (scheduled_for) must be honored rather than
+          -- re-claimed every tick until its attempts are exhausted.
+          OR (metadata->>'entry_point' = 'voicemail_lead_sms_deferred'
+              AND metadata->>'original_block_code' = 'QUIET_HOURS_HOLD'
+              AND COALESCE(NULLIF(metadata->>'scheduled_sms_attempts', ''), '0') = '0')
+        )
       ORDER BY scheduled_for ASC, created_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT ?
@@ -350,6 +384,11 @@ async function claimDueScheduledSms(now) {
     UPDATE sms_log AS s
     SET status = 'sending',
         updated_at = ?,
+        -- A quiet-hours voicemail row claimed ahead of its old 8 AM
+        -- scheduled_for (above) is pulled to the claim time, so
+        -- recoverStaleScheduledSmsClaims (scheduled_for <= now) can recover
+        -- it if this worker dies mid-send. A plainly due row is unchanged.
+        scheduled_for = LEAST(s.scheduled_for, ?::timestamptz),
         metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
           'scheduled_sms_claimed_at', ?::timestamptz,
           'scheduled_sms_attempts',
@@ -371,7 +410,7 @@ async function claimDueScheduledSms(now) {
     FROM due
     WHERE s.id = due.id
     RETURNING s.*
-  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now]);
+  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now, now]);
 
   return result.rows || [];
 }
@@ -571,6 +610,7 @@ function parsePositiveEnvInt(value, fallback) {
 async function runContentRegistryMaintenance({
   registry = require('./content/content-registry'),
   liveStatus = require('./content/content-registry-live-status'),
+  ownedUrlHealth = require('./seo/owned-url-health'),
 } = {}) {
   const contentType = String(process.env.CONTENT_REGISTRY_MAINTENANCE_CONTENT_TYPE || '').trim() || null;
   const syncResult = await registry.runContentRegistrySync({
@@ -594,9 +634,29 @@ async function runContentRegistryMaintenance({
     throw new Error(`live status failed: ${liveResult.error || 'unknown error'}`);
   }
 
+  // Owned cited-URL health rides the same maintenance run (AGENTS.md: one
+  // fetcher/sweep, not a parallel cron) — it reuses this run's live-status
+  // checker but reads a DIFFERENT candidate list (mention data, not registry
+  // rows), so it is additionally gated on GATE_SEO_INTELLIGENCE, the gate
+  // that owns the mention data it depends on. Fails soft: a health-check
+  // hiccup must never fail the registry sync/live-status refresh that owns
+  // this run (that failure is the one this function fails closed for).
+  let ownedUrlHealthResult = null;
+  if (isEnabled('seoIntelligence')) {
+    try {
+      const result = await ownedUrlHealth.runOwnedUrlHealthCheck();
+      ownedUrlHealthResult = { checked: result.checked, bad: result.bad };
+      logger.info(`[content-registry] owned cited-URL health: checked=${result.checked} bad=${result.bad}`);
+    } catch (err) {
+      logger.error(`[content-registry] owned cited-URL health check failed: ${err.message}`);
+      ownedUrlHealthResult = { error: err.message };
+    }
+  }
+
   return {
     sync: syncResult.summary,
     live: liveResult.summary,
+    ownedUrlHealth: ownedUrlHealthResult,
     sync_run_id: syncResult.sync_run_id,
     statuses,
     limit,
@@ -960,6 +1020,22 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[voice-reservice-alert-sweep] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Plaid bank feed → Bank Import staging (GATE_PLAID_SYNC + GATE_BANK_IMPORT,
+  // read at call time). Staging only — nothing reaches the P&L until an
+  // exact match or the operator links it. Items waiting on a re-login skip.
+  cron.schedule('33 * * * *', async () => {
+    if (!gateEnvValue('GATE_BANK_IMPORT') || !gateEnvValue('GATE_PLAID_SYNC')) return;
+    try {
+      await runExclusive('plaid-bank-sync', async () => {
+        const out = await require('./plaid-sync').syncAllItems();
+        const failed = (out.results || []).filter(r => r.error);
+        if (failed.length) logger.warn(`[plaid-sync] hourly sync: ${failed.length}/${out.items} connection(s) failed`);
+      });
+    } catch (err) {
+      logger.error(`[plaid-sync] hourly sync failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1615,6 +1691,26 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Promises kept by a booking for their promised slot whose proof lapsed
+  // (visit cancelled/skipped/moved, call relinked) go back to Owed within
+  // fifteen minutes on the commitments gate alone — the watchdog's own
+  // cadence depends on other gates (slot-proof-reconciler.js).
+  cron.schedule('0 */15 * * * *', async () => {
+    try {
+      const result = await require('./slot-proof-reconciler').runSlotProofReconciler();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('slot-proof-reconciler').catch(() => {});
+        await recordJobEnd('slot-proof-reconciler', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Slot proof reconciler tick skipped: ${result.reason || 'no_connection'}`);
+      }
+      if (result?.reopened > 0) logger.info(`[slot-proof-reconciler] reopened=${result.reopened} of ${result.checked} call(s)`);
+    } catch (err) {
+      logger.error(`[slot-proof-reconciler] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // The same watchdog and persisted identities own reminders before and
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
@@ -1650,6 +1746,27 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[reschedule-link-promises] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Automatic booking-link text after a call (GATE_CALL_BOOKING_LINK_TEXT) —
+  // same 5-minute cadence as reschedule-link-promises: stages newly-extracted
+  // calls and dispatches whatever 2-hour/8am-ET delay has elapsed.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!isEnabled('callBookingLinkText')) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('call-booking-link-text', () => callBookingLinkText.sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Booking-link text tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('call-booking-link-text').catch(() => {});
+        await recordJobEnd('call-booking-link-text', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-booking-link-text] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2050,13 +2167,16 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
-  // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
-  // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
-  // are called directly — never the admin HTTP route. The feeders consume
-  // seo_backlinks, so they run INSIDE the scan's own lock ('backlink-scan'):
-  // a scan still paging at 4:10 keeps the lease and the feeders wait (10-min
-  // retries, up to an hour) rather than reading rows the scan is still
-  // transitioning; while they run, no scan can start.
+  // existing-profile baseline (idempotent) → competitor-gap ingestion →
+  // ai_citation discovery (AEO answer-engine citations, gated by
+  // GATE_SEO_INTELLIGENCE inside the service — DISCOVERY NEVER GRANTS
+  // AUTHORITY: see link-authority-policy.js) → enrich (DataForSEO, gated by
+  // GATE_SEO_INTELLIGENCE inside the service). Services are called directly —
+  // never the admin HTTP route. The feeders consume seo_backlinks, so they
+  // run INSIDE the scan's own lock ('backlink-scan'): a scan still paging at
+  // 4:10 keeps the lease and the feeders wait (10-min retries, up to an hour)
+  // rather than reading rows the scan is still transitioning; while they run,
+  // no scan can start.
   cron.schedule('10 4 * * 0', async () => {
     try {
       await runExclusive('link-registry-sunday-feeders', async () => {
@@ -2065,6 +2185,8 @@ function initScheduledJobs() {
           logger.info(`[link-intake] baseline: scanned ${b.scanned} domains +${b.domainsCreated} placements +${b.placementsCreated} reconciled ${b.placementsReconciled} mappings +${b.mappingsCreated} paths +${b.pathsCreated} skipped ${b.skipped.length}`);
           const g = await require('./seo/link-registry-gap-ingest').ingestCompetitorGap(db);
           logger.info(`[link-intake] competitor gap: scanned ${g.scanned} candidates ${g.candidates} inserted ${g.inserted} touched ${g.touched} existing ${g.existing}`);
+          const ai = await require('./seo/link-registry-ai-citation-ingest').runAiCitationFeeder(db);
+          logger.info(`[link-intake] ai_citation: ${ai.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}scanned ${ai.scanned} domains ${ai.domains} byCategory ${JSON.stringify(ai.byCategory)} enqueued ${ai.enqueued} inserted ${ai.inserted} touched ${ai.touched} existing ${ai.existing}`);
           const e = await require('./seo/link-registry-enrich').enrichDomains(db, { limit: 1000 });
           logger.info(`[link-intake] enrich: ${e.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}${e.skipped ? `SKIPPED (${e.skipped}) ` : ''} selected ${e.selected} enriched ${e.enriched} failed ${e.failed.length} calls ${e.calls}`);
           return { ran: true };
@@ -2267,6 +2389,38 @@ function initScheduledJobs() {
       const AutonomousRunner = require('./content/autonomous-runner');
       await AutonomousRunner.runDaily();
     } catch (err) { logger.error(`Autonomous content engine failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 10:30AM ET — Internal-link candidate sweep. Opens one Astro PR for
+  // patch candidates no run shipped (post-merge planning only plans; the
+  // runner only ships its own run's tasks). No-ops while
+  // SHADOW_MODE_ADD_INTERNAL_LINKS is on or a link PR is still open.
+  // Kill switch: AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP=false.
+  cron.schedule('30 10 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-candidate-sweep', async () => {
+        const executor = require('./content/internal-link-pr-executor');
+        const result = await executor.runCandidateSweep();
+        logger.info(`Internal-link candidate sweep: ${result?.status || 'unknown'}${result?.pr_url ? ` ${result.pr_url}` : ''}${result?.count ? ` (${result.count} link(s))` : ''}`);
+      });
+    } catch (err) { logger.error(`Internal-link candidate sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY MONDAY 10:23AM ET — plan internal links to the pages Search
+  // Console has just off page one (position 8–20), ranked by impressions,
+  // ahead of the 10:30 sweep. On an unused 10am minute per the stagger rule
+  // (see the 10:16 invoice follow-up block). Kill switch:
+  // AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
+  cron.schedule('23 10 * * 1', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-gsc-targets', async () => {
+        const targetPlanner = require('./content/internal-link-target-planner');
+        const result = await targetPlanner.planGscTargets();
+        logger.info(`Internal-link GSC targets: ${result?.status || 'unknown'} targets=${result?.targets ?? 0} queued=${result?.queued ?? 0} candidates=${result?.candidates ?? 0}`);
+      });
+    } catch (err) { logger.error(`Internal-link GSC target planning failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // DAILY 1PM ET — Autonomous Content Engine catch-up. A deploy restarting
@@ -2487,10 +2641,34 @@ function initScheduledJobs() {
       await runExclusive('purchase-receipt-restock', async () => {
         const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
         const result = await runPurchaseReceiptRestockSweep();
+        // A skipped sweep (no valid PURCHASE_RECEIPT_SINCE) stops the agent
+        // too: clearing the cutoff is a kill switch for every receipt write.
         if (result.skipped) return;
         const { logged, held, errors } = summarize(result);
         if (logged || held || errors) {
           logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        }
+        // Inventory agent (GATE_INVENTORY_AGENT): resolves lines the sweep
+        // above just handed off as agent_pending (unmatched/needs_size/
+        // size_mismatch, see receipt-processor.js). Same runExclusive lock,
+        // right after the sweep, so it never races another tick over the
+        // same lines. Self-gated (also cheap to check twice).
+        if (gateEnvValue('GATE_INVENTORY_AGENT')) {
+          const { runInventoryAgent } = require('./purchase-receipts/inventory-agent');
+          const agentResult = await runInventoryAgent();
+          if (!agentResult.skipped && shouldLogInventoryAgentSummary(agentResult)) {
+            logger.info(`[inventory-agent] ${agentResult.logged} logged, ${agentResult.held} held for a person, `
+              + `${agentResult.ignored} ignored, ${agentResult.stillPending} still pending, ${agentResult.errors} error(s)`);
+          }
+        } else {
+          // The gate is off: drain anything already sitting agent_pending
+          // from before it flipped, so a queued line is never stranded
+          // (nothing else ever looks at that status while the gate is off).
+          const { drainAgentQueue } = require('./purchase-receipts/inventory-agent');
+          const drainResult = await drainAgentQueue({});
+          if (drainResult.drained || drainResult.errors) {
+            logger.info(`[inventory-agent] gate off: drained ${drainResult.drained} queued line(s), ${drainResult.errors} error(s)`);
+          }
         }
       });
     } catch (err) {
@@ -3236,8 +3414,9 @@ function initScheduledJobs() {
   // human merge → completes the run (IndexNow + internal-link planning),
   // close-unmerged → fails it, and — ONLY when AUTONOMOUS_BLOG_AUTO_MERGE is
   // set (default off) — merges green + Codex-clear PRs itself, capped per
-  // tick. runExclusive: a merge and its post-merge chain must not double-run
-  // across overlapping deploy instances.
+  // tick. The internal-link lane rides the same tick and cap (open link PR →
+  // InternalLinkPrExecutor.runAutoMerge). runExclusive: a merge and its
+  // post-merge chain must not double-run across overlapping deploy instances.
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
     try {
@@ -3939,8 +4118,93 @@ function initScheduledJobs() {
                 }
               }
             }
-            if (anchorStale || amountsStale) {
-              const blockedReason = anchorStale ? 'stale_agent_decision' : 'stale_amount_agent_decision';
+            // OPEN TIMES revalidation (Codex P2): the same "can't see it
+            // from an inbound-anchored check" gap as the amount check above
+            // — a scheduled send can sit hours past drafting, and the
+            // calendar it quoted is never re-read before firing. Only when
+            // the anchor and amount checks already passed, and only for
+            // pairs the OUTGOING body still carries (planOpenTimesRecheck:
+            // a human-edited reply that dropped every quoted window needs
+            // no recheck; an unverifiable edit refuses).
+            // Fail closed on a gone slot, a fetch error, or a timeout — same
+            // block+retire path as the checks above, no new mechanism.
+            let openTimesStale = false;
+            let openTimesReason = null;
+            if (!anchorStale && !amountsStale) {
+              try {
+                const decisionRow = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'suggested_message');
+                let snapshot = decisionRow?.input_snapshot;
+                if (typeof snapshot === 'string') {
+                  try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+                }
+                const openTimesSnapshot = snapshot?.open_times_snapshot;
+                if (openTimesSnapshot?.quotedWindows?.length) {
+                  // Same planner as the queue-time seam (Codex r2): a
+                  // reviewer-edited body is matched to its snapshot pair by
+                  // pair against the drafted text, so a dropped day that
+                  // shares its window with a kept day is not rechecked, and
+                  // an unverifiable edit refuses here too.
+                  const { openTimesStillOffered, planOpenTimesRecheck } = require('./sms-shadow-drafter');
+                  const plan = planOpenTimesRecheck({
+                    snapshot: openTimesSnapshot,
+                    outgoingBody: msg.message_body,
+                    originalBody: decisionRow?.suggested_message ?? null,
+                  });
+                  if (plan.action === 'refuse') {
+                    openTimesStale = true;
+                    openTimesReason = plan.reason;
+                  } else if (plan.action === 'recheck') {
+                    const recheck = await openTimesStillOffered({
+                      city: openTimesSnapshot.lookup?.city || null,
+                      customerId: openTimesSnapshot.lookup?.customerId || null,
+                      estimateId: openTimesSnapshot.lookup?.estimateId || null,
+                      ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
+                      quotedWindows: plan.quotedWindows,
+                    });
+                    if (!recheck.ok) {
+                      openTimesStale = true;
+                      openTimesReason = recheck.reason;
+                    }
+                  }
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] open-times revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                openTimesStale = true;
+                openTimesReason = 'open_times_recheck_failed';
+              }
+            }
+            // Follow-up SLA phrase revalidation (Codex r3 P2): the relative
+            // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
+            // morning") is frozen at draft time, but this scheduled reply can
+            // fire hours later, past the 8am/8pm ET boundary the phrase was
+            // computed against — the exact "quoted a window that's gone"
+            // staleness the open-times check above covers, for the SLA
+            // phrase. Same fail-closed block+retire path, no new mechanism.
+            let slaStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale) {
+              try {
+                // Scoped to drafts that recorded an escalation (Codex r5):
+                // wording alone never blocks a scheduled reply.
+                const { followupPromiseIsStale } = require('./sms-followup-sla');
+                const slaDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'prompt_version');
+                if (followupPromiseIsStale({ inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version, body: msg.message_body })) slaStale = true;
+              } catch (err) {
+                logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                slaStale = true;
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+              const blockedReason = anchorStale
+                ? 'stale_agent_decision'
+                : amountsStale
+                  ? 'stale_amount_agent_decision'
+                  : openTimesStale
+                    ? 'stale_open_times_agent_decision'
+                    : 'stale_sla_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -3966,7 +4230,11 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                    : amountsStale
+                      ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
+                      : openTimesStale
+                        ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
+                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
                   dbi: trx,
                   strict: true,
                 });
@@ -4078,6 +4346,10 @@ function initScheduledJobs() {
             scheduled_sms_log_id: msg.id,
             customer_id: msg.customer_id,
           };
+          const replayRegistry = require('./messaging/deferred-replay-registry');
+          const replayHandoffMeta = { ...claimMeta,
+            customer_id: msg.customer_id || claimMeta.customer_id || null,
+            to_phone: msg.to_phone || null };
           const replayInput = {
             to: toPhone,
             body: msg.message_body,
@@ -4087,10 +4359,17 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
-            withSmsHandoff: require('./messaging/deferred-replay-registry')
-              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
-                customer_id: msg.customer_id || claimMeta.customer_id || null,
-                to_phone: msg.to_phone || null }),
+            withSmsHandoff: replayRegistry.deferredSmsHandoff(claimMeta.entry_point, replayHandoffMeta),
+            // A queued invoice notice holds the same invoice lock as the
+            // immediate send: the Text/App provider handoff and the Email
+            // leg's check under the Email authority's lock (registry
+            // invoice_send_deferred). Undefined for every other entry point.
+            withProviderHandoff: replayRegistry.deferredProviderHandoff(claimMeta.entry_point, replayHandoffMeta),
+            billingEmailPreSendCheck: replayRegistry.deferredBillingEmailPreSendCheck(claimMeta.entry_point, replayHandoffMeta),
+            // An entry's own predicate at the true provider boundary
+            // (twilio.js runs it immediately before its request); undefined
+            // for entries that register none.
+            providerPreSendCheck: replayRegistry.deferredProviderPreSendCheck(claimMeta.entry_point, replayHandoffMeta),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,
@@ -4128,6 +4407,14 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            // A voicemail quote-link text queued before this lane's own
+            // window check was removed (owner ruling 2026-09-28) is still
+            // sitting on the rail waiting for 8 AM — this entry point is
+            // used for nothing else, so any row wearing it is by
+            // construction the answer to a prospect's own voicemail. Send
+            // it on the very next replay instead of making it wait out the
+            // window it no longer needs to.
+            ...(claimMeta.entry_point === 'voicemail_lead_sms_deferred' ? { customerInitiated: true } : {}),
             ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
@@ -4228,7 +4515,7 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, ...await readFreshMeta(), customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({
@@ -4327,6 +4614,36 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
+          } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
+            // Another attempt holds this notice's billing Text claim
+            // (messaging/billing-text-leg-dedupe.js), so no provider send
+            // was tried. Refund the attempt like QUIET_HOURS_HOLD above:
+            // spent on the bounded ladder, a claim live across three ticks
+            // would terminally block this replay, and the notice would be
+            // lost if that other attempt then ends not_sent. Still bounded:
+            // past CLAIM_STALE_MS the claim answers with the non-retryable
+            // BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
+            const inFlightRetryAt = new Date(smsResult.nextAllowedAt);
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: inFlightRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'billing_text_in_flight_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] ${msg.id} waiting on an in-flight billing text for the same notice — rescheduled for ${inFlightRetryAt.toISOString()} (attempt refunded)`);
           } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // MOVE_HOLD: the replay now names its visit (appointmentId, app
@@ -4364,8 +4681,8 @@ function initScheduledJobs() {
             // off to the deposit email leg BEFORE the row goes terminal — the
             // immediate path treats the same opt-outs as "the email carries
             // the receipt". PURPOSE_OPTED_OUT can also mean the
-            // payment_receipt kill switch; the fallback re-checks it (and
-            // email_enabled) itself. A TRANSIENT fallback failure (prefs
+            // payment_receipt kill switch; the fallback re-checks it
+            // itself. A TRANSIENT fallback failure (prefs
             // blip / provider error) reschedules the row on the bounded
             // attempt rail so the handoff reruns, instead of discarding the
             // only remaining receipt path (codex P2 on a3de55b9); a
@@ -4762,9 +5079,26 @@ function initScheduledJobs() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
       Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
+      Promise.resolve().then(() => require('./missed-call-text-back').sweepMissedCallTextBacks()),
+      // The promise-chaser bell's ONE path: a stateless, idempotent sweep
+      // (see that file's docstring — eligibility is now a per-call stamp,
+      // not a boot-time boundary, so this require is lazy like the other
+      // three sweeps here). Wrapped in the cross-instance cron lock ON ITS
+      // OWN — a Railway deploy overlap or a slow prior tick could otherwise
+      // have two instances paging the same window at once (Codex #5019 r16
+      // P2); the other three sweeps here are already fleet-safe through
+      // their own atomic claims and stay unwrapped and uncoupled from this
+      // one — a held lease elsewhere is a quiet skip (runExclusive resolves,
+      // never rejects, on a skip), so it needs no special handling in the
+      // results.forEach below.
+      // Gate-checked BEFORE the lock (codex r9 P2): dark means no lock, no
+      // connection, no job_health row, the same conjunction the sweep checks.
+      (isEnabled('promiseChaserBell') && isEnabled('callCommitments'))
+        ? runExclusive('promise-chaser-bell', () => require('./promise-chaser-bell').sweepPromiseChasers())
+        : Promise.resolve(0),
     ]);
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller'][index]} sweep failed: ${result.reason.message}`);
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'missed-call-text-back', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
     });
   }, { timezone: 'America/New_York' });
 
@@ -5229,13 +5563,21 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 1:20AM ET — Content registry maintenance.
-  // Syncs the registry from the pinned GitHub Astro source, then refreshes
-  // live HTTP/sitemap status for published/reconciled rows.
+  // Syncs the registry from the pinned GitHub Astro source, refreshes live
+  // HTTP/sitemap status for published/reconciled rows, then (gated on
+  // GATE_SEO_INTELLIGENCE) checks every owned URL an AI answer engine cited
+  // in the last 30 days for a silent break the registry sweep alone
+  // wouldn't see (server/services/seo/owned-url-health.js).
   // =========================================================================
   cron.schedule('20 1 * * *', async () => {
     try {
-      const result = await runContentRegistryMaintenance();
-      logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)}`);
+      // runExclusive: a Railway deploy overlap must not run the sweep twice —
+      // the owned-URL health step sends a FIX digest, and a second instance
+      // would double-send it or race a clean retirement against a failure.
+      await runExclusive('content-registry-maintenance', async () => {
+        const result = await runContentRegistryMaintenance();
+        logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)} ownedUrlHealth=${JSON.stringify(result.ownedUrlHealth)}`);
+      });
     } catch (err) {
       logger.error(`[content-registry] maintenance failed: ${err.message}`);
     }
@@ -6214,7 +6556,7 @@ function initScheduledJobs() {
         try {
           const flaggedEntries = result.results
             .filter(r => r.status === 'flag' || r.status === 'update-needed')
-            .map(r => ({ id: r.id, title: r.title, summary: r.summary, status: r.status }));
+            .map(r => ({ id: r.id, title: r.title, summary: r.summary, status: r.status, fixLabel: r.fixLabel, fixLink: r.fixLink }));
           const { triggerNotification } = require('./notification-triggers');
           await triggerNotification('kb_audit_flagged', {
             count: result.flagged,
@@ -6798,7 +7140,7 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 10:12AM — Renewal reminders (termite bond ONLY — owner ruling
   // 2026-07-13: no-term services never get "renewal" language) + the
-  // annual-prepay payment reminders/sweeps that ride the same run.
+  // annual-prepay covered-term sweep that rides the same run.
   // =========================================================================
   cron.schedule('12 10 * * *', async () => {
     logger.info('Running: renewal reminders');
@@ -7275,7 +7617,9 @@ module.exports = {
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
   holdFinalReviewUncertainty,
+  shouldLogInventoryAgentSummary,
   recoverStaleScheduledSmsClaims,
+  claimDueScheduledSms,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,

@@ -62,6 +62,16 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/twilio.js',
+    snippet: "const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');",
+    reason: 'accepted-send recovery idempotency check keyed by the provider SID Twilio just returned; a pre-provider reservation carries no SID, so it structurally cannot match.',
+  },
+  {
+    file: 'services/messaging/billing-text-leg-dedupe.js',
+    snippet: "return conn('sms_log')",
+    reason: 'findLiveClaim: deliberately reads this module\'s own in-flight claim placeholder (status sending + billing_text_leg_claim marker) for one customer+notice; hiding reservations here would defeat the claim.',
+  },
+  {
     file: 'services/messaging/push-channel-routing.js',
     snippet: "? await trx('sms_log').where({ customer_id: customerId, from_phone: 'push' }).where(function sameNotice() {",
     reason: 'persistPushProof: existence check for this accepted push notice before writing its proof; a send reservation is never a push proof.',
@@ -145,6 +155,18 @@ const ALLOWLIST = [
     file: 'services/messaging/deferred-replay-registry.js',
     snippet: 'rows = await db(\'sms_log\')',
     reason: 'whereIn(status, [blocked, failed, cancelled]) excludes \'sending\' — an unresolved reservation cannot match this status filter.',
+  },
+  {
+    file: 'services/messaging/deferred-replay-registry.js',
+    snippet: "const row = await db('sms_log')",
+    nth: 1,
+    reason: 'billingTextDurablyAccepted: status-scoped to queued/sent/delivered (excludes sending) AND keyed to notificationEventKey with a real twilio_sid — a send reservation is never a billing-leg provider row.',
+  },
+  {
+    file: 'services/messaging/deferred-replay-registry.js',
+    snippet: "const row = await db('sms_log')",
+    nth: 2,
+    reason: 'billingAppDurablyAccepted: status-scoped to queued/sent/delivered (excludes sending) AND keyed to from_phone \'push\' + notificationEventKey — a send reservation is always an ordinary outbound row, never the push-proof row.',
   },
   {
     file: 'services/messaging/sync-optout.js',
@@ -340,8 +362,19 @@ const ALLOWLIST = [
   },
   {
     file: 'services/invoice.js',
+    // queuePendingChannelReplay takes its `database` handle as a param
+    // (Codex round-3 P1/P2 #4963: runs under finalizeInvoiceAfterSms's own
+    // transaction so a queue-insert failure is retried with the delivery
+    // stamp) — its own dedup read reads through that param, not the bare
+    // `db` the wrapper's held-SMS-leg queue below still uses, so the two
+    // no longer share one snippet.
+    snippet: 'const existingQueued = await database("sms_log")',
+    reason: 'queuePendingChannelReplay (Codex round-3 P1 #4963): metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
+  },
+  {
+    file: 'services/invoice.js',
     snippet: 'const existingQueued = await db("sms_log")',
-    reason: 'metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
+    reason: 'sendViaSMSAndEmail\'s held-SMS-leg queue: same metadata key (entry_point = \'invoice_send_deferred\') exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'services/invoice.js',
@@ -417,11 +450,6 @@ const ALLOWLIST = [
     file: 'services/sms-additional-properties.js',
     snippet: 'const live = await trx(\'sms_log\').where({ id: message.id }).forUpdate().first();',
     reason: 'single-row lookup by id — not a list read.',
-  },
-  {
-    file: 'services/sms-auto-send.js',
-    snippet: "const anchor = await trx('sms_log').where({ id: smsLogId, direction: 'inbound' })",
-    reason: 'single-row inbound lookup for the gratitude thread lock; an outbound send reservation cannot match the id plus inbound direction predicate.',
   },
   {
     file: 'services/sms-auto-send.js',

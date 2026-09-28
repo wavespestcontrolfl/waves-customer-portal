@@ -85,6 +85,13 @@ describe('writer-agent-config HARD PUBLISH GATES section', () => {
       expect(system).toContain(token);
     }
   });
+
+  test('related posts extend the closed blog-link set without authorizing guessed slugs', () => {
+    expect(system).toContain('voice_constraints.related_posts');
+    const closedSet = system.slice(system.indexOf('INTERNAL LINK TARGETS are a CLOSED set'), system.indexOf('PAGE-TYPE OUTPUT STANDARDS'));
+    expect(closedSet).toMatch(/RELATED POSTS/);
+    expect(closedSet).toMatch(/Never link a\s+blog post that is not on this list/);
+  });
 });
 
 describe('single-source-of-truth drift guards (prompt values come from the gate modules)', () => {

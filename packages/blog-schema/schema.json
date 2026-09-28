@@ -95,6 +95,41 @@
       "hub_link": {
         "type": "string"
       },
+      "related_posts": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "price_range": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "next_steps": {
+        "maxItems": 4,
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1
+            },
+            "href": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "label",
+            "href"
+          ],
+          "additionalProperties": false
+        }
+      },
       "spoke_links": {
         "maxItems": 1,
         "type": "array",

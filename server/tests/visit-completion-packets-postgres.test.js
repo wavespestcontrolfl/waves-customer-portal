@@ -343,6 +343,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [],
       extraCatalogIds: [] };
     const date = etDateString();
+    fixture.scheduledDate = date;
     await mockPg('customers').insert({ id: fixture.customerId, first_name: 'Fixture', phone: '+12025550123',
       email: `${fixture.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false,
       billing_mode: 'per_application' });
@@ -3588,13 +3589,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
 
   test.each([
-    ['same-date', etDateString(), 'First service application'],
-    ['missing-date', null, 'First service application'],
-    ['same-date combined setup and application', etDateString(), 'WaveGuard Membership — $99 setup fee plus first application'],
-  ])('a paid %s unlinked acceptance application parks ordinary packet mint', async (_label, serviceDate, description) => {
+    ['same-date', true, 'First service application'],
+    ['missing-date', false, 'First service application'],
+    ['same-date combined setup and application', true, 'WaveGuard Membership — $99 setup fee plus first application'],
+  ])('a paid %s unlinked acceptance application parks ordinary packet mint', async (_label, sameDate, description) => {
     const estimateId = await linkFixtureEstimate();
     const invoice = await InvoiceService.create({
-      customerId: fixture.customerId, ...(serviceDate ? { serviceDate } : {}),
+      customerId: fixture.customerId, ...(sameDate ? { serviceDate: fixture.scheduledDate } : {}),
       lineItems: [{ description, quantity: 1, unit_price: 120 }],
       notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application.`,
     });
@@ -3775,6 +3776,25 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const result = await saveVisitCompletionPacket(submission());
     expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'covered_billing_lane' });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+  });
+
+  // Codex round 4 P1 follow-through: buildMemberLines (visit-completion-invoice.js)
+  // is another completionInvoiceAmount caller `primaryLinePrice` must reach.
+  // Without it, a packet member already stamped $0 net with a positive
+  // primary_line_price (the discount engine's own frozen shape) misread as
+  // unpriced, fell back to the whole-plan per_application_fee, failed the
+  // price===0 no-charge branch, and parked the WHOLE combined visit —
+  // including its normal-priced sibling member — as 'member_price_ambiguous'
+  // instead of billing the sibling and reviewing the discounted member's fee.
+  test('a stamped $0 net member with a positive primary_line_price never blocks its normal-priced sibling', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ per_application_fee: 100 });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] })
+      .update({ estimated_price: 0, primary_line_price: 100 });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'invoice_ready', total: 120 });
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(1);
+    expect(Number(invoices[0].total)).toBe(120);
   });
 
   test('a missing member price cannot inherit a whole-plan per-application fee', async () => {

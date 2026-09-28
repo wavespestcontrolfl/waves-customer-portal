@@ -12,7 +12,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Resolved 2026-09-26: EDIS UW259 (\"The Cuban Treefrog in Florida\") and UW394 (\"Managing Conflicts with Wildlife: Living with Frogs\") both loaded directly and confirm skin-secretion eye/nose/mucous-membrane irritation, pet mouth irritation, asthmatic/allergic reactions, and predation on native treefrogs (esp. squirrel treefrogs). safety_line and copy left as written; both URLs added to sources."
+      "notes": "Resolved 2026-09-26: EDIS UW259 (\"The Cuban Treefrog in Florida\") and UW394 (\"Managing Conflicts with Wildlife: Living with Frogs\") both loaded directly and confirm skin-secretion eye/nose/mucous-membrane irritation, pet mouth irritation, asthmatic/allergic reactions, and predation on native treefrogs (esp. squirrel treefrogs). safety_line and copy left as written; both URLs added to sources. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "792f07cea0fc83d14395ed457c05edd9c7ca50447b2645508978d2c626ac5802"
     },
     "slug": "cuban-treefrog",
     "common_name": "Cuban Treefrog",
@@ -24,7 +25,7 @@
     "scientific_name": "Osteopilus septentrionalis",
     "rank": "species",
     "group": "frogs-toads",
-    "subgroup": "treefrogs",
+    "subgroup": "irritant-treefrogs",
     "site_category": "Wildlife neighbors",
     "traits": [
       "Large warty treefrog, up to about 5 inches — the largest treefrog in the US",
@@ -36,13 +37,13 @@
       {
         "slug": "green-treefrog",
         "difference": "Cuban treefrogs are much larger with warty skin and oversized toe pads; green treefrogs are smaller, smooth-skinned, and usually have a white side stripe.",
-        "next_photo": "A close-up of the toe pads and overall size next to a coin.",
+        "next_photo": "From a safe distance, zoom in on the toe pads and overall size.",
         "photo_can_confirm": true
       },
       {
         "slug": "squirrel-treefrog",
         "difference": "Cuban treefrog is much larger (to 5.5 in) with bumpy skin and huge bulging eyes; squirrel treefrog stays under 1.5 in with smooth skin and small eyes.",
-        "next_photo": "A close-up of the eyes (bulging vs. normal) and skin texture (bumpy vs. smooth), next to something for size.",
+        "next_photo": "From a safe distance, zoom in on the eyes (bulging vs. normal) and skin texture (bumpy vs. smooth).",
         "photo_can_confirm": true
       }
     ],
@@ -116,6 +117,471 @@
     "risk": "irritant",
     "action": "fix_conditions",
     "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "cane-toad",
+    "kind": "organism",
+    "common_name": "Cane Toad (bufo toad)",
+    "aka": [
+      "Bufo Toad",
+      "Marine Toad"
+    ],
+    "aliases": [
+      "cane toad",
+      "bufo toad",
+      "giant toad",
+      "marine toad",
+      "rhinella marina"
+    ],
+    "scientific_name": "Rhinella marina",
+    "rank": "species",
+    "group": "frogs-toads",
+    "subgroup": "toxic-toads",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Very large toad, often 4 to 6 inches or more, dry warty skin in gray, brown, olive or reddish-brown",
+      "Large, triangular parotoid glands bulge behind each eye, bigger than on any native toad",
+      "Bony ridges run from above the eyes down toward the snout",
+      "Found around outdoor lights, pet food bowls, pools and mulch beds at night, especially after rain"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southern-toad",
+        "difference": "Cane toad's glands behind the eyes are much larger, often as big as the eye; southern toad has smaller glands and bony head knobs it lacks",
+        "next_photo": "From a safe distance, zoom in from above on the head and the size of the glands just behind the eyes; never handle it.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "lanai-patio",
+      "pool-water",
+      "lights-windows"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "A stronger skin irritant than a native toad's, and toxic to pets; if a pet mouths one, wipe its mouth/gums with a cloth (rinse only with the head tilted down) and call your vet right away.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "An invasive toad whose main real danger is to curious pets, not people. If dogs or cats have access to the yard at night, especially around a pool or food bowls left outside, it's worth knowing this one on sight and keeping pets from mouthing it.",
+      "fact": "It was originally brought to parts of the world, including nearby islands, to control agricultural pests, but it spread far beyond that job and became a problem itself."
+    },
+    "tech_notes": "Confirm large triangular parotoid glands vs. native southern toad before advising removal; safe handling is with gloves, and disposal per local wildlife guidance rather than general pest treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Cane_toad",
+      "https://www.cvcboca.com/keep-your-dog-safe-how-to-spot-treat-bufo-toad-poisoning/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Verdict set to 'watch' rather than 'call' since most encounters don't involve pet contact and there's no Waves pest treatment for this species; urgency set to 'high' to reflect how serious the small number of pet-poisoning cases can be. Owner should confirm this balance reads right. Per audit item 16: safety.irritant set to true (cane toad secretion is a materially stronger skin/eye/mucous-membrane irritant than the southern toad's, which is already marked irritant true) and safety_line updated with wipe-the-gums first aid; a Florida vet clinic source (cvcboca.com, loaded this session) specifically warns against unrestricted running-water rinsing due to drowning/aspiration risk, so the line favors wiping with a cloth and only rinses with the head tilted down. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "a5a3469dada2cc7a54908c01f47dbae3b812997ef9941f2e502efef3f72dd948"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "southern-toad",
+    "kind": "organism",
+    "common_name": "Southern Toad",
+    "aka": [],
+    "aliases": [
+      "southern toad",
+      "anaxyrus terrestris"
+    ],
+    "scientific_name": "Anaxyrus terrestris",
+    "rank": "species",
+    "group": "frogs-toads",
+    "subgroup": "toads",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Smaller toad, usually under 3.5 inches, brick-red to gray, brown or black with warty skin",
+      "Distinct bony knobs and ridges on top of the head, between and behind the eyes",
+      "Parotoid glands behind the eyes are present but noticeably smaller than a cane toad's",
+      "Found in sandy soil, garden beds, and around lights at night"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cane-toad",
+        "difference": "Southern toad has smaller glands and distinct bony head knobs; cane toad's parotoid glands are much larger, often as big as the eye itself",
+        "next_photo": "From a safe distance, zoom in from above on the head and the size of the glands just behind the eyes; never handle it.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "lanai-patio",
+      "lights-windows"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "Its skin secretion can irritate a pet's mouth, far less than a cane toad's. Wipe the gums, rinse with the head tilted down so it doesn't swallow water, and call your vet if it persists.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A native insect-eater that's become harder to find in areas where the invasive cane toad has moved in. It's harmless to leave alone, and worth telling apart from the cane toad since the two are treated very differently.",
+      "fact": "It digs backward into loose soil using its hind feet to bury itself during the day, re-emerging at night to feed."
+    },
+    "tech_notes": "No treatment indicated; confirm smaller parotoid glands and bony head knobs to distinguish from cane toad, since the two get very different guidance.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Anaxyrus_terrestris",
+      "https://edis.ifas.ufl.edu/uw432"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Cane-toad-competition claim confirmed directly this session: UF/IFAS EDIS WEC387/UW432, \"The Cane or 'Bufo' Toad (Rhinella marina) in Florida,\" states \"people have noticed that native southern toads disappear or become uncommon in their neighborhoods when cane toads arrive,\" while noting the exact mechanism (competition, predation, or another factor) isn't settled. Range 'occasional' is consistent with this source; exact current SWFL county-level density still isn't separately quantified anywhere, but the qualitative scarcity claim is resolved. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "56b9064f2a676b4b9a5cda7ccbbe3d4027014417e872d5a11bf1881b93782cdb"
+    },
+    "role": "beneficial",
+    "risk": "irritant",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "green-treefrog",
+    "kind": "organism",
+    "common_name": "Green Treefrog",
+    "aka": [],
+    "aliases": [
+      "green treefrog",
+      "green tree frog",
+      "hyla cinerea"
+    ],
+    "scientific_name": "Hyla cinerea",
+    "rank": "species",
+    "group": "frogs-toads",
+    "subgroup": "treefrogs",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "tadpole",
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slim, smooth-skinned frog 1.25 to 2.5 inches long, usually bright green with a bold white to cream stripe along each side",
+      "Sometimes has small gold or white flecks scattered on its back",
+      "Sticky toe pads let it cling to glass doors, screens, and smooth plant leaves",
+      "Calls with a loud, repeated 'quonk-quonk' from vegetation near water on warm, humid nights"
+    ],
+    "look_alikes": [
+      {
+        "slug": "squirrel-treefrog",
+        "difference": "Green treefrog is consistently bright green with a bold, complete white stripe; squirrel treefrog is smaller and more variable with a fainter stripe",
+        "next_photo": "A close-up of the side stripe (bold and complete vs. faint or missing) next to something for size",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "cuban-treefrog",
+        "difference": "Cuban treefrog is much larger (to 5.5 in), bumpy-skinned with huge bulging eyes; green treefrog stays under 2.5 in, smooth-skinned, with a bold white stripe.",
+        "next_photo": "From a safe distance, zoom in on the eyes (bulging vs. normal) and skin texture (bumpy vs. smooth).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lights-windows",
+      "trees-shrubs",
+      "pool-water"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless, helpful little insect-eater that's a normal part of a Florida evening, not a pest. Clinging to a window or screen at night is exactly where it's supposed to be, hunting bugs drawn to the light.",
+      "fact": "Its toe pads work like tiny suction cups, letting it climb straight up glass doors and windows with ease."
+    },
+    "tech_notes": "No treatment indicated; beneficial insect predator, safe to relocate by hand if found somewhere inconvenient.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/American_green_tree_frog",
+      "https://ask.ifas.ufl.edu/publication/UW259"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 33: added a reciprocal look-alike to cuban-treefrog (A entry), confirmed against UF/IFAS UW259 (size, skin texture, eye size). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "eb2c18bb848bce9e7ee034d8d8fdfe3f67d94e33037ff3195d5db92fbcbabd56"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "squirrel-treefrog",
+    "kind": "organism",
+    "common_name": "Squirrel Treefrog",
+    "aka": [],
+    "aliases": [
+      "squirrel treefrog",
+      "squirrel tree frog",
+      "hyla squirella"
+    ],
+    "scientific_name": "Hyla squirella",
+    "rank": "species",
+    "group": "frogs-toads",
+    "subgroup": "treefrogs",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "tadpole",
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small frog, about 1 to 1.5 inches long, usually green but can shift to brown, yellow, or blotchy patterns",
+      "Side stripe, when present, is fainter or less complete than a green treefrog's",
+      "Common around porch lights, windows, and potted plants, often lower to the ground than a green treefrog",
+      "Named for its scolding, chattering call that sounds a bit like an agitated squirrel"
+    ],
+    "look_alikes": [
+      {
+        "slug": "green-treefrog",
+        "difference": "Squirrel treefrog is smaller and more variable in color with a fainter stripe; green treefrog is consistently bright green with a bold, complete stripe",
+        "next_photo": "A close-up of the side stripe (bold and complete vs. faint or missing) next to something for size",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "cuban-treefrog",
+        "difference": "Cuban treefrog is much larger (to 5.5 in) with bumpy skin and huge bulging eyes; squirrel treefrog stays under 1.5 in with smooth skin and small eyes.",
+        "next_photo": "From a safe distance, zoom in on the eyes (bulging vs. normal) and skin texture (bumpy vs. smooth).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lights-windows",
+      "lawn-garden"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A small, harmless, color-changing frog that shows up around porch lights and potted plants hunting insects. It's one of the most common backyard frogs here and never needs any kind of treatment.",
+      "fact": "Its scratchy, complaining call is where the name comes from; to a lot of people it really does sound like an irritated squirrel."
+    },
+    "tech_notes": "No treatment indicated; beneficial insect predator, safe to relocate by hand if found somewhere inconvenient.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Squirrel_treefrog",
+      "https://ask.ifas.ufl.edu/publication/UW259",
+      "https://www.floridamuseum.ufl.edu/discover-herps/florida-frog-calls/squirrel-treefrog/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed directly this session: the Florida Museum of Natural History's squirrel treefrog page states it is highly variable (\"often green but can be tan, gray or brown and can even have mild splotches\") and explicitly notes \"They look very similar to the Green treefrog.\" This is an authoritative UF source directly backing the claim that the pair can genuinely be hard to distinguish from a photo alone, not just a general judgment call. Per audit item 33: added a reciprocal look-alike to cuban-treefrog (A entry), confirmed against UF/IFAS UW259 (size, skin texture, eye size). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "67efeed0f82775199a4add84ac616f12c0760c4e71d28ecddf28157ca4b0cbf2"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
     "verification": []
   }
 ]

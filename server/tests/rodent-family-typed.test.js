@@ -8,12 +8,9 @@
 const {
   ACTIVITY_INDICATORS,
   REQUIRED_FINDINGS_FIELDS,
-  TYPE_NEXT_STEP_CHIPS,
-  NEXT_STEP_CHIPS,
   customerLabelForValue,
   findBannedCustomerCopy,
   getActivityIndicator,
-  nextStepRequiredForType,
   validateTypedFindings,
   buildTodaysResult,
   buildTypedReportSnapshot,
@@ -60,11 +57,12 @@ describe('rodent family schemas', () => {
     expect(sanitation.entry_points_addressed).toBeUndefined();
     expect(inspection.recommended_service).toBeTruthy();
     expect(inspection.urgency.options).toEqual(['Routine', 'Soon', 'High']);
+    // Next-step chip picker/requirement retired (owner ruling 2026-09-27) —
+    // Recommendations is the single tech-advice field now.
     for (const type of ['rodent_exclusion', 'rodent_sanitation', 'rodent_inspection']) {
-      expect(nextStepRequiredForType(type)).toBe(true);
-      for (const chip of TYPE_NEXT_STEP_CHIPS[type]) {
-        expect({ type, chip, hasSentence: !!NEXT_STEP_CHIPS[chip] }).toEqual({ type, chip, hasSentence: true });
-      }
+      const schema = findingsSchemaForType(type);
+      expect(schema.nextStepRequired).toBeUndefined();
+      expect(schema.nextStepChips).toBeUndefined();
     }
   });
 
@@ -98,7 +96,6 @@ describe('exclusion report (owner template §1)', () => {
       projectType: 'rodent_exclusion',
       reportTypeLabel: 'Rodent Exclusion Summary',
       values: EXCLUSION_VALUES,
-      chips: ['Continue trapping', 'Customer repair needed'],
       activity: { score: 2 },
       visitSequence: 1,
     });
@@ -109,7 +106,9 @@ describe('exclusion report (owner template §1)', () => {
     expect(result.body).toContain('Entry points addressed included the ac line penetration and garage door gaps.');
     expect(result.body).toContain('Materials used included rodent-resistant mesh and sealant.');
     expect(result.body).toContain('Remaining concerns: tree limbs touching roof and trapping still active.');
-    expect(result.body).toContain('Trapping will continue until activity is reduced.');
+    // Next-step chip picker retired (owner ruling 2026-09-27) — no
+    // chip-derived sentence on a new completion.
+    expect(result.nextStep).toBeNull();
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
@@ -118,7 +117,6 @@ describe('exclusion report (owner template §1)', () => {
       projectType: 'rodent_exclusion',
       reportTypeLabel: 'Rodent Exclusion Summary',
       values: { ...EXCLUSION_VALUES, remaining_concerns: 'No remaining concerns observed' },
-      chips: ['No follow-up needed'],
       activity: { score: 0 },
       visitSequence: 1,
     });
@@ -132,7 +130,6 @@ describe('sanitation report (owner template §2)', () => {
       projectType: 'rodent_sanitation',
       reportTypeLabel: 'Rodent Sanitation Summary',
       values: SANITATION_VALUES,
-      chips: ['Complete exclusion', 'Continue trapping'],
       activity: null,
       visitSequence: 1,
     });
@@ -143,7 +140,8 @@ describe('sanitation report (owner template §2)', () => {
     // the removal story instead of a second "we removed and treated" line.
     expect(result.body).toContain('We removed droppings, removed nesting material, disinfected and sanitized the affected areas and deodorized the service areas today.');
     expect(result.body).toContain('Some areas had limitations: insulation contamination remains and electrical / hvac obstruction.');
-    expect(result.body).toContain('Completing the exclusion repairs is the key next step.');
+    // Next-step chip picker retired (owner ruling 2026-09-27).
+    expect(result.nextStep).toBeNull();
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
@@ -310,7 +308,6 @@ describe('trap setup vs. re-check — the tech declares it', () => {
       serviceKey: 'rodent_trapping_check',
       serviceLabel: 'Rodent Trapping',
       values,
-      nextStepChips: ['Continue trapping'],
       visitSequence,
       activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
     });
@@ -326,7 +323,6 @@ describe('trap setup vs. re-check — the tech declares it', () => {
       serviceKey: 'rodent_trapping_setup',
       serviceLabel: 'Rodent Trapping',
       values: { ...SETUP_VALUES, trap_visit_type: 'Initial setup' },
-      nextStepChips: ['Continue trapping'],
       visitSequence: 1,
       activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
     });
@@ -425,7 +421,6 @@ describe('trap setup vs. re-check — the tech declares it', () => {
       serviceKey: 'rodent_trapping_setup',
       serviceLabel: 'Rodent Trapping',
       values: { ...SETUP_VALUES, trap_visit_type: 'Initial setup' },
-      nextStepChips: ['Continue trapping'],
       // Sequence is irrelevant now — the declaration decides.
       visitSequence: 4,
       activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
@@ -437,7 +432,6 @@ describe('trap setup vs. re-check — the tech declares it', () => {
       serviceKey: 'rodent_trapping_check',
       serviceLabel: 'Rodent Trapping',
       values: SETUP_VALUES,
-      nextStepChips: ['Continue trapping'],
       visitSequence: 2,
       activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
     });
@@ -727,7 +721,6 @@ describe('snapshots', () => {
       const snapshot = buildTypedReportSnapshot({
         projectType: type,
         values,
-        nextStepChips: TYPE_NEXT_STEP_CHIPS[type].slice(0, 2),
         serviceKey: type,
         serviceLabel: PROJECT_TYPES[type].label,
         visitSequence: 1,

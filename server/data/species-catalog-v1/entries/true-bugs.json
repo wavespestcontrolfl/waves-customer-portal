@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "e8c3cc70d2fe1ea7e4959b8a2dad912169662d24dd22a01e1ac5f394a89df894"
     },
     "slug": "chinch-bug",
     "common_name": "Southern Chinch Bug",
@@ -122,7 +123,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "844164ac216a167bfe70fb918c71caaa9d76a6457db96296a57e6e669a6b4b6a"
     },
     "slug": "spittlebug",
     "common_name": "Twolined Spittlebug",
@@ -223,7 +225,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "67efa3a2c3c03971b58ae929d1a8474cf473ab1be343a001fc413cf7f8627d2f"
     },
     "slug": "stink-bug",
     "common_name": "Stink Bug",
@@ -321,6 +324,773 @@
     "risk": "low",
     "action": "fix_conditions",
     "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "leaf-footed-bug",
+    "kind": "organism",
+    "common_name": "Leaf-footed Bug",
+    "aka": [],
+    "aliases": [
+      "leaf footed bug",
+      "leaf footed bugs",
+      "leptoglossus"
+    ],
+    "scientific_name": "Leptoglossus spp.",
+    "rank": "genus",
+    "group": "true-bugs",
+    "subgroup": "stink-leaf-footed",
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Brown, elongated body about the size of a large stink bug",
+      "Flattened, leaf-shaped flares on the back legs, which is where the name comes from",
+      "Found clustered on ripening tomatoes, citrus, and other fruiting plants",
+      "Feeding leaves discolored, sunken or distorted spots on fruit rather than chewed holes"
+    ],
+    "look_alikes": [
+      {
+        "slug": "milkweed-assassin-bug",
+        "difference": "Leaf-footed bug has flared, leaf-shaped hind legs and feeds on plants/fruit; milkweed assassin bug has plain thin legs and hunts other insects",
+        "next_photo": "From a safe distance, zoom in on the back legs showing whether they are flared and leaf-shaped or plain and thin.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "kissing-bug",
+        "difference": "Leaf-footed bug has a blunt head and flared, leaf-shaped hind legs, and does not bite people; kissing bug has a slim cone head and thin folded beak.",
+        "next_photo": "From a safe distance, zoom in on the head (blunt vs. slim cone) and the back legs (flared and leaf-shaped vs. plain).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "true-bug"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A plant-feeding bug that pierces developing fruit and seeds, leaving discolored or sunken spots on tomatoes, citrus and other crops. It does not threaten people or structures, but numbers can build up fast on a productive plant.",
+      "fact": "The flared, leaf-shaped part of its hind legs serves no known feeding purpose and is thought to help with balance or signaling to other leaf-footed bugs."
+    },
+    "tech_notes": "Plant/fruit-quality pest, not a structural or health concern. Treat fruiting ornamentals/citrus per label if damage is significant to the homeowner.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Leptoglossus"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 34: added a reciprocal look-alike to kissing-bug, the most common false-alarm pairing for that species (this one is harmless, feeds on plants). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "6096dbb38f1eec488100d8f9bae1fbb8f3e8e735b80c07977fad69aa1a7a237a"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "wheel-bug",
+    "kind": "organism",
+    "common_name": "Wheel Bug",
+    "aka": [],
+    "aliases": [
+      "wheel bug",
+      "wheel bugs",
+      "arilus cristatus"
+    ],
+    "scientific_name": "Arilus cristatus",
+    "rank": "species",
+    "group": "true-bugs",
+    "subgroup": "persistent-bite-assassin-bugs",
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, gray to grayish-brown bug, among the biggest true bugs in the yard",
+      "A jagged, cog- or wheel-shaped ridge standing straight up on the back, present only in adults",
+      "Young nymphs lack the wheel and instead have a bright red or orange abdomen",
+      "Moves slowly and deliberately while hunting caterpillars and beetles on plants"
+    ],
+    "look_alikes": [
+      {
+        "slug": "kissing-bug",
+        "difference": "Wheel bug has a jagged cog-shaped back crest and hunts garden pests by day; kissing bug has a slim cone head and red-orange side spots, and bites at night",
+        "next_photo": "From a safe distance, photograph from above showing whether there is a wheel-shaped ridge on the back, or red-orange spots along the abdomen edge.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "true-bug"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "One of the most painful bites of any local insect if it is picked up or handled; leave it alone and it will leave you alone. See a doctor if numbness or pain lasts more than a few days.",
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "One of the best predators a garden can have, hunting down caterpillars and beetles that damage plants. It is not aggressive and will not chase anyone down, but its bite is famously painful if it is ever handled, so it is best appreciated from a distance.",
+      "fact": "The cog-shaped ridge on its back only appears after its final molt into adulthood; younger nymphs look completely different, with a bright red or orange abdomen instead."
+    },
+    "tech_notes": "Highly beneficial predator; do not target for control. Bite is medically minor but very painful; advise clients and children not to handle it.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Arilus_cristatus"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3a736df68d6a86c87b797713266fc3c7810d2d6a9245c24563056cc574406cab"
+    },
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "milkweed-assassin-bug",
+    "kind": "organism",
+    "common_name": "Milkweed Assassin Bug",
+    "aka": [],
+    "aliases": [
+      "milkweed assassin bug",
+      "zelus longipes"
+    ],
+    "scientific_name": "Zelus longipes",
+    "rank": "species",
+    "group": "true-bugs",
+    "subgroup": "assassin-bugs",
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender, orange-red to reddish body with long, thin legs",
+      "Curved, needle-like beak folded under the head, used to stab prey",
+      "Often perched motionless on milkweed, garden flowers or vegetable plants waiting for prey",
+      "Front legs are somewhat sticky, helping it grip struggling insects it catches"
+    ],
+    "look_alikes": [
+      {
+        "slug": "leaf-footed-bug",
+        "difference": "Milkweed assassin bug has plain thin legs and hunts other insects; leaf-footed bug has flared, leaf-shaped hind legs and feeds directly on plants and fruit",
+        "next_photo": "From a safe distance, zoom in on the back legs showing whether they are flared and leaf-shaped or plain and thin.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "true-bug"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can deliver a sharp, painful bite if picked up or handled, though it is not dangerous; it will not bite unprovoked.",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A beneficial predator that hunts caterpillars and other garden pests from a still perch on plants, including milkweed and vegetables. It is worth leaving alone in the garden, though its bite is sharp if it is ever picked up.",
+      "fact": "It tends to target smaller caterpillars over larger ones, likely because a bigger, thrashing meal is riskier to subdue safely."
+    },
+    "tech_notes": "Beneficial predator on garden pests; painful but non-dangerous bite if handled. No control action needed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Zelus_longipes"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "f15fe1a56dcd4a58980de05c607636463d20ea40bf5f737100ad04861dc4e450"
+    },
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "kissing-bug",
+    "kind": "organism",
+    "common_name": "Kissing Bug",
+    "aka": [
+      "conenose bug"
+    ],
+    "aliases": [
+      "kissing bug",
+      "kissing bugs",
+      "conenose bug",
+      "triatoma sanguisuga"
+    ],
+    "scientific_name": "Triatoma sanguisuga",
+    "rank": "species",
+    "group": "true-bugs",
+    "subgroup": "disease-vector-assassin-bugs",
+    "site_category": "Biting",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Dark brown to black, flattened, elongated body with reddish-orange spots along the edge of the abdomen",
+      "Narrow, cone-shaped head with a thin, forward-pointing beak folded underneath",
+      "Attracted to lights at night and often found near outdoor pet bedding, wood piles or beneath porches",
+      "About 3/4 to 1 inch long, roughly the size of a large stink bug, with wings folded flat over the back"
+    ],
+    "look_alikes": [
+      {
+        "slug": "wheel-bug",
+        "difference": "Kissing bug has a slim cone head and red-orange side spots, and bites people at night; wheel bug has a cog-shaped back crest and hunts garden pests by day",
+        "next_photo": "From a safe distance, photograph from above showing whether there is a wheel-shaped ridge on the back, or red-orange spots along the abdomen edge.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "leaf-footed-bug",
+        "difference": "Kissing bug has a slim cone head and thin folded beak; leaf-footed bug has a blunt head and flared, leaf-shaped hind legs, and does not bite people.",
+        "next_photo": "From a safe distance, zoom in on the head (slim cone vs. blunt) and the back legs (plain vs. flared and leaf-shaped).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "bedroom",
+      "on-pets",
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "true-bug",
+      "flying-biter"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The bite itself doesn't spread disease; Chagas infection needs its feces in the wound or your eyes, and confirmed US cases that way are rare. See a doctor if a bite site swells, fevers, or rashes.",
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "pest",
+      "key": null,
+      "label": "General Pest Control",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A nighttime biter whose feces, not its bite, can carry the Chagas parasite — infection needs droppings rubbed into the bite wound or eyes, and confirmed US cases that way are rare. Finding one indoors, especially near a bed, is worth a pest inspection for nearby outdoor harborage.",
+      "fact": "Chagas disease doesn't spread through the bite itself — only if the bug's feces get rubbed into the wound or the eyes, which is part of why US infections from this species are uncommon."
+    },
+    "tech_notes": "Check for outdoor harborage (dog houses/kennels, wood piles, wildlife den sites) near the home; exclusion plus perimeter treatment per label. If a suspected bug or bite is found, advise saving the specimen for identification rather than discarding it.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Triatoma_sanguisuga"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 42: service.inspection_first changed from false to true (and key from \"pest\" to null) to match action: \"inspection\", consistent with the tech_notes advice to save a specimen for ID before treatment. Traits[3] (biting on the face while sleeping) replaced with a visible size/wing trait, since it described behavior rather than something visible in a photo of the insect itself. Per audit item 34: added a reciprocal look-alike to leaf-footed-bug, the most common false alarm for this species. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "85d7648dd6f18c7894e78d416b77837f1095f70d6ce2bac7bb74557fb758c849"
+    },
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "big-eyed-bug",
+    "kind": "organism",
+    "common_name": "Big-eyed Bug",
+    "aka": [],
+    "aliases": [
+      "big eyed bug",
+      "big eyed bugs",
+      "geocoris"
+    ],
+    "scientific_name": "Geocoris spp.",
+    "rank": "genus",
+    "group": "true-bugs",
+    "subgroup": "chinch-big-eyed",
+    "site_category": "Lawn",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Very small, black, gray or tan bug in short grass",
+      "Eyes noticeably large for its body size, which is where the name comes from",
+      "Broader, more oval body shape than a chinch bug, without bold white wing patches",
+      "Moves briskly through turf hunting other small insects rather than causing brown patches"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chinch-bug",
+        "difference": "Big-eyed bug has a rounder body and oversized eyes and hunts other insects; chinch bug is slimmer with white wing patches and causes lawn dieback",
+        "next_photo": "A macro close-up on a light background showing eye size and whether there are white wing patches",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "true-bug",
+      "crawler"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A beneficial predator living right in the lawn that helps keep chinch bugs, mites and other small pests in check. It is easy to mistake for the pest it is actually eating, so a close look before treating a lawn for chinch bugs can save an unnecessary application.",
+      "fact": "A single nymph can eat well over a thousand small pests like spider mites before it even reaches adulthood."
+    },
+    "tech_notes": "Beneficial lawn predator; often mistaken for chinch bug during inspections. Confirm true chinch bug damage/ID before recommending lawn insecticide treatment so beneficial populations are not needlessly reduced.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN383",
+      "https://ask.ifas.ufl.edu/publication/IN517"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN383 (Southern Chinch Bug): \"a bigeyed bug, Geocoris uliginosus, is the most numerous predator of the southern chinch bug in St. Augustinegrass.\" IN517 (Featured Creatures: Bigeyed Bugs) doesn't list chinch bugs among the prey items it names, but does warn against misidentifying bigeyed bugs as chinch bugs when spraying -- consistent with them being found together in the same turf.",
+      "approval_hash": "9dd96e54fb3e60410c1288657642bee0f29b23c44d568b2029ba142c4abe1c53"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "royal-palm-bug",
+    "kind": "organism",
+    "common_name": "Royal Palm Bug",
+    "aka": [],
+    "aliases": [
+      "royal palm bug",
+      "xylastodoris luteolus"
+    ],
+    "scientific_name": "Xylastodoris luteolus",
+    "rank": "species",
+    "group": "true-bugs",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Extremely small, flattened, pale yellow-green bug with red eyes",
+      "Found only on royal palms, never on other palm species",
+      "Hides inside the unopened, folded new fronds near the top of the palm",
+      "Feeding turns young, unfolding fronds pale, then grayish-brown and shriveled looking"
+    ],
+    "look_alikes": [
+      {
+        "slug": "palmetto-weevil",
+        "difference": "Royal palm bug only scars new fronds cosmetically; palmetto weevil grubs kill the growing point, and the whole crown can collapse (\"popped neck\").",
+        "next_photo": "A wide shot of the whole crown: frizzled new fronds only (bug) versus drooping/collapsing older fronds and a wilting or fallen crown (weevil).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "true-bug",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tiny, harmless-to-people insect found only on royal palms, hiding inside the newest unopened fronds and causing them to look scorched or frizzled as they unfold. It is one of the few pests that specifically targets this palm, and repeated damage can affect the tree's appearance over time.",
+      "fact": "It lives its whole life tucked inside the folded new fronds of a royal palm, feeding there before the leaf even has a chance to open."
+    },
+    "tech_notes": "Host-specific to Roystonea regia; damage concentrates in newly emerging fronds and can resemble nutrient deficiency (K/Mn) symptoms. Rule out palmetto weevil (a documented pest of stressed/transplanted royal palms whose grub damage can be fatal) before treating this as only cosmetic. Treat per label if cosmetic damage to a valued royal palm is a concern.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/108235",
+      "https://edis.ifas.ufl.edu/in139"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 54: replaced the low-value azalea-lace-bug pairing (different host plant, not a realistic visual confusion) with palmetto-weevil (C/beetles, also this session's own work), since UF/IFAS EDIS IN139 documents royal palm (Roystonea sp.) as a host with larval infestations, and the cosmetic-vs-potentially-fatal distinction is genuinely useful triage information. Reciprocal look-alike added on the palmetto-weevil entry.",
+      "approval_hash": "e6435c31532b2da715feaa113ddd4617340d80f2d4ae41915f70b410cf073085"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "azalea-lace-bug",
+    "kind": "organism",
+    "common_name": "Azalea Lace Bug",
+    "aka": [],
+    "aliases": [
+      "azalea lace bug",
+      "stephanitis pyrioides"
+    ],
+    "scientific_name": "Stephanitis pyrioides",
+    "rank": "species",
+    "group": "true-bugs",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny, cream-colored insect with clear, lacy wings held flat over the back",
+      "Found on the underside of azalea leaves, rarely seen from above",
+      "Feeding leaves a stippled, silvery or bleached look on the top of the leaf",
+      "Small dark specks of droppings often dot the underside of affected leaves"
+    ],
+    "look_alikes": [
+      {
+        "slug": "green-lacewing",
+        "difference": "Azalea lace bug is tiny and stays under azalea leaves; green lacewing is larger, flies to lights at night, and is a beneficial predator, not a plant pest.",
+        "next_photo": "A photo of where it was found (underside of an azalea leaf vs. flying near a porch light) plus a close-up of the wings",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "true-bug",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A tiny, harmless-to-people insect that quietly drains the color out of azalea leaves from underneath, leaving them stippled and pale over time. Left alone for a few seasons, it can noticeably weaken a shrub's appearance and vigor, so treatment is worth it for azaleas people care about.",
+      "fact": "It feeds only from the underside of the leaf, which is why the damage shows up as pale stippling on top long before anyone spots the insect itself."
+    },
+    "tech_notes": "Damage is cosmetic/vigor-related, not a threat to structures or people. Treat undersides of leaves per label; multiple generations per season in FL warrant repeat monitoring.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/116090"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 54: replaced the low-value royal-palm-bug pairing (different host plant, not a realistic confusion) with green-lacewing (C/other-insects, also this session's own work) — the two are commonly confused by name ('lace bug' vs 'lacewing') even though one is a pest and the other a beneficial predator, so telling them apart matters for whether to treat. Reciprocal look-alike added on the green-lacewing entry.",
+      "approval_hash": "dad14dddde5a1688c133dc9ed6347dc9fbbf4e911498720e00be24d30438b621"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
     "verification": []
   }
 ]

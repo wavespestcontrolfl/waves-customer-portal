@@ -5,13 +5,9 @@
  */
 const {
   REQUIRED_FINDINGS_FIELDS,
-  NEXT_STEP_CHIPS,
-  TYPE_NEXT_STEP_CHIPS,
-  chipsForType,
   customerLabelForField,
   customerLabelForValue,
   findBannedCustomerCopy,
-  nextStepRequiredForType,
   buildTypedReportSnapshot,
   findingsSchemaForType,
   validateTypedFindings,
@@ -37,33 +33,19 @@ describe('registry-wide customer copy safety', () => {
       }
     }
   });
-
-  test('every next-step sentence is banned-copy clean', () => {
-    for (const [chip, sentence] of Object.entries(NEXT_STEP_CHIPS)) {
-      expect({ chip, violations: findBannedCustomerCopy(sentence) })
-        .toEqual({ chip, violations: [] });
-    }
-  });
-
-  test('every per-type chip has a sentence mapping', () => {
-    for (const [type, chips] of Object.entries(TYPE_NEXT_STEP_CHIPS)) {
-      for (const chip of chips) {
-        expect({ type, chip, hasSentence: !!NEXT_STEP_CHIPS[chip] })
-          .toEqual({ type, chip, hasSentence: true });
-      }
-    }
-  });
 });
 
-describe('required next step coverage', () => {
-  test('all eight sectioned services require a next step', () => {
+// The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
+// Recommendations is the single tech-advice field for every typed service
+// type now, so the schema slice no longer serves a required flag or a
+// per-type chip list for any of the eight sectioned services.
+describe('next-step picker retirement (owner ruling 2026-09-27)', () => {
+  test('none of the eight sectioned services serve the retired picker fields', () => {
     for (const type of SECTIONED_TYPES) {
-      expect({ type, required: nextStepRequiredForType(type) })
-        .toEqual({ type, required: true });
-      expect(findingsSchemaForType(type).nextStepRequired).toBe(true);
+      const schema = findingsSchemaForType(type);
+      expect(schema.nextStepRequired).toBeUndefined();
+      expect(schema.nextStepChips).toBeUndefined();
     }
-    expect(nextStepRequiredForType('one_time_pest_treatment')).toBe(false);
-    expect(nextStepRequiredForType('termite_treatment')).toBe(false);
   });
 
   test('required fields exist and validate', () => {
@@ -100,7 +82,6 @@ describe('mosquito snapshot', () => {
       serviceKey: 'mosquito_event',
       serviceLabel: 'Mosquito Event Spray',
       values: VALUES,
-      nextStepChips: ['Continue mosquito program', 'Customer action — remove standing water'],
       visitSequence: 1,
       activity: null,
     });
@@ -120,7 +101,6 @@ describe('mosquito snapshot', () => {
       serviceKey: 'mosquito_event',
       serviceLabel: 'Mosquito Event Spray',
       values: { ...VALUES, activity_level: 'None observed' },
-      nextStepChips: ['Continue mosquito program'],
       visitSequence: 1,
       activity: null,
     });
@@ -143,7 +123,6 @@ describe('wildlife snapshot', () => {
         trap_actions: 'Traps reset, Bait/lure refreshed',
         customer_recommendations: 'Trim branches off roofline',
       },
-      nextStepChips: ['Continue trapping', 'Exclusion after activity stops'],
       visitSequence: 2,
       activity: {
         indicatorKey: 'wildlife_activity',
@@ -156,7 +135,9 @@ describe('wildlife snapshot', () => {
     });
     expect(snapshot.todaysResult.body).toContain('checked 2 traps');
     expect(snapshot.todaysResult.body).toContain('found no new captures');
-    expect(snapshot.todaysResult.nextStep).toContain('Entry points will be sealed once activity has stopped.');
+    // Next-step chip picker retired (owner ruling 2026-09-27) — no
+    // chip-derived sentence on a new completion.
+    expect(snapshot.todaysResult.nextStep).toBeNull();
     expect(findBannedCustomerCopy(JSON.stringify(snapshot.todaysResult))).toEqual([]);
   });
 });
@@ -175,12 +156,12 @@ describe('inspection snapshot', () => {
         access_limitations: 'Stored items limited inspection',
         customer_recommendations: 'Seal entry gaps, Trim vegetation',
       },
-      nextStepChips: ['Treatment recommended'],
       visitSequence: 1,
       activity: null,
     });
     expect(snapshot.todaysResult.body).toContain('We inspected the exterior perimeter, garage and kitchen.');
-    expect(snapshot.todaysResult.nextStep).toBe('A treatment program is recommended — we will help you get it scheduled.');
+    // Next-step chip picker retired (owner ruling 2026-09-27).
+    expect(snapshot.todaysResult.nextStep).toBeNull();
   });
 });
 
@@ -219,7 +200,6 @@ describe('cockroach + bed bug + palm + lawn snapshots', () => {
         work_completed: 'Bait placement, Insect growth regulator, Crack & crevice treatment',
         customer_prep: 'No over-the-counter sprays, Remove food debris',
       },
-      nextStepChips: ['Follow-up in 10–14 days', 'No store-bought sprays'],
       visitSequence: 1,
       activity: {
         indicatorKey: 'roach_activity', label: 'Roach Activity', score: 3, source: 'derived',
@@ -227,7 +207,8 @@ describe('cockroach + bed bug + palm + lawn snapshots', () => {
     });
     expect(snapshot.todaysResult.headline).toBe('Cockroach activity was moderate today.');
     expect(snapshot.todaysResult.body).toContain('placed targeted bait');
-    expect(snapshot.todaysResult.nextStep).toContain('10–14 days');
+    // Next-step chip picker retired (owner ruling 2026-09-27).
+    expect(snapshot.todaysResult.nextStep).toBeNull();
   });
 
   test('bed bug work sentence, prep status copy, palm + lawn composition', () => {
@@ -244,7 +225,6 @@ describe('cockroach + bed bug + palm + lawn snapshots', () => {
         prep_status: 'Partial',
         customer_prep: 'Dry bedding on high heat, Do not move items between rooms',
       },
-      nextStepChips: ['Follow-up in 10–14 days'],
       visitSequence: 1,
       activity: {
         indicatorKey: 'bed_bug_activity', label: 'Bed Bug Activity', score: 1, source: 'derived',
@@ -267,7 +247,6 @@ describe('cockroach + bed bug + palm + lawn snapshots', () => {
         work_completed: 'Palm fertilizer applied, Canopy / crown inspection',
         customer_recommendations: 'Avoid over-pruning, Keep mulch away from trunks',
       },
-      nextStepChips: ['Continue palm program', 'Monitor canopy response'],
       visitSequence: 1,
       activity: null,
     });
@@ -291,7 +270,6 @@ describe('cockroach + bed bug + palm + lawn snapshots', () => {
         spot_treatment_areas: 'Front right lawn',
         customer_recommendations: 'Adjust irrigation coverage, Avoid mowing too low',
       },
-      nextStepChips: ['Continue lawn program', 'Irrigation correction needed'],
       visitSequence: 1,
       activity: null,
     });
