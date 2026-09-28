@@ -3780,6 +3780,32 @@ describe('citability reconciliation after publisher-boundary failures', () => {
       queue, 'opp-cite', 'astro_pr_audit_failed', { claimToken: claimedAt }, null,
     );
   });
+
+  test('a failed locked park after the PR run is recorded falls back with the run\'s own pending-merge reason', async () => {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._pendingReviewClaimOrThrow = jest.fn()
+      .mockRejectedValueOnce(new Error('page-edit lock unavailable'))
+      .mockResolvedValueOnce(undefined);
+    const claimedAt = new Date('2026-09-27T03:05:00Z');
+    const queue = { getById: jest.fn().mockResolvedValue({ id: 'opp-cite', bucket: 'citability_backfill' }) };
+    const run = {
+      id: 'run-recorded', opportunity_id: 'opp-cite', queue_claim_id: 'claim-current', action_type: 'refresh_existing_page',
+      astro_pr_url: 'https://github.com/waves/pull/79', claimed_at: claimedAt,
+    };
+
+    await runner._parkPublishedClaimForReconciliation(
+      queue, 'opp-cite', 'astro_pr_queue_transition_failed', { claimToken: claimedAt }, new Error('queue write failed'), run,
+    );
+
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenCalledTimes(2);
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenLastCalledWith(
+      queue, 'opp-cite', 'astro_pr_pending_merge', { claimToken: claimedAt }, null,
+    );
+  });
 });
 
 describe('approveAndPublishNamedCompetitor — superseded in-flight approval', () => {

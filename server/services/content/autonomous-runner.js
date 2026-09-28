@@ -2264,11 +2264,17 @@ class AutonomousRunner {
     // to the ordinary reconciliation park below: leaving the row claimed would
     // let stale-claim recovery re-pend it (a second PR) or skip it (orphaning
     // the first), while the park keeps it visible for a person.
+    // Set once a run row carrying this PR as astro_pr_pending_merge is known
+    // to exist. The fallback park must then use the same reason: the poller
+    // only keeps a run whose queue reason matches it, and would otherwise
+    // supersede the run and stop polling a still-open refresh PR.
+    let prRunRecorded = false;
     if (run?.action_type === 'refresh_existing_page' && run.astro_pr_url
       && typeof queue.getById === 'function') {
       try {
         const snapshot = await queue.getById(opportunityId);
         if (snapshot?.bucket === 'citability_backfill') {
+          prRunRecorded = Boolean(run.id);
           let recoveryRun = run;
           if (!recoveryRun.id) {
             const now = new Date();
@@ -2287,6 +2293,7 @@ class AutonomousRunner {
               completed_at: now,
             }).returning('id');
             recoveryRun = { ...run, id: saved?.id || saved };
+            prRunRecorded = true;
           }
           await this._pendingReviewClaimOrThrow(
             queue, opportunityId, 'astro_pr_pending_merge', payload, run.action_type, recoveryRun,
@@ -2298,7 +2305,7 @@ class AutonomousRunner {
       }
     }
     try {
-      await this._pendingReviewClaimOrThrow(queue, opportunityId, reason, payload, null);
+      await this._pendingReviewClaimOrThrow(queue, opportunityId, prRunRecorded ? 'astro_pr_pending_merge' : reason, payload, null);
     } catch (err) {
       logger.error(`[autonomous-runner] failed to park published ${opportunityId} for reconciliation: ${err.message}`);
     }
