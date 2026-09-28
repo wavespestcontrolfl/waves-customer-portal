@@ -4,10 +4,14 @@
  *
  * Three deterministic, honest, non-guaranteeing blocks built from data the
  * visit already collected: (1) a rain + treatment line, (2) a spider
- * ("#1 callback") acknowledgment when eave/web work or spider-targeted
- * products were part of the visit, and (3) a short "what to expect" list
- * keyed to the product classes applied. Pure — no I/O, no DB, no fetch —
- * every fact is handed in by the caller (report-data.js / report-copy-context.js
+ * ("#1 callback") acknowledgment triggered ONLY by a recorded completed
+ * eave/web/soffit protocol action (owner ruling 2026-09-28: a
+ * spider-targeted product alone does NOT establish eaves were treated —
+ * see buildSpiderExpectation), and (3) a short "what to expect" list keyed
+ * to an EXPLICIT, closed product-name map (owner ruling 2026-09-28: never
+ * inferred from active ingredient / moa_group / category — see
+ * PRODUCT_EXPECTATION_CLASS). Pure — no I/O, no DB, no fetch — every fact
+ * is handed in by the caller (report-data.js / report-copy-context.js
  * / reports-public.js), matching the existing pest-report-v2.js "thin
  * arranger" pattern. Every synthesized line runs through the shared
  * banned-copy guard (validateCustomerCopy) before it can render.
@@ -154,30 +158,30 @@ function buildRainExpectation({
 }
 
 // ── Spiders (#1 callback) ────────────────────────────────────────────────
-// Eave/web/soffit work, tech-completed action labels (protocols.json —
-// e.g. "Swept eaves, window frames, door frames, and lanai"), regardless of
-// whether the label itself carries treatmentApplied (a sweep is still
-// spider-relevant work — but sweeping alone is NOT a treatment). actionLabels:
-// raw completed-action label strings for the visit. products: the same
-// applications array pest-report-v2 already builds ({ targets: [...] }) —
-// a spider-labeled applied product is the ONLY evidence of an actual residual.
+// Owner ruling 2026-09-28 (P1 audit): a spider-TARGETED product does NOT
+// establish that eaves were treated — the tech may have tagged a product
+// for spiders while applying it somewhere else entirely (interior crack &
+// crevice, a different zone). The ONLY evidence the eaves/webs were worked
+// is a recorded completed eave/web/soffit protocol action (protocols.json —
+// e.g. "Swept eaves, window frames, door frames, and lanai"), so that is
+// now the SOLE entry point for this whole section. No action recorded =>
+// no spider section, full stop — never inferred from a product target
+// alone. actionLabels: raw completed-action label strings for the visit
+// (server-internal only — see report-data.js's completedProtocolActionLabels;
+// never rendered verbatim, only matched). applications: the same array
+// pest-report-v2 builds ({ product: {...}, targets: [...] }).
 const SPIDER_ACTION_RE = /\b(eave|eaves|web|webs|webbing|soffit|cobweb)\b/i;
 const SPIDER_TARGET_RE = /spider/i;
 
-// Fixed customer wording only — owner ruling 2026-09-28: a raw completed
-// protocol-action label is NEVER rendered here. Labels are tech/protocol
-// vocabulary (can carry internal wording or a product hint) and are used
-// ONLY to decide which fixed sentence applies, never quoted.
-//
-// Wording must match the EVIDENCE (owner ruling 2026-09-28): a matched
-// eave/web/soffit action proves sweeping happened, NOT that a residual was
-// applied there — only a spider-labeled applied product proves that. So
-// three combos, three distinct "what we did" + expectation pairs:
-//   1. action matched, NO residual applied  -> de-web only, no treatment claim
-//   2. residual applied, NO action matched  -> treatment-only wording (unchanged)
-//   3. BOTH action matched AND residual applied -> combined wording
+// Fixed customer wording only — a raw completed protocol-action label is
+// NEVER rendered here; it is used only to decide the action gate above.
+//   1. action recorded, NO spider-labeled pyrethroid residual applied
+//      -> de-web only, no treatment claim
+//   2. action recorded AND a spider-labeled pyrethroid residual (from the
+//      explicit PRODUCT_EXPECTATION_CLASS map) was also applied
+//      -> combined wording — the eaves claim still rests on the recorded
+//         action, never on the product target alone
 const WEB_ONLY_TEXT = 'We knocked down webs around the eaves and entry points.';
-const RESIDUAL_ONLY_TEXT = 'We applied a residual treatment labeled for spiders during this visit.';
 const WEB_AND_RESIDUAL_TEXT = 'We knocked down webs and treated the eaves and entry points where spiders build.';
 
 // De-web-only expectation (combo 1): no "the residual we applied" claim —
@@ -186,7 +190,7 @@ const WEB_AND_RESIDUAL_TEXT = 'We knocked down webs and treated the eaves and en
 const WEB_ONLY_EXPECTATION = 'New webs can appear within days as new spiders arrive from outside — that\'s normal.';
 const WEB_ONLY_NEXT_STEP = 'If webbing keeps coming back over the next two weeks, text us and we\'ll take another look.';
 
-// Residual-backed expectation (combos 2 and 3) — the only case where we can
+// Residual-backed expectation (combo 2) — the only case where we can
 // honestly credit a residual for thinning webs out over time.
 const RESIDUAL_EXPECTATION = 'New webs can appear within days as new spiders arrive from outside — that\'s normal. '
   + 'The residual we applied kills spiders that land on treated eaves and entry points, so webbing should '
@@ -197,17 +201,19 @@ function buildSpiderExpectation({ actionLabels = [], applications = [] } = {}) {
   const actionHit = (actionLabels || []).some(
     (label) => SPIDER_ACTION_RE.test(cleanText(label)),
   );
-  // The ONLY evidence a residual was actually applied: a product this visit
-  // is tagged/targeted for spiders. A completed sweep action is never
-  // treated as treatment evidence on its own.
-  const residualApplied = (applications || []).some(
-    (app) => Array.isArray(app?.targets) && app.targets.some((t) => SPIDER_TARGET_RE.test(cleanText(t))),
-  );
-  if (!actionHit && !residualApplied) return null;
+  // No recorded eave/web/soffit action => no section, regardless of any
+  // spider-targeted product (see module note above).
+  if (!actionHit) return null;
 
-  const whatWeDid = residualApplied
-    ? (actionHit ? WEB_AND_RESIDUAL_TEXT : RESIDUAL_ONLY_TEXT)
-    : WEB_ONLY_TEXT;
+  // A spider-labeled residual actually applied: tech-tagged for spiders
+  // AND classified pyrethroid by the explicit product-name map — never a
+  // target tag alone (that was the P1 this replaces).
+  const residualApplied = (applications || []).some((app) => {
+    const targeted = Array.isArray(app?.targets) && app.targets.some((t) => SPIDER_TARGET_RE.test(cleanText(t)));
+    return targeted && classifyProductExpectation(toExpectationProduct(app)) === 'pyrethroid';
+  });
+
+  const whatWeDid = residualApplied ? WEB_AND_RESIDUAL_TEXT : WEB_ONLY_TEXT;
   const expectation = residualApplied ? RESIDUAL_EXPECTATION : WEB_ONLY_EXPECTATION;
   const nextStep = residualApplied ? RESIDUAL_NEXT_STEP : WEB_ONLY_NEXT_STEP;
 
@@ -220,46 +226,48 @@ function buildSpiderExpectation({ actionLabels = [], applications = [] } = {}) {
 }
 
 // ── What to expect (by treatment) ────────────────────────────────────────
-// Keyed off product class (moa_group / active ingredient / category), never
-// the product's marketing name. One line per class, de-duplicated, capped
-// at 3 — fixed priority order when more than 3 classes are present.
-const NON_REPELLENT_ACTIVE_RE = /\b(fipronil|dinotefuran|imidacloprid|indoxacarb)\b/i;
-const NON_REPELLENT_MOA_RE = /\b(2b|4a|22a)\b/i;
-const PYRETHROID_ACTIVE_RE = /\b(bifenthrin|cyfluthrin|lambda[-\s]?cyhalothrin|deltamethrin|permethrin|esfenvalerate|cypermethrin)\b/i;
-const PYRETHROID_MOA_RE = /\b3a\b/i;
-const IGR_ACTIVE_RE = /\b(hydroprene|pyriproxyfen|novaluron|methoprene|fenoxycarb)\b/i;
-const IGR_CATEGORY_RE = /\bigr\b|growth regulator/i;
-const IGR_MOA_RE = /\b7[ac]\b/i;
-const ROACH_GEL_CATEGORY_RE = /\bgel\b/i;
-const ROACH_BAIT_CATEGORY_RE = /\bbait\b/i;
-const ROACH_NAME_RE = /roach/i;
+// Owner ruling 2026-09-28 (P1 audit, 2 rounds of misclassification from the
+// prior heuristic — a spider-targeted product read as an eave treatment,
+// and a category/name-regex classifier would have called an Advion ANT
+// Bait Gel a roach product): classification is now an EXPLICIT, CLOSED map
+// keyed by the exact catalog product name (normalized: cleanText + lower),
+// never inferred from active ingredient, moa_group, or category alone. A
+// product NOT in this map gets NO what-to-expect line — fail closed, never
+// guess. Extend this map (with an owner-verified product name) rather than
+// reintroducing inference.
+function normalizeProductName(name) {
+  return cleanText(name).toLowerCase();
+}
+
+const PRODUCT_EXPECTATION_CLASS = new Map([
+  ['taurus sc', 'non_repellent'],
+  ['alpine wsg', 'non_repellent'],
+  ['atticus talak 7.9 f', 'pyrethroid'],
+  ['demand cs', 'pyrethroid'],
+  ['onslaught fastcap', 'pyrethroid'],
+  ['delta dust', 'pyrethroid'],
+  ['advion evolution cockroach gel bait', 'roach_gel_bait'],
+  ['advion cockroach gel bait', 'roach_gel_bait'],
+  ['advion ant bait gel', 'ant_bait'],
+  ['advion wdg granular', 'ant_bait'],
+  ['gentrol igr', 'igr'],
+  ['tekko pro igr', 'igr'],
+  // Surfactant/adjuvant — deliberately maps to no class (documented here so
+  // it reads as a decision, not an omission).
+  ['lesco 90/10 nonionic surfactant', null],
+].map(([name, cls]) => [normalizeProductName(name), cls]));
 
 function classifyProductExpectation(product = {}) {
-  const activeIngredient = cleanText(product.activeIngredient);
-  const category = cleanText(product.category);
-  const moaGroup = cleanText(product.moaGroup);
-  const name = cleanText(product.name);
-
-  if (IGR_CATEGORY_RE.test(category) || IGR_CATEGORY_RE.test(name)
-    || IGR_ACTIVE_RE.test(activeIngredient) || IGR_MOA_RE.test(moaGroup)) {
-    return 'igr';
-  }
-  if (ROACH_GEL_CATEGORY_RE.test(category)
-    || (ROACH_BAIT_CATEGORY_RE.test(category) && ROACH_NAME_RE.test(name))) {
-    return 'roach_gel_bait';
-  }
-  if (NON_REPELLENT_ACTIVE_RE.test(activeIngredient) || NON_REPELLENT_MOA_RE.test(moaGroup)) {
-    return 'non_repellent';
-  }
-  if (PYRETHROID_ACTIVE_RE.test(activeIngredient) || PYRETHROID_MOA_RE.test(moaGroup)) {
-    return 'pyrethroid';
-  }
-  return null;
+  const name = normalizeProductName(product?.name);
+  if (!name) return null;
+  return PRODUCT_EXPECTATION_CLASS.get(name) ?? null;
 }
 
 const EXPECTATION_TEXT = {
   non_repellent: 'Non-repellent products (like what we used) work by transfer — ants may show up more for a '
     + 'few days as they carry it back to the colony, then drop off over about 1–2 weeks.',
+  ant_bait: 'Ants that find the bait carry it back to the colony, so you may see a few more ants near the '
+    + 'placements for a few days before they drop off.',
   roach_gel_bait: 'With gel bait, dead roaches may show up out in the open for a week or two as the colony '
     + 'feeds and dies off — that\'s the bait working, not a sign it isn\'t.',
   pyrethroid: 'The barrier treatment keeps working after it\'s applied, but a few insects can still wander in '
@@ -269,7 +277,7 @@ const EXPECTATION_TEXT = {
 };
 
 // Fixed priority when more than 3 classes triggered — cap to ~3 lines.
-const EXPECTATION_PRIORITY = ['non_repellent', 'roach_gel_bait', 'pyrethroid', 'igr'];
+const EXPECTATION_PRIORITY = ['non_repellent', 'ant_bait', 'roach_gel_bait', 'pyrethroid', 'igr'];
 
 function buildWhatToExpect({ products = [] } = {}) {
   const classes = new Set();

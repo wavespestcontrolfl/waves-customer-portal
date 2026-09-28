@@ -307,7 +307,7 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
   afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
 
   const APPLICATIONS = [
-    { product: { active_ingredient: 'Fipronil', category: 'insecticide' }, targets: ['ants'] },
+    { product: { name: 'Taurus SC', active_ingredient: 'Fipronil', category: 'insecticide' }, targets: ['ants'] },
   ];
   const ACTION_LABELS = ['Swept eaves, window frames, door frames, and lanai'];
 

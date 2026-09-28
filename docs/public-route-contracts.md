@@ -105,21 +105,23 @@ rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
 the higher 1" bar) or the same live-only forecast signal fires — never on
 the calendar month alone, and never when there is no rain data at all.
 `spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
-non-guaranteeing acknowledgment card that appears only when the visit
-recorded a completed eave/web/soffit protocol action or a spider-targeted
-applied product. `whatWeDid` / `expectation` / `nextStep` are ALWAYS one of
-three fixed combinations chosen by the underlying EVIDENCE (owner ruling
-2026-09-28 — wording must match evidence: a completed sweep action proves
-sweeping happened, never that a residual was applied there; only a
-spider-targeted applied product proves that): (1) action matched, no
-spider-labeled residual applied → de-web wording only, no treatment claim
-("We knocked down webs around the eaves and entry points.") and a
-de-web-only expectation that never says "the residual we applied"; (2) a
-spider-labeled residual applied, no matching action → the unchanged
-treatment-only fallback ("We applied a residual treatment labeled for
-spiders during this visit."); (3) both → combined wording ("We knocked down
-webs and treated the eaves and entry points where spiders build."). None of
-the three ever interpolates a raw completed protocol-action label. Raw
+non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
+2026-09-28, revised: a spider-targeted product does NOT by itself establish
+that eaves were treated — the tech may have tagged it while applying it
+somewhere else entirely) is a recorded COMPLETED eave/web/soffit protocol
+action; no such action recorded → no spider section at all, regardless of
+any spider-targeted product. `whatWeDid` / `expectation` / `nextStep` are
+ALWAYS one of two fixed combinations: (1) the action was recorded but no
+spider-labeled pyrethroid residual (from the explicit `whatToExpect`
+product-name map below) was also applied → de-web-only wording, no
+treatment claim ("We knocked down webs around the eaves and entry points.")
+and an expectation that never says "the residual we applied"; (2) the
+action was recorded AND a product tagged for spiders that also classifies
+`pyrethroid` in the explicit map was applied → combined wording ("We
+knocked down webs and treated the eaves and entry points where spiders
+build.") with a residual-backed expectation — even here, the eaves-treated
+claim rests on the recorded action, never on the product tag alone. Neither
+combination ever interpolates a raw completed protocol-action label. Raw
 protocol-action labels
 (`server/services/service-report/report-data.js`'s
 `completedProtocolActionLabels`) are internal tech/protocol vocabulary and
@@ -129,9 +131,19 @@ never attached to `data`/the object `buildReportV1Data` returns, so no
 public report payload — `/data`, the PDF, `/map.svg`, or any other render —
 carries a `protocolActionLabels` field or any completed-action label text,
 regardless of the gate. `whatToExpect: { lines: [string] }` — up to 3
-de-duplicated, honest lines keyed to the product class of what was applied
-(`products_catalog.moa_group` / `active_ingredient` / `category`: non-repellent,
-roach gel bait, pyrethroid barrier, IGR), never a "guarantee" or
+de-duplicated, honest lines keyed to product class, resolved through an
+EXPLICIT, CLOSED map keyed by the exact catalog product name only (owner
+ruling 2026-09-28, revised: active_ingredient / moa_group / category
+inference was replaced after 2 rounds of misclassification — e.g. it would
+have called an Advion Ant Bait Gel a roach product via the shared "bait"
+category). Currently mapped: Taurus SC, Alpine WSG → non-repellent;
+Atticus Talak 7.9 F, Demand CS, Onslaught Fastcap, Delta Dust → pyrethroid
+barrier; Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel Bait →
+roach gel bait; Advion Ant Bait Gel, Advion WDG Granular → ant bait; Gentrol
+IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is explicitly
+mapped to no class. A product NOT in this map gets no line — fail closed,
+never guessed; extending the map to a new product requires an
+owner-verified name, never reintroduced inference. Never a "guarantee" or
 "eliminate" claim (screened through the existing `validateCustomerCopy`
 banned-copy guard). The same rain + what-to-expect facts (never the spider
 block, never the live forecast clause) also feed an `EXPECTATIONS` section

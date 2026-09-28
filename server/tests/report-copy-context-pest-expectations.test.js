@@ -61,18 +61,20 @@ const CUSTOMER = { id: 'c1', first_name: 'Pat', last_name: 'Pest', city: 'Braden
 // (mockFetchServiceWeekWeather controls the reading per test).
 const GEOCODED_CUSTOMER = { ...CUSTOMER, id: 'c2', latitude: 27.5, longitude: -82.5 };
 
-const FIPRONIL_PRODUCT = {
-  id: 'p1', name: 'Termidor SC', category: 'insecticide', product_type: 'pesticide',
+// Real catalog product name (owner-approved explicit classification map,
+// pest-report-expectations.js) — classification is name-only now, never
+// inferred from active_ingredient/category/moa_group.
+const NON_REPELLENT_PRODUCT = {
+  id: 'p1', name: 'Taurus SC', category: 'insecticide', product_type: 'pesticide',
   active_ingredient: 'Fipronil', epa_reg_number: '432-1348', approved_for_service_report: true,
   moa_group: null, rainfast_minutes: null,
 };
-// category alone ('bait') is not enough to classify as roach gel bait — the
-// classifier needs the NAME too (owner-flagged P1 2026-09-28: this grounding
-// path used to build its product list without `name`, so this exact product
-// would have silently failed to classify here while still classifying
-// correctly on the customer-facing render path).
+// The classifier needs the NAME (owner-flagged P1 2026-09-28: this
+// grounding path used to build its product list without `name`, so this
+// exact product would have silently failed to classify here while still
+// classifying correctly on the customer-facing render path).
 const ROACH_GEL_PRODUCT = {
-  id: 'p2', name: 'Advion Cockroach Gel', category: 'bait', product_type: 'bait',
+  id: 'p2', name: 'Advion Cockroach Gel Bait', category: 'bait', product_type: 'bait',
   active_ingredient: 'Indoxacarb', epa_reg_number: '352-687', approved_for_service_report: true,
   moa_group: null, rainfast_minutes: null,
 };
@@ -87,13 +89,13 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
 
   it('includes an EXPECTATIONS section with the product-class line; no ants line with no rain data (no geocode)', async () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
-    const knex = makeKnexStub({ customers: [CUSTOMER], catalogProducts: [FIPRONIL_PRODUCT] });
+    const knex = makeKnexStub({ customers: [CUSTOMER], catalogProducts: [NON_REPELLENT_PRODUCT] });
     const { contextText } = await buildReportCopyContext({
       customerId: 'c1',
       serviceType: 'Pest Control Service',
       serviceLine: 'pest',
       serviceDate: '2026-07-15', // July — rainy season, but no rain reading
-      products: [{ productId: 'p1', name: 'Termidor SC' }],
+      products: [{ productId: 'p1', name: 'Taurus SC' }],
       knex,
     });
     expect(contextText).toMatch(/EXPECTATIONS/);
@@ -114,7 +116,7 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
       serviceType: 'Pest Control Service',
       serviceLine: 'pest',
       serviceDate: '2026-02-15', // outside rainy season — isolates the product-class line
-      products: [{ productId: 'p2', name: 'Advion Cockroach Gel' }],
+      products: [{ productId: 'p2', name: 'Advion Cockroach Gel Bait' }],
       knex,
     });
     expect(contextText).toMatch(/EXPECTATIONS/);
@@ -159,13 +161,13 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate off)', () => {
 
   it('never adds the EXPECTATIONS section when the gate is off', async () => {
     delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
-    const knex = makeKnexStub({ customers: [CUSTOMER], catalogProducts: [FIPRONIL_PRODUCT] });
+    const knex = makeKnexStub({ customers: [CUSTOMER], catalogProducts: [NON_REPELLENT_PRODUCT] });
     const { contextText } = await buildReportCopyContext({
       customerId: 'c1',
       serviceType: 'Pest Control Service',
       serviceLine: 'pest',
       serviceDate: '2026-07-15',
-      products: [{ productId: 'p1', name: 'Termidor SC' }],
+      products: [{ productId: 'p1', name: 'Taurus SC' }],
       knex,
     });
     expect(contextText).not.toMatch(/EXPECTATIONS/);

@@ -161,36 +161,62 @@ describe('buildRainExpectation', () => {
   });
 });
 
-describe('classifyProductExpectation', () => {
+// Owner ruling 2026-09-28 (P1 audit, 2 rounds of misclassification from the
+// prior heuristic — a category/name-regex classifier would have called an
+// Advion ANT Bait Gel a roach product, since it also matched the generic
+// "bait" category rule): classification is now an EXPLICIT, CLOSED map
+// keyed by the exact catalog product name — active ingredient, moa_group,
+// and category are NEVER consulted. A product not in the map gets no class.
+describe('classifyProductExpectation — explicit product-name map (no heuristics)', () => {
   const cases = [
-    [{ activeIngredient: 'Fipronil' }, 'non_repellent'],
-    [{ activeIngredient: 'Dinotefuran' }, 'non_repellent'],
-    [{ activeIngredient: 'Imidacloprid' }, 'non_repellent'],
-    [{ activeIngredient: 'Indoxacarb' }, 'non_repellent'],
-    [{ moaGroup: 'Group 2B' }, 'non_repellent'],
-    [{ activeIngredient: 'Bifenthrin' }, 'pyrethroid'],
-    [{ activeIngredient: 'Lambda-Cyhalothrin' }, 'pyrethroid'],
-    [{ moaGroup: 'Group 3A' }, 'pyrethroid'],
-    [{ category: 'IGR', activeIngredient: 'Hydroprene' }, 'igr'],
-    [{ category: 'IGR', name: 'Tekko Pro IGR' }, 'igr'],
-    [{ category: 'bait', name: 'Advion Cockroach Gel' }, 'roach_gel_bait'],
-    [{ category: 'gel', name: 'Vendetta Plus gel' }, 'roach_gel_bait'],
-    [{ activeIngredient: 'Water' }, null],
+    [{ name: 'Taurus SC' }, 'non_repellent'],
+    [{ name: 'Alpine WSG' }, 'non_repellent'],
+    [{ name: 'Atticus Talak 7.9 F' }, 'pyrethroid'],
+    [{ name: 'Demand CS' }, 'pyrethroid'],
+    [{ name: 'Onslaught Fastcap' }, 'pyrethroid'],
+    [{ name: 'Delta Dust' }, 'pyrethroid'],
+    [{ name: 'Advion Evolution Cockroach Gel Bait' }, 'roach_gel_bait'],
+    [{ name: 'Advion Cockroach Gel Bait' }, 'roach_gel_bait'],
+    [{ name: 'Advion Ant Bait Gel' }, 'ant_bait'],
+    [{ name: 'Advion WDG Granular' }, 'ant_bait'],
+    [{ name: 'Gentrol IGR' }, 'igr'],
+    [{ name: 'Tekko Pro IGR' }, 'igr'],
+    // Surfactant — explicitly mapped to no class, not merely absent.
+    [{ name: 'LESCO 90/10 Nonionic Surfactant' }, null],
+    // Unmapped product — fail closed, never guess.
+    [{ name: 'Some Unlisted Product 2000' }, null],
     [{}, null],
   ];
   it.each(cases)('%j → %s', (product, expected) => {
     expect(classifyProductExpectation(product)).toBe(expected);
   });
+
+  it('is case/whitespace-insensitive on the name (same matching style cleanText() uses elsewhere)', () => {
+    expect(classifyProductExpectation({ name: '  taurus sc  ' })).toBe('non_repellent');
+    expect(classifyProductExpectation({ name: 'TAURUS SC' })).toBe('non_repellent');
+  });
+
+  // The actual bug this replaces: a category/active-ingredient/moa_group
+  // heuristic would have classified an Advion Ant Bait Gel as roach gel
+  // bait (both are "bait" category with an "Advion" name prefix). The
+  // explicit map only ever matches the FULL product name, so this never
+  // happens now — and never reintroduces any other combination of
+  // active-ingredient/category/moa_group without a matching name either.
+  it('active ingredient / category / moa_group ALONE (no matching name) never classify anything', () => {
+    expect(classifyProductExpectation({ activeIngredient: 'Fipronil', category: 'insecticide', moaGroup: 'Group 2B' })).toBeNull();
+    expect(classifyProductExpectation({ category: 'bait', activeIngredient: 'Indoxacarb' })).toBeNull();
+    expect(classifyProductExpectation({ category: 'IGR' })).toBeNull();
+  });
 });
 
 // Owner-flagged P1 (2026-09-28): the AI-grounding path (report-copy-context.js)
 // used to build its own product list WITHOUT `name`, so a name-dependent
-// classification (e.g. roach gel bait, which needs the name to distinguish
-// it from other bait) could come out different for the grounded AI copy
-// than for the customer-facing render block. toExpectationProduct is the
-// ONE shared normalizer both paths now funnel through.
+// classification (e.g. roach gel bait vs. ant bait — both "Advion ... Bait"
+// products) could come out different for the grounded AI copy than for the
+// customer-facing render block. toExpectationProduct is the ONE shared
+// normalizer both paths now funnel through.
 describe('toExpectationProduct — shared normalizer (grounding/render can\'t drift)', () => {
-  const GEL_BAIT = { name: 'Advion Cockroach Gel', activeIngredient: 'Indoxacarb', category: 'bait' };
+  const GEL_BAIT = { name: 'Advion Cockroach Gel Bait', activeIngredient: 'Indoxacarb', category: 'bait' };
 
   it('reads the same fields from the render (applications) shape and the grounding (productSafety) shape', () => {
     const renderShape = { product: { name: GEL_BAIT.name, active_ingredient: GEL_BAIT.activeIngredient, category: GEL_BAIT.category, moa_group: null, rainfast_minutes: null } };
@@ -206,12 +232,8 @@ describe('toExpectationProduct — shared normalizer (grounding/render can\'t dr
     expect(classifyProductExpectation(fromRender)).toBe(classifyProductExpectation(fromGrounding));
   });
 
-  it('regression: WITHOUT the shared normalizer preserving name, the same bait-category product would fail to classify as roach gel bait', () => {
-    // Simulates the pre-fix bug directly: a product object missing `name`
-    // (category alone is not enough — 'bait' also covers ant/roach baits
-    // that are not gel, so the classifier requires the name; no other
-    // classifying signal is present here, unlike a non-repellent active
-    // ingredient which would independently trigger a different class).
+  it('regression: WITHOUT the shared normalizer preserving name, the product would fail to classify at all', () => {
+    // Simulates the pre-fix bug directly: a product object missing `name`.
     const missingName = classifyProductExpectation({ category: 'bait' });
     expect(missingName).not.toBe('roach_gel_bait');
     expect(missingName).toBeNull();
@@ -232,40 +254,67 @@ describe('toExpectationProduct — shared normalizer (grounding/render can\'t dr
 
 describe('buildWhatToExpect', () => {
   it('returns null with no classifiable products', () => {
-    expect(buildWhatToExpect({ products: [{ activeIngredient: 'Water' }] })).toBeNull();
+    expect(buildWhatToExpect({ products: [{ name: 'Some Unlisted Product' }] })).toBeNull();
     expect(buildWhatToExpect({ products: [] })).toBeNull();
   });
 
-  it('one line per class, de-duplicated across products of the same class', () => {
+  it('an unmapped product gets NO line (fail closed)', () => {
+    expect(buildWhatToExpect({ products: [{ name: 'Not In The Map' }] })).toBeNull();
+  });
+
+  // The exact P1 scenario this round fixes: an Advion Ant Bait Gel must
+  // NEVER print the roach-gel "dead roaches" line.
+  it('Advion Ant Bait Gel gets the ant_bait line, never the roach gel bait line', () => {
+    const out = buildWhatToExpect({ products: [{ name: 'Advion Ant Bait Gel' }] });
+    expect(out.lines).toHaveLength(1);
+    expect(out.lines[0]).toMatch(/carry it back to the colony/);
+    expect(out.lines[0]).not.toMatch(/dead roaches/);
+  });
+
+  it('Advion WDG Granular also classifies ant_bait', () => {
+    const out = buildWhatToExpect({ products: [{ name: 'Advion WDG Granular' }] });
+    expect(out.lines[0]).toMatch(/carry it back to the colony/);
+  });
+
+  it('LESCO 90/10 Nonionic Surfactant gets no line (explicitly mapped to no class)', () => {
+    expect(buildWhatToExpect({ products: [{ name: 'LESCO 90/10 Nonionic Surfactant' }] })).toBeNull();
+  });
+
+  it('one line per class, de-duplicated across products of the same class (two roach-gel product names)', () => {
     const out = buildWhatToExpect({
       products: [
-        { activeIngredient: 'Fipronil' },
-        { activeIngredient: 'Dinotefuran' }, // same class — must not double the line
+        { name: 'Advion Evolution Cockroach Gel Bait' },
+        { name: 'Advion Cockroach Gel Bait' }, // same class — must not double the line
       ],
     });
     expect(out.lines).toHaveLength(1);
-    expect(out.lines[0]).toMatch(/Non-repellent/);
+    expect(out.lines[0]).toMatch(/gel bait/);
   });
 
-  it('caps to 3 lines in fixed priority order when 4 classes are present', () => {
+  it('caps to 3 lines in fixed priority order when 5 classes are present', () => {
     const out = buildWhatToExpect({
       products: [
-        { category: 'IGR', activeIngredient: 'Hydroprene' },
-        { activeIngredient: 'Bifenthrin' },
-        { category: 'bait', name: 'Advion Cockroach Gel' },
-        { activeIngredient: 'Fipronil' },
+        { name: 'Gentrol IGR' },
+        { name: 'Demand CS' }, // pyrethroid
+        { name: 'Advion Cockroach Gel Bait' },
+        { name: 'Advion Ant Bait Gel' },
+        { name: 'Taurus SC' }, // non_repellent
       ],
     });
     expect(out.lines).toHaveLength(3);
-    // priority: non_repellent, roach_gel_bait, pyrethroid, igr — igr dropped.
-    expect(out.lines.join(' ')).not.toMatch(/next generation/);
+    // priority order: non_repellent, ant_bait, roach_gel_bait, pyrethroid, igr
+    // — pyrethroid and igr dropped.
+    expect(out.lines[0]).toMatch(/Non-repellent/);
+    expect(out.lines[1]).toMatch(/carry it back to the colony/);
+    expect(out.lines[2]).toMatch(/gel bait/);
+    expect(out.lines.join(' ')).not.toMatch(/barrier treatment|next generation/);
   });
 
   it('never uses guarantee/eliminate language', () => {
     const out = buildWhatToExpect({
       products: [
-        { activeIngredient: 'Fipronil' }, { activeIngredient: 'Bifenthrin' },
-        { category: 'gel', name: 'roach gel' }, { category: 'IGR' },
+        { name: 'Taurus SC' }, { name: 'Demand CS' },
+        { name: 'Advion Cockroach Gel Bait' }, { name: 'Gentrol IGR' }, { name: 'Advion Ant Bait Gel' },
       ],
     });
     const joined = out.lines.join(' ');
@@ -275,17 +324,28 @@ describe('buildWhatToExpect', () => {
 });
 
 describe('buildSpiderExpectation', () => {
-  it('returns null with no eave/web action and no spider-targeted product', () => {
-    expect(buildSpiderExpectation({ actionLabels: ['Treated exterior perimeter band'], applications: [{ targets: ['ants'] }] })).toBeNull();
+  const EAVE_ACTION = ['Swept eaves, window frames, door frames, and lanai'];
+
+  it('returns null with no eave/web/soffit action at all', () => {
+    expect(buildSpiderExpectation({ actionLabels: ['Treated exterior perimeter band'], applications: [] })).toBeNull();
   });
 
-  // Owner ruling 2026-09-28: wording must match the evidence. A completed
-  // eave/web/soffit action proves SWEEPING happened — never treated on its
-  // own as proof a residual was applied. Three combos below.
-
-  it('combo 1 — action matched, NO spider-labeled residual applied: de-web wording only, no treatment claim', () => {
+  // Owner ruling 2026-09-28 (P1 audit): a spider-targeted product does NOT
+  // establish that eaves were treated — the tech may have tagged it while
+  // applying it somewhere else entirely. This is the exact required
+  // regression test: no recorded action => no spider section, REGARDLESS
+  // of any spider-targeted (even pyrethroid-classified) product.
+  it('a spider-targeted product WITHOUT a recorded eave/web/soffit action => NO spider section', () => {
     const out = buildSpiderExpectation({
-      actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
+      actionLabels: ['Treated exterior perimeter band'],
+      applications: [{ product: { name: 'Demand CS' }, targets: ['spiders'] }],
+    });
+    expect(out).toBeNull();
+  });
+
+  it('action recorded, no spider-labeled pyrethroid residual applied: de-web wording only, no treatment claim', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
       applications: [],
     });
     expect(out.headline).toBe('Spiders');
@@ -295,12 +355,11 @@ describe('buildSpiderExpectation', () => {
     expect(out.expectation).not.toMatch(/residual we applied/i);
     expect(out.expectation).toMatch(/New webs can appear within days/);
     expect(out.nextStep).toMatch(/keeps coming back/);
-    // The raw protocol-action label text never leaks into the customer copy
-    // (owner ruling 2026-09-28 — it can carry internal wording/product hints).
+    // The raw protocol-action label text never leaks into the customer copy.
     expect(out.whatWeDid).not.toMatch(/Swept eaves, window frames, door frames, and lanai/);
   });
 
-  it('combo 1 (internal-looking label): a differently-worded eave/web action still renders the SAME fixed de-web sentence, not its own text', () => {
+  it('a differently-worded eave/web action still renders the SAME fixed de-web sentence, not its own text', () => {
     const out = buildSpiderExpectation({
       actionLabels: ['Internal SKU-4471 cobweb removal — do not quote to customer'],
       applications: [],
@@ -309,20 +368,10 @@ describe('buildSpiderExpectation', () => {
     expect(out.whatWeDid).not.toMatch(/SKU-4471/);
   });
 
-  it('combo 2 — spider-labeled residual applied, NO matching action label: treatment-only wording (unchanged fallback)', () => {
+  it('action recorded AND a spider-labeled pyrethroid residual (from the explicit map) applied: combined wording', () => {
     const out = buildSpiderExpectation({
-      actionLabels: ['Treated exterior perimeter band'],
-      applications: [{ targets: ['spiders'] }],
-    });
-    expect(out.whatWeDid).toBe('We applied a residual treatment labeled for spiders during this visit.');
-    expect(out.expectation).toMatch(/residual we applied/i);
-    expect(out.expectation).toMatch(/thin out over about two weeks/);
-  });
-
-  it('combo 3 — BOTH action matched AND residual applied: combined treatment wording', () => {
-    const out = buildSpiderExpectation({
-      actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
-      applications: [{ targets: ['spiders'] }],
+      actionLabels: EAVE_ACTION,
+      applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }],
     });
     expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
     expect(out.expectation).toMatch(/residual we applied/i);
@@ -330,11 +379,26 @@ describe('buildSpiderExpectation', () => {
     expect(out.nextStep).toMatch(/come take another look/);
   });
 
-  it('never guarantees a result, in any combo', () => {
+  it('action recorded, a spider-targeted product applied but it is NOT pyrethroid-classified: still de-web only (no false residual credit)', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
+      applications: [{ product: { name: 'Taurus SC' }, targets: ['spiders'] }], // non_repellent, not pyrethroid
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+  });
+
+  it('action recorded, a pyrethroid product applied but NOT targeted for spiders: still de-web only', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
+      applications: [{ product: { name: 'Demand CS' }, targets: ['ants'] }],
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+  });
+
+  it('never guarantees a result, in either combo', () => {
     const combos = [
-      buildSpiderExpectation({ actionLabels: ['Swept eaves, window frames, door frames, and lanai'], applications: [] }),
-      buildSpiderExpectation({ actionLabels: [], applications: [{ targets: ['spiders'] }] }),
-      buildSpiderExpectation({ actionLabels: ['Swept eaves, window frames, door frames, and lanai'], applications: [{ targets: ['spiders'] }] }),
+      buildSpiderExpectation({ actionLabels: EAVE_ACTION, applications: [] }),
+      buildSpiderExpectation({ actionLabels: EAVE_ACTION, applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }] }),
     ];
     for (const out of combos) {
       expect(out.expectation + out.nextStep).not.toMatch(/guarantee/i);
@@ -351,13 +415,17 @@ describe('buildPestExpectations — composition', () => {
     const out = buildPestExpectations({
       weekWeather: { rainInches: 1.5, rainConfidence: null },
       applications: [
-        { product: { active_ingredient: 'Fipronil', category: 'insecticide', moa_group: null, rainfast_minutes: null }, targets: ['ants'] },
+        { product: { name: 'Taurus SC', active_ingredient: 'Fipronil', category: 'insecticide', moa_group: null, rainfast_minutes: null }, targets: ['ants'] },
       ],
       actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
       serviceMonth: 7,
     });
     expect(out.rain.lines.length).toBeGreaterThan(0);
+    // Action recorded, but the only applied product is Taurus SC (targeted
+    // for ants, not spiders, and non_repellent-classified anyway) => de-web
+    // wording, not the combined/residual wording.
     expect(out.spiders.headline).toBe('Spiders');
+    expect(out.spiders.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
     expect(out.whatToExpect.lines[0]).toMatch(/Non-repellent/);
   });
 });
