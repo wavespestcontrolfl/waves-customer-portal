@@ -119,8 +119,9 @@ const SPANISH_CALLER_DESTINATION_RE = /\b(?:(?:a|para|con)\s+(?:ti|usted(?:es)?|
 const SPANISH_TITLED_DESTINATION_RE = /\b(?:a|para|con)\s+(?:el|la)\s+([a-záéíóúñü]+)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)|\bal\s+([a-záéíóúñü]+)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)/i;
 const SPANISH_NONPERSON_TITLE_HEAD_RE = /^(?:correo|email|direcci[oó]n|buz[oó]n|archivo|registro|confirmaci[oó]n|revisi[oó]n|informaci[oó]n|cita|visita|solicitud|reserva|continuaci[oó]n|servicio|mensajería|mañana|tarde|noche|mediodía|medianoche)$/i;
 const SPANISH_POSSESSIVE_DESTINATION_RE = /\b(?:a|para|con)\s+(?:mi|tu|su|nuestro|nuestra)\s+[a-záéíóúñü]+\b/i;
-const SPANISH_BARE_DESTINATION_RE = /\b(?:a|para|con|y)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con|y)\b|[.,;!?]|$)/i;
+const SPANISH_BARE_DESTINATION_RE = /\b(?:a|para|con)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con|y)\b|[.,;!?]|$)/i;
 const SPANISH_COORDINATED_RECIPIENT_RE = /^\s*y\s+([^.!?;,]+?)(?=\s+y\s+|\s+(?:a|para|por|con)\b|[.,;!?]|$)/i;
+const SPANISH_ELIDED_COORDINATED_RECIPIENT_RE = /\by\s+(?!a\b|al\b|para\b|con\b)([^.!?;,]+?)(?=\s+y\s+|\s+(?:a|para|por|con)\b|[.,;!?]|$)/gi;
 const SPANISH_COORDINATED_DESCRIBED_RECIPIENT_RE = new RegExp(`\\by\\s+((?:(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+${SPANISH_PERSON_DESCRIPTOR})|(?:usted(?:es)?|vosotr[oa]s?))\\b`, 'i');
 const SPANISH_NONPERSON_DESTINATION_RE = /\b(?:a|para|con)\s+(?:(?:mi|tu|su|nuestro|nuestra)\s+)?(?:que|correo|email|direcci[oó]n|buz[oó]n|archivo|registro|confirmaci[oó]n|revisi[oó]n|informaci[oó]n|cita|visita|solicitud|reserva|continuaci[oó]n|(?:el\s+)?servicio|mensajería|(?:primera|[uú]ltima)\s+hora|(?:confirm|coordin|inform|revis|comprob|habl|pon|envi|mand|entreg|llam|contact|comunic|escrib|dar|devolv|recib|hac|lleg)[a-záéíóúñü]*)\b/i;
 const SPANISH_ESTIMATE_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
@@ -270,7 +271,13 @@ function spanishPersonDestinationTargetsCaller(roleEvidence, callerNames = []) {
   if ([...possessiveDestinations].some(([destination]) => !SPANISH_NONPERSON_DESTINATION_RE.test(destination))) return false;
   const coordinatedPerson = SPANISH_COORDINATED_DESCRIBED_RECIPIENT_RE.exec(roleEvidence)?.[1];
   if (coordinatedPerson && !/^(?:usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)$/i.test(coordinatedPerson)) return false;
-  const destinations = roleEvidence.matchAll(new RegExp(SPANISH_BARE_DESTINATION_RE.source, 'gi'));
+  const destinations = [...roleEvidence.matchAll(new RegExp(SPANISH_BARE_DESTINATION_RE.source, 'gi'))];
+  const destinationAt = roleEvidence.search(new RegExp(SPANISH_BARE_DESTINATION_RE.source, 'i'));
+  if (destinationAt >= 0) {
+    for (const recipient of roleEvidence.slice(destinationAt).matchAll(SPANISH_ELIDED_COORDINATED_RECIPIENT_RE)) {
+      destinations.push([`a ${recipient[1]}`, recipient[1]]);
+    }
+  }
   for (const destination of destinations) {
     if (SPANISH_CALLER_DESTINATION_RE.test(destination[0]) || SPANISH_NONPERSON_DESTINATION_RE.test(destination[0])) continue;
     const destinationName = destination[1].replace(/^(?:a|al|para|con)\s+/i, '')
