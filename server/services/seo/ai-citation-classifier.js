@@ -106,7 +106,13 @@ function matchesAny(host, list) {
 // (a facebook post/photo/video, or a forbes.com article outside
 // /home-improvement) — the domain is still a listing/editorial HOST, but
 // this particular page is not the kind of page the brief wants enqueued.
-const FACEBOOK_NON_PAGE_PATH_RE = /\/(posts|photos?|videos?|watch|reel|permalink\.php|groups|events|stories)(\/|$|\?|\.php)/i;
+// Codex P2 2026-09-28: Facebook CONTENT is human-only, never a listing — the
+// list must exclude every content route, not just the ones a first pass
+// happened to name. Added: reels (the plural was missing — "reel" alone
+// never matched "/reels/…"), /share/…, and /story.php (a segment named
+// "story" alone also excludes the plain "/story/…" path and, via the
+// existing `\.php` boundary alternative, "/story.php" itself).
+const FACEBOOK_NON_PAGE_PATH_RE = /\/(posts|photos?|videos?|watch|reels?|permalink\.php|groups|events|stories|story|share)(\/|$|\?|\.php)/i;
 function facebookCategory(u) {
   return FACEBOOK_NON_PAGE_PATH_RE.test(u.pathname) ? null : 'listing';
 }
@@ -160,12 +166,28 @@ function decodeURIComponentSafe(v) {
 // and it never promotes a page that already matched listing/editorial by
 // domain (those return before this is reached).
 // ---------------------------------------------------------------------------
-const BEST_TOKENS = Object.freeze(['best', 'top', 'rated', 'near-me', 'near me', 'nearme']);
+// Codex P2 2026-09-28: a marker must match a COMPLETE token, never a
+// substring — plain `.includes('top')` matched inside "desktop-support" and
+// `.includes('rated')` matched inside "integrated-services". Host/path/query
+// are split on every run of non-alphanumeric characters (the URL's own
+// separators: '.', '/', '-', '_', '?', '=', '&', a decoded '%20', …) into
+// whole tokens, and every marker is checked against that token list, never
+// against the raw joined string.
+const BEST_TOKENS = Object.freeze(['best', 'top', 'rated', 'nearme']);
+function tokenize(s) {
+  return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
 function hasBestToken(urlString) {
   let u;
   try { u = new URL(urlString); } catch { return false; }
-  const hay = `${u.hostname} ${decodeURIComponentSafe(u.pathname)} ${u.search}`.toLowerCase();
-  return BEST_TOKENS.some((t) => hay.includes(t));
+  const tokens = tokenize(`${u.hostname} ${decodeURIComponentSafe(u.pathname)} ${u.search}`);
+  if (tokens.some((t) => BEST_TOKENS.includes(t))) return true;
+  // "near-me" / "near me" split into the adjacent token pair ["near", "me"]
+  // (bare "nearme" — no separator — is already a single token above).
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i] === 'near' && tokens[i + 1] === 'me') return true;
+  }
+  return false;
 }
 // A benchmark question's own `intent: 'provider'` (aeo-benchmark-v1.json),
 // or — for a managed/legacy query the benchmark doesn't cover — the raw
@@ -213,6 +235,10 @@ function classifyUrl(urlString, { providerIntent = false } = {}) {
   if (specialHost) {
     const category = SPECIAL_HOSTS[specialHost](u);
     if (category) return { category, host, rule: `special:${specialHost}` };
+    // Facebook CONTENT (reels, posts, shares, stories …) is a human-only
+    // community track — never 'other', where the provider-intent listicle
+    // heuristic below could promote it to an enqueued 'editorial' candidate.
+    if (specialHost === 'facebook.com') return { category: 'community_video', host, rule: 'special:facebook.com:content_route' };
     return other(`special:${specialHost}:excluded_path`);
   }
 

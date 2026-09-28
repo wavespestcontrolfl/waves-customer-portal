@@ -543,6 +543,23 @@ describe('owner-queue safety guard: ai_citation-discovered domains never read AU
     expect(P.isDiscoveryOnlyDomain(domain({ source: 'legacy_unknown', enrichment: 'not json' }))).toBe(false);
   });
 
+  // Codex P1 2026-09-28 (third round, fixed structurally): the durable
+  // signal is the FIRST-TOUCH source_detail prefix — ensureDomain writes it
+  // only on insert and nothing rewrites it (not the 060000 rollback relabel,
+  // not the enrich job that replaces `enrichment` wholesale).
+  test('a rolled-back, re-enriched ai_citation domain still decides OWNER_*, never AUTO_* (source_detail prefix)', () => {
+    const relabeledAndReEnriched = domain({
+      source: 'legacy_unknown',
+      source_detail: 'ai_citation:listing https://www.bbb.org/us/fl/sarasota/category/pest-control',
+      enrichment: { domain_rating: 55 }, // enrich replaced the column; the marker is gone
+    });
+    expect(P.isDiscoveryOnlyDomain(relabeledAndReEnriched)).toBe(true);
+    const r = P.decideAuthority({ path: path(), domain: relabeledAndReEnriched, policy: autoAllowsEverything() });
+    expect(level(r, 'execution')).toBe('OWNER_FREE');
+    // an ordinary domain's detail that merely mentions the word is unaffected
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap', source_detail: 'competitor_gap_scan ai_citation:' }))).toBe(false);
+  });
+
   test('AI_CITATION_SOURCE is the registry enum value', () => {
     expect(R.LINK_SOURCES).toContain(P.AI_CITATION_SOURCE);
     expect(P.AI_CITATION_SOURCE).toBe('ai_citation');

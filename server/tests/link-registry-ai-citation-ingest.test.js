@@ -172,14 +172,23 @@ describe('aggregateCitations (pure)', () => {
 });
 
 describe('citationDetail', () => {
-  test('is bounded and carries category, count, platforms, and a question label', () => {
-    const d = { category: 'listing', citationCount: 3, platforms: ['gemini', 'openai'], locallyRelevant: true, questions: [{ id: 'Q1', query: 'x' }] };
+  // Codex P1 2026-09-28: the detail carries the durable `ai_citation:` prefix
+  // the authority guard reads, and the exact cited URLs the path investigator
+  // extracts — whole URLs only, within the dedupe-key bound.
+  test('starts with the ai_citation: prefix and carries whole cited URLs within the bound', () => {
+    const d = {
+      category: 'editorial', subtype: 'listicle_candidate', citationCount: 3, platforms: ['gemini'], questions: [],
+      sampleUrls: ['https://cityvetted.com/sarasota/pest-control', 'https://cityvetted.com/bradenton/pest-control', 'https://cityvetted.com/venice/pest-control-companies-long-path'],
+    };
     const label = citationDetail(d);
+    expect(label.startsWith('ai_citation:editorial:listicle_candidate')).toBe(true);
     expect(label.length).toBeLessThanOrEqual(120);
-    expect(label).toMatch(/listing/);
-    expect(label).toMatch(/3x/);
-    expect(label).toMatch(/Q1/);
-    expect(label).toMatch(/local/);
+    expect(label).toContain('https://cityvetted.com/sarasota/pest-control');
+    for (const url of label.split(' ').slice(1)) expect(d.sampleUrls).toContain(url); // never a truncated URL
+  });
+
+  test('with no sample URLs it is just the prefix and category', () => {
+    expect(citationDetail({ category: 'listing', sampleUrls: [] })).toBe('ai_citation:listing');
   });
 });
 

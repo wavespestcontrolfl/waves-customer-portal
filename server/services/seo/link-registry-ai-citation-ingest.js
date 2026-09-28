@@ -21,9 +21,21 @@
  * ensureDomain() every other feeder uses, so an existing domain's first-touch
  * source (discovered earlier by a real feeder) is never overwritten — the
  * ai_citation evidence lands as its own `seo_link_domain_sources` touch row
- * (source_detail carries the category/count/platforms/question), which is
- * exactly the "add evidence without overwriting provenance" the brief asks
- * for (ensureDomain's own contract, link-registry.js).
+ * instead.
+ *
+ * citationDetail() (Codex P1 2026-09-28, third round) writes a NEW domain's
+ * first-touch `source_detail` starting with link-authority-policy.js's own
+ * `AI_CITATION_SOURCE_DETAIL_PREFIX` (`ai_citation:<category>[:<subtype>]
+ * <sample cited urls>`) — imported, never re-typed, so the two modules can
+ * never drift apart. That prefix is isDiscoveryOnlyDomain's PRIMARY durable
+ * signal: unlike `source` (which a rollback migration can relabel) or
+ * `enrichment` (which the weekly DataForSEO enrich job replaces wholesale),
+ * NOTHING in this codebase ever rewrites an existing domain's source_detail
+ * once ensureDomain sets it at INSERT time. The embedded sample URLs are
+ * ALSO what link-path-investigator.js's provenance-hint extraction
+ * (`touchUrls`, a plain `https?://…` regex over source_detail) reads, so an
+ * investigation of one of these domains fetches the EXACT page an answer
+ * engine cited, not just the homepage.
  *
  * Own hosts and never-target hosts are skipped (defense in depth — the
  * classifier already routes wavespestcontrol.com/the spoke fleet to `owned`,
@@ -38,17 +50,20 @@
 const { isEnabled } = require('../../config/feature-gates');
 const { ensureDomain, isNeverTargetHost } = require('./link-registry');
 const { classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
+const { AI_CITATION_SOURCE_DETAIL_PREFIX } = require('./link-authority-policy');
 const { MEASUREMENT_VERSION, cleanUrls } = require('./aeo-measurement');
 const benchmark = require('../../data/aeo-benchmark-v1.json');
 
 const SOURCE = 'ai_citation';
-const SOURCE_DETAIL = 'ai_citation_feeder';
 const DEFAULT_LOOKBACK_DAYS = 30;
 const MAX_SAMPLE_URLS = 5;
 // The touch's source_detail sits in link-registry.js's TOUCH_DETAIL_MAX (120
-// chars) bounded btree entry — kept well under it so it never gets replaced
-// by the sha256 digest fallback (that fallback is for a pasted URL, not a
-// short evidence label).
+// chars) bounded btree entry that decides whether the DEDUPE key (touch_key)
+// stays literal or falls back to a sha256 digest — kept well under it, so
+// the touch_key stays literal AND readable. The stored source_detail column
+// itself has no DB length limit; this bound is purely about staying inside
+// that dedupe-key threshold (Codex 2026-09-28: "keep the detail within
+// whatever limit [ensureDomain] enforces").
 const TOUCH_DETAIL_MAX = 120;
 
 function sinceDate(now, lookbackDays) {
@@ -133,14 +148,25 @@ async function readMeasuredMentions(db, { since }) {
     .select('id', 'query', 'query_id', 'llm_platform', 'check_date', 'cited_urls');
 }
 
-/** The bounded evidence label every ai_citation touch carries (never the domain's identity). */
+/**
+ * The evidence label every ai_citation touch carries (never the domain's
+ * identity): `ai_citation:<category>[:<subtype>] <sample cited urls…>`.
+ * ALWAYS starts with AI_CITATION_SOURCE_DETAIL_PREFIX — that prefix is what
+ * isDiscoveryOnlyDomain reads on a domain's FIRST-touch source_detail (set
+ * once by ensureDomain, never rewritten) as its durable discovery-only
+ * signal. Complete URLs only — never a truncated one link-path-investigator's
+ * `touchUrls` regex would extract as a broken page — appended one at a time
+ * while the whole label stays within TOUCH_DETAIL_MAX; a category+subtype
+ * alone (zero URLs fit, or none were sampled) still starts with the prefix.
+ */
 function citationDetail(d) {
-  const q = d.questions[0];
-  const qLabel = q ? String(q.id || q.query || '').slice(0, 40) : '';
-  const local = d.locallyRelevant ? ' · local' : '';
-  const subtype = d.subtype ? ` · ${d.subtype}` : '';
-  const label = `${SOURCE_DETAIL} · ${d.category} · ${d.citationCount}x · ${d.platforms.join('/')}${qLabel ? ` · ${qLabel}` : ''}${local}${subtype}`;
-  return label.slice(0, TOUCH_DETAIL_MAX);
+  let label = `${AI_CITATION_SOURCE_DETAIL_PREFIX}${d.category}${d.subtype ? `:${d.subtype}` : ''}`;
+  for (const url of d.sampleUrls) {
+    const next = `${label} ${url}`;
+    if (next.length > TOUCH_DETAIL_MAX) break;
+    label = next;
+  }
+  return label;
 }
 
 /**
@@ -183,11 +209,32 @@ async function runAiCitationFeeder(db, { dryRun = false, lookbackDays = DEFAULT_
   if (!enqueueable.length) return out;
 
   if (dryRun) {
-    const known = await db('seo_link_domains').select('domain').whereIn('domain', enqueueable.map((d) => d.host));
+    // Codex P2 2026-09-28: a host can legitimately appear in `enqueueable`
+    // more than once (a domain cited under two different enqueueable
+    // categories — e.g. facebook.com's own business Page vs. a provider-
+    // intent-heuristic-promoted post — aggregateCitations groups by (host,
+    // category), never by host alone, on purpose: see its own header). A
+    // LIVE run's ensureDomain calls are sequential and see each other: the
+    // first call on a brand-new host creates it, so a second call for the
+    // SAME host within the same run finds it existing. Deciding each
+    // candidate's `existing` flag independently off the pre-run `known` set
+    // — as a naive whereIn + filter would — reports that same host as
+    // "inserted" on EVERY occurrence, double- (or N-) counting it and
+    // disagreeing with what a live run actually does. `countedThisRun`
+    // reproduces the live sequencing: the first occurrence of a host decides
+    // against the DB snapshot; every later occurrence of the SAME host in
+    // this preview is always `existing` (the hypothetical insert from its
+    // first occurrence would already have happened by then).
+    const hosts = [...new Set(enqueueable.map((d) => d.host))];
+    const known = hosts.length ? await db('seo_link_domains').select('domain').whereIn('domain', hosts) : [];
     const knownSet = new Set(known.map((k) => k.domain));
-    out.inserted = enqueueable.filter((d) => !knownSet.has(d.host)).length;
-    out.existing = enqueueable.length - out.inserted;
-    for (const c of out.candidates) c.existing = knownSet.has(c.domain);
+    const countedThisRun = new Set();
+    for (const c of out.candidates) {
+      const alreadyCountedThisRun = countedThisRun.has(c.domain);
+      c.existing = alreadyCountedThisRun || knownSet.has(c.domain);
+      countedThisRun.add(c.domain);
+      if (c.existing) out.existing += 1; else out.inserted += 1;
+    }
     return out;
   }
 
@@ -206,5 +253,5 @@ async function runAiCitationFeeder(db, { dryRun = false, lookbackDays = DEFAULT_
 
 module.exports = {
   runAiCitationFeeder, aggregateCitations, readMeasuredMentions, citationDetail, sinceDate,
-  SOURCE, SOURCE_DETAIL, DEFAULT_LOOKBACK_DAYS,
+  SOURCE, DEFAULT_LOOKBACK_DAYS,
 };

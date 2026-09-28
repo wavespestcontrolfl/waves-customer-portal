@@ -220,17 +220,30 @@ const AI_CITATION_SOURCE = 'ai_citation';
 const AUTO_TO_OWNER_ON_DISCOVERY = Object.freeze({
   AUTO_FREE: 'OWNER_FREE', AUTO_ACCOUNT: 'OWNER_ACCOUNT', AUTO_OUTREACH: 'OWNER_OUTREACH', AUTO_PAID_WITHIN_POLICY: 'OWNER_PAYMENT',
 });
-// The `enrichment` marker key a source-widening migration rollback stamps
-// (20260928060000_link_source_ai_citation_rollback_safety.js's down()) before
-// relabeling `source` away from 'ai_citation' to keep the narrowed CHECK
-// satisfiable (Codex P1 2026-09-28, second round): `source` is exactly what
-// gets relabeled to `legacy_unknown` on such a rollback, so a guard keyed on
-// it alone would silently stop protecting those domains the moment a
-// rollback (and any later reapply) happened. `enrichment` is an ordinary
-// seo_link_domains jsonb column neither that migration's up() nor
-// 20260928050000's touches, so once stamped it survives any number of
-// down()/up() cycles — an INDEPENDENT, durable discovery-only guard, exactly
-// as durable as the `source` check for a domain that never gets relabeled.
+// PRIMARY durable signal (Codex P1 2026-09-28, THIRD round — fixed
+// structurally, no further migration): `domain.source` is exactly what
+// 20260928060000_link_source_ai_citation_rollback_safety.js's down() relabels
+// to `legacy_unknown` on a rollback, so a guard keyed on it alone stops
+// protecting a domain the moment a rollback (and any later reapply) happens.
+// `domain.source_detail`, in contrast, is set ONCE at first touch
+// (ensureDomain — link-registry.js — writes it only on INSERT, never on a
+// later touch) and NOTHING in this codebase ever rewrites an existing
+// domain's source_detail: not that rollback migration (it only touches
+// `source`, confirmed by reading its down() — see 20260928080000's header),
+// not link-registry-enrich.js's weekly job (it only ever writes `enrichment`,
+// never `source_detail`). link-registry-ai-citation-ingest.js's
+// citationDetail() writes every ai_citation domain's first-touch
+// source_detail starting with this exact prefix
+// (`ai_citation:<category>[:<subtype>] <sample cited urls>`), so it is at
+// least as durable as `source` itself, and MORE durable across the one
+// scenario (a schema rollback) that can actually clear `source`.
+const AI_CITATION_SOURCE_DETAIL_PREFIX = `${AI_CITATION_SOURCE}:`;
+// BELT-AND-BRACES: the `enrichment` marker key
+// 20260928080000_link_source_ai_citation_rollback_marker.js's down() stamps
+// before 20260928060000's down() relabels `source` away — kept as a second
+// independent signal (a compound edge case — a rollback followed by a
+// routine enrich run, which REPLACES `enrichment` wholesale, could in theory
+// still clear this one even though source_detail survives everything).
 const AI_CITATION_ENRICHMENT_MARKER = 'ai_citation_discovered';
 function parsedEnrichment(domain) {
   const e = domain && domain.enrichment;
@@ -242,6 +255,7 @@ function parsedEnrichment(domain) {
 const isDiscoveryOnlyDomain = (domain) => {
   if (!domain) return false;
   if (domain.source === AI_CITATION_SOURCE) return true;
+  if (typeof domain.source_detail === 'string' && domain.source_detail.startsWith(AI_CITATION_SOURCE_DETAIL_PREFIX)) return true;
   const enrichment = parsedEnrichment(domain);
   return Boolean(enrichment && enrichment[AI_CITATION_ENRICHMENT_MARKER] === true);
 };
@@ -477,5 +491,5 @@ module.exports = {
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
   requiredInstances, submitFirst, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
   DIMENSION_INPUT_FIELDS, floorInputs, floorInputsHash, decisionInputs, decisionInputsHash,
-  AI_CITATION_SOURCE, AUTO_TO_OWNER_ON_DISCOVERY, isDiscoveryOnlyDomain,
+  AI_CITATION_SOURCE, AI_CITATION_SOURCE_DETAIL_PREFIX, AI_CITATION_ENRICHMENT_MARKER, AUTO_TO_OWNER_ON_DISCOVERY, isDiscoveryOnlyDomain,
 };

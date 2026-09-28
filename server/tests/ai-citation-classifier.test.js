@@ -46,11 +46,34 @@ describe('classifyUrl', () => {
     }
   });
 
-  test('facebook.com: a business PAGE is listing, a post/photo/video is not', () => {
+  test('facebook.com: a business PAGE is listing; content routes are the human-only community track', () => {
     expect(classifyUrl('https://www.facebook.com/WavesPestControlVenice').category).toBe('listing');
-    expect(classifyUrl('https://www.facebook.com/WavesPestControlVenice/posts/12345').category).toBe('other');
-    expect(classifyUrl('https://www.facebook.com/WavesPestControlVenice/photos/a.12345').category).toBe('other');
-    expect(classifyUrl('https://www.facebook.com/watch/?v=12345').category).toBe('other');
+    for (const url of [
+      'https://www.facebook.com/WavesPestControlVenice/posts/12345',
+      'https://www.facebook.com/WavesPestControlVenice/photos/a.12345',
+      'https://www.facebook.com/watch/?v=12345',
+      // Codex P2 2026-09-28: modern content routes
+      'https://www.facebook.com/WavesPestControlVenice/reels/123',
+      'https://www.facebook.com/share/p/abc123/',
+      'https://www.facebook.com/story.php?story_fbid=1&id=2',
+    ]) {
+      expect(classifyUrl(url).category).toBe('community_video');
+    }
+  });
+
+  test('facebook content is never promoted to an enqueued editorial candidate, even under provider intent', () => {
+    // A local token in the URL + provider intent must not reach the listicle heuristic.
+    const r = classifyUrl('https://www.facebook.com/SarasotaPestPros/reels/123', { providerIntent: true });
+    expect(r.category).toBe('community_video');
+  });
+
+  test('listicle markers match whole tokens only (Codex P2 2026-09-28)', () => {
+    const pi = { providerIntent: true };
+    expect(classifyUrl('https://example-it.com/desktop-support', pi).category).toBe('other');
+    expect(classifyUrl('https://example-it.com/integrated-services', pi).category).toBe('other');
+    expect(classifyUrl('https://example-directory.com/best-exterminators', pi)).toMatchObject({ category: 'editorial', subtype: 'listicle_candidate' });
+    expect(classifyUrl('https://example-directory.com/pest-control-near-me', pi)).toMatchObject({ category: 'editorial', subtype: 'listicle_candidate' });
+    expect(classifyUrl('https://example-directory.com/top-rated/pest-control', pi)).toMatchObject({ category: 'editorial', subtype: 'listicle_candidate' });
   });
 
   test('editorial: SWFL local news and home-services listicles', () => {
@@ -212,9 +235,12 @@ describe('classifyUrl', () => {
       expect(r.subtype).toBeUndefined();
     });
 
-    test('a facebook.com post (excluded path) still gets the heuristic on a provider question with a local token', () => {
+    // Codex P2 2026-09-28: Facebook content is human-only per this
+    // classifier's own rule — the heuristic never promotes it to an enqueued
+    // editorial candidate, even with best/local tokens on a provider question.
+    test('a facebook.com post (content route) stays community_video on a provider question with best/local tokens', () => {
       const r = classifyUrl('https://www.facebook.com/somegroup/posts/12345?text=best+pest+control+sarasota', { providerIntent: true });
-      expect(r).toMatchObject({ category: 'editorial', subtype: 'listicle_candidate' });
+      expect(r).toMatchObject({ category: 'community_video' });
     });
 
     test('providerIntent defaults to false when omitted — byte-identical to pre-heuristic behavior', () => {
