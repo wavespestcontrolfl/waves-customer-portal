@@ -323,6 +323,18 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
   or address, the app's free-text `plant_name` — never reaches a Gemini or
   OpenAI prompt.
 
+## Round 7 hardening (Codex #5186 r7)
+
+- The unnamed-identity line adds a puncture clause for the date palms
+  (`date-palms` subgroup, genus Phoenix), whose spines the catalog states
+  only in each entry's own `safety_line`; a real-catalog test fails if any
+  plant's own safety line triggers no clause.
+- An identity capped by a look-alike a photo cannot separate still gets
+  "a photo can't settle this" guidance when that look-alike is a draft: the
+  pest engine's fixed `NO_PHOTO_CONFIRMS` text (the pair's own text names
+  the draft, so it stays hidden), never a retake prompt, and the tier stays
+  `needs_more_evidence`.
+
 ## What L4 must do
 
 - Wire `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`

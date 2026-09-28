@@ -35,7 +35,7 @@ const { dispatch, rejectCall } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
 const Ajv = require('ajv');
 const {
-  dedupeCandidates, sameCandidateKey, deepestSharedNode, VERDICT_LABELS, ROLE_LABELS, RISK_LABELS, ACTION_LABELS, UNNAMED_SAFETY_CLAUSES,
+  dedupeCandidates, sameCandidateKey, deepestSharedNode, VERDICT_LABELS, ROLE_LABELS, RISK_LABELS, ACTION_LABELS, UNNAMED_SAFETY_CLAUSES, NO_PHOTO_CONFIRMS,
 } = require('./pest-engine');
 const {
   CANDIDATES_A_SCHEMA,
@@ -678,11 +678,19 @@ const UNNAMED_PLANT_SAFETY_CLAUSES = Object.freeze({
   base: "Until we know exactly which plant this is, don't eat any part of it, and keep kids and pets from chewing on it.",
   swallowed: 'If anyone swallows part of it, call Poison Control at 1-800-222-1222 right away.',
   irritant: UNNAMED_SAFETY_CLAUSES.irritant,
+  puncture: 'Some plants like this have sharp spines that can cause a serious puncture wound, so keep a safe distance and wear heavy gloves near it.',
   pets: UNNAMED_SAFETY_CLAUSES.pets,
 });
+// The catalog has no spine flag. Its date palms (the `date-palms` subgroup,
+// genus Phoenix) all carry spines on their lower leaflets, stated only in
+// their own `safety_line`, so the genus node is the structured trigger
+// (Codex #5186 r7 P1). A real-catalog test fails if any plant's own
+// safety_line triggers no clause here.
+const PUNCTURE_SUBGROUPS = new Set(['date-palms']);
 const PLANT_HAZARD_CLAUSES = [
   ['swallowed', (entry) => entry.risk === 'medical'],
   ['irritant', (entry) => !!entry.safety?.irritant || entry.risk === 'irritant'],
+  ['puncture', (entry) => PUNCTURE_SUBGROUPS.has(entry.subgroup)],
   ['pets', (entry) => !!entry.safety?.toxic_to_pets],
 ];
 
@@ -843,6 +851,8 @@ function lookAlikeBetween(candidates) {
  * first approved look-alike at `likely`; for a group-level answer, a pair
  * among the candidates that support the chosen node — never the global
  * top's look-alike when that top is not what the headline is about. */
+const HIDDEN_VETO_PAIR = Object.freeze({ next_photo: NO_PHOTO_CONFIRMS.ask, difference: NO_PHOTO_CONFIRMS.why, photo_can_confirm: false });
+
 function decisiveLookAlike({
   level, nodeId, candidates, disagreementPair,
 }) {
@@ -852,8 +862,14 @@ function decisiveLookAlike({
     const approvedPairs = (top.entry.look_alikes || []).filter((l) => isApproved(catalog.getEntry(l.slug)));
     // A pair a photo cannot settle is the one that capped the wording, so
     // its technician / time-based guidance is what the customer needs first
-    // (Codex #5186 r3 P1).
-    return approvedPairs.find((l) => l.photo_can_confirm === false) || approvedPairs[0] || null;
+    // (Codex #5186 r3 P1). When that pair's look-alike is still a draft its
+    // text (which names it) cannot be shown, but the cap still stands, so the
+    // pest engine's fixed technician guidance does — never a retake prompt
+    // that says a photo could settle it (Codex #5186 r7 P1).
+    const shownVeto = approvedPairs.find((l) => l.photo_can_confirm === false);
+    if (shownVeto) return shownVeto;
+    if (hasPhotoVetoLookAlike(top.entry)) return HIDDEN_VETO_PAIR;
+    return approvedPairs[0] || null;
   }
   return lookAlikeBetween(plantCandidatesSupporting(candidates, level, nodeId));
 }

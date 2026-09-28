@@ -1693,6 +1693,33 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(sent).toContain('grass_type_on_file');
     });
   });
+
+  describe('Codex #5186 round 7 regressions', () => {
+    test('finding 2: an identity capped by a look-alike that is still a draft gets fixed technician guidance, never a retake', () => {
+      const { approvalContentHash } = jest.requireActual('../services/species-catalog-approval');
+      const { NO_PHOTO_CONFIRMS } = require('../services/photo-id-v2/pest-engine');
+      const reapproved = (entry) => {
+        const { review: _review, ...rest } = entry;
+        const base = { ...rest, verification: [] };
+        return { ...base, review: { status: 'owner_approved', approval_hash: approvalContentHash(base) } };
+      };
+      // An owner-approved bahia whose only look-alike, one a photo cannot separate, is the unapproved zoysia draft.
+      const bahia = reapproved({
+        ...catalog.getEntry('fixture-bahia'),
+        look_alikes: [{
+          slug: 'fixture-zoysia-draft', difference: 'Draft-only comparison.', next_photo: 'Draft-only photo tip.', photo_can_confirm: false,
+        }],
+      });
+      const candidate = {
+        slug: 'fixture-bahia', entry: bahia, confidence: 0.95, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: bahia.group,
+      };
+      const built = engine.buildIdentityResult([candidate], { subject: 'lawn', currentMonth: 6 });
+      expect(built.answer).toMatchObject({ level: 'entry', wording: 'likely' });
+      expect(built.next_photo).toEqual({ ask: NO_PHOTO_CONFIRMS.ask, why: NO_PHOTO_CONFIRMS.why, photo_can_confirm: false });
+      expect(built.tier).toBe('needs_more_evidence');
+      expect(JSON.stringify(built)).not.toContain('Draft-only');
+    });
+  });
 });
 
 describe('plant-engine — schema-invalid answers flip their ledger row (Codex #5186 round 2, finding 7)', () => {
@@ -1764,6 +1791,18 @@ describe('plant-engine — real catalog', () => {
       if (entry.safety?.toxic_to_pets) expect(line).toContain(clauses.pets);
     }
     expect(lineFor('palm', null)).toContain(clauses.pets); // sago palm is in the palm index
+  });
+
+  test('unnamed identity safety line (Codex #5186 r7 P1): date palm spines reach the palm lines, and no plant\'s own warning is dropped', () => {
+    const lineFor = engine._test.unnamedPlantSafetyLineFor;
+    const { puncture } = engine.UNNAMED_PLANT_SAFETY_CLAUSES;
+    expect(lineFor('palm', 'palms')).toContain(puncture);
+    expect(lineFor('palm', 'date-palms')).toContain(puncture);
+    // Every plant with its own safety line triggers at least one clause. If this fails, a new
+    // hazard is written only as text: give it a structured trigger in PLANT_HAZARD_CLAUSES.
+    for (const entry of catalog.listEntries({ section: 'plant' }).filter((e) => e.safety_line)) {
+      expect([entry.slug, lineFor('tree_shrub', entry.slug)]).not.toEqual([entry.slug, null]);
+    }
   });
 
   test('identity index: palm subject includes sago-palm', () => {
