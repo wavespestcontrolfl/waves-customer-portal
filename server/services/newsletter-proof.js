@@ -444,7 +444,7 @@ async function sendNewsletterProof(sendId) {
   // blocked from sending gets no proof, it gets a "fix me" notification.
   const recipientCount = await countRecipients(send);
   if (recipientCount === 0) {
-    const notified = await notifyProof('newsletter_proof_blocked', {
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Segment matches 0 active subscribers'],
     });
@@ -454,20 +454,20 @@ async function sendNewsletterProof(sendId) {
     const lockedPrices = await lockedPricesForSend(send, db);
     const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
-      const notified = await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+      const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
       return { skipped: true, reason: 'validation_failed', errors, notified };
     }
   }
   const calendarContext = await resolveFlagshipCalendarContext(send);
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
-    const notified = await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
     return { skipped: true, reason: 'calendar_target_invalid', errors, notified };
   }
   const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
   const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
   if (!eventSelection.valid) {
-    const notified = await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors: eventSelection.errors });
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors: eventSelection.errors });
     return { skipped: true, reason: 'event_selection_invalid', errors: eventSelection.errors, notified };
   }
   // Live official-page recheck (dark behind NEWSLETTER_LIVE_REVERIFY):
@@ -478,7 +478,7 @@ async function sendNewsletterProof(sendId) {
     const errors = proofRecheck.failures.map((f) => `Locked event failed live recheck: ${f.title} — ${f.reason}`);
     const suggestion = await alternateSuggestionLine(send);
     if (suggestion) errors.push(suggestion);
-    const notified = await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
     return { skipped: true, reason: 'live_reverify_failed', errors, notified };
   }
 
@@ -542,7 +542,7 @@ async function sendNewsletterProof(sendId) {
       // silently swallow it.
     });
 
-    await notifyProof('newsletter_proof_sent', {
+    await notifyProof('newsletter_proof_sent', { sendId: send.id,
       subject: send.subject,
       recipient: maskEmail(to),
       recipientCount,
@@ -618,7 +618,7 @@ async function maybeHandleProofApproval(email) {
   // again approves the same proof.
   if (send.newsletter_type === PEST_INSIDER_TYPE && !pestInsiderProofLive()) {
     logger.info(`[newsletter-proof] send ${send.id} is a Pest Insider issue and GATE_PEST_INSIDER_PROOF is off — approval refused, draft untouched`);
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Approved, but Pest Insider proof approval is switched off — nothing sent and the draft is unchanged. Turn the switch back on and reply APPROVED again, or send the issue from the Newsletter page.'],
     });
@@ -640,7 +640,7 @@ async function maybeHandleProofApproval(email) {
   if (send.proof_sent_at && send.updated_at
       && new Date(send.updated_at).getTime() > new Date(send.proof_sent_at).getTime()) {
     logger.info(`[newsletter-proof] send ${send.id} was edited after its proof — refusing stale approval, re-proofing`);
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Draft was edited after the proof went out — approval refused. A fresh proof of the edited draft is on its way; reply APPROVED to that one.'],
     });
@@ -659,7 +659,7 @@ async function maybeHandleProofApproval(email) {
   // have been edited between proof and approval.
   const recipientCount = await countRecipients(send);
   if (recipientCount === 0) {
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Approved, but segment matches 0 active subscribers — nothing sent'],
     });
@@ -669,7 +669,7 @@ async function maybeHandleProofApproval(email) {
     const lockedPrices = await lockedPricesForSend(send, db);
     const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
-      await notifyProof('newsletter_proof_blocked', {
+      await notifyProof('newsletter_proof_blocked', { sendId: send.id,
         subject: send.subject,
         errors: ['Approved, but validation now fails — nothing sent', ...errors],
       });
@@ -679,7 +679,7 @@ async function maybeHandleProofApproval(email) {
 
   const calendarContext = await resolveFlagshipCalendarContext(send);
   if (!calendarContext.valid) {
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Approved, but the linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET. The draft was left unscheduled.'],
     });
@@ -688,7 +688,7 @@ async function maybeHandleProofApproval(email) {
   const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
   const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
   if (!eventSelection.valid) {
-    await notifyProof('newsletter_proof_blocked', {
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
       errors: ['Approved, but the locked event lineup is no longer eligible — nothing scheduled', ...eventSelection.errors],
     });
@@ -703,7 +703,7 @@ async function maybeHandleProofApproval(email) {
     ];
     const suggestion = await alternateSuggestionLine(send);
     if (suggestion) errors.push(suggestion);
-    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
     // Invalidate the proof claim (token-scoped, same shape as the
     // stale-approval branch): the draft needs an event swap and a FRESH
     // proof, but sendNewsletterProof skips any row with proof_sent_at set —

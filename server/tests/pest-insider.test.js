@@ -292,7 +292,11 @@ describe('pest-insider claim validation at the send gates', () => {
     expect(unsafe.some((e) => e.includes('Unverified claim (absolute_safety_claim)'))).toBe(true);
     const minutes = validate(flagship('Keep pets off the sprayed lawn for 30 minutes.'), { recipientCount: 100 }).errors;
     expect(minutes.some((e) => e.includes('Unverified claim (fixed_reentry_time)'))).toBe(true);
-    for (const benign of ['A family-safe fun run this Saturday.', 'Kid-safe bounce houses at the fall festival.', 'Gates open 30 minutes early for the boat parade.']) {
+    // service / plan / program wording is treatment context too (codex round 16 P1)
+    for (const service of ['Our pest-control service is safe.', 'The WaveGuard plan is safe for the whole family.', 'Our program is completely safe around kids.']) {
+      expect(validate(flagship(service), { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim (absolute_safety_claim)'))).toBe(true);
+    }
+    for (const benign of ['A family-safe fun run this Saturday.', 'Kid-safe bounce houses at the fall festival.', 'Gates open 30 minutes early for the boat parade.', 'A family-safe program of concerts all weekend.']) {
       expect(validate(flagship(benign), { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim'))).toBe(false);
     }
     // the Pest Insider is all treatment copy: the same phrase stays a claim there

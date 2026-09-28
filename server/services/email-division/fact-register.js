@@ -964,7 +964,18 @@ function reentryTimeInSentence(sentence) {
 // treatment is safe once dry" is caught, "a family-safe fun run" is not
 // (codex round 15 P1). The pest-fact rules need no such scope: a false
 // termite or large-patch claim is false in any newsletter.
-const TREATMENT_CONTEXT = /\b(?:treat\w*|spray\w*|pesticides?|insecticides?|herbicides?|chemicals?|products?|applications?|applied|appl(?:y|ies|ying)|technicians?|barriers?|baits?|granul\w*|dusts?|fogg\w*|misting|re-?ent(?:ry|er)\w*|(?:once|until|when|after)\s+(?:it\s+(?:is|has)\s+)?dr(?:y|ied|ies))\b/i;
+// …and the SERVICE wording the safety predicate recognises (codex round 16
+// P1): "our pest-control service is safe", "the WaveGuard plan", "our
+// program" — a service, plan or program is treatment context when it is
+// Waves' own ("our …") or pest/lawn-qualified; an event "program" is not.
+const TREATMENT_CONTEXT = new RegExp(
+  '\\b(?:treat\\w*|spray\\w*|pesticides?|insecticides?|herbicides?|chemicals?|products?|applications?|applied|appl(?:y|ies|ying)'
+  + '|technicians?|barriers?|baits?|granul\\w*|dusts?|fogg\\w*|misting|exterminat\\w*|fumigat\\w*|waveguard'
+  + '|re-?ent(?:ry|er)\\w*|(?:once|until|when|after)\\s+(?:it\\s+(?:is|has)\\s+)?dr(?:y|ied|ies)'
+  + '|(?:pest|lawn|mosquito|termite|rodent|ants?|fleas?|roach|bug|weed|fertiliz\\w*|irrigation)[-\\s]+(?:control|care|services?|programs?|plans?|treatments?|barriers?|defense)'
+  + '|our\\s+(?:services?|programs?|plans?|visits?|crew|team\\b))\\b',
+  'i',
+);
 const CLAIM_RULES = [
   { rule: 'termite_second_swarm', find: (sentence, previous) => termiteClaimInSentence(sentence, previous) },
   { rule: 'large_patch_summer_disease', find: (sentence, previous) => patchClaimInSentence(sentence, previous) },

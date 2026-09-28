@@ -817,7 +817,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Newsletter proof sent — reply APPROVED to send',
       body: `Proof of "${p.subject || 'Untitled'}" emailed to ${p.recipient || 'the owner inbox'}. Reply APPROVED to that email and it sends to ${p.recipientCount ?? '?'} active subscribers; any other reply (or none) leaves it a draft.`,
-      link: '/admin/newsletter?tab=compose',
+      // Deep-link THE draft the notice is about — the bare compose tab opens
+      // the latest autopilot draft, not this one (codex round 16 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
     }),
   },
   newsletter_proof_approved: {
@@ -853,7 +855,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Newsletter proof blocked',
       body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Fix the draft in the composer — nothing was sent.`,
-      link: '/admin/newsletter?tab=compose',
+      // Deep-link THE draft the notice is about — the bare compose tab opens
+      // the latest autopilot draft, not this one (codex round 16 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
     }),
   },
   event_sources_unhealthy: {
