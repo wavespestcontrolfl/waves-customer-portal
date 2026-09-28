@@ -926,7 +926,9 @@ async function renderTemplate(templateKey, vars, context = {}) {
 // body will actually render — gate on AND the row present and active. An
 // eager build minted an unreachable short_codes row on every legacy send
 // and every email-only delivery (codex r2).
-async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars, context = {}) {
+// out (optional): receives out.templateKey = the row that rendered the body
+// (v2 or base), so a caller can record it; the return stays a string.
+async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars, context = {}, out = null) {
   if (process.env.GATE_APPOINTMENT_PAGE === 'true') {
     const v2Key = `${baseKey}_v2`;
     // Fail-soft like renderTemplate: a transient DB error here must not
@@ -947,7 +949,10 @@ async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars,
         return null;
       }
       const body = await renderTemplate(v2Key, await v2VarsFactory(), context);
-      if (body) return body;
+      if (body) {
+        if (out) out.templateKey = v2Key;
+        return body;
+      }
       // Active row that failed to render (audited upstream) keeps the same
       // stop-don't-revert semantics as the kill switch.
       logger.warn(`[appt-remind] ${v2Key} did not render - skipping send rather than reverting to legacy copy`);
@@ -956,7 +961,9 @@ async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars,
     // Row absent = rolled-back migration; fall back so the customer still
     // gets a text.
   }
-  return renderTemplate(baseKey, legacyVars, context);
+  const legacyBody = await renderTemplate(baseKey, legacyVars, context);
+  if (legacyBody && out) out.templateKey = baseKey;
+  return legacyBody;
 }
 
 async function renderRequiredTemplate(templateKey, vars, context = {}) {
@@ -1954,6 +1961,9 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
       metadata: JSON.stringify({
         entry_point: 'appointment_notice_contact_deferred',
         ...(metaExtra.scheduled_service_id ? { scheduled_service_id: metaExtra.scheduled_service_id } : {}),
+        // The held body was rendered from this row; the scheduler replay
+        // forwards it so the morning send keeps its template attribution.
+        ...(metaExtra.templateKey ? { template_key: metaExtra.templateKey } : {}),
         appointment_contact_role: held.contact.role || null,
         original_block_code: 'QUIET_HOURS_HOLD',
         replay_purpose: purpose,
@@ -2293,6 +2303,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // above passed, then the clock crossed 20:00 mid-flight) back out so
       // the hold defers instead of burning the confirmation below.
       const smsOutcome = {};
+      const confirmationMeta = { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined };
       const sent = await deliverAppointmentNotice({
         channel: prefs.confirmationChannel,
         kind: 'confirmation',
@@ -2304,6 +2315,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         smsOutcome,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
+          const ladder = {};
           const rendered = await renderAppointmentPageTemplate(
             'appointment_confirmation',
             async () => {
@@ -2327,9 +2339,13 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
             },
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
+            ladder,
           );
+          // safeSendAppointment reads this metadata after the render, so
+          // the send records the row that actually rendered (v2 or base).
+          if (ladder.templateKey) confirmationMeta.templateKey = ladder.templateKey;
           return appendHeldEstimateAcceptLine(rendered, { record, contact, customer, scheduledServiceId });
-        }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome }),
+        }, 'confirmation', 'appointment_confirmation', confirmationMeta, { sendOutcome: smsOutcome }),
       });
 
       // Boundary hold — same treatment as the pre-check above: return
@@ -3715,6 +3731,7 @@ const AppointmentReminders = {
               continue;
             }
             const smsOutcome24 = {};
+            const reminder24Meta = { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined };
             const reached24 = await withReminderSendFence(r, '24h', () => deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
@@ -3733,7 +3750,8 @@ const AppointmentReminders = {
               // occurrence (finding #5).
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-                return renderAppointmentPageTemplate(
+                const ladder = {};
+                const rendered24 = await renderAppointmentPageTemplate(
                   'reminder_24h',
                   // v2: the page carries the detail — body keeps the arrival
                   // window + fee disclosure and hands off to the link.
@@ -3747,8 +3765,13 @@ const AppointmentReminders = {
                   },
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
+                  ladder,
                 );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }, { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
+                // Read by safeSendAppointment after this render (see the
+                // confirmation twin): the row that rendered, v2 or base.
+                if (ladder.templateKey) reminder24Meta.templateKey = ladder.templateKey;
+                return rendered24;
+              }, 'appointment_reminder', 'appointment_reminder_24h', reminder24Meta, { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
               smsOutcome: smsOutcome24,
             }));
             if (reached24 === null) smsOutcome24.blockedCode = 'MOVE_HOLD';
