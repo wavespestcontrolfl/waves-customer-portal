@@ -21,7 +21,8 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
-const { lookupCountyParcelByPoint, unitParcelFromAggregate, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
+const { condoUnitFolioLive } = require('../../config/feature-gates');
+const { lookupCountyParcelByPoint, unitParcelFromAggregate, unitParcelFromAggregateRow, normalizeUnitId, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -1949,6 +1950,87 @@ function aggregateSoleUnitRow(parcel, houseNumber) {
   return parcel.soleUnitRows?.[String(houseNumber)] || null;
 }
 
+// Condo unit folio (unit-scope ruling #8, GATE_CONDO_UNIT_FOLIO, off
+// unless exactly 'true', read per call). Dark = a typed Apt/Unit on a
+// stacked association drops the aggregate to the address search, as before.
+// (typeof guard: suites that mock feature-gates without this reader read OFF.)
+function condoUnitFolioEnabled() {
+  return typeof condoUnitFolioLive === 'function' && condoUnitFolioLive() === true;
+}
+
+const TYPED_DWELLING_UNIT_RE = /(?:\b(?:APT|APARTMENT|UNIT)\b\.?\s*#?\s*|#\s*)([A-Z0-9-]+)/i;
+const TYPED_BUILDING_RE = /\b(?:BLDG|BUILDING)\b\.?\s*#?\s*([A-Z0-9-]+)/i;
+// Designators that are not a dwelling unit: a suite is commercial, and a
+// lot / trailer / room is not a condo folio — those keep the drop.
+const TYPED_NON_DWELLING_RE = /\b(?:STE|SUITE|LOT|TRLR|RM)\b/i;
+
+// { line, unit, building } for a typed unit address, or null when it names
+// no dwelling unit. The unit may sit anywhere ("123 Main St Apt 4",
+// "123 Main St, Unit 4, Venice", "Unit 4, 123 Main St", "123 Main St #4");
+// the line is the "NUMBER STREET" left once the designators are removed. A
+// bare trailing number ("1555 Tarpon Center Dr 201") comes back with
+// unit null and is decided against the county lines by the caller.
+function typedDwellingUnit(address) {
+  const raw = String(address || '');
+  if (!raw.trim() || TYPED_NON_DWELLING_RE.test(raw)) return null;
+  const unitMatch = raw.match(TYPED_DWELLING_UNIT_RE);
+  const bldgMatch = raw.match(TYPED_BUILDING_RE);
+  const street = raw
+    .replace(new RegExp(TYPED_DWELLING_UNIT_RE.source, 'gi'), ' ')
+    .replace(new RegExp(TYPED_BUILDING_RE.source, 'gi'), ' ')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)[0] || '';
+  const line = stripUnitDesignators(normalizeCountyStreetLine(street));
+  if (!line) return null;
+  return {
+    line,
+    unit: unitMatch ? normalizeUnitId(unitMatch[1]) : null,
+    building: bldgMatch ? normalizeUnitId(bldgMatch[1]) : null,
+  };
+}
+
+// A typed dwelling unit against the aggregate's own unit rows. Resolves
+// ONLY on a unique exact match — same "NUMBER STREET", same normalized unit
+// id, the building agreeing when both sides name one, and a row that is
+// positively ONE dwelling with its own living area (the unit's own folio,
+// never a whole-building figure). Anchored to the TYPED address: a snapped
+// canonical number could name a neighbor building's unit, so the canonical
+// form is read only when nothing was typed.
+//   { status: 'resolved', row }            exactly one attested row
+//   { status: 'multiple_unit_matches', candidates }  repeated unit numbers
+//   { status: 'unit_not_matched' }          no row, or the row isn't one
+//                                           dwelling with its own area
+//   null                                   not a dwelling-unit lookup on
+//                                          this association (drop as before)
+function aggregateUnitDesignatorMatch(parcel, searchAddress, typedAddress) {
+  const entries = Array.isArray(parcel?.unitDesignatorRows) ? parcel.unitDesignatorRows : [];
+  if (parcel?.aggregated !== true || !entries.length) return null;
+  const target = typedDwellingUnit(String(typedAddress || '').trim() ? typedAddress : searchAddress);
+  if (!target) return null;
+  const lineOf = (entry) => stripUnitDesignators(normalizeCountyStreetLine(entry.line));
+  let { line, unit } = target;
+  if (!unit) {
+    // Bare trailing unit number: the typed line is a county line plus one
+    // number token.
+    const base = entries.map(lineOf).find((norm) => line.startsWith(`${norm} `)
+      && /^[A-Z0-9-]+$/.test(line.slice(norm.length + 1)));
+    if (!base) return null;
+    unit = normalizeUnitId(line.slice(base.length + 1));
+    line = base;
+  }
+  if (!unit || !entries.some((entry) => lineOf(entry) === line)) return null;
+  const candidates = entries.filter((entry) => lineOf(entry) === line
+    && entry.unit === unit
+    && (!target.building || !entry.building || entry.building === target.building));
+  if (candidates.length > 1) return { status: 'multiple_unit_matches', candidates: candidates.length };
+  const row = candidates[0]?.row;
+  if (!row || !row.parcelId || !(Number(row.livingAreaSqft) > 0) || Number(row.residentialUnits) > 1) {
+    return { status: 'unit_not_matched' };
+  }
+  return { status: 'resolved', row };
+}
+
 // The unit parcel for a 'unit' verdict — anchored to the typed number the
 // same way the verdict was, so a snapped canonical number can't pick a
 // neighbor's row.
@@ -2194,7 +2276,24 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
       parcel = null;
     } else if (parcel && parcel.aggregated === true) {
       const verdict = aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address);
-      if (verdict === 'drop') {
+      const unitMatch = verdict === 'drop' && condoUnitFolioEnabled()
+        ? aggregateUnitDesignatorMatch(parcel, searchAddress, address)
+        : null;
+      if (unitMatch) {
+        // A typed Apt/Unit in a stacked condo building: the unit's OWN roll
+        // row, when exactly one matches, replaces both the association sums
+        // and the address-search guess (unit-scope ruling #8). Anything
+        // short of a unique attested match degrades to the address search as
+        // before — never the building's figures for one unit — and the
+        // outcome rides diag so the route can flag an ambiguous match.
+        if (diag) diag.unitFolio = { status: unitMatch.status, candidates: unitMatch.candidates };
+        logger.info('[county-property] association aggregate unit designator match', {
+          status: unitMatch.status,
+          candidates: unitMatch.candidates ?? null,
+          associationUnits: parcel.residentialUnits ?? null,
+        });
+        parcel = unitMatch.status === 'resolved' ? unitParcelFromAggregateRow(parcel, unitMatch.row) : null;
+      } else if (verdict === 'drop') {
         logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
         parcel = null;
       } else if (verdict === 'unit') {
@@ -5311,6 +5410,8 @@ module.exports = {
   lookupPropertyFromHillsboroughPAO,
   lookupPropertyFromCountyRecords,
   lookupPropertyFromAITrio,
+  condoUnitFolioEnabled,
+  typedDwellingUnit,
   lookupPropertyFromCountyByParcel,
   searchCountyParcelByAddress,
   _private: {
@@ -5347,6 +5448,8 @@ module.exports = {
     aggregateSitusVerdict,
     addressHasSubpremise,
     resolveAggregateUnitParcel,
+    aggregateUnitDesignatorMatch,
+    typedDwellingUnit,
     withholdAssociationLand,
     situsHouseNumberExactMatch,
     houseNumberFromSourceUrl,

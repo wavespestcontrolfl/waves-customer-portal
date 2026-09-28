@@ -17,7 +17,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, typedDwellingUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { isInServiceAreaBox } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
@@ -295,6 +295,19 @@ function cachedAggregateResolvesToOwnUnit(record, address) {
   return Number.isFinite(units) && units > 1 && buildings === units;
 }
 
+// A typed Apt/Unit address whose cached row predates the condo unit folio
+// (GATE_CONDO_UNIT_FOLIO): the live path now resolves the unit's own county
+// row out of a stacked building, where the cached row came from the address
+// search the old drop fell back to — possibly the building's figures. Every
+// live run with the gate on stamps `_unitFolio` (even 'no_stacked_building'),
+// so each unit address re-runs once and is never re-invalidated. Gate off =
+// no-op. Pure; cache rows are inputs, never mutated.
+function cachedUnitAddressPredatesUnitFolio(record, address) {
+  if (typeof condoUnitFolioEnabled !== 'function' || !condoUnitFolioEnabled()) return false;
+  if (!record || record._unitFolio) return false;
+  return Boolean(typedDwellingUnit(address)?.unit);
+}
+
 async function performPropertyLookupCore(address, options = {}) {
   const t0 = Date.now();
   // options.persist === false: read-everything, WRITE-NOTHING mode for
@@ -326,6 +339,12 @@ async function performPropertyLookupCore(address, options = {}) {
       // a known-superseded classification must not reach report/portal
       // pricing either (codex P1).
       logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — treating as a miss');
+      cached = null;
+    }
+    if (cached && cachedUnitAddressPredatesUnitFolio(cached.property_record, address)) {
+      // Same once-only miss for a unit address cached before the unit folio
+      // existed (cacheOnly callers take the ordinary miss, as above).
+      logger.info('[property-lookup] cached unit address predates condo unit folio — treating as a miss');
       cached = null;
     }
     if (cached) {
@@ -537,6 +556,16 @@ async function performPropertyLookupCore(address, options = {}) {
   if (aiProperty) {
     result.propertyRecord = aiProperty;
     result.rentcast = aiProperty;
+
+    // Condo unit folio outcome (GATE_CONDO_UNIT_FOLIO) rides the cached
+    // record like _floodZone: the profile flags an ambiguous unit match, and
+    // its presence marks the row as checked (cachedUnitAddressPredatesUnitFolio).
+    if (typeof condoUnitFolioEnabled === 'function' && condoUnitFolioEnabled()
+      && (lookupDiag.unitFolio || typedDwellingUnit(address)?.unit)) {
+      result.propertyRecord._unitFolio = lookupDiag.unitFolio
+        ? { status: lookupDiag.unitFolio.status, candidates: lookupDiag.unitFolio.candidates ?? null }
+        : { status: 'no_stacked_building', candidates: null };
+    }
 
     // FEMA NFHL flood-zone evidence (point query, fail-open, evidence-only).
     // Rides the merged property record so cache hits keep it. Skipped on
@@ -2206,6 +2235,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     fieldVerifyFlags.push({
       field: 'propertyType',
       reason: `Unit address in a stacked condo building — quoted as ONE condo unit (single level, no lot, no pool assumed). The building's story count, the community pool, and every satellite read (turf, landscape, water) describe the whole parcel and were dropped. Confirm the unit's floor (upper floors price as Condo — Upper)${unitSqFtKept ? ' and its sq ft' : ', and get the unit\'s own sq ft from the customer'}.${typeProvenance}`,
+      priority: 'HIGH',
+    });
+  }
+  if (rc?._unitFolio?.status === 'multiple_unit_matches') {
+    fieldVerifyFlags.push({
+      field: 'squareFootage',
+      reason: `The unit number matches ${Number(rc._unitFolio.candidates) > 1 ? `${rc._unitFolio.candidates} ` : 'several '}county unit records at this address (the same unit number in more than one building), so the unit's own county record could not be picked. Confirm the building and the unit's sq ft with the customer.`,
       priority: 'HIGH',
     });
   }
@@ -5770,6 +5806,7 @@ module.exports._private = {
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,
   cachedAggregateResolvesToOwnUnit,
+  cachedUnitAddressPredatesUnitFolio,
   subdivisionMedianEstimate,
   inFlightLookups,
   lookupCoalesceKey,
