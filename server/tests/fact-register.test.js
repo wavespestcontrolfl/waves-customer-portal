@@ -35,6 +35,12 @@ describe('listFacts', () => {
     expect(db).toHaveBeenCalledWith('knowledge_base');
   });
 
+  test('reads only facts that are active AND in status active, so a flagged or archived fact never reaches a writer', async () => {
+    await listFacts();
+    const q = db.mock.results[db.mock.results.length - 1].value;
+    expect(q.where).toHaveBeenCalledWith({ category: 'facts', active: true, status: 'active' });
+  });
+
   test('filters to facts carrying ANY of the given tags', async () => {
     const facts = await listFacts({ tags: ['swarm-season'] });
     expect(facts.map((f) => f.id).sort()).toEqual(['f1', 'f3']);

@@ -21,13 +21,18 @@ const db = require('../../models/db');
 const CATEGORY = 'facts';
 
 /**
- * List active facts, optionally filtered to any of the given tags.
- * `tags` may be a single string or an array; omitted/empty returns every
- * active fact (bounded by `limit`).
+ * List the facts a writer may use, optionally filtered to any of the given
+ * tags. `tags` may be a single string or an array; omitted/empty returns
+ * every usable fact (bounded by `limit`).
+ *
+ * Usable means active AND status 'active'. The weekly knowledge-base audit
+ * hides an entry it doubts by setting status 'flagged' and leaves `active`
+ * alone, so filtering on `active` only would feed a flagged or archived
+ * fact straight into a customer-facing prompt.
  */
 async function listFacts({ tags, limit = 50 } = {}) {
   const rows = await db('knowledge_base')
-    .where({ category: CATEGORY, active: true })
+    .where({ category: CATEGORY, active: true, status: 'active' })
     .orderBy('title', 'asc');
 
   const wanted = Array.isArray(tags) ? tags : (tags ? [tags] : null);
