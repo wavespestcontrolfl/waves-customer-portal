@@ -346,6 +346,11 @@ function resolveReviewLocationId(customer = {}, opts = {}) {
  * @param {object} customer  { city, zip, latitude, longitude }
  * @returns {object} a WAVES_LOCATIONS entry (never null)
  */
+// Farthest a geocode may sit from its nearest office and still pick that
+// office's line. The footprint (south Hillsborough → Boca Grande) is within
+// ~35mi of an office; beyond this the geocode is treated as unusable.
+const SERVICE_GEOCODE_MAX_MILES = 50;
+
 function resolveServiceLocation(customer = {}) {
   const byId = (id) => WAVES_LOCATIONS.find((l) => l.id === id) || null;
 
@@ -355,10 +360,11 @@ function resolveServiceLocation(customer = {}) {
     if (hit) return hit;
   }
 
-  const zip = String(customer.zip || '').trim().slice(0, 5);
-  if (zip) {
+  // Full value to zipToCity — it extracts the 5-digit run itself, so messy
+  // legacy values like 'FL 34219' still resolve (a slice(0, 5) would not).
+  if (customer.zip) {
     const { zipToCity } = require('../utils/zip-to-city');
-    const zipCity = String(zipToCity(zip) || '').toLowerCase().trim();
+    const zipCity = String(zipToCity(customer.zip) || '').toLowerCase().trim();
     if (zipCity && CITY_TO_LOCATION[zipCity]) {
       const hit = byId(CITY_TO_LOCATION[zipCity]);
       if (hit) return hit;
@@ -366,11 +372,13 @@ function resolveServiceLocation(customer = {}) {
   }
 
   // Same null/blank guard as resolveReviewLocation: Number(null) === 0.
+  // Only a geocode near the service area counts — a (0, 0) sentinel or an
+  // out-of-range pair would otherwise pick an arbitrary "nearest" office.
   const lat = customer.latitude == null || customer.latitude === '' ? NaN : Number(customer.latitude);
   const lng = customer.longitude == null || customer.longitude === '' ? NaN : Number(customer.longitude);
   if (Number.isFinite(lat) && Number.isFinite(lng)) {
     const hit = nearestLocation(lat, lng);
-    if (hit) return hit;
+    if (hit && haversineMiles({ latitude: lat, longitude: lng }, hit) <= SERVICE_GEOCODE_MAX_MILES) return hit;
   }
 
   return WAVES_LOCATIONS[0];

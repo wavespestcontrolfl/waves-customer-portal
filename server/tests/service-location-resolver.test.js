@@ -37,6 +37,7 @@ describe('resolveServiceLocation', () => {
   test('blank city falls through to the ZIP', () => {
     expect(resolveServiceLocation({ city: '', zip: '34286' }).id).toBe('venice');
     expect(resolveServiceLocation({ zip: '34221-1234' }).id).toBe('parrish');
+    expect(resolveServiceLocation({ zip: 'FL 34219' }).id).toBe('parrish');
   });
 
   test('unmapped city falls through to the ZIP, then the geocode', () => {
@@ -51,6 +52,10 @@ describe('resolveServiceLocation', () => {
     expect(resolveServiceLocation({ latitude: null, longitude: null }).id).toBe('bradenton');
     expect(resolveServiceLocation({ latitude: '', longitude: '' }).id).toBe('bradenton');
     expect(resolveServiceLocation({ zip: '99999' }).id).toBe('bradenton');
+    // Sentinel / out-of-range / far-away geocodes are not usable.
+    expect(resolveServiceLocation({ latitude: 0, longitude: 0 }).id).toBe('bradenton');
+    expect(resolveServiceLocation({ latitude: 999, longitude: 999 }).id).toBe('bradenton');
+    expect(resolveServiceLocation({ city: 'Miami', latitude: 25.76, longitude: -80.19 }).id).toBe('bradenton');
   });
 });
 
