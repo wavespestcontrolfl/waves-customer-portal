@@ -1330,7 +1330,7 @@ describe('termite annual renewal charge', () => {
       const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
 
       expect(outcome.status).toBe('no_method');
-      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/no saved card/i), expect.any(String), expect.any(Object));
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/no saved payment method/i), expect.any(String), expect.any(Object));
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'no_method' }));
     });

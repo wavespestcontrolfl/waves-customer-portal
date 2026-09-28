@@ -5506,6 +5506,24 @@ async function handlePayoutEvent(payout, eventType) {
  * 2nd fail (same invoice): switch to card, flag ACH needs_verification
  * 3rd fail (90 days): suspend ACH, switch default to card
  */
+// Is this invoice a termite annual-plan RENEWAL successor's prepay invoice?
+// (annual_prepay_terms.prepay_invoice_id, renewed_from_term_id set, termite-
+// marked.) Fail-open to "no": a lookup error must never suppress the
+// ordinary ACH handling for a non-renewal debit.
+async function isTermiteRenewalPrepayInvoice(invoiceId) {
+  try {
+    const successor = await db('annual_prepay_terms')
+      .where({ prepay_invoice_id: invoiceId })
+      .whereNotNull('renewed_from_term_id')
+      .whereNotNull('annual_plan_version')
+      .first('id');
+    return Boolean(successor);
+  } catch (err) {
+    logger.debug(`[stripe-webhook] termite renewal invoice lookup failed for ${invoiceId}: ${err.message}`);
+    return false;
+  }
+}
+
 async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
   const piId = paymentIntent.id;
 
@@ -5519,6 +5537,19 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
     if (achInvoice?.payer_id) {
       logger.info(`[stripe-webhook] ACH failure on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — skipping homeowner ACH handling`);
+      return;
+    }
+    // Codex #4971 r22 P1: a termite annual RENEWAL debit owns its own
+    // failure follow-through (termite-annual-renewal-charge.js leg 7d: the
+    // failed attempt resolves to 'declined' → one renewal failure notice +
+    // pay link, and the renewal is NEVER retried). This generic ladder would
+    // send a second, contradictory message on top (ach_retry_notice promises
+    // an automatic retry) and count the failure toward the customer's ACH
+    // escalation — so it steps aside for a renewal successor's prepay
+    // invoice. Detected on the durable term link, never on PI metadata.
+    const achInvoiceId = achInvoice?.id || payment.invoice_id || null;
+    if (achInvoiceId && (await isTermiteRenewalPrepayInvoice(achInvoiceId))) {
+      logger.info(`[stripe-webhook] ACH failure on termite renewal invoice ${achInvoiceId} (PI ${piId}) — left to the renewal charge's own follow-through, generic ACH ladder skipped`);
       return;
     }
     const customer = await db('customers').where({ id: payment.customer_id }).first();

@@ -1285,6 +1285,7 @@ describe('annual prepay late-payment gap fixes', () => {
         g.andWhere = (a, b2) => g.comb('and', pred(a, b2));
         g.orWhere = (a, b2) => g.comb('or', pred(a, b2));
         g.whereIn = (col, arr) => g.comb('and', arr.includes(row[col]));
+        g.orWhereIn = (col, arr) => g.comb('or', arr.includes(row[col]));
         g.whereNull = (col) => g.comb('and', row[col] == null);
         g.orWhereNotNull = (col) => g.comb('or', row[col] != null);
         // P2-4's termiteRenewalGraceCovered branch: none of the fixtures
@@ -1312,6 +1313,12 @@ describe('annual prepay late-payment gap fixes', () => {
       activeAnyInvoice: { 't.status': 'active', 't.prepay_invoice_id': 'inv-1', 'i.status': 'overdue', 'i.paid_at': null },
       pendingPaidInvoice: { 't.status': 'payment_pending', 't.prepay_invoice_id': 'inv-1', 'i.status': 'paid', 'i.paid_at': '2026-01-01' },
       pendingOpenInvoice: { 't.status': 'payment_pending', 't.prepay_invoice_id': 'inv-1', 'i.status': 'sent', 'i.paid_at': null },
+      // Codex #4971 r22 P1: account credit covered the whole prepay invoice
+      // ('prepaid', NO paid_at) — collected, for both the pending and the
+      // decided arms.
+      pendingCreditCovered: { 't.status': 'payment_pending', 't.prepay_invoice_id': 'inv-1', 'i.status': 'prepaid', 'i.paid_at': null },
+      renewedCreditCovered: { 't.status': 'renewed', 't.prepay_invoice_id': 'inv-1', 'i.status': 'prepaid', 'i.paid_at': null },
+      decidedLapseCreditCovered: { 't.status': 'cancelled', 't.renewal_decision': 'cancel', 't.prepay_invoice_id': 'inv-1', 'i.status': 'prepaid', 'i.paid_at': null },
       trueCancel: { 't.status': 'cancelled', 't.renewal_decision': null, 't.prepay_invoice_id': 'inv-1', 'i.status': 'refunded', 'i.paid_at': null },
       // P2-4: an unpaid termite renewal successor — the whereRaw grace-
       // deadline check is stubbed true above (its real SQL is exercised
@@ -1341,6 +1348,13 @@ describe('annual prepay late-payment gap fixes', () => {
       expect(evaluateGuard(guard, rows.pendingPaidInvoice)).toBe(true);
       expect(evaluateGuard(guard, rows.pendingOpenInvoice)).toBe(false);
       expect(evaluateGuard(guard, rows.trueCancel)).toBe(false);
+    });
+
+    test('Codex #4971 r22 P1: a credit-covered (prepaid, no paid_at) prepay invoice is collected in the pending AND decided arms', () => {
+      const guard = captureStatusGuard();
+      expect(evaluateGuard(guard, rows.pendingCreditCovered)).toBe(true);
+      expect(evaluateGuard(guard, rows.renewedCreditCovered)).toBe(true);
+      expect(evaluateGuard(guard, rows.decidedLapseCreditCovered)).toBe(true);
     });
 
     // P2-4 (owner ruling 2026-09-26): a termite renewal SUCCESSOR gets the

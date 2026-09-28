@@ -180,11 +180,13 @@ async function recentPrepayRenewalTouch(customerId) {
 // later by a recovery leg. Counted instead, in the window: the renewal
 // successor's invoice delivery stamps (sent_at / sms_sent_at /
 // email_sent_at — the time-bounded form of the charge module's
-// whereInvoiceDelivered), or a charge attempt on it with submission evidence
-// (whereAttemptSubmitted — the card was genuinely tried), dated by
-// submitted_at (created_at for a PaymentIntent-only row).
+// whereInvoiceDelivered), or a charge attempt on it with PROVIDER evidence
+// (whereAttemptPresented — a PaymentIntent id, so Stripe actually processed
+// the request; Codex #4971 r22 P2: submitted_at alone is committed BEFORE
+// the Stripe call, so a crash in that gap stamps it with no contact made),
+// dated by submitted_at (created_at for a PaymentIntent-only row).
 async function recentTermiteRenewalContact(customerId) {
-  const { whereAttemptSubmitted } = require('./termite-annual-renewal-charge')._private;
+  const { whereAttemptPresented } = require('./termite-annual-renewal-charge')._private;
   const recent = db.raw(COOLDOWN_INTERVAL);
   return db('annual_prepay_terms as t')
     .join('invoices as i', 'i.id', 't.prepay_invoice_id')
@@ -195,8 +197,8 @@ async function recentTermiteRenewalContact(customerId) {
       this.where('i.sent_at', '>', recent)
         .orWhere('i.sms_sent_at', '>', recent)
         .orWhere('i.email_sent_at', '>', recent)
-        .orWhereExists(function chargeReachedStripe() {
-          whereAttemptSubmitted(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = i.id'))
+        .orWhereExists(function chargePresentedByStripe() {
+          whereAttemptPresented(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = i.id'))
             .whereRaw(`coalesce(a.submitted_at, a.created_at) > ${COOLDOWN_INTERVAL}`);
         });
     })

@@ -2289,13 +2289,16 @@ const RENEWAL_BELL_COPY = {
   // built by deliverInvoiceAndStampSkip from deliverRenewalInvoice's OWN
   // verified return value — never a hardcoded "it was sent" regardless of
   // what actually happened.
+  // Codex #4971 r22 P2: these bells are payment-method NEUTRAL — the saved
+  // method can be a card or a bank account (us_bank_account debit), and a
+  // bell that says "card" sends staff troubleshooting the wrong tender.
   no_consent: (successor, reason) => ({
     title: 'Termite annual renewal — no auto-charge consent on file',
-    body: `A renewal term for customer ${successor.customer_id} was minted (invoice for $${Number(successor.prepay_amount).toFixed(2)}), but the prior term never recorded renewal-charge consent — the card on file was NOT charged. ${reason}`,
+    body: `A renewal term for customer ${successor.customer_id} was minted (invoice for $${Number(successor.prepay_amount).toFixed(2)}), but the prior term never recorded renewal-charge consent — the saved payment method was NOT charged. ${reason}`,
   }),
   no_method: (successor, reason) => ({
-    title: 'Termite annual renewal — no saved card to charge',
-    body: `A renewal term for customer ${successor.customer_id} was minted (invoice for $${Number(successor.prepay_amount).toFixed(2)}), but no consented, chargeable saved payment method was found — the card on file was NOT charged. ${reason}`,
+    title: 'Termite annual renewal — no saved payment method to charge',
+    body: `A renewal term for customer ${successor.customer_id} was minted (invoice for $${Number(successor.prepay_amount).toFixed(2)}), but no consented, chargeable saved payment method (card or bank account) was found — nothing was charged. ${reason}`,
   }),
   surcharge_not_authorized: (successor, reason) => ({
     title: 'Termite annual renewal — card on file not charged (surcharge)',
@@ -2307,12 +2310,12 @@ const RENEWAL_BELL_COPY = {
   // prepay_amount, which overstates what Stripe was asked for whenever
   // account credit reduced the cash amount actually tried.
   declined: (successor, reason, amount, delivered = true) => ({
-    title: 'Termite annual renewal — card on file declined',
-    body: `The renewal charge of $${Number(amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was declined by the card on file: ${reason}. ${payLinkDeliveryClause(delivered)} The card will NOT be retried automatically.`,
+    title: 'Termite annual renewal — saved payment method declined',
+    body: `The renewal charge of $${Number(amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was declined by the saved payment method on file (card or bank account): ${reason}. ${payLinkDeliveryClause(delivered)} The saved method will NOT be retried automatically.`,
   }),
   refused: (successor, reason, _amount, delivered = true) => ({
-    title: 'Termite annual renewal — card on file not charged',
-    body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was not attempted, or could not complete, for a reason other than a card decline: ${reason}. ${payLinkDeliveryClause(delivered)} The card will NOT be retried automatically.`,
+    title: 'Termite annual renewal — saved payment method not charged',
+    body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was not attempted, or could not complete, for a reason other than a decline: ${reason}. ${payLinkDeliveryClause(delivered)} The saved method will NOT be retried automatically.`,
   }),
   // Codex #4971 pre-push P0: the renewal now routes to a third-party payer
   // (assigned after the mint, or recorded by the charge's own payer guard).
@@ -2323,7 +2326,7 @@ const RENEWAL_BELL_COPY = {
   }),
   ambiguous: (successor, reason) => ({
     title: 'Termite annual renewal — charge outcome unclear, needs reconciliation',
-    body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal may or may not have gone through (${reason}). Check Stripe and the invoice before collecting any other way — the card will NOT be retried automatically.`,
+    body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal may or may not have gone through (${reason}). Check Stripe and the invoice before collecting any other way — the saved method will NOT be retried automatically.`,
   }),
   // Codex round-1 P0: the eligibility re-check (resolveChargeEligibility)
   // refused to claim the fence — most commonly a customer decline landed
@@ -4103,6 +4106,7 @@ module.exports = {
     whereInvoiceSettledNotRevoked,
     whereInvoiceDelivered,
     whereAttemptSubmitted,
+    whereAttemptPresented,
     renewalWasPresented,
     withdrawRenewalSuccessor,
     classifyVoidRefusal,

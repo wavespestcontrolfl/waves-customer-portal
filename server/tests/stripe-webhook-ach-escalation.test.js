@@ -66,6 +66,7 @@ function resetMockState() {
   Object.assign(mockState, {
     paymentRow: { id: 'pay-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_ach_1' },
     invoiceRow: null,
+    termiteRenewalTerm: null, // annual_prepay_terms row for invoiceRow (a renewal successor when set)
     customer: { id: 'cust-1', first_name: 'Pat', phone: '+15550001111' },
     achLogRow: null,        // existing ach_failure_log row (replay when set)
     recentFailures: 1,
@@ -140,6 +141,7 @@ jest.mock('../models/db', () => {
       if (table === 'autopay_log' && mockState.failConsentLookup) throw new Error('consent lookup failed');
       if (table === 'payments') return mockState.paymentRow;
       if (table === 'invoices') return mockState.invoiceRow;
+      if (table === 'annual_prepay_terms') return mockState.termiteRenewalTerm;
       if (table === 'customers') return mockState.customer;
       if (table === 'autopay_log') return mockState.lastAutopayToggle;
       return null;
@@ -264,6 +266,33 @@ describe('handleAchFailure — escalation error propagation', () => {
     await expect(handleAchFailure(PI, 'R01', 'evt_3')).resolves.toBeUndefined();
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+  });
+
+  // Codex #4971 r22 P1: a termite annual RENEWAL debit has its own failure
+  // follow-through (leg 7d → 'declined' → one renewal notice + pay link,
+  // never a retry). The generic ladder must not send a second, contradictory
+  // "we'll retry" notice, log an escalation failure, or flip methods.
+  test('a termite renewal successor\'s debit failure is left to the renewal follow-through — no ACH notice, no escalation, no log row', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT()];
+    mockState.invoiceRow = { id: 'inv-renewal', customer_id: 'cust-1', payer_id: null };
+    mockState.termiteRenewalTerm = { id: 'succ-1' };
+
+    await expect(handleAchFailure(PI, 'R01', 'evt_r22')).resolves.toBeUndefined();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+    expect(mockState.trxUpdates).toEqual([]);
+    expect(mockState.customerUpdates).toEqual([]);
+  });
+
+  test('a non-renewal invoice on the same shape still takes the ordinary ACH path', async () => {
+    mockState.recentFailures = 1;
+    mockState.invoiceRow = { id: 'inv-plain', customer_id: 'cust-1', payer_id: null };
+    mockState.termiteRenewalTerm = null;
+
+    await expect(handleAchFailure(PI, 'R01', 'evt_r22b')).resolves.toBeUndefined();
+    expect(mockHandleAutopayFailure).toHaveBeenCalledWith('cust-1');
   });
 });
 

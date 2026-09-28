@@ -2199,6 +2199,18 @@ function statusAfterDecision(action) {
   return 'renewal_pending';
 }
 
+// Codex #4971 r22 P1: the ONE "this term's prepay invoice is collected"
+// definition, shared by invoiceTermStatus (JS) and every SQL reader of the
+// same fact — coveredTermsAsOf's paid-pending and decided-coverage arms and
+// activatePaidPendingTerms' recovery scan. 'prepaid' is a prepay invoice
+// settled entirely by auto-applied account credit (no paid_at, no card
+// charge — stripe.js's credit-coverage seam): consumed credit is money
+// collected. Only a term's own prepay invoice is ever tested here.
+const PREPAY_INVOICE_COLLECTED_STATUSES = ['paid', 'prepaid'];
+function wherePrepayInvoiceCollected(builder, alias = 'i') {
+  return builder.whereIn(`${alias}.status`, PREPAY_INVOICE_COLLECTED_STATUSES).orWhereNotNull(`${alias}.paid_at`);
+}
+
 function invoiceTermStatus(invoice) {
   if (!invoice) return PAYMENT_PENDING_STATUS;
   const status = String(invoice.status || '').toLowerCase();
@@ -2212,7 +2224,7 @@ function invoiceTermStatus(invoice) {
   // already applied — and the term activates. Only a term's own prepay
   // invoice reaches this function; the coverage-settled 'prepaid' a visit
   // invoice carries under a term is never a prepay_invoice_id.
-  if (status === 'paid' || status === 'prepaid' || invoice.paid_at) return 'active';
+  if (PREPAY_INVOICE_COLLECTED_STATUSES.includes(status) || invoice.paid_at) return 'active';
   return PAYMENT_PENDING_STATUS;
 }
 
@@ -3222,7 +3234,7 @@ function coveredTermsAsOf(conn, coverageDate = null) {
         .orWhere(function paidPending() {
           this.where('t.status', PAYMENT_PENDING_STATUS)
             .andWhere(function invoicePaid() {
-              this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+              wherePrepayInvoiceCollected(this);
             });
         })
         // DECIDED coverage (renewed / switch_plan / a decided lapse riding out
@@ -3242,7 +3254,7 @@ function coveredTermsAsOf(conn, coverageDate = null) {
               });
           }).andWhere(function decidedInvoicePaid() {
             this.whereNull('t.prepay_invoice_id')
-              .orWhere('i.status', 'paid')
+              .orWhereIn('i.status', PREPAY_INVOICE_COLLECTED_STATUSES)
               .orWhereNotNull('i.paid_at');
           });
         });
@@ -4784,7 +4796,7 @@ async function activatePaidPendingTerms(conn = db) {
     .join('invoices as i', 't.prepay_invoice_id', 'i.id')
     .where('t.status', PAYMENT_PENDING_STATUS)
     .where(function () {
-      this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+      wherePrepayInvoiceCollected(this);
     })
     .select('i.id');
 
@@ -10497,6 +10509,8 @@ module.exports = {
     shouldAlertTerm,
     isLastServiceNearTermEnd,
     invoiceTermStatus,
+    wherePrepayInvoiceCollected,
+    PREPAY_INVOICE_COLLECTED_STATUSES,
     formatDateLabel,
     parsePaymentMetadata,
     findInvoiceIdForRefundedPayment,

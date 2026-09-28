@@ -96,14 +96,18 @@ describeOrSkip('campaign cooldown — durable termite renewal contact only (real
   test('bookkeeping alone never counts: a claim that never reached Stripe, or a skip whose pay link never went out', async () => {
     const neverReached = await renewal({ term: { renewal_charge_attempted_at: ago(1) }, attempt: { status: 'failed', created_at: ago(1) } });
     const undeliveredSkip = await renewal({ term: { renewal_charge_skipped_at: ago(1) } });
+    // Codex #4971 r22 P2: submitted_at is committed BEFORE the Stripe call —
+    // alone it proves no contact either (the pre-call crash shape).
+    const submittedOnly = await renewal({ attempt: { status: 'failed', submitted_at: ago(5) } });
     expect(await Gate.campaignCooldownReason(neverReached)).toBeNull();
     expect(await Gate.campaignCooldownReason(undeliveredSkip)).toBeNull();
+    expect(await Gate.campaignCooldownReason(submittedOnly)).toBeNull();
   });
 
   test('durable contact counts: a delivered renewal invoice, or a charge that reached Stripe, inside the window', async () => {
     const smsDelivered = await renewal({ invoice: { sms_sent_at: ago(3) } });
     const emailDelivered = await renewal({ invoice: { email_sent_at: ago(3) } });
-    const submitted = await renewal({ attempt: { status: 'failed', submitted_at: ago(5) } });
+    const submitted = await renewal({ attempt: { status: 'failed', submitted_at: ago(5), stripe_payment_intent_id: 'pi_processed' } });
     const intentOnly = await renewal({ attempt: { status: 'ambiguous', stripe_payment_intent_id: 'pi_x', created_at: ago(5) } });
     // Attempted long ago, but a recovery leg delivered the pay link this week.
     const lateDelivery = await renewal({ term: { renewal_charge_attempted_at: ago(45) }, invoice: { sent_at: ago(2) } });
