@@ -540,6 +540,42 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     expect(screen.getByText(/Charge Now can.t collect invoice WPC-2099-0001 here/)).toBeInTheDocument();
   });
 
+  // codex pre-push P1 (round 14, Codex r11 finding): a fully-discounted
+  // application (estimatedPrice stamped 0 alongside a positive
+  // primaryLinePrice — hasAuthoritativeZeroPrice, billing-lane.js) IS an
+  // authoritative price server-side — resolveScheduledServiceCharge's own
+  // hasOwnPrice includes this exemption, so its per_application_fee_at_completion
+  // refusal does NOT apply, and an attached invoice on this exact shape
+  // (e.g. a genuine extras-only invoice on a $0-net application) stays
+  // normally collectible through this sheet. The SAME fixture as the two
+  // tests above, but with a provenance-backed $0 instead of a bare
+  // unpriced row, must NOT be refused.
+  it('does not refuse checkout for a per_application visit with a provenance-backed $0 (authoritative zero) even with an attached invoice', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          waveguardTier: null,
+          estimatedPrice: 0,
+          primaryLinePrice: 100,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: 'Bills at completion — see the invoice or set a price' })).not.toBeInTheDocument();
+    // $214 invoice total, $60 prepaid credited once.
+    expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
+  });
+
   // Codex pre-push P2 (round 3): predictionFromAttachedInvoice returns
   // `source: 'attached_invoice'` (never grossAmount) for a SETTLED
   // (paid/prepaid) or refunded invoice too, but `invoicePreview` above is

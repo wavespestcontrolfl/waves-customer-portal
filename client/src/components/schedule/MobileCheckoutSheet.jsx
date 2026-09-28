@@ -375,6 +375,20 @@ export default function MobileCheckoutSheet({
   const siblingCollectible = !!siblingCoverage?.collectible;
   const siblingBlocksCharge = !!siblingCoverageVerdict && siblingCoverageVerdict.state !== 'none';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
+  // codex pre-push P1 (round 14, Codex r11 finding): a fully-discounted
+  // application — estimatedPrice stamped 0 alongside a positive
+  // primaryLinePrice (hasAuthoritativeZeroPrice, billing-lane.js) — IS an
+  // authoritative price server-side: resolveScheduledServiceCharge's own
+  // hasOwnPrice includes this exemption, so its per_application_fee_at_completion
+  // refusal does NOT apply to it, and an attached invoice on this exact
+  // shape (e.g. a genuine extras-only invoice on a $0-net application)
+  // stays normally collectible. Checked locally here, matching the SAME
+  // server predicate, rather than widening this file's own `hasOwnPrice`
+  // above, which deliberately stays narrower (positive price only) for the
+  // unpriced-prediction `price` ternary it feeds.
+  const attachedInvoiceHasAuthoritativeZeroPrice = service.estimatedPrice != null && service.estimatedPrice !== ''
+    && Number(service.estimatedPrice) === 0
+    && service.primaryLinePrice != null && Number(service.primaryLinePrice) > 0;
   // Codex pre-push P1 (round 13, Codex r11 finding): resolveScheduledServiceCharge
   // refuses the per_application_fee_at_completion shape UNCONDITIONALLY —
   // even when this visit already has an open, otherwise-collectible
@@ -384,10 +398,11 @@ export default function MobileCheckoutSheet({
   // either, although it drives totalBeforePrepaid to a positive number
   // below and would otherwise leave Charge enabled for a tap the server
   // then 409s. Scoped to the SAME shape as feeOnlyPerApplicationPreview
-  // (unpriced, non-callback, per_application lane) — a callback or an
-  // explicit price is unaffected, and stays on the normal attached-invoice
-  // collection flow.
+  // (unpriced, non-callback, per_application lane, NOT an authoritative
+  // zero) — a callback or an explicit/authoritative-zero price is
+  // unaffected, and stays on the normal attached-invoice collection flow.
   const attachedInvoiceRefusedForFeeAtCompletion = !hasOwnPrice
+    && !attachedInvoiceHasAuthoritativeZeroPrice
     && !service.isCallback
     && service.billingLane?.mode === 'per_application'
     && !!openVisitInvoice;
