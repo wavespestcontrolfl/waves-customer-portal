@@ -1854,17 +1854,24 @@ describe('startPrecedesCall\'s call site is exempted by an existing call appoint
 // call into prompts/call-extraction-v1.js) carries its own ARRIVAL WINDOW
 // EXCEPTION text and had the same "Tuesday, 2 to 4" ambiguous-period gap the
 // sibling v1 prompt was just fixed for. Fixed here with the identical rule.
-describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION requires an unambiguous period, same as the sibling v1 prompt (codex #4919 round-8 P1)', () => {
+describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION states or business-hours-reads the period, same as the sibling v1 prompt (codex #4919 round-8 P1; owner decision 2026-09-29)', () => {
   const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
   test('the rule requires UNAMBIGUOUS period and gives "Tuesday, 2 to 4 PM" as the qualifying example, not the bare "Tuesday, 2 to 4"', () => {
     const ruleAt = processorSrc.indexOf('ARRIVAL WINDOW EXCEPTION:');
     expect(ruleAt).toBeGreaterThan(-1);
-    const section = processorSrc.slice(ruleAt, ruleAt + 1600);
+    const section = processorSrc.slice(ruleAt, ruleAt + 3600);
     expect(section).toContain('UNAMBIGUOUS period for that start');
     expect(section).toContain('"Tuesday, 2 to 4 PM"');
-    expect(section).toContain('"Tuesday, 2 to 4", "between 2 and 4"');
-    expect(section).toContain('does NOT count as confirmed');
+    // Owner decision 2026-09-29 (prompt v18): an hour with no AM/PM is read as
+    // business hours when both sides committed to it, with the same closed
+    // shapes as the V2 prompt (never an approximation, bound or alternative).
+    expect(section).toContain('BUSINESS-HOURS READING');
+    expect(section).toContain('"Tuesday, 2 to 4"; "between 2 and 4"');
+    expect(section).toContain('"can we plan on 2 o\'clock?" answered "Sure."');
+    expect(section).toContain('appointment_confirmed stays false');
+    expect(section).toContain('"two or three"');
+    expect(section).not.toContain('does NOT count as confirmed (you would otherwise have to invent AM or PM)');
     expect(section).not.toMatch(/"Tuesday, 2 to 4"\)\s*DOES count as confirmed/);
     // The already-unambiguous examples still qualify unchanged.
     expect(section).toContain('"between 6 and 9 tonight"');

@@ -141,7 +141,7 @@ async function createShortCode(targetUrl, opts = {}) {
  * Look up target_url for a code. Returns null if unknown or expired.
  * Increments click_count + updates last_click_* on hit. Safe to call per-request.
  */
-async function resolveShortCode(code, { ip, userAgent } = {}) {
+async function resolveShortCode(code, { ip, userAgent, recordClick = true } = {}) {
   if (!code || typeof code !== 'string') return null;
   const row = await db('short_codes').where({ code }).first();
   if (!row) return null;
@@ -162,7 +162,10 @@ async function resolveShortCode(code, { ip, userAgent } = {}) {
   // /l/:code route already skips telemetry for bot/preview/scanner UAs, and
   // this guard keeps any future caller from logging unfurler hits as
   // engagement (bot hits get no row at all — simpler than is_bot flagging).
-  if (!isBotUserAgent(userAgent)) {
+  // recordClick=false is the route's staff-preview signal (admin marker cookie
+  // / WAVES_ADMIN_IPS): a staff member opening a customer's link is not the
+  // customer engaging, so no click row (click_count above still counts it).
+  if (recordClick !== false && !isBotUserAgent(userAgent)) {
     db('short_code_clicks').insert({
       short_code_id: row.id,
       clicked_at: new Date(),

@@ -286,6 +286,23 @@ describe("OwedTabV2", () => {
     await waitFor(() => expect(calls.filter((c) => c.url.includes("/commitments/auto-closed"))).toHaveLength(2));
   });
 
+  it("describes a close a model judged from a person's text or call back, with the quote it rested on", async () => {
+    autoClosedRows = [
+      { id: "k1", kind: "other", party: "waves", status: "fulfilled", customer_id: "cust-1", customer_first_name: "Test", customer_last_name: "Customer",
+        description: "Check on the warranty and let the caller know", updated_at: "2026-09-04T15:00:00.123Z",
+        fulfillment: { kind: "person_contact", strength: "association", record_type: "sms_log", matched_at: "2026-09-03T12:45:00Z", quote: "Your warranty covers the retreatment." } },
+      { id: "k2", kind: "other", party: "waves", status: "fulfilled", customer_id: "cust-2", customer_first_name: "Test", customer_last_name: "Other",
+        description: "Find out about the gate code", updated_at: "2026-09-04T16:00:00.456Z",
+        fulfillment: { kind: "person_contact", strength: "association", record_type: "call_log", matched_at: "2026-09-03T14:00:00Z", quote: "The code is on the lockbox." } },
+    ];
+    render(<OwedTabV2 />);
+    await screen.findByText("Closed automatically (last 7 days)");
+    expect(screen.getByText(/Kept: staff text Sep 3, 8:45 AM/)).toBeInTheDocument();
+    expect(screen.getByText(/Kept: staff call back Sep 3, 10:00 AM/)).toBeInTheDocument();
+    expect(screen.getByText(/Judged kept from: "Your warranty covers the retreatment\."/)).toBeInTheDocument();
+    expect(screen.getByText(/Judged kept from: "The code is on the lockbox\."/)).toBeInTheDocument();
+  });
+
   it("pages the Closed-automatically list: Load more asks for the page after the cursor and appends it", async () => {
     const closedRow = (id, n) => ({ id, kind: "send_estimate", party: "waves", status: "fulfilled", customer_id: `cust-${n}`, customer_first_name: `Test${n}`, customer_last_name: "Customer",
       updated_at: `2026-09-04T1${n}:00:00.000Z`, fulfillment: { kind: "estimate_sent", strength: "association", matched_at: "2026-09-03T12:45:00Z" } });
