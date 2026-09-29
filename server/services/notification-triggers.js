@@ -1122,10 +1122,13 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     if (dedupedNoPush) return { ...stats, deduped: true };
     // Its subject had already moved on (admin-alert-relevance.js): the bell was
     // written activity-only, or — push-only admins, no bell row — judged
-    // directly. Nothing rang, so no phone buzzes either.
+    // directly. Nothing rang, so no phone buzzes either. Reported as HANDLED
+    // (suppressed, the push skipped), like any deliberate suppression: a
+    // caller's last-resort fallback (the lead form's legacy owner SMS, which
+    // lands as an internal_admin_alert bell) must not re-create the alert.
     if (await require('./admin-alert-relevance').pushIsMovedOn({ bellRow, bellWritten, pushTo: pushEnabledIds, category: trigger.category,
       link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload, ...(dedupeKey ? { dedupeKey } : {}) } })) {
-      return { ...stats, quiet: true };
+      return { ...stats, quiet: true, suppressed: true, push: { sent: 0, skipped: 'moved_on' } };
     }
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate

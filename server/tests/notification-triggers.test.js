@@ -333,7 +333,7 @@ describe('triggerNotification bell outcome', () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'quiet-bell',
       metadata: { feed: 'activity', quiet: true, retired: { by: 'alert-relevance', reason: 'Lead is won', at: '2026-09-28T16:00:00.000Z' } } });
     expect(await triggerNotification('new_lead', { leadId: 'fixture-lead-1', name: 'Fixture Lead', service: 'Pest Control' }))
-      .toMatchObject({ bellWritten: true, quiet: true, push: null });
+      .toMatchObject({ bellWritten: true, quiet: true, suppressed: true, push: { sent: 0, skipped: 'moved_on' } });
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
     // A sweep retirement (read + stamp, no activity feed) is not this: the push path is untouched.
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'rung-bell', metadata: { retired: { by: 'alert-relevance' } } });
@@ -347,8 +347,10 @@ describe('triggerNotification bell outcome', () => {
     db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
       : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));
     try {
-      expect(await triggerNotification('new_lead', { leadId: 'fixture-lead-3', name: 'Fixture Lead', service: 'Pest Control' }))
-        .toMatchObject({ bellWritten: false, quiet: true, push: null });
+      const stats = await triggerNotification('new_lead', { leadId: 'fixture-lead-3', name: 'Fixture Lead', service: 'Pest Control' });
+      expect(stats).toMatchObject({ bellWritten: false, quiet: true, suppressed: true, push: { sent: 0, skipped: 'moved_on' } });
+      // Handled for the lead form (lead-webhook.js): its legacy owner SMS, which lands as another bell, is not sent.
+      expect(Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0))).toBe(true);
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
       expect(verdict).toHaveBeenCalledWith(expect.objectContaining({
         bellRow: null, bellWritten: false, pushTo: ['admin-1'], category: 'new_lead',
