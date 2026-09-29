@@ -337,6 +337,15 @@ describe('groundRescheduleAgreement', () => {
     expect(plain(THURSDAY_2PM, 'We will see you Thursday after this one at two.', 'two').ok).toBe(false);
     expect(plain(THURSDAY_2PM, 'We will see you Thursday next week at two.', 'two').ok).toBe(false);
     expect(plain(THURSDAY_2PM, 'We will see you Thursday of next week at two.', 'two').ok).toBe(false);
+    // Qualifier shapes are not enumerable: any week/month/next word beside the
+    // appointment day that the recorded words do not carry fails (pre-push audit).
+    for (const said of ['We will see you Thursday next month at two PM.', "We will see you next week's Thursday at two PM.",
+      'We will see you Thursday next year at two PM.', 'We will see you Thursday at two PM. That is next week.']) {
+      // A qualifier in another sentence than the day never attaches to it.
+      expect([said, agreedAt(THURSDAY_2PM, said, { day: 'Thursday', hour: 'two', period: 'PM' }).ok]).toEqual([said, said.endsWith('That is next week.')]);
+    }
+    expect(agreedAt(THURSDAY_2PM, 'Your plan renews next week. We will see you Thursday at two PM.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok)
+      .toBe(true);
     // A qualifier trailing the time still qualifies the day (pre-push audit).
     for (const said of ['We will see you Thursday at two PM next week.', 'We will see you Thursday at two PM the week after next.',
       'We will see you Thursday at two PM a week from now.']) {
@@ -499,6 +508,8 @@ describe('groundRescheduleAgreement', () => {
     // A relative qualifier omitted from the extraction cannot redirect the
     // move to the nearer appointment with the same weekday.
     expect(moved('my Thursday a week from now appointment', 'Thursday'))
+      .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    expect(moved('my Thursday appointment next month', 'Thursday'))
       .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
     // A model quote cannot shed a relative qualifier from the surrounding
     // sentence, while the same weekday in a separate clause is independent.

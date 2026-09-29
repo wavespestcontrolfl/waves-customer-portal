@@ -350,7 +350,7 @@ function movedAppointmentGrounded(scheduling, quotes, turns, started) {
   const words = scheduling.moved_appointment_words;
   return typeof words === 'string' && namesDate(words, scheduling.moved_appointment_date, started)
     && quotes.some((q) => holds(q, words)
-      && !movedAppointmentHasUnrecordedRelativeDate(sentencesHolding(turns, q), words));
+      && !movedAppointmentHasUnrecordedRelativeDate(sentencesHolding(turns, q, '\n'), words));
 }
 
 // Every quote the grounding uses is screened; a question fails the agent's
@@ -575,7 +575,28 @@ function rangeDistance([a, b], [c, d]) {
   if (d < a) return a - d;
   return 0;
 }
+// Sentence text arrives one sentence per line: a qualifier in one sentence
+// never attaches to a day named in another.
 function hasUnrecordedRelativeDate(text, day, anchor, ownedAnchorRanges = null) {
+  return String(text).split('\n').some((part) => sentenceHasUnrecordedRelativeDate(part, day, anchor, ownedAnchorRanges));
+}
+// Words that shift a day to another week, month or year when they sit
+// within a few words of it. Enumerated shapes ("a week from now", "the
+// Thursday after next") miss others ("next month", "next week's Thursday"),
+// so any of these next to the appointment day is a qualifier the recorded
+// day words must carry; a conjunction ends the neighbourhood.
+const RELATIVE_QUALIFIER_WORDS = new Set(['next', 'following', 'week', 'weeks', 'month', 'months', 'year', 'years']);
+const CLAUSE_CONJUNCTIONS = new Set(['and', 'but', 'so', 'because', 'while', 'since', 'then']);
+const QUALIFIER_NEIGHBOURHOOD = 5;
+function hasQualifierNextTo(normalized, [from, to]) {
+  const before = normalized.slice(0, from).trim().split(' ').filter(Boolean).slice(-QUALIFIER_NEIGHBOURHOOD);
+  const after = normalized.slice(to).trim().split(' ').filter(Boolean).slice(0, QUALIFIER_NEIGHBOURHOOD);
+  const lastBreak = before.map((t) => CLAUSE_CONJUNCTIONS.has(t)).lastIndexOf(true);
+  const firstBreak = after.findIndex((t) => CLAUSE_CONJUNCTIONS.has(t));
+  const near = [...before.slice(lastBreak + 1), ...(firstBreak < 0 ? after : after.slice(0, firstBreak))];
+  return near.some((t) => RELATIVE_QUALIFIER_WORDS.has(t)) || / from (?:now|today) /.test(` ${near.join(' ')} `);
+}
+function sentenceHasUnrecordedRelativeDate(text, day, anchor, ownedAnchorRanges = null) {
   if (typeof day !== 'string') return false;
   const coreDay = normalize(day).replace(NEAREST_LEAD, '').replace(/^the\s+/, '');
   if (!coreDay) return false;
@@ -599,14 +620,16 @@ function hasUnrecordedRelativeDate(text, day, anchor, ownedAnchorRanges = null) 
     + String.raw`)\b`, 'g');
   const normalized = normalize(text);
   const relativeRanges = [...normalized.matchAll(relative)].map((match) => [match.index, match.index + match[0].length]);
-  if (!relativeRanges.length) return false;
   const dayRanges = phraseRanges(normalized, coreDay);
   const anchorRanges = ownedAnchorRanges || phraseRanges(normalized, anchor);
-  if (!dayRanges.length || !anchorRanges.length) return true;
+  if (!dayRanges.length) return relativeRanges.length > 0;
+  // With the anchor (the hour, or the move words) in another sentence, every
+  // mention of the day counts: fail closed.
   const distance = (range) => Math.min(...anchorRanges.map((other) => rangeDistance(range, other)));
-  const nearest = Math.min(...dayRanges.map(distance));
-  const appointmentDays = dayRanges.filter((range) => distance(range) === nearest);
-  return relativeRanges.some(([from, to]) => appointmentDays.some(([dayFrom, dayTo]) => dayFrom < to && dayTo > from));
+  const nearest = anchorRanges.length ? Math.min(...dayRanges.map(distance)) : 0;
+  const appointmentDays = anchorRanges.length ? dayRanges.filter((range) => distance(range) === nearest) : dayRanges;
+  return appointmentDays.some((range) => hasQualifierNextTo(normalized, range))
+    || relativeRanges.some(([from, to]) => appointmentDays.some(([dayFrom, dayTo]) => dayFrom < to && dayTo > from));
 }
 
 // A moved-date quote can contain unrelated dates too. Anchor its recorded
@@ -617,6 +640,9 @@ function hasUnrecordedRelativeDate(text, day, anchor, ownedAnchorRanges = null) 
 const MOVE_ACTION_RE = /\b(?:mov(?:e|ed|ing)|reschedul(?:e|ed|ing)|chang(?:e|ed|ing)|shift(?:ed|ing)?)\b/g;
 const APPOINTMENT_NOUN_RE = /\b(?:appointments?|bookings?|services?|visits?)\b/g;
 function movedAppointmentHasUnrecordedRelativeDate(text, day) {
+  return String(text).split('\n').some((part) => movedSentenceHasUnrecordedRelativeDate(part, day));
+}
+function movedSentenceHasUnrecordedRelativeDate(text, day) {
   const normalized = normalize(text);
   const ranges = (re) => [...normalized.matchAll(re)]
     .map((match) => [match.index, match.index + match[0].length]);
@@ -629,7 +655,7 @@ function movedAppointmentHasUnrecordedRelativeDate(text, day) {
 
 function statesSlotWords(quote, words, turns, agreementQuotes = []) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
-    && !hasUnrecordedRelativeDate(sentencesHolding(turns, quote), words.day, words.hour)
+    && !hasUnrecordedRelativeDate(sentencesHolding(turns, quote, '\n'), words.day, words.hour)
     && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
@@ -640,10 +666,10 @@ function statesSlotWords(quote, words, turns, agreementQuotes = []) {
 
 // The sentences, in every turn that holds this quote, that the quote
 // touches, as one normalized text.
-function sentencesHolding(turns, quote) {
+function sentencesHolding(turns, quote, separator = ' ') {
   const nq = padded(normalize(quote));
   return turns.filter((t) => padded(t.ns).includes(nq))
-    .flatMap((t) => sentencesAround(t, quote)).map((x) => x.ns).join(' ') || normalize(quote);
+    .flatMap((t) => sentencesAround(t, quote)).map((x) => x.ns).join(separator) || normalize(quote);
 }
 
 // Before an unstated hour is read as business hours, the sentences of the
@@ -669,7 +695,7 @@ function commitsToSlot(quote, words, hour24, turns) {
   const around = sentencesHolding(turns, quote);
   const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
-    && !hasUnrecordedRelativeDate(around, words.day, words.hour)
+    && !hasUnrecordedRelativeDate(sentencesHolding(turns, quote, '\n'), words.day, words.hour)
     // Offering alternatives is not committing ("No, we'll see you Thursday
     // at two or Friday at three"), and a trailing "right" asks ("see you
     // at 9, right."); "right now" mid-sentence does not.
