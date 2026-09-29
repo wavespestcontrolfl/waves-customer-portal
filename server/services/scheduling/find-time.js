@@ -23,7 +23,7 @@ const { applyAssignable, absentTechDays } = require('../technician-eligibility')
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
-const { travelGapEnabled, violatesTravelGap, isHoldStop } = require('./travel-gap');
+const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
@@ -396,6 +396,27 @@ function capacityNeighbourEntity(row) {
 // callers never reach this function. A live estimate hold neighbour NEVER
 // gives grace — it may evaporate before this slot is ever committed, unlike
 // a real committed stop the simulation already routed around.
+// Grace may only waive the travel BUFFER against the PREVIOUS stop (the
+// candidate itself arriving late, inside its own arrival window). Never a
+// real overlap, never a live hold, and never the next stop's side — the next
+// customer's promised start is not this customer's to spend.
+function graceWaivesBufferOnly(slot, row, candidate, neighbour) {
+  if (isHoldStop(row)) return false;
+  const grace = selfServeArrivalGraceMinutes({ date: slot.date });
+  if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return false;
+  if (slot.arrival_delay_minutes > grace) return false;
+  return travelGapConflicts(candidate, [neighbour]).every((c) => c.reason === 'travel_gap');
+}
+
+// Offer/commit parity: with grace on for the slot's date, commit
+// (verifyArrivalCapacity) refuses any fit delayed past grace, so the offer
+// must drop those slots too — including ones that pass the strict buffer.
+function withinArrivalGrace(slot) {
+  const grace = selfServeArrivalGraceMinutes({ date: slot.date });
+  if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return true;
+  return slot.arrival_delay_minutes <= grace;
+}
+
 function packCapacityEnds(slots, caller = {}) {
   const groups = new Map();
   for (const slot of slots) {
@@ -403,11 +424,7 @@ function packCapacityEnds(slots, caller = {}) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(slot);
   }
-  const clearsGraceInsteadOfBuffer = (slot, row) => !isHoldStop(row)
-    && selfServeArrivalGraceMinutes({ date: slot.date }) > 0
-    && Number.isFinite(slot.arrival_delay_minutes)
-    && slot.arrival_delay_minutes <= selfServeArrivalGraceMinutes({ date: slot.date });
-  const clearsTravelGap = (slot, row) => {
+  const clearsTravelGap = (slot, row, side) => {
     if (!travelGapEnabled()) return true;
     const neighbour = capacityNeighbourEntity(row);
     if (!neighbour) return true;
@@ -419,7 +436,8 @@ function packCapacityEnds(slots, caller = {}) {
       startMin, endMin, lat: caller.lat ?? null, lng: caller.lng ?? null, windowMinutes: ownWindow,
       expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
     };
-    return !violatesTravelGap(candidate, [neighbour]) || clearsGraceInsteadOfBuffer(slot, row);
+    if (!violatesTravelGap(candidate, [neighbour])) return true;
+    return side === 'prev' && graceWaivesBufferOnly(slot, row, candidate, neighbour);
   };
   const keep = new Set();
   for (const group of groups.values()) {
@@ -428,15 +446,15 @@ function packCapacityEnds(slots, caller = {}) {
     if (!prevReal && !nextReal) { for (const s of group) keep.add(s); continue; }
     const byStart = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
     if (prevReal) {
-      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow));
+      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow, 'prev'));
       if (survivors.length) keep.add(survivors[0]);
     }
     if (nextReal) {
-      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow));
+      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow, 'next'));
       if (survivors.length) keep.add(survivors[survivors.length - 1]);
     }
   }
-  return slots.filter((s) => keep.has(s));
+  return slots.filter((s) => keep.has(s) && withinArrivalGrace(s));
 }
 
 // The candidate's own expected-minutes credit (owner ruling 2026-09-23),

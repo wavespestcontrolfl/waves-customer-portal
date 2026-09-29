@@ -435,6 +435,41 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
     // kept it, so the commit-time check (same inputs) must not refuse it.
     expect(arrivalExceedsGrace({ arrivalDelayMinutes: kept[0].arrival_delay_minutes }, 90)).toBe(false);
   });
+
+  test('grace never waives a real overlap with the previous stop', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    // Previous stop runs 09:00-10:30: the 10:00 candidate's own window overlaps it.
+    const overlapping = { ...prevRow, endMin: 630, expectedMinutes: 90 };
+    expect(packCapacityEnds([candidate(6, overlapping)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+  });
+
+  test('grace never waives the buffer before the NEXT stop (another customer\'s promised start)', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    // Next stop at 11:00 right after a 10:00-11:00 candidate: fails the buffer on the next side.
+    const nextRow = { startMin: 660, endMin: 720, lat: 27.4, lng: -82.4, expectedMinutes: 60 };
+    const slot = {
+      date: '2026-10-01', technician: { id: 't1' }, start_time: '10:00', end_time: '11:00',
+      arrival_delay_minutes: 0, _gap: { prevId: null, nextId: 's2', nextRow },
+    };
+    expect(packCapacityEnds([slot], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+  });
+
+  test('offer/commit parity: with grace on, a slot delayed past grace is dropped even when it passes the strict buffer', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '30';
+    const { arrivalExceedsGrace } = require('../services/scheduling/arrival-route')._internals;
+    // No real neighbours at all (nothing for the strict buffer to reject), but the route runs 50 late.
+    const free = {
+      date: '2026-10-01', technician: { id: 't1' }, start_time: '13:00', end_time: '14:00',
+      arrival_delay_minutes: 50, _gap: { prevId: null, nextId: null },
+    };
+    expect(arrivalExceedsGrace({ arrivalDelayMinutes: 50 }, 30)).toBe(true);
+    expect(packCapacityEnds([free], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+    process.env[GRACE_ENV] = '0';
+    expect(packCapacityEnds([free], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([free]);
+  });
 });
 
 describe('capacityGapNeighbours — unassigned blockers count as time-based anchors (Codex r3 P1)', () => {
