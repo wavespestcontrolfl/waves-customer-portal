@@ -103,3 +103,47 @@ describe('call processor re-holds a collapsed Gmail pair on suppression or forei
     expect(block).toContain('extracted.email_candidates = variants');
   });
 });
+
+// Codex #5323 r2 P1: confirming the undotted spelling on the read-back card
+// must not release a first touch to an inbox suppressed under a dotted one.
+describe('first-touch release suppression check matches the Google mailbox under any spelling', () => {
+  const { emailSuppressedForNewLead } = require('../services/lead-first-touch-resume');
+  function fakeDb(rows) {
+    const calls = { raw: [] };
+    const chain = {
+      where(arg) {
+        if (typeof arg === 'function') {
+          const sub = {
+            whereRaw: (sql, b) => { calls.raw.push({ sql, b }); return sub; },
+            orWhereRaw: (sql, b) => { calls.raw.push({ sql, b, or: true }); return sub; },
+          };
+          arg(sub);
+        }
+        return chain;
+      },
+      then: (resolve) => resolve(rows),
+    };
+    const dbh = (table) => (table === 'automation_templates'
+      ? { where: () => ({ first: async () => ({ key: 'new_lead' }) }) }
+      : chain);
+    dbh.schema = { hasTable: async () => true };
+    return { dbh, calls };
+  }
+  test('a Gmail address adds the mailbox-identity match next to the exact one', async () => {
+    const { dbh, calls } = fakeDb([]);
+    await emailSuppressedForNewLead('JQSample1990@gmail.com', dbh);
+    expect(calls.raw[0].b).toEqual(['jqsample1990@gmail.com']);
+    expect(calls.raw[1].or).toBe(true);
+    expect(calls.raw[1].sql).toContain("REPLACE(SPLIT_PART(SPLIT_PART(LOWER(email), '@', 1), '+', 1), '.', '')");
+    expect(calls.raw[1].b).toEqual(['jqsample1990']);
+  });
+  test('a non-Google address keeps the exact match only', async () => {
+    const { dbh, calls } = fakeDb([]);
+    await emailSuppressedForNewLead('j.q.sample1990@example.com', dbh);
+    expect(calls.raw).toHaveLength(1);
+  });
+  test('a matching active suppression row blocks the release', async () => {
+    const { dbh } = fakeDb([{ email: 'j.q.sample1990@gmail.com', status: 'active', suppression_type: 'unsubscribe', group_key: null }]);
+    await expect(emailSuppressedForNewLead('jqsample1990@gmail.com', dbh)).resolves.toBe(true);
+  });
+});
