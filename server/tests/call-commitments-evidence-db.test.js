@@ -703,4 +703,18 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       });
     }
   });
+
+  test('a reused lead\'s earlier estimate (a hint) never hides a later proof that keeps the promise: the visit booked afterwards closes it', async () => {
+    const w = await world({ kind: 'send_estimate' });
+    const [lead] = await db('leads').insert({ first_name: `Reused${w.n}`, phone: w.phone, created_at: new Date(Date.now() - 30 * DAY) }).returning('id');
+    made.leadIds.push(lead.id);
+    await db('call_log').where({ id: w.call.id }).update({ metadata: JSON.stringify({ lead_id: lead.id }) });
+    const early = later(10);
+    const [est] = await db('estimates').insert({ status: 'sent', customer_phone: w.phone, created_at: new Date(Date.now() - 4 * DAY), sent_at: early,
+      estimate_data: JSON.stringify({ lead_id: lead.id, deliveryState: { firstDeliveredAt: early.toISOString(), lastDeliveredAt: early.toISOString() } }) }).returning('id');
+    made.estimateIds.push(est.id);
+    const booked = await visit(w, { created_at: later(120) });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: booked.id, basis: 'visit_booked_for_same_customer_within_14_days' });
+  });
 });

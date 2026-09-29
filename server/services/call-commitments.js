@@ -1802,12 +1802,16 @@ async function associationProof(ctx, tries) {
     const hit = await spec.find(conn, ctx.associated);
     return hit ? { kind: spec.kind, record_type: spec.type, record_id: hit.id, matched_at: hit.at, strength: "association", basis: spec.basis } : null;
   });
-  let earliest = null;
+  // The earliest proof that can close the promise wins; a hint_only proof (a
+  // reused lead's estimate) is kept only when nothing that can close was found,
+  // so an earlier hint never hides a later proof that keeps the promise.
+  const earliest = { closing: null, hint: null };
   for (const attempt of [...tries, ...extra]) {
     const proof = await attempt();
-    if (proof && (!earliest || new Date(proof.matched_at).getTime() < new Date(earliest.matched_at).getTime())) earliest = proof;
+    const slot = proof?.hint_only ? "hint" : "closing";
+    if (proof && (!earliest[slot] || new Date(proof.matched_at).getTime() < new Date(earliest[slot].matched_at).getTime())) earliest[slot] = proof;
   }
-  return earliest;
+  return earliest.closing || earliest.hint;
 }
 
 // The end of the call — or, for an obligation RENEWED (reopened by staff, or
@@ -2298,8 +2302,9 @@ const closedAtSql = (cc = "cc") => `(${cc}.fulfillment ->> 'closed_at')::timesta
 
 // An association proof closes a promise the portal may close, of a kind an
 // association closes (associationCloses) — never one bound to a confirmed
-// slot (resolveScheduleVisit), nor a hint_only proof (a reused lead's estimate). A customer who left dismisses any promise the
-// portal may close, whatever its kind: the promise is moot, not kept.
+// slot (resolveScheduleVisit), nor a hint_only proof (a reused lead's
+// estimate). A customer who left dismisses any promise the portal may close,
+// whatever its kind: the promise is moot, not kept.
 function closesOnAssociation(commitment, proof) {
   if (proof.kind === CUSTOMER_LEFT) return evidenceCloseApplies(commitment);
   return proof.strength === "association" && !proof.slot_bound && !proof.hint_only && associationCloses(commitment);
