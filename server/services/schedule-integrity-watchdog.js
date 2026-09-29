@@ -173,6 +173,20 @@ function manualSeriesStampIssue(row) {
   return allocationsMatch && inferredMatch ? null : 'manual_series_stamp_conflict';
 }
 
+// A live invoice on this visit (direct or via its service record) that bills
+// its BASE application: billing's own evidence rule for a visit's own
+// invoices (invoiceBillsBaseApplication, a positive base line; completion and
+// the first-application split judge a visit's own invoices the same way).
+// Several invoices can share one visit, so an unrelated repair or add-on
+// invoice never counts, and neither does a $0 or credited base line.
+async function ownInvoiceBillsBaseApplication(row) {
+  const { anyInvoiceLinkedToVisit, CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+  const { invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
+  const own = await anyInvoiceLinkedToVisit(db, row.id)
+    .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES).select('id', 'line_items');
+  return own.some((inv) => invoiceBillsBaseApplication(inv));
+}
+
 // A visit priced by a combined first-application invoice (a new customer's
 // same-trip second service; estimate-converter.js stamps the anchor and every
 // covered sibling) is covered by that invoice, not by its own row. Which
@@ -184,14 +198,10 @@ function manualSeriesStampIssue(row) {
 // (fail toward the alert). The ANCHOR is the other half: it carries the
 // combined invoice (or its live replacement) on its own row — billing reuses
 // that invoice at completion, and its sibling verdict reads 'none' for it —
-// so a stamped visit with a live invoice of its own is billed.
+// so a stamped visit whose own live invoice bills its base application is
+// billed. An unrelated invoice on it (the combined one voided) keeps paging.
 async function coveredByFirstApplicationInvoice(row) {
-  if (row?.first_application_invoice_id) {
-    const { anyInvoiceLinkedToVisit, CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
-    const own = await anyInvoiceLinkedToVisit(db, row.id)
-      .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES).first('id');
-    if (own) return true;
-  }
+  if (row?.first_application_invoice_id && await ownInvoiceBillsBaseApplication(row)) return true;
   if (!row?.source_estimate_id) return false;
   const { siblingInvoiceCoverageVerdict } = require('./billing-lane');
   const verdict = await siblingInvoiceCoverageVerdict({
@@ -370,21 +380,23 @@ async function runInner({ now = new Date() } = {}) {
   const overdueUnpricedRoots = new Set();
   const prepayGaps = [];
   const paidTermById = await loadPaidTerms(coverageCandidates);
+  // Lazy require, like isEnabled above; read at call time so the env is a live kill switch.
+  const episodes = require('../config/feature-gates').alertEpisodesLive();
   for (const row of coverageCandidates) {
     const { annualCovered, issues } = await judgePrepayGaps(row, paidTermById);
     for (const issue of issues) prepayGaps.push({ row, issue });
     if (!isUnpricedSeriesVisit(row)) continue;
     if (annualCovered) continue;
-    if (await coveredByFirstApplicationInvoice(row)) continue;
+    // Only under episodes: the suppression is safe because a void of that
+    // invoice makes the series live again and it re-rings. Killed = the
+    // pre-episode paging, with no coverage lookup at all.
+    if (episodes && await coveredByFirstApplicationInvoice(row)) continue;
     const root = seriesRootId(row);
     // An OVERDUE unpriced visit never pages (the class is upcoming-only), but
     // it is still an unpriced series: its standing bell must not close on it.
     if (row.service_date < todayET) { overdueUnpricedRoots.add(String(root)); continue; }
     if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
   }
-
-  // Lazy require, like isEnabled above; read at call time so the env is a live kill switch.
-  const episodes = require('../config/feature-gates').alertEpisodesLive();
 
   // Unpriced series ring FIRST: they are same-day money loss (a visit can
   // complete and invoice at $0 today).
@@ -638,7 +650,6 @@ async function completedUnpricedRoots(absentKeys) {
     .where(function inRoots() { this.whereIn('ss.id', roots).orWhereIn('ss.recurring_parent_id', roots); })
     .select(db.raw('COALESCE(ss.completed_at, ss.updated_at) as completed_time'));
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
-  const { anyInvoiceLinkedToVisit, CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
   for (const row of completed) {
     const root = String(seriesRootId(row));
     if (held.has(root) || !episodeStart.has(root)) continue;
@@ -646,9 +657,7 @@ async function completedUnpricedRoots(absentKeys) {
     if (!isUnpricedSeriesVisit(row)) continue;
     if (row.prepaid_method === ANNUAL_PREPAY_METHOD && await annualPrepayCoversVisit(row, db)) continue;
     if (await coveredByFirstApplicationInvoice(row)) continue;
-    const invoice = await anyInvoiceLinkedToVisit(db, row.id)
-      .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES).first('id');
-    if (!invoice) held.add(root);
+    if (!(await ownInvoiceBillsBaseApplication(row))) held.add(root);
   }
   return held;
 }

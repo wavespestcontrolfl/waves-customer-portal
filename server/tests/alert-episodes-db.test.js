@@ -225,10 +225,13 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     expect(await held(s)).toEqual([s.root.id]);
   });
 
-  test('an invoice through the visit\'s service record, or directly on the visit, releases it; void, refunded, canceled and cancelled ones do not', async () => {
+  // The visit's base application on an invoice (the line every service mint writes).
+  const baseLines = (visitId) => JSON.stringify([{ client_id: `scheduled_${visitId}_primary`, description: 'General Pest Control', quantity: 1, unit_price: 120, amount: 120 }]);
+
+  test('an invoice billing the visit\'s base application, through its service record or directly on the visit, releases it; void, refunded, canceled and cancelled ones do not, nor does an unrelated add-on invoice', async () => {
     const viaRecord = await series();
     const record = await insert('service_records', { customer_id: viaRecord.customer.id, service_date: '2026-09-28', service_type: 'General Pest Control', scheduled_service_id: viaRecord.child.id });
-    const inv = await insert('invoices', { customer_id: viaRecord.customer.id, token: `${RUN}-a`, invoice_number: `${RUN}-a`, service_record_id: record.id, status: 'void' });
+    const inv = await insert('invoices', { customer_id: viaRecord.customer.id, token: `${RUN}-a`, invoice_number: `${RUN}-a`, service_record_id: record.id, status: 'void', line_items: baseLines(viaRecord.child.id) });
     for (const dead of ['void', 'refunded', 'canceled', 'cancelled']) {
       await db('invoices').where({ id: inv.id }).update({ status: dead });
       expect(await held(viaRecord)).toEqual([viaRecord.root.id]);
@@ -237,7 +240,10 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     expect(await held(viaRecord)).toEqual([]);
 
     const direct = await series();
-    await insert('invoices', { customer_id: direct.customer.id, token: `${RUN}-b`, invoice_number: `${RUN}-b`, scheduled_service_id: direct.child.id, status: 'draft' });
+    const addOn = await insert('invoices', { customer_id: direct.customer.id, token: `${RUN}-b`, invoice_number: `${RUN}-b`, scheduled_service_id: direct.child.id, status: 'draft',
+      line_items: JSON.stringify([{ client_id: 'manual_1', description: 'Irrigation valve repair', quantity: 1, unit_price: 85, amount: 85 }]) });
+    expect(await held(direct)).toEqual([direct.root.id]);
+    await db('invoices').where({ id: addOn.id }).update({ line_items: baseLines(direct.child.id) });
     expect(await held(direct)).toEqual([]);
   });
 

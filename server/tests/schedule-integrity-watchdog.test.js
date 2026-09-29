@@ -27,6 +27,10 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 jest.mock('../services/invoice', () => ({
   anyInvoiceLinkedToVisit: jest.fn(),
   CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'],
+  // The base-application line identity (client_id scheduled_<id>_primary),
+  // stood in at the invoice module's boundary; invoiceBillsBaseApplication
+  // (estimate-first-application-invoice.js) runs for real on top of it.
+  lineIsBaseApplication: (li) => /_primary$/.test(String(li?.client_id || '')),
 }));
 // billing-lane's canonical sibling-coverage verdict: mocked at its boundary
 // (its own logic is covered by its suites); default = nothing covers.
@@ -145,15 +149,18 @@ beforeEach(() => {
 });
 
 // anyInvoiceLinkedToVisit(db, visitId) is a builder: the check adds
-// whereNotIn(status, dead statuses) and first(). `byVisit` maps a visit id to
+// whereNotIn(status, dead statuses) and select(). `byVisit` maps a visit id to
 // its invoice rows; the stub applies the status filter the way SQL would.
 function invoicesByVisit(byVisit) {
   anyInvoiceLinkedToVisit.mockImplementation((_conn, visitId) => ({
     whereNotIn: (_col, dead) => ({
-      first: async () => (byVisit[visitId] || []).find((inv) => !dead.includes(inv.status)),
+      select: async () => (byVisit[visitId] || []).filter((inv) => !dead.includes(inv.status)),
     }),
   }));
 }
+// Line items: a positive base application for a visit, and an unrelated line.
+const baseLine = (visitId, amount = 120) => ({ client_id: `scheduled_${visitId}_primary`, description: 'Pest control', amount });
+const repairLine = { client_id: 'manual_1', description: 'Irrigation valve repair', amount: 85 };
 
 describe('classifiers', () => {
   test('rowHasPrice: either price field counts; zero and null do not', () => {
@@ -284,14 +291,38 @@ describe('runInner alerting', () => {
     });
 
     test('the ANCHOR carrying the combined invoice (or its live replacement) on its own row is billed and rings no bell; a dead own invoice falls back to the verdict', async () => {
-      invoicesByVisit({ 'ss-anchor': [{ id: 'inv-1', status: 'sent' }] });
+      invoicesByVisit({ 'ss-anchor': [{ id: 'inv-1', status: 'sent', line_items: [baseLine('ss-anchor'), baseLine('ss-second-service')] }] });
       makeDbMock({ coverageRows: [sibling({ id: 'ss-anchor' })] });
       expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 0, alerted: 0 });
       // Billing's sibling verdict reads 'none' for the anchor; it is never asked once the own invoice is live.
       expect(siblingInvoiceCoverageVerdict).not.toHaveBeenCalled();
-      invoicesByVisit({ 'ss-anchor': [{ id: 'inv-1', status: 'void' }] });
+      invoicesByVisit({ 'ss-anchor': [{ id: 'inv-1', status: 'void', line_items: [baseLine('ss-anchor')] }] });
       makeDbMock({ coverageRows: [sibling({ id: 'ss-anchor' })] });
       expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1 });
+    });
+
+    test('an unrelated live invoice on the anchor never counts: combined invoice voided + a live repair invoice still pages', async () => {
+      invoicesByVisit({ 'ss-anchor': [
+        { id: 'inv-1', status: 'void', line_items: [baseLine('ss-anchor')] },
+        { id: 'inv-repair', status: 'sent', line_items: [repairLine] },
+      ] });
+      siblingInvoiceCoverageVerdict.mockResolvedValue({ status: 'needs_review', invoice: { id: 'inv-1', status: 'void' } });
+      makeDbMock({ coverageRows: [sibling({ id: 'ss-anchor' })] });
+      expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1, alerted: 1 });
+      // A $0 base line proves nothing either.
+      invoicesByVisit({ 'ss-anchor': [{ id: 'inv-zero', status: 'sent', line_items: [baseLine('ss-anchor', 0)] }] });
+      makeDbMock({ coverageRows: [sibling({ id: 'ss-anchor' })] });
+      expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1 });
+    });
+
+    test('kill switch off: no coverage lookup at all, the covered visit pages as it did before episodes', async () => {
+      alertEpisodesLive.mockReturnValue(false);
+      siblingInvoiceCoverageVerdict.mockResolvedValue({ status: 'covered', invoice: { id: 'inv-2' } });
+      invoicesByVisit({ 'ss-second-service': [{ id: 'inv-1', status: 'sent', line_items: [baseLine('ss-second-service')] }] });
+      makeDbMock({ coverageRows: [sibling()] });
+      expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1, alerted: 1 });
+      expect(siblingInvoiceCoverageVerdict).not.toHaveBeenCalled();
+      expect(anyInvoiceLinkedToVisit).not.toHaveBeenCalled();
     });
 
     test('a voided combined invoice with no replacement pages', async () => {
@@ -896,16 +927,25 @@ describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds i
   });
 
   test('a completed visit invoiced in a billing status is closed; void, REFUNDED, canceled and cancelled invoices leave it unbilled and hold', async () => {
-    invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: 'draft' }] });
+    invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: 'draft', line_items: [baseLine(CHILD)] }] });
     await run([completed()]);
     expect(closedKeys()).toEqual([KEY]);
 
     for (const dead of ['void', 'refunded', 'canceled', 'cancelled']) {
       episodeHelpers.closeAdminAlertKeys.mockClear();
-      invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: dead }] });
+      invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: dead, line_items: [baseLine(CHILD)] }] });
       await run([completed()]);
       expect(closedKeys()).toEqual([]);
     }
+  });
+
+  test('only an invoice that bills the base application counts: an unrelated add-on invoice, or a $0 base line, leaves the visit unbilled and holds', async () => {
+    invoicesByVisit({ [CHILD]: [{ id: 'inv-repair', status: 'sent', line_items: [repairLine] }] });
+    await run([completed()]);
+    expect(closedKeys()).toEqual([]);
+    invoicesByVisit({ [CHILD]: [{ id: 'inv-zero', status: 'sent', line_items: [baseLine(CHILD, 0)] }] });
+    await run([completed()]);
+    expect(closedKeys()).toEqual([]);
   });
 
   test('the check asks the invoice module for the visit\'s linked invoices (direct or via service record)', async () => {
