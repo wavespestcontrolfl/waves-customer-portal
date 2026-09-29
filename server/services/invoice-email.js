@@ -101,6 +101,12 @@ function appendPayUrlParams(url, params = null) {
   }
 }
 
+// A payer-billed invoice's pay/receipt links go to the payer's AP inbox but are
+// minted under the homeowner's customerId. Marking the code lets the customer
+// activity timeline tell a payer's click from the homeowner's engagement. Payer
+// invoices only: every other mint is byte-for-byte unchanged.
+const payerCodeMarker = (invoice) => (invoice && invoice.payer_id ? { channel: 'email', purpose: 'payer_invoice' } : {});
+
 function invoiceRecipientFor(customer, prefs, recipientOverride) {
   const overrideEmail = cleanEmail(recipientOverride?.email);
   if (overrideEmail) {
@@ -249,6 +255,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     entityId: invoice.id,
     customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(invoice),
+    ...payerCodeMarker(invoice),
   });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   invoiceForPdf.annual_prepay = await loadInvoiceAnnualPrepay(invoiceForPdf);
@@ -725,6 +732,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     entityId: invoice.id,
     customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(invoice),
+    ...payerCodeMarker(invoice),
   });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   let pdfBuffer;

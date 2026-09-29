@@ -29,7 +29,10 @@
  * (`lastProviderClickAt`) as separate informational fields. One tap that
  * produced both a provider click and a short-link click shows once, as the
  * short-link click. Portal-visit and outside-link sources join in a follow-up
- * PR once the PRs that create them have merged.
+ * PR once the PRs that create them have merged. A click on a link delivered to a
+ * third party (a bill-to payer's AP inbox; the code is minted under the
+ * homeowner's customer_id) reads "Link clicked by payer" and is never engaged.
+ * A scheduled text's queue parent is hidden when its provider row is listed.
  *
  * RECIPIENTS. Every email event names the address the send row itself recorded
  * (email_messages.recipient_email_snapshot, automation_step_sends.email,
@@ -142,6 +145,18 @@ const maskEmail = (email) => {
   return local && domain ? `${local.slice(0, 1)}***@${domain}`.toLowerCase() : null;
 };
 
+// A short code delivered to a third party (a payer's AP inbox) is minted under
+// the homeowner's customer_id (invoice-email.js), so a click on it is the payer's,
+// never the homeowner's engagement. Two signals: the code's own purpose marker
+// ('payer_invoice', stamped at the producer going forward) and, for codes minted
+// before the marker existed, the invoice the code points at carrying a payer
+// (short_codes.entity_type 'invoices' -> invoices.payer_id). The second one is
+// deliberately conservative: a payer-billed invoice's link is treated as the
+// payer's even if the homeowner ever received a copy.
+const payerCodeSql = (alias) => `(COALESCE(${alias}.purpose, '') = 'payer_invoice'
+  OR (${alias}.entity_type = 'invoices' AND EXISTS (
+    SELECT 1 FROM invoices pinv WHERE pinv.id = ${alias}.entity_id AND pinv.payer_id IS NOT NULL)))`;
+
 // A provider-reported click (SendGrid) is informational: a scanner fires it as
 // readily as a person. When the same tap also produced a human short-link click
 // (email links are short-wrapped), that click is the engaged event and the
@@ -153,6 +168,7 @@ function nearShortClick(tsExpr, ctx) {
     sql: `EXISTS (SELECT 1 FROM short_code_clicks scx JOIN short_codes scy ON scy.id = scx.short_code_id
       WHERE scx.is_bot = false
         AND (scy.customer_id = ? OR scy.lead_id IN (SELECT ld.id FROM leads ld WHERE ld.customer_id = ?))
+        AND NOT ${payerCodeSql('scy')}
         AND scx.clicked_at BETWEEN ${tsExpr} - INTERVAL '2 minutes' AND ${tsExpr} + INTERVAL '2 minutes')`,
     bindings: [ctx.customerId, ctx.customerId],
   };
@@ -181,7 +197,20 @@ const SOURCES = [
     // the feed and to the summary MAX queries alike (both build from here).
     from: (dbh, ctx) => excludeRecruitingSmsLog(dbh('sms_log as sl').where('sl.customer_id', ctx.customerId)
       .where((w) => w.where('sl.direction', 'inbound')
-        .orWhereRaw(`LOWER(COALESCE(sl.status, '')) IN (${OUTBOUND_LEFT.map(() => '?').join(', ')})`, OUTBOUND_LEFT)),
+        .orWhereRaw(`LOWER(COALESCE(sl.status, '')) IN (${OUTBOUND_LEFT.map(() => '?').join(', ')})`, OUTBOUND_LEFT))
+      // A scheduled send is two rows: the queue parent (promoted to 'sent' when
+      // the text leaves) and the provider row that names it in
+      // metadata.scheduled_sms_log_id. Show the provider row (it carries the
+      // real push/text classification and status); keep the parent only when no
+      // visible provider row references it. In SQL so paging stays exact.
+      .whereNotExists(function providerTwin() {
+        this.select(1).from('sms_log as twin')
+          .where('twin.direction', 'outbound')
+          .whereRaw('twin.customer_id = sl.customer_id')
+          .whereRaw('twin.id <> sl.id')
+          .whereRaw("twin.metadata->>'scheduled_sms_log_id' = sl.id::text")
+          .whereRaw(`LOWER(COALESCE(twin.status, '')) IN (${OUTBOUND_LEFT.map(() => '?').join(', ')})`, OUTBOUND_LEFT);
+      }),
     'sl.message_type'),
     select: ['sl.id', 'sl.direction', 'sl.status', 'sl.message_type', 'sl.message_body', 'sl.created_at',
       'sl.from_phone', 'sl.metadata'],
@@ -226,14 +255,25 @@ const SOURCES = [
       .where('scc.is_bot', false)
       .where((w) => w.where('sc.customer_id', ctx.customerId)
         .orWhereIn('sc.lead_id', dbh('leads').where('customer_id', ctx.customerId).select('id'))),
-    select: ['scc.id', 'scc.clicked_at', 'sc.kind', 'sc.channel', 'sc.purpose'],
+    select: ['scc.id', 'scc.clicked_at', 'sc.kind', 'sc.channel', 'sc.purpose',
+      (dbh) => dbh.raw(`${payerCodeSql('sc')} AS by_payer`)],
     ts: ['scc.clicked_at'],
-    engaged: { expr: 'scc.clicked_at' },
+    // A payer's click on a code minted under the homeowner is not the customer's.
+    engaged: { expr: 'scc.clicked_at', where: (q) => q.whereRaw(`NOT ${payerCodeSql('sc')}`) },
     toEvents: (r) => {
       const label = String(r.kind && r.kind !== 'other' ? r.kind : 'a').replace(/_/g, ' ');
+      // Only a recorded sms/email channel names one; a code with none (or an
+      // unknown one) is a neutral 'link', never assumed to be a text.
+      const channel = r.channel === 'email' ? 'email' : r.channel === 'sms' ? 'sms' : 'link';
+      if (r.by_payer) {
+        return compact([mk('link', r.id, { type: 'short_code_click', id: r.id }, {
+          at: r.clicked_at, channel, kind: 'payer_clicked', title: 'Link clicked by payer',
+          detail: `Sent to the bill-to payer, not the customer${label === 'a' ? '' : ` · ${label} link`}`,
+        })]);
+      }
       return compact([mk('link', r.id, { type: 'short_code_click', id: r.id }, {
         at: r.clicked_at,
-        channel: r.channel === 'email' ? 'email' : 'sms',
+        channel,
         kind: 'clicked',
         title: `Clicked ${label === 'a' ? 'a' : `the ${label}`} link`,
         detail: r.purpose ? String(r.purpose).replace(/_/g, ' ') : null,
@@ -264,7 +304,9 @@ const SOURCES = [
         // 'referral_promoter', 'admin', 'test') never rides an address match.
         // This is an allowlist: a new owned type stays out by default.
         if (ctx.emails.length) {
-          w.orWhere((k) => k.whereIn('em.recipient_email_snapshot', ctx.emails)
+          // Compared LOWER(TRIM()) on both sides: the snapshot can be mixed-case
+          // (backed by email_messages_recipient_email_lower_idx).
+          w.orWhere((k) => k.whereRaw(`LOWER(TRIM(em.recipient_email_snapshot)) IN (${ctx.emails.map(() => '?').join(', ')})`, ctx.emails)
             .whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')")
             .whereRaw("COALESCE(em.recipient_id, '') = ''"));
         }
@@ -567,8 +609,7 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
 
   const customer = await dbh('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'email');
   if (!customer) return null;
-  const emails = [...new Set([customer.email, String(customer.email || '').toLowerCase()]
-    .map((e) => String(e || '').trim()).filter(Boolean))];
+  const emails = [...new Set([String(customer.email || '').trim().toLowerCase()].filter(Boolean))];
   const ctx = { dbh, customerId: customer.id, emails, limit: cap, beforeIso: beforeIso || FAR_FUTURE };
 
   const unavailableSources = [];

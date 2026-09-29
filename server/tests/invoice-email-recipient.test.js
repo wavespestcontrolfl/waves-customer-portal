@@ -212,6 +212,25 @@ describe('invoice email recipient resolution', () => {
     expect(result.recipient).toEqual(expect.objectContaining({ email: 'ap@westbay.com', role: 'payer' }));
   });
 
+  test('the pay short code of a payer invoice is marked payer_invoice/email; a homeowner invoice mints it unchanged', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm1' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+    db.mockImplementation(dbWithPayer({ id: 7, ap_email: 'ap@westbay.com', company_name: 'Homes by West Bay', active: true }));
+    await sendInvoiceEmail('invoice-1');
+    expect(shortenOrPassthrough.mock.calls[0][1]).toMatchObject({ customerId: 'cust-1', channel: 'email', purpose: 'payer_invoice' });
+
+    jest.clearAllMocks();
+    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm2' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/y');
+    db.mockImplementation(dbWithPayer(null, { invoiceExtra: { payer_id: null } }));
+    await sendInvoiceEmail('invoice-1');
+    const opts = shortenOrPassthrough.mock.calls[0][1];
+    expect(opts).not.toHaveProperty('channel');
+    expect(opts).not.toHaveProperty('purpose');
+  });
+
   test('an explicit operator override still wins over the payer snapshot', async () => {
     buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
     sendgrid.isConfigured.mockReturnValue(true);

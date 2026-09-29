@@ -6,7 +6,7 @@
 // sets "Last engaged". Email opens, email-provider clicks and raw token-page
 // views are listed, labelled by the server, and never engaged.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bell, Globe, Mail, MessageSquare, Phone, Smartphone } from "lucide-react";
+import { Bell, Globe, Link2, Mail, MessageSquare, Phone, Smartphone } from "lucide-react";
 import { Badge, Button, Card } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -17,6 +17,8 @@ const CHANNELS = {
   call: { label: "Call", Icon: Phone },
   portal: { label: "Portal", Icon: Smartphone },
   push: { label: "Push", Icon: Bell },
+  // A short-link click with no recorded channel: neither a text nor an email.
+  link: { label: "Link", Icon: Link2 },
 };
 
 function fmtWhen(value) {

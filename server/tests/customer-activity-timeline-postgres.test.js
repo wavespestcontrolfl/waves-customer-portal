@@ -17,7 +17,8 @@ const TEMP_TABLES = `
   CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, deleted_at timestamp);
   CREATE TEMP TABLE leads (id uuid PRIMARY KEY, customer_id uuid);
   CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp, from_phone text, metadata jsonb);
-  CREATE TEMP TABLE short_codes (id uuid PRIMARY KEY, customer_id uuid, lead_id uuid, kind text, channel text, purpose text);
+  CREATE TEMP TABLE short_codes (id uuid PRIMARY KEY, customer_id uuid, lead_id uuid, kind text, channel text, purpose text, entity_type text, entity_id uuid);
+  CREATE TEMP TABLE invoices (id uuid PRIMARY KEY, payer_id int);
   CREATE TEMP TABLE short_code_clicks (id uuid PRIMARY KEY, short_code_id uuid, clicked_at timestamp, is_bot boolean NOT NULL DEFAULT false);
   CREATE TEMP TABLE email_messages (id uuid PRIMARY KEY, recipient_type text, recipient_id text, recipient_email_snapshot text, status text, template_key text, subject_snapshot text, queued_at timestamp, updated_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
   CREATE TEMP TABLE automation_templates (key text PRIMARY KEY, name text);
@@ -420,6 +421,124 @@ pg('getCustomerActivity on Postgres', () => {
       if (pages > 1) expect(page.summary).toBeNull();
     } while (cursor && pages < 50);
     expect(seen.map((e) => e.id)).toEqual(full.map((e) => e.id));
+  });
+
+  // Fresh customer per test: every fixture below is scoped to its own ids.
+  const fresh = async (email) => {
+    const id = randomUUID();
+    await db('customers').insert({ id, email });
+    return id;
+  };
+  const activity = (id) => timeline.getCustomerActivity(id, { limit: 200 }, db);
+
+  test('address fallback matches case-insensitively and ignores padding on the snapshot', async () => {
+    const c = await fresh('Mixed.Case@Example.Test');
+    await db('email_messages').insert([
+      { id: randomUUID(), recipient_type: null, recipient_id: null, recipient_email_snapshot: ' MIXED.case@example.TEST ', status: 'sent', subject_snapshot: 'Upper snapshot', sent_at: T(1) },
+      { id: randomUUID(), recipient_type: 'lead', recipient_id: '', recipient_email_snapshot: 'mixed.case@example.test', status: 'sent', subject_snapshot: 'Lower snapshot', sent_at: T(2) },
+      { id: randomUUID(), recipient_type: null, recipient_id: null, recipient_email_snapshot: 'someone.else@example.test', status: 'sent', subject_snapshot: 'Other inbox', sent_at: T(3) },
+    ]);
+    const subjects = (await activity(c)).events.map((e) => e.detail.split(' · ')[0]);
+    expect(subjects.sort()).toEqual(['Lower snapshot', 'Upper snapshot']);
+  });
+
+  test('a payer\'s click on a code minted under the homeowner is "Link clicked by payer" and never engaged', async () => {
+    const c = await fresh('payer.home@example.test');
+    const payerInvoice = randomUUID(); const ownInvoice = randomUUID();
+    await db('invoices').insert([{ id: payerInvoice, payer_id: 12 }, { id: ownInvoice, payer_id: null }]);
+    const byMarker = randomUUID(); const byInvoice = randomUUID(); const own = randomUUID();
+    await db('short_codes').insert([
+      // new mint: carries the producer marker
+      { id: byMarker, customer_id: c, kind: 'invoice', channel: 'email', purpose: 'payer_invoice', entity_type: 'invoices', entity_id: ownInvoice },
+      // historical mint: no marker, but its invoice has a payer
+      { id: byInvoice, customer_id: c, kind: 'invoice', channel: null, purpose: null, entity_type: 'invoices', entity_id: payerInvoice },
+      // the homeowner's own invoice link
+      { id: own, customer_id: c, kind: 'invoice', channel: 'email', purpose: 'invoice_send', entity_type: 'invoices', entity_id: ownInvoice },
+    ]);
+    await db('short_code_clicks').insert([
+      { id: randomUUID(), short_code_id: byMarker, clicked_at: T(10) },
+      { id: randomUUID(), short_code_id: byInvoice, clicked_at: T(11) },
+      { id: randomUUID(), short_code_id: own, clicked_at: T(5) },
+    ]);
+    const r = await activity(c);
+    const clicks = r.events.filter((e) => e.source === 'link');
+    expect(clicks.map((e) => [e.title, e.kind, e.engaged])).toEqual([
+      ['Link clicked by payer', 'payer_clicked', false],
+      ['Link clicked by payer', 'payer_clicked', false],
+      ['Clicked the invoice link', 'clicked', true],
+    ]);
+    // the summary credits only the homeowner's own click, not the newer payer clicks
+    expect(r.summary.lastEngagedAt).toBe(T(5).toISOString());
+    const onlyPayer = await fresh('payer.only@example.test');
+    const code = randomUUID();
+    await db('short_codes').insert({ id: code, customer_id: onlyPayer, kind: 'invoice', channel: 'email', purpose: 'payer_invoice' });
+    await db('short_code_clicks').insert({ id: randomUUID(), short_code_id: code, clicked_at: T(20) });
+    const none = await activity(onlyPayer);
+    expect(none.events.map((e) => e.title)).toEqual(['Link clicked by payer']);
+    expect(none.summary.lastEngagedAt).toBeNull();
+  });
+
+  test('a payer click never collapses the customer\'s own provider click into an "engaged" one', async () => {
+    const c = await fresh('payer.near@example.test');
+    const code = randomUUID();
+    await db('short_codes').insert({ id: code, customer_id: c, kind: 'invoice', channel: 'email', purpose: 'payer_invoice' });
+    await db('short_code_clicks').insert({ id: randomUUID(), short_code_id: code, clicked_at: T(30, 30) });
+    await db('email_messages').insert({ id: randomUUID(), recipient_type: 'customer', recipient_id: c, recipient_email_snapshot: 'payer.near@example.test', status: 'clicked', subject_snapshot: 'Own mail', sent_at: T(29), clicked_at: T(30) });
+    const titles = (await activity(c)).events.map((e) => e.title);
+    expect(titles).toContain('Link clicked (reported by email provider — may be a scanner)');
+    expect(titles).toContain('Link clicked by payer');
+  });
+
+  test('a short code with no (or an unknown) channel is a neutral link, not a text', async () => {
+    const c = await fresh('nochannel@example.test');
+    const none = randomUUID(); const odd = randomUUID(); const sms = randomUUID();
+    await db('short_codes').insert([
+      { id: none, customer_id: c, kind: 'estimate', channel: null },
+      { id: odd, customer_id: c, kind: 'booking', channel: 'whatsapp' },
+      { id: sms, customer_id: c, kind: 'invoice', channel: 'sms' },
+    ]);
+    await db('short_code_clicks').insert([
+      { id: randomUUID(), short_code_id: none, clicked_at: T(1) },
+      { id: randomUUID(), short_code_id: odd, clicked_at: T(2) },
+      { id: randomUUID(), short_code_id: sms, clicked_at: T(3) },
+    ]);
+    const byTitle = Object.fromEntries((await activity(c)).events.map((e) => [e.title, e.channel]));
+    expect(byTitle).toEqual({ 'Clicked the estimate link': 'link', 'Clicked the booking link': 'link', 'Clicked the invoice link': 'sms' });
+  });
+
+  test('a scheduled send is one row: the provider row wins; a parent with no provider row stays', async () => {
+    const c = await fresh('scheduled@example.test');
+    const parent = randomUUID(); const provider = randomUUID(); const pushParent = randomUUID(); const pushProvider = randomUUID();
+    const lonely = randomUUID(); const failedProvider = randomUUID(); const failedParent = randomUUID();
+    const hiddenProviderParent = randomUUID(); const hiddenProvider = randomUUID();
+    await db('sms_log').insert([
+      // promoted parent + text provider row
+      { id: parent, customer_id: c, direction: 'outbound', status: 'sent', message_type: 'reminder', message_body: 'parent text', created_at: T(1) },
+      { id: provider, customer_id: c, direction: 'outbound', status: 'delivered', message_type: 'reminder', message_body: 'provider text', created_at: T(2), metadata: JSON.stringify({ scheduled_sms_log_id: parent }) },
+      // parent + push-proof provider row: only the app-notification row shows
+      { id: pushParent, customer_id: c, direction: 'outbound', status: 'sent', message_type: 'reminder', message_body: 'push parent', created_at: T(3) },
+      { id: pushProvider, customer_id: c, direction: 'outbound', status: 'sent', message_type: 'reminder', message_body: 'push provider', created_at: T(4), from_phone: 'push', metadata: JSON.stringify({ channel: 'push', scheduled_sms_log_id: pushParent }) },
+      // parent nothing references
+      { id: lonely, customer_id: c, direction: 'outbound', status: 'sent', message_type: 'reminder', message_body: 'lonely parent', created_at: T(5) },
+      // a failed provider row still replaces its parent
+      { id: failedParent, customer_id: c, direction: 'outbound', status: 'sent', message_type: 'billing', message_body: 'failed parent', created_at: T(6) },
+      { id: failedProvider, customer_id: c, direction: 'outbound', status: 'failed', message_type: 'billing', message_body: 'failed provider', created_at: T(7), metadata: JSON.stringify({ scheduled_sms_log_id: failedParent }) },
+      // a provider row that is itself not listable (never left) must not hide its parent
+      { id: hiddenProviderParent, customer_id: c, direction: 'outbound', status: 'sent', message_type: 'reminder', message_body: 'kept parent', created_at: T(8) },
+      { id: hiddenProvider, customer_id: c, direction: 'outbound', status: 'canceled', message_type: 'reminder', message_body: 'canceled provider', created_at: T(9), metadata: JSON.stringify({ scheduled_sms_log_id: hiddenProviderParent }) },
+    ]);
+    const texts = (await activity(c)).events.filter((e) => e.source === 'sms');
+    expect(texts.map((e) => e.detail).sort()).toEqual(['failed provider', 'kept parent', 'lonely parent', 'provider text', 'push provider']);
+    expect(texts.find((e) => e.detail === 'push provider').channel).toBe('push');
+    expect(texts.find((e) => e.detail === 'failed provider').kind).toBe('failed');
+    // paging stays exact across the collapse: limit 1 pages walk the same five events
+    const seen = []; let cursor = null;
+    do {
+      const page = await timeline.getCustomerActivity(c, { limit: 1, before: cursor }, db);
+      seen.push(...page.events);
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen.map((e) => e.detail).sort()).toEqual(['failed provider', 'kept parent', 'lonely parent', 'provider text', 'push provider']);
   });
 
   test('a source whose table cannot be read is reported unavailable and the rest still returns', async () => {

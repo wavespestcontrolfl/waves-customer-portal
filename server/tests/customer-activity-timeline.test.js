@@ -73,6 +73,18 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
     }
   });
 
+  test('link clicks: a payer click is not engaged, and only a recorded sms/email channel names one', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    const links = source('link clicks');
+    expect(links.toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'email', by_payer: true })[0])
+      .toMatchObject({ kind: 'payer_clicked', engaged: false, title: 'Link clicked by payer', channel: 'email' });
+    expect(isEngagedKind('payer_clicked')).toBe(false);
+    expect(links.engaged.where).toBeTruthy(); // the summary MAX excludes payer clicks
+    expect(links.toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: null })[0]).toMatchObject({ channel: 'link', engaged: true });
+    expect(links.toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'push' })[0].channel).toBe('link');
+    expect(links.toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'sms' })[0].channel).toBe('sms');
+  });
+
   test('each engaged source produces engaged events', () => {
     const t = new Date('2026-09-01T12:00:00Z');
     expect(source('texts').toEvents({ id: 'x', direction: 'inbound', status: 'received', message_body: 'hi', created_at: t })[0])

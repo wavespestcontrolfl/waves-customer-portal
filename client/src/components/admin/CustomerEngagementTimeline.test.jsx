@@ -71,6 +71,23 @@ describe("CustomerEngagementTimeline", () => {
     expect(screen.queryByText(/Not tracked yet/)).not.toBeInTheDocument();
   });
 
+  it("draws a channel-less link click with the neutral link icon, not the text icon", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => respond({
+      enabled: true,
+      events: [
+        ev("a", "clicked", "Clicked the invoice link", { channel: "link" }),
+        ev("b", "clicked", "Clicked the estimate link", { channel: "sms" }),
+      ],
+      hasMore: false,
+      summary: { lastEngagedAt: "2026-09-20T15:00:00.000Z" },
+      unavailableSources: [],
+    })));
+    render(<CustomerEngagementTimeline customerId="c1" />);
+    const list = within(await screen.findByRole("list", { name: "Customer engagement history" }));
+    expect(within(list.getByText("Clicked the invoice link").closest("li")).getByLabelText("Link")).toBeInTheDocument();
+    expect(within(list.getByText("Clicked the estimate link").closest("li")).getByLabelText("Text")).toBeInTheDocument();
+  });
+
   it("loads older events with the cursor and appends them without repeats", async () => {
     const fetchMock = vi.fn(async (url) => {
       if (String(url).includes("before=")) {
