@@ -822,7 +822,7 @@ customer keeps the quoter's own booking; an identical retry of a booking that
 already committed (same draft, slot and customer, and the typed phone — or the
 email that linked the draft — is the customer's) still reaches the idempotent
 replay. No message is sent on the refusal: the refusal retires the open
-abandoned-booking recovery intent for that draft, phone and email, and
+abandoned-booking recovery intent for that draft and the contact the draft itself stored (never caller-typed values), and
 `/api/booking/capture-intent` stages no recovery row for a handoff whose draft
 is linked to an established customer (`skipped: contact_linked_established`).
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,

@@ -181,6 +181,9 @@ describe('wiring in createSelfBooking (source guard)', () => {
     const branch = src.slice(catchStart, catchStart + 3500);
     expect(branch).toContain("txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN'");
     expect(branch).toContain('suppressRecoveryIntents(db,');
+    // scoped to the verified draft's own stored contact, never typed values
+    expect(branch).toContain('draftContact?.customer_phone');
+    expect(branch).not.toMatch(/suppressRecoveryIntents\(db, \{[^}]*new_customer/);
   });
 });
 
@@ -236,13 +239,22 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
     });
 
     test('a handoff whose draft is linked to an ESTABLISHED customer stages nothing and retires any staged intent', async () => {
-      firstResults.estimates = { customer_id: 'cust-established' };
+      firstResults.estimates = { customer_id: 'cust-established', customer_phone: '941-555-0101', customer_email: 'owner@example.com' };
       firstResults.customers = { pipeline_stage: 'active_customer' };
       const result = await call(base());
       expect(result).toEqual({ ok: true, skipped: 'contact_linked_established' });
       expect(ops.filter((o) => o.table === 'booking_intents' && o.op === 'insert')).toEqual([]);
       const upd = ops.find((o) => o.table === 'booking_intents' && o.op === 'update');
       expect(upd.args[0]).toEqual(expect.objectContaining({ suppressed: true }));
+      // Scoped to the verified draft: its id and ITS stored contact — never
+      // the phone/email the caller typed in the body.
+      const scope = ops.filter((o) => o.table === 'booking_intents' && ['orWhere', 'orWhereRaw'].includes(o.op)).map((o) => o.args);
+      expect(scope).toEqual(expect.arrayContaining([
+        ['pricing_estimate_id', 'pe-victim'],
+        [expect.stringMatching(/RIGHT\(regexp_replace/), ['9415550101']],
+        ['LOWER(email) = ?', ['owner@example.com']],
+      ]));
+      expect(JSON.stringify(scope)).not.toContain('pat@example.com');
     });
 
     test('a lookup error fails closed — no row is staged', async () => {

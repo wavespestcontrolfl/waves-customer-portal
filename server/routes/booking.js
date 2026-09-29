@@ -1233,7 +1233,8 @@ async function assertContactLinkedHandoffProvisional(trx, {
 // A refused (or never-eligible) contact-linked handoff must leave NO open
 // abandoned-booking recovery intent behind: the recovery cron texts/emails
 // the intent's phone/email (the real customer's, when an attacker quoted with
-// their contact). booking_intents.suppressed is the cron's kill flag — every
+// their contact). Callers pass only the VERIFIED draft's id and the contact
+// that draft stored — never caller-typed values. booking_intents.suppressed is the cron's kill flag — every
 // recovery selection filters `suppressed = false`.
 async function suppressRecoveryIntents(conn, { pricingEstimateId, phone, email }) {
   const ten = String(phone || '').replace(/\D/g, '').slice(-10);
@@ -4319,11 +4320,18 @@ async function createSelfBooking(payload = {}) {
         if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
           // No message may follow this refusal: retire the recovery intent the
           // wizard's capture-intent staged for this contact.
-          await suppressRecoveryIntents(db, {
-            pricingEstimateId: pricing_estimate_id,
-            phone: new_customer?.phone,
-            email: new_customer?.email,
-          }).catch((supErr) => {
+          // Scoped to the VERIFIED draft: its id plus the contact the draft
+          // itself stored — never the caller's typed phone/email, which an
+          // anonymous caller could point at a third party's intents.
+          await (async () => {
+            const draftContact = await db('estimates').where({ id: pricing_estimate_id })
+              .first('customer_phone', 'customer_email');
+            await suppressRecoveryIntents(db, {
+              pricingEstimateId: pricing_estimate_id,
+              phone: draftContact?.customer_phone,
+              email: draftContact?.customer_email,
+            });
+          })().catch((supErr) => {
             logger.warn(`[booking:confirm] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
           });
         }
@@ -6471,12 +6479,14 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // staged for this draft and skip. Lookup errors fail closed (no row).
     if (handoffVerified) {
       try {
-        const linkedDraft = await db('estimates').where({ id: handoffId }).first('customer_id');
+        const linkedDraft = await db('estimates').where({ id: handoffId }).first('customer_id', 'customer_phone', 'customer_email');
         if (linkedDraft?.customer_id) {
           const linkedCustomer = await db('customers').where({ id: linkedDraft.customer_id })
             .whereNull('deleted_at').first('pipeline_stage');
           if (linkedCustomer && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(linkedCustomer.pipeline_stage || ''))) {
-            await suppressRecoveryIntents(db, { pricingEstimateId: handoffId, phone: phoneDigits, email: nc.email });
+            await suppressRecoveryIntents(db, {
+              pricingEstimateId: handoffId, phone: linkedDraft.customer_phone, email: linkedDraft.customer_email,
+            });
             return res.json({ ok: true, skipped: 'contact_linked_established' });
           }
         }
