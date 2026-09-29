@@ -117,6 +117,12 @@ describe('customerFlaggedFacts', () => {
   });
 
   test('an unread submission from today is marked awaiting only while the recovery sweep is live (Codex #5320 r10)', async () => {
+    // Only the clock is frozen (a fixed 1 PM ET), so "40 minutes ago" is
+    // always today in ET, whatever time the suite runs.
+    jest.useFakeTimers({
+      now: new Date('2026-10-01T17:00:00Z'),
+      doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask', 'clearTimeout', 'clearInterval', 'clearImmediate'],
+    });
     const seed = () => fakeConn({
       scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
       visit_prep_submissions: [{
@@ -130,6 +136,7 @@ describe('customerFlaggedFacts', () => {
       expect((await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, seed()))[0].read).toEqual({ status: 'none', awaiting: true });
     } finally {
       delete process.env.GATE_VISIT_PREP_READ_SWEEP;
+      jest.useRealTimers();
     }
   });
 
