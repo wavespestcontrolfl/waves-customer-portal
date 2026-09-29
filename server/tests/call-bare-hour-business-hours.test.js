@@ -18,7 +18,7 @@ const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
 
 // The exact shape of call 4de755e1 (names synthetic).
-const LYNDA_TRANSCRIPT = [
+const BARE_HOUR_WDO_TRANSCRIPT = [
   'Caller: Hi, this is Sam. I need a WDO inspection today, can somebody come between 1:30 and 3:30?',
   "Agent: Let me look at the schedule. Let's plan on... can we plan on 2 o'clock?",
   'Caller: Sure.',
@@ -33,7 +33,7 @@ function extraction(scheduling) {
   };
 }
 
-const V2_PROMPT = buildExtractionPrompt(LYNDA_TRANSCRIPT, '+19415550100', '2026-09-29');
+const V2_PROMPT = buildExtractionPrompt(BARE_HOUR_WDO_TRANSCRIPT, '+19415550100', '2026-09-29');
 const processorSrc = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 const V1_PROMPT = processorSrc.slice(processorSrc.indexOf('- ARRIVAL WINDOW EXCEPTION:'), processorSrc.indexOf('- If the agent says "I\'ll text you"'));
 
@@ -41,7 +41,7 @@ describe.each([
   ['V2 prompt (call-extraction-v1.js)', V2_PROMPT, 'confirmed_start_at null'],
   ['V1 prompt (call-recording-processor.js)', V1_PROMPT, 'appointment_confirmed stays false'],
 ])('%s reads a committed, accepted hour with no AM/PM as business hours', (_name, prompt, notConfirmed) => {
-  test('the Lynda shape is the worked example, with the 7-11 / 12 / 1-6 reading', () => {
+  test('the bare-hour WDO shape is the worked example, with the 7-11 / 12 / 1-6 reading', () => {
     expect(prompt).toContain('BUSINESS-HOURS READING');
     expect(prompt).toContain('"can we plan on 2 o\'clock?" answered "Sure."');
     expect(prompt).toContain('7 to 11 is the morning, 12 and 1 to 6 the afternoon');
@@ -95,7 +95,7 @@ describe('the recorded period stays null for an unstated hour', () => {
   });
 });
 
-describe('routing accepts the extraction the contract produces for the Lynda call, and holds the rest', () => {
+describe('routing accepts the extraction the contract produces for the bare-hour WDO call, and holds the rest', () => {
   test('confirmed at 2 PM with no period recorded books', () => {
     const r = canAutoRoute(extraction({
       status: 'confirmed',
