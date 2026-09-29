@@ -207,3 +207,13 @@ describe('suppressionCoversColumnSql — bulk anti-join form', () => {
     expect(src).not.toContain("whereRaw('LOWER(es.email) = LOWER(newsletter_subscribers.email)')");
   });
 });
+
+// Codex #5323 r8 P1: newsletter unsubscribes (no group, or the newsletter's
+// own group) also exclude, not just the global types.
+test('newsletter anti-join also excludes unscoped and marketing_newsletter rows', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/newsletter-sender.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function excludeGloballySuppressed'), src.indexOf('\n}\n', src.indexOf('function excludeGloballySuppressed')));
+  expect(fn).toContain(".orWhereNull('es.group_key')");
+  expect(fn).toContain(".orWhere('es.group_key', 'marketing_newsletter')");
+});
+

@@ -86,7 +86,16 @@ function excludeGloballySuppressed(query) {
       .where('es.status', 'active')
       // Any spelling of the same Gmail inbox counts (owner decision 2026-09-29).
       .whereRaw(require('../utils/email-equivalence').suppressionCoversColumnSql('es.email', 'newsletter_subscribers.email'))
-      .whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES);
+      // A global type from any stream, OR any row scoped to no group or the
+      // newsletter's own group (an unsubscribe recorded under another Gmail
+      // spelling than the subscriber row, codex #5323 r8) — the same rule
+      // automationSuppressionMatches applies.
+      .where(function newsletterScoped() {
+        this.whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES)
+          .orWhereNull('es.group_key')
+          .orWhere('es.group_key', '')
+          .orWhere('es.group_key', 'marketing_newsletter');
+      });
   });
 }
 
