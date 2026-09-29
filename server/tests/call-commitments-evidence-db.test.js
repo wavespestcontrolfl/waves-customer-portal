@@ -120,7 +120,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   // under, and a near-miss that must not close.
   const inbound = (w, extra = {}) => db('call_log').insert({
     twilio_call_sid: `CA${'5'.repeat(24)}${w.n}in${Object.keys(extra).length}`, direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, status: 'completed',
-    duration_seconds: 75, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }), customer_id: w.customerId, created_at: later(), ...extra,
+    duration_seconds: 75, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false, is_spam: false } }), customer_id: w.customerId, created_at: later(), ...extra,
   }).returning('id').then(([r]) => { made.callIds.push(r.id); return r; });
   // A call a person placed through the staff bridge that reached a live conversation.
   const outboundCall = (w, extra = {}) => db('call_log').insert({
@@ -763,6 +763,19 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await stayOpen((w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) }));
     await stayOpen((w) => inbound(w, outcomeOf('voicemail')));
     await stayOpen((w) => inbound(w, outcomeOf('ai_handled')));
+    // A spam / robocall: the extraction's verdict, the processor's terminal status (call_outcome is left unset), or a non-conversation nature or disposition.
+    await stayOpen((w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false, is_spam: true } }) }));
+    await stayOpen((w) => inbound(w, { processing_status: 'spam' }));
+    await stayOpen((w) => inbound(w, { processing_status: 'voicemail' }));
+    await stayOpen((w) => inbound(w, { answered_by: 'voicemail' }));
+    for (const call_nature of ['robocall', 'spam_solicitation', 'wrong_number', 'silent_or_noise', 'vendor_or_partner']) {
+      await stayOpen((w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ call_nature, meta: { is_voicemail: false, is_spam: false } }) }));
+    }
+    for (const disposition of ['spam_discarded', 'wrong_number_closed', 'no_action_needed', 'vendor_logged']) {
+      await stayOpen((w) => inbound(w, { disposition }));
+    }
+    // A stamp missing altogether is not a conversation.
+    await stayOpen((w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }) }));
     await stayOpen((w) => inbound(w, { v2_extraction_status: 'failed' }));
     await stayOpen((w) => inbound(w, { v2_extraction_status: null }));
     // No stamp on is_voicemail: the extraction never said it was a conversation.
@@ -889,6 +902,89 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
         await db('sms_log').whereIn('id', made.smsIds).update({ admin_user_id: null });
         await db('technicians').where({ id: admin.id }).del();
       }
+    });
+  });
+
+  test('a reprocessed evidence call that no longer reads as a conversation is listed by the lapse scan and the refresh reopens the callback', async () => {
+    const meta = (m) => JSON.stringify({ meta: { is_voicemail: false, is_spam: false, ...m } });
+    const changes = [
+      { v2_extraction_status: 'failed' },
+      { ai_extraction_enriched: meta({ is_voicemail: true }) },
+      { ai_extraction_enriched: meta({ is_spam: true }) },
+      { processing_status: 'spam' },
+      { call_outcome: 'ai_handled' },
+      { call_outcome: 'voicemail' },
+      { disposition: 'wrong_number_closed' },
+      { ai_extraction_enriched: JSON.stringify({ call_nature: 'robocall', meta: { is_voicemail: false, is_spam: false } }) },
+    ];
+    const worlds = [];
+    for (const change of changes) {
+      const w = await world({ kind: 'callback' });
+      const talk = await inbound(w);
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      worlds.push({ w, talk, change });
+    }
+    const steady = await world({ kind: 'callback' });
+    await inbound(steady);
+    await cc.refreshFulfillment(db, steady.call.id);
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toEqual(expect.arrayContaining([worlds[0].w.call.id]));
+    for (const { w, talk, change } of worlds) await db('call_log').where({ id: talk.id }).update(change);
+    const lapsed = await cc.listLapsedEvidenceClosedCallIds(db);
+    expect(lapsed).not.toContain(steady.call.id);
+    for (const { w, change } of worlds) {
+      expect(lapsed).toContain(w.call.id);
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1, failed: 0 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+      expect(change).toBeTruthy();
+    }
+  });
+
+  test('a promise call with no usable phone (blocked caller ID) linked to a customer still closes on that customer\'s later inbound conversation', async () => {
+    const w = await world({ kind: 'callback' });
+    await db('call_log').where({ id: w.call.id }).update({ from_phone: null });
+    const talk = await inbound(w);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: talk.id, basis: CB_BASIS } });
+    // Nothing phone-based is looked up: a text to the number the call never had proves nothing.
+    const bare = await world({ kind: 'callback' });
+    await db('call_log').where({ id: bare.call.id }).update({ from_phone: null });
+    await staffText(bare, { status: 'delivered' });
+    expect(await cc.refreshFulfillment(db, bare.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(bare.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+  });
+
+  describe('the direct proof pages past a long run of candidates the shared predicates refuse', () => {
+    const BULK = 201; // one more than a page
+    test('a valid staff call back after 201 invalid staff calls still closes the callback', async () => {
+      const w = await world({ kind: 'callback' });
+      const at = later(5);
+      const rows = Array.from({ length: BULK }, (_, i) => ({
+        twilio_call_sid: `CA${'2'.repeat(24)}${w.n}b${String(i).padStart(3, '0')}`, direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone,
+        status: 'completed', duration_seconds: 80, customer_id: w.customerId, created_at: at, source: 'admin-click',
+        v2_extraction_status: 'failed', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }),
+      }));
+      const inserted = await db('call_log').insert(rows).returning('id');
+      inserted.forEach((r) => made.callIds.push(r.id));
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+      const good = await outboundCall(w, { created_at: later(20) });
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: good.id, strength: 'direct' } });
+    });
+
+    test('a delivered composer text after 201 undelivered ones still closes the callback', async () => {
+      const w = await world({ kind: 'callback' });
+      const at = later(5);
+      const rows = Array.from({ length: BULK }, () => ({
+        direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, customer_id: w.customerId, message_type: 'manual', status: 'sent',
+        created_at: at, metadata: JSON.stringify({ human_authored: true }),
+      }));
+      const inserted = await db('sms_log').insert(rows).returning('id');
+      inserted.forEach((r) => made.smsIds.push(r.id));
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+      const good = await staffText(w, { status: 'delivered', created_at: later(20) });
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: good.id, strength: 'direct' } });
     });
   });
 });
