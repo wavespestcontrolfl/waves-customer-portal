@@ -123,6 +123,27 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       for (const [name, w] of Object.entries(excluded)) expect([name, ids.includes(w.commitment.id)]).toEqual([name, false]);
     });
 
+    test('every candidate is read, page by page: a full page of older promises never crowds a newer one out', async () => {
+      // A whole page of older promises with nothing to judge, then a newer one with a witness.
+      const older = [];
+      try {
+        for (let i = 0; i < check.CANDIDATE_LIMIT; i += 1) {
+          older.push(await world({ callExtra: { created_at: new Date(Date.now() - 5 * DAY + i * 1000) } }));
+        }
+        const newer = await world();
+        const text = await addSms(newer);
+        say(newer, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+        const result = await run();
+        expect(result.candidates).toBeGreaterThan(check.CANDIDATE_LIMIT);
+        expect(asked(newer)).toHaveLength(1);
+        expect((await row(newer.commitment.id)).status).toBe('fulfilled');
+      } finally {
+        // The shared scratch database: later tests read a single page.
+        await db('call_log').whereIn('id', older.map((w) => w.call.id)).del();
+        await db('customers').whereIn('id', older.map((w) => w.customerId)).del();
+      }
+    });
+
     test('a promise whose 14 days have passed is never asked about, even with a witness on file', async () => {
       const w = await world();
       await addSms(w);
@@ -411,6 +432,10 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
     test.each(['sms', 'call'])('a panel open (refreshFulfillment) leaves a %s close as it was, switch on or off', async (kind) => {
       const w = await closedBy(kind);
       const first = await row(w.commitment.id);
+      // The proof records the md5 of the words the model read.
+      const words = kind === 'sms' ? (await db('sms_log').where({ id: w.witness }).first('message_body')).message_body
+        : (await db('call_log').where({ id: w.witness }).first('transcription')).transcription;
+      expect(first.fulfillment.witness_md5).toBe(check.textMd5(words));
       for (const value of [undefined, 'off']) {
         if (value) process.env.PROMISE_CONTACT_CHECK = value; else delete process.env.PROMISE_CONTACT_CHECK;
         const result = await cc.refreshFulfillment(db, w.call.id);
@@ -437,6 +462,7 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       ['deleted', async (w) => db('sms_log').where({ id: w.witness }).del()],
       ['no longer delivered', async (w) => db('sms_log').where({ id: w.witness }).update({ status: 'failed' })],
       ['no longer a person\'s text', async (w) => db('sms_log').where({ id: w.witness }).update({ metadata: null })],
+      ['edited (its words are no longer the ones the model read)', async (w) => db('sms_log').where({ id: w.witness }).update({ message_body: 'Running a few minutes late today.' })],
     ])('a text witness %s: the lapse scan lists the call and the re-judge reopens the promise', async (_name, change) => {
       const w = await closedBy('sms');
       const other = await world();
@@ -456,6 +482,7 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       ['reclassified as a voicemail', async (w) => db('call_log').where({ id: w.witness }).update({ ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) })],
       ['no longer a valid extraction', async (w) => db('call_log').where({ id: w.witness }).update({ v2_extraction_status: 'failed' })],
       ['not placed by a person', async (w) => db('call_log').where({ id: w.witness }).update({ source: 'collections_voice' })],
+      ['re-transcribed (its words are no longer the ones the model read)', async (w) => db('call_log').where({ id: w.witness }).update({ transcription: 'Agent: Just confirming Thursday.\nCustomer: Sounds good.' })],
     ])('a call witness %s: the lapse scan lists the call and the re-judge reopens the promise', async (_name, change) => {
       const w = await closedBy('call');
       const other = await world();

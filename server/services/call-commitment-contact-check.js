@@ -51,6 +51,7 @@
  * message of any kind.
  */
 
+const crypto = require('crypto');
 const Ajv = require('ajv/dist/2020');
 const MODELS = require('../config/models');
 const logger = require('./logger');
@@ -130,6 +131,12 @@ function callWitnessQuery(conn, { customerId, callId, from, to, id = null }) {
 }
 
 const ordered = (query, table) => query.orderBy([{ column: `${table}.created_at`, order: 'asc' }, { column: `${table}.id`, order: 'asc' }]);
+// The md5 of a witness's raw stored text (message_body / transcription), the
+// same bytes Postgres md5(COALESCE(col, '')) hashes: a close rests on the
+// words the model read, so any change to them (a re-transcribed call) takes
+// it away.
+const rawText = (type, row) => String((type === 'sms' ? row.message_body : row.transcription) || '');
+const textMd5 = (text) => crypto.createHash('md5').update(text, 'utf8').digest('hex');
 const iso = (value) => new Date(value).toISOString();
 
 // A text goes out as ordered segments (a card number split across two texts
@@ -178,10 +185,10 @@ async function loadContactWitnesses(conn, { callId, customerId, from, until, now
     if (result.value.length > WITNESS_LIMIT) failures.push(`${type}_truncated`);
     for (const row of result.value.slice(0, WITNESS_LIMIT)) {
       const person = type === 'sms' ? operatorReply(row) && smsDelivered(row) : personCallBack(row);
-      const text = String((type === 'sms' ? row.message_body : row.transcription) || '');
+      const text = rawText(type, row);
       if (!person || !text.trim()) continue;
       if (text.length > BODY_LIMIT) failures.push(`${type}_body_truncated`);
-      records.push({ ref: `${type}:${row.id}`, type, id: row.id, at: iso(row.created_at), text: text.slice(0, BODY_LIMIT) });
+      records.push({ ref: `${type}:${row.id}`, type, id: row.id, at: iso(row.created_at), text: text.slice(0, BODY_LIMIT), text_md5: textMd5(text) });
     }
   });
   scrubRecords(records, failures);
@@ -219,7 +226,7 @@ function groundVerdict(parsed, evidence) {
   const quote = normalized(parsed.quote);
   if (quote.length < 3 || !normalized(witness.text).includes(quote)) return { verdict: 'uncertain', reason: 'ungrounded_witness' };
   return { verdict: 'fulfilled', record_type: witness.type === 'sms' ? 'sms_log' : 'call_log', record_id: witness.id,
-    matched_at: witness.at, quote: parsed.quote };
+    matched_at: witness.at, quote: parsed.quote, witness_md5: witness.text_md5 };
 }
 
 async function judgeWithModel(obligation, evidence) {
@@ -286,7 +293,7 @@ async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { n
     if (grounded.verdict !== 'fulfilled') return false;
     const proof = storedProof({ strength: 'association', kind: PERSON_CONTACT_KIND, basis: PERSON_CONTACT_BASIS,
       record_type: grounded.record_type, record_id: grounded.record_id, matched_at: grounded.matched_at, quote: grounded.quote,
-      extractor_version: VERSION }, call.customer_id);
+      witness_md5: grounded.witness_md5, extractor_version: VERSION }, call.customer_id);
     const written = await trx('call_commitments')
       .where({ id: commitment.id, status: 'open' })
       .whereRaw(...refreshableVerdictSql())
@@ -304,9 +311,11 @@ async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { n
 // Whether a model-judged close still stands, with no model call: the promise
 // is still an untouched Waves "other" promise, the call still has the customer
 // the close was judged for, and the one record it rests on still exists for
-// that customer, still counts as a person's delivered text or call back, and
-// is still after the evidence floor and inside the window. Anything else and
-// the caller reopens it like any close the facts no longer support.
+// that customer, still counts as a person's delivered text or call back, is
+// still after the evidence floor and inside the window, and still says exactly
+// what the model read (its raw text's md5). Anything else and the caller
+// reopens it like any close the facts no longer support; the next tick judges
+// the new words.
 async function contactCloseStands(conn, commitment, call, prior) {
   if (prior?.basis !== PERSON_CONTACT_BASIS || prior.kind !== PERSON_CONTACT_KIND) return false;
   if (commitment.party !== 'waves' || commitment.kind !== 'other' || commitment.human_state) return false;
@@ -317,20 +326,23 @@ async function contactCloseStands(conn, commitment, call, prior) {
   const from = associationFrom(commitment, after);
   const until = windowEnd(after);
   const bounds = { customerId, callId: commitment.call_log_id, from, to: until, id: prior.record_id };
+  const sameWords = (type, row) => typeof prior.witness_md5 === 'string' && textMd5(rawText(type, row)) === prior.witness_md5;
   if (prior.record_type === 'sms_log') {
     const row = await smsWitnessQuery(conn, bounds).first();
-    return Boolean(row && operatorReply(row) && smsDelivered(row));
+    return Boolean(row && operatorReply(row) && smsDelivered(row) && sameWords('sms', row));
   }
   if (prior.record_type === 'call_log') {
     const row = await callWitnessQuery(conn, bounds).first();
-    return Boolean(row && personCallBack(row));
+    return Boolean(row && personCallBack(row) && sameWords('call', row));
   }
   return false;
 }
 
 // ── The periodic job ────────────────────────────────────────────────────────
 
-async function listCandidates(conn, now) {
+// One page of candidates after `cursor` (the last row's call start and id;
+// its text form keeps microseconds, so a page boundary never skips a row).
+async function listCandidates(conn, now, cursor = null) {
   // The call started inside the window plus a day (its end is later than its
   // start; the exact window is checked per row).
   const cutoff = new Date(now.getTime() - (ASSOCIATION_WINDOW_DAYS + 1) * DAY_MS);
@@ -341,10 +353,11 @@ async function listCandidates(conn, now) {
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .whereNotNull('cl.customer_id')
     .where('cl.created_at', '>', cutoff)
+    .modify((b) => { if (cursor) b.whereRaw('(cl.created_at, cc.id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]); })
     .orderBy([{ column: 'cl.created_at', order: 'asc' }, { column: 'cc.id', order: 'asc' }])
     .limit(CANDIDATE_LIMIT)
     .select('cc.*', 'cl.created_at as call_created_at', 'cl.bridged_at as call_bridged_at', 'cl.duration_seconds as call_duration_seconds',
-      'cl.direction as call_direction', 'cl.customer_id as call_customer_id');
+      'cl.direction as call_direction', 'cl.customer_id as call_customer_id', conn.raw('cl.created_at::text as cursor_at'));
 }
 
 async function checkOne(conn, row, { now, budget }) {
@@ -377,21 +390,29 @@ const everyModelCallFailed = (tally) => tally.model_calls > 0 && tally.provider_
 
 async function runPromiseContactCheck({ now = new Date(), conn = require('../models/db'), maxModelCalls = MAX_MODEL_CALLS } = {}) {
   if (!isEnabled('callCommitments') || !promiseEvidenceCloseLive() || !promiseContactCheckLive()) return { skipped: true, reason: 'gated_off' };
-  const rows = await listCandidates(conn, now);
   const budget = { left: maxModelCalls };
-  const tally = { candidates: rows.length, model_calls: 0, closed: 0, lost: 0, deferred: 0, failed: 0, provider_failed: 0 };
-  for (const row of rows) {
-    try {
-      const result = await checkOne(conn, row, { now, budget });
-      if (result.model) tally.model_calls += 1;
-      if (result.outcome === 'closed') tally.closed += 1;
-      if (result.outcome === 'lost') tally.lost += 1;
-      if (result.outcome === 'deferred') tally.deferred += 1;
-      if (result.providerFailed) tally.provider_failed += 1;
-    } catch (err) {
-      tally.failed += 1;
-      logger.warn(`[call-contact-check] check failed for commitment ${row.id}: ${err.message}`);
+  const tally = { candidates: 0, model_calls: 0, closed: 0, lost: 0, deferred: 0, failed: 0, provider_failed: 0 };
+  // Every page, however many: promises already judged cost only reads, so
+  // they never crowd a newer one out; the model budget alone caps the cost.
+  for (let cursor = null; ;) {
+    const rows = await listCandidates(conn, now, cursor);
+    tally.candidates += rows.length;
+    for (const row of rows) {
+      try {
+        const result = await checkOne(conn, row, { now, budget });
+        if (result.model) tally.model_calls += 1;
+        if (result.outcome === 'closed') tally.closed += 1;
+        if (result.outcome === 'lost') tally.lost += 1;
+        if (result.outcome === 'deferred') tally.deferred += 1;
+        if (result.providerFailed) tally.provider_failed += 1;
+      } catch (err) {
+        tally.failed += 1;
+        logger.warn(`[call-contact-check] check failed for commitment ${row.id}: ${err.message}`);
+      }
     }
+    if (rows.length < CANDIDATE_LIMIT) break;
+    const last = rows[rows.length - 1];
+    cursor = { at: last.cursor_at, id: last.id };
   }
   if (tally.closed) logger.info(`[call-contact-check] closed ${tally.closed} of ${tally.candidates} open promise(s)`);
   // A provider that answered nothing all run is a run that failed: job health says so.
@@ -400,4 +421,4 @@ async function runPromiseContactCheck({ now = new Date(), conn = require('../mod
 }
 
 module.exports = { runPromiseContactCheck, contactCloseStands, loadContactWitnesses, groundVerdict, fingerprint, judgeWithModel,
-  closeOnWitness, listCandidates, checkOne, everyModelCallFailed, VERSION, MAX_MODEL_CALLS, WITNESS_LIMIT, BODY_LIMIT };
+  closeOnWitness, listCandidates, checkOne, everyModelCallFailed, textMd5, VERSION, MAX_MODEL_CALLS, WITNESS_LIMIT, BODY_LIMIT, CANDIDATE_LIMIT };

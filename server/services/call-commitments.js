@@ -2645,13 +2645,16 @@ async function listLapsedEvidenceClosedCallIds(conn) {
                 -- be a call a person placed that reached the customer
                 -- (personCallBack, read from the same extraction fields).
                 OR ((cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}'
-                  AND (ev.direction IS DISTINCT FROM 'outbound' OR (${personCallBackSql('ev')}) IS NOT TRUE))))
+                  AND (ev.direction IS DISTINCT FROM 'outbound' OR (${personCallBackSql('ev')}) IS NOT TRUE
+                    -- ... and still say what the model read (a reprocess re-transcribes).
+                    OR md5(COALESCE(ev.transcription, '')) IS DISTINCT FROM (cc.fulfillment ->> 'witness_md5')))))
           -- ... or on a person's delivered text: gone, relinked to another
           -- customer, or no longer a text a person sent that was delivered.
           OR ((cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'sms_log'
               AND (sw.id IS NULL OR sw.customer_id::text IS DISTINCT FROM (cc.fulfillment ->> 'judged_customer_id')
                 OR sw.direction IS DISTINCT FROM 'outbound'
-                OR (${operatorReplySql('sw')} AND ${smsDeliveredSql('sw')}) IS NOT TRUE))
+                OR (${operatorReplySql('sw')} AND ${smsDeliveredSql('sw')}) IS NOT TRUE
+                OR md5(COALESCE(sw.message_body, '')) IS DISTINCT FROM (cc.fulfillment ->> 'witness_md5')))
           OR ((cc.fulfillment ->> 'kind') = ?
               AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id))
           -- ISO-Z text both sides (the stored proof's matched_at), so a
