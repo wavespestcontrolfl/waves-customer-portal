@@ -252,6 +252,140 @@ postgres('first-day rows of a combined booking form one stop at accept (real acc
   });
 });
 
+postgres('a combined first stop with its accept invoice stays movable until real completion state exists', () => {
+  const rebooker = () => require('../services/rebooker');
+  const visitGroups = () => require('../services/visit-groups');
+  let ctx;
+
+  beforeAll(async () => {
+    const url = new URL(connection);
+    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) || !['localhost', '127.0.0.1'].includes(url.hostname)) {
+      throw new Error('Use the verified private waves_qa dev database');
+    }
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
+    const app = express();
+    app.use(express.json());
+    app.use('/api/estimates', require('../routes/estimate-public'));
+    app.use('/api/public/estimates', require('../routes/estimate-slots-public'));
+    app.use((err, req, res, next) => res.status(err.status || 500).json({ error: err.message, code: err.code }));
+    server = await new Promise((resolve) => { const l = app.listen(0, '127.0.0.1', () => resolve(l)); });
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterAll(async () => {
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (mockPg) {
+      await wipe();
+      await mockPg.destroy();
+    }
+  });
+  // One real accept for the whole block (the public reserve route is rate
+  // limited); afterEach puts the accepted state back exactly as it was.
+  let baseline;
+  beforeAll(async () => {
+    await wipe();
+    const { HQ } = require('../services/route-optimizer');
+    await mockPg('service_zones').where('zone_name', 'Bradenton / Parrish').update({ center_lat: HQ.lat, center_lng: HQ.lng });
+    await seedTechnician();
+    const services = [PEST, LAWN];
+    const { estimateId, token, customerId } = await seedEstimate(services);
+    const { holdId } = await reserveAndAccept(token, services);
+    const rows = await firstDayRows(estimateId);
+    const invoice = await mockPg('invoices').where({ customer_id: customerId }).first();
+    ctx = { estimateId, customerId, holdId, rows, invoice, visitId: rows[0].visit_id };
+    expect(ctx.visitId).toBeTruthy();
+    baseline = { visit: await mockPg('service_visits').where({ id: ctx.visitId }).first() };
+  });
+  afterEach(async () => {
+    await mockPg('stripe_invoice_charge_attempts').where({ invoice_id: ctx.invoice.id }).del();
+    await mockPg('payments').where({ customer_id: ctx.customerId }).del();
+    await mockPg('service_records').where({ customer_id: ctx.customerId }).del();
+    await mockPg('invoices').where({ customer_id: ctx.customerId }).whereNot({ id: ctx.invoice.id }).del();
+    await mockPg('invoices').where({ id: ctx.invoice.id }).update({
+      status: 'draft', sent_at: null, paid_at: null, stripe_payment_intent_id: null,
+      service_date: ymd(ctx.invoice.service_date), updated_at: ctx.invoice.updated_at,
+    });
+    for (const row of ctx.rows) {
+      await mockPg('scheduled_services').where({ id: row.id }).update({
+        scheduled_date: ymd(row.scheduled_date), window_start: row.window_start, window_end: row.window_end,
+        status: row.status, visit_id: ctx.visitId, route_order: row.route_order,
+      });
+    }
+    await mockPg('service_visits').where({ id: ctx.visitId }).update({
+      scheduled_date: ymd(baseline.visit.scheduled_date), window_start: baseline.visit.window_start,
+      window_end: baseline.visit.window_end, stop_base_key: baseline.visit.stop_base_key,
+      stop_seq: baseline.visit.stop_seq, status: 'open', en_route_at: null, arrived_at: null,
+    });
+  });
+
+  const nextWeek = (row) => {
+    const d = new Date(`${ymd(row.scheduled_date)}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 7);
+    return d.toISOString().slice(0, 10);
+  };
+  const windowOf = (row) => `${String(row.window_start).slice(0, 5)}-${String(row.window_end).slice(0, 5)}`;
+  const move = (row, date) => rebooker().reschedule(ctx.holdId, date, windowOf(row), 'test move', 'admin',
+    { overlapAdvisory: true, seriesPolicy: 'single' });
+
+  test('the accept invoice does not freeze the stop (not frozen, splittable gate open)', async () => {
+    expect(await visitGroups().visitActivity(ctx.visitId)).toMatchObject({
+      childInvoices: false, firstApplicationInvoice: true, childRecords: false,
+    });
+    expect(await visitGroups().frozenVisitVerdict(mockPg, ctx.visitId)).toMatchObject({ frozen: false });
+    expect(await visitGroups().unsentFirstApplicationInvoiceIds(mockPg, ctx.rows.map((r) => r.id)))
+      .toEqual([ctx.invoice.id]);
+  });
+
+  test('a whole-stop move succeeds and the invoice date follows; nothing else about the invoice changes', async () => {
+    const target = nextWeek(ctx.rows[0]);
+    const result = await move(ctx.rows[0], target);
+    expect(result.visitMove.failed).toEqual([]);
+    const rows = await mockPg('scheduled_services').whereIn('id', ctx.rows.map((r) => r.id));
+    expect(rows.every((r) => ymd(r.scheduled_date) === target && r.visit_id === ctx.visitId)).toBe(true);
+    expect(ymd((await mockPg('service_visits').where({ id: ctx.visitId }).first()).scheduled_date)).toBe(target);
+    const invoice = await mockPg('invoices').where({ id: ctx.invoice.id }).first();
+    expect(ymd(invoice.service_date)).toBe(target);
+    expect(ymd(invoice.due_date)).toBe(ymd(ctx.invoice.due_date));
+    expect(invoice).toMatchObject({ status: 'draft', scheduled_service_id: ctx.holdId, total: ctx.invoice.total,
+      subtotal: ctx.invoice.subtotal, line_items: ctx.invoice.line_items });
+    expect(await mockPg('invoices').where({ customer_id: ctx.customerId })).toHaveLength(1);
+  });
+
+  test('customer self-serve stays refused for the grouped stop (2+ live members), never as frozen', async () => {
+    const members = await visitGroups().openMembers(mockPg, ctx.visitId);
+    expect(members.length).toBeGreaterThanOrEqual(2);
+    expect((await visitGroups().frozenVisitVerdict(mockPg, ctx.visitId)).frozen).toBe(false);
+  });
+
+  test('an explicit office separate of an invoice-carrying stop is refused', async () => {
+    await expect(visitGroups().splitChild({ visitId: ctx.visitId, scheduledServiceId: ctx.rows[1].id, createdBy: 'test' }))
+      .rejects.toMatchObject({ code: 'VISIT_SPLIT_REFUSED', message: expect.stringContaining('first_application_invoice') });
+    expect(await mockPg('scheduled_services').where({ visit_id: ctx.visitId })).toHaveLength(2);
+  });
+
+  test.each([
+    ['the invoice was sent', (c) => mockPg('invoices').where({ id: c.invoice.id }).update({ sent_at: new Date(), status: 'sent' })],
+    ['a PaymentIntent exists', (c) => mockPg('invoices').where({ id: c.invoice.id }).update({ stripe_payment_intent_id: 'pi_synthetic' })],
+    ['it was paid', (c) => mockPg('invoices').where({ id: c.invoice.id }).update({ status: 'paid', paid_at: new Date() })],
+    ['a charge attempt is claimed', (c) => mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: c.invoice.id,
+      stripe_payment_method_id: 'pm_synthetic', idempotency_key: `synthetic-${hex()}`, status: 'claimed' })],
+    ['a payments row references it', (c) => mockPg('payments').insert({ customer_id: c.customerId,
+      payment_date: ymd(new Date()), amount: 1, status: 'processing', metadata: JSON.stringify({ invoice_id: c.invoice.id }) })],
+    ['a service record exists on a member', (c) => mockPg('service_records').insert({ id: randomUUID(),
+      customer_id: c.customerId, scheduled_service_id: c.rows[1].id, service_date: ymd(new Date()),
+      service_type: 'Lawn Care', status: 'completed' })],
+    ['a normal completion invoice is on a member', (c) => mockPg('invoices').insert({ id: randomUUID(),
+      customer_id: c.customerId, scheduled_service_id: c.rows[1].id, status: 'draft', title: 'Service invoice',
+      total: 50, subtotal: 50, line_items: JSON.stringify([]), token: hex(), invoice_number: `SYN-${hex().slice(0, 12)}` })],
+  ])('%s: the stop freezes and the move is refused, as before', async (_label, mutate) => {
+    await mutate(ctx);
+    expect((await visitGroups().frozenVisitVerdict(mockPg, ctx.visitId)).frozen).toBe(true);
+    await expect(move(ctx.rows[0], nextWeek(ctx.rows[0]))).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
+    const rows = await mockPg('scheduled_services').whereIn('id', ctx.rows.map((r) => r.id));
+    expect(rows.every((r) => ymd(r.scheduled_date) === ymd(ctx.rows[0].scheduled_date))).toBe(true);
+    expect(ymd((await mockPg('invoices').where({ id: ctx.invoice.id }).first()).service_date)).toBe(ymd(ctx.invoice.service_date));
+  });
+});
+
 postgres('createOrJoinVisit still refuses rows carrying a real completion artifact (codex #3590 r13)', () => {
   beforeAll(async () => {
     const url = new URL(connection);

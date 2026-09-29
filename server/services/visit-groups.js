@@ -357,6 +357,79 @@ function windowedMembersConnected(members) {
   return true;
 }
 
+/**
+ * The ONE invoice that does not freeze a visit's membership: the estimate
+ * accept's shared first-application invoice (codex #3590 r13 refuses real
+ * completion artifacts; this is a pre-visit placeholder, not one). Every
+ * condition must hold, else it freezes exactly as any invoice does:
+ *  - linked to a member (invoices.scheduled_service_id) AND named by a
+ *    member's first_application_invoice_id (the accept's own stamp);
+ *  - status 'draft', never sent / viewed / paid / prepaid / receipted, no
+ *    scheduled send, no completion packet or service record, no payer,
+ *    prepay term, or batch — the columns the closeout adoption also demands;
+ *  - no payment attempted or recorded: no PaymentIntent / charge / reference
+ *    / method on the invoice, and no charge attempt, payment plan, payments
+ *    row (metadata.invoice_id), completion claim, packet item, billing
+ *    disposition, receipt job, follow-up sequence, orphan charge or terminal
+ *    handoff for it.
+ * Service records on members are checked separately (visitActivity's
+ * childRecords) and still freeze. The customer pay link exists from accept
+ * (invoices.token is minted with the row), so a token alone proves nothing;
+ * sending it stamps sent_at and any payment stamps the columns above.
+ * Returns the qualifying invoice ids.
+ */
+async function unsentFirstApplicationInvoiceIds(trx, memberIds) {
+  const ids = [...new Set((memberIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return [];
+  const stamped = trx('scheduled_services').whereIn('id', ids)
+    .whereNotNull('first_application_invoice_id').select('first_application_invoice_id');
+  const untouched = [
+    'sent_at', 'viewed_at', 'paid_at', 'sms_sent_at', 'email_sent_at', 'receipt_sent_at',
+    'receipt_sms_sent_at', 'scheduled_send_at', 'payment_recorded_at', 'prepaid_at',
+    'ach_processing_notified_at', 'annual_delivery_attempted_at', 'send_claim_token',
+    'stripe_payment_intent_id', 'stripe_charge_id', 'payment_reference', 'payment_method',
+    'collected_via', 'service_record_id', 'visit_completion_packet_id', 'payer_id',
+    'annual_prepay_term_id', 'annual_prepay_covered_term_id', 'batch_key',
+  ];
+  const q = trx('invoices as i')
+    .whereIn('i.scheduled_service_id', ids)
+    .whereIn('i.id', stamped)
+    .where('i.status', 'draft');
+  for (const column of untouched) q.whereNull(`i.${column}`);
+  for (const table of ['stripe_invoice_charge_attempts', 'payment_plans', 'service_completion_attempts',
+    'visit_completion_packet_items', 'visit_billing_dispositions', 'receipt_delivery_jobs',
+    'invoice_followup_sequences', 'stripe_orphan_charges', 'terminal_handoff_tokens']) {
+    q.whereNotExists(trx(`${table} as x`).whereRaw('x.invoice_id = i.id').select(trx.raw('1')));
+  }
+  q.whereNotExists(trx('payments as pay').whereRaw("pay.metadata->>'invoice_id' = i.id::text").select(trx.raw('1')));
+  return (await q.select('i.id')).map((row) => row.id);
+}
+
+/**
+ * Keep the exempt first-application draft's service_date on its anchor's
+ * date when the anchor moves (the accept stamps service_date from the
+ * anchor's scheduled_date; closeout adoption refuses an invoice whose date
+ * differs from the owner row). due_date is the accept day, not the visit
+ * day, and stays. Same transaction as the row's own date write; only an
+ * invoice passing unsentFirstApplicationInvoiceIds is touched. No-op when
+ * the row carries no such invoice.
+ */
+async function syncFirstApplicationInvoiceDate(trx, serviceId, newDate) {
+  const day = dateOnly(newDate);
+  if (!serviceId || !day) return 0;
+  const ids = await unsentFirstApplicationInvoiceIds(trx, [serviceId]);
+  if (!ids.length) return 0;
+  try {
+    await trx('invoices').whereIn('id', ids).forUpdate().noWait().select('id');
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      throw Object.assign(new Error('This visit\'s invoice is being processed — try again in a moment.'), { statusCode: 409, isOperational: true, code: 'VISIT_BUSY' });
+    }
+    throw err;
+  }
+  return Number(await trx('invoices').whereIn('id', ids).update({ service_date: day, updated_at: trx.fn.now() }));
+}
+
 async function visitActivity(visitId, trx = db) {
   const visit = await trx('service_visits').where({ id: visitId }).first();
   if (!visit) return null;
@@ -377,14 +450,25 @@ async function visitActivity(visitId, trx = db) {
     trx('scheduled_services').where({ visit_id: visitId }).select('id'),
   ]);
   const childIds = children.map((c) => c.id);
-  const [record, invoice] = childIds.length
+  const [record, invoices] = childIds.length
     ? await Promise.all([
       trx('service_records').whereIn('scheduled_service_id', childIds).first('id')
         .catch(() => null),
-      trx('invoices').whereIn('scheduled_service_id', childIds).first('id')
+      trx('invoices').whereIn('scheduled_service_id', childIds).select('id')
         .catch(() => null),
     ])
     : [null, null];
+  // The accept's shared first-application draft is not a completion artifact
+  // (see unsentFirstApplicationInvoiceIds); every other invoice still is.
+  let exemptInvoiceIds = new Set();
+  if (invoices && invoices.length) {
+    try {
+      exemptInvoiceIds = new Set(await unsentFirstApplicationInvoiceIds(trx, childIds));
+    } catch (err) {
+      require('./logger').warn(`[visit-groups] first-application invoice exemption unreadable for visit ${visitId} — treated as a freezing invoice: ${err.message}`);
+    }
+  }
+  const invoice = invoices ? invoices.find((row) => !exemptInvoiceIds.has(row.id)) : null;
   return {
     status: visit.status,
     effectsStarted: Boolean(effects),
@@ -395,6 +479,9 @@ async function visitActivity(visitId, trx = db) {
     anyPacket: packets.length > 0,
     childRecords: Boolean(record),
     childInvoices: Boolean(invoice),
+    // The exempt first-application draft rides the visit (joins and the
+    // office separate still refuse it; moves and the automatic seams do not).
+    firstApplicationInvoice: exemptInvoiceIds.size > 0,
     childReports: false, // reports hang off service_records; covered by childRecords
     linkIssued: Boolean(visit.summary_token_issued_at),
     paymentAttempted: Boolean(visit.payment_intent_id),
@@ -601,6 +688,10 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       if (!joinGate.ok) {
         throw new Error(`visit membership conflict: target frozen (${joinGate.reason})`);
       }
+      // The shared first-application draft covers a FIXED member set.
+      if (targetActivity.firstApplicationInvoice) {
+        throw new Error('visit membership conflict: target frozen (first_application_invoice)');
+      }
       // Non-window rules against the target; the window rule runs over
       // the COMBINED member set (codex #3590 r13 P2): a 09-10 visit plus a
       // 10-11 · 11-12 continuation is one chain even though 11-12 never
@@ -635,7 +726,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
         // packet/artifact/link/payment froze its member set never absorbs
         // new rows, even fully unattached ones — skip to a fresh seq.
         const vActivity = await visitActivity(v.id, t);  
-        if (!canSplit(vActivity).ok) continue;
+        if (!canSplit(vActivity).ok || vActivity.firstApplicationInvoice) continue;
         visit = v; break;
       }
     }
@@ -837,6 +928,14 @@ async function splitChild({ visitId, scheduledServiceId, createdBy }) {
     const gate = canSplit(activity);
     if (!gate.ok) {
       const err = new Error(`split refused: ${gate.reason}`);
+      err.code = 'VISIT_SPLIT_REFUSED';
+      throw err;
+    }
+    // An explicit office separate would leave the accept's shared invoice
+    // covering rows that no longer share a stop: handle the invoice first.
+    // (Whole-stop moves and the automatic detach seams are unaffected.)
+    if (activity.firstApplicationInvoice) {
+      const err = new Error('split refused: first_application_invoice');
       err.code = 'VISIT_SPLIT_REFUSED';
       throw err;
     }
@@ -3365,6 +3464,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 
 module.exports = {
   NOTIFICATION_CLAIM_LEASE_MS,
+  unsentFirstApplicationInvoiceIds,
+  syncFirstApplicationInvoiceDate,
   dateOnly,
   rowStillAtVisitStop,
   toMinutes,

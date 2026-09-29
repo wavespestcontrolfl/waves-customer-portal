@@ -10139,6 +10139,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
+              if (prevDate !== bulkTargetDate && svc.first_application_invoice_id) {
+                await require('../services/visit-groups').syncFirstApplicationInvoiceDate(trx, id, bulkTargetDate);
+              }
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
                 const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;

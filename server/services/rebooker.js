@@ -1819,6 +1819,11 @@ class SmartRebooker {
         .returning(['id', 'technician_id']);
       const updated = committedRows.length;
       committedTechId = committedRows[0]?.technician_id || null;
+      // A moved anchor keeps the accept's shared first-application draft on
+      // its own date (same transaction; no-op for any other row).
+      if (updated > 0 && service.first_application_invoice_id && String(newDate).slice(0, 10) !== String(originalDate instanceof Date ? originalDate.toISOString() : originalDate).slice(0, 10)) {
+        await require('./visit-groups').syncFirstApplicationInvoiceDate(trx, serviceId, newDate);
+      }
       if (updated === 0) {
         if (membershipFenced) {
           const now = await trx('scheduled_services').where({ id: serviceId }).first('visit_id');
@@ -3282,6 +3287,10 @@ class SmartRebooker {
             isOperational: true,
             code: 'SLOT_TAKEN',
           });
+        }
+        // The moved row's accept-time first-application draft follows its date.
+        if (sibDateChanges && String(sib.id) === String(serviceId) && service.first_application_invoice_id) {
+          await require('./visit-groups').syncFirstApplicationInvoiceDate(trx, sib.id, String(date).split('T')[0]);
         }
         if (awaitingPlacement || sibClashBeyondHorizon || (anchorCleared && sib.window_start)) {
           // The row just went timed → windowless: pre-close its reminder in
