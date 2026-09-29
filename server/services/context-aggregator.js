@@ -561,7 +561,12 @@ function calendarDay(value) {
 // is directly testable without a DB-backed context build.
 function liveEtaEligible(row, todayStr = etDateString()) {
   const { customerTrackState } = require('./track-transitions');
-  return row?.status === 'en_route'
+  // The customer-facing tracker state alone decides (Codex r3): markEnRoute
+  // writes track_state first and syncs the operational status best-effort,
+  // so status can lag at pending/confirmed while the tracking page already
+  // shows the live vehicle. customerTrackState still rejects terminal
+  // statuses.
+  return Boolean(row)
     && calendarDay(row.scheduled_date) === todayStr
     && customerTrackState(row) === 'en_route';
 }

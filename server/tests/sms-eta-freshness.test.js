@@ -171,10 +171,11 @@ describe('per-claim binding (pre-push audit P1): two distinct stops must never c
         { id: 'svc-2', status: 'en_route', track_state: 'en_route' },
       ]),
     });
-    expect(reason).toBe('eta_claim_no_longer_en_route');
+    // Codex r3: two distinct live ETAs fail closed before any binding.
+    expect(reason).toBe('eta_claim_ambiguous');
   });
 
-  test('the correctly-quoted still-en_route stop passes even while its sibling entry is completed', async () => {
+  test('two distinct live ETAs: even the correctly-quoted stop fails closed (Codex r3)', async () => {
     findEtaMinutesClaims.mockReturnValue([claim(20)]);
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: {
@@ -191,7 +192,8 @@ describe('per-claim binding (pre-push audit P1): two distinct stops must never c
         { id: 'svc-2', status: 'en_route', track_state: 'en_route' },
       ]),
     });
-    expect(reason).toBeNull();
+    // Codex r3: with two distinct live ETAs even the right number fails closed.
+    expect(reason).toBe('eta_claim_ambiguous');
   });
 });
 
@@ -253,7 +255,7 @@ describe('range claims (Codex round-2 P2): every bound is bound and rechecked, n
         { id: 'svc-2', status: 'en_route', track_state: 'en_route' },
       ]),
     });
-    expect(reason).toBe('eta_claim_no_longer_en_route');
+    expect(reason).toBe('eta_claim_ambiguous');
   });
 
   test('"10-12 minutes away" with no snapshot entry for either bound at all: fails closed unbound', async () => {
@@ -267,7 +269,7 @@ describe('range claims (Codex round-2 P2): every bound is bound and rechecked, n
     expect(reason).toBe('eta_claim_unbound');
   });
 
-  test('"10-12 minutes away" with BOTH bounds still en_route: passes', async () => {
+  test('"10-12 minutes away" across two live entries: fails closed as ambiguous (Codex r3)', async () => {
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: {
         entries: [
@@ -283,7 +285,7 @@ describe('range claims (Codex round-2 P2): every bound is bound and rechecked, n
         { id: 'svc-2', status: 'en_route', track_state: 'en_route' },
       ]),
     });
-    expect(reason).toBeNull();
+    expect(reason).toBe('eta_claim_ambiguous');
   });
 });
 

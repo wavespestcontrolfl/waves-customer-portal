@@ -627,6 +627,12 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
   if (!factsMinutes.size) {
     return { ok: false, violations: ['the reply states a minutes-away ETA but the facts carry no LIVE ETA line — never compute, round, or invent one'] };
   }
+  // Two distinct live ETAs (two techs en route at once): prose can't be
+  // bound to the right visit deterministically, so no minutes figure may
+  // go out at all (Codex r3) — rare, and failing closed costs one revision.
+  if (factsMinutes.size > 1) {
+    return { ok: false, violations: ['more than one tech is en route, so a minutes-away figure cannot be tied to the right visit — say the techs are on the way and share the tracking link instead of stating minutes'] };
+  }
   const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => !factsMinutes.has(m)))];
   if (wrong.length) {
     return { ok: false, violations: [`the reply states ${wrong.join('/')} minute(s) away but LIVE ETA is ${[...factsMinutes].join(' or ')} minutes — use that EXACT number`] };

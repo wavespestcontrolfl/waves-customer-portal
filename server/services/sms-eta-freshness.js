@@ -83,6 +83,9 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
     ? liveEtaSnapshot.entries.filter((e) => e && Number.isFinite(e.minutes) && Array.isArray(e.scheduledServiceIds) && e.scheduledServiceIds.length)
     : [];
   if (!entries.length) return 'eta_claim_no_snapshot';
+  // More than one distinct live ETA: a claim can't be bound to the visit the
+  // prose names, so any ETA claim fails closed (Codex r3).
+  if (entries.length > 1) return 'eta_claim_ambiguous';
 
   const draftedAt = parseDraftedAt(factsGeneratedAt);
   if (!draftedAt) return 'eta_claim_no_facts_time';

@@ -464,10 +464,10 @@ describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes 
       expect(result.violations[0]).toMatch(/10 minute/);
     });
 
-    test('validateLiveEtaMinutes passes a range reply only when EVERY bound is grounded (two distinct LIVE ETA lines)', () => {
+    test('validateLiveEtaMinutes rejects a range across two distinct LIVE ETA lines (Codex r3: two live ETAs fail closed)', () => {
       process.env[GATE] = 'true';
       const factsBlock = 'UPCOMING SERVICES:\n- Pest TODAY LIVE ETA: about 10 minutes\n- Lawn TODAY LIVE ETA: about 12 minutes';
-      expect(validateLiveEtaMinutes({ reply: 'The tech is 10-12 minutes away.', factsBlock }).ok).toBe(true);
+      expect(validateLiveEtaMinutes({ reply: 'The tech is 10-12 minutes away.', factsBlock }).ok).toBe(false);
     });
   });
 });
@@ -494,10 +494,10 @@ describe('round 3 (audit P1s): arrival wording beats duration exclusions; every 
     expect(findEtaMinutesClaims(reply)).toEqual([]);
   });
 
-  test('two distinct live stops: a reply quoting the second ETA is grounded', () => {
+  test('two distinct live stops: no minutes figure may go out, even a real one (Codex r3: prose cannot bind to the right visit)', () => {
     const factsBlock = 'UPCOMING SERVICES:\n- Pest TODAY LIVE ETA: about 9 minutes\n- Lawn TODAY LIVE ETA: about 20 minutes';
-    expect(validateLiveEtaMinutes({ reply: 'Your lawn tech is about 20 minutes away.', factsBlock }).ok).toBe(true);
-    expect(validateLiveEtaMinutes({ reply: 'Your tech is about 9 minutes away.', factsBlock }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply: 'Your lawn tech is about 20 minutes away.', factsBlock }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: 'Your lawn tech is about 9 minutes away.', factsBlock }).ok).toBe(false);
     expect(validateLiveEtaMinutes({ reply: 'Your tech is about 15 minutes away.', factsBlock }).ok).toBe(false);
   });
 });
