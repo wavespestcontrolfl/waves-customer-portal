@@ -128,6 +128,7 @@ describe('service report v1', () => {
         customer_id: 'customer-1',
         service_line: 'pest',
         service_type: 'Quarterly Pest Control Service',
+        service_date: '2026-05-01',
         pressure_index: 0,
       },
       knex,

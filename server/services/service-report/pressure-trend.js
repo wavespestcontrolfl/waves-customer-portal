@@ -6,19 +6,24 @@ const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const {
   SCALE_TECHNICIAN_RATING,
   SCALE_BLENDED,
+  SCALE_UNKNOWN,
   loadScaleMap,
-  scaleFromCutoverDate,
+  scaleWithoutProvenance,
+  isComparable,
 } = require('../pest-pressure/score-scale');
 
 // Readings recorded before/after the #4741 tech-rating cutover sit on
 // different scales (see pest-pressure/score-scale.js) and are never compared
 // or charted together.
 
+const PRIOR_SCAN_LIMIT = 25; // same bound as store.loadPreviousScore
+
 function pressureScaleOf(row) {
-  if (row?.pressure_scale === SCALE_TECHNICIAN_RATING || row?.pressure_scale === SCALE_BLENDED) {
+  if ([SCALE_TECHNICIAN_RATING, SCALE_BLENDED, SCALE_UNKNOWN].includes(row?.pressure_scale)) {
     return row.pressure_scale;
   }
-  return scaleFromCutoverDate(serviceStartedAt(row));
+  // No provenance: blended before the cutover, unknown (fail closed) after it.
+  return scaleWithoutProvenance(serviceStartedAt(row));
 }
 
 const SEVERITY_RANK = {
@@ -144,7 +149,7 @@ function buildPressureTrendContextFromRows({
   // so this is not a first visit either: direction 'rescaled' (below).
   const newest = dated[dated.length - 1];
   const points = dated
-    .filter((point) => point.scale === newest?.scale)
+    .filter((point) => point === newest || isComparable(point.scale, newest?.scale))
     .slice(-limit)
     .map(({ scale, ...point }) => point);
 
@@ -224,7 +229,10 @@ async function buildPressureTrendContext({
     })
     .orderBy('service_date', 'desc')
     .orderBy('started_at', 'desc')
-    .limit(Math.max(0, limit - 1))
+    // Fetch a bounded window wider than the chart needs: the scale filter runs
+    // afterwards, and alternating tap/blended visits would otherwise starve
+    // the comparable older readings out of a limit-1 window.
+    .limit(limit > 1 ? Math.max(limit - 1, PRIOR_SCAN_LIMIT) : 0)
     .catch(() => []);
 
   const ids = [...priorRows.map((row) => row.id), record.id].filter(Boolean);

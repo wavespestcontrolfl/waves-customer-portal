@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
-const { loadScaleMap, scaleForVisit } = require('../pest-pressure/score-scale');
+const { loadScaleMap, scaleForVisit, isComparable } = require('../pest-pressure/score-scale');
 const { reserviceReportCopyGateOn } = require('./reservice-report');
 
 function pressureValue(value) {
@@ -83,7 +83,7 @@ async function buildSinceLastVisitContext({ record, currentPressureIndexOverride
   let sameScale = true;
   if (priorPressure && currentPressure && prior) {
     const scaleMap = await loadScaleMap(knex, [record.id, prior.id]);
-    sameScale = scaleForVisit(scaleMap, record) === scaleForVisit(scaleMap, prior);
+    sameScale = isComparable(scaleForVisit(scaleMap, record), scaleForVisit(scaleMap, prior));
   }
   const recommendation = firstRecommendation(currentFindings);
 

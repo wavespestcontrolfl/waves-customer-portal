@@ -72,10 +72,10 @@ describe('pressure trend across the #4741 scale change', () => {
 
   test('new-scale readings compare with each other, ignoring older blended ones', () => {
     const ctx = buildPressureTrendContextFromRows({
-      record: row('rec-now', '2026-10-20', 2),
+      record: row('rec-now', '2026-10-20', 2, { pressure_scale: 'technician_rating' }),
       priorRows: [
         row('rec-june', '2026-06-10', 0.9),
-        row('rec-sep', '2026-09-25', 4),
+        row('rec-sep', '2026-09-25', 4, { pressure_scale: 'technician_rating' }),
       ],
     });
     expect(ctx.direction).toBe('down');
@@ -96,7 +96,7 @@ describe('pressure trend across the #4741 scale change', () => {
   describe('database builder reads the score-row provenance', () => {
     function fakeKnex({ records, scores }) {
       return (table) => {
-        const data = { service_records: records, pest_pressure_scores: scores, service_findings: [] }[table] || [];
+        let data = { service_records: records, pest_pressure_scores: scores, service_findings: [] }[table] || [];
         const q = {
           select: () => q,
           where: () => q,
@@ -105,7 +105,7 @@ describe('pressure trend across the #4741 scale change', () => {
           whereIn: () => q,
           modify: () => q,
           orderBy: () => q,
-          limit: () => q,
+          limit: (n) => { data = data.slice(0, n); return q; },
           catch: () => Promise.resolve(data),
           then: (resolve, reject) => Promise.resolve(data).then(resolve, reject),
         };
@@ -175,5 +175,68 @@ describe('pressure trend across the #4741 scale change', () => {
       const ctx = await buildPressureTrendContext({ record: row('rec-now', '2026-09-28', 3), knex });
       expect(ctx.direction).toBe('rescaled');
     });
+  });
+});
+
+describe('fail closed and full-window provenance (codex r1 P2s)', () => {
+  const TAP = { technicianActivityRating: { value: 3, weight: 100, present: true } };
+  const BLENDED = { clientRating: { value: 3, weight: 25, present: true } };
+  function fakeKnex({ records, scores, scoresThrow = false }) {
+    return (table) => {
+      let data = { service_records: records, pest_pressure_scores: scores, service_findings: [] }[table] || [];
+      const q = {
+        select: () => q, where: () => q, whereNot: () => q, whereNotNull: () => q, whereIn: () => q, modify: () => q, orderBy: () => q,
+        limit: (n) => { data = data.slice(0, n); return q; },
+        catch: (handler) => (table === 'pest_pressure_scores' && scoresThrow
+          ? Promise.reject(new Error('lookup failed')).catch(handler)
+          : Promise.resolve(data)),
+        then: (resolve, reject) => Promise.resolve(data).then(resolve, reject),
+      };
+      return q;
+    };
+  }
+
+  test('a failed provenance lookup never yields an up/down claim for post-cutover visits', async () => {
+    const ctx = await buildPressureTrendContext({
+      record: row('rec-now', '2026-10-20', 4),
+      knex: fakeKnex({ records: [row('rec-sep', '2026-09-25', 1)], scores: [], scoresThrow: true }),
+    });
+    expect(ctx.direction).toBe('rescaled');
+    expect(ctx.customerSummary).not.toMatch(/increased|down/i);
+    expect(ctx.points.map((p) => p.pressureIndex)).toEqual([4]);
+  });
+
+  test('unmarked post-cutover rows are unknown, not comparable even to each other', () => {
+    const ctx = buildPressureTrendContextFromRows({
+      record: row('rec-now', '2026-10-20', 4),
+      priorRows: [row('rec-sep', '2026-09-25', 1)],
+    });
+    expect(ctx.direction).toBe('rescaled');
+  });
+
+  test('pre-cutover rows stay blended by date even when the lookup fails', async () => {
+    const ctx = await buildPressureTrendContext({
+      record: row('rec-now', '2026-08-01', 1.7),
+      knex: fakeKnex({ records: [row('rec-june', '2026-06-10', 0.9)], scores: [], scoresThrow: true }),
+    });
+    expect(ctx.direction).toBe('up');
+  });
+
+  test('alternating scales: comparable older readings are still fetched (window wider than limit-1)', async () => {
+    // newest first, as the ORDER BY returns them
+    const records = [
+      row('rec-b2', '2026-10-10', 0.5), row('rec-t2', '2026-10-01', 4),
+      row('rec-b1', '2026-09-30', 0.4), row('rec-t1', '2026-09-25', 5),
+    ];
+    const scores = [
+      { service_record_id: 'rec-now', component_scores: TAP },
+      { service_record_id: 'rec-t2', component_scores: TAP },
+      { service_record_id: 'rec-t1', component_scores: TAP },
+      { service_record_id: 'rec-b2', component_scores: BLENDED },
+      { service_record_id: 'rec-b1', component_scores: BLENDED },
+    ];
+    const ctx = await buildPressureTrendContext({ record: row('rec-now', '2026-10-20', 2), knex: fakeKnex({ records, scores }) });
+    expect(ctx.points.map((p) => p.pressureIndex)).toEqual([5, 4, 2]);
+    expect(ctx.direction).toBe('down');
   });
 });

@@ -11,15 +11,21 @@
  *
  * Per-record marker: pest_pressure_scores.component_scores carries the
  * technicianActivityRating component (scoreSource 'technician_rating').
- * TECH_RATING_CUTOVER_AT is the fallback only when the marker cannot be read
- * (no score row, or a failed lookup): 2026-09-24 00:00 America/New_York
- * (EDT, UTC-4).
+ * Customer-submitted ratings stay blended after the cutover, so BOTH scales
+ * exist after it: comparability is per-row provenance, never a date. The
+ * cutover (2026-09-24 00:00 America/New_York, EDT UTC-4) only proves that a
+ * reading with no score row is blended when it predates it; after it such a
+ * reading is 'unknown' and fails closed.
  */
 
 const { scoreSourceFromComponents } = require('./calculate');
 
 const SCALE_TECHNICIAN_RATING = 'technician_rating';
 const SCALE_BLENDED = 'blended';
+// Provenance could not be established (a post-cutover reading with no readable
+// score row, or a failed lookup). Comparable to nothing, not even another
+// unknown: callers must make no up/down claim from it.
+const SCALE_UNKNOWN = 'unknown';
 const TECH_RATING_CUTOVER_AT = Date.parse('2026-09-24T04:00:00Z');
 const TECH_RATING_CUTOVER_DATE = '2026-09-24'; // the same day, as a calendar date (ET)
 
@@ -29,20 +35,27 @@ function scaleFromComponentScores(componentScores) {
     : SCALE_BLENDED;
 }
 
-// `at` is the visit instant (Date/ISO string/ms) for the cutover fallback.
-function scaleFromCutoverDate(at) {
+// Fallback ONLY when a reading has no readable score row. Before the cutover
+// direct scoring did not exist, so every such reading is blended. After it,
+// customer-submitted ratings are still blended while technician taps are
+// direct, so a post-cutover reading without provenance is unknown - never
+// guessed from its date. `at` is the visit instant (Date/ISO string/ms).
+function scaleWithoutProvenance(at) {
   const ms = at instanceof Date ? at.getTime() : Date.parse(at);
-  return Number.isFinite(ms) && ms >= TECH_RATING_CUTOVER_AT
-    ? SCALE_TECHNICIAN_RATING
-    : SCALE_BLENDED;
+  return Number.isFinite(ms) && ms < TECH_RATING_CUTOVER_AT ? SCALE_BLENDED : SCALE_UNKNOWN;
 }
 
-// Marker when the score row's components are readable, cutover date otherwise.
+// The one comparability rule: same known scale. Two unknowns are not comparable.
+function isComparable(a, b) {
+  return Boolean(a) && a === b && a !== SCALE_UNKNOWN;
+}
+
+// Marker when the score row's components are readable, else the fallback above.
 function classifyScoreScale({ componentScores, at }) {
   if (componentScores !== null && componentScores !== undefined) {
     return scaleFromComponentScores(componentScores);
   }
-  return scaleFromCutoverDate(at);
+  return scaleWithoutProvenance(at);
 }
 
 // The instant a visit row is dated for the cutover fallback: a real timestamp
@@ -62,8 +75,9 @@ function visitInstant(row) {
 }
 
 // Which scale each visit's stored score was recorded on, from the score row's
-// provenance. Best-effort: a failed lookup leaves the map empty and callers
-// fall back to the cutover date (scaleForVisit).
+// provenance. A failed lookup leaves the map empty, which FAILS CLOSED: pre-
+// cutover visits are still blended by date, post-cutover ones are unknown
+// (scaleForVisit), so an outage never turns into an up/down claim.
 async function loadScaleMap(knex, serviceRecordIds) {
   const scales = new Map();
   const ids = [...new Set((serviceRecordIds || []).filter(Boolean).map(String))];
@@ -80,7 +94,7 @@ async function loadScaleMap(knex, serviceRecordIds) {
 
 function scaleForVisit(scaleMap, row) {
   const known = scaleMap?.get(String(row?.id));
-  return known || scaleFromCutoverDate(visitInstant(row));
+  return known || scaleWithoutProvenance(visitInstant(row));
 }
 
 module.exports = {
@@ -89,9 +103,11 @@ module.exports = {
   scaleForVisit,
   SCALE_TECHNICIAN_RATING,
   SCALE_BLENDED,
+  SCALE_UNKNOWN,
   TECH_RATING_CUTOVER_AT,
   TECH_RATING_CUTOVER_DATE,
   scaleFromComponentScores,
-  scaleFromCutoverDate,
+  scaleWithoutProvenance,
+  isComparable,
   classifyScoreScale,
 };
