@@ -141,6 +141,8 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     ['other', 'an estimate sent to the customer', (w) => estimate(w), 'estimate_sent_to_same_customer_within_14_days', 'estimate_sent'],
     ['callback', 'a completed inbound call from the caller', (w) => inbound(w), 'completed_inbound_call_from_caller_within_14_days', 'inbound_call'],
     ['callback', 'a staff email to the customer', (w) => staffEmail(w), 'staff_email_to_customer_within_14_days', 'email_sent'],
+    ['callback', 'a visit booked for the customer', (w) => visit(w), 'visit_booked_for_same_customer_within_14_days', 'appointment_booked'],
+    ['callback', 'an estimate sent to the customer', (w) => estimate(w), 'estimate_sent_to_same_customer_within_14_days', 'estimate_sent'],
     ['send_estimate', 'a visit booked for the customer', (w) => visit(w), 'visit_booked_for_same_customer_within_14_days', 'appointment_booked'],
     ['send_estimate', 'a visit completed for the customer', (w) => visit(w, { status: 'completed', completed_at: later(), created_at: new Date(Date.now() - 20 * DAY) }), 'visit_completed_for_same_customer_within_14_days', 'visit_completed'],
     ['schedule_visit', 'a visit completed for the customer', (w) => visit(w, { status: 'completed', completed_at: later(), created_at: new Date(Date.now() - 20 * DAY) }), 'visit_completed_for_same_customer_within_14_days', 'visit_completed'],
@@ -170,7 +172,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(new Date(closed.fulfilled_at).getTime()).toBe(new Date(closed.fulfillment.matched_at).getTime());
   });
 
-  test('near-misses do not close: a voicemail or short inbound call, a cancelled or generated visit, an unsent, foreign, self-addressed or longer-address email, before the call, after the window', async () => {
+  test('near-misses do not close: a voicemail, short or AI-only inbound call, a cancelled or generated visit, an unsent, foreign, self-addressed or longer-address email, before the call, after the window', async () => {
     const stayOpen = async (kind, seed) => {
       const w = await world({ kind });
       await seed(w);
@@ -179,6 +181,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     };
     await stayOpen('callback', (w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) }));
     await stayOpen('callback', (w) => inbound(w, { duration_seconds: 40 }));
+    await stayOpen('callback', (w) => inbound(w, { call_outcome: 'ai_handled' }));
     await stayOpen('callback', (w) => inbound(w, { status: 'no-answer' }));
     await stayOpen('callback', (w) => inbound(w, { created_at: new Date(Date.now() - 3 * DAY - 60 * 1000) }));
     await stayOpen('callback', (w) => inbound(w, { created_at: new Date(Date.now() - 3 * DAY + 15 * DAY) }));
@@ -229,23 +232,23 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(await row(theirs.commitment.id)).toMatchObject({ status: 'open', fulfillment: { record_id: back.id, strength: 'association' } });
   });
 
-  test('customer left: a churn or deletion after the call dismisses the Waves promise with the proof and no human verdict; one before the call, or the customer\'s own promise, does not', async () => {
+  test('customer left: a churn after the call dismisses the Waves promise with the proof and no human verdict; a churn before the call, a soft delete (a merge), or the customer\'s own promise does not', async () => {
     const churned = await world({ kind: 'send_report', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
     const deleted = await world({ kind: 'other', customerExtra: { deleted_at: new Date(Date.now() - 1 * DAY) } });
     const before = await world({ kind: 'other', customerExtra: { churned_at: new Date(Date.now() - 10 * DAY).toISOString().slice(0, 10) } });
     const theirs = await world({ kind: 'send_photos', party: 'customer', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
     for (const w of [churned, deleted, before, theirs]) await cc.refreshFulfillment(db, w.call.id);
-    for (const w of [churned, deleted]) {
-      expect(await row(w.commitment.id)).toMatchObject({
-        status: 'dismissed', human_state: null, fulfilled_at: null,
-        fulfillment: { kind: 'customer_left', basis: 'customer_left_after_promise', strength: 'association', record_type: 'customer', record_id: w.customerId },
-      });
-    }
+    expect(await row(churned.commitment.id)).toMatchObject({
+      status: 'dismissed', human_state: null, fulfilled_at: null,
+      fulfillment: { kind: 'customer_left', basis: 'customer_left_after_promise', strength: 'association', record_type: 'customer', record_id: churned.customerId },
+    });
+    // A merge soft-deletes the duplicate profile while the caller is still a customer: never "left".
+    expect(await row(deleted.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     expect(await row(before.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     expect(await row(theirs.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     // Off: nobody is dismissed.
     process.env.PROMISE_EVIDENCE_CLOSE = 'false';
-    const off = await world({ kind: 'other', customerExtra: { deleted_at: new Date(Date.now() - 1 * DAY) } });
+    const off = await world({ kind: 'other', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
     await cc.refreshFulfillment(db, off.call.id);
     expect(await row(off.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
   });
@@ -313,7 +316,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   test('listAutoClosedCommitments: association closes and customer-left dismissals in the window, newest first; never direct, manual, human-dismissed, reopened, customer-party or out-of-window rows', async () => {
     const kept = await world({ kind: 'other' });
     await visit(kept);
-    const left = await world({ kind: 'send_report', customerExtra: { deleted_at: new Date(Date.now() - 1 * DAY) } });
+    const left = await world({ kind: 'send_report', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
     const direct = await world({ kind: 'other' });
     const manual = await world({ kind: 'other' });
     const humanDismissed = await world({ kind: 'other' });

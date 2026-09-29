@@ -1626,6 +1626,9 @@ async function inboundConversation(conn, { callId, after, until, phone }) {
     .where("duration_seconds", ">=", 60)
     .where("v2_extraction_status", "valid")
     .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+    // A person took it: a call the AI agent handled on its own is not Waves
+    // getting back to the caller (a transfer to staff still counts).
+    .whereRaw("COALESCE(call_outcome, '') <> 'ai_handled'")
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
     .modify((b) => phoneWhere(b, "from_phone", phone))
     .orderBy("created_at", "asc")
@@ -1719,7 +1722,9 @@ const EVIDENCE = {
 // Kind → the follow-up evidence beyond what its own case already looks for.
 const EVIDENCE_BY_KIND = {
   other: ["staff_call", "staff_text", "inbound_call", "visit_booked", "visit_done", "estimate"],
-  callback: ["inbound_call", "staff_email"],
+  // A callback exists to reach a decision: once the visit it was about is
+  // booked, or the quote went out, the call back is moot.
+  callback: ["inbound_call", "staff_email", "visit_booked", "estimate"],
   send_estimate: ["visit_booked", "visit_done"],
   schedule_visit: ["visit_done"],
   send_report: ["report_text", "report_email", "staff_email"],
@@ -1750,20 +1755,19 @@ async function evidenceBoundary(conn, commitment, call) {
   return renewed && renewed.getTime() > ended.getTime() ? renewed : ended;
 }
 
-// The promise is moot once the customer it was made to has left: churned or
-// deleted after the boundary (no window). refreshFulfillment writes it as a
-// dismissal, never as a kept promise.
+// The promise is moot once the customer it was made to has left: churned
+// after the boundary (no window). refreshFulfillment writes it as a
+// dismissal, never as a kept promise. A soft delete is NOT leaving — a
+// merge soft-deletes the duplicate profile while the caller is still a
+// customer on the surviving one.
 const CUSTOMER_LEFT = "customer_left";
 async function customerLeftProof(conn, commitment, call) {
   const after = await evidenceBoundary(conn, commitment, call);
   if (!call?.customer_id || !after) return null;
   const customer = await conn("customers").where({ id: call.customer_id })
-    .first("id", "deleted_at", conn.raw("to_char(churned_at, 'YYYY-MM-DD') as churned_day"));
-  if (!customer) return null;
-  const deleted = customer.deleted_at && new Date(customer.deleted_at).getTime() > after.getTime() ? new Date(customer.deleted_at) : null;
-  const churned = customer.churned_day && customer.churned_day > etDateString(after) ? parseETDateTime(`${customer.churned_day}T12:00`) : null;
-  const left = deleted || churned;
-  return left ? { kind: CUSTOMER_LEFT, record_type: "customer", record_id: customer.id, matched_at: left, strength: "association", basis: "customer_left_after_promise" } : null;
+    .first("id", conn.raw("to_char(churned_at, 'YYYY-MM-DD') as churned_day"));
+  if (!customer?.churned_day || customer.churned_day <= etDateString(after)) return null;
+  return { kind: CUSTOMER_LEFT, record_type: "customer", record_id: customer.id, matched_at: parseETDateTime(`${customer.churned_day}T12:00`), strength: "association", basis: "customer_left_after_promise" };
 }
 
 async function resolveFulfillment(conn, commitment, call) {
