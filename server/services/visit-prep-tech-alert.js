@@ -81,9 +81,13 @@ async function writeCard(scheduledServiceId) {
     if (!row?.technician_id) return null;
     // Cancelled or completed since the photos landed (a transition keeps
     // technician_id): no longer a visit on anyone's route (Codex #5303 r2).
-    if (TERMINAL_ROW_STATUSES.includes(row.status)) return null;
+    // 'rescheduled' also leaves the route (awaiting a new date) while
+    // keeping technician_id (Codex #5303 r3 P1).
+    if (TERMINAL_ROW_STATUSES.includes(row.status) || row.status === 'rescheduled') return null;
     const technicianId = String(row.technician_id);
-    const tech = await trx('technicians').where({ id: technicianId })
+    // FOR SHARE: a Team edit that makes this tech office-only either lands
+    // before this read or waits for the card (Codex #5303 r3 P2).
+    const tech = await trx('technicians').where({ id: technicianId }).forShare()
       .first('id', 'employment_status', 'field_dispatchable');
     if (!isAssignable(tech)) return null;
     await trx('tech_notifications').insert({

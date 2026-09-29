@@ -26,6 +26,7 @@ function chain(firstImpl) {
 }
 
 let mockLastSvcChain = null;
+let mockLastTechChain = null;
 
 // scheduled_services.technician_id and technicians rows are independently
 // stubbed per test — the module re-reads BOTH fresh on every call, never
@@ -45,6 +46,7 @@ function prime({
     }
     if (table === 'technicians') {
       const c = chain(null);
+      mockLastTechChain = c;
       c.where = jest.fn((arg) => { c.first = jest.fn(async () => techs[arg.id] || null); return c; });
       return c;
     }
@@ -113,6 +115,8 @@ describe('notifyTechVisitPrepPhotos', () => {
       // The visit row is read FOR SHARE inside the card's transaction.
       expect(db.transaction).toHaveBeenCalledTimes(1);
       expect(mockLastSvcChain.forShare).toHaveBeenCalled();
+      // The technician row too, so an office-only edit can't slip in.
+      expect(mockLastTechChain.forShare).toHaveBeenCalled();
       expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
         title: 'A customer sent photos for a visit on your route',
         body: '',
@@ -149,7 +153,7 @@ describe('notifyTechVisitPrepPhotos', () => {
       }));
     });
 
-    test.each(['cancelled', 'completed', 'skipped', 'no_show'])('a %s visit (still carrying its technician) → no card, no push', async (status) => {
+    test.each(['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'])('a %s visit (still carrying its technician) → no card, no push', async (status) => {
       prime({ status });
       await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
       expect(mockInsertCard).not.toHaveBeenCalled();
