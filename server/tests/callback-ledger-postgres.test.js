@@ -196,6 +196,8 @@ run('callback ledger on PostgreSQL', () => {
   // non-voicemail extraction.
   const returnedCall = (at, callId) => trx('call_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: phone,
     status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+    // Placed through the staff bridge (the shared personCallBack rule reads the source).
+    source: 'admin-callback',
     metadata: { relatedCallId: callId, customer_leg: { status: 'completed', duration_seconds: 120, ended_at: at.toISOString() } },
     created_at: at, updated_at: at });
 

@@ -1748,6 +1748,30 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Visit prep pest read recovery sweep (GATE_VISIT_PREP_READ_SWEEP, dark):
+  // every 15 minutes retries a never-attempted 'none' read or a stop
+  // reclassified to pest since an 'unsupported' verdict (never pending or
+  // failed rows). The gate is checked BEFORE the cron lock, so off means no
+  // query and no job_health write; runExclusive so a deploy overlap can't
+  // double-spend the daily read cap on the same backlog.
+  cron.schedule('0 */15 * * * *', async () => {
+    try {
+      if (!require('../config/feature-gates').visitPrepReadSweepLive()) return;
+      const tickStartedAt = Date.now();
+      const result = await runExclusive('visit-prep-read-sweep', () => require('./visit-prep-pest-read-sweep').sweepVisitPrepPestReads());
+      // A tick that got no DB connection: record the miss through
+      // recordMissedTick (writes only if this tick's window has no start or
+      // success yet, so another replica's run and runExclusive's own record
+      // are never overwritten or double-counted). lease_held is not a miss.
+      if (result?.skipped && result.reason !== 'lease_held') {
+        await recordMissedTick('visit-prep-read-sweep', tickStartedAt, `tick skipped: ${result.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`Visit-prep read sweep tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[visit-prep-read-sweep] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // The same watchdog and persisted identities own reminders before and
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
