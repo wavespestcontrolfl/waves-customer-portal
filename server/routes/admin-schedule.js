@@ -17770,18 +17770,42 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
       // postdates some schemas.
       if (await conn.schema.hasTable('appointment_card_requests')
         && await conn.schema.hasColumn('appointment_card_requests', 'prepay_invoice_id')) {
-        const prepayLinked = await conn('appointment_card_requests as acr')
+        // The prepay covers the WHOLE plan (secure-appointment-plans.js
+        // mints visitCount applications), but the request row sits on ONE
+        // visit — so match a request on any visit in the same series (same
+        // template root) and attribute it to every visit here in that series.
+        const hasParentCol = await conn.schema.hasColumn('scheduled_services', 'recurring_parent_id');
+        const rootOf = new Map(ids.map((id) => [String(id), String(id)]));
+        if (hasParentCol) {
+          const seriesRows = await conn('scheduled_services').whereIn('id', ids).select('id', 'recurring_parent_id');
+          for (const row of seriesRows) rootOf.set(String(row.id), String(row.recurring_parent_id || row.id));
+        }
+        const roots = [...new Set(rootOf.values())];
+        const prepayQuery = conn('appointment_card_requests as acr')
           .join('invoices as inv', 'inv.id', 'acr.prepay_invoice_id')
-          .whereIn('acr.scheduled_service_id', ids)
-          .whereNotIn('inv.status', [...NO_MONEY_HELD])
-          .select(
-            'acr.scheduled_service_id as scheduled_service_id',
-            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
-          );
-        invoiced.push(...prepayLinked.map((row) => ({
-          ...row,
-          _openReason: 'on an annual prepay invoice from the card-confirmation page that is still open at the old price',
-        })));
+          .join('scheduled_services as rs', 'rs.id', 'acr.scheduled_service_id')
+          .whereNotIn('inv.status', [...NO_MONEY_HELD]);
+        if (hasParentCol) {
+          prepayQuery.where(function () { this.whereIn('rs.id', roots).orWhereIn('rs.recurring_parent_id', roots); });
+        } else {
+          prepayQuery.whereIn('rs.id', roots);
+        }
+        const prepayLinked = await prepayQuery.select(
+          'rs.id as req_visit_id',
+          ...(hasParentCol ? ['rs.recurring_parent_id as req_parent_id'] : []),
+          'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+        );
+        for (const row of prepayLinked) {
+          const rowRoot = String(row.req_parent_id || row.req_visit_id);
+          for (const [visitId, root] of rootOf) {
+            if (root !== rowRoot) continue;
+            invoiced.push({
+              ...row,
+              scheduled_service_id: ids.find((id) => String(id) === visitId),
+              _openReason: 'on an annual prepay invoice from the card-confirmation page that is still open at the old price',
+            });
+          }
+        }
       }
       // Combined first-application invoice, non-anchor member (see the
       // comment above this function). scheduled_services.first_application_

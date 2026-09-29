@@ -282,7 +282,7 @@ describe('liveInvoice reaches direct and indirect invoices alike', () => {
 // (owner-ordered follow-up to #5253, Codex round 9): two more indirect
 // links, read only under liveInvoice, same shape as the SR/packet reads.
 describe('liveInvoice reaches the /secure annual-prepay invoice link', () => {
-  const fixture = (rows) => makeConn({
+  const fixture = (rows, seriesRows = [{ id: 'v1', recurring_parent_id: null }]) => makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
       estimate_card_holds: [],
@@ -292,17 +292,18 @@ describe('liveInvoice reaches the /secure annual-prepay invoice link', () => {
       'visit_completion_packet_items as p': [],
       'appointment_card_requests as acr': rows,
       'scheduled_services as ss': [],
+      scheduled_services: seriesRows,
     },
   });
 
   test('an open /secure prepay invoice blocks with the prepay-specific reason', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v1', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
+    const conn = fixture([{ req_visit_id: 'v1', req_parent_id: null, status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
     const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
     expect(covered.get('v1')).toMatch(/annual prepay invoice from the card-confirmation page/);
   });
 
   test('a PAID /secure prepay invoice blocks with the generic "money on it" reason', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v1', status: 'paid', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
+    const conn = fixture([{ req_visit_id: 'v1', req_parent_id: null, status: 'paid', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
     const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
     expect(covered.get('v1')).toMatch(/money on it/);
   });
@@ -314,9 +315,26 @@ describe('liveInvoice reaches the /secure annual-prepay invoice link', () => {
   });
 
   test('without liveInvoice the /secure prepay link is not read', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v1', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
+    const conn = fixture([{ req_visit_id: 'v1', req_parent_id: null, status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
     const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }]);
     expect(covered.size).toBe(0);
+  });
+
+  test('a prepay picked on ANOTHER visit of the same series blocks this one (the prepay covers the whole plan)', async () => {
+    const conn = fixture(
+      [{ req_visit_id: 'v3', req_parent_id: 'p1', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }],
+      [{ id: 'v2', recurring_parent_id: 'p1' }],
+    );
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/annual prepay invoice from the card-confirmation page/);
+  });
+
+  test('a prepay in a DIFFERENT series does not block', async () => {
+    const conn = fixture(
+      [{ req_visit_id: 'v9', req_parent_id: 'p9', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }],
+      [{ id: 'v2', recurring_parent_id: 'p1' }],
+    );
+    expect((await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true })).size).toBe(0);
   });
 });
 
