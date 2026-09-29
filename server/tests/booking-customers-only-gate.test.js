@@ -212,6 +212,92 @@ describe('createSelfBooking — customers-only gate', () => {
     expect(result).toEqual(BEYOND_WINDOW);
   });
 
+  describe('wizard draft contact-linked to an ESTABLISHED customer (B11 — typed contact is not identity)', () => {
+    // public-quote links a draft to ANY customer matching the unverified
+    // contact the anonymous quoter typed, and returns the handoff token to
+    // that same anonymous caller. The token must not turn "I know a
+    // customer's phone + street" into "I am that customer".
+    const linkedDraft = () => ({
+      id: 'pe-victim', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, customer_phone: '941-555-0101',
+    });
+
+    test('the gate itself does not classify the matched contact: established and pre-customer rows behave identically up to address bind + slot validation', async () => {
+      // The established-customer refusal lives INSIDE the booking transaction
+      // (assertContactLinkedHandoffProvisional, unit-tested in
+      // booking-wizard-established-handoff.test.js) — after the address bind
+      // and signed-slot validation — so it is never an early oracle for "is
+      // this contact a customer" (Codex r1 P2). Here both classes flow on to
+      // the same next check…
+      firstResults.estimates = linkedDraft();
+      for (const stage of ['active_customer', 'new_lead', undefined]) {
+        firstResults.customers = { ...BEARER_ROW(), pipeline_stage: stage };
+        expect(await createSelfBooking({
+          ...strangerBody(),
+          customersOnly: true,
+          pricing_estimate_id: 'pe-victim',
+          estimate_token: mintEstimateHandoffToken('pe-victim'),
+        })).toEqual(BEYOND_WINDOW);
+      }
+      // …and a wrong street returns exactly today's address fix-it for both.
+      const wrongStreet = strangerBody();
+      wrongStreet.new_customer.address_line1 = '999 Other Rd';
+      const responses = [];
+      for (const stage of ['active_customer', 'new_lead']) {
+        firstResults.customers = { ...BEARER_ROW(), pipeline_stage: stage };
+        responses.push(await createSelfBooking({
+          ...wrongStreet,
+          customersOnly: true,
+          pricing_estimate_id: 'pe-victim',
+          estimate_token: mintEstimateHandoffToken('pe-victim'),
+        }));
+      }
+      expect(responses[0]).toEqual({
+        ok: false,
+        status: 400,
+        error: expect.stringMatching(/doesn't match what we have on file/i),
+      });
+      expect(responses[1]).toEqual(responses[0]);
+    });
+
+    test('the same draft books when the caller holds the verified portal session', async () => {
+      firstResults.estimates = linkedDraft();
+      firstResults.customers = { ...BEARER_ROW(), pipeline_stage: 'active_customer' };
+      const result = await createSelfBooking({
+        ...strangerBody(),
+        customersOnly: true,
+        authedCustomer: { ...BEARER_ROW(), pipeline_stage: 'active_customer' },
+        pricing_estimate_id: 'pe-victim',
+        estimate_token: mintEstimateHandoffToken('pe-victim'),
+      });
+      expect(result).toEqual(BEYOND_WINDOW);
+    });
+
+    test('a staff-issued accept link to the same customer still books (not contact-linked)', async () => {
+      firstResults.estimates = { id: 'est-9', customer_id: CUST_ID };
+      firstResults.customers = { ...BEARER_ROW(), pipeline_stage: 'active_customer' };
+      const result = await createSelfBooking({
+        ...strangerBody(),
+        customersOnly: true,
+        source_estimate_id: 'est-9',
+        accept_token: mintEstimateAcceptToken('est-9'),
+      });
+      expect(result).toEqual(BEYOND_WINDOW);
+    });
+
+    test('a draft linked to the quoter\'s OWN pre-customer lead row still books', async () => {
+      firstResults.estimates = linkedDraft();
+      for (const stage of ['new_lead', 'contacted', 'estimate_sent']) {
+        firstResults.customers = { ...BEARER_ROW(), pipeline_stage: stage };
+        expect(await createSelfBooking({
+          ...strangerBody(),
+          customersOnly: true,
+          pricing_estimate_id: 'pe-victim',
+          estimate_token: mintEstimateHandoffToken('pe-victim'),
+        })).toEqual(BEYOND_WINDOW);
+      }
+    });
+  });
+
   test('estimator handoff passes the gate for NON-pest quotes too (2026-07-23 estimator lockout)', async () => {
     // The wizard mints the handoff token for EVERY self-bookable quote shape,
     // not just quarterly pest — the token IS the gate pass, and a lawn-only
