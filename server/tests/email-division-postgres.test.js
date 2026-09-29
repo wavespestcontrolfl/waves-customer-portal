@@ -1,18 +1,20 @@
 // Email division — DB-backed reads against real migrated Postgres, synthetic
 // data only, rolled back per test. Skipped without DATABASE_URL; guarded to
-// this worktree's own waves_qa_emaildiv_visitdata or CI's waves_test. The
-// literal `const SKIP = !process.env.DATABASE_URL` line is the exact marker
-// the CI "DB-gated suites" step greps for (.github/workflows/tests.yml) to
+// this worktree's own waves_qa_emaildiv_visitdata, a sibling worktree's own
+// waves_qa_rating_default clone (owner ruling 2026-09-29, first-visit
+// default-flag lane), or CI's waves_test. The literal
+// `const SKIP = !process.env.DATABASE_URL` line is the exact marker the CI
+// "DB-gated suites" step greps for (.github/workflows/tests.yml) to
 // discover and run this file — without it CI silently skips it forever.
 const SKIP = !process.env.DATABASE_URL;
 const testUrl = process.env.DATABASE_URL;
 if (testUrl) {
   const url = new URL(testUrl);
   const localHost = ['localhost', '127.0.0.1'].includes(url.hostname);
-  const ownedQA = localHost && url.pathname === '/waves_qa_emaildiv_visitdata';
+  const ownedQA = localHost && ['/waves_qa_emaildiv_visitdata', '/waves_qa_rating_default'].includes(url.pathname);
   const ci = localHost && process.env.CI === 'true' && url.pathname === '/waves_test';
   if (!ownedQA && !ci) {
-    throw new Error('Email division Postgres tests require this worktree\'s own waves_qa_emaildiv_visitdata or CI\'s waves_test.');
+    throw new Error('Email division Postgres tests require this worktree\'s own waves_qa_emaildiv_visitdata or waves_qa_rating_default, or CI\'s waves_test.');
   }
 }
 const suite = SKIP ? describe.skip : describe;
@@ -397,6 +399,87 @@ suite('email division against real Postgres', () => {
     expect(byVisit.pest[1]).toBe(4);
     expect(counts.pest[1]).toBe(20);
     expect(byVisit.pest[2]).toBeUndefined();
+  });
+
+  // Owner ruling 2026-09-29: the untouched first-visit default rating (owner
+  // ruling 2026-09-24) must not count here — only a rating the technician
+  // actually chose does.
+  test('getActivityRatingAverages: excludes the untouched first-visit default (client_pest_rating_defaulted = true), keeps a technician-chosen rating of the same value', async () => {
+    const customerId = await makeCustomer();
+    // Chosen: the tech's own 5 — counts.
+    await makeTechRatedVisits(customerId, 25, {
+      visit_number: 1, service_line: 'pest', client_pest_rating: 5, client_pest_rating_defaulted: false, service_date: '2026-09-25',
+    });
+    // Defaulted: the untouched first-visit prefill, stamped 1 (a value that
+    // would visibly drag the average if it leaked in) — excluded outright.
+    await makeTechRatedVisits(customerId, 25, {
+      visit_number: 1, service_line: 'pest', client_pest_rating: 1, client_pest_rating_defaulted: true, service_date: '2026-09-25',
+    });
+    const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
+    expect(byVisit.pest[1]).toBe(5); // unmoved by the excluded defaults
+    expect(counts.pest[1]).toBe(25); // only the chosen ratings
+  });
+
+  // Legacy rows (written before the client_pest_rating_defaulted column
+  // existed, 2026-09-29) carry NULL. One could be the untouched default only
+  // if it is a customer's FIRST PERFORMED visit on the line (the default's
+  // own history rule — not visit_number, which also counts inspection-only,
+  // declined, incomplete and internal closeouts; codex round 1 on #5330),
+  // rated exactly 5 and dated at/after the default's 2026-09-24T10:21:12Z
+  // ship instant. Only such a row is excluded on suspicion. Each fixture
+  // customer gets explicit created_at values: inside one test transaction
+  // now() is constant, and "prior" means a record that existed first.
+  async function legacyCohort(count, { line, ratingAt, prior = null, visit }) {
+    for (let i = 0; i < count; i++) {
+      const customerId = await makeCustomer();
+      if (prior) {
+        await makeVisit(customerId, { service_line: line, created_at: '2026-09-20T12:00:00Z', ...prior });
+      }
+      await makeTechRatedVisits(customerId, 1, {
+        service_line: line, client_pest_rating: 5, client_pest_rating_at: ratingAt, created_at: ratingAt, ...visit,
+      });
+    }
+  }
+
+  test('getActivityRatingAverages: a legacy NULL-flag 5 on a customer\'s first performed visit, dated AFTER the default shipped, is excluded on suspicion', async () => {
+    await legacyCohort(25, { line: 'mosquito', ratingAt: '2026-09-25T12:00:00Z', visit: { visit_number: 1 } });
+    const { byVisit } = await getActivityRatingAverages({ conn: trx });
+    expect(byVisit.mosquito?.[1]).toBeUndefined();
+  });
+
+  test('getActivityRatingAverages: the first PERFORMED visit is judged by the default\'s history rule, not visit_number — a 5 on visit 2 after an inspection-only closeout is excluded', async () => {
+    await legacyCohort(25, {
+      line: 'mosquito',
+      ratingAt: '2026-09-25T12:00:00Z',
+      prior: { visit_number: 1, structured_notes: { visitOutcome: 'inspection_only' } },
+      visit: { visit_number: 2 },
+    });
+    const { byVisit } = await getActivityRatingAverages({ conn: trx });
+    expect(byVisit.mosquito?.[2]).toBeUndefined();
+  });
+
+  test('getActivityRatingAverages: a legacy NULL-flag 5 on a LATER performed visit (a performed visit came first) is kept — the default never applies there', async () => {
+    await legacyCohort(25, {
+      line: 'mosquito',
+      ratingAt: '2026-09-25T12:00:00Z',
+      prior: { visit_number: 1, client_pest_rating: 2, client_pest_rating_source: 'technician', service_date: '2026-09-15' },
+      visit: { visit_number: 2 },
+    });
+    const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
+    expect(byVisit.mosquito[2]).toBe(5);
+    expect(counts.mosquito[2]).toBe(25);
+  });
+
+  test('getActivityRatingAverages: a legacy NULL-flag first-visit rating of 5 dated BEFORE the default shipped is kept — no default existed yet', async () => {
+    const customerId = await makeCustomer();
+    // No client_pest_rating_at (falls back to service_date), which predates
+    // the 2026-09-24 ship instant.
+    await makeTechRatedVisits(customerId, 25, {
+      visit_number: 1, service_line: 'rodent', client_pest_rating: 5, service_date: '2026-09-01',
+    });
+    const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
+    expect(byVisit.rodent[1]).toBe(5);
+    expect(counts.rodent[1]).toBe(25);
   });
 
   // Four cities, one recompute: Ellenton (4 visits, below the 5-visit floor

@@ -184,8 +184,13 @@ const OUR_NUMBER = '+19415550100';
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
     // Staff called back and reached the lead an hour ago — the SLA pager's
-    // own "kept" evidence (an ordinary outbound call, 60s+, unlinked).
-    const reached = callRow(60, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90 });
+    // own "kept" evidence (an ordinary outbound call, 60s+, unlinked, placed
+    // through the staff bridge, a live conversation: staff-contact.js
+    // personCallBack).
+    const reached = callRow(60, {
+      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90, source: 'admin-click',
+      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: 'false' } }),
+    });
     const back = callRow(0);
     await mockConn('call_log').insert([earlier, reached, back]);
     await mockConn('call_commitments').insert(commitment);
