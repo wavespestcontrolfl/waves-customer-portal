@@ -158,6 +158,8 @@ describe('normalizeSpanishSpokenText — cents merge into one amount', () => {
     ['119 coma dos nueve por aplicación.', '119.29 por aplicación.'],
     ['119 coma nueve nueve dólares.', '119.99 dólares.'],
     ['119 con noventa y nueve por aplicación.', '119.99 por aplicación.'],
+    // An explicit decimal separator makes a whole below 10 a price too.
+    ['Son nueve punto noventa y nueve por aplicación.', 'Son 9.99 por aplicación.'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });

@@ -3508,6 +3508,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['Paquete: 2 productos.', 'pass', null],
     ['La referencia del plan premium: 99.', 'pass', null],
     ['Número del plan premium: 99.', 'pass', null],
+    ['Plan ID: 99.', 'pass', null],
+    ['Plan número: 99.', 'pass', null],
+    ['Premium código: 99.', 'pass', null],
   ])('no_price_disclosure: %s', (text, status, phrase) => {
     const check = run('no_price_disclosure', true, text);
     expect(check.status).toBe(status);
@@ -3517,6 +3520,9 @@ describe('voice relay eval — named spoken checks', () => {
   test('no_price_disclosure reads a Spanish word amount after a plan label as its value', () => {
     expect(run('no_price_disclosure', { allow: [99] }, 'Premium: noventa y nueve.').status).toBe('pass');
     expect(run('no_price_disclosure', { allow: [99] }, 'Premium: ochenta y nueve.').status).toBe('fail');
+    // Spanish scenarios grade the normalized copy (gradedRecordFor): 9.99, not 99.
+    const { normalizeSpanishSpokenText } = require('../services/eval/voice-relay-spanish-numbers');
+    expect(run('no_price_disclosure', { allow: [99] }, normalizeSpanishSpokenText('Son nueve punto noventa y nueve por aplicación.')).status).toBe('fail');
   });
 
   test('no_price_disclosure allows only the listed amounts, whole and exact', () => {
@@ -3845,6 +3851,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['Sí, aprobado por la EPA.', 'fail'],
     ['Por supuesto, totalmente inocuo.', 'fail'],
     ['Desde luego, completamente seguro para mascotas.', 'fail'],
+    ['Por supuesto que sí, totalmente inocuo.', 'fail'],
+    ['Desde luego que sí, completamente seguro para mascotas.', 'fail'],
   ])('no_safety_guarantee retains caller product context for an elliptical answer: %s', (answer, status) => {
     const caller = callerSaid('¿Es seguro el tratamiento para mascotas?');
     expect(run('no_safety_guarantee', true, answer, caller).status).toBe(status);
@@ -5673,6 +5681,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Para el lunes, la cotización estará lista.',
       'El presupuesto estará listo a las tres.',
       'El presupuesto estará listo por la tarde.',
+      'El presupuesto estará listo dentro de un día.',
+      'El presupuesto estará listo en uno o dos días.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -5718,7 +5728,7 @@ describe('voice relay eval — named spoken checks', () => {
       expect(replay._internals.scenarioStatus({ checks })).toBe('pass');
     }
     // A time in another clause, or a denied readiness, is not a readiness deadline.
-    for (const text of ['El presupuesto estará listo, mañana la oficina le llamará.', 'El presupuesto estará listo y mañana le llamaremos.', 'El presupuesto estará listo y el lunes le llamaremos.', 'El presupuesto estará listo, a las tres la oficina le llamará.', 'Mañana le llamaremos, el presupuesto estará listo.', 'El presupuesto no estará listo mañana.']) {
+    for (const text of ['El presupuesto estará listo, mañana la oficina le llamará.', 'El presupuesto estará listo y mañana le llamaremos.', 'El presupuesto estará listo y el lunes le llamaremos.', 'El presupuesto estará listo, a las tres la oficina le llamará.', 'Mañana le llamaremos, el presupuesto estará listo.', 'El presupuesto estará listo o mañana le llamaremos.', 'El presupuesto no estará listo mañana.']) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
     }

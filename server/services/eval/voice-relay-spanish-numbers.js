@@ -208,7 +208,9 @@ function convertWholeAndCents(text) {
   return text.replace(WHOLE_AND_CENTS_WORDS_RE, (match, wholeRun, connector, centsRun) => {
     const whole = parseSpanishCardinal(wholeRun);
     const fraction = decimalDigits(centsRun, connector.toLowerCase());
-    if (!Number.isFinite(whole) || whole < 10 || fraction === null) return match;
+    // A whole below 10 is a price only with an explicit decimal separator:
+    // "nueve punto noventa y nueve" is 9.99, "dos con cinco" stays words.
+    if (!Number.isFinite(whole) || (whole < 10 && connector.toLowerCase() === 'con') || fraction === null) return match;
     return `${whole}.${fraction}${/\s$/.test(match) ? ' ' : ''}`;
   });
 }

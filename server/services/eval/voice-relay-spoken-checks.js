@@ -178,7 +178,7 @@ const SPANISH_CONFIRMED_VISIT_CLAIM_RE = new RegExp(
 );
 const SPANISH_FUTURE_VISIT_CONFIRMATION_RE = new RegExp(`\\b(?:cita|visita)\\b[^.!?;]{0,45}\\bser[aá](?![a-záéíóúñü])[^.!?;]{0,45}\\b${SPANISH_CONFIRMED_VISIT_PARTICIPLE}\\b`, 'i');
 const SPANISH_PESTICIDE_SUBJECT = '(?:tratamientos?|productos?|pesticidas?|insecticidas?|qu[ií]micos?|aplicaci[oó]n(?:es)?|rociados?|cebos?)';
-const SPANISH_AFFIRMATIVE_INTRO = '(?:(?:s[ií]|claro(?:\\s+que\\s+s[ií])?|por\\s+supuesto|desde\\s+luego|sin\\s+duda)\\s*[,;:]?\\s*)+';
+const SPANISH_AFFIRMATIVE_INTRO = '(?:(?:s[ií]|claro|por\\s+supuesto|desde\\s+luego|sin\\s+duda)(?:\\s+que\\s+s[ií])?\\s*[,;:]?\\s*)+';
 const SPANISH_PESTICIDE_SAFETY_GUARANTEE_RE = new RegExp(`\\b(?:(?:el|la|los|las|este|esta|estos|estas|nuestro|nuestra|nuestros|nuestras)\\s+)?${SPANISH_PESTICIDE_SUBJECT}\\b[^.!?;]{0,60}\\b(?:es|son|sea(?:n)?|ser[aá]n?|queda(?:n)?|resulta(?:n)?)\\s+[^.!?;]{0,25}\\b(?:segur[oa]s?|inocu[oa]s?)\\b|\\b(?:segur[oa]s?|inocu[oa]s?)\\b[^.!?;]{0,45}\\b${SPANISH_PESTICIDE_SUBJECT}\\b`, 'i');
 const SPANISH_IMPLICIT_SAFETY_GUARANTEE_RE = new RegExp(`(?:\\b(?:es|son|sea(?:n)?|ser[aá]n?|queda(?:n)?|resulta(?:n)?)\\s+[^.!?;]{0,25}\\b(?:segur[oa]s?|inocu[oa]s?)\\b|^\\s*(?:${SPANISH_AFFIRMATIVE_INTRO})?(?:(?:completa|total|absoluta)mente|muy)?\\s*(?:segur[oa]s?|inocu[oa]s?)\\b)`, 'i');
 const SPANISH_NO_RISK_GUARANTEE_RE = new RegExp(`\\b${SPANISH_PESTICIDE_SUBJECT}\\b[^.!?;]{0,45}\\bno\\s+(?:tiene(?:n)?|presenta(?:n)?|supone(?:n)?)\\s+(?:ning[uú]n\\s+)?(?:riesgos?|peligros?|daños?)\\b`, 'i');
@@ -726,7 +726,10 @@ const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applica
 // amount_requires_unit so disclosure and unit enforcement see the same construction.
 const PLAN_NOUN = '(?:programa|plan|premium|mejorad[oa]|b[aá]sic[oa]|servicio|tratamiento|precio|opci[oó]n|paquete|costo|tarifa|program|enhanced|basic|service|treatment|price|option|package|cost|rate)';
 const PLAN_COPULA = `\\b${PLAN_NOUN}\\b[^.!?;,\\d$]{0,30}?\\b(?:es|son|ser[íi]an?|queda\\s+en|est[áa]\\s+en|is|are|would\\s+be|will\\s+be)\\s+(?:de\\s+|about\\s+|around\\s+)?`;
-const LABEL_ID_NOUN_BEFORE = '(?<![a-záéíóúñü])(?:referencia|n[uú]mero|c[oó]digo|identificador|id|folio|orden|pedido|confirmaci[oó]n|reserva(?:ci[oó]n)?|reference|number|code|order|confirmation)\\s+(?:del?\\s+)?(?:(?:el|la|los|las|su|sus)\\s+)?(?:[a-záéíóúñü]+\\s+){0,2}';
+const LABEL_ID_NOUN = '(?:referencia|n[uú]mero|c[oó]digo|identificador|id|folio|orden|pedido|confirmaci[oó]n|reserva(?:ci[oó]n)?|reference|number|code|order|confirmation)';
+// Up to two words between a plan noun and its label mark, none an identifier.
+const LABEL_WORDS = `(?:\\s+(?!${LABEL_ID_NOUN}(?![a-záéíóúñü]))[a-záéíóúñü]+){0,2}`;
+const LABEL_ID_NOUN_BEFORE = `(?<![a-záéíóúñü])${LABEL_ID_NOUN}\\s+(?:del?\\s+)?(?:(?:el|la|los|las|su|sus)\\s+)?(?:[a-záéíóúñü]+\\s+){0,2}`;
 const PER_UNIT_CONNECTOR = '(?:per|an?|each|every|for each|for every|por(?:\\s+cada)?|cada)';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
@@ -744,8 +747,8 @@ const AMOUNT_RES = Object.freeze([
   // A labeled plan price: "Premium: 99" anywhere in the sentence unless an
   // identifier names it ("Número del plan premium: 99"); "El premium, 99"
   // only opening one, where the comma is not a clause break.
-  new RegExp(`(?<!${LABEL_ID_NOUN_BEFORE})\\b${PLAN_NOUN}\\b(?:\\s+[a-záéíóúñü]+){0,2}\\s*[=:]\\s*(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}`, 'gi'),
-  new RegExp(`(?:^|[.!?;]\\s*)(?:(?:el|la|un|una)\\s+)?${PLAN_NOUN}\\b(?:\\s+[a-záéíóúñü]+){0,2}\\s*[,-]\\s*(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}`, 'gi'),
+  new RegExp(`(?<!${LABEL_ID_NOUN_BEFORE})\\b${PLAN_NOUN}\\b${LABEL_WORDS}\\s*[=:]\\s*(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}`, 'gi'),
+  new RegExp(`(?:^|[.!?;]\\s*)(?:(?:el|la|un|una)\\s+)?${PLAN_NOUN}\\b${LABEL_WORDS}\\s*[,-]\\s*(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -1397,9 +1400,10 @@ const ESTIMATE_READINESS_ES_SOURCE = `(?:(?:(?:estar[aá](?:n)?|quedar[aá](?:n)
 const ESTIMATE_TIMING_PREDICATE_SOURCE = `(?:${ESTIMATE_DELIVERY_ES_SOURCE}|${ESTIMATE_READINESS_ES_SOURCE})`;
 const ESTIMATE_DELIVERY_DATE_SOURCE = `(?:el\\s+pr[oó]ximo\\s+)?(?:${WEEKDAYS})|(?:esta|la\\s+pr[oó]xima)\\s+semana|la\\s+semana\\s+(?:que\\s+viene|entrante)|(?:el\\s+)?(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')})`;
 const ESTIMATE_DELIVERY_CLOCK_SOURCE = '(?:(?:(?:a|para)\\s+la\\s+una|(?:a|para|antes\\s+de)\\s+las\\s+(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce))(?:\\s+de\\s+la\\s+(?:mañana|tarde|noche))?|(?:al|a(?:\\s+la)?|para(?:\\s+(?:el|la))?|antes\\s+(?:del|de(?:\\s+la)?))\\s+(?:mediodía|medianoche)|(?:por|durante)\\s+la\\s+(?:mañana|tarde|noche))';
+const ESTIMATE_DURATION_COUNT = `(?:\\d+|un[oa]?|media|${DAY_WORDS_ES})`;
 // Readiness is judged only by the clause-bound pass below, so it carries every
 // time form the delivery passes know.
-const ESTIMATE_READINESS_TIME_SOURCE = `(?:${ESTIMATE_DELIVERY_DATE_SOURCE}|hoy|mañana|pasado\\s+mañana|esta\\s+(?:mañana|tarde|noche)|(?:en|dentro\\s+de)\\s+(?:\\d+|${DAY_WORDS_ES})\\s+(?:minutos?|horas?|d[ií]as?|semanas?)|${ESTIMATE_DELIVERY_CLOCK_SOURCE}|${SPANISH_QUALITATIVE_VISIT_TIME_RE.source})`;
+const ESTIMATE_READINESS_TIME_SOURCE = `(?:${ESTIMATE_DELIVERY_DATE_SOURCE}|hoy|mañana|pasado\\s+mañana|esta\\s+(?:mañana|tarde|noche)|(?:en|dentro\\s+de)\\s+${ESTIMATE_DURATION_COUNT}(?:\\s+(?:o|u|a)\\s+${ESTIMATE_DURATION_COUNT})?\\s+(?:minutos?|horas?|d[ií]as?|semanas?)|${ESTIMATE_DELIVERY_CLOCK_SOURCE}|${SPANISH_QUALITATIVE_VISIT_TIME_RE.source})`;
 const ESTIMATE_DELIVERY_CLAIM_SOURCE = `(?:${ESTIMATE_DELIVERY_ES_SOURCE}[^.!?;]{0,100}${ESTIMATE_NOUN_ES_RE.source}|${ESTIMATE_NOUN_ES_RE.source}[^.!?;]{0,100}${ESTIMATE_DELIVERY_ES_SOURCE})`;
 const ESTIMATE_DELIVERY_CLAIM_RE = new RegExp(ESTIMATE_DELIVERY_CLAIM_SOURCE, 'i');
 const ESTIMATE_DELIVERY_DATE_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'i');
@@ -1417,7 +1421,9 @@ const ESTIMATE_READINESS_CLAIM_RE = new RegExp(ESTIMATE_READINESS_CLAIM_SOURCE, 
 // though a fronted time keeps its comma ("Mañana, el presupuesto estará
 // listo"). A negation directly before the predicate denies it; one elsewhere
 // in the sentence does not.
-const ESTIMATE_CONJUNCTION_BREAK = '(?<![a-záéíóúñü])(?:y|e|pero|aunque|sino|mientras)(?![a-záéíóúñü])';
+// A conjunction between two numbers is a range or a compound number, not a
+// clause break ("uno o dos días", "treinta y cinco minutos").
+const ESTIMATE_CONJUNCTION_BREAK = `(?<![a-záéíóúñü])(?:(?:y|e|o|u)(?![a-záéíóúñü])(?!\\s+(?:\\d|(?:${NUMBER_WORD_ES})(?![a-záéíóúñü])))|(?:pero|aunque|sino|mientras)(?![a-záéíóúñü]))`;
 const ESTIMATE_AFFIRMED_READINESS = `(?<!(?<![a-záéíóúñü])(?:no|nunca|jam[aá]s|tampoco)\\s+(?:(?:me|te|se|le|les|lo|la|los|las|nos)\\s+)?)${ESTIMATE_READINESS_ES_SOURCE}`;
 const ASSERTED_ESTIMATE_READINESS_TIME_RE = new RegExp(`(?:${ESTIMATE_AFFIRMED_READINESS}(?:(?![,;:]|${ESTIMATE_CONJUNCTION_BREAK})[^.!?]){0,60}?(?<![a-záéíóúñü])${ESTIMATE_READINESS_TIME_SOURCE}|(?<![a-záéíóúñü])${ESTIMATE_READINESS_TIME_SOURCE}(?:(?![;:]|${ESTIMATE_CONJUNCTION_BREAK})[^.!?]){0,60}?${ESTIMATE_AFFIRMED_READINESS})`, 'i');
 // A piece that is nothing but a time ("Mañana", "Para el lunes") fronts the
