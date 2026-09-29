@@ -1400,7 +1400,7 @@ const ESTIMATE_READINESS_ES_SOURCE = `(?:(?:(?:estar[aá](?:n)?|quedar[aá](?:n)
 const ESTIMATE_TIMING_PREDICATE_SOURCE = `(?:${ESTIMATE_DELIVERY_ES_SOURCE}|${ESTIMATE_READINESS_ES_SOURCE})`;
 const ESTIMATE_DELIVERY_DATE_SOURCE = `(?:el\\s+pr[oó]ximo\\s+)?(?:${WEEKDAYS})|(?:esta|la\\s+pr[oó]xima)\\s+semana|la\\s+semana\\s+(?:que\\s+viene|entrante)|(?:el\\s+)?(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')})`;
 const ESTIMATE_DELIVERY_CLOCK_SOURCE = '(?:(?:(?:a|para)\\s+la\\s+una|(?:a|para|antes\\s+de)\\s+las\\s+(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce))(?:\\s+de\\s+la\\s+(?:mañana|tarde|noche))?|(?:al|a(?:\\s+la)?|para(?:\\s+(?:el|la))?|antes\\s+(?:del|de(?:\\s+la)?))\\s+(?:mediodía|medianoche)|(?:por|durante)\\s+la\\s+(?:mañana|tarde|noche))';
-const ESTIMATE_DURATION_COUNT = `(?:\\d+|un[oa]?|media|${DAY_WORDS_ES})`;
+const ESTIMATE_DURATION_COUNT = `(?:\\d+|media|(?:${NUMBER_WORD_ES})(?:(?:\\s+y\\s+|[\\s-]+)(?:${NUMBER_WORD_ES}))*)`;
 // Readiness is judged only by the clause-bound pass below, so it carries every
 // time form the delivery passes know.
 const ESTIMATE_READINESS_TIME_SOURCE = `(?:${ESTIMATE_DELIVERY_DATE_SOURCE}|hoy|mañana|pasado\\s+mañana|esta\\s+(?:mañana|tarde|noche)|(?:en|dentro\\s+de)\\s+${ESTIMATE_DURATION_COUNT}(?:\\s+(?:o|u|a)\\s+${ESTIMATE_DURATION_COUNT})?\\s+(?:minutos?|horas?|d[ií]as?|semanas?)|${ESTIMATE_DELIVERY_CLOCK_SOURCE}|${SPANISH_QUALITATIVE_VISIT_TIME_RE.source})`;
@@ -1433,12 +1433,23 @@ const ESTIMATE_PIECE_SPLIT_RE = new RegExp(`([,;]|${ESTIMATE_CONJUNCTION_BREAK})
 // Judged piece by piece, so a negation in one clause ("no tiene costo")
 // cannot deny a promise in another. A fronted time is also judged joined to
 // the next piece by its own separator.
+// The subject right before a readiness predicate decides whose readiness it
+// is ("el técnico estará disponible mañana" is not the estimate's).
+const ESTIMATE_READINESS_SUBJECT_RE = new RegExp(`(?<![a-záéíóúñü])(?:el|la|los|las|este|esta|estos|estas|ese|esa|su|sus|un|una|mi|mis|nuestr[oa]s?)(?:\\s+[a-záéíóúñü]+){1,3}?\\s+(?:(?:no|ya|tambi[eé]n|todav[ií]a|nunca)\\s+)?(?:(?:me|te|se|le|les|lo|la|los|las|nos)\\s+)?${ESTIMATE_READINESS_ES_SOURCE}`, 'i');
 function estimateReadinessDeadline(text) {
   const parts = String(text).split(ESTIMATE_PIECE_SPLIT_RE);
+  let estimateContext = false;
   for (let i = 0; i < parts.length; i += 2) {
-    if (assertedSpokenMatch(parts[i], ASSERTED_ESTIMATE_READINESS_TIME_RE)) return true;
-    if (i + 2 < parts.length && ESTIMATE_FRONTED_TIME_RE.test(parts[i])
-      && assertedSpokenMatch(`${parts[i]}${parts[i + 1]}${parts[i + 2]}`, ASSERTED_ESTIMATE_READINESS_TIME_RE)) return true;
+    const fronted = i + 2 < parts.length && ESTIMATE_FRONTED_TIME_RE.test(parts[i]);
+    const piece = fronted ? `${parts[i]}${parts[i + 1]}${parts[i + 2]}` : parts[i];
+    const subject = ESTIMATE_READINESS_SUBJECT_RE.exec(piece);
+    // No subject before the predicate: the estimate named in or after it
+    // ("Tendremos el presupuesto listo", "estará listo el presupuesto"),
+    // else whatever an earlier piece of the sentence was about.
+    const aboutEstimate = subject ? ESTIMATE_NOUN_ES_RE.test(subject[0]) : ESTIMATE_NOUN_ES_RE.test(piece) || estimateContext;
+    if (aboutEstimate && assertedSpokenMatch(piece, ASSERTED_ESTIMATE_READINESS_TIME_RE)) return true;
+    if (ESTIMATE_NOUN_ES_RE.test(parts[i])) estimateContext = true;
+    else if (subject) estimateContext = false;
   }
   return false;
 }
