@@ -65,6 +65,27 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect(await close(['close-unread', 'close-read'])).toBe(0);
   });
 
+  test('a quiet refresh (ringOnRefresh false) rewrites a standing READ row\'s text and keeps the read; a reopen still rings despite it', async () => {
+    const quiet = { refreshOnDedupe: true, ringOnRefresh: () => false };
+    const standing = await bell('quiet-standing', { read: true });
+    const result = await helpers.raiseAdminAlertWithReopen('alert', 'New title', 'New body', {
+      link: '/admin/dispatch', bell: true, dedupeKey: key('quiet-standing'), metadata: { dedupeKey: key('quiet-standing') }, ...quiet,
+    });
+    expect(result).toMatchObject({ deduped: true, refreshed: true, rung: false, rang: false });
+    const s1 = await get(standing.id);
+    expect([s1.title, s1.body]).toEqual(['New title', 'New body']);
+    expect(new Date(s1.read_at).toISOString()).toBe('2026-09-01T12:00:00.000Z');
+
+    const cleared = await bell('quiet-cleared', { read: true, meta: { autoCleared: true } });
+    const reopened = await helpers.raiseAdminAlertWithReopen('alert', 'Back again', 'Body', {
+      link: '/admin/dispatch', bell: true, dedupeKey: key('quiet-cleared'), metadata: { dedupeKey: key('quiet-cleared') }, ...quiet,
+    });
+    expect(reopened.rang).toBe(true);
+    const c1 = await get(cleared.id);
+    expect(c1.read_at).toBeNull();
+    expect(c1.metadata).toMatchObject({ autoCleared: false, recurrenceGeneration: 1 });
+  });
+
   test('openAdminAlertKeys: by prefix, skipping auto-cleared rows', async () => {
     await bell('open-a');
     await bell('open-b', { read: true });

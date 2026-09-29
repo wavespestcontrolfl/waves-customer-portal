@@ -642,11 +642,14 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     expect(episodeHelpers.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(2);
     const [category, , , unpricedOpts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls[0];
     expect(category).toBe('alert');
-    // No version and no refresh for an ordinary class: a standing row must dedupe silently.
+    // No version (a standing row is never re-versioned, so nothing re-rings on deploy); a QUIET
+    // content refresh keeps a standing bell's text current without ringing it.
     expect(unpricedOpts).toEqual({
       link: '/admin/dispatch', bell: true, dedupeKey: 'unpriced-series:ss-parent-1',
+      refreshOnDedupe: true, ringOnRefresh: expect.any(Function),
       metadata: expect.objectContaining({ dedupeKey: 'unpriced-series:ss-parent-1' }),
     });
+    expect(unpricedOpts.ringOnRefresh()).toBe(false);
     // Accepted-schedule keeps its evidence version at generation 0.
     expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls[1][3]).toMatchObject({
       dedupeKey: 'accepted-schedule:e-1:pest_control', dedupeVersion: 'evidence-1', refreshOnDedupe: true,
@@ -755,6 +758,18 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     await runInner({ now: NOW });
     const opts = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.find(([, , , o]) => o.dedupeKey === KEY)[3];
     expect(opts.metadata.episode_started_at).toBe('2026-07-20T10:00:00.000Z');
+  });
+
+  test('a standing bell whose series moves to held gets the held text quietly: a content refresh that never re-rings it', async () => {
+    const ROOT = '0000000f-0000-4000-8000-000000000000';
+    const KEY = `unpriced-series:${ROOT}`;
+    makeDbMock({ coverageRows: [unpricedChild({ service_date: '2026-07-30', recurring_parent_id: ROOT })],
+      bellRows: [{ dedupe_key: KEY, created_at: '2026-07-20T12:00:00Z' }] });
+    await runInner({ now: NOW });
+    const [, title, , opts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.find(([, , , o]) => o.dedupeKey === KEY);
+    expect(title).toMatch(/visit past due$/);
+    expect(opts).toMatchObject({ refreshOnDedupe: true });
+    expect(opts.ringOnRefresh()).toBe(false);
   });
 
   test('a held series never starts a bell: an overdue unpriced visit with no bell for its series raises nothing', async () => {

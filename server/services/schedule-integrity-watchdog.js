@@ -406,6 +406,10 @@ async function runInner({ now = new Date() } = {}) {
   // between the first scan and the first insert).
   const bellSince = episodes ? await unpricedSeriesBells() : new Map();
   const watchSince = (root) => new Date(Math.min(bellSince.get(String(root)) ?? Infinity, now.getTime())).toISOString();
+  // Episodes only: a standing bell's text follows the series (next visit,
+  // past due, completed) through a quiet refresh that never re-rings it, so a
+  // person's read stands; a reopen still rings (raiseAdminAlertWithReopen).
+  const quietRefresh = episodes ? { refreshOnDedupe: true, ringOnRefresh: () => false } : {};
 
   // Unpriced series ring FIRST: they are same-day money loss (a visit can
   // complete and invoice at $0 today).
@@ -423,6 +427,7 @@ async function runInner({ now = new Date() } = {}) {
         // writes this run's time; a reopen writes the bell's earliest start
         // again; a standing row is a silent dedupe. Under episodes only.
         ...(episodes ? { episode_started_at: watchSince(root) } : {}) },
+      quietRefresh,
     ];
   });
   // Held series (episodes only): live, so the close pass keeps their bell and
@@ -565,7 +570,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
     logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
     return true;
   };
-  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', refreshOnDedupe, dedupeVersion } = {}) => {
+  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) => {
     // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
     // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
     // site-level tag these money-loss pages would return a suppressed
@@ -579,6 +584,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
       bell: true,
       dedupeKey,
       ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
+      ...(ringOnRefresh ? { ringOnRefresh } : {}),
       ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
       metadata: { dedupeKey, ...metadata },
     };
@@ -704,6 +710,8 @@ async function heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, since
         : `The ${d} visit is past due with no price on it or its series. Price the series before it closes at $0.`,
       { scheduled_service_id: row.id, series_root_id: root, customer_id: row.customer_id || null, visit_date: d,
         held: completed ? 'completed_unpriced' : 'overdue_unpriced', episode_started_at: new Date(sinceByRoot.get(root)).toISOString() },
+      // A bell entering the held state gets the held text quietly.
+      { refreshOnDedupe: true, ringOnRefresh: () => false },
     ];
   });
 }
@@ -890,6 +898,9 @@ async function raiseAdminAlertWithReopen(category, title, body, opts = {}) {
         ...raiseOpts,
         dedupeVersion: `${baseVersion ?? ''}::g${generation}`,
         refreshOnDedupe: true,
+        // A reopen always rings: a caller's quiet ringOnRefresh governs a
+        // standing row's content refresh, never a comeback.
+        ringOnRefresh: null,
         metadata: { ...opts.metadata, autoCleared: false, recurrenceGeneration: generation },
       };
     } else if (baseVersion !== undefined && priorGeneration > 0) {
