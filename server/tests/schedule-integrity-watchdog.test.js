@@ -142,7 +142,7 @@ function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], comp
 const delegatingRaise = async (...args) => {
   const result = await NotificationService.notifyAdmin(...args);
   if (!result) return result;
-  return { ...result, rang: !result.deduped || (result.refreshed === true && result.rung !== false) };
+  return { ...result, rang: !result.suppressed && (!result.deduped || (result.refreshed === true && result.rung !== false)) };
 };
 
 beforeEach(() => {
@@ -1243,6 +1243,27 @@ describe('unpriced series held by a visit that completed unpriced since its bell
     const completedScan = db.mock.results.map((r) => r.value).find((c) => c.where.mock.calls.some(([a, b]) => a === 'ss.status' && b === 'completed'));
     expect(completedScan).toBeUndefined();
     expect(anyInvoiceLinkedToVisit).not.toHaveBeenCalled();
+  });
+});
+
+describe('raiseAdminAlertWithReopen: a suppressed result never rings', () => {
+  test('an internal test customer\'s suppressed alert reports rang false, so it never uses a ring-cap slot', async () => {
+    const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain), orderBy: jest.fn(() => chain), forUpdate: jest.fn(() => chain), first: jest.fn(async () => undefined) };
+    const trx = jest.fn(() => chain);
+    trx.raw = jest.fn(async () => {});
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: null, suppressed: true }));
+    const result = await realHelpers.raiseAdminAlertWithReopen('alert', 't', 'b', { dedupeKey: 'k', metadata: { dedupeKey: 'k' } });
+    expect(result).toMatchObject({ suppressed: true, rang: false });
+    delete db.transaction;
+  });
+
+  test('the watchdog never counts it: a suppressed churned-customer alert leaves the cap for real ones', async () => {
+    makeDbMock({ churnedRows: [{ id: 'cust-demo', live_visits: 1 }] });
+    // After makeDbMock, which installs its own notifyAdmin stand-in.
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: null, suppressed: true }));
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ churnedLiveWork: 1, alerted: 0 });
   });
 });
 
