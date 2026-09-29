@@ -2125,6 +2125,12 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       const thirdNameJson = { turf: [{ slug: '', off_catalog_name: 'Bermuda', group_id: 'turfgrasses', confidence: 0.9 }] };
       const noMatch = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, thirdNameJson);
       expect(noMatch.outcome).toBe('no_majority');
+      // A CATALOG referee answer in the same group never matches an
+      // off-catalog side either (sameCandidateKey requires equal slugs once
+      // either side has one).
+      const catalogJson = { turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.9 }] };
+      const mixed = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, catalogJson);
+      expect(mixed.outcome).toBe('no_majority');
     });
 
     test('finding 1: an off-catalog referee answer matching a side\'s NAME (case/whitespace-insensitive) settles it', () => {
