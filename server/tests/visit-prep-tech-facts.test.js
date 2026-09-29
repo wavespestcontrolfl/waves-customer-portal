@@ -95,6 +95,10 @@ describe('customerFlaggedFacts', () => {
       locationOnProperty: 'back_yard',
       note: 'Brown spots spreading',
       photoIds: ['photo-a', 'photo-b'],
+      // No read_status on the fixture row (pre-PR-5 shape / column
+      // default) — reads back as 'none', same as gate-off or "engine
+      // never ran".
+      read: { status: 'none' },
     }]);
     // Never S3 keys or URLs in facts (scope §7).
     expect(JSON.stringify(facts)).not.toMatch(/visitprep|s3_key|signed:\/\//);
@@ -142,7 +146,62 @@ describe('customerFlaggedFacts', () => {
     expect(facts).toEqual([{
       id: 'sub-1', sentAt: '2026-09-30T10:00:00.000Z', topic: 'other',
       locationOnProperty: null, note: 'Ants near the mailbox', photoIds: [],
+      read: { status: 'none' },
     }]);
+  });
+
+  test('a DONE read merges ONLY the fixed engine fields from the stored contract, batched in one query', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null }],
+      visit_prep_submissions: [
+        {
+          id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'),
+          topic: 'pest', location_on_property: null, note: null, read_status: 'done', read_ref: 'pi-1',
+        },
+        {
+          id: 'sub-2', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T11:00:00Z'),
+          topic: null, location_on_property: null, note: null, read_status: 'pending', read_ref: null,
+        },
+      ],
+      visit_prep_photos: [],
+      pest_identifications: [
+        {
+          id: 'pi-1',
+          report_contract: JSON.stringify({
+            contract_version: 'pest_id_v1',
+            identification: { slug: 'german-cockroach', label: 'German cockroach', category: 'pest_issue' },
+            safety: {
+              stinging: false, venomous: false, disease_vector: true, structural_threat: false,
+            },
+            // v1 model prose must never reach the tech read.
+            observations: ['MODEL PROSE: looks like a roach near the sink'],
+            distinguishing_features: ['MODEL PROSE: maybe'],
+            v2: {
+              answer: { wording: 'likely', node_id: 'german-cockroach' },
+              entry: { slug: 'german-cockroach', common_name: 'German cockroach' },
+              evidence: { matches: ['Two dark stripes behind the head'], still_need: ['A clear top-down photo'] },
+              referral: null,
+            },
+          }),
+        },
+      ],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    const sub1 = facts.find((s) => s.id === 'sub-1');
+    expect(sub1.read).toEqual({
+      status: 'done',
+      wordingTier: 'likely',
+      commonName: 'German cockroach',
+      matches: ['Two dark stripes behind the head'],
+      stillNeed: ['A clear top-down photo'],
+      referralKind: null,
+      hazards: {
+        stinging: false, venomous: false, disease_vector: true, structural_threat: false,
+      },
+    });
+    // No free model prose anywhere in the facts payload — every string in
+    // the read object traces back to a fixed catalog/engine field.
+    expect(facts.find((s) => s.id === 'sub-2').read).toEqual({ status: 'pending' });
   });
 });
 

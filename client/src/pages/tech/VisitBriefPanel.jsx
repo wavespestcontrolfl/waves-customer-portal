@@ -175,8 +175,9 @@ function AccessSection({ alerts, access }) {
 // facts carry the SAME list — the caller (the main render below) passes
 // whichever member's brief answered it, and its service.id doubles as the
 // id for the thumbnails fetch (the server resolves the same stop from any
-// of its member ids). No AI read line here (PR 5 adds it once the pest
-// engine adapter lands).
+// of its member ids). PR 5 (GATE_VISIT_PREP_PEST_READ) adds `entry.read` —
+// built server-side from ONLY fixed pest-engine fields (never free model
+// text) — rendered by formatVisitPrepReadLine/renderVisitPrepRead below.
 const VISIT_PREP_TOPIC_LABELS = {
   pest: 'Pest',
   lawn: 'Lawn',
@@ -196,6 +197,57 @@ const VISIT_PREP_LOCATION_LABELS = {
   garden_beds: 'Garden beds',
   other: 'Other',
 };
+
+// PR 5 (GATE_VISIT_PREP_PEST_READ) — the automatic pest read on a customer
+// visit-prep submission. `entry.read` carries ONLY fixed server-computed
+// fields (see visit-prep.js's readFactsFromContract): a wording tier (a
+// fixed enum), an APPROVED catalog common name, the catalog's own
+// matched/still-needed trait strings, a referral kind, and boolean hazard
+// flags. This module authors every LABEL below itself — no free text from
+// the model ever reaches this line, and no product or rate guidance rides
+// here.
+const VISIT_PREP_READ_WORDING_LABELS = {
+  pretty_sure: "We're pretty sure",
+  likely: 'Likely',
+  group_only: 'Looks like',
+  unknown: "Couldn't tell",
+};
+
+const VISIT_PREP_READ_HAZARD_LABELS = {
+  stinging: 'stinging',
+  venomous: 'venomous',
+  structural_threat: 'structural threat',
+  disease_vector: 'disease vector',
+};
+
+function formatVisitPrepReadLine(read) {
+  if (!read || read.status !== 'done') return null;
+  const parts = [];
+  const wordingLabel = VISIT_PREP_READ_WORDING_LABELS[read.wordingTier] || 'AI read';
+  parts.push(read.commonName ? `${wordingLabel}: ${read.commonName}.` : 'No species named from these photos.');
+  if (read.matches?.length) parts.push(`Matches: ${read.matches.join('; ')}.`);
+  if (read.stillNeed?.length) parts.push(`Still need: ${read.stillNeed.join('; ')}.`);
+  const hazards = Object.keys(VISIT_PREP_READ_HAZARD_LABELS).filter((k) => read.hazards?.[k]).map((k) => VISIT_PREP_READ_HAZARD_LABELS[k]);
+  if (hazards.length) parts.push(`Hazard: ${hazards.join(', ')}.`);
+  if (read.referralKind) parts.push(`Refer: ${String(read.referralKind).replace(/_/g, ' ')}.`);
+  return parts.join(' ');
+}
+
+function VisitPrepReadLine({ read }) {
+  if (!read) return null;
+  if (read.status === 'done') {
+    const line = formatVisitPrepReadLine(read);
+    if (!line) return null;
+    return <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read (AI suggestion, not confirmed): {line}</p>;
+  }
+  if (read.status === 'pending') return <p style={factMutedStyle}>Photo read pending</p>;
+  // none / unsupported / failed: stay quiet — no line at all (scope doc
+  // §5.4: the mock's "pending for lawn" wording only covers a topic with
+  // no engine adapter, and the owner's "keep it simple and truthful"
+  // steer landed on omitting the line entirely rather than a hedge for
+  // every non-done state).
+  return null;
+}
 
 function formatFlaggedSentAt(iso) {
   if (!iso) return '';
@@ -277,6 +329,7 @@ function CustomerFlaggedSection({ serviceId, customerFlagged, request }) {
             <p style={factMutedStyle}>sent {formatFlaggedSentAt(entry.sentAt)}</p>
             {entry.note && <p style={{ ...factRowStyle, fontStyle: 'italic' }}>&ldquo;{entry.note}&rdquo;</p>}
             {meta && <p style={factMutedStyle}>{meta}</p>}
+            <VisitPrepReadLine read={entry.read} />
             {entry.photoIds?.length > 0 && (
               <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
                 {entry.photoIds.map((photoId) => {

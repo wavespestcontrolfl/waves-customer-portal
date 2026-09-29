@@ -120,6 +120,7 @@
  *   GATE_SELF_BOOK_DAY_CAP=true (owner ruling 2026-09-23: the old "max 3 self-bookings per calendar day" cap — retired in favor of the self-serve notice window, server/services/scheduling/self-serve-notice.js. Unset (default) = no per-day cap anywhere: the offer-time date filtering in routes/booking.js buildBookingAvailability, the commit-time re-checks in routes/booking.js createSelfBooking and services/availability.js confirmBooking, and the offer-time day-loop skip in services/availability.js getAvailableSlots all skip their countActiveSelfBookingsForDay / acquireSelfBookingDayCapLock calls. 'true' = today's cap behavior byte-for-byte. Read at call time via selfBookDayCapEnabled() below — a flip needs no redeploy. The lock/count primitives themselves are unaffected and stay available to every self-booking writer.)
  *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
  *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). Requires GATE_APPOINTMENT_PAGE ALSO on — this rides that router. Off = the SAME generic 404 the token/gate guard already gives, before the new route's own limiter runs, and the GET payload carries no prepPhotos key. Sends nothing to anyone; no client/technician surface yet.)
+ *   GATE_VISIT_PREP_PEST_READ=true (PR 5 — automatic pest read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPestReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS live. Triggered from services/visit-prep.js's createVisitPrepSubmission — the ONE place a submission is created — fire-and-forget AFTER the submission's own transaction commits, never on the request path. A submission whose topic is 'pest', or whose topic is null and whose visit resolves to the Pest Control service line (server/services/service-line.js's classifyServiceLine; a grouped stop counts if ANY live member is pest), runs the same photo-id-v2 identifyPestV2 the app's Photo ID route calls and stores the result in pest_identifications with source='visit_prep', mode='internal' (already an allowed mode — no migration on that table). Lawn / tree & shrub / anything else resolves straight to read_status='unsupported', no engine call. VISIT_PREP_READ_DAILY_CAP (default 40) is this feature's OWN cap, separate from Photo ID's; a capped or failed read never blocks the submission — the technician still gets the photos, just with read_status='failed'. See docs in services/visit-prep-pest-read.js.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -172,6 +173,11 @@ const gates = {
   // logGateStatus only; the route and service read visitPrepPhotosLive()
   // at call time below so a flip needs no redeploy.
   visitPrepPhotos: process.env.GATE_VISIT_PREP_PHOTOS === 'true',
+  // Visit prep photos — automatic pest read (PR 5). Registered for
+  // logGateStatus only; services/visit-prep-pest-read.js reads
+  // visitPrepPestReadLive() at call time below (its own strict opt-in,
+  // ALSO requiring visitPrepPhotosLive()).
+  visitPrepPestRead: process.env.GATE_VISIT_PREP_PEST_READ === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -3596,6 +3602,18 @@ function visitPrepPhotosLive() {
   return process.env.GATE_VISIT_PREP_PHOTOS === 'true';
 }
 
+// GATE_VISIT_PREP_PEST_READ read at CALL time — strict `=== 'true'`, own
+// switch INSIDE the visit-prep gate (scope doc §5.6: "the read adapter has
+// its own switch inside the gate so the pipe can go live before the
+// read"). ALSO requires visitPrepPhotosLive() — the read has no meaning
+// without the foundation it rides on, and a stray env flip of this gate
+// alone (with the foundation gate unset) must not turn anything on. The
+// canonical reader for services/visit-prep-pest-read.js; the
+// visitPrepPestRead gates-map entry above is for logGateStatus only.
+function visitPrepPestReadLive() {
+  return process.env.GATE_VISIT_PREP_PEST_READ === 'true' && visitPrepPhotosLive();
+}
+
 // GATE_STAMPED_ZERO_FREE read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The canonical reader for
 // billing-lane.js's hasAuthoritativeZeroPrice (widens it to ANY stamped 0,
@@ -3622,5 +3640,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, visitPrepPestReadLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive };
 // gates 1775330914

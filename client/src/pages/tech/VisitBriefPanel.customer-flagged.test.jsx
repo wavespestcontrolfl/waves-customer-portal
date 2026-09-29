@@ -148,6 +148,36 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     }
   });
 
+  it('shows the pest read as an AI suggestion built only from fixed fields', () => {
+    renderPanel({ customerFlagged: [{
+      ...CUSTOMER_FLAGGED[0],
+      read: {
+        status: 'done', wordingTier: 'likely', commonName: 'German cockroach',
+        matches: ['Two dark stripes behind the head'], stillNeed: ['A clear top-down photo'],
+        referralKind: null, hazards: { disease_vector: true },
+      },
+    }] });
+    expect(screen.getByText(
+      'Photo read (AI suggestion, not confirmed): Likely: German cockroach. Matches: Two dark stripes behind the head. Still need: A clear top-down photo. Hazard: disease vector.',
+    )).toBeInTheDocument();
+  });
+
+  it('shows "Photo read pending" while a read runs, and nothing for unsupported/failed/none', () => {
+    renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] });
+    expect(screen.getByText('Photo read pending')).toBeInTheDocument();
+    cleanup();
+    for (const status of ['unsupported', 'failed', 'none']) {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status } }] });
+      expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it('a done read with no named species says so plainly', () => {
+    renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', wordingTier: 'unknown', commonName: null } }] });
+    expect(screen.getByText('Photo read (AI suggestion, not confirmed): No species named from these photos.')).toBeInTheDocument();
+  });
+
   it('renders nothing when facts carry no customerFlagged entries (gate off, or nothing sent)', () => {
     renderPanel({ customerFlagged: null });
     expect(screen.queryByText('Customer flagged')).not.toBeInTheDocument();
