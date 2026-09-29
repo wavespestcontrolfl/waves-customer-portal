@@ -95,6 +95,19 @@ describe('the recorded period stays null for an unstated hour', () => {
   });
 });
 
+describe('evidence pinning lets a new booking take its day from an earlier turn (codex #5322 r2 P1)', () => {
+  test('the confirmed_start_at quote may state only the time when the day was set earlier, one turn, never stitched', () => {
+    expect(V2_PROMPT).toContain('except for a NEW booking whose day was already set earlier in the call');
+    expect(V2_PROMPT).toContain('quote the one turn that states the agreed time, verbatim, and resolve the day from that earlier turn; never stitch two turns into one quote');
+  });
+  test('the agent commitment may be the sentence stating the time for such a booking', () => {
+    expect(V2_PROMPT).toContain('the agent sentence that states the agreed TIME is enough ("can we plan on 2 o\'clock?")');
+  });
+  test('a reschedule keeps its one-turn day-and-time quote rule', () => {
+    expect(V2_PROMPT).toContain('For a reschedule, each of the scheduling quotes above is ONE speaker\'s words from ONE turn');
+  });
+});
+
 describe('routing accepts the extraction the contract produces for the bare-hour WDO call, and holds the rest', () => {
   test('confirmed at 2 PM with no period recorded books', () => {
     const r = canAutoRoute(extraction({
