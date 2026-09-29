@@ -33,6 +33,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'cancel_plan',
   'merge_customers',
   'repair_closeout',
+  'cancel_queued_message',
 ]);
 
 // Legacy writes with no structural gate — their executors mutate on call, so

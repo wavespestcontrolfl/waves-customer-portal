@@ -2068,6 +2068,14 @@ function requiresDurableFinalize(entryPoint) {
 // for these (same contract as finalize_pending: the obligation must be
 // durable BEFORE the hook runs, or a crash/throw between the flip and the
 // hook loses it where no sweep can see it).
+// True for any entry point this registry owns — the deferred-replay executor
+// drives the row, whether or not it registers an onTerminal hook (an
+// invoice_send_deferred row, for one, holds its invoice's send claim). The
+// Intelligence Bar never cancels such a row itself.
+function isDeferredReplayEntryPoint(entryPoint) {
+  return !!entryFor(entryPoint);
+}
+
 function requiresTerminalHook(entryPoint) {
   const entry = entryFor(entryPoint);
   return !!(entry && typeof entry.onTerminal === 'function');
@@ -2101,6 +2109,7 @@ module.exports = {
   sweepPendingTerminalHooks,
   requiresDurableFinalize,
   requiresTerminalHook,
+  isDeferredReplayEntryPoint,
   DURABLE_FINALIZE_ENTRY_POINTS,
   TERMINAL_HOOK_ENTRY_POINTS,
   _registry: REGISTRY,
