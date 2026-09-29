@@ -196,8 +196,8 @@ describeOrSkip('recap context common products on PostgreSQL', () => {
     const pestVisit = await visit('Pest Control Re-Service');
     const lawnVisit = await visit('Lawn Care Visit');
     jest.useFakeTimers(FAKE_DATE_ONLY);
-    const pest = await buildRecapContext(pestVisit, db);
-    const lawn = await buildRecapContext(lawnVisit, db);
+    const pest = await buildRecapContext(pestVisit, db, { includeCommonProducts: true });
+    const lawn = await buildRecapContext(lawnVisit, db, { includeCommonProducts: true });
 
     expect(logger.warn).not.toHaveBeenCalled();
     expect(pest.commonProducts).toEqual([
@@ -229,7 +229,7 @@ describeOrSkip('recap context common products on PostgreSQL', () => {
 
     const pestVisit = await visit('Quarterly Pest Control');
     jest.useFakeTimers(FAKE_DATE_ONLY);
-    const result = await buildRecapContext(pestVisit, db);
+    const result = await buildRecapContext(pestVisit, db, { includeCommonProducts: true });
 
     expect(result.commonProducts.map((row) => [row.productId, row.visits])).toEqual([
       [ids.Zeta, 2],

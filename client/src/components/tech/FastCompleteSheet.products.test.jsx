@@ -8,7 +8,8 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import FastCompleteSheet from './FastCompleteSheet';
+import FastCompleteSheet, { isSendableRateUnit } from './FastCompleteSheet';
+import RATE_UNITS from '../../../../shared/rate-units.json';
 import { formatMeasuredAmount } from '../../lib/mix-amount';
 
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
@@ -84,7 +85,7 @@ function makeRequest({ products = CATALOG, commonProducts = COMMON } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
-    if (path.endsWith('/pest-recap/context')) {
+    if (path.split('?')[0].endsWith('/pest-recap/context')) {
       const rows = typeof products === 'function' ? products() : products;
       return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: rows, commonProducts, existingRecord: null };
     }
@@ -272,6 +273,13 @@ describe('FastCompleteSheet + Other product picker', () => {
     expect(screen.queryByText(/shows 0 in stock/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Taurus SC — 4 fl oz' })).toBeTruthy();
+    // Only the sheet's first read asks for the most-used aggregate; the stock
+    // re-read (and the recap modal, which shares the endpoint) never does.
+    const contextReads = request.calls.map((c) => c.path).filter((p) => p.includes('/pest-recap/context'));
+    expect(contextReads).toEqual([
+      '/admin/dispatch/svc-1/pest-recap/context?include=common_products',
+      '/admin/dispatch/svc-1/pest-recap/context',
+    ]);
 
     const body = await completeBody(request);
     expect(productIn(body, 'taurus')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz', targets: ['Ants'] });
@@ -643,4 +651,50 @@ test('nothing on the sheet is in mL', async () => {
     expect(node.value.toLowerCase()).not.toBe('ml');
     expect(node.textContent.toLowerCase()).not.toBe('ml');
   }
+});
+
+describe('FastCompleteSheet catalog formulation and rate units', () => {
+  test('a product that is granular only in its catalog formulation is weighed and broadcast, never sprayed', async () => {
+    // "granular" is only in the formulation: no method, stock unit or label
+    // unit of its own (Codex on #5313: Heritage G, Pillar G Intrinsic).
+    const products = [...CATALOG, { id: 'heritage', name: 'Heritage G', category: 'fungicide', formulation: 'granular' }];
+    const request = await openSheet(makeRequest({ products }));
+    const picker = openPicker();
+    fireEvent.click(within(picker).getByRole('button', { name: 'Show other products' }));
+    fireEvent.click(option(picker, 'Heritage G'));
+    const editor = screen.getByRole('group', { name: 'Heritage G' });
+    const units = within(editor).getByRole('group', { name: 'Unit' });
+    expect(within(units).getAllByRole('button').map((b) => b.textContent)).toEqual(['g', 'oz', 'lb']);
+    expect(howChoice(editor, 'Granular').getAttribute('aria-pressed')).toBe('true');
+    enterAmount(editor, 2, 'lb');
+    fillVisit();
+    // Nothing goes down as a perimeter spray, so no linear feet are asked for.
+    expect(screen.queryByLabelText('Linear ft sprayed')).toBeNull();
+    const heritage = productIn(await completeBody(request), 'heritage');
+    expect(heritage).toMatchObject({ applicationMethod: 'granular_broadcast', totalAmount: 2, amountUnit: 'lb' });
+  });
+
+  test("a sprayed dry formulation (soluble granules) is weighed but follows the visit's How", async () => {
+    const products = [...CATALOG, { id: 'soluble', name: 'Example 20 Insecticide', category: 'insecticide', formulation: 'soluble granular' }];
+    const request = await openSheet(makeRequest({ products }));
+    const editor = addProduct('Example 20 Insecticide');
+    const units = within(editor).getByRole('group', { name: 'Unit' });
+    expect(within(units).getAllByRole('button').map((b) => b.textContent)).toEqual(['g', 'oz', 'lb']);
+    expect(howChoice(editor, 'Spot treatment').getAttribute('aria-pressed')).toBe('true');
+    expect(within(editor).getByText("Same as the visit's How")).toBeTruthy();
+    enterAmount(editor, 5, 'g');
+    fillVisit();
+    const soluble = productIn(await completeBody(request), 'soluble');
+    expect(soluble).toMatchObject({ applicationMethod: 'spot_treatment', totalAmount: 5, amountUnit: 'g' });
+  });
+
+  test("a rate goes only in a unit on the server's own list, never one of its mL units", () => {
+    // shared/rate-units.json is the list /complete checks (inventory-units.js).
+    for (const unit of RATE_UNITS) {
+      expect(isSendableRateUnit(unit)).toBe(unit.split('/')[0] !== 'ml');
+    }
+    expect(isSendableRateUnit(' FL_OZ/GAL ')).toBe(true);
+    expect(isSendableRateUnit('percent_solution')).toBe(false);
+    expect(isSendableRateUnit('tsp')).toBe(false);
+  });
 });

@@ -71,11 +71,24 @@ const isGelProduct = (product) => /\bgels?\b/i.test(
   `${product?.name || ""} ${product?.category || ""} ${product?.formulation || ""}`,
 );
 
+// The catalog formulation names the form outright ("granular", "dust",
+// "bait block", "DF", "SC", "flowable", "liquid concentrate"). A dry form is
+// weighed even when it is sprayed (a DF or soluble granule); "dry flowable"
+// is dry, a bare "flowable" is not.
+const DRY_FORMULATION = /\b(granul\w*|dust|bait|briquet|block|cartridge|pellets?|df|sg|wdg|wsg|wg|wp|dry)\b/i;
+const LIQUID_FORMULATION = /\b(sc|ec|ew|cs|me|mec|sl|se|aq|flowable|liquid|concentrate|suspension|emulsion|microemulsion|emulsifiable)\b/i;
+function formulationDimension(product) {
+  const text = String(product?.formulation || "");
+  if (DRY_FORMULATION.test(text)) return "weight";
+  return LIQUID_FORMULATION.test(text) ? "liquid" : null;
+}
+
 /**
  * 'liquid' | 'weight' | 'count'. The first source that settles it wins: a
  * gel bait is weighed; then the unit its stock is kept in; then the unit it
  * is usually recorded in on these visits; then its catalog rate unit; then
- * its form (a dust, granule or bait is weighed, anything else is a liquid).
+ * its catalog formulation; then its name and category (a dust, granule or
+ * bait is weighed, anything else is a liquid).
  */
 export function productDimension(product, common) {
   if (isGelProduct(product)) return "weight";
@@ -84,6 +97,7 @@ export function productDimension(product, common) {
     || unitDimension(common?.usualUnit)
     || unitDimension(resolved.amountUnit)
     || unitDimension(resolved.rateUnit)
+    || formulationDimension(product)
     || (isDryFormProduct(product) ? "weight" : "liquid");
 }
 

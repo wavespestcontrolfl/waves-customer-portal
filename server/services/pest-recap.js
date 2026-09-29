@@ -221,13 +221,18 @@ async function loadCommonProducts(svc, knex) {
   }
 }
 
-/** Build the data the recap modal needs: service info, timeline, catalog, prior note. */
-async function buildRecapContext(serviceId, knex = db) {
+/**
+ * Build the data the recap modal needs: service info, timeline, catalog,
+ * prior note. `includeCommonProducts` adds the Fast Complete picker's
+ * most-used list; only that sheet asks for it, so the recap modal (and the
+ * sheet's stock re-read) never pay for the aggregate.
+ */
+async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
 
   // Started first so the aggregate overlaps the reads below.
-  const commonProductsLoad = loadCommonProducts(svc, knex);
+  const commonProductsLoad = includeCommonProducts ? loadCommonProducts(svc, knex) : null;
 
   const timeline = await knex('job_status_history')
     .where({ job_id: serviceId })
@@ -306,6 +311,7 @@ async function buildRecapContext(serviceId, knex = db) {
       })
     : [];
 
+  // null when the caller did not ask for the list.
   const commonProducts = await commonProductsLoad;
 
   return {
@@ -340,7 +346,7 @@ async function buildRecapContext(serviceId, knex = db) {
     },
     timeline,
     products,
-    commonProducts,
+    ...(commonProducts && { commonProducts }),
     existingRecord: existingRecord
       ? { ...existingRecord, products: existingProducts, productsLoadFailed }
       : null,

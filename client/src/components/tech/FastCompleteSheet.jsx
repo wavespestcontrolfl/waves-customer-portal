@@ -46,6 +46,7 @@ import {
 } from '../../lib/fast-complete-products';
 import DictationButton from './DictationButton';
 import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
+import RATE_UNITS from '../../../../shared/rate-units.json';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import { UiSurface, Button, Field, Input, Textarea, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
@@ -71,27 +72,21 @@ const ROW_METHOD_CHOICES = [
   { value: 'granular_broadcast', label: 'Granular' },
 ];
 // A rate goes on the record only in a unit /complete accepts: the server's
-// VALID_RATE_UNITS (inventory-units.js), matched trimmed and case-blind as
-// it matches them, less its mL units, which this sheet never shows (owner
-// ruling 2026-09-27) — a rate the tech can't see is not one they confirmed.
-// Any other unit (a catalog oddity such as "percent_solution") leaves the
-// row without a rate rather than have the server refuse the whole visit.
-const SENDABLE_RATE_UNITS = new Set([
-  'oz', 'fl_oz', 'g', 'lb', 'gal', 'each',
-  'oz/gal', 'fl_oz/gal', 'g/gal', 'lb/gal', 'gal/gal',
-  'oz/1000sf', 'lb/1000sf', 'g/1000sf',
-  'g/spot', 'fl_oz/100gal', 'oz/100gal', 'g/inch dbh',
-  'oz/acre', 'fl_oz/acre', 'lb/acre', 'gal/acre',
-  'lb/100sf', 'each/100sf', 'each/acre', 'fl_oz/50ft',
-  'each/20ft', 'each/station', 'each/placement',
-]);
-const isSendableRateUnit = (unit) => SENDABLE_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
+// own list (shared/rate-units.json, read by inventory-units.js), matched
+// trimmed and case-blind as it matches them, less its mL units, which this
+// sheet never shows (owner ruling 2026-09-27) — a rate the tech can't see
+// is not one they confirmed. Any other unit (a catalog oddity such as
+// "percent_solution") leaves the row without a rate rather than have the
+// server refuse the whole visit.
+const SENDABLE_RATE_UNITS = new Set(RATE_UNITS.filter((unit) => unit.split('/')[0].trim() !== 'ml'));
+export const isSendableRateUnit = (unit) => SENDABLE_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
 // With no method of its own in the catalog, the shared pest resolver calls
 // anything outside a bait category a spray, which then follows the How row.
-// A product's form says otherwise: a sprayable dry form (WSG, WDG, WG, WP,
-// DF) still follows the How row, but a bait, block, station or gel is placed
-// and a granule is broadcast.
-const SPRAYED_DRY_FORM = /\b(wsg|wdg|wg|wp|df)\b/i;
+// A product's form — its name, category or catalog formulation — says
+// otherwise: a sprayable dry form (WSG, WDG, WG, WP, DF, SG, soluble
+// granules) still follows the How row, but a bait, block, station or gel
+// is placed and a granule is broadcast.
+const SPRAYED_DRY_FORM = /\b(wsg|wdg|wg|wp|df|sg|soluble)\b/i;
 const PLACED_FORM = /\b(baits?|blox|stations?|gels?)\b/i;
 const BROADCAST_FORM = /\bgranul\w*/i;
 
@@ -242,7 +237,7 @@ function productRow(product, { serviceType, totalAmount = '', common = null, vis
 function catalogMethodOf(product, serviceType) {
   const resolved = defaultApplicationMethodForLine(product, 'pest', { serviceType });
   if (product.application_method || product.method || !SPRAY_METHODS.has(resolved)) return resolved;
-  const form = `${product.name || ''} ${product.category || ''}`;
+  const form = `${product.name || ''} ${product.category || ''} ${product.formulation || ''}`;
   if (SPRAYED_DRY_FORM.test(form)) return resolved;
   if (PLACED_FORM.test(form)) return 'bait_placement';
   return BROADCAST_FORM.test(form) ? 'granular_broadcast' : resolved;
@@ -367,7 +362,9 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
     (async () => {
       try {
         const [data, ratingContract] = await Promise.all([
-          request(`${base}/pest-recap/context`),
+          // The picker's most-used list is asked for here only; the recap
+          // modal and the stock re-read below never run that aggregate.
+          request(`${base}/pest-recap/context?include=common_products`),
           // A failed read keeps the rating off: never send a rating the
           // server may drop, or show a scale it may not use.
           request(`${base}/tech-rating-allowed`).catch(() => null),

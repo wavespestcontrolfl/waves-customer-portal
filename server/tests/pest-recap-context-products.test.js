@@ -87,6 +87,20 @@ test('catalog rows add the short label, stock unit, formulation and a numeric st
   ]);
 });
 
+// Only the Fast Complete sheet asks for the most-used list
+// (?include=common_products on the route).
+const WITH_COMMON = { includeCommonProducts: true };
+
+test('without the Fast Complete opt-in (the recap modal, the stock re-read) the aggregate never runs', async () => {
+  const { knex, seen } = contextDb({
+    commonRows: [{ product_id: 'p-alpine', visits: 12, usual_unit: 'g', usual_amount: '5.000' }],
+  });
+  const result = await buildRecapContext(visit.id, knex);
+  expect(result.ok).toBe(true);
+  expect(seen.raw).toHaveLength(0);
+  expect(result).not.toHaveProperty('commonProducts');
+});
+
 test('commonProducts keeps the query order and returns numbers, bound to the visit line and the ET 90-day window', async () => {
   // 10:30 PM ET on Sep 27 is already Sep 28 in UTC: the window must end on
   // the ET day and start 89 days before it.
@@ -100,7 +114,7 @@ test('commonProducts keeps the query order and returns numbers, bound to the vis
     ],
   });
 
-  const result = await buildRecapContext(visit.id, knex);
+  const result = await buildRecapContext(visit.id, knex, WITH_COMMON);
 
   expect(result.ok).toBe(true);
   expect(result.commonProducts).toEqual([
@@ -122,13 +136,13 @@ test('commonProducts keeps the query order and returns numbers, bound to the vis
 
 test('the line comes from the visit type, not a pest default', async () => {
   const { knex, seen } = contextDb({ svc: { ...visit, service_type: 'Lawn Care Visit #3' } });
-  await buildRecapContext(visit.id, knex);
+  await buildRecapContext(visit.id, knex, WITH_COMMON);
   expect(seen.raw[0].bindings[0]).toBe('lawn');
 });
 
 test.each([null, '', '   '])('a visit with no type (%p) has no line: commonProducts is [] and nothing is queried', async (serviceType) => {
   const { knex, seen } = contextDb({ svc: { ...visit, service_type: serviceType } });
-  const result = await buildRecapContext(visit.id, knex);
+  const result = await buildRecapContext(visit.id, knex, WITH_COMMON);
   expect(result.ok).toBe(true);
   expect(result.commonProducts).toEqual([]);
   expect(seen.raw).toHaveLength(0);
@@ -142,7 +156,7 @@ test('a failed common-products query is [] with one warn that carries no driver 
     commonError: err,
   });
 
-  const result = await buildRecapContext(visit.id, knex);
+  const result = await buildRecapContext(visit.id, knex, WITH_COMMON);
 
   expect(result.ok).toBe(true);
   expect(result.commonProducts).toEqual([]);

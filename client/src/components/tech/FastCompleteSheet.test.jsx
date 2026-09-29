@@ -34,7 +34,7 @@ function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = 
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
-    if (path.endsWith('/pest-recap/context')) {
+    if (path.split('?')[0].endsWith('/pest-recap/context')) {
       return {
         ok: true,
         eligible,
