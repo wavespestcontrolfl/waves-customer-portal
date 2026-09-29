@@ -842,11 +842,33 @@ travel-gap buffer would reject is still offered — `find-time.js`'s
 `packCapacityEnds` — when the day's own route simulation already certifies
 the technician arrives within grace minutes of that slot's start (never for
 a live estimate hold neighbour, which may evaporate before it is ever
-committed), and still accepted at commit — `arrival-route.js`'s
-`verifyArrivalCapacity` — only while its certified delay stays within that
-same grace, tighter than but never wider than the existing 120-minute
-arrival promise every capacity booking already carries. Scoped to the
-estimate picker/`/book`/public-reschedule single-visit move only; staff,
+committed, and never on the other side of that gap — the next customer's
+promised start is not this one's to spend), and still accepted at commit —
+`arrival-route.js`'s `verifyArrivalCapacity` — only while its certified
+delay stays within that same grace, tighter than but never wider than the
+existing 120-minute arrival promise every capacity booking already carries.
+**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314 — narrowed from an earlier
+draft that also covered `/book` and public reschedule): those two surfaces'
+commit paths (`createSelfBooking`, the rebooker's single-visit move) each
+run a STRICT pre-verify travel probe ahead of their capacity check, so a
+grace-kept slot there would already 409 SLOT_TAKEN before `verifyArrivalCapacity`
+ever ran it — the estimate picker's own commit (`slot-reservation.js`) has
+no such probe under capacity, which is what makes it safe to grant grace
+there in the first place. Concretely: `packCapacityEnds` only reads grace
+for a caller that explicitly passes `arrivalGrace: true` — `estimate-slot-
+availability.js`'s `getAvailableSlots`/`getSlotDebug` are the only two call
+sites (guard-tested), even though `/book`'s `buildBookingAvailability`
+shares the SAME `packEnds: true` admission and is otherwise byte-identical;
+and `slot-reservation.js`'s `reserveSlot`/`commitReservation` are the only
+`verifyArrivalCapacity` callers that pass `arrivalGraceMinutes` — `/book`'s
+`createSelfBooking` and the rebooker never do (guard-tested), so raising the
+env value changes nothing for them. `extendReservation` (the 15-minute hold
+countdown) never re-verifies whole-route capacity fitness at all under
+capacity mode — a pre-existing gap unrelated to grace (a live hold's
+certified route order is trusted as-is rather than re-simulating the whole
+day's route on every extend, which was judged not cheap enough to add for
+this lane) — so a hold's grace certification is fixed at reserve time and is
+not re-checked if grace or the route changes before a later extend. Staff,
 admin, voice and the assistant's booking tools never opt in and are
 unaffected. Default 0 is byte-identical to before this lane.
 Catalog-sized estimate offers resolve the primary appointment allowance from

@@ -380,6 +380,13 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
     if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
   });
 
+  // Scoped to the estimate picker only (Codex r1 P1, #5314): every call here
+  // opts in with `arrivalGrace: true` on the caller arg, exactly like
+  // estimate-slot-availability.js. A caller without it (e.g. /book's
+  // buildBookingAvailability) gets byte-identical strict behavior regardless
+  // of env — see the opt-in-required test below.
+  const GRACE_CALLER = { lat: 27.4, lng: -82.4, durationMinutes: 60, arrivalGrace: true };
+
   // Same fixture the "route-feasible but travel-gap-rejected" test above
   // already proves fails the STRICT buffer check: a co-located 09:00-10:00
   // stop crediting its full window (0 padding) leaves 0 free minutes before
@@ -396,40 +403,53 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
   test('grace 90, a 6-minute simulated delay: the strict-rejected packed end is kept', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env[GRACE_ENV] = '90';
-    const kept = packCapacityEnds([candidate(6)], { lat: 27.4, lng: -82.4, durationMinutes: 60 });
+    const kept = packCapacityEnds([candidate(6)], GRACE_CALLER);
     expect(kept.map((s) => s.start_time)).toEqual(['10:00']);
+  });
+
+  // Codex r1 P1 (#5314): packCapacityEnds reads the global grace with no
+  // surface signal — a caller that never opts in (booking.js's own
+  // packEnds:true call) must be byte-identical to strict, EVEN with the gate
+  // and env both live, because its commit path 409s a grace-kept slot before
+  // ever reaching verifyArrivalCapacity.
+  test('no arrivalGrace opt-in on the caller: strict, even with grace 90 live and a tiny delay', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    const nonOptedCaller = { lat: 27.4, lng: -82.4, durationMinutes: 60 }; // no arrivalGrace: true
+    expect(packCapacityEnds([candidate(6)], nonOptedCaller)).toEqual([]);
+    expect(packCapacityEnds([candidate(6)], { ...nonOptedCaller, arrivalGrace: false })).toEqual([]);
   });
 
   test('grace 0: the same slot is dropped — unchanged from today', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env[GRACE_ENV] = '0';
-    expect(packCapacityEnds([candidate(6)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+    expect(packCapacityEnds([candidate(6)], GRACE_CALLER)).toEqual([]);
   });
 
   test('capacity mode off: no grace to read, so the strict-rejected slot is still dropped', () => {
     delete process.env.GATE_SCHEDULING_CAPACITY;
     process.env[GRACE_ENV] = '90';
-    expect(packCapacityEnds([candidate(6)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+    expect(packCapacityEnds([candidate(6)], GRACE_CALLER)).toEqual([]);
   });
 
   test('a 100-minute simulated delay exceeds a 90-minute grace: still dropped', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env[GRACE_ENV] = '90';
-    expect(packCapacityEnds([candidate(100)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+    expect(packCapacityEnds([candidate(100)], GRACE_CALLER)).toEqual([]);
   });
 
   test('a live estimate hold neighbour never gives grace, even at grace 90 with a tiny delay', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env[GRACE_ENV] = '90';
     const holdRow = { ...prevRow, reservation_expires_at: '2099-01-01T00:00:00Z', customer_id: null };
-    expect(packCapacityEnds([candidate(6, holdRow)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+    expect(packCapacityEnds([candidate(6, holdRow)], GRACE_CALLER)).toEqual([]);
   });
 
   test('offer/commit parity: the grace-kept slot\'s own delay is exactly what verifyArrivalCapacity would compare against the same grace', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env[GRACE_ENV] = '90';
     const { arrivalExceedsGrace } = require('../services/scheduling/arrival-route')._internals;
-    const kept = packCapacityEnds([candidate(6)], { lat: 27.4, lng: -82.4, durationMinutes: 60 });
+    const kept = packCapacityEnds([candidate(6)], GRACE_CALLER);
     expect(kept).toHaveLength(1);
     // The exact same delay number and the exact same grace value: the offer
     // kept it, so the commit-time check (same inputs) must not refuse it.
@@ -441,7 +461,7 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
     process.env[GRACE_ENV] = '90';
     // Previous stop runs 09:00-10:30: the 10:00 candidate's own window overlaps it.
     const overlapping = { ...prevRow, endMin: 630, expectedMinutes: 90 };
-    expect(packCapacityEnds([candidate(6, overlapping)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+    expect(packCapacityEnds([candidate(6, overlapping)], GRACE_CALLER)).toEqual([]);
   });
 
   test('grace never waives the buffer before the NEXT stop (another customer\'s promised start)', () => {
@@ -453,7 +473,7 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
       date: '2099-10-01', technician: { id: 't1' }, start_time: '10:00', end_time: '11:00',
       arrival_delay_minutes: 0, _gap: { prevId: null, nextId: 's2', nextRow },
     };
-    expect(packCapacityEnds([slot], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+    expect(packCapacityEnds([slot], GRACE_CALLER)).toEqual([]);
   });
 
   test('offer/commit parity: with grace on, a slot delayed past grace is dropped even when it passes the strict buffer', () => {
@@ -466,9 +486,47 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
       arrival_delay_minutes: 50, _gap: { prevId: null, nextId: null },
     };
     expect(arrivalExceedsGrace({ arrivalDelayMinutes: 50 }, 30)).toBe(true);
-    expect(packCapacityEnds([free], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+    expect(packCapacityEnds([free], GRACE_CALLER)).toEqual([]);
     process.env[GRACE_ENV] = '0';
-    expect(packCapacityEnds([free], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([free]);
+    expect(packCapacityEnds([free], GRACE_CALLER)).toEqual([free]);
+  });
+
+  // Codex r1 P2 (#5314): withinArrivalGrace used to run AFTER a group already
+  // picked its packed endpoint, so an earlier candidate failing only on
+  // grace could sink the whole side even though a later, still-valid
+  // candidate existed. Trailing gap (picks the EARLIEST survivor): 10:00
+  // clears the strict buffer easily (prev stop ends at 08:00, 120 free
+  // minutes) but is delayed 100 (past a 90-minute grace); 11:00 also clears
+  // the buffer AND is delayed only 50 (within grace). The fix must pick
+  // 11:00, never drop the whole side.
+  test('trailing gap: a later candidate within grace survives when the earliest one is delayed past it', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    const farPrevRow = { startMin: 480, endMin: 480, lat: 27.4, lng: -82.4, expectedMinutes: 0 };
+    const slotAt = (start, end, delay) => ({
+      date: '2099-10-01', technician: { id: 't1' }, start_time: start, end_time: end,
+      arrival_delay_minutes: delay,
+      _gap: { prevId: 's1', nextId: null, prevRow: farPrevRow },
+    });
+    const kept = packCapacityEnds([slotAt('10:00', '11:00', 100), slotAt('11:00', '12:00', 50)], GRACE_CALLER);
+    expect(kept.map((s) => s.start_time)).toEqual(['11:00']);
+  });
+
+  // Same shape, leading/middle gap picking the LATEST survivor (before-next
+  // side): the LATER on-the-hour candidate is the one delayed past grace,
+  // the EARLIER one is within it — the fix must still pick the latest
+  // candidate that satisfies BOTH the buffer and grace, not just the buffer.
+  test('leading gap (packed-before-next side): the latest candidate within grace survives when a later one is delayed past it', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    const farNextRow = { startMin: 1020, endMin: 1020, lat: 27.4, lng: -82.4, expectedMinutes: 0 }; // 17:00, far away
+    const slotAt = (start, end, delay) => ({
+      date: '2099-10-01', technician: { id: 't1' }, start_time: start, end_time: end,
+      arrival_delay_minutes: delay,
+      _gap: { prevId: null, nextId: 's2', nextRow: farNextRow },
+    });
+    const kept = packCapacityEnds([slotAt('10:00', '11:00', 50), slotAt('11:00', '12:00', 100)], GRACE_CALLER);
+    expect(kept.map((s) => s.start_time)).toEqual(['10:00']);
   });
 });
 

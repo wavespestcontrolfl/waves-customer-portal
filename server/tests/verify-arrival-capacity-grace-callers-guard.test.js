@@ -1,17 +1,25 @@
 /**
- * Source guard: every non-test call to verifyArrivalCapacity (arrival-
- * route.js) either passes `arrivalGraceMinutes` (a self-serve caller opting
- * into the owner's 2026-09-28 arrival-grace ruling) or is explicitly listed
- * on the ALLOWLIST below as a documented non-self-serve caller (staff/voice
- * — verifyArrivalCapacity's own 120-minute arrival promise is their only
- * bound, unchanged by this lane).
+ * Source guards for the self-serve arrival grace lane (owner ruling
+ * 2026-09-28, "I'd rather be more lenient than strict"), scoped to the
+ * ESTIMATE PICKER ONLY after Codex r1 P1 (#5314): /book (createSelfBooking)
+ * and public reschedule (the rebooker's single-visit move) both run a
+ * STRICT pre-verify travel probe ahead of their capacity commit check, so a
+ * grace-kept slot there would 409 SLOT_TAKEN before ever reaching
+ * verifyArrivalCapacity — the estimate picker's own commit
+ * (slot-reservation.js) has no such probe under capacity.
  *
- * As of this lane there are exactly four production call sites, and all
- * four are self-serve (or, for the rebooker, self-serve-only when the ONE
- * opted-in caller — reschedule-public.js — is the one invoking it; the
- * ALLOWLIST is empty today). A NEW call site that forgets the option fails
- * this test until it is reviewed and either wired or allowlisted, the same
- * shape as stamped-zero-charge-fallback-guard.test.js.
+ * 1. Every non-test call to verifyArrivalCapacity either passes
+ *    `arrivalGraceMinutes` (a self-serve caller opting in) or is explicitly
+ *    listed on the ALLOWLIST below as a documented non-grace caller.
+ * 2. `packEnds: true` (packCapacityEnds' own admission) is only ever passed
+ *    by the two self-serve availability builders.
+ * 3. `arrivalGrace: true` (packCapacityEnds' GRACE opt-in) is only ever
+ *    passed by estimate-slot-availability.js — never booking.js, even
+ *    though it shares packEnds:true.
+ *
+ * A NEW call site that forgets the right signal fails until it is reviewed
+ * and either wired or allowlisted — same shape as
+ * stamped-zero-charge-fallback-guard.test.js.
  */
 const fs = require('fs');
 const path = require('path');
@@ -21,9 +29,13 @@ const SCAN_DIRS = ['services', 'routes'];
 const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', 'coverage', 'dist']);
 
 // { 'relative/path.js': 'why every verifyArrivalCapacity call there is a
-// documented non-self-serve (staff/voice) caller' }. Empty today — see the
-// header comment.
-const ALLOWLIST = {};
+// documented non-grace caller' }.
+const ALLOWLIST = {
+  'routes/booking.js':
+    'createSelfBooking runs findConflictingVisits with a strict `travel` probe before this check — a grace-kept slot would already be refused SLOT_TAKEN (Codex r1 P1, #5314); grace is estimate-picker only',
+  'services/rebooker.js':
+    "the single-visit move's own pre-verify conflict probe is equally strict — the ONE caller that could opt in (reschedule-public.js) deliberately never sets arrivalGraceMinutes for the same reason (Codex r1 P1, #5314)",
+};
 
 function walk(dir, out) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -66,12 +78,16 @@ function callArgSpans(source) {
   return spans;
 }
 
-test('every verifyArrivalCapacity call site passes arrivalGraceMinutes or is allowlisted as non-self-serve', () => {
+function scanFiles() {
   const files = [];
   for (const dir of SCAN_DIRS) walk(path.join(SERVER_ROOT, dir), files);
+  return files;
+}
+
+test('every verifyArrivalCapacity call site passes arrivalGraceMinutes or is allowlisted as non-grace', () => {
   const offenders = [];
   let totalCalls = 0;
-  for (const file of files) {
+  for (const file of scanFiles()) {
     const rel = path.relative(SERVER_ROOT, file).replace(/\\/g, '/');
     if (rel === 'services/scheduling/arrival-route.js') continue; // the function's own definition/export
     const source = fs.readFileSync(file, 'utf8');
@@ -88,24 +104,47 @@ test('every verifyArrivalCapacity call site passes arrivalGraceMinutes or is all
   // function everywhere would otherwise make this test vacuously pass).
   expect(totalCalls).toBeGreaterThanOrEqual(4);
   expect(offenders).toEqual([]);
+  // The two allowlisted files must each still actually call the function —
+  // an allowlist entry for a call site that no longer exists is dead
+  // documentation, not a guard.
+  for (const rel of Object.keys(ALLOWLIST)) {
+    const source = fs.readFileSync(path.join(SERVER_ROOT, rel), 'utf8');
+    expect(callArgSpans(source).length).toBeGreaterThan(0);
+  }
 });
 
-// The offer-side mirror: packCapacityEnds' self-serve grace only ever runs
-// under findCapacitySlots' opts.packEnds === true, and packEnds:true is
-// ONLY ever passed by the two documented self-serve builders — never a
-// voice/staff/assistant surface (server/services/availability.js is a
-// SEPARATE, unrelated module with its own unrelated `packEnds` concept and
-// is deliberately excluded here).
+// The offer-side mirror: packCapacityEnds' own admission (packEnds:true) is
+// still shared by both self-serve builders — never a voice/staff/assistant
+// surface (server/services/availability.js is a SEPARATE, unrelated module
+// with its own unrelated `packEnds` concept and is deliberately excluded).
 test('packEnds: true is only ever passed by the two self-serve availability builders', () => {
-  const files = [];
-  for (const dir of SCAN_DIRS) walk(path.join(SERVER_ROOT, dir), files);
   const ALLOWED = new Set(['services/estimate-slot-availability.js', 'routes/booking.js']);
   const hits = [];
-  for (const file of files) {
+  for (const file of scanFiles()) {
     const rel = path.relative(SERVER_ROOT, file).replace(/\\/g, '/');
     if (rel === 'services/scheduling/find-time.js') continue; // packEnds's own consumer/contract
     const source = fs.readFileSync(file, 'utf8');
     if (/packEnds:\s*true/.test(source)) hits.push(rel);
   }
   expect(hits.sort()).toEqual([...ALLOWED].sort());
+});
+
+// packCapacityEnds' GRACE opt-in is narrower than packEnds:true itself
+// (Codex r1 P1, #5314): booking.js shares packEnds:true with the estimate
+// picker but must NEVER also pass arrivalGrace — its commit path can't
+// honor a grace-kept slot (see the ALLOWLIST reason above).
+test('arrivalGrace: true is only ever passed by the estimate picker', () => {
+  const ALLOWED = new Set(['services/estimate-slot-availability.js']);
+  const hits = [];
+  for (const file of scanFiles()) {
+    const rel = path.relative(SERVER_ROOT, file).replace(/\\/g, '/');
+    if (rel === 'services/scheduling/find-time.js') continue; // arrivalGrace's own consumer/contract
+    const source = fs.readFileSync(file, 'utf8');
+    if (/arrivalGrace:\s*true/.test(source)) hits.push(rel);
+  }
+  expect(hits.sort()).toEqual([...ALLOWED].sort());
+  // booking.js MUST NOT carry the grace opt-in even though it shares
+  // packEnds:true with the estimate picker (the whole point of this guard).
+  const bookingSrc = fs.readFileSync(path.join(SERVER_ROOT, 'routes/booking.js'), 'utf8');
+  expect(bookingSrc).not.toMatch(/arrivalGrace:\s*true/);
 });

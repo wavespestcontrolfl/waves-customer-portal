@@ -2416,6 +2416,22 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // re-picks, and /reserve runs the full capacity path). A live hold's
     // allocation is still on the row, so extending its expiry alone changes
     // no occupancy.
+    //
+    // Self-serve arrival grace write-up (owner ruling 2026-09-28, decision 4
+    // of that lane, #5314): a still-live hold's expiry-only extend NEVER
+    // re-verifies whole-route capacity fitness here — pre-existing, not new
+    // with grace. A hold accepted under a since-lowered
+    // SELF_SERVE_ARRIVAL_GRACE_MINUTES (or a route the day's stops have since
+    // reshuffled) keeps whatever grace certification it received at RESERVE
+    // time; extending only pushes reservation_expires_at forward and touches
+    // no occupancy. Re-running verifyArrivalCapacity here would need a fresh
+    // prepareArrivalCapacity call (the original prepared/fingerprint object
+    // lives only in the reserve request's memory, never persisted) — a full
+    // whole-route simulation on every extend, which this function already
+    // deliberately avoids for the SAME reason above. Not implemented: no
+    // cheaper option exists, and adding it would extend well past a genuine
+    // grace-only fix into re-verifying every capacity hold's fitness on every
+    // extend, gate-0 included.
     if (alreadyLapsed && rowUnderCapacity) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';

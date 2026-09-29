@@ -278,6 +278,10 @@ async function findCapacitySlots(opts) {
   }
   const packed = opts.packEnds === true ? packCapacityEnds(slots, {
     lat: opts.lat, lng: opts.lng, durationMinutes, expectedMinutes: opts.expectedMinutes,
+    // Self-serve arrival grace opt-in (owner ruling 2026-09-28) — ONLY
+    // estimate-slot-availability.js ever passes this; see packCapacityEnds'
+    // own header for why /book and every other packEnds:true caller must not.
+    arrivalGrace: opts.arrivalGrace === true,
   }) : slots;
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
@@ -389,35 +393,48 @@ function capacityNeighbourEntity(row) {
 // start (slot.arrival_delay_minutes — only ever set on a slot that already
 // passed evaluateArrivalPlacement's feasibility check, so "the simulation
 // found it feasible" is a precondition of the slot existing at all here).
-// Every caller of packCapacityEnds is itself customer-facing-only (findCapacitySlots
-// only runs it under opts.packEnds === true, which only booking.js's
-// buildBookingAvailability and estimate-slot-availability.js ever set — see
-// this module's own packEnds contract above); voice/staff/assistant
-// callers never reach this function. A live estimate hold neighbour NEVER
-// gives grace — it may evaporate before this slot is ever committed, unlike
-// a real committed stop the simulation already routed around.
-// Grace may only waive the travel BUFFER against the PREVIOUS stop (the
-// candidate itself arriving late, inside its own arrival window). Never a
-// real overlap, never a live hold, and never the next stop's side — the next
-// customer's promised start is not this customer's to spend.
-function graceWaivesBufferOnly(slot, row, candidate, neighbour) {
-  if (isHoldStop(row)) return false;
+//
+// SCOPED TO THE ESTIMATE PICKER ONLY (Codex r1 P1, #5314): packCapacityEnds
+// itself runs for every packEnds:true caller (booking.js's
+// buildBookingAvailability too — /book, voice, re-service, inspection, every
+// public reschedule), but that builder's own commit path (createSelfBooking,
+// the rebooker) runs a STRICT pre-verify travel probe the estimate picker's
+// commit does not, so a grace-kept slot there would 409 SLOT_TAKEN before
+// ever reaching verifyArrivalCapacity. `caller.arrivalGrace === true` is the
+// ONLY signal that opts a call into grace — passed by
+// estimate-slot-availability.js alone (guard-tested); every other caller,
+// including booking.js's own packEnds:true call, is byte-identical to
+// before this whole lane regardless of the env value.
+// A live estimate hold neighbour NEVER gives grace — it may evaporate before
+// this slot is ever committed, unlike a real committed stop the simulation
+// already routed around. Grace may only waive the travel BUFFER against the
+// PREVIOUS stop (the candidate itself arriving late, inside its own arrival
+// window) — never a real overlap, never a live hold, and never the next
+// stop's side, since the next customer's promised start is not this
+// customer's to spend.
+function graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbour) {
+  if (!arrivalGraceOptIn || isHoldStop(row)) return false;
   const grace = selfServeArrivalGraceMinutes({ date: slot.date });
   if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return false;
   if (slot.arrival_delay_minutes > grace) return false;
   return travelGapConflicts(candidate, [neighbour]).every((c) => c.reason === 'travel_gap');
 }
 
-// Offer/commit parity: with grace on for the slot's date, commit
-// (verifyArrivalCapacity) refuses any fit delayed past grace, so the offer
-// must drop those slots too — including ones that pass the strict buffer.
-function withinArrivalGrace(slot) {
+// Offer/commit parity: with grace opted in and on for the slot's date,
+// commit (verifyArrivalCapacity) refuses any fit delayed past grace, so the
+// offer must drop those slots too — including ones that pass the strict
+// buffer outright. Applied BEFORE a group picks its packed endpoint (Codex
+// r1 P2), not as a final pass after — a later, still-valid candidate on the
+// same side must not be lost because an earlier one failed only on grace.
+function withinArrivalGrace(arrivalGraceOptIn, slot) {
+  if (!arrivalGraceOptIn) return true;
   const grace = selfServeArrivalGraceMinutes({ date: slot.date });
   if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return true;
   return slot.arrival_delay_minutes <= grace;
 }
 
 function packCapacityEnds(slots, caller = {}) {
+  const arrivalGraceOptIn = caller.arrivalGrace === true;
   const groups = new Map();
   for (const slot of slots) {
     const key = `${slot.date}|${slot.technician.id}|${slot._gap?.prevId ?? ''}|${slot._gap?.nextId ?? ''}`;
@@ -437,24 +454,29 @@ function packCapacityEnds(slots, caller = {}) {
       expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
     };
     if (!violatesTravelGap(candidate, [neighbour])) return true;
-    return side === 'prev' && graceWaivesBufferOnly(slot, row, candidate, neighbour);
+    return side === 'prev' && graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbour);
   };
   const keep = new Set();
   for (const group of groups.values()) {
     const prevReal = group[0]._gap?.prevId != null;
     const nextReal = group[0]._gap?.nextId != null;
-    if (!prevReal && !nextReal) { for (const s of group) keep.add(s); continue; }
+    if (!prevReal && !nextReal) {
+      for (const s of group) if (withinArrivalGrace(arrivalGraceOptIn, s)) keep.add(s);
+      continue;
+    }
     const byStart = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
     if (prevReal) {
-      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow, 'prev'));
+      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow, 'prev')
+        && withinArrivalGrace(arrivalGraceOptIn, s));
       if (survivors.length) keep.add(survivors[0]);
     }
     if (nextReal) {
-      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow, 'next'));
+      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow, 'next')
+        && withinArrivalGrace(arrivalGraceOptIn, s));
       if (survivors.length) keep.add(survivors[survivors.length - 1]);
     }
   }
-  return slots.filter((s) => keep.has(s) && withinArrivalGrace(s));
+  return slots.filter((s) => keep.has(s));
 }
 
 // The candidate's own expected-minutes credit (owner ruling 2026-09-23),

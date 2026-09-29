@@ -17,7 +17,7 @@ const {
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { capacityEnabled, applySchedulingPolicy, placementFitsShift, selfServeArrivalGraceMinutes } = require('../services/scheduling/policy');
+const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -3936,8 +3936,12 @@ async function createSelfBooking(payload = {}) {
           windowEnd: endTime,
           durationMinutes: duration,
           serviceTypes: capacityServiceTypes,
-          // Self-serve /book confirm — owner ruling 2026-09-28 arrival grace.
-          arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date: slotDateStr }),
+          // No arrivalGraceMinutes here (owner ruling 2026-09-28, scope cut
+          // Codex r1 P1 #5314): /book runs a STRICT pre-verify travel probe
+          // (findConflictingVisits below, with `travel`) that a grace-kept
+          // slot would fail before ever reaching this check — grace is
+          // estimate-picker-only. See scheduling/policy.js and
+          // scheduling/find-time.js's packCapacityEnds header.
         })
         : null;
 

@@ -1756,13 +1756,11 @@ class SmartRebooker {
           windowStart: updates.window_start,
           windowEnd: occupancyGateEnd,
           durationMinutes: service.estimated_duration_minutes || undefined,
-          // Self-serve arrival grace (owner ruling 2026-09-28): caller-
-          // supplied ONLY, never resolved here — reschedule-public.js is the
-          // one caller that opts in (mirrors options.capacityPlacement's own
-          // single-caller scoping just above); every other rebooker caller
-          // (admin dispatch, auto-dispatch, rain-out, SMS-reply reschedule)
-          // never sets it, so they stay byte-identical to before this lane.
-          arrivalGraceMinutes: options.arrivalGraceMinutes,
+          // No arrivalGraceMinutes here (owner ruling 2026-09-28, scope cut
+          // Codex r1 P1 #5314): public reschedule's own commit runs a STRICT
+          // pre-verify travel probe (probeMoveConflicts) a grace-kept slot
+          // would fail before this check ever ran — grace is estimate-picker
+          // only. See scheduling/policy.js and find-time.js's packCapacityEnds.
         })
         : null;
       // A reviewed move also pins the route whose destination was probed.

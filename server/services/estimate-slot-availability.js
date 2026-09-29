@@ -2047,6 +2047,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // both ends of a real route gap instead of one earliest-only
       // candidate — see find-time.js's packEnds option.
       packEnds: true,
+      // Self-serve arrival grace (owner ruling 2026-09-28) — the estimate
+      // picker is the ONLY caller that opts in (guard-tested); its commit
+      // path (slot-reservation.js reserveSlot/commitReservation) has no
+      // pre-verify strict travel probe under capacity, unlike /book and the
+      // rebooker, so a grace-kept slot here is actually committable.
+      arrivalGrace: true,
       // The resolved whole-visit credit (above) — find-time must not
       // re-derive it from one service key.
       expectedMinutes: candidateExpectedMinutes,
@@ -2277,6 +2283,9 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     excludeEstimateId: estimateId,
     bufferMinutes: customerFacingBufferMinutes(),
     packEnds: true,
+    // Same grace opt-in as the live path — this debug view must show what
+    // the customer is actually offered (owner ruling 2026-09-28).
+    arrivalGrace: true,
     serviceKey: serviceProfile.services[0]?.catalogServiceKey || serviceProfile.services[0]?.engineKey || null,
     // Same customer-facing day close as the live path (see above).
     dayEndHour: currentDayEndMinutes() / 60,
