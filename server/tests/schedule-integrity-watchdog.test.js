@@ -529,21 +529,23 @@ describe('standing bells the scan no longer raises (alert relevance)', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(MAX_ALERTS_PER_RUN + 2);
   });
 
-  test('after a complete scan, the prepay and accepted-plan bells it no longer raised are handed to the relevance retire with exactly the current keys', async () => {
+  test('after a complete scan, the unpriced-series, prepay and accepted-plan bells it no longer raised are handed to the relevance retire with exactly the current keys', async () => {
     findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([acceptedGap(1)]);
-    makeDbMock({ coverageRows: [prepayRow('prepay-1')] });
+    makeDbMock({ coverageRows: [prepayRow('prepay-1'), unpricedChild({ id: 'ss-child-9', recurring_parent_id: 'ss-parent-9' })] });
     const result = await runInner({ now: NOW });
-    expect(result.cleared).toEqual({ prepayCoverage: 0, acceptedSchedule: 0 });
+    expect(result.cleared).toEqual({ unpricedSeries: 0, prepayCoverage: 0, acceptedSchedule: 0 });
     const byPrefix = Object.fromEntries(retireKeysNoLongerRaised.mock.calls.map(([o]) => [o.prefix, o]));
     const rung = NotificationService.notifyAdmin.mock.calls.map((call) => call[3].metadata.dedupeKey);
     expect(byPrefix['prepay-coverage:'].liveKeys).toEqual(rung.filter((k) => k.startsWith('prepay-coverage:prepay-1:')));
     expect(byPrefix['prepay-coverage:'].liveKeys).toHaveLength(1);
     expect(byPrefix['accepted-schedule:'].liveKeys).toEqual(['accepted-schedule:e-1:pest_control']);
-    // Nothing found at all: every standing bell of both classes is handed over.
+    // The series bell stands for its whole root: the root this scan still raised stays.
+    expect(byPrefix['unpriced-series:'].liveKeys).toEqual(['unpriced-series:ss-parent-9']);
+    // Nothing found at all: every standing bell of every class is handed over.
     retireKeysNoLongerRaised.mockClear();
     makeDbMock();
     await runInner({ now: NOW });
-    expect(retireKeysNoLongerRaised.mock.calls.map(([o]) => [o.prefix, o.liveKeys])).toEqual([['prepay-coverage:', []], ['accepted-schedule:', []]]);
+    expect(retireKeysNoLongerRaised.mock.calls.map(([o]) => [o.prefix, o.liveKeys])).toEqual([['unpriced-series:', []], ['prepay-coverage:', []], ['accepted-schedule:', []]]);
   });
 
   test('a run stopped at its cap clears nothing (the replacements are not all raised yet), and a failed accepted-plan check leaves that class alone', async () => {
@@ -554,7 +556,7 @@ describe('standing bells the scan no longer raises (alert relevance)', () => {
     findAcceptedRecurringScheduleGaps.mockRejectedValueOnce(new Error('read failed'));
     makeDbMock({ coverageRows: [prepayRow('prepay-2')] });
     expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleCheckFailed: true });
-    expect(retireKeysNoLongerRaised.mock.calls.map(([o]) => o.prefix)).toEqual(['prepay-coverage:']);
+    expect(retireKeysNoLongerRaised.mock.calls.map(([o]) => o.prefix)).toEqual(['unpriced-series:', 'prepay-coverage:']);
   });
 
   test('a failed clear is logged and never fails the run (the bells already rang)', async () => {

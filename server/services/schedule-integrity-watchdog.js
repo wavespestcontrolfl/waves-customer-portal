@@ -341,7 +341,7 @@ async function runInner({ now = new Date() } = {}) {
 
   // Unpriced series ring FIRST: they are same-day money loss (a visit can
   // complete and invoice at $0 today).
-  const alerts = Array.from(unpricedByRoot, ([root, v]) => {
+  const unpricedAlerts = Array.from(unpricedByRoot, ([root, v]) => {
     const d = v.service_date;
     return [
       `unpriced-series:${root}`,
@@ -351,6 +351,7 @@ async function runInner({ now = new Date() } = {}) {
       { scheduled_service_id: v.id, series_root_id: root, customer_id: v.customer_id || null, next_visit_date: d },
     ];
   });
+  const alerts = [...unpricedAlerts];
 
   // Class 2 — recurring-lawn customers invisible to the Monday irrigation
   // email (owner directive 2026-08-05: check daily). The email's audience is
@@ -473,11 +474,14 @@ async function runInner({ now = new Date() } = {}) {
   // Only after a complete scan whose every current key was raised: a failed
   // accepted-plan check proves nothing, and a run stopped at its cap has not
   // yet raised the replacements. Advisory — a failure never fails the run.
-  const cleared = { prepayCoverage: 0, acceptedSchedule: 0 };
+  const cleared = { unpricedSeries: 0, prepayCoverage: 0, acceptedSchedule: 0 };
   if (!capHit) {
     try {
       const { retireKeysNoLongerRaised } = require('./admin-alert-relevance');
       const reason = 'The schedule watchdog no longer finds this gap';
+      // The unpriced-series bell stands for EVERY unpriced upcoming visit of
+      // its series root; only this scan of the whole root can say it is gone.
+      cleared.unpricedSeries = await retireKeysNoLongerRaised({ prefix: 'unpriced-series:', liveKeys: unpricedAlerts.map(([key]) => key), reason: 'The schedule watchdog no longer finds an unpriced upcoming visit in this series', now });
       cleared.prepayCoverage = await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: prepayAlerts.map(([key]) => key), reason, now });
       if (!acceptedScheduleCheckFailed) {
         cleared.acceptedSchedule = await retireKeysNoLongerRaised({ prefix: 'accepted-schedule:', liveKeys: acceptedAlerts.map(([key]) => key), reason, now });

@@ -30,16 +30,20 @@
  * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
  * — never dedupeVersion/autoCleared/invoiceId, so every emitter's own dedupe
  * and recovery logic still sees the row exactly as a human dismissal. The one
- * exception is a class marked `rearm` (first-application divergence, unpriced
- * series, estimate hot view, prepaid-coverage and accepted-plan reviews —
- * every class whose emitter re-raises a stable key): its emitter dedupes on a key
- * the subject's return need not change (forever, or a rolling day), so the
- * key moves into the stamp (`retired.dedupeKey`, `dedupeKey: null`) and a
- * condition that comes back (the price removed again, an estimate restored,
- * a customer reactivated) raises a fresh bell instead of finding this row.
+ * exception is a class marked `rearm` (first-application divergence, estimate
+ * hot view, prepaid-coverage and accepted-plan reviews — every class whose
+ * emitter re-raises a stable key): its emitter dedupes on a key the subject's
+ * return need not change (forever, or a rolling day), so the key moves into
+ * the stamp (`retired.dedupeKey`, `dedupeKey: null`) and a condition that
+ * comes back (an invoice sent, an estimate restored, a customer reactivated)
+ * raises a fresh bell instead of finding this row.
  * An emitter that knows its whole current set can also clear on absence
- * (retireKeysNoLongerRaised, the schedule-integrity watchdog's prepay and
- * accepted-plan reviews), re-arming the same way.
+ * (retireKeysNoLongerRaised), re-arming the same way: the schedule-integrity
+ * watchdog does for its unpriced-series, prepay and accepted-plan bells. The
+ * unpriced-series bell is cleared ONLY that way — it stands for every
+ * unpriced visit of a series root and names one, so only the watchdog's own
+ * scan of the whole root can say it is gone; a money-loss page is never
+ * cleared by a narrower check here.
  * A genuine state change can still re-bell a refreshOnDedupe row once; the
  * next sweep retires it again if its subject is still gone. Read-only apart
  * from notification rows.
@@ -152,32 +156,7 @@ async function loadSubjects(rows, conn = db) {
   const invoiceIds = ids((r) => r.invoiceIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
   if (visitIds.length) {
-    data.visits = byId(await conn('scheduled_services as ss')
-      .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
-      .leftJoin('invoices as fa_invoice', 'fa_invoice.id', 'ss.first_application_invoice_id')
-      .whereIn('ss.id', visitIds)
-      .select('ss.id', 'ss.customer_id', 'ss.status', 'ss.is_recurring', 'ss.recurring_parent_id',
-        'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount', 'ss.prepaid_method',
-        'ss.annual_prepay_term_id', 'ss.prepaid_at', 'ss.service_type', 'ss.scheduled_date', 'ss.completed_at',
-        'ss.first_application_invoice_id', 'fa_invoice.status as first_application_invoice_status',
-        'parent.estimated_price as parent_estimated_price', 'parent.primary_line_price as parent_primary_line_price'));
-    // The watchdog's second, async coverage step: an annual-prepay stamp
-    // suppresses the unpriced page only once annualPrepayCoversVisit validates
-    // its term. Same validator, same fail-closed stance (an unverifiable stamp
-    // is not coverage, so the alert stays).
-    // Inside a transaction — the ring-time savepoint — every failure must
-    // surface (the validator's strict mode): its default mode catches a
-    // failed query and answers false, which would leave the savepoint's
-    // transaction aborted and fail the bell's own insert. Thrown, the
-    // savepoint rolls back and the gate rings (fail open). The sweep reads
-    // outside a transaction and keeps the fail-closed default.
-    const { annualPrepayCoversVisit, ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
-    for (const visit of data.visits.values()) {
-      if (visit.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) continue;
-      visit.annual_prepay_covered = conn.isTransaction
-        ? await annualPrepayCoversVisit(visit, conn, { throwOnError: true })
-        : await annualPrepayCoversVisit(visit, conn).catch(() => false);
-    }
+    data.visits = byId(await conn('scheduled_services as ss').whereIn('ss.id', visitIds).select('ss.id', 'ss.customer_id', 'ss.status'));
   }
   if (invoiceIds.length) {
     data.invoices = byId(await conn('invoices').whereIn('id', invoiceIds).select('id', 'status', 'customer_id'));
@@ -233,17 +212,6 @@ const customerLeft = (s) => (s.customerLeft ? CUSTOMER_LEFT : null);
 const visitClosed = (s) => (s.refs.visitId && (!s.visit || CLOSED_VISIT_STATUSES.has(String(s.visit.status)))
   ? 'Visit is no longer open' : null);
 
-function unpricedSeriesMovedOn(s) {
-  const left = customerLeft(s) || visitClosed(s);
-  if (left || !s.visit || s.visit.status == null) return left;
-  // Same two steps the watchdog uses to raise the alert: the pure predicate
-  // (price on the row or its parent, an out-of-band prepay stamp, a live
-  // first-application invoice), then a validated annual-prepay term.
-  const { isUnpricedSeriesVisit } = require('./schedule-integrity-watchdog');
-  if (!isUnpricedSeriesVisit(s.visit)) return 'Visit now carries a price or is covered';
-  return s.visit.annual_prepay_covered ? 'Visit is covered by a paid annual prepay' : null;
-}
-
 function seriesMoveMovedOn(s) {
   const dates = [...arr(s.meta.overlapDates), ...arr(s.meta.conflicts).map((c) => c?.date),
     ...arr(s.meta.preservedOccurrences).map((c) => c?.date)]
@@ -251,8 +219,11 @@ function seriesMoveMovedOn(s) {
   if (dates.length && dates.every((d) => d < s.todayET)) return 'Every flagged date has passed';
   // Every visit the move named — the moved one, its windowless conflicts, its
   // preserved occurrences — must be settled: cancelling only the moved visit
-  // leaves the others' dispatch work standing.
-  if (s.affectedVisits.length && s.affectedVisits.every((v) => !v || CLOSED_VISIT_STATUSES.has(String(v.status)))) {
+  // leaves the others' dispatch work standing. Only a card that names every
+  // visit involved: an overlap date is stored without the sibling that sits
+  // on it, so a card with one waits for its dates instead.
+  if (!arr(s.meta.overlapDates).length && s.affectedVisits.length
+    && s.affectedVisits.every((v) => !v || CLOSED_VISIT_STATUSES.has(String(v.status)))) {
     return 'Every visit it named is closed';
   }
   return customerLeft(s);
@@ -281,9 +252,6 @@ const CLASSES = [
     rule: (s) => (s.customerLeft && s.meta.alertKind === 'diverged' && s.invoices.length
       && s.invoices.every((i) => i && NO_MONEY_INVOICE_STATUSES.has(String(i.status)))
       ? 'Customer left and the combined invoice is an unsent draft or void' : null),
-  },
-  { // schedule-integrity-watchdog.js class 1 — forever-deduped on a stable key, so a retire re-arms it
-    key: 'unpriced_series', categories: ['alert'], prefix: 'unpriced-series:', rule: unpricedSeriesMovedOn, rearm: true,
   },
   { // emitter removed in #5223; unread rows remain
     key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: (s) => customerLeft(s) || visitClosed(s),

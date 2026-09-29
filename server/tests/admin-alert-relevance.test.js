@@ -11,16 +11,6 @@
 // suites skip locally). All identities are synthetic.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: () => false }));
-// The watchdog's annual-prepay validator: true/false, or an Error to throw.
-let mockAnnualCovered;
-jest.mock('../services/annual-prepay-renewals', () => ({
-  ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
-  annualPrepayCoversVisit: jest.fn(async () => {
-    if (mockAnnualCovered instanceof Error) throw mockAnnualCovered;
-    return mockAnnualCovered === true;
-  }),
-}));
-
 let mockTables;
 let mockQueries;
 let mockHooks;
@@ -175,7 +165,6 @@ beforeEach(() => {
   mockHooks = {};
   mockFailTable = null;
   mockTrxs = [];
-  mockAnnualCovered = false;
 });
 
 // The reason a row's class gives against the current fake mockTables (null = still relevant).
@@ -271,59 +260,30 @@ describe('class rules', () => {
     expect((await reasonFor(divergence())).reason).toBeNull();
   });
 
-  const unpriced = () => note({ category: 'alert', metadata: { dedupeKey: `unpriced-series:${PARENT}`, scheduled_service_id: VISIT, customer_id: CUST, series_root_id: PARENT } });
+  const prepay = (customerId = CUST) => note({ category: 'alert', metadata: { dedupeKey: `prepay-coverage:${VISIT}:annual_coverage_unverified:x`, scheduled_service_id: VISIT, customer_id: customerId } });
 
-  test('unpriced series: still relevant while the visit is open, unpriced and the customer is here', async () => {
-    mockTables['scheduled_services as ss'] = [visit()];
-    expect(await reasonFor(unpriced())).toEqual({ cls: 'unpriced_series', reason: null });
+  test('an unpriced-series bell is not judged here: it stands for every unpriced visit of its series root and names one, so only the watchdog\'s own scan of the root clears it', async () => {
+    const unpriced = note({ category: 'alert', metadata: { dedupeKey: `unpriced-series:${PARENT}`, scheduled_service_id: VISIT, customer_id: CUST, series_root_id: PARENT } });
+    expect(classify(unpriced)).toBeNull();
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    mockTables.customers = [customer({ churned_at: new Date() })];
+    mockTables.notifications = [unpriced];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 0 });
+    expect(unpriced.read_at).toBeNull();
   });
 
-  test.each([
-    ['customer churned', () => { mockTables.customers = [customer({ churned_at: new Date() })]; }, 'Customer left'],
-    ['customer churned on a legacy row with no churn date', () => { mockTables.customers = [customer({ pipeline_stage: 'churned' })]; }, 'Customer left'],
-    ['visit cancelled', () => { mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' })]; }, 'no longer open'],
-    ['visit completed', () => { mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })]; }, 'no longer open'],
-    ['visit skipped', () => { mockTables['scheduled_services as ss'] = [visit({ status: 'skipped' })]; }, 'no longer open'],
-    ['visit no-show', () => { mockTables['scheduled_services as ss'] = [visit({ status: 'no_show' })]; }, 'no longer open'],
-    ['visit gone', () => { mockTables['scheduled_services as ss'] = []; }, 'no longer open'],
-    ['visit now priced', () => { mockTables['scheduled_services as ss'] = [visit({ estimated_price: '99.00' })]; }, 'carries a price'],
-    ['parent priced', () => { mockTables['scheduled_services as ss'] = [visit({ recurring_parent_id: PARENT, parent_primary_line_price: '72.00' })]; }, 'carries a price'],
-    ['covered by a live combined invoice', () => { mockTables['scheduled_services as ss'] = [visit({ first_application_invoice_id: INV, first_application_invoice_status: 'sent' })]; }, 'covered'],
-  ])('unpriced series: %s -> retired', async (_label, arrange, text) => {
+  test('customer left is the live churned stage: a legacy churned row with no date has left; a reactivated customer who still carries an old churn date has not', async () => {
     mockTables['scheduled_services as ss'] = [visit()];
-    arrange();
-    expect((await reasonFor(unpriced())).reason).toEqual(expect.stringContaining(text));
-  });
-
-  test('a reactivated customer who still carries an old churn date has not left: the stage is the live state', async () => {
-    mockTables['scheduled_services as ss'] = [visit()];
+    mockTables.customers = [customer({ pipeline_stage: 'churned' })];
+    expect((await reasonFor(prepay())).reason).toEqual('Customer left');
     mockTables.customers = [customer({ churned_at: new Date('2026-06-01T12:00:00Z'), pipeline_stage: 'active_customer' })];
-    expect((await reasonFor(unpriced())).reason).toBeNull();
+    expect((await reasonFor(prepay())).reason).toBeNull();
   });
 
-  test('unpriced series: an annual-prepay stamp clears it only once the watchdog validator confirms the term (fail-closed)', async () => {
-    const stamped = visit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '98.01', annual_prepay_term_id: PARENT });
-    mockTables['scheduled_services as ss'] = [stamped];
-    mockAnnualCovered = true;
-    expect((await reasonFor(unpriced())).reason).toEqual(expect.stringContaining('paid annual prepay'));
-    mockTables['scheduled_services as ss'] = [{ ...stamped }];
-    mockAnnualCovered = false;
-    expect((await reasonFor(unpriced())).reason).toBeNull();
-    mockTables['scheduled_services as ss'] = [{ ...stamped }];
-    mockAnnualCovered = new Error('terms table unavailable');
-    expect((await reasonFor(unpriced())).reason).toBeNull();
-  });
-
-  test('unpriced series: a merged-away (soft-deleted) profile frozen in the alert is not "customer left" when the live visit now belongs to the survivor', async () => {
-    const merged = note({ category: 'alert', metadata: { dedupeKey: `unpriced-series:${PARENT}`, scheduled_service_id: VISIT, customer_id: CUST2, series_root_id: PARENT } });
+  test('a merged-away (soft-deleted) profile frozen in the alert is not "customer left" when the live visit now belongs to the survivor', async () => {
     mockTables.customers = [customer(), customer({ id: CUST2, deleted_at: new Date() })];
     mockTables['scheduled_services as ss'] = [visit({ customer_id: CUST })];
-    expect((await reasonFor(merged)).reason).toBeNull();
-  });
-
-  test('unpriced series: a voided combined invoice does not cover the visit', async () => {
-    mockTables['scheduled_services as ss'] = [visit({ first_application_invoice_id: INV, first_application_invoice_status: 'void' })];
-    expect((await reasonFor(unpriced())).reason).toBeNull();
+    expect((await reasonFor(prepay(CUST2))).reason).toBeNull();
   });
 
   test.each([['stale-visit:', 'stale_visit'], ['prepay-coverage:', 'prepay_coverage']])('%s alerts retire when the visit closed or the customer left', async (prefix, key) => {
@@ -360,14 +320,21 @@ describe('class rules', () => {
     expect((await reasonFor(move({ overlapDates: ['2026-09-20', '2026-09-27'], conflicts: [{ id: VISIT, date: '2026-09-01' }], preservedOccurrences: [{ date: '2026-08-01' }] }))).reason)
       .toEqual(expect.stringContaining('passed'));
     mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' })];
-    expect((await reasonFor(move())).reason).toEqual(expect.stringContaining('closed'));
+    expect((await reasonFor(move({ overlapDates: [], conflicts: [{ id: VISIT, date: '2026-10-05' }] }))).reason).toEqual(expect.stringContaining('closed'));
     mockTables['scheduled_services as ss'] = [visit()];
     mockTables.customers = [customer({ churned_at: new Date() })];
     expect((await reasonFor(move())).reason).toBe('Customer left');
   });
 
+  test('series move: a card with an overlap date names only the moved visit, not the sibling on that date — closing every visit it names keeps it until the date passes', async () => {
+    const overlapping = move({ overlapDates: ['2026-10-05'], conflicts: [{ id: PARENT, date: '2026-10-12' }] });
+    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'cancelled' })];
+    expect((await reasonFor(overlapping)).reason).toBeNull();
+    expect((await reasonFor(move({ overlapDates: ['2026-09-20'], conflicts: [{ id: PARENT, date: '2026-09-21' }] }))).reason).toEqual(expect.stringContaining('passed'));
+  });
+
   test('series move: cancelling only the moved visit keeps the alert while a conflict or preserved occurrence it named is still open', async () => {
-    const named = move({ conflicts: [{ id: PARENT, date: '2026-10-12' }], preservedOccurrences: [{ id: uid(9), date: '2026-11-09' }] });
+    const named = move({ overlapDates: [], conflicts: [{ id: PARENT, date: '2026-10-12' }], preservedOccurrences: [{ id: uid(9), date: '2026-11-09' }] });
     mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'pending' }), visit({ id: uid(9), status: 'completed' })];
     expect((await reasonFor(named)).reason).toBeNull();
     mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'cancelled' }), visit({ id: uid(9), status: 'completed' })];
@@ -559,35 +526,16 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(JSON.parse(row.metadata)).toEqual(before);
   });
 
-  test('re-arm: a retired unpriced-series bell frees its forever-dedupe key, so the price removed again rings a fresh bell', async () => {
-    const key = `unpriced-series:${PARENT}`;
-    mockTables['scheduled_services as ss'] = [visit({ estimated_price: '99.00' })];
-    const row = note({ id: uid(555), category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST } });
-    mockTables.notifications = [row];
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 1, byClass: { unpriced_series: 1 } });
-    expect(JSON.parse(row.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: key, reason: expect.stringContaining('price') } });
-    // The price is removed again; the watchdog raises the same stable key.
-    mockTables['scheduled_services as ss'] = [visit()];
-    const again = await NotificationService.notifyAdmin('alert', 'Recurring service has no price', 'body', {
-      bell: true, dedupeKey: key, metadata: { dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST },
-    });
-    expect(again.deduped).toBe(false);
-    expect(mockTables.notifications).toHaveLength(2);
-    const fresh = mockTables.notifications.find((r) => r.id !== row.id);
-    expect(fresh.read_at == null).toBe(true);
-    expect(JSON.parse(fresh.metadata).feed).toBeUndefined();
-  });
-
   test('re-arm put-back: a change between the write and the final judgement restores the dedupe key with the bell', async () => {
-    const key = `unpriced-series:${PARENT}`;
-    mockTables['scheduled_services as ss'] = [visit({ estimated_price: '99.00' })];
-    const row = note({ id: uid(556), category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST } });
+    const key = `estimate_hot_view:${EST}`;
+    mockTables.estimates = [{ id: EST, status: 'viewed', archived_at: new Date('2026-09-28T12:00:00Z'), sent_at: null, customer_id: CUST }];
+    const row = note({ id: uid(556), category: 'estimate_hot_view', metadata: { dedupeKey: key, estimateId: EST, customerId: CUST } });
     mockTables.notifications = [row];
-    let visitReads = 0;
-    mockHooks['scheduled_services as ss'] = () => { visitReads += 1; if (visitReads === 3) mockTables['scheduled_services as ss'] = [visit()]; };
+    let estimateReads = 0;
+    mockHooks.estimates = () => { estimateReads += 1; if (estimateReads === 3) mockTables.estimates[0].archived_at = null; };
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 0 });
     expect(row.read_at).toBeNull();
-    expect(JSON.parse(row.metadata)).toEqual({ dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST });
+    expect(JSON.parse(row.metadata)).toEqual({ dedupeKey: key, estimateId: EST, customerId: CUST });
   });
 
   test('the retire writes an explicit millisecond read_at (never NOW(), whose microseconds a read-back would lose) and the put-back matches it exactly', async () => {
@@ -881,8 +829,8 @@ describe('ring time, through the existing ringGate seam', () => {
   });
 
   test.each([
-    ['unpriced series, customer left', 'alert', `unpriced-series:${PARENT}`, { scheduled_service_id: VISIT, customer_id: CUST },
-      () => { mockTables['scheduled_services as ss'] = [visit()]; mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })]; },
+    ['accepted-plan review, customer left', 'alert', `accepted-schedule:${EST}:pest_control`, { estimate_id: EST, customer_id: CUST },
+      () => { mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })]; },
       () => { mockTables.customers = [customer()]; }],
     ['estimate hot view, estimate archived', 'estimate_hot_view', `estimate_hot_view:${EST}`, { estimateId: EST, customerId: CUST },
       () => { mockTables.estimates = [{ id: EST, status: 'viewed', archived_at: new Date('2026-09-28T12:00:00Z'), sent_at: null, customer_id: CUST }]; },
@@ -898,23 +846,6 @@ describe('ring time, through the existing ringGate seam', () => {
     expect(mockTables.notifications).toHaveLength(1);
     expect(stored()[0]).toMatchObject({ dedupeKey: key, rungAt: expect.any(String) });
     expect(stored()[0].quiet).toBeUndefined();
-  });
-
-  test('inside the ring-time savepoint the annual-prepay validator runs strict: a failure rolls the savepoint back and the bell rings, never an insert on an aborted transaction', async () => {
-    const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
-    mockTables['scheduled_services as ss'] = [visit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '98.01', annual_prepay_term_id: PARENT })];
-    mockAnnualCovered = new Error('canceling statement due to statement timeout');
-    const key = `unpriced-series:${PARENT}`;
-    const created = await NotificationService.notifyAdmin('alert', 'Recurring service has no price', 'body', {
-      bell: true, dedupeKey: key, metadata: { dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST },
-    });
-    expect(created.deduped).toBe(false);
-    expect(stored()[0]).toMatchObject({ dedupeKey: key, rungAt: expect.any(String) });
-    expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: VISIT }), expect.anything(), { throwOnError: true });
-    // The sweep reads outside any transaction: the default, fail-closed mode.
-    annualPrepayCoversVisit.mockClear();
-    await loadSubjects([note({ category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT } })]);
-    expect(annualPrepayCoversVisit.mock.calls[0]).toHaveLength(2);
   });
 
   test('ringTimeCheck is null when the switch is off or the row is not in the table', () => {
