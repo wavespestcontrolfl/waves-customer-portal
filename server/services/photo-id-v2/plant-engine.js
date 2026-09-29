@@ -2041,6 +2041,14 @@ const NO_REFEREE_INFO = Object.freeze({
   triggered: false, result: null, json: null, scopes: [], outcomes: {},
 });
 
+/** The scopes the referee may vote on — one question per mode (Codex #5307
+ * r5): identify mode's own identity lanes, or a workup's conditions scope
+ * when its trigger fired. */
+function refereeCandidateScopes(run, escalation) {
+  if (run.mode === 'identify') return identifyLaneSlotsFor(run.subject);
+  return escalation.conditionFlags.triggered ? ['conditions'] : [];
+}
+
 /** Step between `runEscalation` and `legFailureReason` (owner ruling
  * 2026-09-28). Returns `escalation` unchanged (plus a `refereeInfo`
  * diagnostic for `internalFor`) when the gate is off, the run is
@@ -2060,11 +2068,14 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
   // identity slot uniformly (`identitySlotTriggers`), including a slot the
   // subject can't use at all, so checking every IDENTITY_SLOT here made an
   // irrelevant slot look "still unsure" and drew an unneeded referee call
-  // (Codex #5307 r1 finding 5). Conditions is a candidate scope only for a
-  // workup run whose OWN trigger actually fired.
-  const candidateIdentitySlots = identifyLaneSlotsFor(run.subject);
-  const conditionsApplies = run.mode !== 'identify' && !!escalation.conditionFlags.triggered;
-  const candidateScopes = conditionsApplies ? [...candidateIdentitySlots, 'conditions'] : candidateIdentitySlots;
+  // (Codex #5307 r1 finding 5).
+  // One question per mode (Codex #5307 r5): identify mode's question is the
+  // plant, so the referee votes on identity slots only; a workup's question
+  // is the problem, so it votes on conditions only (when that scope's own
+  // trigger fired) and never moves the host/turf a workup's condition index
+  // and possibilities were built for — a referee-changed host would leave
+  // them assessed against the wrong plant.
+  const candidateScopes = refereeCandidateScopes(run, escalation);
 
   // A scope with no earlier answer at all can never reach a 2-of-3 majority
   // (Codex #5307 r3), so it never draws the billed referee call either.
@@ -2403,6 +2414,7 @@ module.exports = {
     appendRefereeCandidate,
     appendRefereePossibility,
     stillUnsureAfterEscalation,
+    refereeCandidateScopes,
     earlierReadsFor,
     describeIdentityRead,
     reconcileCorrectedHost,

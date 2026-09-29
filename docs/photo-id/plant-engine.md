@@ -374,10 +374,12 @@ when the run is not `photosUnusable`, the total budget (`PHOTO_ID_V2_TIMEOUT_MS`
 has room for one more leg, and at least one scope that **triggered**
 escalation is still unsure after it: the providers disagreed, OpenAI never
 answered that scope (`blockPrettySure`), or the combined top confidence is
-still below `PHOTO_ID_ESCALATE_BELOW`. Candidate scopes are restricted to
-what the SUBJECT actually uses — `identifyLaneSlotsFor(subject)` (turf/weeds
-for a lawn, host for tree_shrub/palm) plus `conditions` for a workup run
-whose own trigger fired — never a slot the subject never populates (a
+still below `PHOTO_ID_ESCALATE_BELOW`. The referee answers ONE question per
+mode (`refereeCandidateScopes`): identify mode votes on the identity lanes
+the subject actually uses (`identifyLaneSlotsFor(subject)`: turf/weeds for a
+lawn, host for tree_shrub/palm); a workup votes on `conditions` only (when
+its own trigger fired) and never moves the host or turf its condition index
+and possibilities were built for. Never a slot the subject never populates (a
 whole-ladder Gemini miss trips `gemini_missed` on every identity slot
 uniformly, so an unfiltered check would draw a referee call for a lawn's
 turf/weeds on a tree_shrub request). One call covers every still-unsure

@@ -2215,6 +2215,23 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(shown).toHaveLength(3);
     });
 
+    test('Codex #5307 r5: one question per mode — a workup referee votes on conditions only, never the host', () => {
+      const flags = (triggered) => ({
+        triggered, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+      });
+      const escalation = {
+        identityFlags: { turf: flags(true), weeds: flags(true), host: flags(true) },
+        conditionFlags: flags(true),
+      };
+      const scopes = (subject, mode, esc = escalation) => engine._test.refereeCandidateScopes({ subject, mode }, esc);
+      expect(scopes('tree_shrub', 'workup')).toEqual(['conditions']);
+      expect(scopes('palm', 'workup')).toEqual(['conditions']);
+      expect(scopes('lawn', 'workup')).toEqual(['conditions']);
+      expect(scopes('tree_shrub', 'workup', { ...escalation, conditionFlags: flags(false) })).toEqual([]);
+      expect(scopes('tree_shrub', 'identify')).toEqual(['host']);
+      expect(scopes('lawn', 'identify')).toEqual(['turf', 'weeds']);
+    });
+
     test('Codex #5307 r3: with no earlier answer the referee is never called, and a lone referee vote never confirms', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       try {
