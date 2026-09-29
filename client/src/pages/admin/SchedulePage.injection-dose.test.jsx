@@ -101,6 +101,19 @@ describe('the injection record', () => {
     expect(screen.getByText(injectionLabelText(PALM_RATE))).toBeTruthy();
   });
 
+  it('keeps an explicit other product, never putting the one injection product back', async () => {
+    render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }]} />);
+    await waitFor(() => expect(record().product).toBe(IMA_JET.name));
+    fireEvent.change(screen.getByLabelText('Injection product'), { target: { value: '__other__' } });
+    expect(record().product).toBe('');
+    fireEvent.change(screen.getByPlaceholderText('Injection product'), { target: { value: 'Tree-age' } });
+    fireEvent.change(screen.getByPlaceholderText('Injection product'), { target: { value: '' } });
+    await act(async () => {});
+    expect(record().product).toBe('');
+    expect(screen.getByLabelText('Injection product').value).toBe('__other__');
+    expect(screen.queryByText(/^Label:/)).toBeNull();
+  });
+
   it('takes another product by name, with no helper', () => {
     render(<Block injectionProducts={[{ name: IMA_JET.name, rate: IMA_RATE }, { name: PALM_JET.name, rate: PALM_RATE }]} />);
     // Two injection products: nothing is picked for the tech.

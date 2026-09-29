@@ -10988,10 +10988,12 @@ export function TreeShrubCloseoutBlock({
   const unreadableDose = String(record.dose || "").trim() && !dose.amount ? String(record.dose).trim() : "";
   const doseUnit = dose.unit || doseUnitPick;
   const overLabel = Boolean(labelRate) && doseOverLabel(labelRate, trunkInches, dose.amount, doseUnit);
-  // One injection product on this visit: the record names it.
+  // One injection product on this visit: the record names it, until the tech
+  // chooses or types a product of their own (then it is never put back).
   const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
+  const productTouched = useRef(false);
   useEffect(() => {
-    if (injectionVisible && onlyInjection && !record.product) setInjectionField("product", onlyInjection);
+    if (injectionVisible && onlyInjection && !record.product && !productTouched.current) setInjectionField("product", onlyInjection);
   }, [injectionVisible, onlyInjection, record.product]);
   const caption = { display: "grid", gap: 4, fontSize: 13, color: colors.muted };
   return (
@@ -11143,6 +11145,7 @@ export function TreeShrubCloseoutBlock({
               value={otherProduct ? "__other__" : chosenInjection?.name || ""}
               onChange={(e) => {
                 const picked = e.target.value;
+                productTouched.current = true;
                 setOtherProduct(picked === "__other__");
                 setInjectionField("product", picked === "__other__" ? "" : picked);
               }}
@@ -11158,7 +11161,10 @@ export function TreeShrubCloseoutBlock({
           {(!injectionProducts.length || otherProduct || (record.product && !chosenInjection)) && (
             <input
               value={record.product || ""}
-              onChange={(e) => setInjectionField("product", e.target.value)}
+              onChange={(e) => {
+                productTouched.current = true;
+                setInjectionField("product", e.target.value);
+              }}
               placeholder="Injection product"
               style={input}
             />
