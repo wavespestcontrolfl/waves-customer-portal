@@ -222,7 +222,10 @@ function isBareAnnualCount(amount) {
 }
 
 function convertPriceWordRuns(text) {
-  const out = convertWholeAndCents(text).replace(PRICE_WORD_RUN_RE, (match, run, currencyWord, otherUnit, yearUnit) => {
+  // A digit-led decimal ("119 punto nueve nueve por aplicación") merges
+  // before the word-run pass: that pass would otherwise sum the fraction's
+  // digit words ("nueve nueve" → 18) and leave "119 punto 18".
+  const out = mergeCents(convertWholeAndCents(text)).replace(PRICE_WORD_RUN_RE, (match, run, currencyWord, otherUnit, yearUnit) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount)) return match;
     if (currencyWord) return `${amount} ${currencyWord}`;

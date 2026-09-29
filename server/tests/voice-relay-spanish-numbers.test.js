@@ -153,6 +153,11 @@ describe('normalizeSpanishSpokenText — cents merge into one amount', () => {
     ['Ciento diecinueve coma cinco por aplicación.', '119.5 por aplicación.'],
     ['Ciento diecinueve coma cero cinco por aplicación.', '119.05 por aplicación.'],
     ['Ciento diecinueve con cinco centavos por aplicación.', '119.05 por aplicación.'],
+    // A digit-led whole keeps its fraction's digit words as digits, not a sum.
+    ['119 punto nueve nueve por aplicación.', '119.99 por aplicación.'],
+    ['119 coma dos nueve por aplicación.', '119.29 por aplicación.'],
+    ['119 coma nueve nueve dólares.', '119.99 dólares.'],
+    ['119 con noventa y nueve por aplicación.', '119.99 por aplicación.'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });

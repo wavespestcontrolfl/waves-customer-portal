@@ -1391,15 +1391,18 @@ const ESTIMATE_DELIVERY_CLAIM_SOURCE = `(?:${ESTIMATE_TIMING_PREDICATE_SOURCE}[^
 const ESTIMATE_DELIVERY_CLAIM_RE = new RegExp(ESTIMATE_DELIVERY_CLAIM_SOURCE, 'i');
 const ESTIMATE_DELIVERY_DATE_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'i');
 const ESTIMATE_DELIVERY_CLOCK_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_CLOCK_SOURCE})\\b`, 'i');
-const ESTIMATE_REQUEST_DATE_RE = new RegExp(`\\b(?:que\\s+)?(?:solicit|pid)\\w*\\b(?:(?!\\b${ESTIMATE_DELIVERY_ES_SOURCE}\\b)[^.!?;]){0,40}?\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'gi');
+const ESTIMATE_REQUEST_DATE_RE = new RegExp(`\\b(?:que\\s+)?(?:solicit|pid)\\w*\\b(?:(?!\\b${ESTIMATE_TIMING_PREDICATE_SOURCE}\\b)[^.!?;]){0,40}?\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'gi');
 const ASSERTED_ESTIMATE_DELIVERY_DATE_RE = new RegExp(`(?=[\\s\\S]*${ESTIMATE_NOUN_ES_RE.source})(?=[\\s\\S]*${ESTIMATE_TIMING_PREDICATE_SOURCE})(?=[\\s\\S]*(?:${ESTIMATE_DELIVERY_DATE_SOURCE}))`, 'i');
 const ASSERTED_ESTIMATE_DELIVERY_CLOCK_RE = new RegExp(`(?:${ESTIMATE_DELIVERY_CLAIM_SOURCE}[^.!?;]{0,80}${ESTIMATE_DELIVERY_CLOCK_SOURCE}|${ESTIMATE_DELIVERY_CLOCK_SOURCE}[^.!?;]{0,80}${ESTIMATE_DELIVERY_CLAIM_SOURCE})`, 'i');
-const ASSERTED_ESTIMATE_READINESS_RE = new RegExp(`(?:${ESTIMATE_DELIVERY_CLAIM_SOURCE}[^.!?;]{0,60}${ESTIMATE_READINESS_TIME_SOURCE}|${ESTIMATE_READINESS_TIME_SOURCE}[^.!?;]{0,60}${ESTIMATE_DELIVERY_CLAIM_SOURCE})`, 'i');
+// Readiness wording only: a delivery verb tied to a time is the date, clock
+// and qualitative passes' job, which strip a request date first.
+const ESTIMATE_READINESS_CLAIM_SOURCE = `(?:${ESTIMATE_READINESS_ES_SOURCE}[^.!?;]{0,100}${ESTIMATE_NOUN_ES_RE.source}|${ESTIMATE_NOUN_ES_RE.source}[^.!?;]{0,100}${ESTIMATE_READINESS_ES_SOURCE})`;
+const ASSERTED_ESTIMATE_READINESS_RE = new RegExp(`(?:${ESTIMATE_READINESS_CLAIM_SOURCE}[^.!?;]{0,60}${ESTIMATE_READINESS_TIME_SOURCE}|${ESTIMATE_READINESS_TIME_SOURCE}[^.!?;]{0,60}${ESTIMATE_READINESS_CLAIM_SOURCE})`, 'i');
 
 function no_spanish_estimate_delivery_date(value, record, { utterances }) {
   for (const utterance of utterances) {
     for (const sentence of String(utterance.text || '').split(SENTENCE_SPLIT_RE)) {
-      const readiness = assertedSpokenMatch(sentence, ASSERTED_ESTIMATE_READINESS_RE);
+      const readiness = assertedSpokenMatch(sentence.replace(ESTIMATE_REQUEST_DATE_RE, ' '), ASSERTED_ESTIMATE_READINESS_RE);
       if (readiness && !SPANISH_NEGATION_RE.test(readiness[0])) {
         return ['fail', `estimate readiness tied to a time: "${clip(sentence, 160)}"`];
       }
