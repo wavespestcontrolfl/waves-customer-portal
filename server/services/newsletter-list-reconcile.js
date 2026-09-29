@@ -351,6 +351,20 @@ const appliedOrProjected = (write, applied, projected) => (write ? applied : pro
 class AddressMovedError extends Error {}
 const MAX_DECISION_ATTEMPTS = 3;
 
+// Never store or log a raw driver-thrown error message (codex P1): a
+// Postgres/pg error's own DETAIL — and, for some error shapes, the message
+// itself — can embed the actual row value (a unique-violation's "Key
+// (email)=(x@y.com) already exists."), which would leak a customer email
+// into the `errors` array or the log line despite every other id-only
+// convention in this module. AddressMovedError's own messages are a fixed,
+// reviewed allowlist (no row data, ever) and pass through verbatim; any
+// other error — almost always the database driver — is reduced to just
+// its error CODE (e.g. '23505'), never its message or detail.
+function safeErrorDescriptor(e) {
+  if (e instanceof AddressMovedError) return e.message;
+  return e && e.code ? `db_error_${e.code}` : 'error';
+}
+
 // THE eligibility decision for one customer's CURRENT address — the single
 // chokepoint the dry run's projection AND the write's insert both go
 // through (withAddressDecision), so the preview can never promise what the
@@ -691,8 +705,9 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     try {
       decision = await withAddressDecision(conn, row.customer_id, async (_trx, d) => d);
     } catch (e) {
-      errors.push({ customerId: row.customer_id, error: e.message });
-      logger.error(`[newsletter-list-reconcile] classify customer id=${row.customer_id} failed: ${e.message}`);
+      const safe = safeErrorDescriptor(e);
+      errors.push({ customerId: row.customer_id, error: safe });
+      logger.error(`[newsletter-list-reconcile] classify customer id=${row.customer_id} failed: ${safe}`);
       continue;
     }
     if (decision.outcome === 'excluded') { excluded[decision.reason] += 1; continue; }
@@ -740,13 +755,15 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
 
   // Runs `action` per item, catching so one failure never aborts the batch.
   // `idFor` returns an id-only descriptor for the error/log — never the
-  // full row (an importable row carries email/first_name/last_name).
+  // full row (an importable row carries email/first_name/last_name), and
+  // never the raw driver error message/detail either (safeErrorDescriptor).
   async function guardedEach(items, idFor, action) {
     for (const item of items) {
       try { await action(item); } catch (e) {
         const id = idFor(item);
-        errors.push({ ...id, error: e.message });
-        logger.error(`[newsletter-list-reconcile] write failed for ${JSON.stringify(id)}: ${e.message}`);
+        const safe = safeErrorDescriptor(e);
+        errors.push({ ...id, error: safe });
+        logger.error(`[newsletter-list-reconcile] write failed for ${JSON.stringify(id)}: ${safe}`);
       }
     }
   }

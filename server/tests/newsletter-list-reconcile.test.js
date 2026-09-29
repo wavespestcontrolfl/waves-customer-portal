@@ -499,6 +499,32 @@ test('a row that appears for the same email in the instant between the recheck a
   expect(row.source).toBe('other_flow'); // untouched by the import
 });
 
+// Codex P1 (this round): a raw driver error's own message/detail can embed
+// the actual row value (a real Postgres unique-violation's DETAIL reads
+// "Key (email)=(x@y.com) already exists."). Neither the errors array nor
+// the log line may ever carry that — only an id-only descriptor plus the
+// driver's error CODE.
+test('a thrown DB-style error during classification never leaks the customer email into errors[] or the log — only an id + error code', async () => {
+  const state = { customers: [cust({ id: 'c1', email: 'secret-pii@example.com' })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  conn.raw = jest.fn(async (sql, bindings) => {
+    if (sql.includes('WHERE c.id = ?')) {
+      const err = Object.assign(
+        new Error('duplicate key value violates unique constraint "x" - Key (email)=(secret-pii@example.com) already exists.'),
+        { code: '23505', detail: 'Key (email)=(secret-pii@example.com) already exists.' },
+      );
+      throw err;
+    }
+    return rawImpl(sql, bindings);
+  });
+  const result = await reconcileCustomers({ conn });
+  expect(result.errors).toEqual([{ customerId: 'c1', error: 'db_error_23505' }]);
+  expect(JSON.stringify(result.errors)).not.toContain('secret-pii');
+  const logger = require('../services/logger');
+  for (const call of logger.error.mock.calls) expect(call.join(' ')).not.toContain('secret-pii');
+});
+
 test('zone fill (write mode only): fills a null/blank region_zone from a live customer city that maps to a zone; a non-mapping city is left alone; reports ACTUALLY applied', async () => {
   const state = {
     customers: [cust({ id: 'c1', email: 'z1@e.com', city: 'Venice' }), cust({ id: 'c2', email: 'z2@e.com', city: 'Nowhere' })],
