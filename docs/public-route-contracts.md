@@ -1752,7 +1752,14 @@ because that URL carried the server's Google Maps key, the same key Geocoding
 and Routes use, which cannot be referrer-restricted; `/data` and the SSR HTML
 also run a last-line scrub that strips any maps.googleapis.com `key=` and
 blanks the literal key, and stored `estimates.satellite_url` rows that already
-hold a keyed URL are redacted on output — no migration). Token format gate
+hold a keyed URL are redacted on output — no migration). A small guard (`mapImagePreGuard`) is mounted in
+`server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter,
+scoped to these two GET paths: it stamps `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` and `Cross-Origin-Resource-Policy:
+cross-origin` first — so the router.param malformed-token 404 and the global
+and route limiters' 429s inherit them, and a successful image overwrites
+Cache-Control — and answers the dark overlay's generic 404 there, before the
+global limiter can turn it into a 429. Token format gate
 (router.param) + ONE generic 404 body (`Estimate not found`, `no-store`) for
 every refusal — malformed/unknown token, callSideBlock, a row that is not
 `isEstimateCustomerViewable` (drafts, expired, archived, send_failed 404; the

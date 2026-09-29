@@ -28249,10 +28249,27 @@ function mapImageNotFound(res) {
 }
 
 // The overlay route is dark while estimateShowYourWork is off: answer the
-// generic 404 BEFORE the limiter (a dark route must not 429) and before any
+// generic 404 BEFORE any limiter (a dark route must not 429) and before any
 // database work.
 function overlayGateOpen(req, res, next) {
   if (!featureGates.isEnabled('estimateShowYourWork')) return mapImageNotFound(res);
+  return next();
+}
+
+const MAP_IMAGE_PATH_RE = /^\/[^/]+\/map\/(satellite|overlay)\/?$/;
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/
+// limiter (which runs ahead of this router). It stamps the privacy headers
+// first — so router.param's malformed-token 404, the global limiter's 429 and
+// the route limiter's 429 all inherit no-store + CORP; a successful image
+// response overwrites Cache-Control — and answers the dark overlay's generic
+// 404 before the global limiter can turn it into a 429.
+function mapImagePreGuard(req, res, next) {
+  const match = MAP_IMAGE_PATH_RE.exec(req.path || '');
+  if (!match || req.method !== 'GET') return next();
+  stampMapImageHeaders(res);
+  res.set('Cache-Control', 'no-store');
+  if (match[1] === 'overlay') return overlayGateOpen(req, res, next);
   return next();
 }
 
@@ -28389,6 +28406,7 @@ async function handleEstimateAsk(req, res, next) {
 module.exports = router;
 // Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
+module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.selectTierCeiling = selectTierCeiling;

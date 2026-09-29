@@ -380,6 +380,97 @@ describe('map proxy rate limit', () => {
   });
 });
 
+describe('map proxy pre-guard (mounted before the global /api limiter)', () => {
+  const rateLimit = require('express-rate-limit');
+
+  async function withGuardedApp(globalMax, fn) {
+    const app = express();
+    app.use('/api/estimates', estimatePublicRouter.mapImagePreGuard);
+    app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: globalMax, standardHeaders: true, legacyHeaders: false }));
+    app.use('/api/estimates', estimatePublicRouter);
+    const server = app.listen(0);
+    try {
+      return await fn(`http://127.0.0.1:${server.address().port}/api/estimates`);
+    } finally {
+      server.close();
+    }
+  }
+
+  const expectPrivacyHeaders = (res) => {
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('cross-origin-resource-policy')).toBe('cross-origin');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+  };
+
+  test('server/index.js mounts the guard before the global /api/ limiter', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+    const guardAt = src.indexOf("app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard)");
+    const limiterAt = src.indexOf("app.use('/api/', limiter)");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(limiterAt).toBeGreaterThan(guardAt);
+  });
+
+  test('dark overlay: an over-budget IP still gets the generic 404, never 429', async () => {
+    getCachedLookup.mockResolvedValue(cacheRowFixture());
+    dbRows = { estimates: estimateRow() };
+    await withGuardedApp(2, async (base) => {
+      for (let i = 0; i < 6; i += 1) {
+        const res = await fetch(`${base}/${TOKEN}/map/overlay`);
+        expect(res.status).toBe(404);
+        expect(await res.json()).toEqual({ error: 'Estimate not found' });
+        expectPrivacyHeaders(res);
+      }
+    });
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('malformed token 404 carries no-store + CORP', async () => {
+    await withGuardedApp(100, async (base) => {
+      for (const kind of ['satellite', 'overlay']) {
+        const res = await fetch(`${base}/short/map/${kind}`);
+        expect(res.status).toBe(404);
+        expectPrivacyHeaders(res);
+      }
+    });
+  });
+
+  test('a 429 (global limiter) carries no-store + CORP on both map routes', async () => {
+    isEnabled.mockImplementation((name) => name === 'estimateShowYourWork');
+    getCachedLookup.mockResolvedValue(cacheRowFixture());
+    dbRows = { estimates: estimateRow({ satellite_url: STORED_KEYED }) };
+    await withGuardedApp(1, async (base) => {
+      const first = await fetch(`${base}/${TOKEN}/map/satellite`);
+      expect(first.status).toBe(200);
+      await first.arrayBuffer();
+      for (const kind of ['satellite', 'overlay']) {
+        const limited = await fetch(`${base}/${TOKEN}/map/${kind}`);
+        expect(limited.status).toBe(429);
+        expectPrivacyHeaders(limited);
+      }
+    });
+  });
+
+  test('a successful image overwrites Cache-Control with the private max-age', async () => {
+    dbRows = { estimates: estimateRow({ satellite_url: STORED_KEYED }) };
+    await withGuardedApp(100, async (base) => {
+      const res = await fetch(`${base}/${TOKEN}/map/satellite`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('private, max-age=3600');
+      expect(res.headers.get('cross-origin-resource-policy')).toBe('cross-origin');
+      await res.arrayBuffer();
+    });
+  });
+
+  test('other estimate routes are untouched by the guard', async () => {
+    dbRows = { estimates: estimateRow() };
+    await withGuardedApp(100, async (base) => {
+      const res = await fetch(`${base}/${TOKEN}/data`);
+      expect(res.headers.get('cross-origin-resource-policy')).toBeNull();
+      await res.arrayBuffer();
+    });
+  });
+});
+
 describe('GET /:token/map/overlay', () => {
   test('gate on + cached polygon: streams the overlay, URL rebuilt from the cached row', async () => {
     isEnabled.mockImplementation((name) => name === 'estimateShowYourWork');
