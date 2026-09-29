@@ -819,6 +819,35 @@ candidate must clear both: the grid decides whether a start is offered at
 all, packing decides how close it may legally sit to a real neighbouring
 stop. Ranking ties on `/book` break toward the less hole-making slot
 (`idle_minutes`, new per-slot field on the public availability payload).
+Self-serve arrival grace (owner ruling 2026-09-28, `SELF_SERVE_ARRIVAL_GRACE_MINUTES`
+— **ships DARK: 0 unless set**, read at call time via
+`scheduling/travel-gap.js`'s `selfServeArrivalGraceMinutes({ date })`, clamped
+to the 120-minute `ARRIVAL_WINDOW_MINUTES` promise with one warning past it):
+every self-serve surface above (the estimate picker + its reserve/commit/
+extend gates, `/api/booking/availability`, `/find-slots`, `/confirm` and its
+recurring-follow-up seeding sweep, public reschedule single + series, public
+re-service, the Waves Assessment booking) may additionally OFFER and COMMIT a
+start the tech would arrive at up to this many minutes late, instead of
+demanding the exact stored minute be free — the customer still sees the same
+2-hour arrival-window promise either way. Same-day (today, ET) is always
+strict regardless of the configured value (decision 2 — legacy mode has no
+live-route-state signal for a day already in progress). A candidate never
+makes an existing stop's own arrival later (a live estimate hold on the
+BEFORE side gets no grace at all — whoever reserved first keeps the window);
+a second or third graced booking on the same day is measured from a
+projected chain of that day's real stops (`annotateProjectedArrivals`), not
+each stop's stored, never-adjusted end, so lateness cannot silently stack
+past the 2-hour promise. The AI assistant / lead-response booking engine
+(`services/availability.js`'s `check_availability` tool) is explicitly
+EXCLUDED — offer and commit there stay strict together. With a second
+active technician, a graced candidate's commit check is scoped to its own
+ASSIGNED technician's rows (+ unassigned) rather than every technician's
+rows chained as one route (`travel.technicianId` on the shared
+`findConflictingVisits`/`travelGapConflicts` probe) — voice, staff, the
+rebooker's non-customer callers, and the optimizer are unaffected; they
+never set `graceMinutes` and stay byte-identical. Unsetting the env (or `0`)
+is the kill switch; a live graced hold fails at accept with a clear re-pick
+when it lands mid-flip.
 Self-serve notice window (owner ruling 2026-09-23,
 `scheduling/self-serve-notice.js`, `SELF_SERVE_NOTICE_HOURS`, default 24 h):
 every SELF-SERVE offer and commit surface — the estimate slot picker and its
@@ -3122,7 +3151,13 @@ route-fit, not the day's). Day lists contain the packed feasible starts (owner r
 on a day with a committed stop, each route gap offers only the hour packed
 against its neighbouring stop(s) — the latest start before the next stop and/or
 the earliest after the previous one — never a mid-gap hour; an empty day still
-lists every grid hour); only the separate recommendations are curated. Moving an existing self-booked visit
+lists every grid hour; with `SELF_SERVE_ARRIVAL_GRACE_MINUTES` set (owner
+ruling 2026-09-28, see the packing paragraph above), the packed-after-prev
+hour may sit up to that many minutes earlier than a strict arrival would
+allow — same-day moves stay strict — and both `SmartRebooker.reschedule`
+(single) and `rescheduleSeries` thread the resolved grace into their own
+occupancy probe so an offered graced hour also commits); only the separate
+recommendations are curated. Moving an existing self-booked visit
 excludes that booking from its own day-cap count (the per-day cap runs only
 while `GATE_SELF_BOOK_DAY_CAP` is set — retired 2026-09-23). Self-serve notice
 windows (owner ruling 2026-09-23, `scheduling/self-serve-notice.js`; split
