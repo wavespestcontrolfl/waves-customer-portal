@@ -1241,12 +1241,31 @@ async function resolveTemplateForSend({ templateKey, versionId, expectedContentH
   return { template, version };
 }
 
+// Refusal code for a marketing-stream send from a caller that must not send
+// marketing directly (codex P1 round 7 on #5154): the email division's
+// marketing lanes (e.g. nurture.expired_1 on marketing_nurture) send ONLY
+// through email-division/ledger.js sendWithLedger, which owns eligibility,
+// frequency caps, reservation idempotency and the final recipient/consent
+// fence.
+const LEDGER_REQUIRED_CODE = 'EMAIL_DIVISION_LEDGER_REQUIRED';
+
 // Step 2 of the shared guard chain: the effective suppression stream, the
 // SendGrid ASM group and unsubscribe URL, the marketing-compliance guard
 // (a marketing send needs an unsubscribe URL or ASM group), the render,
 // required variables, and the production placeholder guards. Pure (no I/O).
-function prepareTemplateSend({ template, version, payload, suppressionGroupKey, unsubscribeUrl = null, test = false } = {}) {
+// marketingRequiresLedger: refuse (LEDGER_REQUIRED_CODE, no audit row) when
+// the send classifies as marketing by the library's own isMarketingSend —
+// set by the automation executor, which is not the ledger.
+function prepareTemplateSend({
+  template, version, payload, suppressionGroupKey, unsubscribeUrl = null, test = false, marketingRequiresLedger = false,
+} = {}) {
   const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
+  if (marketingRequiresLedger && isMarketingSend(template, effectiveSuppressionGroupKey)) {
+    const err = new Error('marketing-stream sends must go through the email division ledger (email-division/ledger.js sendWithLedger), not the automation executor');
+    err.status = 409;
+    err.code = LEDGER_REQUIRED_CODE;
+    throw sendRefusal(err);
+  }
   const asmGroupId = asmGroupIdFor(template, effectiveSuppressionGroupKey);
   const effectiveUnsubscribeUrl = unsubscribeUrlForRender({
     template,
@@ -1326,6 +1345,7 @@ function prepareTemplateSend({ template, version, payload, suppressionGroupKey, 
 async function preflightTemplateSend({
   templateKey, versionId, expectedContentHash = null, payload, to, suppressionGroupKey,
   unsubscribeUrl = null, estimateId = null, estimateIds = null, withheldLinkPolicy = null,
+  marketingRequiresLedger = false,
 } = {}) {
   if (!to) return { ok: false, reason: 'recipient email required' };
   let template;
@@ -1333,7 +1353,7 @@ async function preflightTemplateSend({
   let prepared;
   try {
     ({ template, version } = await resolveTemplateForSend({ templateKey, versionId, expectedContentHash }));
-    prepared = prepareTemplateSend({ template, version, payload, suppressionGroupKey, unsubscribeUrl });
+    prepared = prepareTemplateSend({ template, version, payload, suppressionGroupKey, unsubscribeUrl, marketingRequiresLedger });
   } catch (err) {
     if (err && err[SEND_REFUSAL]) return { ok: false, reason: err.message, ...(err.code ? { code: err.code } : {}) };
     throw err;
@@ -1425,6 +1445,10 @@ async function sendTemplate({
   // pricing-authority CTA swap for the same reason (the deposit is owed
   // regardless of the offer's own state).
   withheldLinkPolicy = null,
+  // Refuse a marketing-stream send before any email_messages row (the
+  // automation executor's email-division ledger fence; see
+  // prepareTemplateSend).
+  marketingRequiresLedger = false,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   const auditRefusal = (err) => auditSendRefusal(err, {
@@ -1460,7 +1484,9 @@ async function sendTemplate({
 
   let prepared;
   try {
-    prepared = prepareTemplateSend({ template, version, payload, suppressionGroupKey, unsubscribeUrl, test });
+    prepared = prepareTemplateSend({
+      template, version, payload, suppressionGroupKey, unsubscribeUrl, test, marketingRequiresLedger,
+    });
   } catch (err) {
     await auditRefusal(err);
     throw err;
@@ -1965,4 +1991,5 @@ module.exports = {
   publishVersion,
   sendTemplate,
   preflightTemplateSend,
+  LEDGER_REQUIRED_CODE,
 };

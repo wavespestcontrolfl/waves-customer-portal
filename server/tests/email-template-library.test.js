@@ -2677,6 +2677,51 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
     })).rejects.toThrow('connection terminated');
   });
 
+  // codex P1 round 7 on #5154: the email-division ledger fence lives in the
+  // shared chain (prepareTemplateSend), classified by the library's own
+  // isMarketingSend — so live sendTemplate refuses BEFORE any email_messages
+  // row, preflight blocks identically, and a service template is untouched.
+  test('marketingRequiresLedger: a marketing-stream template is refused by sendTemplate before any email_messages row, and blocked by preflight', async () => {
+    const nurtureTemplate = () => serviceTemplate({
+      template_key: 'nurture.expired_1', send_stream: 'marketing_nurture', suppression_group_key: 'marketing_nurture',
+      layout_wrapper_id: 'service_pinned_v1', active_version_id: 'ver-1',
+    });
+    setDbQueues({
+      email_templates: [chain({ first: nurtureTemplate() }), chain({ first: nurtureTemplate() })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) }), chain({ first: version({ id: 'ver-1' }) })],
+      // No email_messages / email_suppressions queue: touching either throws.
+    });
+    const args = {
+      templateKey: 'nurture.expired_1',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+      marketingRequiresLedger: true,
+    };
+
+    await expect(EmailTemplates.sendTemplate(args)).rejects.toMatchObject({ code: EmailTemplates.LEDGER_REQUIRED_CODE });
+    const result = await EmailTemplates.preflightTemplateSend(args);
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: 'EMAIL_DIVISION_LEDGER_REQUIRED' }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('marketingRequiresLedger leaves a service_operational template alone (preflight passes)', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+      marketingRequiresLedger: true,
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
   test('blocks (ok:false) a missing template', async () => {
     setDbQueues({ email_templates: [chain({ first: null })] });
 

@@ -311,6 +311,40 @@ jest.mock('../services/email-template-automation-executor', () => ({
     }
   });
 
+  // codex P1 round 7: the merge-undo email guard probes pending markers
+  // through the SAME surface definition customer-dedupe.js iterates
+  // (EMAIL_BOUND_SURFACES) — built here exactly the way its
+  // probeIdentitySurfaces builds every probe, so the jsonb link/address
+  // predicates are proven against real Postgres.
+  test('the merge-undo email probe finds a winner-linked pending marker at the merged-in email, and nothing else', async () => {
+    const dedupe = require('../services/customer-dedupe');
+    const surface = dedupe._test.EMAIL_BOUND_SURFACES.find((s) => s.table === 'email_template_automation_intents');
+    const winnerId = randomUUID();
+    const occurredAt = new Date(Date.now() - 10 * 60 * 1000);
+    const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    const marker = (id, status, payload) => ({
+      id, trigger_event_key: 'estimate.expired', entity_type: 'estimate', entity_id: `est-${id.slice(0, 8)}`,
+      occurred_at: occurredAt, status, payload: JSON.stringify(payload),
+    });
+    await db('email_template_automation_intents').insert([
+      marker(ids[0], 'pending', { customer_id: winnerId, customer_email: 'Merged.In@example.com' }),
+      marker(ids[1], 'processed', { customer_id: winnerId, customer_email: 'merged.in@example.com' }),
+      marker(ids[2], 'pending', { customer_id: winnerId, customer_email: 'own@example.com' }),
+      marker(ids[3], 'pending', { customer_id: randomUUID(), customer_email: 'merged.in@example.com' }),
+    ]);
+    try {
+      let query = db(surface.table).where(function linked() { surface.linkWhere(this, winnerId, db); });
+      query = query.select(['id', ...dedupe.activityColumnsFor(surface.table)]);
+      query = query.whereRaw(`lower(${surface.emailColumn}) = ?`, ['merged.in@example.com']);
+      const rows = await surface.active(query);
+      expect(rows.map((r) => r.id)).toEqual([ids[0]]);
+      expect(rows[0].created_at).toBeInstanceOf(Date);
+      expect(rows[0].updated_at).toBeInstanceOf(Date);
+    } finally {
+      await cleanup({ markerIds: ids });
+    }
+  });
+
   test('the sweep replays a real, committed pending marker and settles it processed', async () => {
     const markerId = randomUUID();
     const occurredAt = new Date(Date.now() - 10 * 60 * 1000); // well past the sweep's grace window

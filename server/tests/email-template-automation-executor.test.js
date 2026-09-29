@@ -5,6 +5,7 @@ jest.mock('../services/email-template-library', () => ({
   // overrides this — matches today's "would send" behavior before the
   // preflight existed.
   preflightTemplateSend: jest.fn(async () => ({ ok: true })),
+  LEDGER_REQUIRED_CODE: 'EMAIL_DIVISION_LEDGER_REQUIRED',
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -1915,6 +1916,96 @@ describe('email template automation executor', () => {
       } finally {
         delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
       }
+    });
+  });
+
+  // codex P1 round 7 on #5154 (owner ruling 2026-09-28: fence, wire later):
+  // a marketing-stream template belongs to the email division's ledger, so
+  // the executor asks the library to refuse it (marketingRequiresLedger) on
+  // BOTH the live send and the shadow preflight. The classification itself
+  // (isMarketingSend) is the library's and is proven in
+  // email-template-library.test.js.
+  describe('email-division ledger fence', () => {
+    afterEach(() => { delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS; });
+
+    function ledgerRefusal() {
+      return Object.assign(new Error('marketing-stream sends must go through the email division ledger (email-division/ledger.js sendWithLedger), not the automation executor'), {
+        status: 409, code: 'EMAIL_DIVISION_LEDGER_REQUIRED',
+      });
+    }
+
+    test('live: a marketing-template run is settled skipped (ledger_required) — never retried, nothing sent', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const queuedRun = run({ attempts: 0 });
+      const skippedRunQuery = chain({ returning: [{ ...queuedRun, status: 'skipped' }] });
+      const skippedLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          skippedRunQuery,
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), skippedLogQuery],
+        estimates: [chain({ first: { id: 'est-1', status: 'sent' } })],
+      });
+      EmailTemplates.sendTemplate.mockRejectedValueOnce(ledgerRefusal());
+
+      const result = await AutomationExecutor.executeRun(queuedRun, {
+        automation: automation(), now: new Date('2026-05-18T12:00:00.000Z'),
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ marketingRequiresLedger: true }));
+      expect(skippedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'skipped', exit_reason: expect.stringContaining('email division ledger'),
+      }));
+      expect(skippedRunQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'retry_scheduled' }));
+      expect(JSON.parse(skippedLogQuery.insert.mock.calls[0][0].metadata)).toEqual(expect.objectContaining({ guard: 'ledger_required' }));
+    });
+
+    test('live: a service/operational template run still dispatches (the fence flag rides along, the library lets it through)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const queuedRun = run({ attempts: 0 });
+      const sentRunQuery = chain({ returning: [{ ...queuedRun, status: 'sent', email_message_id: 'message-1' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          sentRunQuery,
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), chain({ returning: [{ id: 'event-2' }] })],
+        estimates: [chain({ first: { id: 'est-1', status: 'sent' } })],
+      });
+      EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, message: { id: 'message-1', provider_message_id: 'sg-1' } });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, {
+        automation: automation(), now: new Date('2026-05-18T12:00:00.000Z'),
+      });
+
+      expect(result.status).toBe('sent');
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ marketingRequiresLedger: true }));
+    });
+
+    test('shadow: the preflight carries the same fence and records would_block ledger_required — what live would do', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      EmailTemplates.preflightTemplateSend.mockResolvedValueOnce({
+        ok: false, reason: ledgerRefusal().message, code: 'EMAIL_DIVISION_LEDGER_REQUIRED',
+      });
+      const queuedRun = run({ entity_type: '', entity_id: '' });
+      const wouldBlockLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          chain({ returning: [{ ...queuedRun, status: 'skipped' }] }),
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), wouldBlockLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.preflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({ marketingRequiresLedger: true }));
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(wouldBlockLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'would_block' }));
+      expect(JSON.parse(wouldBlockLogQuery.insert.mock.calls[0][0].metadata)).toEqual(expect.objectContaining({ guard: 'ledger_required' }));
     });
   });
 

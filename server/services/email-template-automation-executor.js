@@ -1357,6 +1357,25 @@ function annualGuardArgsFor(run) {
   return run.entity_type === 'estimate' && run.entity_id ? { estimateId: run.entity_id } : {};
 }
 
+// Email-division ledger fence (codex P1 round 7 on #5154; owner ruling
+// 2026-09-28: FENCE now, wire later). This executor is not the email
+// division's ledger: a run whose template resolves to a marketing stream
+// (the library's own isMarketingSend over the resolved template and the
+// automation's suppression group — e.g. nurture.expired_1 on
+// marketing_nurture) must send ONLY through email-division/ledger.js
+// sendWithLedger (eligibility, frequency caps, reservation idempotency,
+// the final recipient/consent fence), which the planned wiring PR adds.
+// Passed to BOTH the live send (dispatchRun) and the shadow preflight so
+// they refuse identically: live settles the run skipped (guard
+// ledger_required — no provider call, no email_messages row), shadow
+// records would_block with the same code, i.e. shadow reports exactly what
+// live would do.
+const EXECUTOR_SEND_POLICY = Object.freeze({ marketingRequiresLedger: true });
+function isLedgerRequiredRefusal(err) {
+  const code = EmailTemplates.LEDGER_REQUIRED_CODE;
+  return !!code && err?.code === code;
+}
+
 // Runs the SAME pre-provider checks dispatchRun's sendTemplate call would
 // hit (codex P2): disabled/missing template, required-variable validation,
 // recipient suppression, and the estimate annual-offer guard. A block
@@ -1382,6 +1401,7 @@ async function shadowPreflight(run, executionPayload, automation) {
       // itself (sendgrid-mail.js applyAnnualOfferGuard), so a withheld offer
       // is a would_block here exactly as it is a block live.
       ...annualGuardArgsFor(run),
+      ...EXECUTOR_SEND_POLICY,
     });
   } catch (err) {
     logger.warn(`[email-template-automation] shadow preflight failed for run ${run.id}: ${scrubSentryText(err && err.message ? err.message : err)}`);
@@ -1409,7 +1429,7 @@ async function finalizeShadowRun(run, automation, executionPayload = {}) {
     }).returning('*');
     await logRunEvent(run.id, 'would_block', preflight.reason || 'Shadow mode: the live send would have blocked pre-provider', {
       ...wouldSendMetadata,
-      guard: preflight.code || 'preflight',
+      guard: isLedgerRequiredRefusal(preflight) ? 'ledger_required' : (preflight.code || 'preflight'),
     });
     return blocked || { ...run, status: 'skipped', exit_reason: preflight.reason || 'would_block' };
   }
@@ -1465,6 +1485,7 @@ async function dispatchRun(run, automation, executionPayload) {
       // Fires immediately before the provider call — the dispatch boundary.
       onQueued: () => { prepDispatched = true; },
       ...annualGuardArgsFor(run),
+      ...EXECUTOR_SEND_POLICY,
     });
     // Pre-push audit P1: a pre-dispatch abort (result.aborted — the annual
     // guard's own row lookup threw, or any other onQueued-style abort) is
@@ -1659,6 +1680,12 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     return outcome.updated;
   } catch (err) {
     if (err.message === PREP_LOCK_HELD) return deferForPrepLock(claimedRun, attemptNumber, now);
+    // A deterministic refusal, not a failure: never retried (the template's
+    // stream cannot change under a retry), settled skipped with its own
+    // guard so it reads as "belongs to the ledger", not "broke".
+    if (isLedgerRequiredRefusal(err)) {
+      return markRunSkipped(claimedRun, err.message, { guard: 'ledger_required', attempt: attemptNumber });
+    }
     if (attemptNumber < retryPolicy.maxAttempts) {
       return scheduleRetry(claimedRun, err, attemptNumber, retryPolicy, now);
     }
