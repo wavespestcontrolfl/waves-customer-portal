@@ -279,6 +279,10 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       const pestChild = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).first('id');
       const preview = await previewRiderPair(trx, { riderParentId: pestChild.id, hostParentId: lawnParent.id });
       expect(preview.reasons).toContain('not_series_root');
+      // Structural blocker: no plan is computed for a child row.
+      expect(preview.anchor).toBeNull();
+      expect(preview.plan).toEqual([]);
+      expect([...preview.move, ...preview.cancel, ...preview.insert]).toEqual([]);
     });
 
     test('not_recurring: a rider with no recurring pattern is structurally blocked', async () => {

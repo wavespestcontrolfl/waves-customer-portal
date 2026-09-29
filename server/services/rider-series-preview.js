@@ -64,7 +64,7 @@ const NON_PINNING_MESSAGE_PURPOSES = ['appointment_cancellation'];
 // comment for why these, and only these, skip plan computation.
 const STRUCTURAL_BLOCKERS = new Set([
   'rider_not_found', 'not_a_rider', 'host_missing', 'self_link', 'host_is_rider',
-  'cross_customer', 'not_recurring',
+  'cross_customer', 'not_recurring', 'not_series_root',
 ]);
 
 // Table-driven pair-structure gates (Codex P2 round on PR #5290 —

@@ -189,6 +189,14 @@ function pairsFromBucket(bucket, customerId) {
   return pairs;
 }
 
+function mergePair(byPair, pair) {
+  const key = `${pair.lawnParentId}|${pair.pestParentId}`;
+  const seen = byPair.get(key);
+  if (!seen) { byPair.set(key, { ...pair, extraReasons: [...pair.extraReasons] }); return; }
+  for (const r of pair.extraReasons) if (!seen.extraReasons.includes(r)) seen.extraReasons.push(r);
+  if (!seen.propertyId && pair.propertyId) seen.propertyId = pair.propertyId;
+}
+
 async function findCandidatePairs(trx) {
   const rows = await trx('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
@@ -225,12 +233,17 @@ async function findCandidatePairs(trx) {
     .map((s) => [String(s.id), s]));
   const byCustomer = classifyAndGroupByCustomer(rows, serviceMap);
 
-  const pairs = [];
+  // One entry per lawn/pest id pair: a wildcard root copied into several
+  // buckets would otherwise emit the same pair once per bucket. Merge
+  // duplicates, keeping the union of their reasons.
+  const byPair = new Map();
   for (const [customerId, group] of [...byCustomer.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const buckets = await clusterIntoPropertyBuckets(trx, group);
-    for (const bucket of buckets) pairs.push(...pairsFromBucket(bucket, customerId));
+    for (const bucket of buckets) {
+      for (const pair of pairsFromBucket(bucket, customerId)) mergePair(byPair, pair);
+    }
   }
-  return pairs;
+  return [...byPair.values()];
 }
 
 function printHuman(pair, preview) {
