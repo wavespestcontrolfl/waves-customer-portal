@@ -1420,16 +1420,18 @@ const ESTIMATE_READINESS_CLAIM_RE = new RegExp(ESTIMATE_READINESS_CLAIM_SOURCE, 
 const ESTIMATE_CONJUNCTION_BREAK = '(?<![a-záéíóúñü])(?:y|e|pero|aunque|sino|mientras)(?![a-záéíóúñü])';
 const ESTIMATE_AFFIRMED_READINESS = `(?<!(?<![a-záéíóúñü])(?:no|nunca|jam[aá]s|tampoco)\\s+(?:(?:me|te|se|le|les|lo|la|los|las|nos)\\s+)?)${ESTIMATE_READINESS_ES_SOURCE}`;
 const ASSERTED_ESTIMATE_READINESS_TIME_RE = new RegExp(`(?:${ESTIMATE_AFFIRMED_READINESS}(?:(?![,;:]|${ESTIMATE_CONJUNCTION_BREAK})[^.!?]){0,60}?(?<![a-záéíóúñü])${ESTIMATE_READINESS_TIME_SOURCE}|(?<![a-záéíóúñü])${ESTIMATE_READINESS_TIME_SOURCE}(?:(?![;:]|${ESTIMATE_CONJUNCTION_BREAK})[^.!?]){0,60}?${ESTIMATE_AFFIRMED_READINESS})`, 'i');
-const ESTIMATE_READINESS_TIME_RE = new RegExp(ESTIMATE_READINESS_TIME_SOURCE, 'i');
+// A piece that is nothing but a time ("Mañana", "Para el lunes") fronts the
+// next clause; a time with its own predicate ("Mañana le llamaremos") does not.
+const ESTIMATE_FRONTED_TIME_RE = new RegExp(`^\\s*(?:(?:para|hasta|antes\\s+del?|a\\s+m[aá]s\\s+tardar)\\s+)?(?:(?:el|la)\\s+)?(?:${ESTIMATE_READINESS_TIME_SOURCE})\\s*$`, 'i');
 const ESTIMATE_PIECE_SPLIT_RE = new RegExp(`([,;]|${ESTIMATE_CONJUNCTION_BREAK})`, 'i');
 // Judged piece by piece, so a negation in one clause ("no tiene costo")
-// cannot deny a promise in another. A piece with a fronted time is also
-// judged joined to the next piece by its own separator.
+// cannot deny a promise in another. A fronted time is also judged joined to
+// the next piece by its own separator.
 function estimateReadinessDeadline(text) {
   const parts = String(text).split(ESTIMATE_PIECE_SPLIT_RE);
   for (let i = 0; i < parts.length; i += 2) {
     if (assertedSpokenMatch(parts[i], ASSERTED_ESTIMATE_READINESS_TIME_RE)) return true;
-    if (i + 2 < parts.length && ESTIMATE_READINESS_TIME_RE.test(parts[i])
+    if (i + 2 < parts.length && ESTIMATE_FRONTED_TIME_RE.test(parts[i])
       && assertedSpokenMatch(`${parts[i]}${parts[i + 1]}${parts[i + 2]}`, ASSERTED_ESTIMATE_READINESS_TIME_RE)) return true;
   }
   return false;
