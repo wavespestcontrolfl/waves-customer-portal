@@ -31,6 +31,11 @@ const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 // The canonical plan-row predicate: the root, explicit or legacy NULL-flagged
 // children; never a booster, a callback or an included follow-up.
 const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
+// Tracker state can run ahead of status (the best-effort status sync lags):
+// the same two-column rule customer-lifecycle-guard.js#whereVisitRowLive
+// applies. A terminal tracker state is finished; a live one is in progress.
+const { TERMINAL_TRACK_STATES } = require('./customer-lifecycle-guard');
+const { LIVE_TRACK_STATES } = require('./cancellation-eligibility');
 const { LIVE_COMPLETION_CLAIM_STATUSES } = require('./visit-groups');
 const { getBlackoutLayers } = require('./scheduling/blackout-dates');
 const { clearOfBlackout } = require('./scheduling/blackout-nudge');
@@ -339,12 +344,15 @@ async function attributeReasonMap(conn, rowIds) {
 //    from the anchor computation even though it is `pinned`, the one case
 //    where a pinned row does not anchor.
 function classifyRiderRow(row, reasonMap, nearTermCutoff) {
+  if (TERMINAL_TRACK_STATES.includes(row.track_state)) return { terminal: true };
   if (isPlanSeriesRow(row) && row.status === 'rescheduled') {
     return { pinned: true, why: 'rescheduled_pending' };
   }
   if (JOIN_INELIGIBLE_STATUSES.includes(row.status)) return { terminal: true };
   if (!isPlanSeriesRow(row)) return { booster: true };
-  if (IN_PROGRESS_STATUSES.includes(row.status)) return { pinned: true, why: 'in_progress' };
+  if (IN_PROGRESS_STATUSES.includes(row.status) || LIVE_TRACK_STATES.includes(row.track_state)) {
+    return { pinned: true, why: 'in_progress' };
+  }
   if (row.prepaid_amount != null) return { pinned: true, why: 'prepaid' };
   if (row.customer_confirmed === true) return { pinned: true, why: 'customer_confirmed' };
   if (row.field_confirmed_at != null) return { pinned: true, why: 'field_confirmed' };
@@ -533,6 +541,9 @@ async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
   const hostRowsRaw = await conn('scheduled_services')
     .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
     .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
+    .modify((q) => {
+      if (cols.track_state) q.where((t) => { t.whereNull('track_state').orWhereNotIn('track_state', TERMINAL_TRACK_STATES); });
+    })
     .where('scheduled_date', '>=', todayStr)
     .orderBy('scheduled_date', 'asc')
     .select(

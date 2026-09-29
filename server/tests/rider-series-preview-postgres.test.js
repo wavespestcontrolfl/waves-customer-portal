@@ -844,4 +844,33 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     expect(acted).toContain(legacy.id);
     expect(acted).not.toContain(callback.id);
   });
+
+  test('tracker state wins over a lagging status: a confirmed row tracked complete is finished, one tracked en_route is in progress', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const [done, enRoute] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc');
+    await trx('scheduled_services').where({ id: done.id }).update({ status: 'confirmed', track_state: 'complete' });
+    await trx('scheduled_services').where({ id: enRoute.id }).update({ status: 'confirmed', track_state: 'en_route' });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    const actedOn = [...preview.move, ...preview.cancel, ...preview.keep].map((r) => r.id);
+    expect(actedOn).not.toContain(done.id);
+    expect(actedOn).not.toContain(enRoute.id);
+    expect(preview.pinned).toEqual(expect.arrayContaining([expect.objectContaining({ id: enRoute.id, why: 'in_progress' })]));
+    expect(preview.pinned.map((r) => r.id)).not.toContain(done.id);
+  });
+
+  test('a host row tracked complete is not a host date', async () => {
+    const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+    // An off-cadence lawn visit inside the 77-105 day window, so the host
+    // date (ANCHOR+80) differs from pest's own fallback date (ANCHOR+84).
+    const offCadence = await row({
+      recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true, recurring_pattern: 'every_6_weeks',
+      service_type: 'Lawn Care - Every 6 Weeks', scheduled_date: addDays(ANCHOR, 80),
+    });
+    const hostDate = dateOnlyStr(offCadence.scheduled_date);
+    const before = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(before.plan[0]).toBe(hostDate);
+    await trx('scheduled_services').where({ id: offCadence.id }).update({ track_state: 'complete' });
+    const after = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(after.plan[0]).not.toBe(hostDate);
+  });
 });

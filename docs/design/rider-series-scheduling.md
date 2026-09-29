@@ -341,26 +341,20 @@ the catalog identity (`service_key`/`name`) is re-resolved from the new
 service via a small in-memory `services` map rather than the row's original
 join.
 
-**Bucketing and ambiguity (Codex P1/P2 rounds, PR #5290):** every qualifying
-lawn and pest root is kept, grouped per customer, then clustered into
-property buckets with the SAME resolver and comparator
-`previewRiderPair`'s own `different_property`/`property_unresolved` gates
-use (`resolveSeriesPropertyScope`/`seriesPropertyVerdict`, "Property scope"
-above) — a pair this script buckets together can never fail the preview's
-own gate as a different property, or the reverse. This replaces the old
-`${customer_id}::${property_id || 'unstamped'}` key, which collapsed every
-null-property root for a customer into one bucket regardless of whether
-they were really the same address. A root whose scope cannot be resolved at
-all never silently joins another root's bucket — it lands in the
-customer's own shared `property_unresolved` bucket instead (still reported,
-not dropped). Every lawn×pest combination inside a bucket is emitted (never
-one root picked arbitrarily); a bucket with more than one qualifying lawn or
-pest root is tagged `host_ambiguous` / `rider_ambiguous` (merged into that
-pair's `reasons`, forcing `eligible: false` — `previewRiderPair` has no way
-to know about sibling roots, so this is decided here, not inside the
-per-pair preview) and every combination inside it is still shown. Order is
-deterministic (customer id, then root id) both for the bucketing walk and
-for the emitted pairs.
+**Pairing and ambiguity (Codex P1/P2 rounds, PR #5290):** candidate pairs
+are found pairwise, not by grouping roots into property buckets first. A
+lawn root and a pest root of the same customer pair when their scopes,
+resolved with the same resolver and comparator as the preview's
+`different_property` gate (`resolveSeriesPropertyScope` /
+`seriesPropertyVerdict`), match. Two roots that both fail to resolve pair
+too, flagged `property_unresolved`. An unresolved root never pairs with a
+resolved one. A street-only scope treats a missing city or ZIP as a
+wildcard, so compatibility isn't transitive: grouping into buckets either
+merged incompatible roots or lost valid pairs, depending on order.
+Pairwise matching avoids both. A root compatible with more than one
+counterpart flags every pair it's in as `host_ambiguous` or
+`rider_ambiguous` (not eligible), so the office resolves it rather than the
+report picking one. Output is ordered by customer id, then root id.
 
 ## Why nothing is linked yet
 
