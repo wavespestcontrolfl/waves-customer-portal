@@ -49,6 +49,8 @@ suite('first-application-sibling-split — periodic sweep', () => {
     clearStandingAlerts,
     loadSweepCursor,
     saveSweepCursor,
+    loadCandidateInvoiceIdPage,
+    loadSweepBatchInvoiceIds,
   } = require('../services/first-application-sibling-split');
   const { stampCombinedFirstApplicationInvoiceCoverage } = require('../services/estimate-converter');
   const { backfillFirstApplicationInvoiceStamps } = require('../services/estimate-first-application-invoice');
@@ -1933,9 +1935,10 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const bell = await readBell(trx, PENDING_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]));
       expect(bell.read_at).toBeNull();
       expect(metaOf(bell).alertKind).toBe('payment_pending_never_ran');
-      expect(bell.title).toMatch(/ACH payment still settling/);
-      expect(bell.body).toContain('still settling');
-      expect(bell.body).toMatch(/Wait for the ACH payment to settle or fail/);
+      expect(bell.title).toMatch(/payment still processing/);
+      expect(bell.body).toContain('still processing');
+      expect(bell.body).not.toMatch(/\bACH\b/);
+      expect(bell.body).toMatch(/Wait for that payment to settle, fail, or be reconciled/);
       expect(bell.body).not.toMatch(/refund or credit/);
       expect(bell.body).not.toContain('already been paid');
       expect(await readBell(trx, REFUND_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]))).toBeUndefined();
@@ -3852,6 +3855,54 @@ suite('first-application-sibling-split — periodic sweep', () => {
       await backfillFirstApplicationInvoiceStamps(trx);
       expect((await row(trx, ids.pestId)).first_application_invoice_id).toBe(ids.invoiceId);
       expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+  });
+
+  // Codex r14 P2 on #5021: the sweep pages candidate invoice ids in SQL
+  // before loading members, so a tick's read is bounded by the batch size.
+  describe('keyset paging of candidate invoices', () => {
+    async function seedCandidates(trx, n) {
+      const ids = [];
+      for (let i = 0; i < n; i += 1) ids.push((await fixture(trx, { invoiceStatus: 'sent' })).invoiceId);
+      return ids.sort();
+    }
+
+    test('a page is ascending, strictly after the cursor, and bounded by the limit', () => rollbackTest(async (trx) => {
+      const own = await seedCandidates(trx, 5);
+      const page = await loadCandidateInvoiceIdPage(trx, { afterId: own[1], limit: 2 });
+      expect(page).toHaveLength(2);
+      expect(page.every((id) => id > own[1])).toBe(true);
+      expect([...page].sort()).toEqual(page);
+    }));
+
+    test('a settled invoice with nothing to review is not a candidate', () => rollbackTest(async (trx) => {
+      const settled = await fixture(trx, { invoiceStatus: 'paid' });
+      const all = await loadCandidateInvoiceIdPage(trx, { limit: 100000 });
+      expect(all).not.toContain(settled.invoiceId);
+    }));
+
+    test('ticks round-robin over every candidate, wrap at the end, and never repeat inside a batch', () => rollbackTest(async (trx) => {
+      const own = await seedCandidates(trx, 5);
+      const total = (await loadCandidateInvoiceIdPage(trx, { limit: 100000 })).length;
+      const limit = 2;
+      const seen = new Set();
+      let cursor = null;
+      for (let tick = 0; tick < Math.ceil(total / limit); tick += 1) {
+        const batch = await loadSweepBatchInvoiceIds(trx, { cursor, limit });
+        expect(new Set(batch).size).toBe(batch.length);
+        expect(batch.length).toBe(Math.min(limit, total));
+        batch.forEach((id) => seen.add(id));
+        cursor = batch[batch.length - 1];
+      }
+      expect(seen.size).toBe(total);
+      own.forEach((id) => expect(seen).toContain(id));
+    }));
+
+    test('a cursor past the last candidate wraps to the start', () => rollbackTest(async (trx) => {
+      await seedCandidates(trx, 3);
+      const all = await loadCandidateInvoiceIdPage(trx, { limit: 100000 });
+      const batch = await loadSweepBatchInvoiceIds(trx, { cursor: 'ffffffff-ffff-ffff-ffff-ffffffffffff', limit: 2 });
+      expect(batch).toEqual(all.slice(0, 2));
     }));
   });
 });

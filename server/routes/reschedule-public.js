@@ -64,7 +64,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 // missed-appointment rule) lives in a service so the promised-link worker
 // reaches the SAME answer this page gives (codex #4293 r3 P2).
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
-const { visitInsideNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
+const { visitInsideMoveNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -249,15 +249,16 @@ async function eligibilityAsync(svc, now = new Date()) {
   return grouped ? { ok: false, reason: 'grouped' } : elig;
 }
 
-// Self-serve notice window (owner ruling 2026-09-23) layered ON TOP of
+// Self-serve MOVE notice window (owner ruling 2026-09-23; split from the
+// book window 2026-09-28, SELF_SERVE_MOVE_NOTICE_HOURS) layered ON TOP of
 // eligibilityAsync's verdict: refuse even an otherwise-eligible visit that
-// itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED visit is being
+// itself starts within the move notice window. A MISSED visit is being
 // REBOOKED — its own past start is irrelevant — so the notice rule doesn't
 // apply to it. Kept OUT of services/reschedule-eligibility.js: that module
 // is shared with the call-driven promised-link worker, which the notice
 // rule must not reach (self-serve only).
 function withSelfServeNotice(elig, svc, now = new Date()) {
-  if (elig.ok && !elig.missed && visitInsideNoticeWindow(svc, now)) {
+  if (elig.ok && !elig.missed && visitInsideMoveNoticeWindow(svc, now)) {
     return { ok: false, reason: 'self_serve_notice' };
   }
   return elig;
@@ -735,8 +736,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       });
     }
 
-    // Self-serve notice window (owner ruling 2026-09-23): refuse moving a
-    // visit that itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED
+    // Self-serve MOVE notice window (owner ruling 2026-09-23; split from the
+    // book window 2026-09-28, SELF_SERVE_MOVE_NOTICE_HOURS): refuse moving a
+    // visit that itself starts within the move notice window. A MISSED
     // visit is being rebooked, not moved off its own too-soon start. Runs
     // AFTER the idempotent replay above: a move that succeeded just outside
     // the boundary but lost its response must replay as success when
@@ -744,7 +746,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // (not the generic reason above) so the client renders the specific
     // call-us guidance (ScheduleFlowPage.jsx falls back to body.error
     // verbatim for an unrecognized code).
-    if (!elig.missed && visitInsideNoticeWindow(svc)) {
+    if (!elig.missed && visitInsideMoveNoticeWindow(svc)) {
       return res.status(409).json({
         error: 'This visit starts too soon to move online — call (941) 297-5749 and our team can help.',
         code: 'SELF_SERVE_NOTICE',
@@ -813,16 +815,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // should have every later visit follow, not sit a double interval out.
     // Strict statuses only (no allowLive) — eligibility already gated those.
     const reanchor = shouldReanchor(svc, date);
-    // Self-serve notice window re-check INSIDE the rebooker's transaction
-    // (owner ruling 2026-09-23): the guard above ran on an unlocked snapshot
-    // before the availability build. The `expect` fence below pins the row to
-    // that snapshot (a concurrent staff move that changed date/start aborts
-    // the CAS with SLOT_TAKEN instead of moving a row this page never saw),
-    // and beforeMove re-reads the clock under the scheduling locks so a
-    // request that waited across the boundary is refused, missed exemption
+    // Self-serve MOVE notice window re-check INSIDE the rebooker's
+    // transaction (owner ruling 2026-09-23; split from the book window
+    // 2026-09-28): the guard above ran on an unlocked snapshot before the
+    // availability build. The `expect` fence below pins the row to that
+    // snapshot (a concurrent staff move that changed date/start aborts the
+    // CAS with SLOT_TAKEN instead of moving a row this page never saw), and
+    // beforeMove re-reads the clock under the scheduling locks so a request
+    // that waited across the boundary is refused, missed exemption
     // preserved. Same code/message as the pre-check.
     const noticeRecheck = async () => {
-      if (!elig.missed && visitInsideNoticeWindow(svc)) {
+      if (!elig.missed && visitInsideMoveNoticeWindow(svc)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
         });

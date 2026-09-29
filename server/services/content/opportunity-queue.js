@@ -29,10 +29,11 @@ const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
 // pending_review parks that stand for a POSSIBLE external write whose PR or
 // live URL could not be recorded. Supersession marks them but never
 // terminalizes them: only a person who has checked GitHub may retire one.
+const UNRECONCILED_REFRESH_REASON = 'refresh_publish_unreconciled';
 const RECONCILIATION_HOLD_REASONS = [
   'astro_pr_audit_failed', 'published_audit_failed',
   'astro_pr_queue_transition_failed', 'published_queue_complete_failed',
-  'named_competitor_publish_interrupted',
+  'named_competitor_publish_interrupted', UNRECONCILED_REFRESH_REASON,
 ];
 
 // Keep read-only catch-up probes and atomic claims on the same eligibility.
@@ -594,6 +595,15 @@ class OpportunityQueue {
         AND r.astro_pr_url IS NOT NULL
         AND r.published_url IS NULL
       ORDER BY r.created_at DESC LIMIT 1)`;
+    // A worker whose timed-out GitHub write could not be reconciled records
+    // refresh_publish_unreconciled on its run before parking the row. If that
+    // park itself failed, the run is the durable evidence: recovery parks the
+    // row for a person instead of re-pending (a duplicate PR) or retiring it.
+    const unreconciledEvidence = `EXISTS (SELECT 1 FROM autonomous_runs r
+      WHERE r.opportunity_id = opportunity_queue.id
+        AND r.queue_claim_id IS NOT DISTINCT FROM opportunity_queue.claim_id
+        AND r.outcome = 'completed_pending_review'
+        AND r.skip_reason = '${UNRECONCILED_REFRESH_REASON}')`;
     const supersededAt = new Date();
     const superseded = await db('opportunity_queue')
       .where('status', 'claimed')
@@ -602,10 +612,10 @@ class OpportunityQueue {
       .whereRaw(`jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)`, [PAGE_EDIT_SUPERSEDED_KEY])
       .whereRaw(`skip_reason IS DISTINCT FROM 'named_competitor_publishing'`)
       .update({
-        status: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL THEN 'pending_review' ELSE 'skipped' END`),
+        status: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL OR ${unreconciledEvidence} THEN 'pending_review' ELSE 'skipped' END`),
         claimed_at: null,
-        skip_reason: db.raw(`COALESCE(${currentClaimPrReason}, ?)`, [PAGE_EDIT_SUPERSEDED_REASON]),
-        completed_at: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL THEN NULL ELSE ?::timestamptz END`, [supersededAt]),
+        skip_reason: db.raw(`COALESCE(${currentClaimPrReason}, CASE WHEN ${unreconciledEvidence} THEN '${UNRECONCILED_REFRESH_REASON}' END, ?)`, [PAGE_EDIT_SUPERSEDED_REASON]),
+        completed_at: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL OR ${unreconciledEvidence} THEN NULL ELSE ?::timestamptz END`, [supersededAt]),
         updated_at: supersededAt,
       });
     const recovered = await db('opportunity_queue')
@@ -623,7 +633,8 @@ class OpportunityQueue {
       .whereRaw(`NOT (bucket = 'citability_backfill'
         AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?))`, [PAGE_EDIT_SUPERSEDED_KEY])
       .update({
-        status: 'pending',
+        status: db.raw(`CASE WHEN ${unreconciledEvidence} THEN 'pending_review' ELSE 'pending' END`),
+        skip_reason: db.raw(`CASE WHEN ${unreconciledEvidence} THEN '${UNRECONCILED_REFRESH_REASON}' ELSE skip_reason END`),
         claimed_at: null,
         updated_at: new Date(),
       });
@@ -744,4 +755,5 @@ module.exports._internals = {
   PAGE_EDIT_SUPERSEDED_KEY,
   PAGE_EDIT_SUPERSEDED_REASON,
   RECONCILIATION_HOLD_REASONS,
+  UNRECONCILED_REFRESH_REASON,
 };

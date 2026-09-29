@@ -926,7 +926,9 @@ async function renderTemplate(templateKey, vars, context = {}) {
 // body will actually render — gate on AND the row present and active. An
 // eager build minted an unreachable short_codes row on every legacy send
 // and every email-only delivery (codex r2).
-async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars, context = {}) {
+// out (optional): receives out.templateKey = the row that rendered the body
+// (v2 or base), so a caller can record it; the return stays a string.
+async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars, context = {}, out = null) {
   if (process.env.GATE_APPOINTMENT_PAGE === 'true') {
     const v2Key = `${baseKey}_v2`;
     // Fail-soft like renderTemplate: a transient DB error here must not
@@ -947,7 +949,10 @@ async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars,
         return null;
       }
       const body = await renderTemplate(v2Key, await v2VarsFactory(), context);
-      if (body) return body;
+      if (body) {
+        if (out) out.templateKey = v2Key;
+        return body;
+      }
       // Active row that failed to render (audited upstream) keeps the same
       // stop-don't-revert semantics as the kill switch.
       logger.warn(`[appt-remind] ${v2Key} did not render - skipping send rather than reverting to legacy copy`);
@@ -956,7 +961,9 @@ async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars,
     // Row absent = rolled-back migration; fall back so the customer still
     // gets a text.
   }
-  return renderTemplate(baseKey, legacyVars, context);
+  const legacyBody = await renderTemplate(baseKey, legacyVars, context);
+  if (legacyBody && out) out.templateKey = baseKey;
+  return legacyBody;
 }
 
 async function renderRequiredTemplate(templateKey, vars, context = {}) {
@@ -1954,6 +1961,9 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
       metadata: JSON.stringify({
         entry_point: 'appointment_notice_contact_deferred',
         ...(metaExtra.scheduled_service_id ? { scheduled_service_id: metaExtra.scheduled_service_id } : {}),
+        // The held body was rendered from this row; the scheduler replay
+        // forwards it so the morning send keeps its template attribution.
+        ...(metaExtra.templateKey ? { template_key: metaExtra.templateKey } : {}),
         appointment_contact_role: held.contact.role || null,
         original_block_code: 'QUIET_HOURS_HOLD',
         replay_purpose: purpose,
@@ -2293,6 +2303,8 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // above passed, then the clock crossed 20:00 mid-flight) back out so
       // the hold defers instead of burning the confirmation below.
       const smsOutcome = {};
+      // Filled at the call below; the render adds templateKey before the send.
+      const confirmationMeta = {};
       const sent = await deliverAppointmentNotice({
         channel: prefs.confirmationChannel,
         kind: 'confirmation',
@@ -2304,6 +2316,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         smsOutcome,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
+          const ladder = {};
           const rendered = await renderAppointmentPageTemplate(
             'appointment_confirmation',
             async () => {
@@ -2327,9 +2340,13 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
             },
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
+            ladder,
           );
+          // safeSendAppointment reads this metadata after the render, so
+          // the send records the row that actually rendered (v2 or base).
+          if (ladder.templateKey) confirmationMeta.templateKey = ladder.templateKey;
           return appendHeldEstimateAcceptLine(rendered, { record, contact, customer, scheduledServiceId });
-        }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome }),
+        }, 'confirmation', 'appointment_confirmation', Object.assign(confirmationMeta, { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }), { sendOutcome: smsOutcome }),
       });
 
       // Boundary hold — same treatment as the pre-check above: return
@@ -3448,7 +3465,7 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined, templateKey: 'reminder_72h' }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
             }));
             if (reached72 === null) smsOutcome72.blockedCode = 'MOVE_HOLD';
 
@@ -3715,6 +3732,8 @@ const AppointmentReminders = {
               continue;
             }
             const smsOutcome24 = {};
+            // Filled at the call below; the render adds templateKey before the send.
+            const reminder24Meta = {};
             const reached24 = await withReminderSendFence(r, '24h', () => deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
@@ -3733,7 +3752,8 @@ const AppointmentReminders = {
               // occurrence (finding #5).
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-                return renderAppointmentPageTemplate(
+                const ladder = {};
+                const rendered24 = await renderAppointmentPageTemplate(
                   'reminder_24h',
                   // v2: the page carries the detail — body keeps the arrival
                   // window + fee disclosure and hands off to the link.
@@ -3747,8 +3767,13 @@ const AppointmentReminders = {
                   },
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
+                  ladder,
                 );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }, { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
+                // Read by safeSendAppointment after this render (see the
+                // confirmation twin): the row that rendered, v2 or base.
+                if (ladder.templateKey) reminder24Meta.templateKey = ladder.templateKey;
+                return rendered24;
+              }, 'appointment_reminder', 'appointment_reminder_24h', Object.assign(reminder24Meta, { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }), { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
               smsOutcome: smsOutcome24,
             }));
             if (reached24 === null) smsOutcome24.blockedCode = 'MOVE_HOLD';
@@ -4318,6 +4343,7 @@ const AppointmentReminders = {
             // A windowless notice promised no window: the slot still guards
             // the send, but it is recorded as an unknown-window promise.
             ...(resolved?.windowless ? { window_unknown: true } : {}),
+            templateKey: 'appointment_rescheduled',
           }, { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
@@ -4801,7 +4827,7 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId }, {
+          }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
             sendOutcome,
             // Lease-ownership recheck AT the provider handoff (codex r6):
             // customer lookup, prefs, rendering, and the line lookup all
@@ -4977,7 +5003,7 @@ const AppointmentReminders = {
         // 'appointment_cancellation' profile (a no-show notice is the same
         // class of "your appointment isn't happening — let's rebook" comms,
         // and 'appointment_no_show' is not a registered MessagePurpose).
-      }, 'appointment_no_show', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId }, {
+      }, 'appointment_no_show', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_no_show' }, {
         // Authenticated dispatcher click with an explicit notify choice —
         // exempt from the send window (rain-out/quick-move contract).
         // options.operatorInitiated is threaded by the (only) route
@@ -5620,7 +5646,7 @@ const AppointmentReminders = {
         // Row-backed linkage (codex r13): record always has a reminder
         // row, so acceptance reconciliation can find the group through it
         // even when the preferred representative lacks one.
-        { scheduled_service_id: record.scheduled_service_id }, {
+        { scheduled_service_id: record.scheduled_service_id, templateKey: 'appointment_series_cancelled' }, {
           sendOutcome,
           // Ownership fence at the provider handoff (codex r7): if the
           // sweep reclaimed this series while we rendered, stand down —

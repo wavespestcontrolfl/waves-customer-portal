@@ -38,6 +38,13 @@ test('tier mirrors write-gates: two-step/legacy-bare = yellow, confirmed-endpoin
   expect(tierFor('query_customers')).toBe('green');
 });
 
+test('every outside-write tool (Sentry/Cloudflare/Railway/GitHub/GSC) is irreversible — none has a portal-side undo', () => {
+  for (const n of gates.OUTSIDE_WRITE_TOOL_NAMES) {
+    expect(buildContract({ toolName: n, params: {}, displayParams: {} }).irreversible).toBe(true);
+  }
+  expect(gates.OUTSIDE_WRITE_TOOL_NAMES.size).toBe(11);
+});
+
 test('send_sms: pinned recipient becomes a comms effect, internals hidden, irreversible + notifies', () => {
   const c = buildContract({
     toolName: 'send_sms',

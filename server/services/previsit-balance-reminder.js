@@ -775,5 +775,12 @@ module.exports = {
   leadDays,
   DUES_GRACE_DAYS,
   OVERDUE_AFTER_DAYS,
+  // The same two dark levers runSweep() itself checks before it does
+  // anything (PREVISIT_BALANCE_REMINDER=true AND the seeded SMS template
+  // active) — exported so balance-reminder.js's dailyCheck() can tell
+  // whether ITS replacement is actually live before retiring under
+  // GATE_BALANCE_REMINDER_LEGACY_OFF (dunning unification round-2 review).
+  gateEnabled,
+  smsTemplateActive,
   _test: { previsitQuoteAuthority },
 };
