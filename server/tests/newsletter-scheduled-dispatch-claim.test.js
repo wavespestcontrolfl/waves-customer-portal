@@ -41,7 +41,10 @@ const SEND = {
 function chain({ first, rows, returning } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereNotExists', 'whereIn',
-    'select', 'orderBy', 'leftJoin', 'join', 'forUpdate'].forEach((m) => { q[m] = jest.fn(() => q); });
+    'select', 'orderBy', 'leftJoin', 'join', 'forUpdate',
+    // excludeMarketingOptedOut's pre-filtering CTE (codex #5165) — a no-op
+    // chain link here, same as every other query-shape method above.
+    'withMaterialized'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.limit = jest.fn(async () => rows || []);
   q.first = jest.fn(async () => first);
   q.count = jest.fn(() => ({ first: jest.fn(async () => ({ c: 5 })) }));

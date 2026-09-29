@@ -127,6 +127,18 @@ const HAS_AT = (alias) => `${alias}.email LIKE '%@%'`;
 // NULL counted in, was a build choice, not a ruling).
 const candidateStageSql = (alias) => `${alias}.pipeline_stage = ANY(?)`;
 
+// ORDER BY is THE canonical picker's own tie-break (liveTwinSubselect —
+// is_primary_profile DESC NULLS LAST, created_at ASC, id ASC), applied
+// globally so it also decides ties ACROSS a Google mailbox group (two
+// candidates spelled differently but sharing one inbox — codex round on
+// #5165), not just within one literal email spelling. Two candidates
+// sharing a mailbox are deduped to ONE projected/imported row in the loop
+// below (`projectedAddresses` keyed by mailbox identity) — this order
+// guarantees the FIRST one iterated, and therefore the one whose OWN
+// canonicalProfile pick and OWN email spelling get kept, is always the
+// profile the picker would choose, never whichever the database happened
+// to return first. Deterministic across runs: an unordered scan of the
+// same rows always sorts back to this one order.
 async function fetchCandidateRows(conn) {
   const result = await conn.raw(`
     SELECT c.id AS customer_id, c.email, c.first_name, c.last_name, c.city
@@ -142,6 +154,7 @@ async function fetchCandidateRows(conn) {
               WHERE (ns.customer_id = c.id OR LOWER(TRIM(ns.email)) = LOWER(TRIM(c.email)))
                 AND ns.status = 'active'
            )
+     ORDER BY c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
   `, [CUSTOMER_STAGES]);
   return result.rows || [];
 }
@@ -323,6 +336,13 @@ async function classifyAddress(conn, { email, profileIds }) {
 
   return null;
 }
+
+// A count/array field that means "what WOULD happen" on a dry run and
+// "what WAS applied" on a confirmed write — never the read-time projection
+// once a write-time recheck could have moved it (codex #5165 P2, :717:
+// importable/byCity are the two fields reconcileCustomers reports this way).
+// Its own tiny branch, so the caller's return statement stays branch-free.
+const appliedOrProjected = (write, applied, projected) => (write ? applied : projected);
 
 // Thrown (and retried from a fresh transaction) when the address, or the
 // set of profiles sharing it, moved after its comms locks were chosen — a
@@ -600,18 +620,24 @@ async function importOneCustomer(conn, customerId) {
     await linkToCustomer(lc, trx);
     // Identity follows the link that actually landed: re-read from the
     // linked profile (a no-op when it is the canonical pick above, which
-    // the decision's locks make it on unchanged data).
-    await trx.raw(
+    // the decision's locks make it on unchanged data). RETURNING the
+    // linked profile's CURRENT city too — never the pre-insert
+    // decision.canonical.city — so the caller's applied-city accounting
+    // (reconcileCustomers' appliedByCity) reflects the row this write
+    // actually produced.
+    const identity = await trx.raw(
       `UPDATE newsletter_subscribers ns
           SET first_name = linked.first_name, last_name = linked.last_name
          FROM customers linked
-        WHERE ns.id = ? AND linked.id = ns.customer_id`,
+        WHERE ns.id = ? AND linked.id = ns.customer_id
+        RETURNING linked.city AS city`,
       [inserted[0].id],
     );
     // The SAME locked zone fill the sweep runs — the linked customer's
     // current city and live status, never a snapshot.
     await fillZoneForSubscriber(trx, inserted[0].id);
-    return { outcome: 'imported' };
+    const city = (identity.rows?.[0]?.city || '').trim() || 'Unknown';
+    return { outcome: 'imported', city };
   });
 }
 
@@ -710,10 +736,15 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   let imported = 0;
   let zoneFillsApplied = 0;
   let orphanLinksApplied = 0;
+  const appliedCityCounts = new Map();
   if (write) {
     await guardedEach(importableRows, (row) => ({ customerId: row.customer_id }), async (row) => {
       const result = await importOneCustomer(conn, row.customer_id);
-      if (result.outcome === 'imported') { imported += 1; return; }
+      if (result.outcome === 'imported') {
+        imported += 1;
+        appliedCityCounts.set(result.city, (appliedCityCounts.get(result.city) || 0) + 1);
+        return;
+      }
       if (result.outcome === 'excluded') { excluded[result.reason] = (excluded[result.reason] || 0) + 1; return; }
       // 'row_appeared' and 'no_longer_live' each have their own bucket —
       // a rejected candidate always keeps its reason and is counted,
@@ -734,20 +765,41 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     });
   }
 
+  // Applied-vs-projected (codex #5165 P2, :717): a candidate that classified
+  // importable at read time can still fail its write-time recheck (opted
+  // out / archived / a race) — importOneCustomer already counts that
+  // rejection under its OWN reason above, but the row never left
+  // importableRows or cityCounts, so a confirmed run could report
+  // importable:1 / imported:0 / one exclusion, with byCity still showing an
+  // import that never happened. In write mode, importable/byCity now
+  // describe ONLY what was actually applied (== imported, keyed by the
+  // ACTUAL linked profile's city importOneCustomer returns); the read-time
+  // projection is always available under `projected`, unchanged by write
+  // mode and identical to the top-level fields on a dry run.
+  const appliedByCity = Array.from(appliedCityCounts.entries())
+    .map(([city, count]) => ({ city, count }))
+    .sort((a, b) => b.count - a.count || a.city.localeCompare(b.city));
+
   return {
     dryRun: !write,
     candidates: candidateRows.length,
-    importable: importableRows.length,
+    importable: appliedOrProjected(write, imported, importableRows.length),
     imported,
     excluded,
     // Dry run reports the projection (what WOULD happen); write mode
     // reports what was ACTUALLY applied — a change landing between the two
     // can make these differ, never the rules themselves.
     // The dry run adds the fills its projected orphan links would run, as
-    // the write counts the fills its links actually made.
+    // the write counts the fills its links actually made. (Kept as ternaries,
+    // not appliedOrProjected: the dry-run branch's projectedOrphanZoneFills
+    // call must stay short-circuited out of write mode, never evaluated.)
     zoneFills: write ? zoneFillsApplied : zoneFillCandidates.length + await projectedOrphanZoneFills(conn, orphanLinks),
     orphanLinks: write ? orphanLinksApplied : orphanLinks.length,
-    byCity,
+    byCity: appliedOrProjected(write, appliedByCity, byCity),
+    // The pre-write classification, always — identical to the top-level
+    // importable/byCity on a dry run; the ONLY place to see what the batch
+    // looked like before the write-time recheck ran, in write mode.
+    projected: { importable: importableRows.length, byCity },
     errors,
   };
 }

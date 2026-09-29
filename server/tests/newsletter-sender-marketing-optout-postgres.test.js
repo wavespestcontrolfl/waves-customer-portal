@@ -112,6 +112,20 @@ postgres('newsletter sender — explicit marketing opt-out at send time (real Po
     expect(await audienceIds([plain.id, dotted.id])).toEqual([]);
   });
 
+  // Codex #5165 (:141): GOOGLE_MAILBOX_SQL.mailbox() strips everything from
+  // '+' onward and every '.', so a local part that is JUST a '+tag' (no text
+  // before the '+') reduces to '' — the profile side already guarded against
+  // matching on that empty string; this proves the SUBSCRIBER side must too,
+  // or two UNRELATED addresses that both happen to degenerate to '' would
+  // wrongly read as the same mailbox and the opt-out would leak across them.
+  test('two different Google addresses that both reduce to an empty mailbox identity ("+tag@gmail.com" shape) do NOT cross-match', async () => {
+    const t = tag().replace(/-/g, '');
+    await customer({ email: `+optout${t}@gmail.com` }, { marketing_offers: false });
+    const keep = await customer({ email: `+keep${t}@gmail.com` });
+    const sub = await subscriber(keep.email, { customer_id: keep.id });
+    expect(await audienceIds([sub.id])).toEqual([sub.id]); // NOT excluded — a different real mailbox
+  });
+
   test('NULL / missing prefs, an archived opted-out sharer, and a non-Google +tag profile do NOT exclude', async () => {
     const nullFlags = await customer({}, { marketing_offers: null, email_enabled: null, marketing_channel: null });
     const noPrefs = await customer();

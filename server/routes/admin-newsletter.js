@@ -2391,11 +2391,24 @@ router.get('/subscribers/zone-distribution', async (req, res, next) => {
 // Shared by both routes below. Default is a DRY RUN — a write needs both
 // `dryRun: false` AND `confirm: 'IMPORT'` in the body; anything else
 // (including an empty body) returns the dry-run result untouched.
+//
+// Held push-audit P1 (codex #5165): a confirmed write (dryRun:false) can hit
+// per-customer errors (each caught by reconcileCustomers' own guardedEach,
+// never aborting the batch) and still return the applied/excluded numbers
+// alongside them, silently, at HTTP 200 — nothing in the response shape
+// told a caller it was partial. A write with errors.length > 0 now answers
+// 422 with an explicit `success: false`; the result object (importable,
+// imported, excluded, byCity, projected, errors — id-only, per the module's
+// own contract) is otherwise unchanged. Dry runs are never affected.
 async function reconcileCustomersHandler(req, res, next) {
   try {
     const { reconcileCustomers } = require('../services/newsletter-list-reconcile');
     const write = req.body?.dryRun === false && req.body?.confirm === 'IMPORT';
-    res.json(await reconcileCustomers({ dryRun: !write }));
+    const result = await reconcileCustomers({ dryRun: !write });
+    if (write && Array.isArray(result.errors) && result.errors.length > 0) {
+      return res.status(422).json({ ...result, success: false });
+    }
+    res.json(result);
   } catch (err) { next(err); }
 }
 

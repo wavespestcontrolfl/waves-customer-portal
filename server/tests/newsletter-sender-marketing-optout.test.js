@@ -13,14 +13,21 @@ const { buildSubscriberQuery, excludeMarketingOptedOut, outstandingEligibleDeliv
 describe('excludeMarketingOptedOut', () => {
   test('buildSubscriberQuery anti-joins explicit opt-outs on the linked customer or any live same-mailbox profile', () => {
     const { sql } = buildSubscriberQuery(null).toSQL();
-    expect(sql).toMatch(/not exists \(select 1 from "notification_prefs" as "mop" inner join "customers" as "moc" on "moc"\."id" = "mop"\."customer_id" where "moc"\."deleted_at" is null/i);
+    // The notification_prefs/customers join is pre-filtered to explicit
+    // opt-out rows in its own MATERIALIZED CTE (codex #5165 EXPLAIN finding:
+    // a plain/inlined derived table gets flattened back into a per-outer-row
+    // rescan) — the outer query anti-joins against that small precomputed set.
+    expect(sql).toMatch(/with "opted_out_profiles" as materialized \(select "moc"\."id" as "customer_id", "moc"\."email" as "email" from "notification_prefs" as "mop" inner join "customers" as "moc" on "moc"\."id" = "mop"\."customer_id" where "moc"\."deleted_at" is null/i);
     // Explicit opt-outs only: an equality on false / 'sms' is never true for NULL.
     expect(sql).toContain("mop.marketing_offers = false OR mop.email_enabled = false OR LOWER(TRIM(mop.marketing_channel)) = 'sms'");
-    expect(sql).toContain('moc.id = newsletter_subscribers.customer_id');
-    expect(sql).toContain('LOWER(TRIM(moc.email)) = LOWER(TRIM(newsletter_subscribers.email))');
-    // Google mailbox identity from customer-comms-lock.js GOOGLE_MAILBOX_SQL.
-    expect(sql).toContain("SPLIT_PART(LOWER(TRIM(moc.email)), '@', 2) IN ('gmail.com', 'googlemail.com')");
-    expect(sql).toContain("REPLACE(SPLIT_PART(SPLIT_PART(LOWER(TRIM(newsletter_subscribers.email)), '@', 1), '+', 1), '.', '')");
+    expect(sql).toMatch(/not exists \(select 1 from "opted_out_profiles" as "oo"/i);
+    expect(sql).toContain('oo.customer_id = newsletter_subscribers.customer_id');
+    expect(sql).toContain('LOWER(TRIM(oo.email)) = LOWER(TRIM(newsletter_subscribers.email))');
+    // Google mailbox identity from customer-comms-lock.js GOOGLE_MAILBOX_SQL —
+    // the non-empty guard now applies to BOTH sides of the mailbox match.
+    expect(sql).toContain("SPLIT_PART(LOWER(TRIM(oo.email)), '@', 2) IN ('gmail.com', 'googlemail.com')");
+    expect(sql).toContain("REPLACE(SPLIT_PART(SPLIT_PART(LOWER(TRIM(oo.email)), '@', 1), '+', 1), '.', '') <> ''");
+    expect(sql).toContain("REPLACE(SPLIT_PART(SPLIT_PART(LOWER(TRIM(newsletter_subscribers.email)), '@', 1), '+', 1), '.', '') <> ''");
   });
 
   test('present with a segment filter too, and usable on a delivery-ledger join (resume precheck shape)', () => {
@@ -39,7 +46,9 @@ describe('excludeMarketingOptedOut', () => {
     const { sql } = db('newsletter_sends').select(db.raw('EXISTS (?) AS has_outstanding', [
       outstandingEligibleDeliveries('newsletter_sends.id', { correlate: true }).select(db.raw('1')),
     ])).toSQL();
-    expect(sql).toMatch(/EXISTS \(select .*"notification_prefs" as "mop".*moc\.id = newsletter_subscribers\.customer_id/is);
+    // A CTE is valid inside a subquery expression (Postgres) — the MATERIALIZED
+    // opt-out set is still scoped to this one EXISTS(...), never shared globally.
+    expect(sql).toMatch(/EXISTS \(\(with "opted_out_profiles" as materialized \(select .*"notification_prefs" as "mop".*oo\.customer_id = newsletter_subscribers\.customer_id/is);
   });
 
   // Every audience read (fresh selection, resume refetch, per-chunk

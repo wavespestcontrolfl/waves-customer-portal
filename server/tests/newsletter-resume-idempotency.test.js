@@ -48,7 +48,10 @@ const { sendCampaign, prepareResumeCampaign, resumeCampaign, hasOutstandingDeliv
 function chain({ first, result, returning, count, updated, onUpdate, onWhereIn } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
-   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate']
+   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate',
+   // excludeMarketingOptedOut's pre-filtering CTE (codex #5165) — a no-op
+   // chain link here, same as every other query-shape method above.
+   'withMaterialized']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.whereIn = jest.fn((...args) => {
     if (onWhereIn) onWhereIn(...args);

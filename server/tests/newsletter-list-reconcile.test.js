@@ -114,6 +114,14 @@ function makeConn(state) {
   // every NON-ARCHIVED profile on the normalized address, any stage, ordered
   // is_primary_profile DESC NULLS LAST, created_at ASC, id ASC.
   const primaryRank = (v) => (v === true ? 0 : v === false ? 1 : 2);
+  // THE SAME tie-break, applied globally to fetchCandidateRows' ORDER BY
+  // (production SQL) — ties a mailbox-sharing group's iteration order to the
+  // picker's own ranking, so whichever candidate is processed first (and
+  // therefore kept — see `projectedAddresses` in the module under test) is
+  // never an artifact of insertion order.
+  const candidateOrder = (a, b) => primaryRank(a.is_primary_profile) - primaryRank(b.is_primary_profile)
+    || String(a.created_at || '').localeCompare(String(b.created_at || ''))
+    || String(a.id).localeCompare(String(b.id));
   const canonicalPick = (email) => state.customers
     .filter((c) => !c.deleted_at && key(c.email || '') === key(email))
     .sort((a, b) => primaryRank(a.is_primary_profile) - primaryRank(b.is_primary_profile)
@@ -165,12 +173,14 @@ function makeConn(state) {
       const c = canonicalPick(bindings[0]);
       return { rows: c ? [{ canonical_id: c.id, first_name: c.first_name, last_name: c.last_name, city: c.city }] : [] };
     }
-    // Identity refresh from the profile the link actually landed on.
+    // Identity refresh from the profile the link actually landed on —
+    // RETURNING its CURRENT city too (the applied-city accounting reads
+    // this, never the pre-insert decision.canonical.city).
     if (sql.includes('SET first_name = linked.first_name')) {
       const row = state.subscribers.find((s) => s.id === bindings[0]);
       const linked = row && state.customers.find((c) => c.id === row.customer_id);
       if (linked) Object.assign(row, { first_name: linked.first_name, last_name: linked.last_name });
-      return { rows: [] };
+      return { rows: linked ? [{ city: linked.city }] : [] };
     }
     // decideAddress's FOR SHARE on every sharing profile's customers row —
     // a real row lock (proved in the Postgres suite); a no-op here.
@@ -222,7 +232,9 @@ function makeConn(state) {
       return { rows: ok ? [{ city: c.city }] : [] };
     }
     if (sql.includes('FROM customers c') && sql.includes('NOT EXISTS')) {
-      return { rows: state.customers.filter(isCandidate).filter((c) => !hasActive(c)).map((c) => ({ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city })) };
+      // Mirrors the production ORDER BY verbatim — see candidateOrder above.
+      return { rows: state.customers.filter(isCandidate).filter((c) => !hasActive(c)).sort(candidateOrder)
+        .map((c) => ({ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city })) };
     }
     if (sql.includes('WHERE c.id = ?')) {
       const [customerId] = bindings;
@@ -442,8 +454,12 @@ test('re-check before write: a customer who unsubscribes between the read and th
     return rawImpl(sql, bindings);
   });
   const result = await reconcileCustomers({ dryRun: false, conn });
-  expect(result.importable).toBe(1); // the pre-write snapshot still counted it
+  // Codex #5165 (:717): importable/byCity describe what was ACTUALLY
+  // applied in write mode — a write-time exclusion must not leave the
+  // rejected candidate counted as importable while imported stays 0.
+  expect(result.importable).toBe(0);
   expect(result.imported).toBe(0); // the recheck caught the mid-flight unsubscribe
+  expect(result.projected.importable).toBe(1); // the pre-write snapshot, exposed separately
   expect(linkToCustomer).not.toHaveBeenCalled();
 });
 
@@ -460,8 +476,9 @@ test('re-check reloads the customer: one archived between the read and the write
     return rawImpl(sql, bindings);
   });
   const result = await reconcileCustomers({ dryRun: false, conn });
-  expect(result.importable).toBe(1); // the pre-write snapshot still counted it
+  expect(result.importable).toBe(0); // ACTUALLY applied — the recheck excluded it
   expect(result.imported).toBe(0);
+  expect(result.projected.importable).toBe(1); // the pre-write snapshot, exposed separately
   expect(linkToCustomer).not.toHaveBeenCalled();
 });
 
@@ -611,8 +628,14 @@ test('write-time recheck rejections keep their specific reason and are counted �
     return rawImpl(sql, bindings);
   });
   const result = await reconcileCustomers({ dryRun: false, conn });
-  expect(result.importable).toBe(1);
+  // Codex #5165 (:717) regression: this is the exact "candidates:1,
+  // importable:1, imported:0, one exclusion, byCity still shows the
+  // never-happened import" inconsistency — importable/byCity in write mode
+  // must now describe ONLY what was actually applied (nothing).
+  expect(result.importable).toBe(0);
   expect(result.imported).toBe(0);
+  expect(result.byCity).toEqual([]);
+  expect(result.projected).toMatchObject({ importable: 1, byCity: [{ city: 'Venice', count: 1 }] });
   // The rejection reason from the SECOND (write-time) classification is
   // the one that's counted — never silently absorbed into imported:0 with
   // no reason anywhere in the response.
@@ -712,6 +735,53 @@ test('the dry run keys duplicates by mailbox identity: equivalent Google spellin
   const dry = await reconcileCustomers({ conn: makeConn(state) });
   expect(dry.importable).toBe(1);
   expect(dry.excluded.duplicate_address).toBe(1);
+});
+
+// Codex P2 (:673) — two live profiles sharing a Google mailbox under
+// DIFFERENT spellings must resolve to the SAME canonical profile every run,
+// never whichever spelling the (unordered) database scan happened to return
+// first. fetchCandidateRows now orders candidates by the picker's own
+// tie-break (is_primary_profile DESC NULLS LAST, created_at ASC, id ASC),
+// so the canonical one is always iterated first and wins the mailbox-level
+// dedup — proven here by listing the NON-canonical spelling FIRST in the
+// fixture (insertion order alone would pick the wrong one) and asserting
+// the canonical profile's name/city/email spelling is what's kept, on both
+// the dry run and the write, and stably across repeated runs.
+test('two live profiles sharing a Google mailbox under different spellings resolve to the SAME canonical profile, deterministically — never whichever spelling the scan returns first', async () => {
+  const state = {
+    customers: [
+      // Listed FIRST (non-canonical): relying on scan/insertion order alone
+      // would wrongly keep this one.
+      cust({
+        id: 'c1', email: 'john.doe+work@gmail.com', first_name: 'Alias', last_name: 'Spelling', city: 'Nowhere',
+        created_at: '2026-01-01',
+      }),
+      // The picker's own pick: is_primary_profile wins the tie-break.
+      cust({
+        id: 'c2', email: 'johndoe@gmail.com', first_name: 'Canonical', last_name: 'Holder', city: 'Venice',
+        is_primary_profile: true, created_at: '2026-02-01',
+      }),
+    ],
+    subscribers: [],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry).toMatchObject({ importable: 1, byCity: [{ city: 'Venice', count: 1 }] });
+  expect(dry.excluded.duplicate_address).toBe(1);
+
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(1);
+  expect(state.subscribers).toHaveLength(1);
+  // The CANONICAL spelling was kept and inserted — never the alias's.
+  expect(state.subscribers[0]).toMatchObject({
+    email: 'johndoe@gmail.com', customer_id: 'c2', first_name: 'Canonical', last_name: 'Holder',
+  });
+
+  // Re-run against a fresh copy of the SAME fixture: the same profile wins
+  // every time — deterministic, not a lucky draw on this one run's order.
+  const rerunState = { customers: state.customers.map((c) => ({ ...c })), subscribers: [], prefs: [] };
+  const again = await reconcileCustomers({ conn: makeConn(rerunState) });
+  expect(again.byCity).toEqual([{ city: 'Venice', count: 1 }]);
 });
 
 test('a profile that joins the address after its comms locks were chosen forces a fresh attempt, and its opt-out is honoured', async () => {

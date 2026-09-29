@@ -576,6 +576,39 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     expect(row).toMatchObject({ customer_id: primary.id, first_name: 'Primary', last_name: 'Holder', region_zone: 'south_sarasota' });
   }));
 
+  // Codex P2 (:673) — two live profiles sharing a Google mailbox under
+  // DIFFERENT spellings (never an exact-match twin, so the canonicalProfile
+  // query alone can't disambiguate them) must resolve to the picker's own
+  // pick every run, never whichever spelling Postgres's (otherwise
+  // unordered) heap scan happens to return first. fetchCandidateRows' own
+  // ORDER BY (is_primary_profile DESC NULLS LAST, created_at ASC, id ASC)
+  // is what makes this deterministic — proven against real Postgres, not a
+  // mocked row order.
+  test('two live profiles sharing a Google mailbox under different spellings resolve to the SAME canonical profile every run (real Postgres)', () => rollbackTest(async (trx) => {
+    const tag = randomUUID().slice(0, 8).replace(/-/g, '');
+    const alias = synthCustomer({
+      email: `j.o.h.n${tag}+work@gmail.com`, first_name: 'Alias', last_name: 'Spelling', city: 'Nowhere',
+    });
+    const canonical = synthCustomer({
+      email: `john${tag}@gmail.com`, first_name: 'Canonical', last_name: 'Holder', city: 'Venice', is_primary_profile: true,
+    });
+    await trx('customers').insert([alias, canonical]);
+    const dry = await reconcileCustomers({ conn: trx });
+    expect(dry.byCity).toEqual(expect.arrayContaining([{ city: 'Venice', count: 1 }]));
+    expect(dry.byCity).not.toEqual(expect.arrayContaining([{ city: 'Nowhere', count: 1 }]));
+
+    const write = await reconcileCustomers({ dryRun: false, conn: trx });
+    expect(write.imported).toBe(1);
+    const row = await trx('newsletter_subscribers').whereRaw(
+      'LOWER(TRIM(email)) IN (?, ?)',
+      [alias.email.toLowerCase(), canonical.email.toLowerCase()],
+    ).first();
+    // The CANONICAL spelling was kept and inserted — never the alias's.
+    expect(row).toMatchObject({
+      email: canonical.email.toLowerCase(), customer_id: canonical.id, first_name: 'Canonical', last_name: 'Holder',
+    });
+  }));
+
   test('zone fill writes from the customer\'s CURRENT city: an uncommitted city edit blocks the locked re-read, and the committed city is the one used (real Postgres)', async () => {
     const cust = synthCustomer({ city: 'Venice' });
     await seedCommitted([cust]);

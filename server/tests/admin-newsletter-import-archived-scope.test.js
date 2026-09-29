@@ -82,6 +82,62 @@ describe.each([
   });
 });
 
+// Held push-audit P1 (codex #5165): a confirmed write with per-customer
+// errors must not read as a clean 200 — the route now answers 422 with an
+// explicit success:false. Dry runs, and a clean write (no errors), are
+// unaffected — pinned by the shared-contract test above (still asserts 200).
+describe.each([
+  ['/subscribers/import-customers'],
+  ['/subscribers/reconcile-customers'],
+])('POST %s — a confirmed write with errors answers success:false, non-2xx', (path) => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a write with errors.length > 0 -> 422, success:false, errors preserved', async () => {
+    reconcileCustomers.mockResolvedValue({
+      dryRun: false, candidates: 2, importable: 1, imported: 1, excluded: {}, byCity: [], projected: { importable: 2, byCity: [] },
+      errors: [{ customerId: 'c1', error: 'boom' }],
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/newsletter${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun: false, confirm: 'IMPORT' }),
+      });
+      expect(res.status).toBe(422);
+      const body = await res.json();
+      expect(body).toMatchObject({ success: false, imported: 1, errors: [{ customerId: 'c1', error: 'boom' }] });
+    });
+  });
+
+  test('a clean write (errors: []) still answers 200 with no success key', async () => {
+    reconcileCustomers.mockResolvedValue({ dryRun: false, imported: 3, errors: [] });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/newsletter${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun: false, confirm: 'IMPORT' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.success).toBeUndefined();
+      expect(body.imported).toBe(3);
+    });
+  });
+
+  test('a dry run with errors.length > 0 is UNCHANGED — still 200, no success key (dry runs never gate on this)', async () => {
+    reconcileCustomers.mockResolvedValue({ dryRun: true, importable: 1, errors: [{ customerId: 'c1', error: 'boom' }] });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/newsletter${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.success).toBeUndefined();
+    });
+  });
+});
+
 describe('POST /subscribers/import routes the bulk first-link through the canonical picker', () => {
   let rawCalls;
   beforeEach(() => {
