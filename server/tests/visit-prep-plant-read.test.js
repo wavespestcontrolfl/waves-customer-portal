@@ -29,9 +29,10 @@ jest.mock('../services/photos', () => ({
   getPhotoBase64: (...args) => mockGetPhotoBase64(...args),
 }));
 
-const mockPestTrigger = jest.fn(async () => 'done');
-jest.mock('../services/visit-prep-pest-read', () => ({
-  triggerVisitPrepPestRead: (...args) => mockPestTrigger(...args),
+// "Not this read's stop" outcomes go back to the ONE dispatcher.
+const mockDispatch = jest.fn(async () => 'done');
+jest.mock('../services/visit-prep-read-dispatch', () => ({
+  dispatchVisitPrepRead: (...args) => mockDispatch(...args),
 }));
 
 let mockGateOn = true;
@@ -315,7 +316,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     mockIdentifyPlantV2.mockRejectedValue(new Error('vision provider down'));
     await expect(triggerVisitPrepPlantRead({
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
-    })).resolves.toBeUndefined();
+    })).resolves.toBe('failed');
     expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
 
@@ -419,78 +420,10 @@ describe('service labels (Codex #5320 r2/r5: the canonical classifier)', () => {
   });
 });
 
-describe('engine hand-off when the stop changes lines (Codex #5320 r7)', () => {
-  const tick = () => new Promise((resolve) => setImmediate(resolve));
-  // Earlier tests' unsupported outcomes schedule hand-offs too; let them
-  // land before counting this test's calls.
-  beforeEach(async () => { await tick(); mockPestTrigger.mockClear(); });
 
-  test('a stop that is pest now hands the photos to the pest read once, marked handedOff', async () => {
-    const conn = fakeConn();
-    const svc = { ...BASE_SVC, service_type: 'Quarterly Pest Control' };
-    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc, photos: PHOTOS, conn });
-    await tick();
-    expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
-    expect(mockPestTrigger).toHaveBeenCalledTimes(1);
-    expect(mockPestTrigger).toHaveBeenCalledWith(expect.objectContaining({
-      submissionId: 'sub-1', photos: PHOTOS, conn, handedOff: true,
-    }));
-  });
-
-  test('a read that was itself handed off never hands back (no ping-pong)', async () => {
-    const conn = fakeConn();
-    const svc = { ...BASE_SVC, service_type: 'Quarterly Pest Control' };
-    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc, photos: PHOTOS, conn, handedOff: true });
-    await tick();
-    expect(mockPestTrigger).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
-  });
-
-  test('a lawn stop that gets read never hands off', async () => {
-    mockGetPhotoBase64.mockResolvedValue('b64');
-    mockIdentifyPlantV2.mockResolvedValue({ ok: false, reason: 'blurry' });
-    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() });
-    await tick();
-    expect(mockPestTrigger).not.toHaveBeenCalled();
-  });
-});
-
-describe('the stop changes while the engine runs (Codex #5320 r8)', () => {
-  const tick = () => new Promise((resolve) => setImmediate(resolve));
-  const retype = (conn, type) => conn._store.scheduled_services.forEach((r) => { if (r.id === 'svc-1') r.service_type = type; });
-
-  test('lawn → tree & shrub mid-read: the lawn result is not stored; the claim is released and the stop re-read as tree & shrub', async () => {
-    const conn = fakeConn();
-    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
-    mockIdentifyPlantV2
-      .mockImplementationOnce(async () => { retype(conn, 'Tree & Shrub Care'); return okEngineResult(); })
-      .mockResolvedValueOnce(okEngineResult());
-    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
-    const row = () => conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1');
-    expect(row().read_status).toBe('none');
-    expect(row().read_result).toBeNull();
-    await tick(); await tick();
-    expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(2);
-    expect(mockIdentifyPlantV2.mock.calls[1][0].subject).toBe('tree_shrub');
-    expect(row().read_status).toBe('done');
-    expect(JSON.parse(row().read_result).subject_type).toBe('tree_shrub');
-  });
-
-  test('a re-read that sees the stop change again leaves the row at none (the recovery sweep\'s case), never a third read', async () => {
-    const conn = fakeConn();
-    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
-    mockIdentifyPlantV2.mockImplementation(async () => { retype(conn, 'Tree & Shrub Care'); return okEngineResult(); });
-    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn, rechecked: true });
-    await tick(); await tick();
-    expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(1);
-    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('none');
-  });
-});
 
 describe('released attempts still count against the daily cap (Codex #5320 r8 audit)', () => {
-  const tick = () => new Promise((resolve) => setImmediate(resolve));
-
-  test('cap 1: a read released because the stop changed mid-read is not re-read (the first engine call used the slot)', async () => {
+  test('cap 1: a read released because the stop changed mid-read keeps its slot, so the re-dispatched read is capped', async () => {
     process.env.VISIT_PREP_READ_DAILY_CAP = '1';
     const conn = fakeConn();
     mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
@@ -498,12 +431,13 @@ describe('released attempts still count against the daily cap (Codex #5320 r8 au
       conn._store.scheduled_services.forEach((r) => { if (r.id === 'svc-1') r.service_type = 'Tree & Shrub Care'; });
       return okEngineResult();
     });
-    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
-    await tick(); await tick();
+    await expect(triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn })).resolves.toBe('changed');
     const row = conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1');
-    expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(1);
     expect(row.read_status).toBe('none');
     expect(row.read_attempts).toBe(1);
+    // The re-dispatch, run by hand: the day's one slot is already spent.
+    await expect(triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn })).resolves.toBe('capped');
+    expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(1);
   });
 
   test('readsToday sums attempts, and counts a claimed row with no attempts recorded (pre-column) once', async () => {
@@ -518,5 +452,57 @@ describe('released attempts still count against the daily cap (Codex #5320 r8 au
     });
     // sub-1 is seeded at 'none' with no attempts.
     expect(await readsToday(conn)).toBe(4);
+  });
+});
+
+describe('the stop changes line or subject (Codex #5320 r7–r9): back to the dispatcher, never to the other engine', () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const retype = (conn, type) => conn._store.scheduled_services.forEach((r) => { if (r.id === 'svc-1') r.service_type = type; });
+  beforeEach(async () => { await tick(); mockDispatch.mockClear(); });
+
+  test('a pest stop at the locked claim: unsupported, no engine call, re-dispatched with the dispatch count', async () => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    const svc = { ...BASE_SVC, service_type: 'Quarterly Pest Control' };
+    await expect(triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc, photos: PHOTOS, conn, dispatches: 2 })).resolves.toBe('unsupported');
+    await tick();
+    expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockDispatch).toHaveBeenCalledWith(expect.objectContaining({ submissionId: 'sub-1', photos: PHOTOS, conn, dispatches: 2 }));
+    expect(mockDispatch.mock.calls[0][0]).not.toHaveProperty('expectStatus');
+  });
+
+  test('lawn → tree & shrub while the engine runs: the lawn result is not stored, the claim released, the stop re-dispatched', async () => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    mockIdentifyPlantV2.mockImplementation(async () => { retype(conn, 'Tree & Shrub Care'); return okEngineResult(); });
+    await expect(triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn })).resolves.toBe('changed');
+    await tick();
+    const row = conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1');
+    expect(row.read_status).toBe('none');
+    expect(row.read_result).toBeNull();
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('an engine FAILURE on a stop that changed is released and re-dispatched too, never left failed under the old subject', async () => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    mockIdentifyPlantV2.mockImplementation(async () => { retype(conn, 'Quarterly Pest Control'); throw new Error('vision provider down'); });
+    await expect(triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn })).resolves.toBe('changed');
+    await tick();
+    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('none');
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failure on an unchanged stop settles failed with the plant marker, no re-dispatch', async () => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    mockIdentifyPlantV2.mockResolvedValue({ ok: false, reason: 'blurry' });
+    await expect(triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn })).resolves.toBe('failed');
+    await tick();
+    const row = conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1');
+    expect(row.read_status).toBe('failed');
+    expect(JSON.parse(row.read_result)).toEqual({ engine: 'plant', subject_type: 'lawn' });
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 });

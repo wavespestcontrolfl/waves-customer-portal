@@ -502,7 +502,10 @@ async function createVisitPrepSubmission({
     }
   }
 
-  // PR 5 — automatic pest read (GATE_VISIT_PREP_PEST_READ). This is THE
+  // PR 5 — automatic photo read (GATE_VISIT_PREP_PEST_READ,
+  // GATE_VISIT_PREP_PLANT_READ). ONE dispatch (visit-prep-read-dispatch.js)
+  // picks the single engine for the stop, so the photos are downloaded once
+  // (Codex #5320 r9). This is THE
   // single place a submission is created (both today's public
   // appointment-page POST and the upcoming customer-auth app route call
   // through here), so hooking it here — rather than in either route —
@@ -512,39 +515,22 @@ async function createVisitPrepSubmission({
   // never awaited, so a slow or failing vision call can never add latency
   // to, or fail, the customer's own upload response. Only for a NEW
   // submission (`result.created`) — an all-duplicate resubmit stored
-  // nothing new to read. A lazy require keeps the pest v2 engine (and the
-  // species catalog it loads) out of every caller of this module that
+  // nothing new to read. A lazy require keeps the v2 engines (and the
+  // catalogs they load) out of every caller of this module that
   // never actually creates a submission.
   // Gate first, and the engine module (catalog + validators, built at load)
   // is required only on the next tick, never on this response path
   // (Codex #5305 r3 P2). The upload is already committed: a failure to load
   // or start the read is logged, never a 500 to the customer.
-  if (result.created && require('../config/feature-gates').visitPrepPestReadLive()) {
+  const gatesNow = require('../config/feature-gates');
+  if (result.created && (gatesNow.visitPrepPestReadLive() || gatesNow.visitPrepPlantReadLive())) {
     const readArgs = { submissionId: result.submissionId, svc: result.current, photos: result.photos };
     setImmediate(() => {
       try {
-        require('./visit-prep-pest-read').triggerVisitPrepPestRead(readArgs)
-          .catch((err) => logger.error(`[visit-prep] pest read trigger failed for submission ${readArgs.submissionId}: ${err.message}`));
+        require('./visit-prep-read-dispatch').dispatchVisitPrepRead(readArgs)
+          .catch((err) => logger.error(`[visit-prep] read dispatch failed for submission ${readArgs.submissionId}: ${err.message}`));
       } catch (err) {
-        logger.error(`[visit-prep] pest read could not start for submission ${readArgs.submissionId}: ${err.message}`);
-      }
-    });
-  }
-
-  // Sibling of the pest read above (GATE_VISIT_PREP_PLANT_READ) — the lawn /
-  // tree & shrub counterpart, its own independent fire-and-forget call, so
-  // it never disturbs the pest-read or tech-alert hooks. A stop applicable
-  // to the pest read is never ALSO applicable here (visit-prep-plant-
-  // applicability.js's "pest wins"), so the two triggers never race to
-  // claim the same submission.
-  if (result.created && require('../config/feature-gates').visitPrepPlantReadLive()) {
-    const readArgs = { submissionId: result.submissionId, svc: result.current, photos: result.photos };
-    setImmediate(() => {
-      try {
-        require('./visit-prep-plant-read').triggerVisitPrepPlantRead(readArgs)
-          .catch((err) => logger.error(`[visit-prep] plant read trigger failed for submission ${readArgs.submissionId}: ${err.message}`));
-      } catch (err) {
-        logger.error(`[visit-prep] plant read could not start for submission ${readArgs.submissionId}: ${err.message}`);
+        logger.error(`[visit-prep] read could not start for submission ${readArgs.submissionId}: ${err.message}`);
       }
     });
   }

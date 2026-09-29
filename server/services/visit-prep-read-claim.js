@@ -106,8 +106,10 @@ async function claimReadSlot(conn, submissionId, svc, {
  * subject) while it runs. Under the same stop lock + share locks as the
  * claim, re-proves applicability; a match runs `store(trx)`, anything else
  * releases the claim back to 'none' (its attempt stays counted in
- * read_attempts) and returns 'changed' so the
- * caller re-dispatches for the stop as it is now (Codex #5320 r8 P2).
+ * read_attempts) and returns 'changed' so the caller re-dispatches for the
+ * stop as it is now. A failed engine call settles through here too, so a
+ * miss on a stop that changed is re-read, not left 'failed' under the
+ * obsolete engine (Codex #5320 r8, r9).
  *
  * @param {object} opts
  * @param {(svc: object, trx: object) => Promise<any>} opts.applicable
@@ -142,32 +144,35 @@ async function settleClaimedRead(conn, submissionId, svc, { applicable, matches,
 // load, claim error) lands only while no engine has claimed the row. Each
 // submission runs through every read engine, and one must never overwrite
 // another's pending / done / failed.
-async function markUnclaimed(conn, submissionId, status, logger) {
+// `expectStatus` narrows it further for a caller (the recovery sweep)
+// entitled to only one starting status.
+async function markUnclaimed(conn, submissionId, status, logger, expectStatus = UNCLAIMED_STATUSES) {
   try {
     await conn('visit_prep_submissions')
       .where({ id: submissionId })
-      .whereIn('read_status', UNCLAIMED_STATUSES)
+      .whereIn('read_status', expectStatus)
       .update({ read_status: status });
   } catch (err) {
     logger?.error?.(`[visit-prep-read] failed to write read_status=${status} submission=${submissionId}: ${err.message}`);
   }
 }
 
-const markUnsupported = (conn, submissionId, logger) => markUnclaimed(conn, submissionId, 'unsupported', logger);
+const markUnsupported = (conn, submissionId, logger, expectStatus) => markUnclaimed(conn, submissionId, 'unsupported', logger, expectStatus);
 
-// When an engine's LOCKED applicability check finds the stop no longer suits
-// it (reclassified while photos loaded), the other engine's own pre-check may
-// already have passed on it too; hand the submission over once so the final
-// classification is read (Codex #5320 r7). `handedOff` stops any ping-pong.
-function handOff(toModule, triggerName, args, logger) {
+// Every "this stop isn't what the read was for" outcome (the locked claim
+// found another line, or the stop changed while the engine ran) goes back
+// to the ONE dispatcher (visit-prep-read-dispatch.js), which picks the
+// engine for the stop as it is now and bounds how often that can repeat
+// (Codex #5320 r7–r9). Never engine-to-engine.
+function redispatch(args, logger) {
   setImmediate(() => {
     try {
-      Promise.resolve(require(toModule)[triggerName]({ handedOff: true, ...args }))
-        .catch((err) => logger?.error?.(`[visit-prep-read] hand-off failed submission=${args.submissionId}: ${err.message}`));
+      Promise.resolve(require('./visit-prep-read-dispatch').dispatchVisitPrepRead(args))
+        .catch((err) => logger?.error?.(`[visit-prep-read] re-dispatch failed submission=${args.submissionId}: ${err.message}`));
     } catch (err) {
-      logger?.error?.(`[visit-prep-read] hand-off could not start submission=${args.submissionId}: ${err.message}`);
+      logger?.error?.(`[visit-prep-read] re-dispatch could not start submission=${args.submissionId}: ${err.message}`);
     }
   });
 }
 
-module.exports = { handOff, settleClaimedRead, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };
+module.exports = { redispatch, settleClaimedRead, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };

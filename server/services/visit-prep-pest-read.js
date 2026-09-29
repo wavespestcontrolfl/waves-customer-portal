@@ -16,19 +16,16 @@
  * include a pest-only service (pest-production-calibration.js
  * isPestOnlyServiceType — never a WDO inspection or assessment; members from
  * visit-prep.js techStopMemberIds) is read; anything else is
- * 'unsupported' — no engine call, no cap spent. Lawn and tree & shrub have
- * no engine yet (scope doc §5.3, "being rebuilt").
+ * 'unsupported' — no engine call, no cap spent. Lawn and tree & shrub stops
+ * go to visit-prep-plant-read.js instead.
  *
- * Called from visit-prep.js's createVisitPrepSubmission — the ONE place a
- * submission is created, never from a route — so every entry point (the
- * public appointment-page POST today, the upcoming customer-auth app
- * route) inherits this for free. Always invoked AFTER that submission's
- * own transaction has already committed, fire-and-forget: the caller does
- * `void triggerVisitPrepPestRead(...)` and never awaits it, so a slow or
- * failing vision call can never add latency to, or fail, the customer's
- * upload response. Every error here is caught and logged: an attempt that
- * reached the engine ends 'failed', never stuck on 'pending'; one that never
- * claimed a cap slot ends 'none'.
+ * Dispatched by visit-prep-read-dispatch.js — the ONE place that picks an
+ * engine for a submission. createVisitPrepSubmission calls it
+ * fire-and-forget AFTER the submission's own transaction has committed, so
+ * a slow or failing vision call can never add latency to, or fail, the
+ * customer's upload response. Every error here is caught and logged: an
+ * attempt that reached the engine ends 'done' or 'failed', never stuck on
+ * 'pending'; one that never claimed a cap slot ends 'none'.
  *
  * Own daily cap, `VISIT_PREP_READ_DAILY_CAP` (default 40, env, read fresh
  * per call) — separate from the app Photo ID route's own per-customer/
@@ -45,7 +42,8 @@ const { visitPrepPestReadLive } = require('../config/feature-gates');
 // The daily cap and the locked claim are shared with every visit-prep read
 // engine (visit-prep-read-claim.js).
 const {
-  claimReadSlot: claimSharedReadSlot, handOff, settleClaimedRead, markUnclaimed, markUnsupported, dailyCap, etDayStart,
+  claimReadSlot: claimSharedReadSlot, redispatch, settleClaimedRead, markUnclaimed, markUnsupported, dailyCap, etDayStart,
+  UNCLAIMED_STATUSES,
 } = require('./visit-prep-read-claim');
 const { isPestStop, liveStopServiceTypes } = require('./visit-prep-pest-applicability');
 
@@ -60,11 +58,12 @@ async function resolveApplicability(svc, conn) {
 
 // Returns 'claimed', 'unsupported' (no longer a pest stop) or 'refused'
 // (cap reached, or not a today submission).
-async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
+async function claimReadSlot(conn, submissionId, svc, { now = new Date(), expectStatus } = {}) {
   const out = await claimSharedReadSlot(conn, submissionId, svc, {
     applicable: (stop, trx) => isPestStop(stop, trx),
     pendingPatch: { read_ref: null, read_result: null },
     now,
+    ...(expectStatus ? { expectStatus } : {}),
   });
   return out && out.claimed ? 'claimed' : out;
 }
@@ -111,21 +110,46 @@ async function storeIdentification(conn, { svc, submissionId, result }) {
   return row[0]?.id || row[0];
 }
 
-// The stop changed while the engine ran: read it again as it is now (the
-// pre-check hands it to the plant read if it is a lawn / tree & shrub stop
-// now). Once only — a second change leaves the row at 'none' for the
-// recovery sweep.
-function rereadAfterChange(args) {
-  if (args.rechecked) return;
-  logger.warn(`[visit-prep-pest-read] stop changed during the read — re-reading submission=${args.submissionId}`);
-  handOff('./visit-prep-pest-read', 'triggerVisitPrepPestRead', { ...args, rechecked: true, handedOff: false }, logger);
+// A re-dispatch starts from whatever unclaimed status the row is in now.
+function nextDispatch({ submissionId, svc, photos, conn, dispatches }) {
+  return { submissionId, svc, photos, conn, dispatches };
+}
+
+// Claims the daily slot, or settles every non-claimed outcome and returns
+// its outcome string ('taken', 'unsupported' — back to the dispatcher —
+// 'capped', or 'error'); null when claimed.
+async function claimOrSettle(args) {
+  const { submissionId, svc, conn, expectStatus } = args;
+  let claimed;
+  try {
+    claimed = await claimReadSlot(conn, submissionId, svc, { expectStatus });
+  } catch (err) {
+    logger.error(`[visit-prep-pest-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
+    await markUnclaimed(conn, submissionId, 'none', logger, expectStatus);
+    return 'error';
+  }
+  if (claimed === 'claimed') return null;
+  if (claimed === 'taken') return 'taken'; // another read holds the row
+  if (claimed === 'unsupported') {
+    await markUnsupported(conn, submissionId, logger, expectStatus);
+    redispatch(nextDispatch(args), logger);
+    return 'unsupported';
+  }
+  logger.warn(`[visit-prep-pest-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
+  // 'none', not 'failed': a cap rejection never claimed a slot, so it
+  // must not hold the count up if the cap is raised the same day
+  // (Codex #5305 r1 P2). The tech sees no read line either way.
+  await markUnclaimed(conn, submissionId, 'none', logger, expectStatus);
+  return 'capped';
 }
 
 /**
+ * Called by visit-prep-read-dispatch.js, which already chose this engine
+ * for the stop; the claim re-proves it under the stop lock.
+ *
  * @param {object} opts
  * @param {string} opts.submissionId        the just-committed visit_prep_submissions row id
- * @param {object} opts.svc                 the RECHECKED visit row (createVisitPrepSubmission's
- *                                           own `result.current`) — id, customer_id, service_type,
+ * @param {object} opts.svc                 the visit row — id, customer_id, service_type,
  *                                           visit_id, status
  * @param {Array<{s3Key:string, mimeType:string}>} opts.photos  the NEW photos this submission stored
  * @param {object} [opts.conn]               defaults to the global pool — this ALWAYS runs after
@@ -133,37 +157,18 @@ function rereadAfterChange(args) {
  *                                            must never be handed that transaction (a caller
  *                                            passing one is a bug: it would hold the connection
  *                                            open across a network vision call).
- * @returns {Promise<void>} never throws — every failure is caught, logged, and written as
- *          read_status='failed' so the row never sticks on 'pending'.
+ * @param {string[]} [opts.expectStatus]     statuses the claim may start from
+ * @param {number} [opts.dispatches]         carried back to the dispatcher on a re-dispatch
+ * @returns {Promise<'done'|'failed'|'error'|'capped'|'unsupported'|'taken'|'changed'|'skipped'>}
+ *          never throws — every failure is caught, logged, and settled.
  */
 async function triggerVisitPrepPestRead({
-  submissionId, svc, photos, conn = db, handedOff = false, rechecked = false,
+  submissionId, svc, photos, conn = db, expectStatus = UNCLAIMED_STATUSES, dispatches = 1,
 } = {}) {
-  if (!submissionId || !svc?.id) return;
-  if (!visitPrepPestReadLive()) return; // gate off — leave read_status at its 'none' default
-  if (!Array.isArray(photos) || photos.length === 0) return;
-  // Not this engine's stop: settle 'unsupported' and hand the photos to the
-  // other engine once — a service-line change can make both see "not mine"
-  // (Codex #5320 r7 P2). The target re-checks its own gate and applicability.
-  const settleUnsupported = async () => {
-    await markUnsupported(conn, submissionId, logger);
-    if (!handedOff) handOff('./visit-prep-plant-read', 'triggerVisitPrepPlantRead', { submissionId, svc, photos, conn, rechecked }, logger);
-  };
-
-  let applicability;
-  try {
-    applicability = await resolveApplicability(svc, conn);
-  } catch (err) {
-    logger.error(`[visit-prep-pest-read] applicability check failed submission=${submissionId}: ${err.message}`);
-    // Never reached the engine: 'none', so it never counts against the cap.
-    await markUnclaimed(conn, submissionId, 'none', logger);
-    return;
-  }
-
-  if (applicability === 'unsupported') {
-    await settleUnsupported();
-    return;
-  }
+  if (!submissionId || !svc?.id) return 'skipped';
+  if (!visitPrepPestReadLive()) return 'skipped'; // gate off — leave read_status alone
+  if (!Array.isArray(photos) || photos.length === 0) return 'skipped';
+  const args = { submissionId, svc, photos, conn, expectStatus, dispatches };
 
   // Photos BEFORE the daily-slot claim: a storage failure never reaches the
   // engine and never holds a slot, so it can't make an overlapping
@@ -174,69 +179,54 @@ async function triggerVisitPrepPestRead({
     loaded = await Promise.all(photos.map((p) => PhotoService.getPhotoBase64(p.s3Key)));
   } catch (err) {
     logger.error(`[visit-prep-pest-read] photo load failed for submission=${submissionId}: ${err.message}`);
-    await markUnclaimed(conn, submissionId, 'none', logger);
-    return;
+    await markUnclaimed(conn, submissionId, 'none', logger, expectStatus);
+    return 'error';
   }
 
-  let claimed;
-  try {
-    claimed = await claimReadSlot(conn, submissionId, svc);
-  } catch (err) {
-    logger.error(`[visit-prep-pest-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
-    await markUnclaimed(conn, submissionId, 'none', logger);
-    return;
-  }
-  if (claimed === 'taken') return; // another read holds the row
-  if (claimed === 'unsupported') {
-    await settleUnsupported();
-    return;
-  }
-  if (claimed !== 'claimed') {
-    logger.warn(`[visit-prep-pest-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
-    // 'none', not 'failed': a cap rejection never claimed a slot, so it
-    // must not hold the count up if the cap is raised the same day
-    // (Codex #5305 r1 P2). The tech sees no read line either way.
-    await markUnclaimed(conn, submissionId, 'none', logger);
-    return;
-  }
+  const unclaimed = await claimOrSettle(args);
+  if (unclaimed) return unclaimed;
 
   let result;
   try {
     result = await identifyPestV2(loaded);
   } catch (err) {
     logger.error(`[visit-prep-pest-read] engine threw for submission=${submissionId}: ${err.message}`);
-    await setReadStatus(conn, submissionId, 'failed');
-    return;
+    result = { ok: false };
   }
-
-  if (!result.ok) {
-    logger.warn(`[visit-prep-pest-read] engine miss (${result.reason}) submission=${submissionId}`);
-    await setReadStatus(conn, submissionId, 'failed');
-    return;
-  }
-
-  await storeOrReread({ submissionId, svc, photos, conn, rechecked }, result);
+  if (!result.ok && result.reason) logger.warn(`[visit-prep-pest-read] engine miss (${result.reason}) submission=${submissionId}`);
+  return settle(args, result);
 }
 
-// The identification and the submission's done/read_ref commit together
-// (Codex #5305 r5): never an orphaned paid read with the row left pending.
-// Stored only if the stop is still a pest stop now that the engine is back;
-// otherwise the claim is released and the stop re-read (Codex #5320 r8).
-async function storeOrReread(args, result) {
+// Done or failed, stored only if the stop is still a pest stop now that the
+// engine is back; otherwise the claim is released and the stop goes back to
+// the dispatcher (Codex #5320 r8, r9). A done read's identification and the
+// submission's done/read_ref commit together (Codex #5305 r5): never an
+// orphaned paid read with the row left pending.
+async function settle(args, result) {
   const { submissionId, svc, conn } = args;
   try {
     const settled = await settleClaimedRead(conn, submissionId, svc, {
       applicable: (stop, trx) => isPestStop(stop, trx),
       matches: Boolean,
       store: async (trx) => {
+        if (!result.ok) {
+          await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'failed', read_ref: null });
+          return;
+        }
         const readRef = await storeIdentification(trx, { svc, submissionId, result });
         await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'done', read_ref: readRef });
       },
     });
-    if (settled === 'changed') rereadAfterChange(args);
+    if (settled === 'changed') {
+      logger.warn(`[visit-prep-pest-read] stop changed during the read — re-dispatching submission=${submissionId}`);
+      redispatch(nextDispatch(args), logger);
+      return 'changed';
+    }
+    return result.ok ? 'done' : 'failed';
   } catch (err) {
     logger.error(`[visit-prep-pest-read] storing the read failed submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');
+    return 'failed';
   }
 }
 
