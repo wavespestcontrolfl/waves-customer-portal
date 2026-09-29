@@ -29,6 +29,17 @@ const WINDOW_DAYS = 7;
 // Fixed, short instruction — never the list itself (bell-body length rule).
 const BELL_BODY = 'Ask the bar "show gap reports" for the list. Tell any session "build gap #N" to start a PR.';
 
+// A gap's `source` (agent-gap-reports.js) read as a short label for the
+// email list, so a Monday glance says where it came from. An unrecognized
+// or missing source (should not happen — the column is NOT NULL) falls back
+// to the raw value, or 'bar' if even that is empty.
+const SOURCE_LABELS = {
+  'intelligence-bar': 'bar',
+  'tech-bar': 'tech bar',
+  'texting-ai': 'texting AI',
+  'phone-agent': 'phone agent',
+};
+
 // Gaps the owner already settled (fixed, by_design, dismissed) stay out of
 // the reminder; the recorder reopens a `fixed` gap that happens again, so a
 // regression still shows up. Most-seen this week first.
@@ -40,7 +51,8 @@ async function loadRecentGaps() {
 // and stays in the bar ("show gap reports"), never in the email.
 function gapLine(row) {
   const tool = row.closest_tool ? `, closest tool ${row.closest_tool}` : '';
-  return `gap #${row.id} (${row.status}, ${row.domain || 'other'}${tool}): seen ${row.seen_in_window}x this week, ${row.occurrences}x total`;
+  const source = SOURCE_LABELS[row.source] || row.source || 'bar';
+  return `gap #${row.id} (${row.status}, ${row.domain || 'other'}, ${source}${tool}): seen ${row.seen_in_window}x this week, ${row.occurrences}x total`;
 }
 
 // Pure composition: null = nothing worth an email (the common, quiet case).
@@ -157,5 +169,5 @@ async function runAgentGapDigest(opts = {}) {
 
 module.exports = {
   runAgentGapDigest,
-  _private: { composeAgentGapDigest, dedupeKeyFor, loadRecentGaps, BELL_BODY },
+  _private: { composeAgentGapDigest, dedupeKeyFor, loadRecentGaps, BELL_BODY, gapLine, SOURCE_LABELS },
 };
