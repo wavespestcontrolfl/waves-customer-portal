@@ -4009,7 +4009,7 @@ class AutonomousRunner {
     try {
       const cutoff = new Date(Date.now() - staleMinutes * 60000);
       const REASON = 'named_competitor_publish_interrupted';
-      const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post before requeueing; the publish may have completed externally before the crash`;
+      const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post, close or keep it, then dismiss; the publish may have completed externally before the crash`;
       const stuckOpps = await db('opportunity_queue')
         .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
         .where('claimed_at', '<', cutoff)

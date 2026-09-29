@@ -451,6 +451,25 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
       .rejects.toThrow('reached transaction');
   });
 
+  test('an interrupted approval publish is dismiss-only: the janitor cannot tell whether its PR landed', async () => {
+    const hold = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'named_competitor_publish_interrupted',
+      bucket: 'citability_backfill', action_type: 'refresh_existing_page', signal_metadata: '{}',
+    };
+    expect(reviewActions({ opportunity: hold, run: { action_type: 'refresh_existing_page' } }))
+      .toMatchObject({ can_requeue: false, can_dismiss: true });
+    const chain = {
+      where: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      first: jest.fn().mockResolvedValue(hold),
+    };
+    db.mockImplementation(() => chain);
+    db.transaction = jest.fn().mockRejectedValue(new Error('reached transaction'));
+    await expect(decideReviewItem('opp-1', { decision: 'requeue', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/check GitHub, then dismiss/) });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('a superseded reconciliation hold rejects requeue but lets dismiss through to its locked transaction', async () => {
     const hold = {
       id: 'opp-1',
@@ -467,8 +486,10 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
     db.mockImplementation(() => chain);
     db.transaction = jest.fn().mockRejectedValue(new Error('reached transaction'));
 
+    // An interrupted publish is a may-have-published hold: the dismiss-only
+    // guard answers before the supersession one.
     await expect(decideReviewItem('opp-1', { decision: 'requeue', reviewer: 'owner' }))
-      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/superseded/) });
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/check GitHub, then dismiss/) });
     expect(db.transaction).not.toHaveBeenCalled();
     await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
       .rejects.toThrow('reached transaction');

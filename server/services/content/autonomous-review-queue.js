@@ -473,17 +473,20 @@ function supersededReconciliationHold(opportunity) {
   return pageEditSuperseded(opportunity) && RECONCILIATION_HOLD_REASONS.includes(opportunity?.skip_reason);
 }
 
-// A timed-out GitHub write that could not be reconciled may still appear as a
-// PR. Only Dismiss (terminal, after a person has checked GitHub) is allowed:
-// requeue or approval would retry into a duplicate PR.
+// Holds whose publish may already have reached GitHub: a timed-out refresh
+// write that could not be reconciled, and an approval publish the janitor
+// found interrupted (including one whose unreconciled park itself failed).
+// Only Dismiss (terminal, after a person has checked GitHub) is allowed;
+// requeue or approval could open a duplicate PR (owner ruling 2026-09-28).
+const MAY_HAVE_PUBLISHED_HOLD_REASONS = ['refresh_publish_unreconciled', 'named_competitor_publish_interrupted'];
+
 function unreconciledRefreshHold(opportunity) {
-  const { UNRECONCILED_REFRESH_REASON } = require('./opportunity-queue')._internals;
-  return opportunity?.status === 'pending_review' && opportunity?.skip_reason === UNRECONCILED_REFRESH_REASON;
+  return opportunity?.status === 'pending_review' && MAY_HAVE_PUBLISHED_HOLD_REASONS.includes(opportunity?.skip_reason);
 }
 
 function assertPageEditNotSuperseded(opportunity, decision = null) {
   if (decision && decision !== 'dismiss' && unreconciledRefreshHold(opportunity)) {
-    const err = new Error('This refresh may have opened a PR that could not be confirmed; check GitHub, then dismiss it');
+    const err = new Error('This publish may have opened a PR that could not be confirmed; check GitHub, then dismiss it');
     err.statusCode = 409;
     err.isOperational = true;
     throw err;
