@@ -8,9 +8,13 @@
  */
 
 const mockTrigger = jest.fn(async () => undefined);
-jest.mock('../services/visit-prep-pest-read', () => ({
-  triggerVisitPrepPestRead: (...args) => mockTrigger(...args),
-}));
+jest.mock('../services/visit-prep-pest-read', () => {
+  const { etDateString, parseETDateTime } = jest.requireActual('../utils/datetime-et');
+  return {
+    triggerVisitPrepPestRead: (...args) => mockTrigger(...args),
+    _internal: { etDayStart: (now = new Date()) => parseETDateTime(`${etDateString(now)}T00:00`) },
+  };
+});
 
 const mockIsPestStop = jest.fn(async () => false);
 jest.mock('../services/visit-prep-pest-applicability', () => ({
@@ -238,9 +242,9 @@ describe('base eligibility filters', () => {
     expect(await selectCandidates(conn, NOW)).toHaveLength(0);
   });
 
-  test('a submission older than the 72h window is excluded', async () => {
+  test('a submission from before today\'s ET midnight is excluded (the claim would refuse it)', async () => {
     const conn = fakeConn({
-      submissions: [submission({ read_status: 'none', created_at: new Date(NOW.getTime() - 73 * 3600 * 1000) })],
+      submissions: [submission({ read_status: 'none', created_at: new Date(NOW.getTime() - 26 * 3600 * 1000) })],
       services: [svc({ scheduled_date: TODAY_ET })],
     });
     expect(await selectCandidates(conn, NOW)).toHaveLength(0);

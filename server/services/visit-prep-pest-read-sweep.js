@@ -22,7 +22,7 @@
  * directly. 'failed' rows are NEVER retried — an engine error already cost
  * a paid vision call, and retrying it is how a retry storm starts.
  *
- * Candidates: submissions created in the last CANDIDATE_WINDOW_MS whose
+ * Candidates: submissions created TODAY (America/New_York) whose
  * visit is still upcoming (scheduled_date >= today ET) and not
  * join-ineligible (visit-context/statuses.js JOIN_INELIGIBLE_STATUSES —
  * terminal statuses plus 'rescheduled'). Case (c) additionally requires the
@@ -44,7 +44,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { triggerVisitPrepPestRead } = require('./visit-prep-pest-read');
+const { triggerVisitPrepPestRead, _internal: { etDayStart } } = require('./visit-prep-pest-read');
 const { isPestStop } = require('./visit-prep-pest-applicability');
 const { visitPrepReadSweepLive } = require('../config/feature-gates');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
@@ -54,7 +54,9 @@ const { etDateString } = require('../utils/datetime-et');
 const { effectiveReadStatus } = require('./visit-prep')._internal;
 
 const SWEEP_ACTION = 'visit_prep_read_sweep_attempt';
-const CANDIDATE_WINDOW_MS = 72 * 60 * 60 * 1000;
+// Only today's (ET) submissions: the trigger's claim refuses any submission
+// from an earlier ET day (its cap is counted by submission day), so an older
+// retry could only end 'none' without a read.
 // Same value as visit-prep.js's READ_PENDING_STALE_MS (not exported as a
 // bare constant, so effectiveReadStatus is reused directly for case (a);
 // this is the buffer applied to case (b) 'none' rows so the sweep never
@@ -81,7 +83,7 @@ async function candidateRows(conn, now) {
   return conn('visit_prep_submissions as vps')
     .join('scheduled_services as ss', 'ss.id', 'vps.scheduled_service_id')
     .whereIn('vps.read_status', ['pending', 'none', 'unsupported'])
-    .where('vps.created_at', '>=', new Date(now.getTime() - CANDIDATE_WINDOW_MS))
+    .where('vps.created_at', '>=', etDayStart(now))
     .where('ss.scheduled_date', '>=', etDateString(now))
     .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
     .select(
@@ -198,6 +200,6 @@ module.exports = {
   sweepVisitPrepPestReads,
   SWEEP_BATCH_LIMIT,
   _internal: {
-    SWEEP_ACTION, SWEEP_CASE, selectCandidates, candidateRows, NONE_MIN_AGE_MS, CANDIDATE_WINDOW_MS,
+    SWEEP_ACTION, SWEEP_CASE, selectCandidates, candidateRows, NONE_MIN_AGE_MS,
   },
 };
