@@ -17577,16 +17577,8 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // completion and Charge Now reuse it at the OLD price.
 // It also discovers invoices linked through a service record or a
 // combined-visit packet (Codex r2 P1 on #5253), so money or a live invoice
-// on an indirectly linked invoice blocks too. Two more indirect links
+// on an indirectly linked invoice blocks too. One more indirect link
 // (owner-ordered follow-up to #5253, Codex round 9):
-//   - an annual prepay invoice picked (but not yet paid) from the /secure
-//     card-confirmation page. secure-appointment-plans.js mints the invoice
-//     and stamps it on appointment_card_requests.prepay_invoice_id while the
-//     request itself stays 'pending' and the annual_prepay_terms row is
-//     deliberately left with no source_estimate_id — so neither the visit
-//     stamp this function already reads (annual_prepay_term_id) nor
-//     findEstimateScopedCommitment's estimate-keyed read ever sees it. The
-//     request's own scheduled_service_id is the only durable link.
 //   - a combined first-application invoice for a non-anchor member visit.
 //     estimate-converter.js stamps EVERY covered member (anchor and
 //     siblings alike) with the SAME invoice id on
@@ -17831,42 +17823,6 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
           );
         invoiced.push(...packetLinked);
       }
-      // /secure annual-prepay pick, unpaid (owner-ordered follow-up to
-      // #5253, Codex round 9). The request row stays 'pending' and the term
-      // carries no source_estimate_id (see the comment above this function),
-      // so appointment_card_requests.prepay_invoice_id is the ONLY durable
-      // link from the visit to this invoice. hasColumn-guarded: the column
-      // postdates some schemas.
-      if (await conn.schema.hasTable('appointment_card_requests')
-        && await conn.schema.hasColumn('appointment_card_requests', 'prepay_invoice_id')
-        && await conn.schema.hasTable('annual_prepay_terms')) {
-        // The prepay covers the WHOLE plan (secure-appointment-plans.js
-        // mints visitCount applications), but the request row sits on ONE
-        // visit — so the join matches a request on any visit sharing this
-        // visit's series root, in SQL. Only a term still payment_pending
-        // counts (Codex r1 P1 on #5301): once paid, the term stamps
-        // annual_prepay_term_id on the covered visits and the canonical term
-        // read above owns it — a paid request link would otherwise block the
-        // series forever. Only visits inside the term window count (Codex r3
-        // P2); the sold visit count is not bounded here, so a pending term
-        // can over-block the tail of its own window until staff void it.
-        const prepayLinked = await conn('appointment_card_requests as acr')
-          .join('invoices as inv', 'inv.id', 'acr.prepay_invoice_id')
-          .join('annual_prepay_terms as apt', 'apt.id', 'acr.annual_prepay_term_id')
-          .join('scheduled_services as rs', 'rs.id', 'acr.scheduled_service_id')
-          .joinRaw('JOIN scheduled_services AS tv ON COALESCE(tv.recurring_parent_id, tv.id) = COALESCE(rs.recurring_parent_id, rs.id) AND tv.scheduled_date BETWEEN apt.term_start AND apt.term_end')
-          .whereIn('tv.id', ids)
-          .where('apt.status', 'payment_pending')
-          .whereNotIn('inv.status', [...NO_MONEY_HELD])
-          .select(
-            'tv.id as scheduled_service_id',
-            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
-          );
-        invoiced.push(...prepayLinked.map((row) => ({
-          ...row,
-          _openReason: 'on an annual prepay invoice from the card-confirmation page that is still open at the old price',
-        })));
-      }
       // Combined first-application invoice, non-anchor member (see the
       // comment above this function). scheduled_services.first_application_
       // invoice_id is the only durable link for a member other than the
@@ -17905,8 +17861,8 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
         // Completion and Charge Now reuse any live attached invoice, so it
         // would keep billing the OLD price (Codex r1 P1: a $0 draft too) —
         // the same "any live invoice" rule the sibling propagation already
-        // applies (Codex #3505 r7, owner decision). The prepay and combined
-        // first-application reads above tag their rows with a more specific
+        // applies (Codex #3505 r7, owner decision). The combined
+        // first-application read above tags its rows with a more specific
         // `_openReason` so the refusal names which invoice is still open;
         // every other source falls back to the generic wording.
         mark(inv.scheduled_service_id, inv._openReason || 'attached to an invoice that is still open at the old price');

@@ -287,57 +287,9 @@ describe('liveInvoice reaches direct and indirect invoices alike', () => {
   });
 });
 
-// /secure annual-prepay pick and the combined first-application invoice
-// (owner-ordered follow-up to #5253, Codex round 9): two more indirect
-// links, read only under liveInvoice, same shape as the SR/packet reads.
-describe('liveInvoice reaches the /secure annual-prepay invoice link', () => {
-  const fixture = (rows) => makeConn({
-    hasTables: ALL_TABLES_PRESENT,
-    byTable: {
-      estimate_card_holds: [],
-      appointment_card_requests: [],
-      invoices: [],
-      'invoices as inv': [],
-      'visit_completion_packet_items as p': [],
-      'appointment_card_requests as acr': rows,
-      'scheduled_services as ss': [],
-    },
-  });
-
-  test('an open /secure prepay invoice blocks with the prepay-specific reason', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v1', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
-    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
-    expect(covered.get('v1')).toMatch(/annual prepay invoice from the card-confirmation page/);
-  });
-
-  test('a PAID /secure prepay invoice blocks with the generic "money on it" reason', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v1', status: 'paid', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
-    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
-    expect(covered.get('v1')).toMatch(/money on it/);
-  });
-
-  test('a void /secure prepay invoice does not block (the query itself excludes it)', async () => {
-    const conn = fixture([]);
-    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
-    expect(covered.size).toBe(0);
-  });
-
-  test('without liveInvoice the /secure prepay link is not read', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v1', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
-    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }]);
-    expect(covered.size).toBe(0);
-  });
-
-  // The series match and the payment_pending filter live in SQL (the fake
-  // builder can't evaluate a join), so they're pinned against the source.
-  test('the prepay read matches the whole series in SQL and only a payment_pending term (Codex r1 P1 on #5301)', () => {
-    const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
-    expect(src).toContain("JOIN scheduled_services AS tv ON COALESCE(tv.recurring_parent_id, tv.id) = COALESCE(rs.recurring_parent_id, rs.id) AND tv.scheduled_date BETWEEN apt.term_start AND apt.term_end");
-    expect(src).toMatch(/\.join\('annual_prepay_terms as apt', 'apt\.id', 'acr\.annual_prepay_term_id'\)/);
-    expect(src).toMatch(/\.where\('apt\.status', 'payment_pending'\)/);
-  });
-});
-
+// The combined first-application invoice (owner-ordered follow-up to
+// #5253, Codex round 9): one more indirect link, read only under
+// liveInvoice, same shape as the SR/packet reads.
 describe('liveInvoice reaches the combined first-application invoice link', () => {
   // `anchorInvoices` feeds the plain 'invoices' key, which loadGoverningInvoice
   // reads for a replacement when the stamp is terminal (the direct

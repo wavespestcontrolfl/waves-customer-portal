@@ -93,7 +93,7 @@ class Sentinel extends Error {}
 
 function chain(table) {
   const c = {};
-  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'andWhere', 'orWhere', 'select', 'orderBy', 'limit', 'forUpdate', 'forNoKeyUpdate', 'forShare', 'leftJoin', 'join', 'joinRaw', 'groupBy', 'distinct', 'clone', 'transacting', 'skipLocked']) {
+  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'andWhere', 'orWhere', 'select', 'orderBy', 'limit', 'forUpdate', 'forNoKeyUpdate', 'forShare', 'leftJoin', 'join', 'groupBy', 'distinct', 'clone', 'transacting', 'skipLocked']) {
     c[m] = jest.fn().mockReturnThis();
   }
   c.first = jest.fn(async () => (table === 'scheduled_services' ? { ...STORED } : null));
