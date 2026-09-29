@@ -1060,8 +1060,6 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // only be a concurrent dispatch of the same (promise, ET day) that
     // already pushed.
     let dedupedNoPush = false;
-    // The bell row this event wrote, for the relevance verdict on its push.
-    let bellRow = null;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
     // banners, some are bells"): the bell policy is evaluated ONCE per event,
@@ -1106,7 +1104,6 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           );
           if (created && !created.suppressed) bellWritten = true;
           if (created?.deduped && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
-          bellRow = created;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -1120,16 +1117,6 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (dedupedNoPush) return { ...stats, deduped: true };
-    // Its subject had already moved on (admin-alert-relevance.js): the bell was
-    // written activity-only, or — push-only admins, no bell row — judged
-    // directly. Nothing rang, so no phone buzzes either. Reported as HANDLED
-    // (suppressed, the push skipped), like any deliberate suppression: a
-    // caller's last-resort fallback (the lead form's legacy owner SMS, which
-    // lands as an internal_admin_alert bell) must not re-create the alert.
-    if (await require('./admin-alert-relevance').pushIsMovedOn({ bellRow, bellWritten, pushTo: pushEnabledIds, category: trigger.category,
-      link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload, ...(dedupeKey ? { dedupeKey } : {}) } })) {
-      return { ...stats, quiet: true, suppressed: true, push: { sent: 0, skipped: 'moved_on' } };
-    }
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
     // preference suppression, not a delivery failure — report it so

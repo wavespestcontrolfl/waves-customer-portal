@@ -266,26 +266,19 @@ function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
 // plain create(), unless the caller supplied `ringGate` — see notifyAdmin's
 // own doc comment for the full contract. Pulled out of notifyAdmin to keep
 // its own complexity down; `service` is `this` from the caller.
-// A caller with NO ringGate still gets one when its row is in
-// admin-alert-relevance.js's class table (ADMIN_ALERT_RELEVANCE, default on):
-// a row whose visit, series move or lead has already moved on is written
-// activity-only with metadata.retired, through this same seam.
 function createPlainAdmin(service, { category, title, body, createOpts, ringGate, callerTrx }) {
-  const relevance = typeof ringGate === 'function' ? null
-    : require('./admin-alert-relevance').ringTimeCheck({ category, link: createOpts.link, metadata: createOpts.metadata });
-  if (typeof ringGate !== 'function' && !relevance) {
+  if (typeof ringGate !== 'function') {
     return service.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
   }
-  const gate = relevance ? relevance.gate : ringGate;
   const gated = async (conn) => {
-    const ring = await gate(conn);
+    const ring = await ringGate(conn);
     // A ring stamps its own rungAt (admin-alerts-ring-v2 follow-up):
     // findPriorRungRow's 7-day baseline reads this, not created_at, so a
     // later refresh of a DIFFERENT row can find this one as "the prior
     // ring" for its own window.
     const meta = ring
       ? { ...(createOpts.metadata || {}), rungAt: new Date().toISOString() }
-      : { ...(createOpts.metadata || {}), quiet: true, feed: 'activity', ...(relevance ? relevance.stamp() : {}) };
+      : { ...(createOpts.metadata || {}), quiet: true, feed: 'activity' };
     return service.create({ recipientType: 'admin', category, title, body, ...createOpts, metadata: meta, connection: conn });
   };
   return callerTrx ? gated(callerTrx) : db.transaction(gated);

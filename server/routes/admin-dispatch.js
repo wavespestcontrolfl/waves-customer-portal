@@ -4536,7 +4536,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             : dueConflicts.length ? 'Series move left visits without a time window'
               : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
+          // A card-only pass stores only the conflicts it rings for: the
+          // successor owns the preserved and overlap work (admin-alert-relevance.js
+          // settles the card by the items it names).
+          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts,
+            overlapDates: cardOnly ? [] : overlapDates, preservedOccurrences: cardOnly ? [] : preserved } }
         );
         if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');

@@ -124,9 +124,8 @@ jest.mock('../models/db', () => {
 });
 
 const db = require('../models/db');
-const NotificationService = require('../services/notification-service');
 const {
-  runAdminAlertRelevanceSweep, classify, loadSubjects, subjectFor, refsFromRow, ringTimeCheck,
+  runAdminAlertRelevanceSweep, classify, loadSubjects, subjectFor, refsFromRow,
 } = require('../services/admin-alert-relevance');
 const { adminAlertRelevanceLive } = require('../config/feature-gates');
 
@@ -172,6 +171,9 @@ const leadNote = (extra = {}) => note({
   category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD }, ...extra },
 });
 const lead = (over = {}) => ({ id: LEAD, status: 'new', converted_at: null, deleted_at: null, created_at: new Date('2026-09-27T10:00:00Z'), customer_id: CUST, estimate_id: null, ...over });
+// A note() bell rings at 2026-09-27T12:00Z: evidence either side of it.
+const AFTER_BELL = new Date('2026-09-27T15:00:00Z');
+const BEFORE_BELL = new Date('2026-09-27T11:00:00Z');
 
 describe('kill switch', () => {
   test.each([[undefined, true], ['', true], ['on', true], ['true', true], ['off', false], ['OFF', false], [' False ', false], ['0', false], ['false', false]])(
@@ -264,94 +266,102 @@ describe('class rules', () => {
     metadata: { scheduledServiceId: VISIT, seriesMoveId: 'move-1', conflicts: [], overlapDates: ['2026-10-05'], preservedOccurrences: [], ...metadata },
   });
 
-  test('series move: relevant while any flagged date is today or later', async () => {
+  test('series move: settled item by item — a conflict given a time, closed or gone; a preserved occurrence closed or gone; never the moved visit alone', async () => {
+    const card = move({ overlapDates: [], conflicts: [{ id: PARENT, date: '2026-10-12' }], preservedOccurrences: [{ id: OPEN_VISIT, date: '2026-11-09' }] });
+    const visits = (conflict, preserved, moved = {}) => {
+      mockTables['scheduled_services as ss'] = [visit(moved), visit({ id: PARENT, service_date: '2026-10-12', window_start: null, ...conflict }),
+        visit({ id: OPEN_VISIT, service_date: '2026-11-09', ...preserved })];
+    };
+    visits({ status: 'confirmed' }, { status: 'confirmed' });
+    expect(await reasonFor(card)).toEqual({ cls: 'series_move', reason: null });
+    // The conflict got the time the card asked for; the preserved occurrence still needs its review.
+    visits({ status: 'confirmed', window_start: '09:00' }, { status: 'confirmed' });
+    expect((await reasonFor(card)).reason).toBeNull();
+    visits({ status: 'confirmed', window_start: '09:00' }, { status: 'cancelled' });
+    expect((await reasonFor(card)).reason).toBe('Everything it flagged is settled');
+    // A closed conflict settles too, and so does a visit that is gone.
+    visits({ status: 'cancelled' }, { status: 'completed' });
+    expect((await reasonFor(card)).reason).toBe('Everything it flagged is settled');
     mockTables['scheduled_services as ss'] = [visit()];
-    expect(await reasonFor(move())).toEqual({ cls: 'series_move', reason: null });
-    expect((await reasonFor(move({ overlapDates: ['2026-09-20'], conflicts: [{ id: VISIT, date: '2026-09-28' }] }))).reason).toBeNull();
+    expect((await reasonFor(card)).reason).toBe('Everything it flagged is settled');
+    // The moved visit is the card's subject, not its work: closing only it settles nothing.
+    visits({ status: 'confirmed' }, { status: 'confirmed' }, { status: 'cancelled' });
+    expect((await reasonFor(card)).reason).toBeNull();
   });
 
-  test('series move: every overlap / conflict / preserved date in the past (Eastern), or every visit it named closed — never the customer leaving', async () => {
+  test('series move: an item\'s day passes by the visit\'s current date (Eastern), else the date the card stored; an overlap date only by its day', async () => {
     mockTables['scheduled_services as ss'] = [visit()];
-    expect((await reasonFor(move({ overlapDates: ['2026-09-20', '2026-09-27'], conflicts: [{ id: VISIT, date: '2026-09-01' }], preservedOccurrences: [{ date: '2026-08-01' }] }))).reason)
-      .toEqual(expect.stringContaining('passed'));
-    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' })];
-    expect((await reasonFor(move({ overlapDates: [], conflicts: [{ id: VISIT, date: '2026-10-05' }] }))).reason).toEqual(expect.stringContaining('closed'));
-    // Never on the customer's account: the card is written once per move, and only the visits and dates decide it.
-    mockTables['scheduled_services as ss'] = [visit()];
+    // Every stored day past, nothing loaded for them: settled.
+    expect((await reasonFor(move({ overlapDates: ['2026-09-20', '2026-09-27'], conflicts: [{ id: 'not-a-uuid', date: '2026-09-01' }], preservedOccurrences: [{ date: '2026-08-01' }] }))).reason)
+      .toBe('Everything it flagged is settled');
+    // Today is not past; a future overlap date keeps the card.
+    expect((await reasonFor(move({ overlapDates: [TODAY] }))).reason).toBeNull();
     expect((await reasonFor(move())).reason).toBeNull();
-  });
-
-  test('series move: a card with an overlap date names only the moved visit, not the sibling on that date — closing every visit it names keeps it until the date passes', async () => {
-    const overlapping = move({ overlapDates: ['2026-10-05'], conflicts: [{ id: PARENT, date: '2026-10-12' }] });
-    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'cancelled' })];
-    expect((await reasonFor(overlapping)).reason).toBeNull();
-    expect((await reasonFor(move({ overlapDates: ['2026-09-20'], conflicts: [{ id: PARENT, date: '2026-09-21' }] }))).reason).toEqual(expect.stringContaining('passed'));
-  });
-
-  test('series move: cancelling only the moved visit keeps the alert while a conflict or preserved occurrence it named is still open', async () => {
-    const named = move({ overlapDates: [], conflicts: [{ id: PARENT, date: '2026-10-12' }], preservedOccurrences: [{ id: OPEN_VISIT, date: '2026-11-09' }] });
-    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'pending' }), visit({ id: OPEN_VISIT, status: 'completed' })];
-    expect((await reasonFor(named)).reason).toBeNull();
-    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'cancelled' }), visit({ id: OPEN_VISIT, status: 'completed' })];
-    expect((await reasonFor(named)).reason).toEqual(expect.stringContaining('closed'));
+    // A windowless conflict moved to a later date is judged where it is now, not where the card left it.
+    mockTables['scheduled_services as ss'] = [visit(), visit({ id: PARENT, status: 'confirmed', window_start: null, service_date: '2026-10-20' })];
+    expect((await reasonFor(move({ overlapDates: [], conflicts: [{ id: PARENT, date: '2026-09-21' }] }))).reason).toBeNull();
+    // A card that names no item is never judged — nor ever the customer's account.
+    expect((await reasonFor(move({ overlapDates: [], conflicts: [], preservedOccurrences: [] }))).reason).toBeNull();
   });
 
   test('a schedule_conflict row that is not a series move is not in the table', () => {
     expect(classify(note({ category: 'schedule_conflict', metadata: { scheduledServiceId: VISIT } }))).toBeNull();
   });
 
-  test.each([
-    ['new', false], ['contacted', false], ['open', false], ['qualified', false],
-    ['estimate_sent', true], ['estimate_viewed', true], ['won', true], ['lost', true], ['duplicate', true], ['spam', true], ['unresponsive', true], ['disqualified', true],
-  ])('new lead: status %s -> retired=%s', async (status, retired) => {
-    mockTables.leads = [lead({ status })];
-    expect((await reasonFor(leadNote())).reason !== null).toBe(retired);
-  });
-
-  test('new lead: deleted, converted, estimate sent, or a visit booked after it was created retires it; anything earlier or unknown does not', async () => {
-    mockTables.leads = [lead({ deleted_at: new Date() })];
-    expect((await reasonFor(leadNote())).reason).toEqual(expect.stringContaining('deleted'));
-    mockTables.leads = [lead({ converted_at: new Date() })];
-    expect((await reasonFor(leadNote())).reason).toEqual(expect.stringContaining('converted'));
+  test('new lead: judged only by what happened after the bell — deleted, converted, its estimate sent, or a visit booked', async () => {
+    mockTables.leads = [lead({ deleted_at: AFTER_BELL })];
+    expect((await reasonFor(leadNote())).reason).toBe('Lead was deleted');
+    mockTables.leads = [lead({ converted_at: AFTER_BELL })];
+    expect((await reasonFor(leadNote())).reason).toBe('Lead was converted');
     mockTables.leads = [lead({ estimate_id: EST })];
-    mockTables.estimates = [{ id: EST, status: 'sent', archived_at: null, sent_at: new Date(), customer_id: CUST }];
-    expect((await reasonFor(leadNote())).reason).toEqual(expect.stringContaining('Estimate'));
-    mockTables.estimates = [{ id: EST, status: 'draft', archived_at: null, sent_at: null, customer_id: CUST }];
+    mockTables.estimates = [{ id: EST, sent_at: AFTER_BELL }];
+    expect((await reasonFor(leadNote())).reason).toBe('Estimate was sent');
+    mockTables.estimates = [{ id: EST, sent_at: null }];
     expect((await reasonFor(leadNote())).reason).toBeNull();
     mockTables.leads = [lead()];
-    mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: new Date('2026-09-27T15:00:00Z') }];
-    expect((await reasonFor(leadNote())).reason).toEqual(expect.stringContaining('visit'));
-    mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: new Date('2026-09-20T15:00:00Z') }];
-    expect((await reasonFor(leadNote())).reason).toBeNull();
+    mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: AFTER_BELL }];
+    expect((await reasonFor(leadNote())).reason).toBe('A visit was booked');
     // A child the system generated on its own (series top-up, seeded follow-up)
-    // after the lead is not a booking anyone made for it.
+    // is not a booking anyone made for it.
     mockTables.scheduled_services = [
-      { customer_id: CUST, latest_created_at: new Date('2026-09-27T15:00:00Z'), recurring_parent_id: VISIT },
-      { customer_id: CUST, latest_created_at: new Date('2026-09-27T16:00:00Z'), parent_service_id: VISIT },
+      { customer_id: CUST, latest_created_at: AFTER_BELL, recurring_parent_id: VISIT },
+      { customer_id: CUST, latest_created_at: AFTER_BELL, parent_service_id: VISIT },
     ];
     expect((await reasonFor(leadNote())).reason).toBeNull();
     // Degraded emitter path: leadId is really a customer id, no lead row -> unknown, never "deleted".
     mockTables.leads = [];
     expect((await reasonFor(leadNote())).reason).toBeNull();
     // Lead id from the link alone.
-    mockTables.leads = [lead({ status: 'won' })];
-    expect((await reasonFor(note({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead' } }))).cls).toBe('new_lead');
+    mockTables.leads = [lead({ converted_at: AFTER_BELL })];
+    expect((await reasonFor(note({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead' } }))).reason).toBe('Lead was converted');
     expect(classify(note({ category: 'new_lead', link: '/admin/leads', metadata: { triggerKey: 'new_lead' } }))).toBeNull();
   });
 
+  test('new lead: the lead\'s state from before the bell never counts — a website submission attached to a lead already quoted, worked or booked stays relevant', async () => {
+    // applyLeadAttachUpdate keeps an open lead's status, and the intake trigger rings for the new submission.
+    for (const status of ['estimate_sent', 'estimate_viewed', 'contacted', 'spam', 'cancelled', 'won', 'lost', 'duplicate']) {
+      mockTables.leads = [lead({ status, estimate_id: EST })];
+      mockTables.estimates = [{ id: EST, sent_at: BEFORE_BELL }];
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: BEFORE_BELL }];
+      expect((await reasonFor(leadNote())).reason).toBeNull();
+    }
+    mockTables.leads = [lead({ converted_at: BEFORE_BELL, deleted_at: BEFORE_BELL })];
+    expect((await reasonFor(leadNote())).reason).toBeNull();
+    // A bell with no raise time on record is never judged.
+    mockTables.leads = [lead({ converted_at: AFTER_BELL })];
+    expect((await reasonFor({ ...leadNote(), created_at: null })).reason).toBeNull();
+  });
+
   test('new lead: only the intake bell is judged — a repeat submission filed as a duplicate, or an email follow-up\'s new draft, is fresh work', async () => {
-    mockTables.leads = [lead({ status: 'duplicate' })];
+    mockTables.leads = [lead({ status: 'duplicate', converted_at: AFTER_BELL })];
     const repeat = note({ category: 'new_lead', link: '/admin/leads', metadata: { leadId: LEAD, duplicateOfLeadId: uid(8) } });
     const followUp = note({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { leadId: LEAD, estimateId: EST } });
-    for (const row of [repeat, followUp]) {
-      expect(classify(row)).toBeNull();
-      expect(ringTimeCheck(row)).toBeNull();
-    }
+    for (const row of [repeat, followUp]) expect(classify(row)).toBeNull();
     mockTables.notifications = [repeat, followUp];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 0 });
     expect([repeat.read_at, followUp.read_at]).toEqual([null, null]);
     // The intake bell for the same lead is judged.
-    expect((await reasonFor(leadNote())).reason).toBe('Lead is duplicate');
+    expect((await reasonFor(leadNote())).cls).toBe('new_lead');
   });
 
   test('customer-contact bells and money-owed alerts are never in the table, whatever their metadata says', () => {
@@ -367,49 +377,6 @@ describe('class rules', () => {
   });
 });
 
-describe('pushIsMovedOn (the push verdict for the trigger dispatcher)', () => {
-  const { pushIsMovedOn } = require('../services/admin-alert-relevance');
-  const leadEvent = { category: 'new_lead', link: null, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } } };
-  const leadRow = (over = {}) => ({ id: LEAD, status: 'new', converted_at: null, deleted_at: null, created_at: new Date('2026-09-28T12:00:00Z'), customer_id: CUST, estimate_id: null, ...over });
-
-  const quiet = { metadata: { feed: 'activity', quiet: true, retired: { by: 'alert-relevance', reason: 'x' } } };
-
-  test('a bell written activity-only at ring time is judged again at the push: still moved on stays silent, relevant again pushes', async () => {
-    mockTables.leads = [leadRow({ status: 'won' })];
-    expect(await pushIsMovedOn({ bellRow: quiet, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(true);
-    // The lead came back between the bell write and the push: the push goes out.
-    mockTables.leads = [leadRow()];
-    expect(await pushIsMovedOn({ bellRow: quiet, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
-    // A rung or sweep-retired row pushes without a read.
-    db.mockClear();
-    expect(await pushIsMovedOn({ bellRow: { metadata: { retired: { by: 'alert-relevance' } } }, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
-    expect(await pushIsMovedOn({ bellRow: { metadata: JSON.stringify({ triggerKey: 'new_lead' }) }, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
-    expect(db).not.toHaveBeenCalled();
-  });
-
-  test('push-only (no bell row): judged directly — a worked lead stays silent, a new one pushes, nobody to push or the switch off never reads', async () => {
-    mockTables.leads = [leadRow({ status: 'won' })];
-    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(true);
-    mockTables.leads = [leadRow()];
-    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(false);
-    db.mockClear();
-    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: [], ...leadEvent })).toBe(false);
-    process.env.ADMIN_ALERT_RELEVANCE = 'off';
-    mockTables.leads = [leadRow({ status: 'won' })];
-    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(false);
-    expect(db).not.toHaveBeenCalled();
-  });
-
-  test('a failed read fails open (pushes); an event outside the table is never judged', async () => {
-    mockTables.leads = [leadRow({ status: 'won' })];
-    mockFailTable = 'leads';
-    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(false);
-    expect(await pushIsMovedOn({ bellRow: quiet, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
-    mockFailTable = null;
-    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], category: 'inbound_sms', metadata: { customerId: CUST } })).toBe(false);
-  });
-});
-
 describe('runAdminAlertRelevanceSweep', () => {
   // Reads of the visits table, in order: 1 = the batch, 2 = the fresh read
   // before the write, 3 = the final judgement after it. The hook runs before
@@ -421,7 +388,7 @@ describe('runAdminAlertRelevanceSweep', () => {
 
   test('retires only unread matching rows whose subject moved on; stamps the reason and touches nothing else', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' }), visit({ id: OPEN_VISIT, status: 'on_site' })];
-    mockTables.leads = [lead({ status: 'won' })];
+    mockTables.leads = [lead({ converted_at: AFTER_BELL })];
     const staleMeta = { dedupeKey: `stale-visit:${uid(501)}`, dedupeVersion: 'fp::g2', autoCleared: false, recurrenceGeneration: 2, scheduled_service_id: VISIT, customer_id: CUST };
     const stale = note({ id: uid(501), category: 'alert', metadata: staleMeta });
     const leadRow = { ...leadNote(), id: uid(502) };
@@ -438,7 +405,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     // dedupe key included.
     expect(JSON.parse(stale.metadata)).toEqual({ ...staleMeta, retired: { by: 'alert-relevance', reason: 'Visit is no longer in progress', at: NOW.toISOString() } });
     expect(leadRow.read_at).toBeInstanceOf(Date);
-    expect(JSON.parse(leadRow.metadata)).toEqual({ ...leadBefore, retired: { by: 'alert-relevance', reason: 'Lead is won', at: NOW.toISOString() } });
+    expect(JSON.parse(leadRow.metadata)).toEqual({ ...leadBefore, retired: { by: 'alert-relevance', reason: 'Lead was converted', at: NOW.toISOString() } });
     expect(alreadyRead.read_at).toEqual(new Date('2026-09-27T13:00:00Z'));
     expect(JSON.parse(alreadyRead.metadata).retired).toBeUndefined();
     for (const untouched of [stillOpen, contact]) { expect(untouched.read_at).toBeNull(); expect(JSON.parse(untouched.metadata).retired).toBeUndefined(); }
@@ -452,7 +419,8 @@ describe('runAdminAlertRelevanceSweep', () => {
     const flat = JSON.stringify(q.calls);
     expect(q.calls).toEqual(expect.arrayContaining([['where', { recipient_type: 'admin' }], ['whereNull', 'read_at']]));
     expect(flat).toContain("metadata->>'feed'");
-    expect(flat).not.toContain('created_at');
+    // created_at is read (a new lead is judged by what came after it), never filtered on.
+    expect(JSON.stringify(q.calls.filter(([m]) => m !== 'select'))).not.toContain('created_at');
   });
 
   test('an unread bell first raised months ago (then re-rung by a refresh) is still judged and retired', async () => {
@@ -496,12 +464,13 @@ describe('runAdminAlertRelevanceSweep', () => {
   });
 
   test('the put-back also holds for a lead reopened in that window', async () => {
-    mockTables.leads = [lead({ status: 'won' })];
+    mockTables.leads = [lead({ converted_at: AFTER_BELL })];
     const row = leadNote();
     const before = JSON.parse(row.metadata);
     mockTables.notifications = [row];
     let leadReads = 0;
-    mockHooks.leads = () => { leadReads += 1; if (leadReads === 3) mockTables.leads[0].status = 'contacted'; };
+    // The conversion is undone between the retire write and the final judgement.
+    mockHooks.leads = () => { leadReads += 1; if (leadReads === 3) mockTables.leads[0].converted_at = null; };
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
     expect(JSON.parse(row.metadata)).toEqual(before);
@@ -535,7 +504,7 @@ describe('runAdminAlertRelevanceSweep', () => {
 
   test('no row locks anywhere: the sweep never takes FOR SHARE / FOR UPDATE (invoice settlement takes the visit FOR UPDATE NOWAIT)', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
-    mockTables.leads = [lead({ status: 'won' })];
+    mockTables.leads = [lead({ converted_at: AFTER_BELL })];
     mockTables.notifications = [staleNote(uid(553)), { ...leadNote(), id: uid(554) }];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 2 });
     expect(mockQueries.some((q) => q.calls.some(([m]) => m === 'forShare' || m === 'forUpdate'))).toBe(false);
@@ -656,17 +625,6 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     expect(JSON.parse(stillClosed.metadata).retired).toMatchObject({ by: 'alert-relevance', at: AT });
   });
 
-  test('a row quieted at ring time goes onto the bell when its lead is relevant again — unless someone read it in the Activity feed', async () => {
-    mockTables.leads = [lead({ status: 'new' })];
-    const quieted = leadNote({ quiet: true, feed: 'activity', ...retiredStamp('Lead is duplicate') });
-    const seen = { ...leadNote({ quiet: true, feed: 'activity', ...retiredStamp('Lead is duplicate') }), read_at: new Date('2026-09-27T18:00:00Z') };
-    mockTables.notifications = [quieted, seen];
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
-    expect(quieted.read_at).toBeNull();
-    expect(JSON.parse(quieted.metadata)).toEqual({ triggerKey: 'new_lead', payload: { leadId: LEAD } });
-    expect(JSON.parse(seen.metadata)).toMatchObject({ feed: 'activity', retired: { by: 'alert-relevance' } });
-  });
-
   test('a retirement older than the window is final; a human dismissal or another module\'s stamp is never re-armed', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
     const final = swept(staleNote(uid(710)), 'Visit is no longer in progress', '2026-09-13T15:59:59.000Z');
@@ -718,78 +676,5 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     mockTables['scheduled_services as ss'][0].status = 'on_site';
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
     expect(row.read_at).toBeNull();
-  });
-});
-
-describe('ring time, through the existing ringGate seam', () => {
-  const raise = (opts = {}) => NotificationService.notifyAdmin('new_lead', 'New lead', 'body', {
-    link: `/admin/leads?lead=${LEAD}`, ...opts, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } },
-  });
-  const stored = () => mockTables.notifications.map((r) => JSON.parse(r.metadata));
-
-  test('a fresh row whose lead was already worked lands activity-only with the retired stamp (never skipped, never rung)', async () => {
-    mockTables.leads = [lead({ status: 'won' })];
-    const created = await raise();
-    expect(created.id).toEqual(expect.any(String));
-    expect(stored()).toHaveLength(1);
-    expect(stored()[0]).toMatchObject({ quiet: true, feed: 'activity', retired: { by: 'alert-relevance', reason: expect.stringContaining('won'), at: expect.any(String) } });
-    expect(stored()[0].rungAt).toBeUndefined();
-    expect(mockTables.notifications[0].read_at).toBeUndefined();
-  });
-
-  test('a series-move card whose flagged dates have all passed lands activity-only too', async () => {
-    await NotificationService.notifyAdmin('schedule_conflict', 'Series moved', 'body', {
-      link: '/admin/dispatch?tab=schedule', metadata: { seriesMoveId: 'move-1', overlapDates: ['2020-01-05'], conflicts: [], preservedOccurrences: [] },
-    });
-    expect(stored()[0]).toMatchObject({ quiet: true, feed: 'activity', retired: { by: 'alert-relevance', reason: expect.stringContaining('passed') } });
-  });
-
-  test('a lead still being worked rings as before (rungAt stamped, no quiet)', async () => {
-    mockTables.leads = [lead()];
-    await raise();
-    expect(stored()[0]).toMatchObject({ rungAt: expect.any(String) });
-    expect(stored()[0].quiet).toBeUndefined();
-    expect(stored()[0].retired).toBeUndefined();
-  });
-
-  test('switch off = today\'s behavior: a plain insert, no subject reads, no transaction', async () => {
-    process.env.ADMIN_ALERT_RELEVANCE = 'off';
-    mockTables.leads = [lead({ status: 'won' })];
-    await raise();
-    expect(stored()[0].quiet).toBeUndefined();
-    expect(mockQueries.filter((q) => ['leads', 'scheduled_services as ss', 'estimates'].includes(q.table))).toEqual([]);
-    expect(mockTrxs).toHaveLength(0);
-  });
-
-  test('a caller that passes its own ringGate keeps it — the relevance check never overrides it', async () => {
-    mockTables.leads = [lead({ status: 'won' })];
-    await raise({ ringGate: async () => true });
-    expect(stored()[0]).toMatchObject({ rungAt: expect.any(String) });
-    expect(stored()[0].retired).toBeUndefined();
-  });
-
-  test('a row outside the class table takes the untouched plain path (no subject reads)', async () => {
-    mockTables.leads = [lead({ status: 'won' })];
-    await NotificationService.notifyAdmin('service', 'Something else', 'body', { dedupeKey: 'other:1', metadata: { customerId: CUST, payload: { leadId: LEAD } } });
-    expect(stored()[0]).toEqual({ dedupeKey: 'other:1', customerId: CUST, payload: { leadId: LEAD } });
-    expect(mockQueries.filter((q) => q.table === 'leads')).toEqual([]);
-  });
-
-  test('a failed subject read rings (fail open) on a savepoint, never aborting the caller\'s transaction', async () => {
-    mockFailTable = 'leads';
-    await raise();
-    expect(stored()[0]).toMatchObject({ rungAt: expect.any(String) });
-    expect(stored()[0].quiet).toBeUndefined();
-    // The read ran inside a nested transaction (savepoint) on the insert's own transaction.
-    expect(mockTrxs).toHaveLength(1);
-    expect(mockTrxs[0].transaction).toHaveBeenCalledTimes(1);
-  });
-
-  test('ringTimeCheck is null when the switch is off or the row is not in the table', () => {
-    expect(ringTimeCheck({ category: 'inbound_sms', metadata: {} })).toBeNull();
-    expect(ringTimeCheck({ category: 'billing', metadata: { dedupeKey: 'first_application_sibling_divergence:x' } })).toBeNull();
-    expect(ringTimeCheck({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead' } })).not.toBeNull();
-    process.env.ADMIN_ALERT_RELEVANCE = '0';
-    expect(ringTimeCheck({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } } })).toBeNull();
   });
 });

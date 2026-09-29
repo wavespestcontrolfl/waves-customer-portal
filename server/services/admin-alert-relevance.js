@@ -12,32 +12,37 @@
  * visit closed by a direct database edit, a lead quoted from another surface),
  * and every new alert class would need its own hook. This module judges the
  * LIVE record instead. It does not replace those hooks (their classes are
- * untouched); it only adds the classes below, and the two entry points share
- * ONE rule table:
- *   - runAdminAlertRelevanceSweep: periodic (scheduler.js, every 10 minutes)
- *     retirement of unread rows whose subject has moved on. Unread rows never
+ * untouched); it only adds the classes below, judged by ONE periodic sweep,
+ * runAdminAlertRelevanceSweep (scheduler.js, every 10 minutes):
+ *   - It retires unread rows whose subject has moved on. Unread rows never
  *     age out of it (a refreshed bell keeps its first created_at). Each
  *     retirement is judged on a fresh read right before it is written, lands
  *     only on the version judged, and is judged once more after it; a change
  *     that landed in between, or a check after the write that could not
- *     finish, puts the bell back. A retirement holds only while its rule
- *     does: each run first judges again what this module retired or quieted
- *     in the last REARM_DAYS and puts back any row whose subject is relevant
- *     again (a booking cancelled, a visit reopened), since the emitters in
- *     the table never raise it again. No row locks, ever: this
- *     sweep is advisory and must never block or fail a money path (invoice
- *     settlement takes the visit FOR UPDATE NOWAIT).
- *   - ringTimeCheck: the ringGate notifyAdmin's existing seam already runs
- *     inside the insert's transaction — a fresh row that has ALREADY moved on
- *     is written activity-only instead of ringing (notification-service.js
- *     createPlainAdmin; the dedupe/refresh path is untouched).
+ *     finish, puts the bell back.
+ *   - A retirement holds only while its rule does: each run first judges
+ *     again what it retired in the last REARM_DAYS and puts back any row
+ *     whose subject is relevant again (a booking cancelled, a visit
+ *     reopened), since the emitters in the table never raise it again.
+ *   - No row locks, ever: the sweep is advisory and must never block or fail
+ *     a money path (invoice settlement takes the visit FOR UPDATE NOWAIT).
+ * A bell is always rung as its emitter wrote it; the sweep clears it within
+ * minutes once its subject has moved on.
+ *
+ * "Moved on" is judged from what the bell itself is about, never from the
+ * customer's account: a stale visit by the bell's own predicate, a series-move
+ * card by each item it flagged, and a new lead only by what happened AFTER the
+ * bell was raised — the lead's current state can predate it (a website
+ * submission attached to a lead already quoted or worked), so a status or an
+ * earlier estimate is never read as the new bell handled.
  *
  * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
  * — the row reads exactly like a human dismissal to anything else.
  *
  * The table holds only classes whose emitter never re-raises the same alert
- * on a stable dedupe key: a new lead (one event per lead), a series-move card
- * (written once per move), a stale-visit bell (its emitter is gone). An alert
+ * on a stable dedupe key: a new lead (one intake event per submission), a
+ * series-move card (written once per move), a stale-visit bell (its emitter
+ * is gone). An alert
  * whose emitter re-raises a stable key — the first-application split, the
  * schedule watchdog's price / prepay / plan reviews, the estimate hot view —
  * is its emitter's to clear, with the emitter's own recurrence rules: a
@@ -72,13 +77,6 @@ const CLOSED_VISIT_STATUSES = new Set([...VISIT_NEVER_RAN_STATUSES, 'completed']
 // The statuses the stale in-progress bell was raised for (the removed
 // schedule-integrity-watchdog class's STALE_STATUSES).
 const STALE_IN_PROGRESS_STATUSES = new Set(['on_site', 'en_route']);
-const CANCELLED_VISIT_STATUSES = new Set(['cancelled', 'canceled']);
-// leads.status values that mean staff worked the lead (admin-leads.js
-// LEAD_STATUSES + the non-engaged set in lead-statuses.js). 'new' and
-// 'contacted' are NOT worked — an automatic first reply sets 'contacted'.
-const WORKED_LEAD_STATUSES = new Set([
-  'estimate_sent', 'estimate_viewed', 'won', 'lost', 'unresponsive', 'disqualified', 'duplicate', 'spam', 'cancelled',
-]);
 
 const uuidOrNull = (v) => (typeof v === 'string' && UUID_RE.test(v.trim()) ? v.trim().toLowerCase() : null);
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -122,8 +120,7 @@ function resolveRefs(row, data) {
   const lead = refs.leadId ? data.leads.get(refs.leadId) : undefined;
   const estimateId = refs.estimateId || (lead?.estimate_id ? String(lead.estimate_id) : null);
   const estimate = estimateId ? data.estimates.get(estimateId) : undefined;
-  const affectedVisits = refs.visitIds.map((id) => data.visits.get(id));
-  return { refs, visit, affectedVisits, lead, estimate };
+  return { refs, visit, lead, estimate };
 }
 
 const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map() });
@@ -142,25 +139,26 @@ async function loadSubjects(rows, conn = db) {
     // The service date as text: a DATE parsed to a JS Date lands at the
     // host's midnight, the previous ET day on a UTC host.
     data.visits = byId(await conn('scheduled_services as ss').whereIn('ss.id', visitIds)
-      .select('ss.id', 'ss.customer_id', 'ss.status', conn.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date")));
+      .select('ss.id', 'ss.customer_id', 'ss.status', 'ss.window_start', conn.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date")));
   }
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
-      .select('id', 'status', 'converted_at', 'deleted_at', 'created_at', 'customer_id', 'estimate_id'));
+      .select('id', 'converted_at', 'deleted_at', 'customer_id', 'estimate_id'));
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
   const leadCustomerIds = [...new Set([...data.leads.values()].map((l) => l.customer_id && String(l.customer_id)).filter(Boolean))];
   if (estimateIds.length) {
-    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds)
-      .select('id', 'status', 'archived_at', 'sent_at', 'customer_id'));
+    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).select('id', 'sent_at'));
   }
   if (leadCustomerIds.length) {
-    // A booking someone made: never a child the system generated on its own
-    // (the nightly series top-up, a booking's seeded follow-ups) — those land
-    // on an existing customer's plan whether or not anyone worked the lead.
+    // A booking someone made that is still to run or ran: never a child the
+    // system generated on its own (the nightly series top-up, a booking's
+    // seeded follow-ups — those land on an existing customer's plan whether
+    // or not anyone worked the lead), and never one that did not run
+    // (cancelled, no-show, skipped).
     const booked = await conn('scheduled_services').whereIn('customer_id', leadCustomerIds)
-      .where((q) => q.whereNull('status').orWhereNotIn('status', [...CANCELLED_VISIT_STATUSES]))
+      .where((q) => q.whereNull('status').orWhereNotIn('status', VISIT_NEVER_RAN_STATUSES))
       .whereNull('recurring_parent_id').whereNull('parent_service_id')
       .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
     data.leadVisits = new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
@@ -170,10 +168,15 @@ async function loadSubjects(rows, conn = db) {
 
 function subjectFor(row, data, todayET) {
   const resolved = resolveRefs(row, data);
+  const bellAt = row.created_at ? new Date(row.created_at) : null;
   return {
     ...resolved,
     meta: resolved.refs.meta,
     todayET,
+    // When the bell was raised: a new lead is judged only by what came after.
+    bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null,
+    // A visit the row names, by id; loaded ids only, so a miss is a visit gone.
+    visitOf: (id) => data.visits.get(id),
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
   };
 }
@@ -192,36 +195,48 @@ function staleVisitSettled(s) {
   return DATE_RE.test(day) && day < s.todayET ? null : 'Visit is no longer past its date';
 }
 
+// A series-move card's own work (admin-dispatch.js applySeriesMoveEffects):
+// each windowless conflict needs a time, each preserved occurrence a cadence
+// review, each overlap date a route check. The card is settled once every
+// item is — a conflict given a time, closed or gone; a preserved occurrence
+// closed or gone; any item whose day has passed (the visit's current date
+// when it is loaded, else the date the card stored). A card that names no
+// item is never judged. Not the moved visit itself (the card's subject, not
+// its work), and never the customer's account: the card is written once per
+// move (conflict_card_at).
 function seriesMoveMovedOn(s) {
-  const dates = [...arr(s.meta.overlapDates), ...arr(s.meta.conflicts).map((c) => c?.date),
-    ...arr(s.meta.preservedOccurrences).map((c) => c?.date)]
-    .map((d) => String(d || '').slice(0, 10)).filter((d) => DATE_RE.test(d));
-  if (dates.length && dates.every((d) => d < s.todayET)) return 'Every flagged date has passed';
-  // Every visit the move named — the moved one, its windowless conflicts, its
-  // preserved occurrences — must be settled: cancelling only the moved visit
-  // leaves the others' dispatch work standing. Only a card that names every
-  // visit involved: an overlap date is stored without the sibling that sits
-  // on it, so a card with one waits for its dates instead.
-  if (!arr(s.meta.overlapDates).length && s.affectedVisits.length
-    && s.affectedVisits.every((v) => !v || CLOSED_VISIT_STATUSES.has(String(v.status)))) {
-    return 'Every visit it named is closed';
-  }
-  // Never on the customer's account alone: the card is written once per move
-  // (conflict_card_at), so a customer reactivated with the visits still
-  // standing would keep dispatch work with no card.
-  return null;
+  const past = (day) => DATE_RE.test(day) && day < s.todayET;
+  const visitItem = (item, settled) => {
+    const id = uuidOrNull(item?.id);
+    const visit = id ? s.visitOf(id) : undefined;
+    if (id && !visit) return true;
+    if (visit && settled(visit)) return true;
+    return past(String(visit?.service_date || item?.date || '').slice(0, 10));
+  };
+  const closed = (v) => CLOSED_VISIT_STATUSES.has(String(v.status));
+  const items = [
+    ...arr(s.meta.conflicts).map((c) => visitItem(c, (v) => closed(v) || v.window_start != null)),
+    ...arr(s.meta.preservedOccurrences).map((c) => visitItem(c, closed)),
+    ...arr(s.meta.overlapDates).map((d) => past(String(d || '').slice(0, 10))),
+  ];
+  return items.length && items.every(Boolean) ? 'Everything it flagged is settled' : null;
 }
 
+// A new-lead bell is about the submission that raised it, so only what
+// happened AFTER the bell counts: the lead deleted or converted, its estimate
+// sent, or a live visit booked for its customer. Timestamped facts only — a
+// status carries no time, and the lead's state can predate the bell (a
+// website submission attached to a lead already quoted or worked).
 function newLeadMovedOn(s) {
   const lead = s.lead;
   // A missing lead row is "unknown", never "gone": the emitter falls back to a
   // customer id when lead creation failed.
-  if (!lead) return null;
-  if (lead.deleted_at) return 'Lead was deleted';
-  if (lead.converted_at) return 'Lead was converted';
-  if (WORKED_LEAD_STATUSES.has(String(lead.status))) return `Lead is ${lead.status}`;
-  if (s.estimate?.sent_at) return 'Estimate was sent';
-  if (s.leadBookedAt && lead.created_at && new Date(s.leadBookedAt) > new Date(lead.created_at)) return 'A visit was booked';
+  if (!lead || !s.bellAt) return null;
+  const after = (at) => !!at && new Date(at).getTime() > s.bellAt.getTime();
+  if (after(lead.deleted_at)) return 'Lead was deleted';
+  if (after(lead.converted_at)) return 'Lead was converted';
+  if (after(s.estimate?.sent_at)) return 'Estimate was sent';
+  if (after(s.leadBookedAt)) return 'A visit was booked';
   return null;
 }
 
@@ -234,10 +249,10 @@ const CLASSES = [
   { // admin-dispatch.js applySeriesMoveEffects — one card per move
     key: 'series_move', categories: ['schedule_conflict'], match: (meta) => !!meta.seriesMoveId, rule: seriesMoveMovedOn,
   },
-  { // notification-triggers.js new_lead — the intake bell, one event per lead,
-    // no dedupe key. A direct notifyAdmin('new_lead') (a repeat submission
-    // filed as a duplicate, an email follow-up's new draft) is fresh work
-    // about a lead already on file, never judged.
+  { // notification-triggers.js new_lead — the intake bell, one event per
+    // submission, no dedupe key. A direct notifyAdmin('new_lead') (a repeat
+    // submission filed as a duplicate, an email follow-up's new draft) is
+    // fresh work about a lead already on file, never judged.
     key: 'new_lead', categories: ['new_lead'], match: (meta, row) => meta.triggerKey === 'new_lead' && !!refsFromRow(row).leadId, rule: newLeadMovedOn,
   },
 ];
@@ -271,7 +286,7 @@ function candidateQuery(cursor) {
     .modify((q) => { if (cursor) q.where('id', '>', cursor); })
     .orderBy('id', 'asc')
     .limit(PAGE_SIZE)
-    .select('id', 'category', 'link', 'metadata');
+    .select('id', 'category', 'link', 'metadata', 'created_at');
 }
 
 // The row as the batch read it, still: a refresh that rewrote it since is
@@ -304,7 +319,7 @@ function unretired(metadata) {
 // re-arm pass's.
 async function retireIfStillMovedOn(row, cls, todayET, now) {
   const current = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
-    .first('id', 'category', 'link', 'metadata');
+    .first('id', 'category', 'link', 'metadata', 'created_at');
   if (!current || !sameRow(current, row)) return null;
   const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
   if (!reason) return null;
@@ -319,7 +334,7 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   if (!retired) return null;
   const stillOurs = (q) => q.where({ id: row.id, read_at: readAt }).whereRaw("metadata->'retired'->>'at' = ?", [stamp.at]);
   try {
-    const latest = await stillOurs(db('notifications')).first('id', 'category', 'link', 'metadata');
+    const latest = await stillOurs(db('notifications')).first('id', 'category', 'link', 'metadata', 'created_at');
     if (!latest) return null;
     const judged = { ...latest, metadata: unretired(latest.metadata) };
     if (cls.rule(subjectFor(judged, await loadSubjects([judged]), todayET))) return reason;
@@ -330,8 +345,8 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   return null;
 }
 
-// Rows this module retired (read, stamped) or quieted at ring time
-// (activity-only, stamped) in the last REARM_DAYS, keyset-paged on id.
+// Rows this module retired (read, stamped) in the last REARM_DAYS,
+// keyset-paged on id.
 function retiredQuery(cursor, since) {
   return db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->'retired'->>'by' = ?", [RETIRED_BY])
@@ -339,27 +354,23 @@ function retiredQuery(cursor, since) {
     .modify((q) => { if (cursor) q.where('id', '>', cursor); })
     .orderBy('id', 'asc')
     .limit(PAGE_SIZE)
-    .select('id', 'category', 'link', 'metadata', 'read_at');
+    .select('id', 'category', 'link', 'metadata', 'read_at', 'created_at');
 }
 
-// Puts back one retired row whose subject is relevant again, onto exactly the
-// version read (category, link, metadata, and the read_at this module wrote):
-// a row this sweep retired is unread again; a row quieted at ring time goes
-// onto the bell as it would have rung — unless someone read it in the
-// Activity feed. Nothing is pushed either way.
+// Puts back one retired row whose subject is relevant again, unread, onto
+// exactly the version read: category, link, metadata, and the read_at this
+// module wrote. Nothing is pushed.
 function putBack(row) {
-  const q = sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row);
-  if (quietedAtRingTime(row)) {
-    return q.whereNull('read_at').update({ metadata: db.raw("metadata - 'retired' - 'feed' - 'quiet'") });
-  }
   if (!row.read_at) return 0;
-  return q.where({ read_at: row.read_at }).update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
+  return sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row)
+    .where({ read_at: row.read_at })
+    .update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
 }
 
 // The emitters in the table are one-shot: a booking cancelled or a visit or
 // lead reopened raises nothing. So each run judges again what this module
-// retired or quieted in the last REARM_DAYS, on the bell as it read before
-// the stamp, and puts back any row whose rule no longer holds. Also the
+// retired in the last REARM_DAYS, on the bell as it read before the stamp,
+// and puts back any row whose rule no longer holds. Also the
 // retry for a retire whose put-back failed. A retirement older than that is
 // final: a subject that comes back weeks later is a new event, not this bell.
 // Walked across runs like the retire pass (resumeAfter below): a run that
@@ -434,81 +445,11 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   return { skipped: false, scanned, retired, byClass, rearmed };
 }
 
-// Ring-time seam for notification-service.js createPlainAdmin: null when the
-// row is not in the table (or the switch is off), else the `ringGate` notifyAdmin
-// already runs inside the insert's transaction plus the retired stamp to write
-// when it declines. A failed read rings (fail open) — on a savepoint, so the
-// caller's transaction is never left aborted.
-function ringTimeCheck({ category, link, metadata }) {
-  try {
-    const row = { category, link, metadata };
-    // Classify first: the pure match is cheap and most admin rows are not in the
-    // table, so the switch is only read for rows it could apply to.
-    const cls = classify(row);
-    if (!cls || !adminAlertRelevanceLive()) return null;
-    let retired = null;
-    return {
-      async gate(conn) {
-        try {
-          const run = (c) => loadSubjects([row], c);
-          const data = await (typeof conn.transaction === 'function' ? conn.transaction(run) : run(conn));
-          const reason = cls.rule(subjectFor(row, data, etDateString(new Date())));
-          if (reason) retired = { by: RETIRED_BY, reason, at: new Date().toISOString() };
-          return !reason;
-        } catch (err) {
-          logger.warn(`[alert-relevance] ring-time check failed for ${cls.key}: ${err.message}`);
-          return true;
-        }
-      },
-      stamp: () => (retired ? { retired } : {}),
-    };
-  } catch (err) {
-    // Relevance is advisory: it must never break writing the bell itself.
-    logger.warn(`[alert-relevance] ring-time setup failed: ${err.message}`);
-    return null;
-  }
-}
-
-// A row the ring-time check wrote activity-only (its subject had already
-// moved on): nothing rang. A sweep retirement never sets feed 'activity', and
-// a later ringing refresh replaces the row's feed, so neither reads as
-// quieted here.
-function quietedAtRingTime(row) {
-  const meta = parseMeta(row?.metadata);
-  return meta.feed === 'activity' && meta.retired?.by === RETIRED_BY;
-}
-
-// Whether a trigger's push stays silent because the event's subject has
-// moved on, judged live here: for a bell row written activity-only at ring
-// time (the subject can come back between that write and this push — a
-// booking cancelled — and the event's one push must not rest on the earlier
-// verdict; the re-arm pass then puts that bell back), and when no bell row
-// was written at all (every admin who gets the event has the bell off and
-// push on), so the push-only path is as quiet as the bell would have been.
-// A rung bell pushes. Fails open (pushes).
-async function pushIsMovedOn({ bellRow, bellWritten, pushTo, category, link, metadata }) {
-  const quieted = !!bellRow && quietedAtRingTime(bellRow);
-  if (!quieted && (bellWritten || !pushTo?.length)) return false;
-  try {
-    const row = { category, link, metadata };
-    const cls = classify(row);
-    if (!cls || !adminAlertRelevanceLive()) return false;
-    return !!cls.rule(subjectFor(row, await loadSubjects([row]), etDateString(new Date())));
-  } catch (err) {
-    logger.warn(`[alert-relevance] push-time check failed: ${err.message}`);
-    return false;
-  }
-}
-
 module.exports = {
   runAdminAlertRelevanceSweep,
-  quietedAtRingTime,
-  pushIsMovedOn,
-  ringTimeCheck,
   classify,
   loadSubjects,
   subjectFor,
   refsFromRow,
   CLASSES,
-  WORKED_LEAD_STATUSES,
 };
