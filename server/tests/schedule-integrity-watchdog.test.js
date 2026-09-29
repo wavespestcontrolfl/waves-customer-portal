@@ -786,6 +786,47 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1 });
   });
 
+  test('one alert per series, most urgent fact first: a visit that completed unpriced leads, and the next visit is still named', async () => {
+    const ROOT = '00000011-0000-4000-8000-000000000000';
+    const KEY = `unpriced-series:${ROOT}`;
+    // An upcoming unpriced visit AND a completed one, since the bell first rang.
+    makeDbMock({ coverageRows: [unpricedChild({ recurring_parent_id: ROOT })],
+      completedRows: [unpricedChild({ id: 'ss-done', recurring_parent_id: ROOT, status: 'completed', service_date: '2026-08-03', completed_time: '2026-08-03T15:00:00Z' })],
+      bellRows: [{ dedupe_key: KEY, created_at: '2026-08-01T12:00:00Z' }] });
+    await runInner({ now: NOW });
+    const calls = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.filter(([, , , o]) => o.dedupeKey === KEY);
+    expect(calls).toHaveLength(1);
+    const [, title, body, opts] = calls[0];
+    expect(title).toMatch(/has no price — 2026-08-03 visit completed$/);
+    expect(body).toMatch(/^The 2026-08-03 visit completed without a price; next visit 2026-08-10\. Price the series or bill that visit by hand\.$/);
+    expect(opts.metadata).toMatchObject({ held: 'completed_unpriced', scheduled_service_id: 'ss-done', next_visit_date: '2026-08-10' });
+    // Past due and upcoming: past due leads.
+    episodeHelpers.raiseAdminAlertWithReopen.mockClear();
+    makeDbMock({ coverageRows: [unpricedChild({ recurring_parent_id: ROOT }), unpricedChild({ id: 'ss-late', recurring_parent_id: ROOT, service_date: '2026-07-30' })],
+      bellRows: [{ dedupe_key: KEY, created_at: '2026-07-20T12:00:00Z' }] });
+    await runInner({ now: NOW });
+    const [, lateTitle, lateBody, lateOpts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.find(([, , , o]) => o.dedupeKey === KEY);
+    expect(lateTitle).toMatch(/has no price — 2026-07-30 visit past due$/);
+    expect(lateBody).toBe('The 2026-07-30 visit is past due; next visit 2026-08-10. Price the series before it closes at $0.');
+    expect(lateOpts.metadata).toMatchObject({ held: 'overdue_unpriced', scheduled_service_id: 'ss-late' });
+  });
+
+  test('a child that inherits its parent\'s price honors the parent\'s authoritative $0: no page, no hold', async () => {
+    const ROOT = '00000012-0000-4000-8000-000000000000';
+    const KEY = `unpriced-series:${ROOT}`;
+    const freeParent = { recurring_parent_id: ROOT, parent_estimated_price: 0, parent_primary_line_price: null };
+    makeDbMock({ coverageRows: [unpricedChild(freeParent)] });
+    expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 0 });
+    makeDbMock({ coverageRows: [unpricedChild({ ...freeParent, service_date: '2026-07-30' })],
+      completedRows: [unpricedChild({ ...freeParent, id: 'ss-done', status: 'completed', completed_time: '2026-08-03T15:00:00Z' })],
+      bellRows: [{ dedupe_key: KEY, created_at: '2026-07-20T12:00:00Z' }] });
+    await runInner({ now: NOW });
+    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls.filter(([, , , o]) => o.dedupeKey === KEY)).toHaveLength(0);
+    // A booster child (is_recurring false) bills on its own, so its parent's $0 is not its price.
+    makeDbMock({ coverageRows: [unpricedChild({ ...freeParent, is_recurring: false })] });
+    expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1 });
+  });
+
   test('a held series never starts a bell: an overdue unpriced visit with no bell for its series raises nothing', async () => {
     makeDbMock({ coverageRows: [unpricedChild({ service_date: '2026-07-30', recurring_parent_id: '0000000d-0000-4000-8000-000000000000' })] });
     await runInner({ now: NOW });

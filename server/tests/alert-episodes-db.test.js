@@ -297,7 +297,8 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [s.key])
       .update({ read_at: NOW, metadata: db.raw("metadata || ?::jsonb", [JSON.stringify({ autoCleared: true, autoClearedAt: NOW.toISOString() })]) });
     const since = new Map([...await watchdog._unpricedSeriesBells()].filter(([root]) => root === String(s.root.id)));
-    const [raise] = await watchdog._heldUnpricedAlerts({ unpricedByRoot: new Map(), overdueUnpricedByRoot: new Map(), sinceByRoot: since });
+    const [raise] = watchdog._unpricedSeriesAlerts({ upcomingByRoot: new Map(), overdueByRoot: new Map(),
+      completedByRoot: await watchdog._completedUnpricedSince(since), bellSince: since, episodes: true, now: NOW });
     const [dedupeKey, title, body, metadata] = raise;
     const result = await watchdog._private.raiseAdminAlertWithReopen('alert', title, body, { dedupeKey, bell: true, metadata: { dedupeKey, ...metadata } });
     expect(result.rang).toBe(true);

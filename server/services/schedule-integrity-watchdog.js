@@ -385,58 +385,32 @@ async function runInner({ now = new Date() } = {}) {
     for (const issue of issues) prepayGaps.push({ row, issue });
     if (!isUnpricedSeriesVisit(row)) continue;
     if (annualCovered) continue;
-    // Under episodes an authoritative $0 (billing-lane's
-    // hasAuthoritativeZeroPrice, GATE_STAMPED_ZERO_FREE) is a price here too,
-    // upcoming or overdue: the same rule the completed-visit watch applies.
-    if (episodes && require('./billing-lane').hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) continue;
+    // Under episodes an authoritative $0 is a price here too, upcoming or
+    // overdue: the same rule the completed-visit watch applies.
+    if (episodes && authoritativeZeroPrice(row)) continue;
     // Only under episodes: the suppression is safe because a void of that
     // invoice makes the series live again and it re-rings. Killed = the
     // pre-episode paging, with no coverage lookup at all.
     if (episodes && await coveredByFirstApplicationInvoice(row)) continue;
     const root = seriesRootId(row);
     // An OVERDUE unpriced visit never pages a new bell (the class is
-    // upcoming-only), but it is still an unpriced series: heldUnpricedAlerts
+    // upcoming-only), but it is still an unpriced series: unpricedSeriesAlerts
     // keeps its bell live.
     if (row.service_date < todayET) {
       if (!overdueUnpricedByRoot.has(String(root))) overdueUnpricedByRoot.set(String(root), row);
       continue;
     }
-    if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
+    if (!unpricedByRoot.has(String(root))) unpricedByRoot.set(String(root), row);
   }
 
-  // Every unpriced-series bell's start (episodes only): a raise onto one
-  // writes that start back, never a later time, so the completed-visit watch
-  // never moves forward (a reopen would otherwise drop a visit that completed
-  // between the first scan and the first insert).
+  // Under episodes: every unpriced-series bell (its watch start) and the
+  // series still unpriced by a visit that completed since its bell first rang.
   const bellSince = episodes ? await unpricedSeriesBells() : new Map();
-  const watchSince = (root) => new Date(Math.min(bellSince.get(String(root)) ?? Infinity, now.getTime())).toISOString();
-  // Episodes only: a standing bell's text follows the series (next visit,
-  // past due, completed) through a quiet refresh that never re-rings it, so a
-  // person's read stands; a reopen still rings (raiseAdminAlertWithReopen).
-  const quietRefresh = episodes ? { refreshOnDedupe: true, ringOnRefresh: () => false } : {};
-
+  const completedUnpricedByRoot = episodes ? await completedUnpricedSince(bellSince) : new Map();
   // Unpriced series ring FIRST: they are same-day money loss (a visit can
   // complete and invoice at $0 today).
-  const alerts = Array.from(unpricedByRoot, ([root, v]) => {
-    const d = v.service_date;
-    return [
-      `unpriced-series:${root}`,
-      `Recurring ${v.service_type || 'service'} has no price — next visit ${d}`,
-      `The recurring ${v.service_type || 'service'} series has no price on any row (parent or child). ` +
-      `Its next visit is ${d}; it will complete and invoice at $0 unless the series is priced first.`,
-      { scheduled_service_id: v.id, series_root_id: root, customer_id: v.customer_id || null, next_visit_date: d,
-        // The watch's start, taken BEFORE the scan read: a visit that
-        // completes after the scan but before this bell lands has
-        // completed_at >= this, so the series stays held for it. A new row
-        // writes this run's time; a reopen writes the bell's earliest start
-        // again; a standing row is a silent dedupe. Under episodes only.
-        ...(episodes ? { episode_started_at: watchSince(root) } : {}) },
-      quietRefresh,
-    ];
-  });
-  // Held series (episodes only): live, so the close pass keeps their bell and
-  // a bell auto-cleared meanwhile reopens and rings.
-  if (episodes) alerts.push(...await heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, sinceByRoot: bellSince }));
+  const alerts = unpricedSeriesAlerts({ upcomingByRoot: unpricedByRoot, overdueByRoot: episodes ? overdueUnpricedByRoot : new Map(),
+    completedByRoot: completedUnpricedByRoot, bellSince, episodes, now });
 
   // Class 2 — recurring-lawn customers invisible to the Monday irrigation
   // email (owner directive 2026-08-05: check daily). The email's audience is
@@ -643,7 +617,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
 // of the bell's watch, the earliest of its created_at and its
 // episode_started_at (the pre-scan time of the run that first raised it, so a
 // completion racing the first insert still counts). Every raise onto an
-// existing bell writes this start back (watchSince), so it never moves
+// existing bell writes this start back (unpricedSeriesAlerts), so it never moves
 // forward.
 async function unpricedSeriesBells() {
   const bells = await db('notifications').where({ recipient_type: 'admin' })
@@ -662,8 +636,7 @@ async function unpricedSeriesBells() {
 // Of these series (root -> bell start), the ones with a visit that completed
 // at or after the bell's start while still unpriced by its own row: the scan's
 // own rule (isUnpricedSeriesVisit, annual-prepay coverage validated the same
-// way), with an authoritative $0 (billing-lane's hasAuthoritativeZeroPrice,
-// under GATE_STAMPED_ZERO_FREE) counting as a price. Whether such a visit was
+// way), with an authoritative $0 (authoritativeZeroPrice) counting as a price. Whether such a visit was
 // then billed right (a combined first-visit invoice, an invoice by hand) is a
 // person's call, never this job's. Root -> the latest such visit. Read-only.
 async function completedUnpricedSince(sinceByRoot) {
@@ -676,46 +649,89 @@ async function completedUnpricedSince(sinceByRoot) {
     .whereRaw('COALESCE(ss.completed_at, ss.updated_at) >= ?', [new Date(Math.min(...sinceByRoot.values()))])
     .select(db.raw('COALESCE(ss.completed_at, ss.updated_at) as completed_time'));
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
-  const { hasAuthoritativeZeroPrice } = require('./billing-lane');
   const at = (row) => new Date(row.completed_time).getTime();
   for (const row of completed) {
     const root = String(seriesRootId(row));
     if (!sinceByRoot.has(root) || !(at(row) >= sinceByRoot.get(root))) continue;
     if (found.has(root) && at(found.get(root)) >= at(row)) continue;
-    if (!isUnpricedSeriesVisit(row) || hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) continue;
+    if (!isUnpricedSeriesVisit(row) || authoritativeZeroPrice(row)) continue;
     if (row.prepaid_method === ANNUAL_PREPAY_METHOD && await annualPrepayCoversVisit(row, db)) continue;
     found.set(root, row);
   }
   return found;
 }
 
-// Held series. The class pages upcoming visits only, but a series still
-// unpriced by an overdue visit, or by one that completed unpriced since its
-// bell first rang, is the same unpriced series: its key stays LIVE, so the
-// close pass keeps the bell, and a bell auto-cleared meanwhile (priced, then
-// the price removed) reopens and rings. A held series only keeps or reopens a
-// bell it already has; it never starts one, so nothing new rings on deploy.
-async function heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, sinceByRoot }) {
-  const paged = new Set([...unpricedByRoot.keys()].map(String));
-  const held = new Map();
-  for (const [root, row] of overdueUnpricedByRoot) {
-    if (sinceByRoot.has(root)) held.set(root, { row, completed: false });
+// Under episodes an authoritative $0 is a price: billing-lane's
+// hasAuthoritativeZeroPrice (GATE_STAMPED_ZERO_FREE) on the visit's own stamp,
+// or, for a child that inherits its parent's price (isUnpricedSeriesVisit's
+// own rule), on the parent's.
+function authoritativeZeroPrice(row) {
+  const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+  if (hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) return true;
+  const inheritsFromParent = !!row.recurring_parent_id && row.is_recurring !== false;
+  return inheritsFromParent && hasAuthoritativeZeroPrice(row.parent_estimated_price, row.parent_primary_line_price);
+}
+
+// The one alert for each unpriced series, from everything this run knows
+// about it. A series pages a NEW bell only for an upcoming visit (the class is
+// upcoming-only). Under episodes a held series (a visit past due, or one that
+// completed unpriced since its bell first rang) is live too, so the close pass
+// keeps its bell and a bell auto-cleared meanwhile reopens and rings; it only
+// keeps or reopens a bell it already has, never starts one, so nothing new
+// rings on deploy. The copy leads with the most urgent fact (a visit that
+// completed without a price, then one past due, then the next visit) and names
+// the others, so a quiet refresh never swaps a completed visit's warning for a
+// forward-looking one; an upcoming-only series keeps its original copy.
+// Most urgent first, so the per-run cap spends itself where money is already
+// at stake.
+// A held series' copy and state, most urgent first.
+const HELD_SERIES = {
+  completed: { word: 'completed', state: 'completed_unpriced', action: 'Price the series or bill that visit by hand.' },
+  overdue: { word: 'past due', state: 'overdue_unpriced', action: 'Price the series before it closes at $0.' },
+};
+
+function unpricedSeriesAlerts({ upcomingByRoot, overdueByRoot, completedByRoot, bellSince, episodes, now }) {
+  // Killed, overdue and completed are empty: exactly the pre-episode alerts.
+  const roots = [...upcomingByRoot.keys()];
+  for (const root of [...completedByRoot.keys(), ...overdueByRoot.keys()]) {
+    if (bellSince.has(root) && !roots.includes(root)) roots.push(root);
   }
-  for (const [root, row] of await completedUnpricedSince(sinceByRoot)) {
-    if (!held.has(root)) held.set(root, { row, completed: true });
-  }
-  return [...held].filter(([root]) => !paged.has(root)).map(([root, { row, completed }]) => {
-    const type = row.service_type || 'service';
-    const d = row.service_date;
+  const urgency = (root) => (completedByRoot.has(root) ? 0 : overdueByRoot.has(root) ? 1 : 2);
+  roots.sort((a, b) => urgency(a) - urgency(b));
+  // Under episodes a standing bell's text follows the series through a quiet
+  // refresh that never re-rings it, so a person's read stands; a reopen still
+  // rings (raiseAdminAlertWithReopen).
+  const quiet = episodes ? { refreshOnDedupe: true, ringOnRefresh: () => false } : {};
+  return roots.map((root) => {
+    const up = upcomingByRoot.get(root);
+    const done = completedByRoot.get(root);
+    const late = overdueByRoot.get(root);
+    const held = done ? HELD_SERIES.completed : late ? HELD_SERIES.overdue : null;
+    const lead = done || late || up;
+    const type = lead.service_type || 'service';
+    const facts = [done && `the ${done.service_date} visit completed without a price`,
+      late && `the ${late.service_date} visit is past due`, up && `next visit ${up.service_date}`].filter(Boolean).join('; ');
+    const [title, body] = held
+      ? [`Recurring ${type} has no price — ${lead.service_date} visit ${held.word}`, `${facts[0].toUpperCase()}${facts.slice(1)}. ${held.action}`]
+      : [`Recurring ${type} has no price — next visit ${up.service_date}`,
+        `The recurring ${type} series has no price on any row (parent or child). ` +
+        `Its next visit is ${up.service_date}; it will complete and invoice at $0 unless the series is priced first.`];
     return [
       `${UNPRICED_PREFIX}${root}`,
-      `Recurring ${type} has no price — ${d} visit ${completed ? 'completed' : 'past due'}`,
-      completed ? `The ${d} visit completed with no price on it or its series. Price the series or bill that visit by hand.`
-        : `The ${d} visit is past due with no price on it or its series. Price the series before it closes at $0.`,
-      { scheduled_service_id: row.id, series_root_id: root, customer_id: row.customer_id || null, visit_date: d,
-        held: completed ? 'completed_unpriced' : 'overdue_unpriced', episode_started_at: new Date(sinceByRoot.get(root)).toISOString() },
-      // A bell entering the held state gets the held text quietly.
-      { refreshOnDedupe: true, ringOnRefresh: () => false },
+      title,
+      body,
+      { scheduled_service_id: lead.id, series_root_id: root, customer_id: lead.customer_id || null,
+        ...(up ? { next_visit_date: up.service_date } : {}),
+        // Under episodes only: the watch's start and the held state. The start
+        // is the bell's own when it has one (every raise writes it back, so it
+        // never moves forward: a reopen cannot drop a visit that completed
+        // between the first scan and the first insert), else this run's time,
+        // taken BEFORE the scan read.
+        ...(episodes ? {
+          episode_started_at: new Date(Math.min(bellSince.get(root) ?? Infinity, now.getTime())).toISOString(),
+          ...(held ? { held: held.state, visit_date: lead.service_date } : {}),
+        } : {}) },
+      quiet,
     ];
   });
 }
@@ -811,7 +827,7 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, s
 
   // Priced, done, cancelled, or moved past the look-ahead window: a visit
   // that comes back into the window unpriced re-rings. A series still
-  // unpriced by an overdue or completed visit is live (heldUnpricedAlerts),
+  // unpriced by an overdue or completed visit is live (unpricedSeriesAlerts),
   // so it is never absent here.
   closed += await close(await absentOf(UNPRICED_PREFIX), 'no longer unpriced in the look-ahead window');
   closed += await closeLawnAlerts({ absentOf, close, liveKeys, deliveredKeys });
@@ -931,7 +947,7 @@ module.exports = {
   seriesRootId,
   _unpricedSeriesBells: unpricedSeriesBells,
   _completedUnpricedSince: completedUnpricedSince,
-  _heldUnpricedAlerts: heldUnpricedAlerts,
+  _unpricedSeriesAlerts: unpricedSeriesAlerts,
   _closeResolvedAlerts: closeResolvedAlerts,
   _private: episodeHelpers,
   UPCOMING_WINDOW_DAYS,
