@@ -364,14 +364,19 @@ function phraseOffsetDays(phrase) {
   }
   return null;
 }
-// Every offset form the quote states (one number when they all agree, else
-// null): a second, different form anywhere in the quote is ambiguity.
-function quoteOffsetDays(quote) {
-  const offsets = [];
+// Every offset form the quote states, with the words that stated it.
+function quoteOffsets(quote) {
+  const found = [];
   let text = normalize(quote);
   for (const { src, days } of OFFSET_PATTERNS) {
-    text = text.replace(new RegExp(String.raw`(?<!half )\b${src}\b`, 'g'), (...m) => { offsets.push(days(m)); return ' '; });
+    text = text.replace(new RegExp(String.raw`(?<!half )\b${src}\b`, 'g'), (...m) => { found.push({ days: days(m), text: m[0] }); return ' '; });
   }
+  return found;
+}
+// One number when every form agrees, else null: a second, different form
+// anywhere in the quote is ambiguity.
+function quoteOffsetDays(quote) {
+  const offsets = quoteOffsets(quote).map((o) => o.days);
   return offsets.length && offsets.every((o) => o === offsets[0]) ? offsets[0] : null;
 }
 function namesRelativeDate(words, date, started, relativeQuotes = []) {
@@ -388,7 +393,20 @@ function namesRelativeDate(words, date, started, relativeQuotes = []) {
   }
   if (said.month !== undefined || said.day !== undefined || said.year !== undefined) return false;
   if (new Date(`${date}T12:00:00Z`).getUTCDay() !== said.weekday) return false;
-  return withinHorizon && nearestDate(said, started) !== date;
+  if (!withinHorizon) return false;
+  // A pinned clause whose exact closed-set offset ("Thursday three days from
+  // now") computes to the resolved date is computed, so it may land on the
+  // nearest weekday. Otherwise only a date that is NOT the nearest fits:
+  // "next Thursday", "this Thursday", "the following Thursday" and a weekday
+  // with a looser count ("Thursday two weeks from now") are ambiguous. A
+  // bound modifier on any offset in the clause rejects it either way.
+  return relativeQuotes.some((q) => {
+    const offsets = quoteOffsets(q);
+    if (offsets.some((o) => boundedPhrase(q, o.text))) return false;
+    const days = quoteOffsetDays(q);
+    if (days !== null && etDateString(addETDays(started, days)) === date) return true;
+    return nearestDate(said, started) !== date;
+  });
 }
 
 // Do the recorded slot words state exactly this slot? No day words only
@@ -780,6 +798,9 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (!commitments.length) return fail('agent_commitment_ungrounded');
   if (!grounded('/scheduling/caller_accepted_slot', 'caller').length) return fail('caller_acceptance_ungrounded');
   const movedDate = stringOrNull(scheduling.moved_appointment_date);
+  // A relative moved-appointment flag with no resolved date names a visit
+  // nobody resolved; the planner must not fall back to a lone candidate.
+  if (scheduling.moved_appointment_relative_date_used === true && !movedDate) return fail('moved_relative_without_date');
   if (movedDate && !movedAppointmentGrounded(scheduling, grounded('/scheduling/moved_appointment_date'),
     grounded('/scheduling/moved_appointment_relative_date_used'), started)) {
     return fail('moved_appointment_ungrounded');

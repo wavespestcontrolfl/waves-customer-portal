@@ -128,6 +128,13 @@ const visit = (overrides = {}) => {
 };
 
 describe('planRescheduleFromCall', () => {
+  test('a relative moved-appointment flag with no resolved date never falls back to the lone candidate', () => {
+    const args = { call: call(), customer: customer(), candidates: [visit()], now: NOW };
+    expect(planRescheduleFromCall({ ...args, v2: v2() })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    expect(planRescheduleFromCall({ ...args, v2: v2({ scheduling: { moved_appointment_relative_date_used: true, moved_appointment_date: null } }) }))
+      .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'moved_relative_without_date' });
+  });
+
   test('relative dates resolve against the call\'s start (callStartedAt), not the row\'s created_at', () => {
     // The call began 11:50 PM ET Sep 23; its post-call row was written at
     // 12:10 AM ET Sep 24. "In two days" is Sep 25 from the start date.
