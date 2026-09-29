@@ -209,6 +209,8 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const [outbound] = await db('call_log').insert({
       twilio_call_sid: 'CA' + '8'.repeat(30) + 'd2', direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE,
       status: 'completed', duration_seconds: 45, created_at: new Date(Date.now() - 10 * 60 * 1000),
+      // A staff-bridge call that reached a conversation (the shared personCallBack rule), but abandoned at 45 s.
+      source: 'admin-click', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }),
     }).returning('id');
     cleanup.callIds.push(outbound.id);
     // A FAILED confirmation earlier is no witness; the earliest surviving row is the hint (codex gh-r16 P2).
@@ -271,7 +273,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     cleanup.smsIds.push(auto.id);
     expect(await cc.resolveFulfillment(db, callback, call)).toBeNull();
     const [manual] = await db('sms_log').insert({
-      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, message_type: 'manual', status: 'sent', created_at: new Date(Date.now() - 3 * 60 * 1000),
+      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, message_type: 'manual', status: 'delivered', created_at: new Date(Date.now() - 3 * 60 * 1000),
+      // The composer's stamp: a person wrote it (a bare 'manual' type is reused by automations).
+      metadata: JSON.stringify({ human_authored: true }),
     }).returning('id');
     cleanup.smsIds.push(manual.id);
     expect(await cc.resolveFulfillment(db, callback, call)).toMatchObject({ kind: 'sms_sent', record_id: manual.id, strength: 'direct' });

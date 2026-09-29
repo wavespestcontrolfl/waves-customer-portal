@@ -292,8 +292,8 @@ const ALLOWLIST = [
   },
   {
     file: 'services/call-commitments.js',
-    snippet: 'const row = await conn("sms_log as os")',
-    reason: 'humanTextTo: status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+    snippet: 'const row = await firstContactMatch((cursor, size) => conn("sms_log as os")',
+    reason: 'humanTextTo: status filtered to sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
     file: 'services/call-commitments.js',
