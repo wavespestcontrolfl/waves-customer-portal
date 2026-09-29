@@ -1,6 +1,8 @@
-// search_knowledge_base (tech portal): a product page keeps its label rate
-// exactly as the catalog states it for every other reader, but a tech's
-// search leaves out one in mL (owner ruling: nothing a tech reads is in mL).
+// search_knowledge_base: a product page keeps its label rate exactly as the
+// catalog states it for every other reader (an admin workflow such as Agent
+// Estimate passes an empty context), but a technician's search (a tech
+// context with techId) leaves out one in mL (owner ruling: nothing a tech
+// reads is in mL).
 
 let mockKbRows = [];
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -28,8 +30,10 @@ function productPage(rateLine) {
   ].join('\n');
 }
 
-async function snippets() {
-  const { results } = await executeTechTool('search_knowledge_base', { query: 'kelp' }, {});
+const TECH = { techId: 'tech-1', techName: null };
+
+async function snippets(context = TECH) {
+  const { results } = await executeTechTool('search_knowledge_base', { query: 'kelp' }, context);
   return results.map((r) => r.snippet);
 }
 
@@ -69,5 +73,11 @@ describe('search_knowledge_base leaves an mL label rate out of a tech answer', (
   test('a page with no content has no snippet', async () => {
     mockKbRows = [{ id: 1, title: 'Empty', content: null }];
     expect(await snippets()).toEqual([null]);
+  });
+
+  test('an admin workflow reads the page exactly as stored, mL label rate included', async () => {
+    const content = productPage('Default Rate: 5-10 ml/gal');
+    mockKbRows = [{ id: 1, title: 'Sample Kelp', content }];
+    expect(await snippets({})).toEqual([content]);
   });
 });
