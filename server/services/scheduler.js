@@ -7740,17 +7740,22 @@ function initScheduledJobs() {
         // the very next tick tries again. Inside the late-arrival window
         // the previous month is recomputed regardless of the marker.
         const prevMonthStr = etMonthStart(now, -1);
-        const inLateArrivalWindow = etParts(now).day <= EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY;
+        const day = etParts(now).day;
+        const inLateArrivalWindow = day <= EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY;
         const marker = await db('system_settings').where({ key: EMAIL_AREA_INTEL_PREV_MONTH_KEY }).first('value');
         const markerCurrent = marker?.value === prevMonthStr;
         if (inLateArrivalWindow || !markerCurrent) {
           const prevResult = await computeAreaIntel({ month: new Date(`${prevMonthStr}T12:00:00Z`) });
           logger.info(`[email-area-intel] recomputed ${prevResult.month} (previous month): ${prevResult.citiesProcessed} cities`);
         }
-        if (!markerCurrent) {
+        // The marker means "the FINAL late-arrival recompute succeeded": it is
+        // written only on or after the window's last day, so a recompute that
+        // fails on day 10 is retried on day 11 instead of being taken as
+        // final by an earlier in-window success (codex round 7 P2).
+        if (!markerCurrent && day >= EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY) {
           await db('system_settings').insert({
             key: EMAIL_AREA_INTEL_PREV_MONTH_KEY, value: prevMonthStr, category: 'email_area_intel',
-            description: 'Latest previous-month email_area_intel_monthly recompute that succeeded; the daily tick retries until this matches.',
+            description: 'Previous month whose final (day 10 or later) email_area_intel_monthly recompute succeeded; the daily tick retries until this matches.',
             updated_at: new Date(),
           }).onConflict('key').merge();
         }

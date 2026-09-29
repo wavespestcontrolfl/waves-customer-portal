@@ -100,6 +100,13 @@ const PRIMARY_FAMILY_RANK = ['non_repellent', 'contact_residual', 'igr', 'fungic
 // before chemistry, so a wetting agent whose AI text is a trade chemistry
 // ("Alkoxylated polyols + glucoethers") still stays internal.
 const ADJUVANT_CATEGORY_RE = /adjuvant|surfactant|wetting|spreader|sticker|penetrant|defoam|anti-?foam|drift|marker|dye|colorant|pattern indicator/i;
+// The catalog's nutrition categories decide nutrition the same way (codex
+// round 7 P2): "Fertilizer", "Micronutrient Fertilizer", "Soil Amendment /
+// Biostimulant" — so a fertilizer whose name and analysis miss the nutrition
+// lists ("LESCO 6-0-0 Liquid") never counts its feeding goals ("Nitrogen
+// green-up") as pests treated. A weed-and-feed is catalogued as Herbicide and
+// is not caught here.
+const NUTRITION_CATEGORY_RE = /fertili[sz]er|nutrition|nutrient|biostimulant|soil\s+amendment|amendments?\b/i;
 
 // Nutrients named only when the recorded active ingredient lists them.
 // [nutrient, word (any case), two-letter element symbol (exact case,
@@ -147,6 +154,7 @@ function allCustomerFacingStrings() {
 
 function classifyProduct({ productName, activeIngredient, productCategory, catalogCategory, catalogProductType } = {}) {
   if ([productCategory, catalogCategory, catalogProductType].some((c) => c && ADJUVANT_CATEGORY_RE.test(String(c)))) return 'adjuvant';
+  if ([productCategory, catalogCategory, catalogProductType].some((c) => c && NUTRITION_CATEGORY_RE.test(String(c)))) return 'nutrition';
   const ai = String(activeIngredient || '').toLowerCase();
   const name = String(productName || '').toLowerCase();
   for (const family of FAMILY_ORDER) if (FAMILIES[family].ai.some((s) => ai.includes(s))) return family;

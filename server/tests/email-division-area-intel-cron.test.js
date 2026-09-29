@@ -67,7 +67,7 @@ test('gate on, no prior success marker — recomputes both the current and previ
   expect(computeAreaIntel).toHaveBeenCalledTimes(2);
 });
 
-test('day 5 of the month, no prior success recorded — still recomputes the previous month and persists the marker', async () => {
+test('day 5 of the month, no prior success recorded — recomputes the previous month but does NOT mark it final (only a day-10+ success does; codex round 7 P2)', async () => {
   jest.useFakeTimers().setSystemTime(new Date('2026-10-05T09:10:00Z')); // 5:10 AM ET, Oct 5 — past the old day-3 window
   emailAreaIntelLive.mockReturnValue(true);
   computeAreaIntel.mockResolvedValue({ month: '2026-10-01', citiesProcessed: 0, summary: [] });
@@ -76,8 +76,39 @@ test('day 5 of the month, no prior success recorded — still recomputes the pre
   const months = computeAreaIntel.mock.calls.map(([{ month: m }]) => m);
   expect(months[0].getUTCMonth()).toBe(9); // October — current month
   expect(months[1].getUTCMonth()).toBe(8); // September — previous month, still caught up on day 5
-  expect(db.__inserts).toHaveLength(1);
-  expect(db.__inserts[0]).toMatchObject({ key: 'email_area_intel_previous_month_computed', value: '2026-09-01' });
+  expect(db.__inserts).toHaveLength(0); // an in-window success is not the final recompute
+  jest.useRealTimers();
+});
+
+test('day 10 — the final late-arrival recompute succeeds and is recorded as final', async () => {
+  jest.useFakeTimers().setSystemTime(new Date('2026-10-10T09:10:00Z')); // 5:10 AM ET, Oct 10 — last window day
+  db.__systemSettingsRow = { value: '2026-08-01' };
+  emailAreaIntelLive.mockReturnValue(true);
+  computeAreaIntel.mockResolvedValue({ month: '2026-10-01', citiesProcessed: 0, summary: [] });
+  await registeredTick()();
+  expect(computeAreaIntel).toHaveBeenCalledTimes(2);
+  expect(db.__inserts).toEqual([expect.objectContaining({ key: 'email_area_intel_previous_month_computed', value: '2026-09-01' })]);
+  jest.useRealTimers();
+});
+
+test('a failed day-10 recompute leaves the month unfinalised, so day 11 retries it (codex round 7 P2)', async () => {
+  jest.useFakeTimers().setSystemTime(new Date('2026-10-10T09:10:00Z'));
+  db.__systemSettingsRow = { value: '2026-08-01' }; // earlier in-window successes never finalised September
+  emailAreaIntelLive.mockReturnValue(true);
+  computeAreaIntel
+    .mockResolvedValueOnce({ month: '2026-10-01', citiesProcessed: 0, summary: [] })
+    .mockRejectedValueOnce(new Error('synthetic db failure'));
+  const tick = registeredTick();
+  await tick();
+  expect(db.__inserts).toHaveLength(0);
+
+  jest.setSystemTime(new Date('2026-10-11T09:10:00Z')); // day 11: window closed, marker still not September
+  computeAreaIntel.mockReset();
+  computeAreaIntel.mockResolvedValue({ month: '2026-10-01', citiesProcessed: 0, summary: [] });
+  await tick();
+  expect(computeAreaIntel).toHaveBeenCalledTimes(2);
+  expect(computeAreaIntel.mock.calls[1][0].month.getUTCMonth()).toBe(8);
+  expect(db.__inserts).toEqual([expect.objectContaining({ value: '2026-09-01' })]);
   jest.useRealTimers();
 });
 

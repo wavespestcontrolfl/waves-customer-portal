@@ -132,6 +132,18 @@ describe('classifyProduct', () => {
     expect(classifyProduct({ productName: 'Taurus SC', activeIngredient: 'fipronil', catalogCategory: 'termiticide' })).toBe('non_repellent');
   });
 
+  test('a catalogued nutrition category decides nutrition even when name and analysis miss the lists (codex round 7 P2)', () => {
+    for (const fields of [
+      { catalogCategory: 'Fertilizer' }, { catalogCategory: 'Micronutrient Fertilizer' }, { productCategory: 'Soil Amendment / Biostimulant' },
+    ]) {
+      expect(classifyProduct({ productName: 'LESCO 6-0-0 Liquid', activeIngredient: '6-0-0', ...fields })).toBe('nutrition');
+    }
+    // a weed-and-feed is catalogued as Herbicide and stays a herbicide
+    expect(classifyProduct({ productName: 'Brand Weed & Feed', activeIngredient: 'atrazine', catalogCategory: 'Herbicide' })).not.toBe('nutrition');
+    // and a fertilizer's feeding goals are never counted as pests treated
+    expect(treatmentTargets([{ product_name: 'LESCO 6-0-0 Liquid', active_ingredient: '6-0-0', catalog_category: 'Fertilizer', targets: ['Nitrogen green-up'] }])).toEqual([]);
+  });
+
   test('a catalogued wetting agent is never ranked primary and carries no customer phrase', async () => {
     const { products, primary } = await readVisitProducts('sr-1', { conn: stubConn([
       { product_name: 'Dispatch Sprayable Wetting Agent', active_ingredient: 'Alkoxylated polyols + glucoethers', catalog_category: 'soil_surfactant' },
