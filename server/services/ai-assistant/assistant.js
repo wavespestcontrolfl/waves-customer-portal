@@ -14,6 +14,14 @@ const logger = require('../logger');
 const { TOOLS, executeToolCall } = require('./tools');
 const { recordGap } = require('../agent-gap-reports');
 
+// One texting-AI gap report for an escalation its caller marked as the
+// assistant not knowing how to help. Fire-and-forget; never throws.
+function recordEscalationGap(customerMessage, reason) {
+  const summary = (reason && String(reason).trim()) || customerMessage;
+  const attempted = customerMessage && customerMessage !== reason ? `Customer text: ${customerMessage}` : 'Escalated to staff';
+  recordGap({ source: 'texting-ai', summary, attempted }).catch(() => {});
+}
+
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
@@ -423,11 +431,7 @@ class WavesAssistant {
     // (`gap`), since classifyEscalation's keyword buckets can't tell a
     // missing feature from a staff workflow. Fire-and-forget — a failed write
     // must never affect the escalation reply.
-    if (gap) {
-      const gapSummary = (reason && String(reason).trim()) || customerMessage;
-      const attempted = customerMessage && customerMessage !== reason ? `Customer text: ${customerMessage}` : 'Escalated to staff';
-      recordGap({ source: 'texting-ai', summary: gapSummary, attempted }).catch(() => {});
-    }
+    if (gap) recordEscalationGap(customerMessage, reason);
 
     // The ai_escalations row above is the source of truth. Once it exists,
     // the customer must get the escalation reply — session bookkeeping and
