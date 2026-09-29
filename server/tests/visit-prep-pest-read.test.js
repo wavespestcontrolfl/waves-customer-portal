@@ -235,7 +235,7 @@ describe('trigger rule', () => {
     await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockLockStopForRow).toHaveBeenCalledTimes(3);
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_ref: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
   });
 
   test('the claim share-locks every row of the stop, siblings included', async () => {
@@ -395,7 +395,7 @@ describe('daily cap (VISIT_PREP_READ_DAILY_CAP)', () => {
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     // 'none': a cap rejection never claimed a slot, so it never counts.
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_ref: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
   });
 
   test('under the cap: proceeds', async () => {
@@ -418,7 +418,7 @@ describe('daily cap (VISIT_PREP_READ_DAILY_CAP)', () => {
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     const patch = readStatusWrites(conn, 'sub-1')[0];
-    expect(Object.keys(patch)).toEqual(['read_status', 'read_ref']);
+    expect(Object.keys(patch)).toEqual(['read_status']);
   });
 });
 
@@ -536,6 +536,6 @@ describe('claim day', () => {
     const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000) }] });
     await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_ref: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
   });
 });

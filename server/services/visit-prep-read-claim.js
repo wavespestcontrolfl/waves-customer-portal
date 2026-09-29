@@ -80,18 +80,22 @@ async function claimReadSlot(conn, submissionId, svc, { applicable, pendingPatch
   }
 }
 
-// "This engine doesn't apply" — written only while no engine has claimed
-// the row. Every submission runs through each read engine, and the one that
-// doesn't apply must never overwrite the other's pending / done / failed.
-async function markUnsupported(conn, submissionId, logger) {
+// Every write an engine makes BEFORE holding a claim ('unsupported' = this
+// engine doesn't apply; 'none' = not read: cap refused, photos failed to
+// load, claim error) lands only while no engine has claimed the row. Each
+// submission runs through every read engine, and one must never overwrite
+// another's pending / done / failed.
+async function markUnclaimed(conn, submissionId, status, logger) {
   try {
     await conn('visit_prep_submissions')
       .where({ id: submissionId })
       .whereIn('read_status', ['none', 'unsupported'])
-      .update({ read_status: 'unsupported' });
+      .update({ read_status: status });
   } catch (err) {
-    logger?.error?.(`[visit-prep-read] failed to mark unsupported submission=${submissionId}: ${err.message}`);
+    logger?.error?.(`[visit-prep-read] failed to write read_status=${status} submission=${submissionId}: ${err.message}`);
   }
 }
 
-module.exports = { claimReadSlot, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };
+const markUnsupported = (conn, submissionId, logger) => markUnclaimed(conn, submissionId, 'unsupported', logger);
+
+module.exports = { claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };

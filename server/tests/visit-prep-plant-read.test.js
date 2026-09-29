@@ -260,7 +260,7 @@ describe('trigger rule', () => {
     await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockLockStopForRow).toHaveBeenCalledTimes(3);
     expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_result: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
   });
 });
 
@@ -286,7 +286,7 @@ describe('daily cap (VISIT_PREP_READ_DAILY_CAP) — shared with the pest read', 
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_result: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
   });
 
   test('under the cap: proceeds, using the SAME advisory lock key the pest read uses', async () => {
@@ -369,6 +369,6 @@ describe('claim day', () => {
     const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000) }] });
     await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_result: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
   });
 });

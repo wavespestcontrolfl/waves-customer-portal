@@ -48,7 +48,7 @@ const { plantSubjectForStop } = require('./visit-prep-plant-applicability');
 // The daily cap and the locked claim are the SAME ones the pest read uses
 // (visit-prep-read-claim.js): one cap across both engines.
 const {
-  claimReadSlot: claimSharedReadSlot, markUnsupported, dailyCap, etDayStart,
+  claimReadSlot: claimSharedReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart,
 } = require('./visit-prep-read-claim');
 
 // 'lawn' | 'tree_shrub' | 'unsupported'.
@@ -101,7 +101,7 @@ async function triggerVisitPrepPlantRead({
     applicability = await resolveApplicability(svc, conn);
   } catch (err) {
     logger.error(`[visit-prep-plant-read] applicability check failed submission=${submissionId}: ${err.message}`);
-    await setReadStatus(conn, submissionId, 'none');
+    await markUnclaimed(conn, submissionId, 'none', logger);
     return;
   }
 
@@ -119,7 +119,7 @@ async function triggerVisitPrepPlantRead({
     loaded = await Promise.all(photos.map((p) => PhotoService.getPhotoBase64(p.s3Key)));
   } catch (err) {
     logger.error(`[visit-prep-plant-read] photo load failed for submission=${submissionId}: ${err.message}`);
-    await setReadStatus(conn, submissionId, 'none');
+    await markUnclaimed(conn, submissionId, 'none', logger);
     return;
   }
 
@@ -128,7 +128,7 @@ async function triggerVisitPrepPlantRead({
     claim = await claimReadSlot(conn, submissionId, svc);
   } catch (err) {
     logger.error(`[visit-prep-plant-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
-    await setReadStatus(conn, submissionId, 'none');
+    await markUnclaimed(conn, submissionId, 'none', logger);
     return;
   }
   if (claim === 'unsupported') {
@@ -139,7 +139,7 @@ async function triggerVisitPrepPlantRead({
     logger.warn(`[visit-prep-plant-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
     // 'none', not 'failed': a cap rejection never claimed a slot (see the
     // pest read's own comment on this).
-    await setReadStatus(conn, submissionId, 'none');
+    await markUnclaimed(conn, submissionId, 'none', logger);
     return;
   }
 
