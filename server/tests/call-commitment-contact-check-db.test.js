@@ -436,6 +436,7 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       const words = kind === 'sms' ? (await db('sms_log').where({ id: w.witness }).first('message_body')).message_body
         : (await db('call_log').where({ id: w.witness }).first('transcription')).transcription;
       expect(first.fulfillment.witness_md5).toBe(check.textMd5(words));
+      expect(first.fulfillment.promise_md5).toEqual(expect.stringMatching(/^[0-9a-f]{32}$/));
       for (const value of [undefined, 'off']) {
         if (value) process.env.PROMISE_CONTACT_CHECK = value; else delete process.env.PROMISE_CONTACT_CHECK;
         const result = await cc.refreshFulfillment(db, w.call.id);
@@ -488,6 +489,17 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       const other = await world();
       await change(w, other);
       expect(await lapsed()).toContain(w.call.id);
+      expect((await cc.refreshFulfillment(db, w.call.id)).reopened).toBe(1);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test.each([
+      ['its description', (w) => ({ description: `${w.commitment.description} and the second yard` })],
+      ['its quotes', () => ({ evidence: JSON.stringify([{ quote: 'I will check on the termite bond and let you know', speaker: 'agent' }]) })],
+      ['its due time', () => ({ due_at: new Date(Date.now() + DAY), due_type: 'deadline' })],
+    ])('a reprocess that rewrites what was promised (%s) reopens a model-judged close on the next panel open', async (_name, patch) => {
+      const w = await closedBy('sms');
+      await db('call_commitments').where({ id: w.commitment.id }).update(patch(w));
       expect((await cc.refreshFulfillment(db, w.call.id)).reopened).toBe(1);
       expect((await row(w.commitment.id)).status).toBe('open');
     });

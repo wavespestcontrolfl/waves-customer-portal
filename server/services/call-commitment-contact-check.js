@@ -197,15 +197,25 @@ async function loadContactWitnesses(conn, { callId, customerId, from, until, now
 
 // ── The judgment ────────────────────────────────────────────────────────────
 
-// What the model is told the promise was: Waves' words on the call.
-function obligationOf(commitment, call) {
+// The promise itself, as the model reads it: Waves' words on the call.
+function promiseOf(commitment) {
   const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : [])
     .map((e) => ({ speaker: e?.speaker || null, quote: String(e?.quote || '').slice(0, 600) }))
     .filter((e) => e.quote).slice(0, 3);
   return { party: commitment.party, kind: commitment.kind, description: commitment.description, evidence: quotes,
-    made_on_call_ending_at: (callEndedAt(call) || new Date(call.created_at)).toISOString(),
     due_at: commitment.due_at ? iso(commitment.due_at) : null, due_type: commitment.due_type || null };
 }
+
+// What the model is told: the promise, and when the call it was made on ended.
+function obligationOf(commitment, call) {
+  return { ...promiseOf(commitment), made_on_call_ending_at: (callEndedAt(call) || new Date(call.created_at)).toISOString() };
+}
+
+// A close rests on the promise the model judged: a reprocess that rewrites
+// what was promised (its description, quotes or due time) takes the close
+// away, and the next tick judges the new promise. The call's timing is left
+// out: the evidence floor is checked on its own.
+const promiseMd5 = (commitment) => textMd5(JSON.stringify(promiseOf(commitment)));
 
 function fingerprint(commitment, call, evidence) {
   const obligation = obligationOf(commitment, call);
@@ -293,7 +303,7 @@ async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { n
     if (grounded.verdict !== 'fulfilled') return false;
     const proof = storedProof({ strength: 'association', kind: PERSON_CONTACT_KIND, basis: PERSON_CONTACT_BASIS,
       record_type: grounded.record_type, record_id: grounded.record_id, matched_at: grounded.matched_at, quote: grounded.quote,
-      witness_md5: grounded.witness_md5, extractor_version: VERSION }, call.customer_id);
+      witness_md5: grounded.witness_md5, promise_md5: promiseMd5(commitment), extractor_version: VERSION }, call.customer_id);
     const written = await trx('call_commitments')
       .where({ id: commitment.id, status: 'open' })
       .whereRaw(...refreshableVerdictSql())
@@ -309,16 +319,17 @@ async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { n
 // ── Keeping a close (called by refreshFulfillment's re-judge) ───────────────
 
 // Whether a model-judged close still stands, with no model call: the promise
-// is still an untouched Waves "other" promise, the call still has the customer
-// the close was judged for, and the one record it rests on still exists for
-// that customer, still counts as a person's delivered text or call back, is
-// still after the evidence floor and inside the window, and still says exactly
-// what the model read (its raw text's md5). Anything else and the caller
-// reopens it like any close the facts no longer support; the next tick judges
-// the new words.
+// is still the untouched Waves "other" promise the model judged (its md5), the
+// call still has the customer the close was judged for, and the one record it
+// rests on still exists for that customer, still counts as a person's
+// delivered text or call back, is still after the evidence floor and inside the
+// window, and still says exactly what the model read (its raw text's md5).
+// Anything else and the caller reopens it like any close the facts no longer
+// support; the next tick judges the promise and the words as they are now.
 async function contactCloseStands(conn, commitment, call, prior) {
   if (prior?.basis !== PERSON_CONTACT_BASIS || prior.kind !== PERSON_CONTACT_KIND) return false;
   if (commitment.party !== 'waves' || commitment.kind !== 'other' || commitment.human_state) return false;
+  if (typeof prior.promise_md5 !== 'string' || prior.promise_md5 !== promiseMd5(commitment)) return false;
   const customerId = call?.customer_id;
   if (!customerId || prior.judged_customer_id !== customerId || !UUID_RE.test(String(prior.record_id))) return false;
   const after = await evidenceBoundary(conn, commitment, call);
