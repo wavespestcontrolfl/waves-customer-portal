@@ -199,6 +199,28 @@ describe('PublicBookingPage offer identity', () => {
   });
 });
 
+describe('PublicBookingPage arrival-window copy (A10, owner ruling 2026-09-28)', () => {
+  it('quotes an arrival window, never a fixed "1-hour window", and shows the full range once a time is picked', async () => {
+    stubFetch();
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+
+    // Step 2 copy: arrival language, no fixed job-length window claim.
+    expect(screen.getAllByText(/your technician arrives within 2 hours of it/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/1-hour window/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/each is a .* window/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
+
+    // Step 3's "Your selected time" card shows the FULL 2-hour arrival
+    // range, not just the bare start.
+    expect(await screen.findByText(/9:00 AM\s*–\s*11:00 AM/)).toBeInTheDocument();
+  });
+});
+
 describe('PublicBookingPage custom-date failures', () => {
   it('shows a retryable outage instead of claiming the selected date has no openings', async () => {
     const fetchMock = stubFetch();

@@ -878,8 +878,6 @@ export default function PublicBookingPage() {
     || (browseDays || []).find((d) => d.date === selectedDate)
     || (searchResult?.days || []).find((d) => d.date === selectedDate)
   )?.fullDate;
-  // Slot length follows the service (60 → "1-hour", else "<n>-minute").
-  const slotLenLabel = service.duration === 60 ? '1-hour' : `${service.duration}-minute`;
   // A pending custom-date lookup will replace the picker (and clear the
   // selection) when it lands — Continue waits for it.
   const continueDisabled = !selectedSlot || browseLoading || aiSearching;
@@ -1163,7 +1161,10 @@ export default function PublicBookingPage() {
               Find a time
             </h1>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
-              Pick a day and we'll show the open {slotLenLabel} windows. Days where a tech is already working nearby are marked.
+              {/* Arrival language (A10, owner ruling 2026-09-28) — a start
+                  time, not a fixed job-length window; the technician
+                  arrives within the promised 2-hour window of it. */}
+              Pick a day and we'll show open start times — your technician arrives within 2 hours of it. Days where a tech is already working nearby are marked.
             </p>
 
             {loading && (
@@ -1194,7 +1195,9 @@ export default function PublicBookingPage() {
                   onSelectSlot={(slot) => (slot ? selectSlot(slot.date, slot) : setSelectedSlot(null))}
                   intro={pickedDayObj && !pickedDayObj.nearby
                     ? "No route near you that day yet — here's what's close."
-                    : `Tap a time — each is a ${slotLenLabel} window.`}
+                    // Arrival language (A10) — matches SchedulePicker's own
+                    // default intro copy.
+                    : 'Tap a start time — your technician arrives within 2 hours of it.'}
                   slotDetail={(slot) => slot.reason || null}
                   empty={searchResult ? (
                     <div style={{ marginBottom: 16, fontSize: 14, color: COLORS.slate600 }}>
@@ -1315,7 +1318,15 @@ export default function PublicBookingPage() {
                 Your selected time
               </div>
               <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.glassNavy }}>
-                {selectedSlot?.fullDate || selectedDayLabel} · {selectedSlot?.start_label}
+                {selectedSlot?.fullDate || selectedDayLabel} ·{' '}
+                {/* Full arrival window (A10, owner ruling 2026-09-28) —
+                    never just the bare start; the 2-hour window is the
+                    promise (same rule as the confirmation card below). */}
+                {selectedSlot?.start_label}
+                {(() => {
+                  const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
+                  return end ? ` – ${end}` : '';
+                })()}
               </div>
               <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 2 }}>
                 {service?.label}
