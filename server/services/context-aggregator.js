@@ -636,6 +636,20 @@ function liveEtaDedupeKey(row, customer) {
 // poll still gets a fresh number. Bounded (LIVE_ETA_MEMO_MAX_ENTRIES) so many
 // concurrent customers/technicians can never grow this without limit; the
 // oldest entries are evicted first.
+//
+// Codex round-5 P1, PR #5334 — memoize ONLY the tech-position/route-minutes
+// lookup, never the per-visit result: the key is technician+destination
+// ONLY, with no customer or visit in it, so TWO DIFFERENT customers at the
+// same coordinates (e.g. two units of one property) with the same tech
+// inside the 60s TTL must never be handed the same cached trackUrl — that
+// would leak one customer's /track/:token link (and thus their live map) to
+// the other. resolveLiveEtaMinutesUncached below returns ONLY
+// { minutes, asOf } and is what the memo stores/shares; resolveLiveEtaFact
+// always builds the { minutes, asOf, trackUrl } result the caller sees from
+// THAT caller's own row, after awaiting the (possibly shared) minutes
+// lookup — so the expensive GPS + Distance Matrix call is still shared
+// across concurrent callers for the same stop, but no customer- or
+// visit-specific data (the tracking token) ever lives in the shared cache.
 const LIVE_ETA_MEMO_TTL_MS = 60 * 1000;
 const LIVE_ETA_MEMO_MAX_ENTRIES = 200;
 const liveEtaMemo = new Map(); // key -> { expiresAt, promise }
@@ -650,7 +664,7 @@ function pruneLiveEtaMemo(now) {
   }
 }
 
-async function resolveLiveEtaFactUncached(row, dest) {
+async function resolveLiveEtaMinutesUncached(row, dest) {
   try {
     const { lat: destLat, lng: destLng } = dest;
 
@@ -687,7 +701,6 @@ async function resolveLiveEtaFactUncached(row, dest) {
     return {
       minutes: eta.minutes,
       asOf: `${formatETTime(new Date(position.lastReportedAt))} ET`,
-      trackUrl: `${publicPortalUrl()}/track/${row.track_view_token}`,
     };
   } catch (err) {
     logger.warn(`[context] live ETA lookup failed for scheduled_service ${row?.id}: ${err.message}`);
@@ -704,15 +717,29 @@ async function resolveLiveEtaFact(row, customer) {
   const memoKey = `${row.technician_id}:${dest.lat}:${dest.lng}`;
   const now = Date.now();
   const cached = liveEtaMemo.get(memoKey);
-  if (cached && cached.expiresAt > now) return cached.promise;
+  let minutesPromise;
+  if (cached && cached.expiresAt > now) {
+    minutesPromise = cached.promise;
+  } else {
+    minutesPromise = resolveLiveEtaMinutesUncached(row, dest);
+    liveEtaMemo.set(memoKey, { expiresAt: now + LIVE_ETA_MEMO_TTL_MS, promise: minutesPromise });
+    // Pruned AFTER inserting (never before): an eviction pass that ran first
+    // would trim to the cap and then this insert would push it one back
+    // over — pruning last is what actually keeps the map at or under the
+    // cap.
+    pruneLiveEtaMemo(now);
+  }
 
-  const promise = resolveLiveEtaFactUncached(row, dest);
-  liveEtaMemo.set(memoKey, { expiresAt: now + LIVE_ETA_MEMO_TTL_MS, promise });
-  // Pruned AFTER inserting (never before): an eviction pass that ran first
-  // would trim to the cap and then this insert would push it one back over —
-  // pruning last is what actually keeps the map at or under the cap.
-  pruneLiveEtaMemo(now);
-  return promise;
+  const minutesFact = await minutesPromise;
+  if (!minutesFact) return null;
+  // Built OUTSIDE the shared memo, from THIS caller's own row — never the
+  // representative/first row that happened to populate the memo entry — so
+  // each visit/customer always gets its own tracking link (Codex round-5 P1).
+  return {
+    minutes: minutesFact.minutes,
+    asOf: minutesFact.asOf,
+    trackUrl: `${publicPortalUrl()}/track/${row.track_view_token}`,
+  };
 }
 
 // Test-only: clears the cross-request memo so unrelated test cases sharing a

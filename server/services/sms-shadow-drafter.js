@@ -529,6 +529,43 @@ function normalizeNumberWords(text) {
 function bodyMentionsArrival(text) {
   return STRONG_ARRIVAL_TRIGGER_RE.test(String(text || ''));
 }
+// Vague/approximate duration wording (Codex round-5 P2, PR #5334): a
+// reviewer or the model rewriting an exact "20 minutes away" claim as "half
+// an hour away" / "an hour out" / "a few minutes away" / "a couple minutes"
+// / "quarter hour" states a TIMED claim exactly like a parsed number does —
+// it says WHEN the tech arrives, not just THAT they're coming — even though
+// findEtaMinutesClaims can never parse an exact figure out of it. "soon" and
+// "shortly" / "any minute now" lean TIMED on purpose (owner-facing default:
+// fail closed): a customer reads any of them as a time-bounded promise, not
+// a pure status statement like "on the way"/"en route", which claims no
+// timeframe at all and is left alone. Scoped to a sentence that also carries
+// an arrival trigger (ARRIVAL_TRIGGER_RE), with the SAME duration-exclusion
+// window a numeric claim gets for a WEAK trigger only ("out") — a strong
+// arrival word in the sentence wins over the exclusion, same as round 3 —
+// so "the treatment needs about half an hour to dry" (no arrival word at
+// all besides "out" from an unrelated "letting pets out") never
+// false-positives.
+const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of\s+an?\s+)?hour|an?\s+hour\b|a\s+(?:few|couple)\s+(?:of\s+)?min(?:ute)?s?|any\s+minute\s+now|shortly|soon)\b/i;
+function bodyHasTimedArrivalPhrase(text) {
+  const str = normalizeNumberWords(text);
+  const spans = sentenceSpans(str);
+  const sentenceFor = (index) => {
+    const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+    return str.slice(span[0], span[1]);
+  };
+  const re = new RegExp(TIMED_ARRIVAL_PHRASE_RE.source, 'gi');
+  let m;
+  while ((m = re.exec(str))) {
+    const sentence = sentenceFor(m.index);
+    if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return true;
+    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
+    const before = str.slice(Math.max(0, m.index - 30), m.index);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) continue;
+    return true;
+  }
+  return false;
+}
 // Range claims ("10–12 minutes away", "ten to twelve minutes away", "10 or
 // 12 minutes", "between 10 and 12 minutes") — Codex round-2 P2: the old
 // single-number pass matched only the bound sitting right next to
@@ -651,7 +688,18 @@ function buildLiveEtaSnapshot(context) {
 function validateLiveEtaMinutes({ reply, factsBlock }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const claims = findEtaMinutesClaims(reply);
-  if (!claims.length) return { ok: true, violations: [] };
+  if (!claims.length) {
+    // Codex round-5 P2: a vague/approximate duration ("half an hour away",
+    // "an hour out", "a few minutes", "a couple minutes", "quarter hour",
+    // "shortly", "any minute now", "soon") is a TIMED claim exactly like a
+    // parsed number, but there is no number here to check against the LIVE
+    // ETA fact — it is rejected outright, the same direction as a claim that
+    // doesn't match, rather than waved through as pure status copy.
+    if (bodyHasTimedArrivalPhrase(reply)) {
+      return { ok: false, violations: ['the reply gives an approximate/vague arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number, or drop the timeframe and say the tech is on the way'] };
+    }
+    return { ok: true, violations: [] };
+  }
   // Every LIVE ETA line, not only the first (audit P1): a customer with two
   // distinct live stops has two figures, and a reply about either is grounded.
   const factsMinutes = new Set([...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10)));
@@ -2824,6 +2872,7 @@ module.exports = {
   PAYMENT_ACK_RE,
   validateLiveEtaMinutes,
   findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival,
+  bodyHasTimedArrivalPhrase,
   replyClaimsEtaMinutes,
   buildLiveEtaSnapshot,
   replyBindsDeclaredDays,

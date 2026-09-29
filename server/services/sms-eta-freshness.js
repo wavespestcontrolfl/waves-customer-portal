@@ -38,6 +38,17 @@
 //      `trackTokens`) and its visit(s) must still be en route OR on site —
 //      a link to a stop that has since gone terminal, or a stray/old link
 //      that never belonged to this snapshot at all, fails closed.
+//   5. Codex round-5 P2: whenever the outgoing body carries a /track/:token
+//      link (link-only, or riding along a minutes/status claim), each such
+//      token's OWN track_token_expires_at is re-read and must still be live
+//      — a stale row still marked en_route/on_property is not enough if the
+//      customer-facing token itself has already expired. A missing expiry
+//      also fails closed here (never the public tracking route's own
+//      fail-OPEN default for a legacy row) because the schema normally
+//      stamps one the moment a token is minted (backfill + INSERT/
+//      reschedule triggers, migrations 20260422000009/20260429000002/
+//      20260505000001) — a live-ETA-eligible row missing it is unexpected,
+//      not trusted.
 // Missing evidence fails CLOSED: no live_eta_snapshot, a snapshot in the old
 // flat shape (no `entries` — that shape never shipped to prod, this branch
 // isn't merged), no facts_generated_at, or a claim that can't be bound to
@@ -84,6 +95,19 @@ function parseDraftedAt(factsGeneratedAt) {
   return null;
 }
 
+// Codex round-5 P2: deliberately NOT track-token-expiry.js's isTrackTokenLive
+// — that helper fails OPEN on a missing expiry (a legacy row with no
+// track_token_expires_at at all is treated as still live), which is the
+// right default for a customer who already has the link open on the public
+// tracking page. This send-time gate decides whether Waves is about to HAND
+// OUT a link, so it fails CLOSED instead: any expiry that is missing,
+// unparseable, or in the past blocks the send.
+function sendTimeTrackTokenLive(expiresAt) {
+  if (!expiresAt) return false;
+  const expiresMs = new Date(expiresAt).getTime();
+  return Number.isFinite(expiresMs) && expiresMs > Date.now();
+}
+
 /**
  * null when the outgoing body may go out, else a short reason string the
  * caller logs before blocking/superseding. `liveEtaSnapshot` and
@@ -94,18 +118,35 @@ function parseDraftedAt(factsGeneratedAt) {
  * instead of round-tripping through JSON.
  */
 async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, now = new Date(), dbh = db }) {
-  const { findEtaMinutesClaims, bodyMentionsArrival } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
+  const { findEtaMinutesClaims, bodyMentionsArrival, bodyHasTimedArrivalPhrase } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
   const claims = findEtaMinutesClaims(outgoingBody);
+  // TIMED unparsed claim (Codex round-5 P2): a vague/approximate duration
+  // ("half an hour away", "an hour out", "a few minutes away", "a couple
+  // minutes", "quarter hour", "shortly", "any minute now", "soon") states
+  // WHEN the tech arrives just as surely as a parsed number does, even
+  // though findEtaMinutesClaims can never bind an exact figure to it — so it
+  // gets the SAME 15-minute freshness window a numeric claim gets, AND
+  // always fails closed as unbound below: there is no number here that
+  // could ever match the snapshot's exact minutes. bodyHasTimedArrivalPhrase
+  // runs its own arrival-trigger check (it also recognizes the weak "out"
+  // trigger, e.g. "an hour out"/"a quarter hour out" — narrower than
+  // bodyMentionsArrival below, which only looks for a STRONG trigger), so
+  // it's checked independently, BEFORE the status-only backstop, so a timed
+  // phrase is never waved through as status copy just because it also
+  // happens to contain the word "minutes".
+  const timedArrivalClaim = !claims.length && bodyHasTimedArrivalPhrase(outgoingBody);
   // Backstop (audit P1, round 4): the claim parser can't read every way a
   // person or model writes an ETA. A body that talks about the tech arriving
   // is checked whenever the draft carried a LIVE ETA, or whenever it mentions
   // minutes at all — every snapshot entry must then still be live and fresh.
+  // Pure status copy only ("on the way", "en route") — no duration wording
+  // of any kind — lands here.
   const snapshotHasEntries = Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0;
-  const unparsedArrivalClaim = !claims.length && bodyMentionsArrival(outgoingBody)
+  const unparsedStatusClaim = !claims.length && !timedArrivalClaim && bodyMentionsArrival(outgoingBody)
     && (snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || '')));
   const trackTokens = extractTrackTokens(outgoingBody);
   const hasTrackLink = trackTokens.length > 0;
-  if (!claims.length && !unparsedArrivalClaim && !hasTrackLink) return null;
+  if (!claims.length && !timedArrivalClaim && !unparsedStatusClaim && !hasTrackLink) return null;
 
   // Only the current grouped shape is accepted — { entries: [{ minutes,
   // scheduledServiceIds, trackTokens }] }. A missing/malformed snapshot, or
@@ -122,20 +163,32 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // visit) so more than one live ETA in the snapshot is not itself
   // disqualifying here the way it is for an unbound minutes/arrival claim
   // below. A token this draft's snapshot never minted fails closed.
-  if (!claims.length && !unparsedArrivalClaim) {
+  if (!claims.length && !timedArrivalClaim && !unparsedStatusClaim) {
     const linkedEntries = entries.filter((e) => Array.isArray(e.trackTokens) && e.trackTokens.some((t) => trackTokens.includes(t)));
     if (!linkedEntries.length) return 'eta_claim_untracked_link';
-    return checkEntriesStillLive({ boundEntries: linkedEntries, allowOnSite: true, dbh });
+    return checkEntriesStillLive({ boundEntries: linkedEntries, allowOnSite: true, dbh, trackTokensToVerify: trackTokens });
   }
 
   if (entries.length > 1) return 'eta_claim_ambiguous';
 
   let boundEntries;
-  if (unparsedArrivalClaim) {
+  if (timedArrivalClaim) {
+    // A vague timeframe still ages out like a stated number (round-5 P2):
+    // apply the SAME 15-minute draft-freshness window a numeric claim gets.
+    const draftedAt = parseDraftedAt(factsGeneratedAt);
+    if (!draftedAt) return 'eta_claim_no_facts_time';
+    if (now.getTime() - draftedAt.getTime() > ETA_FRESHNESS_WINDOW_MS) return 'eta_claim_stale_facts';
+    // Even within the freshness window, there is no exact number here to
+    // bind to the snapshot's minutes figure — fails closed as unbound rather
+    // than pass on "some entry is still live", the same way an unmatched
+    // numeric claim would.
+    return 'eta_claim_unbound';
+  }
+  if (unparsedStatusClaim) {
     // Status-only claim (Codex round-4 P2): "the tech is on the way" carries
     // no minutes figure to go stale — recheck ONLY whether the tracker still
-    // says en route right now. The 15-minute freshness window below is about
-    // a STATED NUMBER outliving the moment it was true; a bare status claim
+    // says en route right now. The 15-minute freshness window is about a
+    // STATED TIMEFRAME outliving the moment it was true; a bare status claim
     // never carries one, so the window never applies to it.
     boundEntries = [...entries];
   } else {
@@ -165,7 +218,7 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
     if (!linkedOk) return 'eta_claim_untracked_link';
   }
 
-  return checkEntriesStillLive({ boundEntries, allowOnSite: false, dbh });
+  return checkEntriesStillLive({ boundEntries, allowOnSite: false, dbh, trackTokensToVerify: hasTrackLink ? trackTokens : [] });
 }
 
 // Shared "is the bound entry's visit still customer-facing live" recheck —
@@ -174,17 +227,33 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
 // tracking-link-only share (the link itself never claims a number or
 // "still coming", so arrival doesn't make sharing it stale — only the visit
 // going fully terminal, or never having belonged to this snapshot, does).
-async function checkEntriesStillLive({ boundEntries, allowOnSite, dbh }) {
+// `trackTokensToVerify` (Codex round-5 P2): the exact /track/:token(s) found
+// in the outgoing body, if any — each one's OWN track_token_expires_at is
+// checked too, never inferred from the visit's status/track_state alone, so
+// an expired (or unexpectedly missing) token blocks the send even while its
+// row still reads en_route/on_property.
+async function checkEntriesStillLive({ boundEntries, allowOnSite, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
     const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
-    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state');
+    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at');
     const liveStates = allowOnSite ? new Set(['en_route', 'on_property']) : new Set(['en_route']);
     const liveById = new Map(rows.map((row) => [row.id, liveStates.has(customerTrackState(row))]));
     // EACH bound entry must have at least one of ITS OWN visits still live —
     // a different entry's live visit never covers this one.
     const allBoundEntriesLive = boundEntries.every((entry) => entry.scheduledServiceIds.some((id) => liveById.get(id)));
     if (!allBoundEntriesLive) return 'eta_claim_no_longer_en_route';
+
+    if (trackTokensToVerify.length) {
+      const rowByToken = new Map(rows.filter((row) => row.track_view_token).map((row) => [row.track_view_token, row]));
+      for (const token of trackTokensToVerify) {
+        const row = rowByToken.get(token);
+        // A token with no matching row here would already have failed the
+        // untracked-link check above — guarded again defensively rather than
+        // assumed live.
+        if (!row || !sendTimeTrackTokenLive(row.track_token_expires_at)) return 'eta_claim_link_expired';
+      }
+    }
   } catch (err) {
     logger.warn(`[sms-eta-freshness] en_route recheck failed: ${err.message}; blocking send`);
     return 'eta_claim_recheck_failed';

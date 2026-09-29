@@ -170,6 +170,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   // identical mock comment. Fixed gratitude copy never claims an ETA.
   findEtaMinutesClaims: jest.fn(() => []),
   bodyMentionsArrival: jest.fn(() => false),
+  bodyHasTimedArrivalPhrase: jest.fn(() => false),
 }));
 jest.mock('../services/sms-graduation', () => ({
   evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true, blockers: [] })),

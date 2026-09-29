@@ -17,6 +17,7 @@
 jest.mock('../services/sms-shadow-drafter', () => ({
   findEtaMinutesClaims: jest.fn(),
   bodyMentionsArrival: jest.fn(() => false),
+  bodyHasTimedArrivalPhrase: jest.fn(() => false),
 }));
 jest.mock('../services/track-transitions', () => ({
   customerTrackState: jest.fn((row) => row?.track_state || null),
@@ -40,6 +41,12 @@ function claim(minutes) {
 const NOW = new Date('2026-09-29T14:30:00.000Z');
 const FRESH = new Date(NOW.getTime() - 5 * 60 * 1000).toISOString(); // 5 min ago
 const STALE = new Date(NOW.getTime() - 20 * 60 * 1000).toISOString(); // 20 min ago
+// track_token_expires_at fixtures (Codex round-5 P2): sendTimeTrackTokenLive
+// reads the REAL wall clock (Date.now()), never the `now` override some
+// tests pass for the draft-freshness window, so these are relative to real
+// time regardless of what NOW/FRESH/STALE simulate.
+const FUTURE = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // well past any token TTL
+const PAST = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // already expired
 
 beforeEach(() => {
   findEtaMinutesClaims.mockReset().mockReturnValue([claim(12)]);
@@ -243,6 +250,69 @@ describe('round 4 (audit P1): written-out minutes and unparsed arrival wording s
   });
 });
 
+describe('round 5 (Codex P2): vague/approximate duration wording is a TIMED claim, never status-only', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    drafter.findEtaMinutesClaims.mockReset().mockImplementation(real.findEtaMinutesClaims);
+    drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
+    drafter.bodyHasTimedArrivalPhrase.mockReset().mockImplementation(real.bodyHasTimedArrivalPhrase);
+  });
+  const liveEtaSnapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] };
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+
+  test.each([
+    'He is about half an hour away.',
+    'He is an hour out.',
+    'He should be there in a few minutes.',
+    'He should be there in a couple minutes.',
+    'He is a quarter hour out.',
+    'He is on the way and should be there shortly.',
+    'He is on the way and should be there any minute now.',
+    'He is on the way and should be there soon.',
+  ])('within the freshness window, %p still fails closed as unbound — no number here can ever match the snapshot', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_unbound');
+  });
+
+  test('a timed phrase past the 15-minute freshness window fails closed as stale, not unbound', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: STALE, outgoingBody: 'He is about half an hour away.', now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_stale_facts');
+  });
+
+  test('a timed phrase with no facts_generated_at at all fails closed', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: null, outgoingBody: 'He is about half an hour away.', now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_no_facts_time');
+  });
+
+  test('pure status copy with NO duration wording at all stays status-only — untouched by round 5', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      outgoingBody: 'He is on the way.', now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBeNull();
+  });
+
+  test('a duration phrase in an unrelated sentence (treatment dry time, not arrival) never false-positives', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, now: NOW,
+      outgoingBody: 'Please let the dog out — the treatment needs about half an hour to dry.',
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBeNull();
+  });
+});
+
 describe('range claims (Codex round-2 P2): every bound is bound and rechecked, not just one', () => {
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
@@ -332,7 +402,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // an hour old — irrelevant to a link-only share
       outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
-      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: FUTURE }]),
     });
     expect(reason).toBeNull();
   });
@@ -342,7 +412,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
       outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
-      dbh: fakeDb([{ id: 'svc-1', status: 'on_site', track_state: 'on_property' }]),
+      dbh: fakeDb([{ id: 'svc-1', status: 'on_site', track_state: 'on_property', track_view_token: 'abc123', track_token_expires_at: FUTURE }]),
     });
     expect(reason).toBeNull();
   });
@@ -374,7 +444,78 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
       factsGeneratedAt: FRESH,
       outgoingBody: 'The tech is 12 minutes away: wavespestcontrol.com/track/abc123',
       now: NOW,
-      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: FUTURE }]),
+    });
+    expect(reason).toBeNull();
+  });
+});
+
+describe('round 5 (Codex P2): a /track/ link\'s own token expiry is re-checked, never inferred from status/track_state alone', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    drafter.findEtaMinutesClaims.mockReset().mockImplementation(real.findEtaMinutesClaims);
+    drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
+  });
+
+  test('link-only: a still-en_route row whose token has already expired blocks the send', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: PAST }]),
+    });
+    expect(reason).toBe('eta_claim_link_expired');
+  });
+
+  test('link-only: a still-en_route row with NO expiry stamped at all fails closed (the schema normally sets one)', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: null }]),
+    });
+    expect(reason).toBe('eta_claim_link_expired');
+  });
+
+  test('link-only: an on_site row whose token has expired still blocks — a live track_state is not enough', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      dbh: fakeDb([{ id: 'svc-1', status: 'on_site', track_state: 'on_property', track_view_token: 'abc123', track_token_expires_at: PAST }]),
+    });
+    expect(reason).toBe('eta_claim_link_expired');
+  });
+
+  test('a minutes claim carrying a link whose OWN token has expired blocks, even though the minutes figure itself is bound and live', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'The tech is 12 minutes away: wavespestcontrol.com/track/abc123',
+      now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: PAST }]),
+    });
+    expect(reason).toBe('eta_claim_link_expired');
+  });
+
+  test('a status-only claim carrying a link whose OWN token has expired blocks the send', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
+      factsGeneratedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      outgoingBody: 'He is on the way and should be there in a few: wavespestcontrol.com/track/abc123',
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: PAST }]),
+    });
+    expect(reason).toBe('eta_claim_link_expired');
+  });
+
+  test('a minutes claim with NO link at all is unaffected by expiry — never queried for a token that was never sent', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'The tech is 12 minutes away.',
+      now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: PAST }]),
     });
     expect(reason).toBeNull();
   });

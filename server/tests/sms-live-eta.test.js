@@ -222,6 +222,58 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     expect(calculateBoundedTrackingEta).toHaveBeenCalledTimes(1);
   });
 
+  // Codex round-5 P1: the memo must never leak one customer's tracking token
+  // to another customer who happens to share a tech+destination inside the
+  // 60s TTL (e.g. two units of one property, or a coincidental coordinate
+  // collision). Each caller's own track_view_token must always come back in
+  // ITS OWN result, even though the underlying GPS/Distance Matrix lookup is
+  // shared exactly once.
+  test('two different customers/tokens sharing a tech+destination each get their OWN trackUrl from one provider call', async () => {
+    process.env[GATE] = 'true';
+    let resolvePosition;
+    resolveFreshTechPosition.mockImplementation(() => new Promise((resolve) => { resolvePosition = resolve; }));
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    const rowA = baseRow({ id: 'svc-a', track_view_token: 'token-customer-a' });
+    const rowB = baseRow({ id: 'svc-b', track_view_token: 'token-customer-b' });
+    const customerA = baseCustomer({ address_line1: '100 Main St' });
+    const customerB = baseCustomer({ address_line1: '200 Other St' });
+
+    const p1 = resolveLiveEtaFact(rowA, customerA);
+    const p2 = resolveLiveEtaFact(rowB, customerB);
+    resolvePosition(FRESH_POSITION);
+    const [outA, outB] = await Promise.all([p1, p2]);
+
+    expect(outA.minutes).toBe(outB.minutes);
+    expect(outA.asOf).toBe(outB.asOf);
+    expect(outA.trackUrl).toContain('/track/token-customer-a');
+    expect(outB.trackUrl).toContain('/track/token-customer-b');
+    expect(outA.trackUrl).not.toBe(outB.trackUrl);
+    // One shared provider call for both — the memoized part is only the
+    // tech-position/route-minutes lookup.
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+    expect(calculateBoundedTrackingEta).toHaveBeenCalledTimes(1);
+  });
+
+  // Same guarantee against the CACHED-result path (no in-flight promise —
+  // the second call arrives after the first has already resolved and been
+  // stored).
+  test('a second customer reusing a cached (tech, destination) entry gets their OWN trackUrl, not the first customer\'s', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    const rowA = baseRow({ id: 'svc-a', track_view_token: 'token-customer-a' });
+    const rowB = baseRow({ id: 'svc-b', track_view_token: 'token-customer-b' });
+
+    const outA = await resolveLiveEtaFact(rowA, baseCustomer());
+    const outB = await resolveLiveEtaFact(rowB, baseCustomer());
+
+    expect(outA.trackUrl).toContain('/track/token-customer-a');
+    expect(outB.trackUrl).toContain('/track/token-customer-b');
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+  });
+
   test('a different technician never shares the memo — its own lookup runs', async () => {
     process.env[GATE] = 'true';
     resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
@@ -639,6 +691,54 @@ describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes 
       process.env[GATE] = 'true';
       const factsBlock = 'UPCOMING SERVICES:\n- Pest TODAY LIVE ETA: about 10 minutes\n- Lawn TODAY LIVE ETA: about 12 minutes';
       expect(validateLiveEtaMinutes({ reply: 'The tech is 10-12 minutes away.', factsBlock }).ok).toBe(false);
+    });
+  });
+
+  // Codex round-5 P2: a vague/approximate duration phrase states WHEN the
+  // tech arrives exactly like a parsed number, but there is no exact figure
+  // to check against the LIVE ETA fact — reject it outright, the same
+  // direction as an unmatched number, instead of waving it through as pure
+  // status copy.
+  describe('validateLiveEtaMinutes — vague/approximate duration wording is rejected, not waved through as status copy', () => {
+    let prior;
+    beforeEach(() => { prior = process.env[GATE]; process.env[GATE] = 'true'; });
+    afterEach(() => { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; });
+
+    test.each([
+      'The tech is about half an hour away.',
+      'He is an hour out.',
+      'He should be there in a few minutes.',
+      'He should be there in a couple minutes.',
+      'He is a quarter hour out.',
+      'He is on the way and should be there shortly.',
+      'He is on the way and should be there any minute now.',
+      'He is on the way and should be there soon.',
+    ])('%p is rejected even though the facts carry a matching LIVE ETA', (reply) => {
+      const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)' });
+      expect(result.ok).toBe(false);
+      expect(result.violations[0]).toMatch(/exact/i);
+    });
+
+    test('rejected the same way with NO LIVE ETA fact in the facts block at all', () => {
+      const result = validateLiveEtaMinutes({ reply: 'He is about half an hour away.', factsBlock: 'LIVE STATUS: tech marked en route to this visit' });
+      expect(result.ok).toBe(false);
+    });
+
+    test('pure status copy with no duration wording at all still passes', () => {
+      expect(validateLiveEtaMinutes({ reply: 'The tech is on the way!', factsBlock: 'LIVE ETA: about 12 minutes' })).toEqual({ ok: true, violations: [] });
+    });
+
+    test('a duration phrase in an unrelated sentence (treatment dry time, not arrival) never false-positives', () => {
+      const result = validateLiveEtaMinutes({
+        reply: 'The tech is 12 minutes away. Please let the dog out — the treatment needs about half an hour to dry.',
+        factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)',
+      });
+      expect(result).toEqual({ ok: true, violations: [] });
+    });
+
+    test('gate off: never runs (byte-identical to v11)', () => {
+      delete process.env[GATE];
+      expect(validateLiveEtaMinutes({ reply: 'He is about half an hour away.', factsBlock: 'LIVE ETA: about 12 minutes' })).toEqual({ ok: true, violations: [] });
     });
   });
 });
