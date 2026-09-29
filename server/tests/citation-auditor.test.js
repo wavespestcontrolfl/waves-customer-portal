@@ -49,7 +49,11 @@ describe('classifyListing', () => {
   test('mismatched structured address reports the address seen', () => {
     const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa', postalCode: '33601' } })}`), expected);
     expect(r.status).toBe('mismatched');
-    expect(r.detail.mismatches).toEqual([{ field: 'address', expected: BRAND.address, seen: '99 Old Rd, Tampa, 33601' }]);
+    expect(r.detail.mismatches).toEqual([
+      { field: 'address', expected: BRAND.address, seen: '99 Old Rd, Tampa, 33601' },
+      { field: 'city', expected: 'Bradenton', seen: 'Tampa' },
+      { field: 'postal_code', expected: '34211', seen: '33601' },
+    ]);
   });
 
   test('a wrong visible address next to the right name and phone is NOT verified (no JSON-LD)', () => {
@@ -100,7 +104,7 @@ describe('classifyListing', () => {
       expect(r.detail).toMatchObject({ reason: 'address_unconfirmed', seen: '1450 Pine Street' });
     });
 
-    test.each(['1450 Pine Warbler Pl, Sarasota, FL 34240', '1450 PINE WARBLER PLACE', '1450 pine warbler pl.'])('%s is confirmed', (text) => {
+    test.each(['1450 Pine Warbler Pl, Sarasota, FL 34240', '1450 PINE WARBLER PLACE, SARASOTA, FLORIDA 34240', '1450 pine warbler pl. Sarasota FL 34240-1234'])('%s is confirmed', (text) => {
       const r = forOffice(SARASOTA, text);
       expect(r.status).toBe('verified');
       expect(r.detail.address_checked).toBe(true);
@@ -110,12 +114,78 @@ describe('classifyListing', () => {
       expect(forOffice(SARASOTA, '11450 Pine Warbler Pl').status).toBe('unverified');
     });
 
-    test.each(['1978 S Tamiami Trl #10', '1978 South Tamiami Trail', '1978 S. Tamiami Trail, Suite 10'])('%s matches 1978 South Tamiami Trail', (text) => {
+    test.each(['1978 S Tamiami Trl #10, Venice, FL 34293', '1978 South Tamiami Trail, Venice, Florida 34293', '1978 S. Tamiami Trail, Suite 10, Venice, FL 34293'])('%s matches 1978 South Tamiami Trail', (text) => {
       expect(forOffice(VENICE, text).status).toBe('verified');
     });
 
     test('a directional-less variant is ambiguous, so unconfirmed (never confirmed)', () => {
       expect(forOffice(VENICE, '1978 Tamiami Trail').status).toBe('unverified');
+    });
+  });
+
+  describe('addresses: city, ZIP and directionals count; stored values are what was observed', () => {
+    const LUXE_ENTITY = (address) => ({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address });
+    const viaEntity = (address) => classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${ld(LUXE_ENTITY(address))}`), candidatesFor({}));
+    const viaText = (addressText) => classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p><p>${addressText}</p>`), candidatesFor({}));
+
+    test("'13649 Luxe Ave #110, Tampa, 33601' is not confirmed from text, and a mismatch when entity-stated", () => {
+      const t = viaText('13649 Luxe Ave #110, Tampa, 33601');
+      expect(t.status).toBe('unverified');
+      expect(t.detail).toMatchObject({ reason: 'address_unconfirmed', seen: '13649 Luxe Ave' });
+      const e = viaEntity({ streetAddress: '13649 Luxe Ave #110', addressLocality: 'Tampa', postalCode: '33601' });
+      expect(e.status).toBe('mismatched');
+      expect(e.detail.mismatches.map((m) => m.field)).toEqual(['city', 'postal_code']);
+    });
+
+    test("'13649 Luxe Avenue East' is not confirmed (extra directional), in text or as the entity street", () => {
+      expect(viaText('13649 Luxe Avenue East, Bradenton, FL 34211').status).toBe('unverified');
+      expect(viaEntity({ streetAddress: '13649 Luxe Avenue East' }).detail.mismatches.map((m) => m.field)).toEqual(['address']);
+    });
+
+    test.each(['13649 Luxe Ave #110, Bradenton, FL 34211', '13649 Luxe Avenue, Bradenton, Florida 34211', '13649 LUXE AVE STE 110 BRADENTON FL 34211-5678'])('%s in text is confirmed', (text) => {
+      expect(viaText(text)).toMatchObject({ status: 'verified', detail: { address_checked: true } });
+    });
+
+    test('text with our street and city but no ZIP is not confirmed', () => {
+      expect(viaText('13649 Luxe Ave, Bradenton, FL').status).toBe('unverified');
+    });
+
+    test('an entity with the correct street but postalCode 34212 is mismatched on the postal code', () => {
+      const r = viaEntity({ streetAddress: '13649 Luxe Ave #110', addressLocality: 'Bradenton', addressRegion: 'FL', postalCode: '34212' });
+      expect(r.status).toBe('mismatched');
+      expect(r.detail.mismatches).toEqual([{ field: 'postal_code', expected: '34211', seen: '34212' }]);
+    });
+
+    test('an entity in the wrong region is mismatched on the region', () => {
+      const r = viaEntity({ streetAddress: '13649 Luxe Ave', addressLocality: 'Bradenton', addressRegion: 'GA' });
+      expect(r.detail.mismatches).toEqual([{ field: 'region', expected: 'FL', seen: 'GA' }]);
+    });
+
+    test('an entity with the correct street and no locality or postal is confirmed; a ZIP+4 and Florida spelling also pass', () => {
+      expect(viaEntity({ streetAddress: '13649 Luxe Ave #110' }).status).toBe('verified');
+      expect(viaEntity({ streetAddress: '13649 Luxe Avenue', addressLocality: 'bradenton', addressRegion: 'Florida', postalCode: '34211-1234' }).status).toBe('verified');
+    });
+
+    test('an entity address given as one string goes through the same parser', () => {
+      expect(viaEntity('13649 Luxe Ave #110, Bradenton, FL 34211').status).toBe('verified');
+      expect(viaEntity('13649 Luxe Ave, Tampa, FL 33601').detail.mismatches.map((m) => m.field)).toEqual(['city', 'postal_code']);
+    });
+
+    test('nap_address stores the OBSERVED value when mismatched or unconfirmed, never the canonical one', () => {
+      const m = viaEntity({ streetAddress: '13649 Luxe Ave #110', addressLocality: 'Bradenton', addressRegion: 'FL', postalCode: '34212' });
+      expect(m.nap.nap_address).toBe('13649 Luxe Ave #110, Bradenton, FL 34212');
+      expect(m.nap.nap_address).not.toBe(BRAND.address);
+      const u = viaText('13649 Luxe Ave #110, Tampa, 33601');
+      expect(u.nap.nap_address).toBe('13649 Luxe Ave');
+      const none = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>`), candidatesFor({}));
+      expect(none.nap.nap_address).toBeNull();
+    });
+
+    test('nap_name and nap_phone are observed values too', () => {
+      const r = classifyListing(page('', { html: `<html><body><h1>WAVES PEST CONTROL</h1><p>(941) 555-0142</p>${filler}</body></html>` }), candidatesFor({}));
+      expect(r.nap).toEqual({ nap_name: 'WAVES PEST CONTROL', nap_phone: '(941) 555-0142', nap_address: null });
+      const e = classifyListing(page(`<h1>x</h1><p>${BRAND.phone}</p>${ld(LUXE_ENTITY({ streetAddress: '13649 Luxe Ave' }))}`), candidatesFor({}));
+      expect(e.nap.nap_name).toBe('Waves Pest Control');
     });
   });
 
@@ -133,7 +203,8 @@ describe('classifyListing', () => {
     test('the Waves entity with a wrong street is mismatched, even after a publisher node', () => {
       const r = withLd([publisher, bizLd({ streetAddress: '99 Old Rd', addressLocality: 'Tampa' })]);
       expect(r.status).toBe('mismatched');
-      expect(r.detail.mismatches).toEqual([{ field: 'address', expected: BRAND.address, seen: '99 Old Rd, Tampa' }]);
+      expect(r.detail.mismatches.map((m) => m.field)).toEqual(['address', 'city']);
+      expect(r.detail.mismatches[0]).toEqual({ field: 'address', expected: BRAND.address, seen: '99 Old Rd, Tampa' });
     });
 
     test('the Waves entity is also recognised by one of our office phones alone', () => {
@@ -153,7 +224,7 @@ describe('classifyListing', () => {
       test('wrong entity phone + street are mismatched even though a footer shows the canonical details', () => {
         const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '(941) 555-0142', address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa' } }, footer);
         expect(r.status).toBe('mismatched');
-        expect(r.detail.mismatches.map((m) => m.field)).toEqual(['phone', 'address']);
+        expect(r.detail.mismatches.map((m) => m.field)).toEqual(['phone', 'address', 'city']);
         expect(r.detail.mismatches[0].seen).toEqual(['(941) 555-0142']);
         expect(r.detail.mismatches[1].seen).toBe('99 Old Rd, Tampa');
       });
@@ -186,7 +257,10 @@ describe('classifyListing', () => {
         const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: VENICE.phone, address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Sarasota' } }, `<footer>${SARASOTA.address}</footer>`);
         expect(r.status).toBe('mismatched');
         expect(r.detail.office).toBe('venice');
-        expect(r.detail.mismatches).toEqual([{ field: 'address', expected: VENICE.address, seen: '1450 Pine Warbler Pl, Sarasota' }]);
+        expect(r.detail.mismatches).toEqual([
+          { field: 'address', expected: VENICE.address, seen: '1450 Pine Warbler Pl, Sarasota' },
+          { field: 'city', expected: 'Venice', seen: 'Sarasota' },
+        ]);
       });
 
       test('unassigned brand row: entity phone and address both Venice -> verified, office venice', () => {
@@ -220,7 +294,7 @@ describe('classifyListing', () => {
       const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${loc.phone} ${loc.address}</p>`), candidatesFor({}));
       expect(r.status).toBe('verified');
       expect(r.detail.office).toBe(loc.id);
-      expect(r.nap.nap_address).toBe(loc.address);
+      expect(r.nap.nap_address).toBe(loc.address.split(' #')[0].split(',')[0]); // the street as the page wrote it
     }
   });
 

@@ -16,16 +16,22 @@
  *                  pages often show OTHER businesses' addresses, so this is
  *                  never "mismatched" unless JSON-LD states our own address)
  *   verified       fetched; name and phone match, plus the address when the
- *                  page shows one (an address-like string on the page must match
- *                  the office whose phone matched; a page with none is judged on
- *                  name + phone)
- *                  Street matching is on the FULL normalized street (number, whole
- *                  name, suffix, directional — normalizeStreet), never a partial
- *                  match. Precedence: when the page's JSON-LD has a Waves entity
- *                  (its name, or one of our office phones; never another node),
- *                  that entity IS the listing's NAP — each field it states is
- *                  judged on its own and page text can never erase a mismatch
- *                  there; only fields it leaves unstated are read from the text.
+ *                  page shows one. Conservative: a false "unverified" is fine, a
+ *                  false "verified" is not. Visible text confirms an address ONLY
+ *                  when it contains the office's whole normalized address
+ *                  ("<number> <street> <suffix> [directional] <city> fl <zip5>",
+ *                  unit dropped, contiguous, on word boundaries); any other
+ *                  address-like text is 'address_unconfirmed'. A page with no
+ *                  address-like string is judged on name + phone.
+ *                  Precedence: when the page's JSON-LD has a Waves entity (its
+ *                  name, or one of our office phones; never another node), that
+ *                  entity IS the listing's NAP — each field it states is judged
+ *                  on its own (street must EQUAL the office street; a stated
+ *                  locality, region and postal code must equal the office's) and
+ *                  page text can never erase a mismatch there; only fields it
+ *                  leaves unstated are read from the text.
+ *                  Stored nap_name / nap_phone / nap_address are always what the
+ *                  page showed, never the office's canonical values.
  *   mismatched     fetched; a field differs — status_detail.mismatches lists
  *                  each { field, expected, seen }
  *   fetch-blocked  the page could not be read: 403/429/5xx or any non-2xx,
@@ -65,25 +71,14 @@ const invalid = (message) => Object.assign(new Error(message), { code: 'INVALID_
 const phoneKey = (s) => { const d = String(s || '').replace(/\D/g, ''); return d.length === 11 && d[0] === '1' ? d.slice(1) : d; };
 const alnum = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
-const napOf = (loc) => ({ locationId: loc.id, name: BRAND_NAME, phone: loc.phone, phoneKey: phoneKey(loc.phone), address: loc.address });
-// The office a row is assigned to, else the default office (WAVES_LOCATIONS[0]) — the dashboard's reference NAP.
-function expectedNapFor(row) {
-  return napOf(WAVES_LOCATIONS.find((l) => l.id === row.location_id) || WAVES_LOCATIONS[0]);
-}
-// What a listing may legitimately show: its assigned office, or any office when unassigned.
-function candidatesFor(row) {
-  const assigned = WAVES_LOCATIONS.find((l) => l.id === row.location_id);
-  return (assigned ? [assigned] : WAVES_LOCATIONS).map(napOf);
-}
-
 const STREET_WORDS = {
   st: 'street', ave: 'avenue', rd: 'road', blvd: 'boulevard', dr: 'drive', ln: 'lane', ct: 'court', cir: 'circle',
   pl: 'place', trl: 'trail', hwy: 'highway', pkwy: 'parkway', n: 'north', s: 'south', e: 'east', w: 'west',
+  florida: 'fl',
 };
-// The ONE street normalizer (expected addresses, visible text and JSON-LD all go through it):
+// The ONE address normalizer (expected addresses, visible text and JSON-LD all go through it):
 // lowercase, drop unit designators and their value, strip punctuation, expand suffixes and
-// directionals, collapse spaces. A street is confirmed only when the full normalized string
-// (number + whole street name + suffix + directional) appears — never a partial match.
+// directionals, "florida" -> "fl", collapse spaces.
 function normalizeStreet(str) {
   return String(str || '').toLowerCase()
     .replace(/#\s*[a-z0-9-]+/g, ' ')
@@ -91,9 +86,35 @@ function normalizeStreet(str) {
     .replace(/[^a-z0-9]+/g, ' ')
     .split(' ').filter(Boolean).map((w) => STREET_WORDS[w] || w).join(' ');
 }
-const streetOfAddress = (address) => normalizeStreet(String(address || '').split(',')[0]);
-const hasStreet = (normalizedText, normalizedStreet) => Boolean(normalizedStreet) && ` ${normalizedText} `.includes(` ${normalizedStreet} `);
 
+// The ONE address parser ("13649 Luxe Ave #110, Bradenton, FL 34211" -> street / city / region /
+// postal, each normalized). Used for the office addresses in locations.js and any string address.
+function parseAddress(str) {
+  const parts = String(str || '').split(',');
+  const tail = normalizeStreet(parts.slice(1).join(' ')).split(' ').filter(Boolean);
+  if (tail.length > 1 && /^\d{4}$/.test(tail[tail.length - 1]) && /^\d{5}$/.test(tail[tail.length - 2])) tail.pop(); // ZIP+4
+  const postal = /^\d{5}$/.test(tail[tail.length - 1] || '') ? tail.pop() : null;
+  const region = /^[a-z]{2}$/.test(tail[tail.length - 1] || '') ? tail.pop() : null;
+  return { street: normalizeStreet(parts[0]), city: tail.join(' ') || null, region, postal };
+}
+const streetOfAddress = (address) => parseAddress(address).street;
+
+const officeOf = (loc) => {
+  const a = parseAddress(loc.address);
+  return { locationId: loc.id, name: BRAND_NAME, phone: loc.phone, phoneKey: phoneKey(loc.phone), address: loc.address, cityLabel: String(loc.address).split(',')[1]?.trim() || '', ...a, full: [a.street, a.city, a.region, a.postal].join(' ') };
+};
+// The office a row is assigned to, else the default office (WAVES_LOCATIONS[0]) — the dashboard's reference NAP.
+function expectedNapFor(row) {
+  return officeOf(WAVES_LOCATIONS.find((l) => l.id === row.location_id) || WAVES_LOCATIONS[0]);
+}
+// What a listing may legitimately show: its assigned office, or any office when unassigned.
+function candidatesFor(row) {
+  const assigned = WAVES_LOCATIONS.find((l) => l.id === row.location_id);
+  return (assigned ? [assigned] : WAVES_LOCATIONS).map(officeOf);
+}
+const hasSequence = (normalizedText, sequence) => Boolean(sequence) && ` ${normalizedText} `.includes(` ${sequence} `);
+
+const BRAND_RE = /waves\s+pest\s+control/i;
 const PHONE_RE = /(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\d{3}[-.\s]\d{3}[-.\s]\d{4})/g;
 const fmtPhone = (k) => `(${k.slice(0, 3)}) ${k.slice(3, 6)}-${k.slice(6)}`;
 
@@ -125,11 +146,23 @@ function wavesEntity(html) {
   return mine.find((n) => n.address) || mine[0] || null;
 }
 
+// A JSON-LD address (object or string) as { parsed, raw, display }: `parsed` is normalized for
+// comparison (postal = first 5 digits); `raw` and `display` are the values AS GIVEN.
 function addressStrings(address) {
-  if (!address) return { display: null, street: null };
-  if (typeof address === 'string') return { display: address, street: address };
-  const display = [address.streetAddress, address.addressLocality, address.postalCode].filter(Boolean).join(', ') || null;
-  return { display, street: address.streetAddress || null };
+  if (!address) return null;
+  if (typeof address === 'string') {
+    const parsed = parseAddress(address);
+    return { parsed, raw: { street: address.split(',')[0].trim(), city: parsed.city, region: parsed.region, postal: parsed.postal }, display: address };
+  }
+  const raw = { street: address.streetAddress || null, city: address.addressLocality || null, region: address.addressRegion || null, postal: address.postalCode || null };
+  const parsed = {
+    street: normalizeStreet(raw.street) || null,
+    city: normalizeStreet(raw.city) || null,
+    region: normalizeStreet(raw.region) || null,
+    postal: (String(raw.postal || '').match(/\d{5}/) || [null])[0],
+  };
+  const display = [raw.street, raw.city, [raw.region, raw.postal].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null;
+  return { parsed, raw, display };
 }
 
 // What the page says. `entity` is the Waves JSON-LD entity's own stated fields (null when the
@@ -143,36 +176,46 @@ function extractNap(html) {
   }
   const title = (String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
   const node = wavesEntity(html);
-  const addr = addressStrings(node && node.address);
   const entity = node && {
     name: node.name || null,
     phones: [].concat(node.telephone || []).map(phoneKey).filter((k) => k.length === 10),
-    street: addr.street,
-    address: addr.display,
+    address: addressStrings(node.address),
   };
   return { text, textPhones: [...textPhones], title: title.replace(/\s+/g, ' ').trim(), entity };
 }
 
 // Street-address-like strings in visible text: number + street name + a common suffix.
 const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
-const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?`, 'gi');
+const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
-// Address. A street the Waves entity states IS the listing's address: it confirms (full
-// normalized street present) or is a mismatch, and page text cannot change that. A page with no
-// stated street: our full normalized street anywhere in the visible text confirms it; otherwise
-// address-like strings that are not ours leave it unconfirmed (a sidebar may list other
-// businesses, so never a mismatch); none at all means the page shows no address.
-function judgeAddress(nap, expected) {
-  const street = streetOfAddress(expected.address);
-  const stated = nap.entity && nap.entity.street;
-  if (stated) {
-    const confirmed = hasStreet(normalizeStreet(stated), street);
-    const mismatch = confirmed ? null : { field: 'address', expected: expected.address, seen: nap.entity.address };
-    return { confirmed, checked: true, mismatch, unconfirmed: null };
+// Address, conservative: a false "unverified" is fine, a false "verified" is not.
+// A Waves entity's stated address IS the listing's address: its street must EQUAL the office's
+// normalized street (not a substring), and any locality / postal code / region it states must
+// equal the office's; each stated field that differs is its own mismatch and page text cannot
+// change that. Without a stated street, the visible text confirms only when it contains the
+// office's whole normalized address ("<number> <street> <suffix> [directional] <city> fl <zip5>")
+// contiguously on word boundaries. Other address-like strings leave it unconfirmed (a sidebar
+// may list other businesses, so never a mismatch); none at all means the page shows no address.
+// `observed` is always what the page said, never the office's canonical address.
+function judgeAddress(nap, office) {
+  const a = nap.entity && nap.entity.address;
+  if (a) {
+    const { parsed, raw } = a;
+    const mismatches = [];
+    if (parsed.street && parsed.street !== office.street) mismatches.push({ field: 'address', expected: office.address, seen: a.display });
+    if (parsed.city && parsed.city !== office.city) mismatches.push({ field: 'city', expected: office.cityLabel, seen: raw.city });
+    if (parsed.postal && parsed.postal !== office.postal) mismatches.push({ field: 'postal_code', expected: office.postal, seen: raw.postal });
+    if (parsed.region && parsed.region !== office.region) mismatches.push({ field: 'region', expected: 'FL', seen: raw.region });
+    if (mismatches.length) return { confirmed: false, checked: true, mismatches, unconfirmed: null, observed: a.display };
+    if (parsed.street) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: a.display };
   }
-  if (hasStreet(normalizeStreet(nap.text), street)) return { confirmed: true, checked: true, mismatch: null, unconfirmed: null };
-  const seen = nap.text.match(ADDRESS_LIKE_RE);
-  return { confirmed: false, checked: false, mismatch: null, unconfirmed: seen ? seen[0].trim() : null };
+  const seen = nap.text.match(ADDRESS_LIKE_RE) || [];
+  if (hasSequence(normalizeStreet(nap.text), office.full)) {
+    const ours = seen.find((m) => normalizeStreet(m) === office.street) || seen[0] || null;
+    return { confirmed: true, checked: true, mismatches: [], unconfirmed: null, observed: ours };
+  }
+  const first = seen[0] ? seen[0].trim() : null;
+  return { confirmed: false, checked: false, mismatches: [], unconfirmed: first, observed: (a && a.display) || first };
 }
 
 /**
@@ -209,12 +252,13 @@ function classifyListing(page, candidates) {
   if (phones.length && !phoneOk) mismatches.push({ field: 'phone', expected: candidates.map((c) => c.phone).join(' or '), seen: phones.slice(0, 3).map(fmtPhone) });
 
   const address = judgeAddress(nap, expected);
-  if (address.mismatch) mismatches.push(address.mismatch);
+  mismatches.push(...address.mismatches);
 
+  // Stored values are what the page showed, never the office's canonical values.
   const observed = {
-    nap_name: namePresent ? expected.name : (entity && entity.name) || null,
-    nap_phone: phoneOk ? expected.phone : (phones[0] ? fmtPhone(phones[0]) : null),
-    nap_address: address.confirmed ? expected.address : (entity && entity.address) || null,
+    nap_name: (entity && entity.name) || (nap.text.match(BRAND_RE) || [null])[0],
+    nap_phone: phones.length ? fmtPhone(phoneOk ? expected.phoneKey : phones[0]) : null,
+    nap_address: address.observed,
   };
   const base = { http_status: page.status, final_url: page.finalUrl, office: expected.locationId, address_checked: address.checked };
 
@@ -314,4 +358,4 @@ class CitationAuditor {
 
 module.exports = new CitationAuditor();
 module.exports.statusCounts = statusCounts; // shared with backlink-monitor's dashboard
-module.exports._internals = { classifyListing, candidatesFor, expectedNapFor, extractNap, normalizeStreet, streetOfAddress, STATES };
+module.exports._internals = { classifyListing, candidatesFor, expectedNapFor, extractNap, normalizeStreet, parseAddress, streetOfAddress, STATES };
