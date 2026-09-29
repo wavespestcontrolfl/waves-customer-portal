@@ -53,21 +53,25 @@ describe('preserved recurring visit staff alert', () => {
 // Admin alerts check the live record (owner ruling 2026-09-28): a date the move
 // only flagged for arrival-window route review (rebooker.js arrivalWindowDates —
 // no other appointment sits on it) is a heads-up, not work, so with nothing
-// preserved, untimed or truly overlapping it lands in the Activity feed only.
+// preserved, untimed or truly overlapping it is written into the bell already
+// read: visible in the list, never counted or rung.
 describe('series move card rings only when there is something to act on', () => {
+  let tableUpdates;
   beforeEach(() => {
     jest.clearAllMocks();
+    tableUpdates = [];
     db.fn = { now: () => new Date() };
-    db.mockImplementation(() => ({
+    db.mockImplementation((table) => ({
       where: jest.fn().mockReturnThis(),
       whereNull: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue({
         status: 'committed', conflict_card_at: null, reminders_synced_at: new Date(), notified_at: new Date(),
       }),
-      update: jest.fn(async () => 1),
+      update: jest.fn(async (patch) => { tableUpdates.push({ table, patch }); return 1; }),
     }));
     notifyAdmin.mockResolvedValue({ id: 'staff-alert' });
   });
+  const readOnInsert = () => tableUpdates.some((u) => u.table === 'notifications' && u.patch.read_at instanceof Date);
 
   const move = (result) => applySeriesMoveEffects({
     result: { seriesMoveId: 'move-1', notifyRequested: false, rescheduledOccurrences: [], ...result },
@@ -75,11 +79,14 @@ describe('series move card rings only when there is something to act on', () => 
   });
   const cardOpts = () => notifyAdmin.mock.calls[0][3];
 
-  test('a pure route-review move (only arrival-window dates, nothing preserved or untimed) goes to the Activity feed', async () => {
+  test('a pure route-review move (only arrival-window dates, nothing preserved or untimed) is written into the bell already read', async () => {
     await move({ overlapDates: ['2099-02-01', '2099-03-01'], arrivalWindowDates: ['2099-02-01', '2099-03-01'] });
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(notifyAdmin.mock.calls[0][1]).toBe('Series move needs route review');
-    expect(cardOpts().metadata).toMatchObject({ quiet: true, feed: 'activity', seriesMoveId: 'move-1' });
+    // In the bell list (no Activity-only feed, which shows ops digests only), never unread.
+    expect(cardOpts().metadata).toMatchObject({ seriesMoveId: 'move-1' });
+    expect(cardOpts().metadata.feed).toBeUndefined();
+    expect(readOnInsert()).toBe(true);
   });
 
   test.each([
@@ -98,6 +105,7 @@ describe('series move card rings only when there is something to act on', () => 
     expect(cardOpts().metadata.quiet).toBeUndefined();
     expect(cardOpts().metadata.feed).toBeUndefined();
     expect(cardOpts()).toMatchObject({ bell: true });
+    expect(readOnInsert()).toBe(false);
   });
 });
 

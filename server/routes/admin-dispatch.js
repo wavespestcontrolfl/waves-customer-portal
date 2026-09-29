@@ -4511,7 +4511,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // A date the move only flagged for arrival-window route review (no other
     // appointment sits on it — rebooker.js arrivalWindowDates) is a
     // heads-up, not work: with nothing preserved, untimed or truly
-    // overlapping, that card goes to the Activity feed instead of the bell.
+    // overlapping, that card is written into the bell already read — visible
+    // in its list, never counted or rung.
     const arrivalOnlyDates = new Set((Array.isArray(result.arrivalWindowDates) ? result.arrivalWindowDates : []).map((d) => String(d).split('T')[0]));
     const bellWorthy = dueConflicts.length || preserved.length || overlapDates.some((d) => !arrivalOnlyDates.has(d));
     if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {
@@ -4542,10 +4543,13 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             : dueConflicts.length ? 'Series move left visits without a time window'
               : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved, ...(bellWorthy ? {} : { quiet: true, feed: 'activity' }) } }
+          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
         );
         if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
-        else await stampMarker('conflict_card_at');
+        else {
+          if (!bellWorthy) await db('notifications').where({ id: notif.id }).whereNull('read_at').update({ read_at: new Date() });
+          await stampMarker('conflict_card_at');
+        }
       } catch (err) {
         logger.error(`[dispatch] schedule_conflict notification failed for ${serviceId}: ${err.message}`);
       }

@@ -27,8 +27,12 @@
  *     createPlainAdmin; the dedupe/refresh path is untouched).
  *
  * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
- * — never dedupeKey/dedupeVersion/autoCleared/invoiceId, so every emitter's own
- * dedupe and recovery logic still sees the row exactly as a human dismissal.
+ * — never dedupeVersion/autoCleared/invoiceId, so every emitter's own dedupe
+ * and recovery logic still sees the row exactly as a human dismissal. The one
+ * exception is a class marked `rearm` (unpriced series): its emitter
+ * forever-dedupes on a stable key, so the key moves into the stamp
+ * (`retired.dedupeKey`, `dedupeKey: null`) and a condition that regresses
+ * (the price removed again) raises a fresh bell instead of finding this row.
  * A genuine state change can still re-bell a refreshOnDedupe row once; the
  * next sweep retires it again if its subject is still gone. Read-only apart
  * from notification rows.
@@ -258,8 +262,8 @@ const CLASSES = [
       && s.invoices.every((i) => i && NO_MONEY_INVOICE_STATUSES.has(String(i.status)))
       ? 'Customer left and the combined invoice is an unsent draft or void' : null),
   },
-  { // schedule-integrity-watchdog.js class 1
-    key: 'unpriced_series', categories: ['alert'], prefix: 'unpriced-series:', rule: unpricedSeriesMovedOn,
+  { // schedule-integrity-watchdog.js class 1 — forever-deduped on a stable key, so a retire re-arms it
+    key: 'unpriced_series', categories: ['alert'], prefix: 'unpriced-series:', rule: unpricedSeriesMovedOn, rearm: true,
   },
   { // emitter removed in #5223; unread rows remain
     key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: (s) => customerLeft(s) || visitClosed(s),
@@ -335,15 +339,17 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   if (!current || !sameRow(current, row)) return null;
   const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
   if (!reason) return null;
-  const stamp = { by: RETIRED_BY, reason, at: now.toISOString() };
+  const { dedupeKey } = parseMeta(current.metadata);
+  const rearm = cls.rearm && dedupeKey ? { dedupeKey: null } : {};
+  const stamp = { by: RETIRED_BY, reason, at: now.toISOString(), ...(rearm.dedupeKey === null ? { dedupeKey } : {}) };
   const [retired] = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
-    .update({ read_at: db.fn.now(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]) })
+    .update({ read_at: db.fn.now(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp, ...rearm })]) })
     .returning(['id', 'read_at']);
   if (!retired) return null;
   if (cls.rule(subjectFor(current, await loadSubjects([current]), todayET))) return reason;
   await db('notifications').where({ id: row.id, read_at: retired.read_at })
     .whereRaw("metadata->'retired'->>'at' = ?", [stamp.at])
-    .update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
+    .update({ read_at: null, metadata: db.raw("(metadata - 'retired') || ?::jsonb", [JSON.stringify(rearm.dedupeKey === null ? { dedupeKey } : {})]) });
   return null;
 }
 
@@ -411,7 +417,12 @@ function ringTimeCheck({ category, link, metadata }) {
           return true;
         }
       },
-      stamp: () => (retired ? { retired } : {}),
+      // A re-arm class written quiet leaves its dedupe key free as well.
+      stamp: () => {
+        if (!retired) return {};
+        const { dedupeKey } = parseMeta(metadata);
+        return cls.rearm && dedupeKey ? { retired: { ...retired, dedupeKey }, dedupeKey: null } : { retired };
+      },
     };
   } catch (err) {
     // Relevance is advisory: it must never break writing the bell itself.

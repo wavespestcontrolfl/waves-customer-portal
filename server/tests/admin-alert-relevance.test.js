@@ -65,7 +65,7 @@ jest.mock('../models/db', () => {
           Object.assign(r, rest);
           if (metadata && metadata.__raw && /- 'retired'/.test(metadata.__raw)) {
             const { retired: _dropped, ...kept } = parse(r.metadata);
-            r.metadata = JSON.stringify(kept);
+            r.metadata = JSON.stringify({ ...kept, ...(metadata.bindings?.[0] ? JSON.parse(metadata.bindings[0]) : {}) });
           } else if (metadata && metadata.__raw) r.metadata = JSON.stringify({ ...parse(r.metadata), ...JSON.parse(metadata.bindings[0]) });
           else if (metadata !== undefined) r.metadata = metadata;
         });
@@ -522,6 +522,37 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
     expect(JSON.parse(row.metadata)).toEqual(before);
+  });
+
+  test('re-arm: a retired unpriced-series bell frees its forever-dedupe key, so the price removed again rings a fresh bell', async () => {
+    const key = `unpriced-series:${PARENT}`;
+    mockTables['scheduled_services as ss'] = [visit({ estimated_price: '99.00' })];
+    const row = note({ id: uid(555), category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST } });
+    mockTables.notifications = [row];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 1, byClass: { unpriced_series: 1 } });
+    expect(JSON.parse(row.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: key, reason: expect.stringContaining('price') } });
+    // The price is removed again; the watchdog raises the same stable key.
+    mockTables['scheduled_services as ss'] = [visit()];
+    const again = await NotificationService.notifyAdmin('alert', 'Recurring service has no price', 'body', {
+      bell: true, dedupeKey: key, metadata: { dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST },
+    });
+    expect(again.deduped).toBe(false);
+    expect(mockTables.notifications).toHaveLength(2);
+    const fresh = mockTables.notifications.find((r) => r.id !== row.id);
+    expect(fresh.read_at == null).toBe(true);
+    expect(JSON.parse(fresh.metadata).feed).toBeUndefined();
+  });
+
+  test('re-arm put-back: a change between the write and the final judgement restores the dedupe key with the bell', async () => {
+    const key = `unpriced-series:${PARENT}`;
+    mockTables['scheduled_services as ss'] = [visit({ estimated_price: '99.00' })];
+    const row = note({ id: uid(556), category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST } });
+    mockTables.notifications = [row];
+    let visitReads = 0;
+    mockHooks['scheduled_services as ss'] = () => { visitReads += 1; if (visitReads === 3) mockTables['scheduled_services as ss'] = [visit()]; };
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 0 });
+    expect(row.read_at).toBeNull();
+    expect(JSON.parse(row.metadata)).toEqual({ dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST });
   });
 
   test('a person who reads the bell in that window keeps their read: nothing is put back over it', async () => {
