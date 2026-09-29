@@ -403,32 +403,32 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
 }
 
 // Live re-service lane eligibility for a customer, through the EXISTING
-// mechanism — reservice-scheduler.reserviceLanesForCustomer, the same check
-// the composer's /reservice-link helper and the public /reservice page run
-// (server/routes/admin-communications.js). Deliberately has NO dependency
-// on GATE_SMS_REAL_ANSWERS (unlike fetchReserviceLanes below, which wraps
-// this for the draft-time facts block, which only ever renders inside a
-// real-answers facts block): the send-time re-service promise recheck
-// (reservicePromiseStillEligible) must revalidate an ALREADY-DRAFTED
-// promise's wording even if the gate were flipped off between drafting and
-// sending. Fail-closed everywhere: self-serve off, no customer, an inactive
-// or missing customer row, a lookup error, or a timeout all resolve to []
-// (not eligible).
+// mechanism — reservice-scheduler.loadEligibleReserviceLanes, the SAME
+// shared predicate the composer's /reservice-link helper resolves through
+// (Codex round-4 P1: one loader, not three parallel re-implementations of
+// "deleted_at IS NULL, active, has a reservice_token, has a live lane") —
+// so the FREE RE-SERVICE fact, the drafted offer, and what staff can
+// actually send from the composer never disagree. Deliberately has NO
+// dependency on GATE_SMS_REAL_ANSWERS (unlike fetchReserviceLanes below,
+// which wraps this for the draft-time facts block, which only ever renders
+// inside a real-answers facts block): the send-time re-service promise
+// recheck (reservicePromiseStillEligible) must revalidate an
+// ALREADY-DRAFTED promise's wording even if the gate were flipped off
+// between drafting and sending. Fail-closed everywhere: self-serve off, no
+// customer, an inactive/missing/tokenless/deleted customer row, a lookup
+// error, or a timeout all resolve to [] (not eligible) — loadEligibleReserviceLanes
+// itself never throws, but the timeout race below still guards against it
+// hanging.
 async function liveReserviceLanes(customerId) {
   if (!customerId) return [];
   let timer = null;
   try {
-    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('./reservice-scheduler');
+    const { reserviceSelfServeEnabled, loadEligibleReserviceLanes } = require('./reservice-scheduler');
     if (!reserviceSelfServeEnabled()) return [];
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
-    const lookup = (async () => {
-      const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate');
-      if (!row || row.active === false) return [];
-      return reserviceLanesForCustomer(row);
-    })();
-    const lanes = await Promise.race([lookup, timeout]);
+    const lanes = await Promise.race([loadEligibleReserviceLanes(customerId), timeout]);
     return Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [];
   } catch (err) {
     logger.warn(`[sms-shadow] re-service eligibility lookup failed (${err.message}); treating as not eligible`);
@@ -545,6 +545,15 @@ function eligibleReserviceLanes(factsBlock) {
   if (!line) return [];
   return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane}\\b`).test(line.slice(RESERVICE_FACT_LABEL.length).split('(')[0]));
 }
+// The lane(s) an SMS body EXPLICITLY names — shared by validateReserviceOffer
+// (the drafted reply) and reservicePromiseStillEligible (the actual outgoing
+// body, which a human may have edited after drafting) so the two never run
+// different named-lane logic on text that is supposed to mean the same thing.
+const RESERVICE_LANE_NAME_PATTERNS = [['pest', /\bpest\b/i], ['lawn', /\b(?:lawn|turf|grass)\b/i]];
+function namedReserviceLanesInText(text) {
+  const t = String(text || '');
+  return RESERVICE_LANE_NAME_PATTERNS.filter(([, rx]) => rx.test(t)).map(([lane]) => lane);
+}
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
@@ -555,7 +564,7 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   }
   // Codex r7: eligibility is per service line — a pest-only customer must
   // not be offered a free LAWN re-service (or the reverse).
-  const named = [['pest', /\bpest\b/i], ['lawn', /\b(?:lawn|turf|grass)\b/i]].filter(([, rx]) => rx.test(text)).map(([lane]) => lane);
+  const named = namedReserviceLanesInText(text);
   const wrong = named.filter((lane) => !lanes.includes(lane));
   if (wrong.length) {
     return { ok: false, violations: [`the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
@@ -570,15 +579,19 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     // names no service line in the reply, so the named-lane check above has
     // nothing to run against — a pest customer offered a lawn-only
     // entitlement (or the reverse) would sail through. Resolve the REPORTED
-    // issue's own lane from the customer's inbound text, via the SAME
-    // PEST_KEYWORDS/LAWN_KEYWORDS regexClassify sms-service-intent.js uses
-    // for lead intake (no model call, no drift between the two), and
-    // require it to intersect what FREE RE-SERVICE actually lists. An
-    // unresolved report (neither/both/ambiguous, or no inbound text at all)
-    // has no lane to check, so the reply itself must name a covered one.
-    const { regexClassify } = require('./sms-service-intent');
-    const reported = regexClassify(inboundMessage)?.interest;
-    const reportedLane = reported === 'pest' || reported === 'lawn' ? reported : null;
+    // issue's own lane from the customer's inbound text, via
+    // reservice-scheduler's OWN lane classifier (Codex round-4 P2) — NOT
+    // sms-service-intent.js's lead-intake regexClassify, which lumps
+    // termite/rodent/mosquito words into its 'pest' bucket and would let a
+    // termite report ride the free pest re-service link (that classifier's
+    // 'pest' bucket is for lead-intake ROUTING, not for the re-service
+    // mechanism's own pest/lawn lane split, which categorically excludes
+    // those specialties) — and require it to intersect what FREE RE-SERVICE
+    // actually lists. An unresolved report (neither/both/ambiguous, an
+    // excluded specialty, or no inbound text at all) has no lane to check,
+    // so the reply itself must name a covered one.
+    const { reportedReserviceLane } = require('./reservice-scheduler');
+    const reportedLane = reportedReserviceLane(inboundMessage);
     if (reportedLane && !lanes.includes(reportedLane)) {
       return { ok: false, violations: [`the reply offers a free re-service but the customer reported a ${reportedLane} issue and FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
     }
@@ -617,16 +630,28 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
 // so they never reach the auto-send claim/executor path at all.
 //
 // promisedLanes is what validateReserviceOffer resolved at DRAFT time
-// (persisted in input_snapshot, never re-derived from a possibly-edited
-// body) — re-deriving "which lane" from the OUTGOING text at send time
-// would let a human edit that drops the lane word dodge this check
-// entirely. Fails CLOSED: an outgoing body that still reads as a promise
-// but has no recorded lane, or no customer to check, blocks; the live
-// lookup (liveReserviceLanes) is itself fail-closed on any DB/timeout
-// error. Returns null when the body may go out, else a short reason.
+// (persisted in input_snapshot). Codex round-4 P2: a REVIEWED card's body can
+// be hand-edited before it sends — including swapping which lane the text
+// actually names (a pest promise edited to name lawn) — and this recheck
+// used to validate ONLY the stale draft-time snapshot, never noticing the
+// edit changed what is actually being promised. Fix: reuse
+// namedReserviceLanesInText (the SAME named-lane detector
+// validateReserviceOffer runs on the drafted reply) on the ACTUAL outgoing
+// body — when the edited text explicitly names a lane, THAT lane is what
+// must be live-eligible, not the snapshot. Generic wording (no lane named in
+// the outgoing text — e.g. an unedited generic promise, or an edit that
+// only changes phrasing) falls back to the draft-time snapshot, unchanged
+// from before. Fails CLOSED: an outgoing body that still reads as a promise
+// but resolves no lane to check (named or snapshot), or no customer to
+// check, blocks; the live lookup (liveReserviceLanes) is itself fail-closed
+// on any DB/timeout error. Returns null when the body may go out, else a
+// short reason.
 async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes }) {
-  if (!isReserviceOfferPromise(String(outgoingBody || ''))) return null;
-  const lanes = Array.isArray(promisedLanes) ? promisedLanes.filter((l) => l === 'pest' || l === 'lawn') : [];
+  const body = String(outgoingBody || '');
+  if (!isReserviceOfferPromise(body)) return null;
+  const snapshotLanes = Array.isArray(promisedLanes) ? promisedLanes.filter((l) => l === 'pest' || l === 'lawn') : [];
+  const namedLanes = namedReserviceLanesInText(body);
+  const lanes = namedLanes.length ? namedLanes : snapshotLanes;
   if (!lanes.length) return 'no promised re-service lane on record to revalidate';
   if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
   const live = await liveReserviceLanes(customerId);

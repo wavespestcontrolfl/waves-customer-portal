@@ -538,18 +538,17 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
   });
   function setup(lanes) {
     jest.resetModules();
-    jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => true, reserviceLanesForCustomer: jest.fn(async () => lanes) }));
+    // liveReserviceLanes (fetchReserviceLanes's underlying live-lane check)
+    // delegates entirely to reservice-scheduler.loadEligibleReserviceLanes
+    // (Codex round-4 P1 — the ONE shared "can we mint a re-service link"
+    // predicate) — mock that directly rather than modeling a fake customer
+    // row through models/db.
+    jest.doMock('../services/reservice-scheduler', () => ({
+      ...jest.requireActual('../services/reservice-scheduler'),
+      reserviceSelfServeEnabled: () => true,
+      loadEligibleReserviceLanes: jest.fn(async () => lanes),
+    }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ days: [] })) }));
-    // models/db is the REAL knex instance outside a live DATABASE_URL suite,
-    // so a live lookup fails closed to [] regardless of what lanes the
-    // reservice-scheduler mock above returns — which happens to still read
-    // as "not eligible" for the lanes:[] case, but silently masks an
-    // ELIGIBLE case. Mock it explicitly so the mocked reserviceLanesForCustomer
-    // above is actually reached.
-    jest.doMock('../models/db', () => {
-      const db = jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
-      return db;
-    });
     const drafter = require('../services/sms-shadow-drafter');
     jest.spyOn(drafter, 'fetchReserviceLanes'); // observed only; the real one runs
     return drafter;
@@ -561,8 +560,6 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
 
   test('NOT eligible: the offer is caught deterministically, then a revision that escalates instead converges', async () => {
     const drafter = setup([]);
-    const db = require('../models/db');
-    if (db.mockImplementation) db.mockImplementation(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
     const client = makeClient([
       { reply: 'So sorry — we will come back for a free re-service.', intended_actions: [], missing_info: null },
       { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
@@ -581,8 +578,6 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
   // sends the link.
   test('ELIGIBLE but no send_reservice_link action: caught deterministically, a revision that adds the action converges', async () => {
     const drafter = setup(['pest']);
-    const db = require('../models/db');
-    if (db.mockImplementation) db.mockImplementation(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
     const client = makeClient([
       { reply: 'So sorry — we will come back for a free pest re-service.', intended_actions: [], missing_info: null },
       { reply: 'So sorry — we will come back for a free pest re-service.', intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }], missing_info: null },
@@ -600,8 +595,6 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
   // entitlement must not cover a customer who reported ants.
   test('ELIGIBLE for lawn only, but the customer reported ants (pest): a generic offer is caught, a revision naming the right (ineligible) outcome converges', async () => {
     const drafter = setup(['lawn']);
-    const db = require('../models/db');
-    if (db.mockImplementation) db.mockImplementation(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
     const client = makeClient([
       // Generic — no lane named — but the inbound reports ants (pest), and
       // only lawn is eligible.

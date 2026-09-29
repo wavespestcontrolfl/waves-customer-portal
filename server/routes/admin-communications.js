@@ -2687,7 +2687,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
 //     owned by the public page — plan state can change after the text.
 router.post('/reservice-link', requireAdmin, async (req, res) => {
   try {
-    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
+    const { reserviceSelfServeEnabled, loadEligibleReserviceLanes } = require('../services/reservice-scheduler');
     if (!reserviceSelfServeEnabled()) {
       return res.status(404).json({ error: 'Self-serve re-service links are not enabled' });
     }
@@ -2740,38 +2740,37 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     // property the operator actually picked (codex P2 #3194). Remaining
     // siblings follow in a sorted (deterministic) order —
     // customerIdsForAccount has no ORDER BY of its own. First eligible row
-    // wins; none → nothing to insert.
+    // wins; none → nothing to insert. Eligibility itself is the ONE shared
+    // predicate (reservice-scheduler.loadEligibleReserviceLanes, Codex
+    // round-4 P1) — the SAME check the SMS FREE RE-SERVICE fact and the
+    // send-time promise recheck resolve through, so this route's behavior
+    // can never drift from what those report.
     const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
     const orderedIds = selectedId
       ? [selectedId, ...customerIds.filter((id) => id !== selectedId).sort()]
       : [...customerIds].sort();
-    let eligible = null;
+    let eligibleId = null;
     let lanes = [];
     for (const id of orderedIds) {
-      const row = await db('customers')
-        .where({ id })
-        .whereNull('deleted_at')
-        .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-      if (!row || row.active === false || !row.reservice_token) continue;
-      const rowLanes = await reserviceLanesForCustomer(row);
+      const rowLanes = await loadEligibleReserviceLanes(id);
       if (rowLanes.length) {
-        eligible = row;
+        eligibleId = id;
         lanes = rowLanes;
         break;
       }
     }
-    if (!eligible) {
+    if (!eligibleId) {
       return res.status(404).json({ error: 'No active recurring plan on this account — a free re-service needs an active plan' });
     }
 
     const { buildReserviceLink } = require('../services/reservice-link');
-    const { url, line } = await buildReserviceLink(eligible.id);
+    const { url, line } = await buildReserviceLink(eligibleId);
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
     res.json({
       url: stripSmsUrlScheme(url),
       line: stripSmsUrlScheme(line),
-      customerId: eligible.id,
+      customerId: eligibleId,
       lanes,
       firstName: recipientFirstName,
     });

@@ -199,6 +199,67 @@ async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = fa
   return ['pest', 'lawn'].filter((lane) => lanes.has(lane));
 }
 
+/**
+ * The ONE "can we mint/promise a re-service link for this customer" check
+ * (Codex round-4 P1, structural fix): a live, non-deleted customer row that
+ * carries a reservice_token AND has at least one live lane — the exact
+ * predicate the admin composer's /reservice-link route already applied per
+ * candidate row (deleted_at IS NULL, active !== false, reservice_token
+ * present, reserviceLanesForCustomer non-empty). Every other consumer that
+ * needs to know "what could staff actually send right now" — the SMS FREE
+ * RE-SERVICE fact (fetchReserviceLanes), the draft-time offer check
+ * (validateReserviceOffer, via the same fact), and the send-time promise
+ * recheck (reservicePromiseStillEligible) — resolves through this loader
+ * too, so none of them can drift from what the route (and buildReserviceLink,
+ * which mints from the same reservice_token) actually honors. An archived
+ * (deleted_at set), tokenless, or inactive customer is never eligible, same
+ * as a customer with no qualifying lane. Never throws: any lookup failure
+ * returns [] (fail-closed — a lookup error must read as "not eligible",
+ * never crash the caller).
+ */
+async function loadEligibleReserviceLanes(customerId, dbh = db) {
+  if (!customerId) return [];
+  try {
+    const row = await dbh('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
+    if (!row || row.active === false || !row.reservice_token) return [];
+    return reserviceLanesForCustomer(row, dbh);
+  } catch (err) {
+    logger.warn(`[reservice-scheduler] eligibility loader failed for customer ${customerId}: ${err.message}`);
+    return [];
+  }
+}
+
+// Free-text lane classification for a CUSTOMER-REPORTED issue — used by the
+// re-service SMS promise validators (sms-shadow-drafter.js
+// validateReserviceOffer / reservicePromiseStillEligible) to resolve which
+// lane an inbound or outgoing message's own wording is about. Deliberately
+// its OWN classifier, NOT sms-service-intent.js's lead-intake regexClassify:
+// that classifier lumps termite/rodent/mosquito species words into its
+// single 'pest' bucket for LEAD-INTAKE routing purposes, but those are
+// separate service families laneForCoverageRow above explicitly EXCLUDES
+// from the self-bookable pest lane — resolving "the termites are back" to
+// 'pest' here would let a termite (or rodent/mosquito) report ride the free
+// PEST re-service link (Codex round-4 P2). A report naming an excluded
+// specialty, or mentioning both lawn and pest words, resolves to null
+// (unresolved) rather than guessing.
+const EXCLUDED_RESERVICE_SPECIALTY_RE = /\b(termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?|shrubs?)\b|\btrees?\b/i;
+const RESERVICE_LAWN_WORDS_RE = /\b(lawn|turf|grass|weeds?|fert|fertilizer|fertilization|mow(?:ing)?|sod|yard)\b/i;
+const RESERVICE_PEST_WORDS_RE = /\b(pests?|bugs?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|fleas?|ticks?|wasps?|bees?|silverfish|scorpions?|exterminator)\b/i;
+
+function reportedReserviceLane(text) {
+  const s = String(text || '');
+  if (!s || EXCLUDED_RESERVICE_SPECIALTY_RE.test(s)) return null;
+  const hasLawn = RESERVICE_LAWN_WORDS_RE.test(s);
+  const hasPest = RESERVICE_PEST_WORDS_RE.test(s);
+  if (hasLawn && hasPest) return null; // ambiguous — let the reply itself name the lane
+  if (hasLawn) return 'lawn';
+  if (hasPest) return 'pest';
+  return null;
+}
+
 // Statuses that keep a callback "open" for the lane dedupe: booked
 // (pending/confirmed) AND live (en_route/on_site) — a tech already on the
 // way is the strongest possible reason not to book a second free visit in
@@ -318,6 +379,8 @@ module.exports = {
   laneForCoverageRow,
   laneForCallbackRow,
   reserviceLanesForCustomer,
+  loadEligibleReserviceLanes,
+  reportedReserviceLane,
   openReserviceCallbacks,
   openCallbackExistsForLane,
 };
