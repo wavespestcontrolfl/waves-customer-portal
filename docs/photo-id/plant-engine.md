@@ -357,78 +357,74 @@ bahiagrass.
 - **Output budget 4096**: Gemini's reasoning shares the output budget with
   the JSON answer, and at 2048 one lawn read came back cut off (a miss).
 
-## Referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-28)
+## Referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-29 — narrowed from 09-28)
 
-Owner ruling 2026-09-28 replaces the 09-26 "Gemini → GPT-6 Astra, no Claude"
+Owner ruling 2026-09-28 replaced the 09-26 "Gemini → GPT-6 Astra, no Claude"
 ruling **for the plant engine only** (the pest engine's `photoIdVision`
 ladder in `pest-engine.js` / `pest-identification.js` is unchanged): the
-plant engine's second opinion moves from `OPENAI_FRONTIER` (Astra) to
-`OPENAI_PLANT_ID` (Sol) — `TEXT_POLICIES.plantIdVision` — and a scope still
-unsure after that second opinion may get one more look from Claude Fable 5.1
-at effort `high` (`MODELS.ROUTES.plantIdReferee`) as a deciding vote. Ships
-DARK behind `GATE_PLANT_ID_REFEREE` (off unless exactly `'true'`); off, the
-ladder is byte-identical to Gemini → Sol with no third call.
+plant engine's second opinion moved from `OPENAI_FRONTIER` (Astra) to
+`OPENAI_PLANT_ID` (Sol) — `TEXT_POLICIES.plantIdVision`, unchanged by this
+narrowing. Owner ruling 2026-09-29 then narrowed the referee itself: Claude
+Fable 5.1 at effort `high` (`MODELS.ROUTES.plantIdReferee`) now breaks a
+plant-**NAME** tie only. Ships DARK behind `GATE_PLANT_ID_REFEREE` (off
+unless exactly `'true'`); off, the ladder is byte-identical to Gemini → Sol
+with no third call.
 
 `runReferee` runs between `runEscalation` and the leg-failure check, only
-when the run is not `photosUnusable`, the total budget (`PHOTO_ID_V2_TIMEOUT_MS`)
-has room for one more leg, and at least one scope that **triggered**
-escalation is still unsure after it: the providers disagreed, OpenAI never
-answered that scope (`blockPrettySure`), or the combined top confidence is
-still below `PHOTO_ID_ESCALATE_BELOW`. The referee answers ONE question per
-mode (`refereeCandidateScopes`): identify mode votes on the identity lanes
-the subject actually uses (`identifyLaneSlotsFor(subject)`: turf/weeds for a
-lawn, host for tree_shrub/palm); a workup votes on `conditions` only (when
-its own trigger fired) and never moves the host or turf its condition index
-and possibilities were built for. Never a slot the subject never populates (a
-whole-ladder Gemini miss trips `gemini_missed` on every identity slot
-uniformly, so an unfiltered check would draw a referee call for a lawn's
-turf/weeds on a tree_shrub request). One call covers every still-unsure
-scope at once — same photos, the same `ESCALATION_SCHEMA` output (so the
-existing resolvers/validators apply unchanged), with an appended "earlier
-reads" block (`buildRefereePrompt`) naming each still-unsure scope's first
-read and second opinion (slug + confidence) and asking the referee to look
-at the photos fresh, since either earlier read may be wrong. The condition
-scope's "first" read and index both follow a corrected-host rerun
-(`reconcileCorrectedHost`'s `conditionIndex`/`rerun.top`) when one happened,
-and its "second" read is OpenAI's own ranked top resolved against that same
-index — never the already-merged (Gemini+OpenAI) list's top, which can read
-as the wrong provider's pick.
+when **the run is `identify` mode**, the run is not `photosUnusable`, the
+total budget (`PHOTO_ID_V2_TIMEOUT_MS`) has room for one more leg, and at
+least one identity lane the subject actually uses
+(`identifyLaneSlotsFor(subject)`: turf/weeds for a lawn, host for
+tree_shrub/palm) came back **disagreed** (`identityFlags[slot].disagreed`
+with a `disagreementPair`). `identifyPlantV2` skips the call entirely when
+the combined prior read is already `blocked` (`namingGateFor(...).blocked`:
+unusable, conflicting `shows`, or `multiple_subjects`) — a blocked identify
+result discards every candidate, so the referee's vote could never surface
+either way.
 
-**Merge (2-of-3 majority, deterministic)**, per still-unsure scope, `R` =
-the referee's own top:
+**Never a referee call for**: a workup (problem check) of any subject —
+workups stay Gemini → Sol, always; a missing second opinion
+(`blockPrettySure` with no disagreement); or a low-confidence AGREEMENT
+(both providers named the same thing, just under-confident). Only a genuine
+two-provider NAME split draws the call.
 
-- A disagreement scope (`disagreementPair` = `[A, B]`) where `R` matches `A`
-  or `B` → that candidate goes first, `disagreed: false`; wording is capped
-  at `likely` — a referee-settled split never reads `pretty_sure`.
-- A scope with an undisputed combined top (no second opinion, or still low
-  confidence) where `R` agrees → the referee stands in for the missing
-  second opinion; order is kept, also capped at `likely`.
-- `R` is a third answer (agrees with neither, or disagrees with an
-  undisputed top) → the scope is marked EXPLICITLY unresolved
-  (`disagreed: true`, `blockPrettySure: true`, a fresh `disagreementPair` of
-  `[the scope's own pre-referee top, R]`) — the answer climbs or stays
-  uncertain exactly like today's two-provider disagreement. `R` is appended
-  AFTER the existing candidate/possibility list (deduped by identity/slug)
-  and marked `refereeOnly`; it can join the visible list but never displaces
-  the pre-referee top or reorders the rest. `buildWorkup` ranks
-  possibilities by referee standing before confidence: a settled majority
-  (`refereeMajority`) first, a referee-only pick last.
-- A scope with no earlier answer at all is never sent to the referee — one
-  vote can never be a 2-of-3 majority — and a merge that finds no earlier
-  top leaves the scope unchanged (`'unavailable'`).
+One call covers every disagreed lane at once — same photos, the same
+`ESCALATION_SCHEMA` output (so the existing resolvers/validators apply
+unchanged), with an appended "earlier reads" block (`buildRefereePrompt`)
+naming each disagreed lane's first (Gemini) read and second (Sol) opinion
+(slug + confidence) and asking the referee to look at the photos fresh,
+since either earlier read may be wrong. The second read is exactly
+`disagreementPair[1]` — `combineIdentity` already sets that pair to
+`[geminiTop, openaiTop]`, i.e. Sol's own ranked top for that slot, never a
+merged (Gemini+Sol) list's top.
+
+**Merge (tie-break only, deterministic)**, per disagreed lane, `R` = the
+referee's own top for that slot:
+
+- `R` matches side `A` or `B` of `disagreementPair` → that side goes first,
+  `disagreed: false`, `disagreementPair: null`; wording is capped at
+  `likely` — a referee-settled split never reads `pretty_sure`. A match on
+  an off-catalog side also requires the normalized `offCatalogName` to
+  match (case/whitespace-insensitive) — `sameCandidateKey` alone (shared
+  with the pest engine, never changed here) matches two off-catalog
+  candidates by `groupId` only, so two different off-catalog names in the
+  same group must not count as the same candidate for this tie-break.
+- Anything else — a third name, no referee answer for that slot at all,
+  schema-invalid, or unusable referee photos — leaves the lane **exactly**
+  as the escalation left it: no append, no re-rank, no partial credit.
+  `internal.referee.outcome[slot]` reads `'no_majority'` (a third name) or
+  `'unavailable'` (no usable referee answer for that slot).
 - The referee's own `quality`/`shows` verdict always joins the conservative
   photo-quality combine (`photoReadFor`), alongside every other leg's. When
   it says the photos are unusable (`quality.usable === false` or
-  `shows === 'nothing'`), its identity/condition votes are NOT merged at
-  all — every still-unsure scope is left exactly as it was — but the quality
-  read still counts.
-- Referee missing, schema-invalid, or out of budget → that scope's
-  escalation result stands unchanged.
+  `shows === 'nothing'`), its identity vote is not merged at all — every
+  disagreed lane is left exactly as it was — but the quality read still
+  counts.
 
 Diagnostics land in `internal` only (never `v2`): `internal.models.referee`
 (the leg, like every other model call) and `internal.referee: { triggered,
-scopes, outcome }` — `outcome` maps each scope the referee actually looked
-at to `'settled' | 'confirmed' | 'third_answer' | 'unavailable'`.
+scopes, outcome }` — `outcome` maps each identity lane the referee actually
+looked at to `'settled' | 'no_majority' | 'unavailable'`.
 
 ## What L4 must do
 

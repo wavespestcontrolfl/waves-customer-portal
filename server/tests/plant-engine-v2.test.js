@@ -1799,8 +1799,9 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
     });
   });
 
-  // ── referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-28) ────────────
-  describe('referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-28)', () => {
+  // ── referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-29: narrowed to
+  // plant-NAME tie-breaks, identify mode only) ────────────────────────────
+  describe('referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-29)', () => {
     const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
     const OK_QUALITY = { usable: true, issue: 'none' };
     const idItem = (slug, confidence) => ({
@@ -1812,9 +1813,9 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       else process.env.GATE_PLANT_ID_REFEREE = savedGate;
     });
 
-    // Same close-call setup as the photo-eval describe above: Gemini's own
-    // top (st-augustine, verified 0.95) vs. OpenAI's escalation top (bahia,
-    // 0.9) — a genuine disagreement, disagreementPair = [st-augustine, bahia].
+    // Gemini's own top (st-augustine, verified 0.95) vs. Sol's escalation
+    // top (bahia, 0.9) — a genuine disagreement, disagreementPair =
+    // [st-augustine, bahia].
     const candidatesLeg = { ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [idItem('fixture-st-augustine', 0.95), idItem('fixture-bahia', 0.30)], weeds: [], host: [] } };
     const verifyLeg = {
       ok: true,
@@ -1838,27 +1839,6 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       },
     });
 
-    test('Codex #5307 r2: a run with no usable vision leg fails BEFORE the billed referee call', async () => {
-      process.env.GATE_PLANT_ID_REFEREE = 'true';
-      dispatch.mockResolvedValue({ ok: false, reason: 'gemini_503' });
-      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
-      expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
-      const lanes = dispatch.mock.calls.map(([, payload]) => payload?.laneId);
-      expect(lanes).not.toContain('photo_id_v2_plant_referee');
-    });
-
-    test('Codex #5307 r6: a prior leg that judged the photos unusable skips the billed referee call', async () => {
-      process.env.GATE_PLANT_ID_REFEREE = 'true';
-      const unusableEscalation = {
-        ...disagreeingEscalationLeg,
-        json: { ...disagreeingEscalationLeg.json, quality: { usable: false, issue: 'blurry' } },
-      };
-      [candidatesLeg, verifyLeg, unusableEscalation, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
-      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
-      expect(dispatch).toHaveBeenCalledTimes(3);
-      expect(result.internal.referee.triggered).toBe(false);
-    });
-
     test('gate off: no 4th dispatch, result identical to the pre-referee disagreement outcome', async () => {
       delete process.env.GATE_PLANT_ID_REFEREE;
       [candidatesLeg, verifyLeg, disagreeingEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
@@ -1869,14 +1849,15 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.internal.models.referee).toBeNull();
     });
 
-    test('gate on + disagreement: the referee sides with one earlier read -> that answer first, not disagreed, wording capped at likely', async () => {
+    test('identify + disagreement: the referee sides with side A (Gemini) -> that answer first, not disagreed, wording capped at likely', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
       expect(dispatch).toHaveBeenCalledTimes(4);
+      expect(dispatch.mock.calls[3][1].laneId).toBe('photo_id_v2_plant_referee');
       // Settled on Gemini's own top — never pretty_sure, even though its own
       // confidence (0.95) clears the threshold, because a referee-settled
-      // split is capped (owner ruling 2026-09-28).
+      // split is capped (owner ruling 2026-09-28, unchanged 09-29).
       expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-st-augustine', wording: 'likely' });
       expect(result.internal.identity.turf.disagreed).toBe(false);
       expect(result.internal.referee.triggered).toBe(true);
@@ -1885,21 +1866,30 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.internal.models.referee).toMatchObject({ ok: true });
     });
 
-    test('gate on + referee third answer: the scope stays disagreed, and the third answer joins the candidate list', async () => {
+    test('identify + disagreement: the referee sides with side B (Sol) -> that answer first instead', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-bahia', 0.6)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result.internal.referee.outcome.turf).toBe('settled');
+      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-bahia', wording: 'likely' });
+      expect(result.internal.identity.turf.disagreed).toBe(false);
+    });
+
+    test('identify + disagreement + a third answer: the lane is left exactly as escalation left it, outcome no_majority', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-seashore-paspalum', 0.7)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
       expect(dispatch).toHaveBeenCalledTimes(4);
-      // Still no majority: the disagreement stands exactly as it did before
-      // the referee (group-level answer, never named).
+      // Still no majority — owner ruling 2026-09-29: the lane is left EXACTLY
+      // as the escalation left it (no append, unlike the removed 2-of-3
+      // shape's `refereeOnly` third candidate).
       expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
       expect(result.internal.identity.turf.disagreed).toBe(true);
-      expect(result.internal.referee.outcome.turf).toBe('third_answer');
-      // The referee's own read is visible in the candidate list (deduped).
-      expect(result.v2.candidates.map((c) => c.slug)).toContain('fixture-seashore-paspalum');
+      expect(result.internal.referee.outcome.turf).toBe('no_majority');
+      expect(result.v2.candidates.map((c) => c.slug)).not.toContain('fixture-seashore-paspalum');
     });
 
-    test('gate on + referee invalid/unavailable: the escalation result stands unchanged', async () => {
+    test('referee invalid/unavailable: the escalation result stands unchanged, outcome unavailable', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       [candidatesLeg, verifyLeg, disagreeingEscalationLeg, { ok: false, reason: 'provider_error' }].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
@@ -1911,38 +1901,105 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.internal.models.referee).toMatchObject({ ok: false });
     });
 
-    test('gate on + no second opinion (OpenAI left the scope empty): the referee confirming the Gemini top counts as answered', async () => {
+    test('identify + low-confidence AGREEMENT (no split): no referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      // Gemini and Sol both land on st-augustine (agreement) even though the
+      // combined confidence never climbs — an undisputed but unsure top.
+      // Owner ruling 2026-09-29: the referee never runs for an agreement,
+      // low-confidence or not.
+      const lowConfidenceAgreeingLeg = {
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', group_id: null, confidence: 0.4, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+        },
+      };
+      [candidatesLeg, verifyLeg, lowConfidenceAgreeingLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.identity.turf.disagreed).toBe(false);
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+    });
+
+    test('identify + missing second opinion (Sol left the scope empty): no referee call', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       const emptyTurfEscalationLeg = {
         ok: true,
         json: { quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [], observed_terms: [], conditions: [] },
       };
-      [candidatesLeg, verifyLeg, emptyTurfEscalationLeg, refereeTurf('fixture-st-augustine', 0.9)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      [candidatesLeg, verifyLeg, emptyTurfEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
-      expect(dispatch).toHaveBeenCalledTimes(4);
-      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-st-augustine', wording: 'likely' });
-      // Before the referee this scope read openai_answered: false
-      // (`blockPrettySure`, Codex #5186 r6 finding 2); the referee standing
-      // in for the missing second opinion flips it to true.
-      expect(result.internal.identity.turf.openai_answered).toBe(true);
-      expect(result.internal.referee.outcome.turf).toBe('confirmed');
-    });
-
-    test('gate on + nothing unsure after escalation: no referee call', async () => {
-      process.env.GATE_PLANT_ID_REFEREE = 'true';
-      const agreeingEscalationLeg = {
-        ok: true,
-        json: {
-          quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', group_id: null, confidence: 0.92, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
-        },
-      };
-      [candidatesLeg, verifyLeg, agreeingEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
-      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      // Only 3 dispatches (candidates, verify, escalation) — a missing
+      // second opinion (`blockPrettySure`, never `disagreed`) is explicitly
+      // excluded from the narrowed referee (owner ruling 2026-09-29).
       expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.identity.turf.openai_answered).toBe(false);
       expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
     });
 
-    test('finding 4: an unusable referee read never merges its votes, but its own quality still counts', async () => {
+    test('workup mode: even with a condition disagreement, no referee call (workups stay Gemini -> Sol)', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      // Call A: no identity candidates at all (verify is skipped).
+      dispatch.mockResolvedValueOnce({ ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [] } });
+      // Call C (conditions): Gemini's own top.
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: OK_QUALITY,
+          observed_terms: ['browning'],
+          candidates: [{ slug: 'fixture-drought', confidence: 0.5, elements_visible: [1], signs_visible: [], symptoms_visible: [] }],
+        },
+      });
+      // Call D (escalation): Sol disagrees.
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [], observed_terms: [], conditions: [{ slug: 'fixture-herbicide-injury', confidence: 0.5, elements_visible: [1], signs_visible: [], symptoms_visible: [] }],
+        },
+      });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'workup' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.conditions.disagreed).toBe(true);
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+    });
+
+    test('Codex #5307 r2: a run with no usable vision leg fails BEFORE the billed referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      dispatch.mockResolvedValue({ ok: false, reason: 'gemini_503' });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
+      const lanes = dispatch.mock.calls.map(([, payload]) => payload?.laneId);
+      expect(lanes).not.toContain('photo_id_v2_plant_referee');
+    });
+
+    test('Codex #5307 r6: a prior UNUSABLE read skips the billed referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const unusableEscalation = {
+        ...disagreeingEscalationLeg,
+        json: { ...disagreeingEscalationLeg.json, quality: { usable: false, issue: 'blurry' } },
+      };
+      [candidatesLeg, verifyLeg, unusableEscalation, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.referee.triggered).toBe(false);
+    });
+
+    test('finding 2: a prior BLOCKED (but still usable) read — multiple subjects — also skips the billed referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      // Identify results discard every candidate once the combined read is
+      // `blocked` (usable OR not), so the referee's vote could never
+      // surface either way (Codex #5307 r7 finding 2, widened from
+      // `.unusable` alone).
+      const blockedEscalation = {
+        ...disagreeingEscalationLeg,
+        json: { ...disagreeingEscalationLeg.json, quality: { usable: true, issue: 'multiple_subjects' } },
+      };
+      [candidatesLeg, verifyLeg, blockedEscalation, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.referee.triggered).toBe(false);
+    });
+
+    test('finding: an unusable referee read never merges its vote, but its own quality still counts', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       const unusableRefereeLeg = {
         ok: true,
@@ -1965,7 +2022,7 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.v2.answer).toMatchObject({ level: 'unknown' });
     });
 
-    test('finding 5: a tree_shrub run with a total Gemini miss and a confident Sol host makes NO referee call (turf/weeds never apply)', async () => {
+    test('finding 5: a tree_shrub run with a total Gemini miss and a confident Sol host makes NO referee call (turf/weeds never apply, and no disagreement)', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       const geminiMiss = { ok: false, reason: 'provider_error' };
       const solHostLeg = {
@@ -1976,48 +2033,24 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       };
       [geminiMiss, solHostLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'tree_shrub', mode: 'identify' });
-      // A whole-ladder Gemini miss trips `gemini_missed` on EVERY identity
-      // slot uniformly, including turf/weeds, which a tree_shrub run never
-      // populates at all. Old code checked every IDENTITY_SLOT regardless of
-      // subject and so called the referee a 3rd time for those irrelevant
-      // slots even though the one real slot (host) is fully settled.
       expect(dispatch).toHaveBeenCalledTimes(2);
       expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
       expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-citrus' });
     });
   });
 
-  // ── Codex #5307 r1 (referee round 1) ────────────────────────────────────
-  describe('Codex #5307 r1 referee regressions', () => {
-    const OK_QUALITY = { usable: true, issue: 'none' };
-
-    test('finding 1 (identity, non-disagreement path): a third answer never displaces the pre-referee top, and the scope becomes explicitly disagreed', () => {
-      const turfIndex = engine.turfIndexFor();
-      const existingTop = {
-        slug: 'fixture-bahia', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.4, entry: turfIndex.find((e) => e.slug === 'fixture-bahia'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
-      };
-      const escalation = {
-        identityFlags: {
-          turf: {
-            triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
-          },
-        },
-        slots: { turf: [existingTop] },
-      };
-      const refereeJson = { turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', group_id: null, confidence: 0.97 }] };
-      const merged = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, refereeJson);
-      expect(merged.outcome).toBe('third_answer');
-      // Old code ran the combined list through `dedupeCandidates`, which
-      // re-sorts by confidence — the referee's 0.97 would climb over the
-      // pre-referee top (0.4).
-      expect(merged.slots[0].slug).toBe('fixture-bahia');
-      expect(merged.slots.map((c) => c.slug)).toContain('fixture-st-augustine');
-      expect(merged.flags.disagreed).toBe(true);
-      expect(merged.flags.blockPrettySure).toBe(true);
-      expect(merged.flags.disagreementPair.map((c) => c.slug)).toEqual(['fixture-bahia', 'fixture-st-augustine']);
+  // ── Codex #5307 r7 referee regressions (narrowed design) ────────────────
+  describe('Codex #5307 r7 referee regressions (name tie-breaks only)', () => {
+    test('identify mode gets its own subject lanes; workup mode never gets any (owner ruling 2026-09-29)', () => {
+      expect(engine._test.refereeCandidateScopes({ subject: 'tree_shrub', mode: 'workup' })).toEqual([]);
+      expect(engine._test.refereeCandidateScopes({ subject: 'palm', mode: 'workup' })).toEqual([]);
+      expect(engine._test.refereeCandidateScopes({ subject: 'lawn', mode: 'workup' })).toEqual([]);
+      expect(engine._test.refereeCandidateScopes({ subject: 'tree_shrub', mode: 'identify' })).toEqual(['host']);
+      expect(engine._test.refereeCandidateScopes({ subject: 'palm', mode: 'identify' })).toEqual(['host']);
+      expect(engine._test.refereeCandidateScopes({ subject: 'lawn', mode: 'identify' })).toEqual(['turf', 'weeds']);
     });
 
-    test('finding 1 (identity, disagreement path): a genuine third answer keeps the ORIGINAL top first and rebuilds the pair around it', () => {
+    test('a third referee answer never settles the tie, and the lane comes back untouched (no append, unlike the removed 2-of-3 shape)', () => {
       const turfIndex = engine.turfIndexFor();
       const bahia = {
         slug: 'fixture-bahia', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.6, entry: turfIndex.find((e) => e.slug === 'fixture-bahia'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
@@ -2028,299 +2061,94 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       const escalation = {
         identityFlags: {
           turf: {
-            triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [bahia, stAug],
+            disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [bahia, stAug],
           },
         },
         slots: { turf: [bahia, stAug] },
       };
       const refereeJson = { turf: [{ slug: 'fixture-seashore-paspalum', off_catalog_name: '', group_id: null, confidence: 0.99 }] };
       const merged = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, refereeJson);
-      expect(merged.outcome).toBe('third_answer');
-      expect(merged.slots[0].slug).toBe('fixture-bahia');
-      expect(merged.slots.map((c) => c.slug)).toContain('fixture-seashore-paspalum');
-      expect(merged.flags.disagreementPair.map((c) => c.slug)).toEqual(['fixture-bahia', 'fixture-seashore-paspalum']);
+      expect(merged.outcome).toBe('no_majority');
+      expect(merged.slots).toBeUndefined();
+      expect(merged.flags).toBeUndefined();
     });
 
-    test('finding 1 (conditions, non-disagreement path): a third answer never displaces the pre-referee top', () => {
-      const conditionIndex = engine.conditionIndexFor('lawn', null);
-      const largePatch = engine.resolveConditionCandidate({
-        slug: 'fixture-large-patch', confidence: 0.4, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, conditionIndex);
-      const conditions = { possibilities: [largePatch], index: conditionIndex };
+    test('no referee answer for the slot at all -> unavailable, no merge', () => {
+      const turfIndex = engine.turfIndexFor();
+      const bahia = {
+        slug: 'fixture-bahia', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.6, entry: turfIndex.find((e) => e.slug === 'fixture-bahia'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
+      const stAug = {
+        slug: 'fixture-st-augustine', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.5, entry: turfIndex.find((e) => e.slug === 'fixture-st-augustine'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
       const escalation = {
-        conditionFlags: {
-          triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        identityFlags: {
+          turf: {
+            disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [bahia, stAug],
+          },
         },
-        possibilities: [largePatch],
-        conditionIndex,
-        json: { conditions: [{ slug: 'fixture-large-patch', confidence: 0.4, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+        slots: { turf: [bahia, stAug] },
       };
-      const refereeJson = { conditions: [{ slug: 'fixture-drought', confidence: 0.9, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
-      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
-      expect(merged.outcome).toBe('third_answer');
-      // Old code ran this through `dedupePossibilities`, which re-sorts by
-      // confidence — the referee's 0.9 would climb over the pre-referee top.
-      expect(merged.possibilities[0].slug).toBe('fixture-large-patch');
-      expect(merged.possibilities.map((p) => p.slug)).toContain('fixture-drought');
-      expect(merged.flags.disagreed).toBe(true);
-      expect(merged.flags.blockPrettySure).toBe(true);
+      const merged = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, { turf: [] });
+      expect(merged.outcome).toBe('unavailable');
     });
 
-    test('finding 1 (conditions, disagreement path): a genuine third answer keeps the original top first', () => {
-      const conditionIndex = engine.conditionIndexFor('lawn', null);
-      const largePatch = engine.resolveConditionCandidate({
-        slug: 'fixture-large-patch', confidence: 0.5, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, conditionIndex);
-      const drought = engine.resolveConditionCandidate({
-        slug: 'fixture-drought', confidence: 0.45, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, conditionIndex);
-      const conditions = { possibilities: [largePatch], index: conditionIndex };
+    test('finding 1: an off-catalog third name in the SAME group does not settle the tie (sameCandidateKey alone would have matched it)', () => {
+      const turfIndex = engine.turfIndexFor();
+      const zoysia = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Zoysia', group_id: 'turfgrasses', confidence: 0.6,
+      }, turfIndex);
+      const centipede = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Centipede', group_id: 'turfgrasses', confidence: 0.5,
+      }, turfIndex);
       const escalation = {
-        conditionFlags: {
-          triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        identityFlags: {
+          turf: {
+            disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [zoysia, centipede],
+          },
         },
-        possibilities: [largePatch, drought],
-        conditionIndex,
-        json: { conditions: [{ slug: 'fixture-drought', confidence: 0.45, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+        slots: { turf: [zoysia, centipede] },
       };
-      const refereeJson = { conditions: [{ slug: 'fixture-herbicide-injury', confidence: 0.95, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
-      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
-      expect(merged.outcome).toBe('third_answer');
-      expect(merged.possibilities[0].slug).toBe('fixture-large-patch');
-      expect(merged.possibilities.map((p) => p.slug)).toContain('fixture-herbicide-injury');
-      expect(merged.flags.disagreementPair.map((p) => p.slug)).toEqual(['fixture-large-patch', 'fixture-herbicide-injury']);
+      // "Bermuda" is off-catalog, same group ('turfgrasses') as both sides —
+      // `sameCandidateKey` alone (groupId only) would read this as matching
+      // EITHER side. It matches neither name, so it must not settle.
+      const thirdNameJson = { turf: [{ slug: '', off_catalog_name: 'Bermuda', group_id: 'turfgrasses', confidence: 0.9 }] };
+      const noMatch = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, thirdNameJson);
+      expect(noMatch.outcome).toBe('no_majority');
     });
 
-    test('pre-push audit on r1: after a corrected-host rerun, siding with the rerun\'s top settles the split', () => {
-      const conditionIndex = engine.conditionIndexFor('lawn', null);
-      const cond = (slug, confidence) => engine.resolveConditionCandidate({
-        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, conditionIndex);
-      // Gemini's first pass read large patch; the corrected-host rerun read
-      // drought; OpenAI read herbicide injury — a split the referee is shown
-      // as drought (first) vs herbicide injury (second).
-      const conditions = { possibilities: [cond('fixture-large-patch', 0.6)], index: conditionIndex };
+    test('finding 1: an off-catalog referee answer matching a side\'s NAME (case/whitespace-insensitive) settles it', () => {
+      const turfIndex = engine.turfIndexFor();
+      const zoysia = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Zoysia', group_id: 'turfgrasses', confidence: 0.6,
+      }, turfIndex);
+      const centipede = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Centipede', group_id: 'turfgrasses', confidence: 0.5,
+      }, turfIndex);
       const escalation = {
-        conditionFlags: {
-          triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        identityFlags: {
+          turf: {
+            disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [zoysia, centipede],
+          },
         },
-        possibilities: [cond('fixture-drought', 0.55), cond('fixture-herbicide-injury', 0.5)],
-        conditionIndex,
-        rerun: { top: cond('fixture-drought', 0.55) },
-        json: { conditions: [{ slug: 'fixture-herbicide-injury', confidence: 0.5, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+        slots: { turf: [zoysia, centipede] },
       };
-      const reads = engine._test.earlierReadsFor({ slots: { turf: [], weeds: [], host: [] } }, conditions, escalation, ['conditions']);
-      expect(reads[0].first.slug).toBe('fixture-drought');
-      const refereeJson = { conditions: [{ slug: 'fixture-drought', confidence: 0.8, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
-      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
-      expect(merged.outcome).toBe('settled');
-      expect(merged.possibilities[0].slug).toBe('fixture-drought');
-      expect(merged.flags.disagreed).toBe(false);
+      const matchingNameJson = { turf: [{ slug: '', off_catalog_name: '  zoysia  ', group_id: 'turfgrasses', confidence: 0.9 }] };
+      const matched = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, matchingNameJson);
+      expect(matched.outcome).toBe('settled');
+      expect(matched.slots[0]).toBe(zoysia);
+      expect(matched.flags.disagreed).toBe(false);
+      expect(matched.flags.disagreementPair).toBeNull();
     });
 
-    test('Codex #5307 r2: Sol\'s vote resolves against the index Sol was shown, never a rerun\'s expanded one', () => {
-      const expanded = engine.conditionIndexFor('lawn', null);
-      const shown = expanded.filter((e) => e.slug !== 'fixture-drought');
-      const cond = (slug, confidence, index) => engine.resolveConditionCandidate({
-        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, index);
-      // Gemini read large patch; Sol returned drought (not in the index it
-      // was shown) above herbicide injury; the referee picks drought.
-      const conditions = { possibilities: [cond('fixture-large-patch', 0.6, shown)], index: shown };
+    test('finding 4: earlierReadsFor\'s second read is exactly disagreementPair[1] — Sol\'s own ranked top for the slot (verified: already correct, made explicit)', () => {
+      const geminiTop = { slug: 'fixture-st-augustine', offCatalogName: null, confidence: 0.95 };
+      const solTop = { slug: 'fixture-bahia', offCatalogName: null, confidence: 0.9 };
       const escalation = {
-        conditionFlags: {
-          triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
-        },
-        possibilities: [cond('fixture-large-patch', 0.6, shown), cond('fixture-herbicide-injury', 0.5, shown)],
-        conditionIndex: expanded,
-        json: {
-          conditions: [
-            { slug: 'fixture-drought', confidence: 0.9, elements_visible: [], signs_visible: [], symptoms_visible: [] },
-            { slug: 'fixture-herbicide-injury', confidence: 0.5, elements_visible: [], signs_visible: [], symptoms_visible: [] },
-          ],
-        },
+        identityFlags: { turf: { disagreementPair: [geminiTop, solTop] } },
       };
-      const reads = engine._test.earlierReadsFor({ slots: { turf: [], weeds: [], host: [] } }, conditions, escalation, ['conditions']);
-      expect(reads[0].second.slug).toBe('fixture-herbicide-injury');
-      const refereeJson = { conditions: [{ slug: 'fixture-drought', confidence: 0.8, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
-      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
-      // Only the referee voted for drought: no majority, never "settled".
-      expect(merged.outcome).toBe('third_answer');
-      expect(merged.flags.disagreed).toBe(true);
-    });
-
-    test('Codex #5307 r2: a referee-settled majority stays first through buildWorkup, whatever the raw confidences', () => {
-      const index = engine.conditionIndexFor('lawn', null);
-      const cond = (slug, confidence) => engine.resolveConditionCandidate({
-        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, index);
-      // Gemini (large patch 0.5) and the referee agree; Sol read drought at 0.9.
-      const conditions = { possibilities: [cond('fixture-large-patch', 0.5)], index };
-      const escalation = {
-        conditionFlags: {
-          triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
-        },
-        possibilities: [cond('fixture-drought', 0.9), cond('fixture-large-patch', 0.5)],
-        conditionIndex: index,
-        json: { conditions: [{ slug: 'fixture-drought', confidence: 0.9, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
-      };
-      const refereeJson = { conditions: [{ slug: 'fixture-large-patch', confidence: 0.7, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
-      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
-      expect(merged.outcome).toBe('settled');
-      const workup = engine.buildWorkup({
-        subject: 'lawn', possibilities: merged.possibilities, conditionFlags: merged.flags, currentMonth: 6, photosCount: 1,
-      });
-      expect(workup.possibilities[0].slug).toBe('fixture-large-patch');
-    });
-
-    test('Codex #5307 r3: a referee-only third answer never leads the workup, however confident', () => {
-      const index = engine.conditionIndexFor('lawn', null);
-      const cond = (slug, confidence) => engine.resolveConditionCandidate({
-        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, index);
-      const conditions = { possibilities: [cond('fixture-large-patch', 0.4)], index };
-      const escalation = {
-        conditionFlags: {
-          triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
-        },
-        possibilities: [cond('fixture-large-patch', 0.4)],
-        conditionIndex: index,
-        json: { conditions: [{ slug: 'fixture-large-patch', confidence: 0.4, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
-      };
-      const refereeJson = { conditions: [{ slug: 'fixture-drought', confidence: 0.95, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
-      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
-      expect(merged.outcome).toBe('third_answer');
-      const workup = engine.buildWorkup({
-        subject: 'lawn', possibilities: merged.possibilities, conditionFlags: merged.flags, currentMonth: 6, photosCount: 1,
-      });
-      expect(workup.possibilities[0].slug).toBe('fixture-large-patch');
-      expect(workup.possibilities.map((p) => p.slug)).toContain('fixture-drought');
-    });
-
-    test('Codex #5307 r4: with three earlier possibilities, the referee\'s third answer still takes the last displayed slot', () => {
-      const index = engine.conditionIndexFor('lawn', null);
-      const approved = index.filter((e) => e.review?.status === 'owner_approved' || e.review?.owner_approved).map((e) => e.slug);
-      expect(approved.length).toBeGreaterThanOrEqual(4);
-      const [a, b, c, d] = approved;
-      const cond = (slug, confidence) => engine.resolveConditionCandidate({
-        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, index);
-      const earlier = [cond(a, 0.5), cond(b, 0.45), cond(c, 0.4)];
-      const conditions = { possibilities: earlier, index };
-      const escalation = {
-        conditionFlags: {
-          triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
-        },
-        possibilities: earlier,
-        conditionIndex: index,
-        json: { conditions: [{ slug: a, confidence: 0.5, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
-      };
-      const refereeJson = { conditions: [{ slug: d, confidence: 0.9, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
-      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
-      expect(merged.outcome).toBe('third_answer');
-      const workup = engine.buildWorkup({
-        subject: 'lawn', possibilities: merged.possibilities, conditionFlags: merged.flags, currentMonth: 6, photosCount: 1,
-      });
-      const shown = workup.possibilities.map((p) => p.slug);
-      expect(shown[0]).toBe(a);
-      expect(shown).toContain(d);
-      expect(shown).toHaveLength(3);
-    });
-
-    test('Codex #5307 r5: one question per mode — a workup referee votes on conditions only, never the host', () => {
-      const flags = (triggered) => ({
-        triggered, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
-      });
-      const escalation = {
-        identityFlags: { turf: flags(true), weeds: flags(true), host: flags(true) },
-        conditionFlags: flags(true),
-      };
-      const scopes = (subject, mode, esc = escalation) => engine._test.refereeCandidateScopes({ subject, mode }, esc);
-      expect(scopes('tree_shrub', 'workup')).toEqual(['conditions']);
-      expect(scopes('palm', 'workup')).toEqual(['conditions']);
-      expect(scopes('lawn', 'workup')).toEqual(['conditions']);
-      expect(scopes('tree_shrub', 'workup', { ...escalation, conditionFlags: flags(false) })).toEqual([]);
-      expect(scopes('tree_shrub', 'identify')).toEqual(['host']);
-      expect(scopes('lawn', 'identify')).toEqual(['turf', 'weeds']);
-    });
-
-    test('Codex #5307 r3: with no earlier answer the referee is never called, and a lone referee vote never confirms', async () => {
-      process.env.GATE_PLANT_ID_REFEREE = 'true';
-      try {
-        const emptyTriggered = {
-          triggered: true, disagreed: false, blockPrettySure: true, openaiAnswered: false, disagreementPair: null,
-        };
-        const escalation = {
-          slots: { turf: [], weeds: [], host: [] },
-          identityFlags: { turf: emptyTriggered, weeds: emptyTriggered, host: emptyTriggered },
-          possibilities: [],
-          conditionFlags: { ...emptyTriggered, triggered: false },
-        };
-        const run = { subject: 'lawn', mode: 'identify', deadline: Date.now() + 60000, images: [] };
-        dispatch.mockClear();
-        const out = await engine._test.runReferee(run, { slots: escalation.slots }, { possibilities: [], index: [] }, escalation);
-        expect(dispatch).not.toHaveBeenCalled();
-        expect(out.refereeInfo.triggered).toBe(false);
-        const index = engine.turfIndexFor();
-        const merged = engine._test.mergeIdentityScope({ indexes: { turf: index } }, 'turf', escalation, {
-          turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.99 }],
-        });
-        expect(merged.outcome).toBe('unavailable');
-      } finally {
-        delete process.env.GATE_PLANT_ID_REFEREE;
-      }
-    });
-
-    test('finding 2: earlierReadsFor\'s conditions "second" read is OpenAI\'s own ranked top, never the merged list\'s top', () => {
-      const conditionIndex = engine.conditionIndexFor('lawn', null);
-      const geminiTop = engine.resolveConditionCandidate({
-        slug: 'fixture-large-patch', confidence: 0.95, elements_visible: [], signs_visible: [], symptoms_visible: [],
-      }, conditionIndex);
-      const escalation = {
-        conditionFlags: {
-          triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
-        },
-        // The merged list's own top happens to be Gemini's (higher raw
-        // confidence) — old code read THIS as the "second opinion".
-        possibilities: [geminiTop],
-        conditionIndex,
-        json: { conditions: [{ slug: 'fixture-herbicide-injury', confidence: 0.6, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
-      };
-      const conditions = { possibilities: [geminiTop], index: conditionIndex };
-      const identity = { slots: { turf: [], weeds: [], host: [] } };
-      const reads = engine._test.earlierReadsFor(identity, conditions, escalation, ['conditions']);
-      const conditionsRead = reads.find((r) => r.scope === 'conditions');
-      expect(conditionsRead.second.slug).toBe('fixture-herbicide-injury');
-    });
-
-    test('finding 3: reconcileCorrectedHost carries the expanded index and its own top out as conditionIndex/rerun.top', async () => {
-      const run = {
-        subject: 'tree_shrub', mode: 'workup', images: [{ data: 'x', mimeType: 'image/jpeg' }], chips: {}, context: {}, deadline: Date.now() + 60000, legTimeoutMs: () => 5000,
-      };
-      const originalIndex = engine.conditionIndexFor('tree_shrub', 'fixture-sago-palm');
-      const conditions = { index: originalIndex, hostUnion: ['fixture-sago-palm'], possibilities: [] };
-      const hostCombined = { openaiTop: { entry: catalog.getEntry('fixture-citrus') } };
-      dispatch.mockResolvedValueOnce({
-        ok: true,
-        json: {
-          quality: OK_QUALITY, observed_terms: [], candidates: [{ slug: 'fixture-citrus-greening', confidence: 0.7, elements_visible: [1], signs_visible: [], symptoms_visible: [] }],
-        },
-      });
-      const result = await engine._test.reconcileCorrectedHost(run, conditions, hostCombined, { conditions: [] }, { possibilities: [] });
-      expect(result.rerun.host).toBe('fixture-citrus');
-      // The rerun's own top (against the EXPANDED index) — old code never
-      // carried this out at all.
-      expect(result.rerun.top?.slug).toBe('fixture-citrus-greening');
-      // `conditionIndex` is the expanded index the rerun actually used, not
-      // the narrower pre-rerun class/host index.
-      expect(result.conditionIndex.map((e) => e.slug)).toContain('fixture-citrus-greening');
-      expect(originalIndex.map((e) => e.slug)).not.toContain('fixture-citrus-greening');
-    });
-
-    test('finding 6: the PLANT_ID_REFEREE switchboard selector requires vision', () => {
-      const sb = require('../services/model-switchboard');
-      const selector = sb.SELECTORS.find((s) => s.key === 'PLANT_ID_REFEREE');
-      expect(selector.accepts.cap).toBe('vision');
+      const reads = engine._test.earlierReadsFor(escalation, ['turf']);
+      expect(reads).toEqual([{ scope: 'turf', first: { slug: 'fixture-st-augustine', confidence: 0.95 }, second: { slug: 'fixture-bahia', confidence: 0.9 } }]);
     });
 
     test('finding 7: describeIdentityRead reads the normalized offCatalogName field, not the raw off_catalog_name', () => {

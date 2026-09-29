@@ -354,6 +354,18 @@ const LANES = [
   // then the prior Gemini, and reaches ChatGPT's best vision model when both
   // miss OR Gemini is unsure / lists a runner-up of different risk. No Claude.
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: P('photoIdVision', 'fallback'), note: `Gemini-first (owner 2026-09-26); OpenAI takes a second look when Gemini misses, scores itself under PHOTO_ID_ESCALATE_BELOW, or lists a runner-up of different risk · ${SHARED_GEMINI_PIN}` }),
+  // Sequential ladder, same shape as pest_id above (owner ruling 2026-09-28,
+  // TEXT_POLICIES.plantIdVision): identifyPlantV2 tries Gemini, then reaches
+  // GPT-6 Sol (its own OPENAI_PLANT_ID selector) when a scope misses, scores
+  // low, or disagrees. L3 only — no route wires it in yet (Codex #5307 r7
+  // finding 3: this lane previously had zero entries, so the switchboard
+  // showed zero blast radius for both PLANT_ID_VISION legs).
+  L('plant_id', 'Plant/tree/shrub/palm photo ID (lawn + tree/shrub/palm)', 'photo-id-v2/plant-engine.js', 'multimodal', P('plantIdVision', 'primary'), P('plantIdVision', 'fallback'), { inbound: true, note: 'L3 only, no runtime caller yet; Gemini-first, Sol second opinion (owner ruling 2026-09-28)' }),
+  // The gated tie-break referee (owner ruling 2026-09-29, narrowed from
+  // 09-28): identify mode only, and only for an identity lane where Gemini
+  // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
+  // invalid, or out of budget leaves the escalation result unchanged.
+  L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE, dark; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
   // not a fan-out: Gemini live, then the prior Gemini model, then Claude

@@ -497,6 +497,18 @@ describe('model-switchboard', () => {
     // (Codex #5307 r1 finding 6).
     expect(selectors.find((s) => s.key === 'PLANT_ID_REFEREE').accepts.cap).toBe('vision');
     // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity — two lanes, two backups.
+    // Codex #5307 r7 finding 3: LANES had no entry for either the plant
+    // engine's own Gemini/Sol ladder or the gated referee, so the Models tab
+    // reported zero blast radius for GEMINI_VISION_BEST/OPENAI_PLANT_ID's
+    // plant use and for PLANT_ID_REFEREE entirely.
+    const plantId = lanes.find((l) => l.id === 'plant_id');
+    expect(plantId.primary.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.primary.model);
+    expect(plantId.fallback.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.fallback.model);
+    expect(plantId.inbound).toBe(true);
+    const plantReferee = lanes.find((l) => l.id === 'plant_id_referee');
+    expect(plantReferee.primary.model).toBe(MODELS.ROUTES.plantIdReferee.model);
+    expect(plantReferee.primary.selector).toBe('PLANT_ID_REFEREE');
+    expect(plantReferee.fallback).toBeNull();
     expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
     expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();

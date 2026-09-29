@@ -10,8 +10,11 @@
  * Claude, owner ruling 2026-09-26) — this file reads
  * `MODELS.TEXT_POLICIES.plantIdVision` instead (Gemini -> GPT-6 Sol, owner
  * ruling 2026-09-28, PLANT ENGINE ONLY), both read at call time, plus an
- * optional Claude Fable referee (`runReferee`, `GATE_PLANT_ID_REFEREE`) when
- * a scope is still unsure after the second opinion.
+ * optional Claude Fable referee (`runReferee`, `GATE_PLANT_ID_REFEREE`) that
+ * breaks a plant-NAME tie: identify mode only, and only for an identity lane
+ * where Gemini and Sol disagreed (owner ruling 2026-09-29, narrowed from the
+ * 09-28 shape — workups and low-confidence/missing-second-opinion scopes
+ * never draw a referee call).
  *
  * **L3 has no runtime caller.** No route, no gate, no storage — L4 wires
  * `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`.
@@ -1127,18 +1130,6 @@ function workupAnswerFor(namedAnswer, observedTerms, subject) {
  * round 2) — a disagreement or an unanswered trigger changes the
  * customer-facing answer, not just an admin-only log line.
  */
-/** The top three possibilities the workup displays. A referee-only third
- * answer ranks last (`refereeRank`) but still holds the last displayed slot
- * when it would otherwise fall off the list (Codex #5307 r4) — the same
- * reserved slot `appendRefereeCandidate` gives an identity third answer.
- * The leader and the order of the rest never change. */
-function displayedPossibilities(ranked) {
-  const shown = ranked.slice(0, 3);
-  const refereeOnly = ranked.find((p) => p.refereeOnly);
-  if (refereeOnly && shown.length === 3 && !shown.includes(refereeOnly)) shown[2] = refereeOnly;
-  return shown;
-}
-
 function buildWorkup(ctx) {
   const {
     subject, possibilities = [], currentMonth, chips = {}, photosCount = 0, quality = DEFAULT_QUALITY, conditionFlags = {},
@@ -1156,12 +1147,10 @@ function buildWorkup(ctx) {
   // needs_more_evidence tier. A subject-conflicted one (providers split
   // `plant` vs `damage`) names nothing but keeps its symptom workup.
   const gate = namingGateFor(quality);
-  // Referee rank before confidence (Codex #5307 r2 + r3): a settled 2-of-3
-  // majority always leads, a referee-only third answer always trails (one
-  // vote never outranks an earlier read), everything else by confidence.
   const allApprovedPossibilities = gate.unusable ? [] : possibilities.filter((p) => isApproved(p.entry))
-    .sort((a, b) => (refereeRank(a) - refereeRank(b)) || (b.confidence - a.confidence));
-  const approvedPossibilities = displayedPossibilities(allApprovedPossibilities)
+    .sort((a, b) => b.confidence - a.confidence);
+  const approvedPossibilities = allApprovedPossibilities
+    .slice(0, 3)
     .map((p) => ({ ...p, localCtx: { currentMonth, chips, context: ctx.context || {} } }));
 
   const { plant, weeds, accountTurf } = workupSubjectFor(ctx, gate.blocked);
@@ -1691,16 +1680,11 @@ function conditionTriggerReasons(conditions) {
   ]);
 }
 
-// `indexIndexOverride` (Codex #5307 r1 finding 3): the referee prompt, run
-// AFTER `reconcileCorrectedHost` may have expanded the condition index for a
-// corrected host, reads THAT index (`escalation.conditionIndex`) rather than
-// the narrower pre-rerun `conditions.index` Call D itself was shown.
-function escalationPromptArgs(run, identity, conditions, conditionIndexOverride = null) {
-  const conditionIndex = conditionIndexOverride || conditions.index;
+function escalationPromptArgs(run, identity, conditions) {
   return {
     subject: run.subject,
     ...run.indexTexts,
-    indexLines: conditionPromptArgs(run, conditionIndex).indexLines,
+    indexLines: conditionPromptArgs(run, conditions.index).indexLines,
     identityContext: identityContextFor(identity.catalogCandidates),
     conditionContext: conditions.possibilities.map((p) => buildConditionIndexLine(p.entry, p.sig)),
     chips: run.chips,
@@ -1719,11 +1703,6 @@ function escalationPromptArgs(run, identity, conditions, conditionIndexOverride 
  * OpenAI answered at all. */
 function scopeFlags(triggered, combined = {}) {
   return {
-    // Whether THIS scope's own trigger fired (Codex #5186 r6 P2's per-scope
-    // rule) — the referee (`runReferee`) only ever looks at a scope that
-    // triggered escalation in the first place, never a bystander scope
-    // OpenAI happened to answer or leave low.
-    triggered: !!triggered,
     disagreed: !!combined.disagreed,
     blockPrettySure: triggered && !combined.openaiAnswered,
     openaiAnswered: !!combined.openaiAnswered,
@@ -1740,36 +1719,22 @@ function scopeFlags(triggered, combined = {}) {
  * are dropped). */
 async function reconcileCorrectedHost(run, conditions, hostCombined, escalationJson, combined) {
   const correctedHost = hostCombined.openaiTop?.entry?.slug || null;
-  if (run.mode === 'identify' || !correctedHost || conditions.hostUnion.includes(correctedHost)) {
-    return { ...combined, rerun: null, conditionIndex: conditions.index };
-  }
+  if (run.mode === 'identify' || !correctedHost || conditions.hostUnion.includes(correctedHost)) return { ...combined, rerun: null };
   const index = conditionIndexForHosts(run.subject, [...conditions.hostUnion, correctedHost]);
   const remainingMs = run.deadline - Date.now();
   const result = remainingMs >= MIN_LEG_TIMEOUT_MS ? await callConditionSelection(run.images, conditionPromptArgs(run, index), remainingMs) : null;
   const json = validJson(result, 'conditions');
-  // The rerun's own top (against the EXPANDED index) is this scope's real
-  // "first" (Gemini) read from here on — the referee's `earlierReadsFor`
-  // reads it instead of the narrower pre-rerun top (Codex #5307 r1 finding
-  // 3), and `conditionIndex` (the index the rerun actually saw) rides along
-  // for the referee prompt and merge to use in place of `conditions.index`.
-  const rerunTop = json ? resolvePossibilities(json.candidates, index)[0] || null : null;
-  const rerun = {
-    host: correctedHost, result, quality: json?.quality || null, index, top: rerunTop,
-  };
+  const rerun = { host: correctedHost, result, quality: json?.quality || null };
   if (!json) {
     const classSlugs = new Set(conditionIndexFor(run.subject, null).map((e) => e.slug));
-    return {
-      ...combined, possibilities: combined.possibilities.filter((p) => classSlugs.has(p.slug)), rerun, conditionIndex: conditions.index,
-    };
+    return { ...combined, possibilities: combined.possibilities.filter((p) => classSlugs.has(p.slug)), rerun };
   }
   // OpenAI's picks are resolved against the index it was actually shown
   // (`conditions.index`) — a condition only the re-run's expanded index
   // lists, and element numbers OpenAI never saw for it, are not evidence
   // (pre-push audit on #5186 r1). New conditions come only from the re-run.
   const recombined = combinePossibilities(resolvePossibilities(json.candidates, index), escalationJson.conditions, conditions.index);
-  return {
-    ...recombined, observedTerms: json.observed_terms, rerun, conditionIndex: index,
-  };
+  return { ...recombined, observedTerms: json.observed_terms, rerun };
 }
 
 /** Call D (OpenAI escalation) when any scope's trigger fires, plus the
@@ -1791,7 +1756,6 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
     result: null,
     json: null,
     rerun: null,
-    conditionIndex: conditions.index,
     slots: identity.slots,
     possibilities: conditions.possibilities,
     observedTerms: conditions.observedTerms,
@@ -1811,7 +1775,6 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
     result,
     json,
     rerun: conditionCombined.rerun,
-    conditionIndex: conditionCombined.conditionIndex,
     slots: mapSlots((slot) => combined[slot].candidates),
     identityFlags: mapSlots((slot) => scopeFlags(slotTriggered[slot], combined[slot])),
     conditionFlags: scopeFlags(conditionsTriggered, conditionCombined),
@@ -1821,26 +1784,19 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
 }
 
 // ── referee (Claude Fable, GATE_PLANT_ID_REFEREE) ─────────────────────────
-// Owner ruling 2026-09-28, plant engine ONLY (the pest engine's
-// photoIdVision ladder is unchanged): when a scope that TRIGGERED the
-// Gemini -> OpenAI Sol escalation is still unsure after it, Claude Fable
-// gets one more look at the same photos as a deciding vote — ships dark
-// behind GATE_PLANT_ID_REFEREE, off by default.
+// Owner ruling 2026-09-29 (narrowed from 09-28): the referee breaks a plant
+// NAME tie only. It runs ONLY in identify mode, for an identity lane
+// (turf/weeds for a lawn, host for tree_shrub/palm — `identifyLaneSlotsFor`)
+// where Gemini and Sol's escalation DISAGREED. Workups (problem checks) stay
+// Gemini -> Sol with no referee; a missing second opinion or a low-confidence
+// AGREEMENT never draws a call either. Ships dark behind
+// GATE_PLANT_ID_REFEREE, off by default.
 
 // Fable thinks before answering; llm/call.js#dispatch already raises this to
 // the always-thinking floor (anthropicMaxTokens, services/llm/anthropic-wire.js)
 // for a model that needs it, so this is a generous starting cap, not the
 // final wire size.
 const REFEREE_MAX_TOKENS = 8192;
-
-/** A scope (an identity slot, or 'conditions') that TRIGGERED escalation and
- * is STILL unsure after it: the providers disagreed, OpenAI never answered
- * this scope (`blockPrettySure`), or the combined top confidence remains
- * below `escalateBelow()`. A scope that never triggered, or that the
- * escalation settled, is never a referee candidate. */
-function stillUnsureAfterEscalation(flags, topConfidence) {
-  return !!flags.triggered && (flags.disagreed || flags.blockPrettySure || (topConfidence ?? 0) < escalateBelow());
-}
 
 function describeIdentityRead(candidate) {
   if (!candidate) return null;
@@ -1850,244 +1806,109 @@ function describeIdentityRead(candidate) {
   // here always fell through to 'unknown' (Codex #5307 r1 finding 7).
   return { slug: candidate.slug || candidate.offCatalogName || 'unknown', confidence: candidate.confidence ?? 0 };
 }
-function describePossibilityRead(possibility) {
-  if (!possibility) return null;
-  return { slug: possibility.slug, confidence: possibility.confidence ?? 0 };
-}
 
-/** The condition scope's first (Gemini) read: a corrected-host rerun's own
- * top when one ran (against the expanded index), else Gemini's original
- * ranked top. The referee prompt (`earlierReadsFor`) and the 2-of-3 merge
- * (`mergeConditionsScope`) read this ONE value, so the referee is judged
- * against the vote it was actually shown (pre-push audit on Codex #5307 r1). */
-function openaiConditionVote(conditions, escalation) {
-  return resolvePossibilities(escalation.json?.conditions, conditions.index)[0] || null;
-}
-
-function firstConditionRead(conditions, escalation) {
-  return escalation.rerun?.top || [...conditions.possibilities].sort(byConfidenceDesc)[0] || null;
-}
-
-/** Per still-unsure scope: the first (Gemini) read and the second opinion
- * (OpenAI), when it answered this scope at all — the "Earlier reads" block
+/** Per disagreed identity slot: the first (Gemini) read and Sol's own
+ * ranked top for that slot. `combineIdentity` sets `disagreementPair` to
+ * `[geminiTop, openaiTop]`, so `[1]` already IS Sol's own top — never a
+ * merged (Gemini+OpenAI) list's top (Codex #5307 r7 finding 4, verified: no
+ * change needed, made explicit here). The "Earlier reads" block
  * `buildRefereePrompt` renders into the referee's prompt. */
-function earlierReadsFor(identity, conditions, escalation, unsureScopes) {
+function earlierReadsFor(escalation, unsureScopes) {
   return unsureScopes.map((scope) => {
-    if (scope === 'conditions') {
-      const flags = escalation.conditionFlags;
-      // A corrected-host rerun's own top (against the EXPANDED index) IS the
-      // "first" read from here on — the narrower pre-rerun Gemini top it
-      // replaced is stale (Codex #5307 r1 finding 3).
-      const first = firstConditionRead(conditions, escalation);
-      // OpenAI's own ranked top — never the merged (Gemini+OpenAI) list's
-      // top (Codex #5307 r1 finding 2) — resolved against the index OpenAI
-      // was actually SHOWN (`conditions.index`), never a corrected-host
-      // rerun's expanded one (Codex #5307 r2, the same rule
-      // reconcileCorrectedHost applies to OpenAI's picks).
-      const second = flags.openaiAnswered ? openaiConditionVote(conditions, escalation) : null;
-      return { scope, first: describePossibilityRead(first), second: describePossibilityRead(second) };
-    }
-    const flags = escalation.identityFlags[scope];
-    const first = identity.slots[scope][0] || null;
-    // A disagreement's own pair names OpenAI's real top directly; otherwise
-    // (agreed, or OpenAI silent) the combined slot's current top stands in
-    // when OpenAI did answer, and there is no second read to show when it
-    // did not (blockPrettySure).
-    const second = flags.disagreementPair ? flags.disagreementPair[1]
-      : (flags.openaiAnswered ? (escalation.slots[scope][0] || null) : null);
+    const [first, second] = escalation.identityFlags[scope].disagreementPair;
     return { scope, first: describeIdentityRead(first), second: describeIdentityRead(second) };
   });
 }
 
-// A settled/confirmed scope is never allowed back to `pretty_sure` (a
-// referee-settled split, or a referee standing in for a missing second
-// opinion, is still only one extra look, not certainty) — `blockPrettySure`
-// stays true even though the scope is no longer disagreed or unanswered.
+// A settled scope is never allowed back to `pretty_sure` (a referee-settled
+// split is still only one extra look, not certainty) — `blockPrettySure`
+// stays true even though the scope is no longer disagreed.
 const REFEREE_SETTLED_FLAGS = Object.freeze({
   disagreed: false, blockPrettySure: true, openaiAnswered: true, disagreementPair: null,
 });
 
-/** Append the referee's own pick after the pre-referee list — NEVER through
- * `dedupeCandidates`/`dedupePossibilities`, which re-rank the whole list by
- * confidence and so could let a confident third answer climb over the real
- * (pre-referee) top (Codex #5307 r1 finding 1). Already present (matched by
- * identity/slug) leaves the list untouched; otherwise it is appended, and
- * `cap` is kept by dropping the CURRENT list's own tail first — which entry
- * leads, and the order of the ones kept, never changes. */
-/** Sort key for a possibility's referee standing (0 majority, 1 ordinary,
- * 2 referee-only) — `buildWorkup` ranks by this before confidence. */
-function refereeRank(p) {
-  if (p.refereeMajority) return 0;
-  return p.refereeOnly ? 2 : 1;
+/** `sameCandidateKey` (shared with the pest engine — never changed here)
+ * matches two off-catalog candidates by `groupId` alone, so two different
+ * off-catalog names in the same group (e.g. "Zoysia" vs "Centipede", both
+ * off-catalog turf guesses) count as the same candidate. The referee's A/B
+ * tie-break needs a REAL name match for an off-catalog side, so this local
+ * helper adds a normalized `offCatalogName` compare on top of
+ * `sameCandidateKey` (Codex #5307 r7 finding 1). */
+function normalizedOffCatalogName(candidate) {
+  return String(candidate?.offCatalogName || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+function refereeMatchesSide(candidate, side) {
+  if (!sameCandidateKey(candidate, side)) return false;
+  if (candidate?.slug || side?.slug) return true;
+  return normalizedOffCatalogName(candidate) === normalizedOffCatalogName(side);
 }
 
-function appendRefereeCandidate(existing, extra, cap = 3) {
-  if (!extra || existing.some((c) => sameCandidateKey(c, extra))) return existing;
-  return [...existing.slice(0, Math.max(0, cap - 1)), { ...extra, refereeOnly: true }];
-}
-function appendRefereePossibility(existing, extra) {
-  if (!extra || existing.some((p) => p.slug === extra.slug)) return existing;
-  return [...existing, { ...extra, refereeOnly: true }];
-}
-
-/** One identity slot's referee merge (2-of-3 majority, deterministic): `R`
- * is the referee's own top, resolved against this slot's own index. */
+/** One identity slot's referee tie-break (owner ruling 2026-09-29, narrowed
+ * from the 09-28 2-of-3 shape): `R` is the referee's own top, resolved
+ * against this slot's own index. `R` matching side A or B of the
+ * disagreement settles it — that side goes first, `disagreed: false`,
+ * `disagreementPair: null`, wording capped at `likely`. Anything else (a
+ * third name, or no referee answer for this slot at all) leaves the lane
+ * EXACTLY as the escalation left it — the referee never adds a third
+ * candidate and never confirms an undisputed top (only disagreed lanes ever
+ * reach this function). */
 function mergeIdentityScope(run, slot, escalation, refereeJson) {
   const flags = escalation.identityFlags[slot];
   const refereeCandidates = dedupeCandidates((refereeJson?.[slot] || []).map((r) => resolveIdentityCandidate(r, run.indexes[slot])));
   const topReferee = refereeCandidates[0] || null;
   if (!topReferee) return { outcome: 'unavailable' };
-  const top = escalation.slots[slot][0] || null;
-  if (flags.disagreementPair) {
-    const [a, b] = flags.disagreementPair;
-    const matched = sameCandidateKey(topReferee, a) ? a : (sameCandidateKey(topReferee, b) ? b : null);
-    if (matched) {
-      const rest = escalation.slots[slot].filter((c) => !sameCandidateKey(c, matched));
-      return { outcome: 'settled', slots: [matched, ...rest].slice(0, 3), flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
-    }
-    // A genuine third answer: still no majority — but the disagreement now
-    // sits between this scope's OWN current top and the referee's read
-    // (never the original pair, which the referee has already rejected on
-    // both sides), marked explicitly unresolved so the answer climbs or
-    // stays uncertain exactly like today's two-provider disagreement (Codex
-    // #5307 r1 finding 1). The referee pick only joins the visible list.
-    return {
-      outcome: 'third_answer',
-      slots: appendRefereeCandidate(escalation.slots[slot], topReferee),
-      flags: {
-        ...flags, disagreed: true, blockPrettySure: true, disagreementPair: [top, topReferee],
-      },
-    };
-  }
-  // No disagreement — this scope is a referee candidate only because OpenAI
-  // never answered it (blockPrettySure) or its confidence is still low.
-  // No earlier answer at all: the referee's lone vote is never a majority
-  // (Codex #5307 r3) — the scope stays as it was.
-  if (!top) return { outcome: 'unavailable' };
-  if (sameCandidateKey(topReferee, top)) {
-    return { outcome: 'confirmed', slots: escalation.slots[slot], flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
-  }
-  // The referee disagrees with the (undisputed, single earlier-read) top:
-  // that is a fresh disagreement of its own, not the answer moving to the
-  // referee's pick (Codex #5307 r1 finding 1).
-  return {
-    outcome: 'third_answer',
-    slots: appendRefereeCandidate(escalation.slots[slot], topReferee),
-    flags: {
-      ...flags, disagreed: true, blockPrettySure: true, disagreementPair: [top, topReferee],
-    },
-  };
-}
-
-/** The condition scope's referee merge — the same 2-of-3 rule on
- * `possibilities`. Conditions have no stored disagreement pair
- * (`combinePossibilities` never keeps one), so a disagreed scope's pair is
- * rebuilt here from each provider's own ranked top, exactly as
- * `combinePossibilities` itself compares them. */
-function mergeConditionsScope(conditions, escalation, refereeJson) {
-  const flags = escalation.conditionFlags;
-  // The index the referee's OWN prompt was actually built from (a
-  // corrected-host rerun's expanded index, when one happened) — never the
-  // narrower pre-rerun `conditions.index` (Codex #5307 r1 finding 3).
-  const index = escalation.conditionIndex || conditions.index;
-  const refereePossibilities = resolvePossibilities(refereeJson?.conditions, index);
-  const topReferee = refereePossibilities[0] || null;
-  if (!topReferee) return { outcome: 'unavailable' };
-  const top = escalation.possibilities[0] || null;
-  if (flags.disagreed) {
-    const geminiTop = firstConditionRead(conditions, escalation);
-    const openaiTop = openaiConditionVote(conditions, escalation);
-    const matched = geminiTop && topReferee.slug === geminiTop.slug ? geminiTop
-      : (openaiTop && topReferee.slug === openaiTop.slug ? openaiTop : null);
-    if (matched) {
-      const rest = escalation.possibilities.filter((p) => p.slug !== matched.slug);
-      // `refereeMajority` keeps the 2-of-3 winner first through
-      // `buildWorkup`'s confidence sort (Codex #5307 r2): a settled scope has
-      // no uncertainty guard left, so a re-sort would name the losing vote.
-      return {
-        outcome: 'settled', possibilities: [{ ...matched, refereeMajority: true }, ...rest], flags: { ...flags, ...REFEREE_SETTLED_FLAGS },
-      };
-    }
-    // Still no majority — the disagreement now sits between this scope's
-    // OWN current top and the referee's read, marked explicitly unresolved
-    // (Codex #5307 r1 finding 1), and the referee's pick only joins the
-    // visible list (never re-ranked by confidence over the pre-referee top).
-    return {
-      outcome: 'third_answer',
-      possibilities: appendRefereePossibility(escalation.possibilities, topReferee),
-      flags: {
-        ...flags, disagreed: true, blockPrettySure: true, disagreementPair: [top, topReferee],
-      },
-    };
-  }
-  // No earlier answer: one vote is not a majority (Codex #5307 r3).
-  if (!top) return { outcome: 'unavailable' };
-  if (topReferee.slug === top.slug) {
-    return { outcome: 'confirmed', possibilities: escalation.possibilities, flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
-  }
-  // The referee disagrees with the (undisputed, single earlier-read) top: a
-  // fresh disagreement of its own, never the answer moving to the referee's
-  // pick (Codex #5307 r1 finding 1).
-  return {
-    outcome: 'third_answer',
-    possibilities: appendRefereePossibility(escalation.possibilities, topReferee),
-    flags: {
-      ...flags, disagreed: true, blockPrettySure: true, disagreementPair: [top, topReferee],
-    },
-  };
+  const [a, b] = flags.disagreementPair;
+  const matched = refereeMatchesSide(topReferee, a) ? a : (refereeMatchesSide(topReferee, b) ? b : null);
+  if (!matched) return { outcome: 'no_majority' };
+  const rest = escalation.slots[slot].filter((c) => !sameCandidateKey(c, matched));
+  return { outcome: 'settled', slots: [matched, ...rest].slice(0, 3), flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
 }
 
 const NO_REFEREE_INFO = Object.freeze({
   triggered: false, result: null, json: null, scopes: [], outcomes: {},
 });
 
-/** The scopes the referee may vote on — one question per mode (Codex #5307
- * r5): identify mode's own identity lanes, or a workup's conditions scope
- * when its trigger fired. */
-function refereeCandidateScopes(run, escalation) {
-  if (run.mode === 'identify') return identifyLaneSlotsFor(run.subject);
-  return escalation.conditionFlags.triggered ? ['conditions'] : [];
+/** The identity slots the referee may ever be asked about — identify mode's
+ * own lane slots (turf/weeds for a lawn, host for tree_shrub/palm), the same
+ * scope `identifyLaneSlotsFor` draws the final lane from. A workup (problem
+ * check) is never a referee candidate (owner ruling 2026-09-29: the referee
+ * breaks a plant-NAME tie only, and only in identify mode). */
+function refereeCandidateScopes(run) {
+  return run.mode === 'identify' ? identifyLaneSlotsFor(run.subject) : [];
 }
 
 /** Step between `runEscalation` and `legFailureReason` (owner ruling
- * 2026-09-28). Returns `escalation` unchanged (plus a `refereeInfo`
- * diagnostic for `internalFor`) when the gate is off, the run is
- * `photosUnusable`, the budget has no room left, or nothing that triggered
- * escalation is still unsure. Otherwise ONE call covers every still-unsure
- * scope, and a scope the referee could not answer (missing/invalid/timeout)
- * leaves that scope's escalation result exactly as it was. */
+ * 2026-09-29, narrowed from 09-28's 2-of-3 shape). Returns `escalation`
+ * unchanged (plus a `refereeInfo` diagnostic for `internalFor`) when the
+ * gate is off, the run is not `identify`, the budget has no room left, or no
+ * identity lane the subject actually uses came back disagreed. Otherwise ONE
+ * call covers every disagreed lane, and a lane the referee did not settle (a
+ * third name, no answer, schema-invalid, or unusable referee photos) leaves
+ * that lane's escalation result exactly as it was — `identifyPlantV2` skips
+ * this call entirely once the combined prior read is already `blocked`
+ * (Codex #5307 r7 finding 2: a blocked identify result discards every
+ * candidate, so the referee's vote could never surface). */
 async function runReferee(run, identity, conditions, escalation, { skip = false } = {}) {
   const unchanged = { ...escalation, refereeInfo: NO_REFEREE_INFO };
   if (skip || !plantIdRefereeLive()) return unchanged;
   const remainingMs = run.deadline - Date.now();
   if (remainingMs < MIN_LEG_TIMEOUT_MS) return unchanged;
 
-  // Only the identity slots this SUBJECT can actually answer from — turf and
-  // weeds for a lawn, host for tree_shrub/palm — never a slot the subject
-  // never populates. A Gemini-wide miss trips `gemini_missed` on every
-  // identity slot uniformly (`identitySlotTriggers`), including a slot the
-  // subject can't use at all, so checking every IDENTITY_SLOT here made an
-  // irrelevant slot look "still unsure" and drew an unneeded referee call
-  // (Codex #5307 r1 finding 5).
-  // One question per mode (Codex #5307 r5): identify mode's question is the
-  // plant, so the referee votes on identity slots only; a workup's question
-  // is the problem, so it votes on conditions only (when that scope's own
-  // trigger fired) and never moves the host/turf a workup's condition index
-  // and possibilities were built for — a referee-changed host would leave
-  // them assessed against the wrong plant.
-  const candidateScopes = refereeCandidateScopes(run, escalation);
-
-  // A scope with no earlier answer at all can never reach a 2-of-3 majority
-  // (Codex #5307 r3), so it never draws the billed referee call either.
-  const unsureScopes = candidateScopes.filter((scope) => (scope === 'conditions'
-    ? !!escalation.possibilities[0] && stillUnsureAfterEscalation(escalation.conditionFlags, escalation.possibilities[0].confidence)
-    : !!escalation.slots[scope][0] && stillUnsureAfterEscalation(escalation.identityFlags[scope], escalation.slots[scope][0].confidence)));
+  // Identify mode's own identity lanes only — never a slot the subject never
+  // populates (a whole-ladder Gemini miss trips `gemini_missed` on every
+  // identity slot uniformly), and never a workup's conditions scope (workups
+  // stay Gemini -> Sol, no referee, owner ruling 2026-09-29).
+  const candidateScopes = refereeCandidateScopes(run);
+  const unsureScopes = candidateScopes.filter((scope) => {
+    const flags = escalation.identityFlags[scope];
+    return flags.disagreed && !!flags.disagreementPair;
+  });
   if (!unsureScopes.length) return unchanged;
 
-  const promptArgs = escalationPromptArgs(run, identity, conditions, escalation.conditionIndex);
-  const earlierReads = earlierReadsFor(identity, conditions, escalation, unsureScopes);
+  const promptArgs = escalationPromptArgs(run, identity, conditions);
+  const earlierReads = earlierReadsFor(escalation, unsureScopes);
   const system = `${buildEscalationPrompt(promptArgs)}\n\n${buildRefereePrompt(earlierReads)}`;
-  const result = await callWithProvider(MODELS.ROUTES?.plantIdReferee, {
+  const result = await callWithProvider(MODELS.ROUTES.plantIdReferee, {
     system,
     text: 'Identify and assess these photos fresh, as the deciding vote.',
     images: run.images,
@@ -2108,43 +1929,25 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
   }
   // The referee's own photo-quality verdict feeds `photoReadFor`'s
   // conservative combine either way (see below); when it says the photos
-  // are unusable, its identity/condition votes are not trustworthy evidence
-  // either, so every still-unsure scope is left exactly as it was (Codex
-  // #5307 r1 finding 4).
+  // are unusable, its identity vote is not trustworthy evidence either, so
+  // every disagreed lane is left exactly as it was (no merge).
   const refereePhotosUnusable = json.quality?.usable === false || json.shows === 'nothing';
   if (refereePhotosUnusable) {
     for (const scope of unsureScopes) refereeInfo.outcomes[scope] = 'unavailable';
     return { ...escalation, refereeInfo };
   }
 
-  return applyRefereeMerges(run, conditions, escalation, json, unsureScopes, refereeInfo);
-}
-
-/** The per-scope merge loop, split out of `runReferee` (complexity):
- * applies `mergeIdentityScope`/`mergeConditionsScope` for each still-unsure
- * scope and folds an 'unavailable' outcome into `refereeInfo` without
- * touching that scope's escalation result. */
-function applyRefereeMerges(run, conditions, escalation, refereeJson, unsureScopes, refereeInfo) {
-  let { slots, identityFlags, possibilities, conditionFlags } = escalation;
+  let { slots, identityFlags } = escalation;
   for (const scope of unsureScopes) {
-    if (scope === 'conditions') {
-      const merged = mergeConditionsScope(conditions, escalation, refereeJson);
-      refereeInfo.outcomes.conditions = merged.outcome;
-      if (merged.outcome !== 'unavailable') {
-        possibilities = merged.possibilities;
-        conditionFlags = merged.flags;
-      }
-    } else {
-      const merged = mergeIdentityScope(run, scope, escalation, refereeJson);
-      refereeInfo.outcomes[scope] = merged.outcome;
-      if (merged.outcome !== 'unavailable') {
-        slots = { ...slots, [scope]: merged.slots };
-        identityFlags = { ...identityFlags, [scope]: merged.flags };
-      }
+    const merged = mergeIdentityScope(run, scope, escalation, json);
+    refereeInfo.outcomes[scope] = merged.outcome;
+    if (merged.outcome === 'settled') {
+      slots = { ...slots, [scope]: merged.slots };
+      identityFlags = { ...identityFlags, [scope]: merged.flags };
     }
   }
   return {
-    ...escalation, slots, identityFlags, possibilities, conditionFlags, refereeInfo,
+    ...escalation, slots, identityFlags, refereeInfo,
   };
 }
 
@@ -2275,9 +2078,9 @@ function internalFor(run, { identity, conditions, escalation }, lane) {
     },
     escalation_triggered: escalation.all.length > 0,
     escalation_reasons: escalation.all,
-    // Admin-only, never merged into `v2` (owner ruling 2026-09-28):
-    // `outcome` keys are the scopes the referee actually looked at
-    // ('settled' | 'confirmed' | 'third_answer' | 'unavailable').
+    // Admin-only, never merged into `v2` (owner ruling 2026-09-29):
+    // `outcome` keys are the identity lanes the referee actually looked at
+    // ('settled' | 'no_majority' | 'unavailable').
     referee: {
       triggered: refereeInfo.triggered,
       scopes: refereeInfo.scopes,
@@ -2328,10 +2131,12 @@ async function identifyPlantV2({
   const failure = legFailureReason(run, identity, conditions, escalation);
   if (failure) return { ok: false, reason: failure };
   // Every prior leg's own photo-quality verdict, combined exactly as the
-  // final answer's will be: a read already unusable can never surface the
-  // referee's answer, so it never draws the billed call (Codex #5307 r6).
-  const priorUnusable = namingGateFor(photoReadFor(identity, conditions, escalation)).unusable;
-  const refereed = await runReferee(run, identity, conditions, escalation, { skip: photosUnusable || priorUnusable });
+  // final answer's will be: a `blocked` read (unusable, OR the providers
+  // disagreed on what the photos show, OR multiple subjects) discards every
+  // identify candidate either way, so it never draws the billed referee call
+  // (Codex #5307 r6, widened by r7 finding 2 from `.unusable` alone).
+  const priorBlocked = namingGateFor(photoReadFor(identity, conditions, escalation)).blocked;
+  const refereed = await runReferee(run, identity, conditions, escalation, { skip: photosUnusable || priorBlocked });
 
   const quality = photoReadFor(identity, conditions, refereed);
   const lane = mode === 'identify' ? identifyLaneFor(subject, refereed.slots, refereed.identityFlags) : null;
@@ -2414,13 +2219,8 @@ module.exports = {
     SCHEMA_INVALID_REASON,
     runReferee,
     mergeIdentityScope,
-    mergeConditionsScope,
-    appendRefereeCandidate,
-    appendRefereePossibility,
-    stillUnsureAfterEscalation,
     refereeCandidateScopes,
     earlierReadsFor,
     describeIdentityRead,
-    reconcileCorrectedHost,
   },
 };

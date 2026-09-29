@@ -2668,3 +2668,35 @@ timed-out referee leaves the escalation result unchanged. Diagnostics
 (`internal.models.referee`, `internal.referee: { triggered, scopes,
 outcome }`) are admin-only, never merged into `v2`. Full detail:
 `docs/photo-id/plant-engine.md`'s "Referee" section.
+
+## 2026-09-29 — Plant photo ID referee narrowed to name tie-breaks
+
+Owner narrowed the plant referee (`GATE_PLANT_ID_REFEREE`, dark, see the
+2026-09-28 entry above) to plant-NAME tie-breaks in identify mode.
+
+It now fires ONLY when the run is in `identify` mode and ONLY for an
+identity lane the subject actually uses (turf/weeds for a lawn, host for
+tree_shrub/palm) where Gemini and Sol's escalation DISAGREED
+(`identityFlags[slot].disagreed` with a `disagreementPair`). A workup
+(problem check), a missing second opinion, and a low-confidence AGREEMENT no
+longer draw a referee call at all — the removed 09-28 shape's "still unsure"
+trigger (disagreed, no second opinion, or still below
+`PHOTO_ID_ESCALATE_BELOW`) and its conditions-scope vote are gone.
+
+The merge is a tie-break only, never a 2-of-3 majority: the referee's own
+top for that slot either matches side A or side B of the disagreement
+(that side goes first, `disagreed: false`, `disagreementPair: null`,
+`blockPrettySure: true`, capped at `likely`, outcome `settled`) or it
+doesn't — a third name, no usable referee answer, or unusable referee
+photos leave the lane EXACTLY as the escalation left it, with no appended
+candidate and no partial credit (outcome `no_majority` or `unavailable`).
+An off-catalog match additionally requires the normalized `offCatalogName`
+to agree, not just the shared group id (`sameCandidateKey`, unchanged,
+still shared with the pest engine).
+
+Unchanged: `TEXT_POLICIES.plantIdVision` (Gemini → Sol), `ROUTES.plantIdReferee`
+(Fable 5.1, effort `high`), the gate, the referee prompt and "earlier reads"
+idea, the pre-referee `legFailureReason` short-circuit, the rule that the
+referee's own quality verdict joins `photoReadFor` and an unusable referee
+read merges nothing, and admin-only `internal.referee` diagnostics. Full
+detail: `docs/photo-id/plant-engine.md`'s "Referee" section.
