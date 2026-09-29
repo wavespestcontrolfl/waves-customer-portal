@@ -41,7 +41,7 @@ const { findBillingCoveredVisits } = require('../routes/admin-schedule');
 // resolve straight from `rows`.
 function fakeQuery(rows) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'joinRaw', 'orderBy', 'select']) {
+  for (const m of ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'joinRaw', 'orderBy', 'forUpdate', 'select']) {
     q[m] = jest.fn(() => q);
   }
   q.first = jest.fn(async () => rows[0] || null);
@@ -330,40 +330,53 @@ describe('liveInvoice reaches the /secure annual-prepay invoice link', () => {
 });
 
 describe('liveInvoice reaches the combined first-application invoice link', () => {
-  const fixture = (rows) => makeConn({
+  // `anchorInvoices` feeds the plain 'invoices' key, which loadGoverningInvoice
+  // reads for a replacement when the stamp is terminal (the direct
+  // scheduled_service_id read sees them too, but on the ANCHOR's id).
+  const fixture = (rows, anchorInvoices = []) => makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
       estimate_card_holds: [],
       appointment_card_requests: [],
-      invoices: [],
+      invoices: anchorInvoices,
       'invoices as inv': [],
       'visit_completion_packet_items as p': [],
       'appointment_card_requests as acr': [],
       'scheduled_services as ss': rows,
     },
   });
+  const stamp = (status) => ({
+    member_id: 'v2', id: 'inv1', status, scheduled_service_id: 'anchor',
+    credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 400,
+  });
+  const replacement = {
+    id: 'inv2', status: 'draft', scheduled_service_id: 'anchor', total: 400, created_at: '2026-09-20T00:00:00Z',
+    line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 400, amount: 400 }]),
+  };
 
   test('an open combined first-application invoice blocks the member visit', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v2', status: 'draft', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 400 }]);
-    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    const covered = await findBillingCoveredVisits(fixture([stamp('draft')]), [{ id: 'v2' }], { liveInvoice: true });
     expect(covered.get('v2')).toMatch(/combined first-application invoice/);
   });
 
   test('a PAID combined first-application invoice blocks with the generic "money on it" reason', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v2', status: 'paid', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 400 }]);
-    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    const covered = await findBillingCoveredVisits(fixture([stamp('paid')]), [{ id: 'v2' }], { liveInvoice: true });
     expect(covered.get('v2')).toMatch(/money on it/);
   });
 
-  test('a void combined first-application invoice does not block (the query itself excludes it)', async () => {
-    const conn = fixture([]);
-    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
-    expect(covered.size).toBe(0);
+  test('a void stamp with no replacement on the anchor does not block', async () => {
+    const covered = await findBillingCoveredVisits(fixture([stamp('void')]), [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.has('v2')).toBe(false);
+  });
+
+  // Codex r2 P1 on #5301: void-and-reissue on the anchor.
+  test('a void stamp REISSUED on the anchor blocks through the live replacement', async () => {
+    const covered = await findBillingCoveredVisits(fixture([stamp('void')], [replacement]), [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
   });
 
   test('without liveInvoice the combined first-application link is not read', async () => {
-    const conn = fixture([{ scheduled_service_id: 'v2', status: 'draft', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 400 }]);
-    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }]);
+    const covered = await findBillingCoveredVisits(fixture([stamp('draft')]), [{ id: 'v2' }]);
     expect(covered.size).toBe(0);
   });
 });

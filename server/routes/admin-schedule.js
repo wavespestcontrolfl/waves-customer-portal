@@ -17629,6 +17629,43 @@ async function findEstimateScopedCommitment(conn, estimateId) {
   return null;
 }
 
+// The combined first-application invoice that GOVERNS each member visit
+// (Codex r2 P1 on #5301): the stamp on scheduled_services.first_application_
+// invoice_id, unless that invoice was voided/refunded and reissued on the
+// anchor — then the live replacement that bills the base application, via
+// the same loadGoverningInvoice the sibling split uses (it locks the
+// anchor's candidate invoices FOR UPDATE; every liveInvoice caller runs in
+// a transaction). Resolved once per distinct stamp. A governing invoice that
+// is itself terminal holds nothing and is dropped. Returns rows in the
+// shape findBillingCoveredVisits classifies.
+async function governingFirstApplicationRows(conn, ids) {
+  const { loadGoverningInvoice } = require('../services/first-application-sibling-split');
+  const stamped = await conn('scheduled_services as ss')
+    .join('invoices as inv', 'inv.id', 'ss.first_application_invoice_id')
+    .whereIn('ss.id', ids)
+    .select(
+      'ss.id as member_id', 'inv.id', 'inv.status', 'inv.scheduled_service_id',
+      'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+    );
+  const governingById = new Map();
+  for (const row of stamped) {
+    if (!governingById.has(row.id)) governingById.set(row.id, await loadGoverningInvoice(conn, row));
+  }
+  const terminal = new Set(require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES);
+  return stamped
+    .map((row) => ({ member: row.member_id, inv: governingById.get(row.id) }))
+    .filter(({ inv }) => inv && !terminal.has(inv.status))
+    .map(({ member, inv }) => ({
+      scheduled_service_id: member,
+      status: inv.status,
+      credit_applied: inv.credit_applied ?? 0,
+      line_items: inv.line_items,
+      stripe_payment_intent_id: inv.stripe_payment_intent_id ?? null,
+      total: inv.total,
+      _openReason: 'attached to a combined first-application invoice that is still open at the old price',
+    }));
+}
+
 async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
@@ -17802,18 +17839,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
       // anchor — invoices.scheduled_service_id names only the anchor.
       // hasColumn-guarded: the column postdates some schemas.
       if (await conn.schema.hasColumn('scheduled_services', 'first_application_invoice_id')) {
-        const firstAppLinked = await conn('scheduled_services as ss')
-          .join('invoices as inv', 'inv.id', 'ss.first_application_invoice_id')
-          .whereIn('ss.id', ids)
-          .whereNotIn('inv.status', [...NO_MONEY_HELD])
-          .select(
-            'ss.id as scheduled_service_id',
-            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
-          );
-        invoiced.push(...firstAppLinked.map((row) => ({
-          ...row,
-          _openReason: 'attached to a combined first-application invoice that is still open at the old price',
-        })));
+        invoiced.push(...await governingFirstApplicationRows(conn, ids));
       }
     }
     const hasDepositCreditLine = (items) => {

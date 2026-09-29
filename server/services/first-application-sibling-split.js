@@ -1162,6 +1162,7 @@ async function runFirstApplicationSiblingSplitSweep() {
 
 module.exports = {
   runFirstApplicationSiblingSplitSweep,
+  loadGoverningInvoice,
   reconcileRecentUnstampedAccepts,
   RECENT_STAMP_RECONCILE_DAYS,
   dateOnly,
