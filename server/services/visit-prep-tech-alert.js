@@ -42,12 +42,14 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { visitPrepPhotosLive, visitPrepTechAlertsLive } = require('../config/feature-gates');
 const { isAssignable, applyAssignable } = require('./technician-eligibility');
-const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
+const { dateOnlyString } = require('../utils/datetime-et');
 
 const TYPE = 'customer_visit_photos';
 
-// Statuses that take a visit off the route while it keeps technician_id.
-const OFF_ROUTE_STATUSES = [...TERMINAL_ROW_STATUSES, 'rescheduled'];
+// Statuses that take a visit off the route while it keeps technician_id:
+// the canonical join-ineligible set (terminal + rescheduled).
+const OFF_ROUTE_STATUSES = JOIN_INELIGIBLE_STATUSES;
 
 // Exact copy (owner-approved, scope doc §5.4 item 4): one line, no
 // customer name/address/note — the same lock-screen discipline as every
@@ -70,11 +72,6 @@ async function loadVisitLocked(scheduledServiceId, trx) {
     .first('id', 'technician_id', 'visit_id', 'scheduled_date', 'status');
 }
 
-function isoDate(value) {
-  if (!value) return null;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return String(value).slice(0, 10);
-}
 
 // Writes the card and returns the recipient, or null when there is no one
 // to tell. Throws only on a database error (the caller logs it).
@@ -100,7 +97,7 @@ async function writeCard(scheduledServiceId) {
       payload: JSON.stringify({
         scheduled_service_id: row.id,
         visit_id: row.visit_id || null,
-        scheduled_date: isoDate(row.scheduled_date),
+        scheduled_date: dateOnlyString(row.scheduled_date),
       }),
     });
     return technicianId;
@@ -142,21 +139,21 @@ async function sendPhotoAlert(scheduledServiceId) {
   try {
     const technicianId = await writeCard(scheduledServiceId);
     if (!technicianId) return;
-    // Last check before the push leaves: if the visit was reassigned, moved
-    // off the route, or its tech went office-only since the card was
-    // written, send nothing (the card itself is hidden by the feed's read-
-    // time scope). A push already handed to the provider cannot be recalled;
-    // this closes the window up to that point (Codex #5303 r8).
-    if (!(await stillAlertable(scheduledServiceId, technicianId))) return;
     try {
       const PushService = require('./push-notifications');
-      await PushService.sendToAdminUser(technicianId, {
+      // The last liveness check runs INSIDE the sender, after its
+      // subscription lookup and immediately before the provider handoff
+      // (push-notifications.js beforeDispatch; Codex #5303 r10): a
+      // reassignment, cancellation or office-only edit committed up to
+      // that point sends nothing. The card itself is re-scoped on every
+      // feed read.
+      await PushService.sendToAdminUsers([technicianId], {
         title: PUSH_TITLE,
         body: '',
         url: '/tech',
         tag: `visit-prep-${scheduledServiceId}`,
         priority: 'high',
-      });
+      }, { beforeDispatch: () => stillAlertable(scheduledServiceId, technicianId) });
     } catch (pushErr) {
       // The card is already durable — a push failure never loses it.
       logger.warn(`[visit-prep-tech-alert] push failed for tech ${technicianId} (card already written): ${pushErr.message}`);
@@ -199,7 +196,7 @@ async function refreshPhotoCardDates(rows, conn) {
   const byId = new Map(live.map((v) => [String(v.id), v]));
   for (const r of cards) {
     const v = byId.get(String(r.payload.scheduled_service_id));
-    if (v) r.payload = { ...r.payload, scheduled_date: isoDate(v.scheduled_date), visit_id: v.visit_id || null };
+    if (v) r.payload = { ...r.payload, scheduled_date: dateOnlyString(v.scheduled_date), visit_id: v.visit_id || null };
   }
   return rows;
 }

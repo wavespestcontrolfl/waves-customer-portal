@@ -14,7 +14,12 @@ jest.mock('../services/tech-visit-notifications', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/push-notifications', () => ({
-  sendToAdminUser: (...args) => mockSendToAdminUser(...args),
+  // The real sender runs beforeDispatch after its lookup and before the
+  // provider handoff; a false return sends nothing.
+  sendToAdminUsers: async (ids, notification, opts = {}) => {
+    if (typeof opts.beforeDispatch === 'function' && (await opts.beforeDispatch()) === false) return { superseded: true };
+    return mockSendToAdminUser(ids[0], notification);
+  },
 }));
 
 const db = require('../models/db');
@@ -175,7 +180,7 @@ describe('notifyTechVisitPrepPhotos', () => {
       expect(mockSendToAdminUser).not.toHaveBeenCalled();
     });
 
-    test('a reassignment between the card and the push → card written, NO push', async () => {
+    test('a reassignment before the provider handoff (beforeDispatch) → card written, NO push', async () => {
       prime({ alertableAtPush: false });
       await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
       expect(mockInsertCard).toHaveBeenCalledTimes(1);
