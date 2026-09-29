@@ -10937,6 +10937,9 @@ export function treeShrubCloseoutBlocksClient({
     // Nothing a tech records is in mL (owner ruling 2026-09-29); the server
     // refuses the same dose (tree-shrub-closeout.js).
     else if (hasMlAmount(injection.dose)) push("Injection dose must be in tsp or fl oz, not mL.", "injectionRecord.dose");
+    // A dose saved before the dose became a number of tsp or fl oz, and not
+    // readable as one, is entered again rather than sent unseen.
+    else if (!parseDose(injection.dose).amount) push("Enter the injection dose as a number of tsp or fl oz.", "injectionRecord.dose");
     if (treeShrubNumber(injection.numberOfPorts) === null) push("Injection record requires number of ports.", "injectionRecord.numberOfPorts");
     if (!String(injection.targetIssue || "").trim()) push("Injection record requires target issue.", "injectionRecord.targetIssue");
     if (!String(injection.followUpDate || "").trim()) push("Injection record requires follow-up date.", "injectionRecord.followUpDate");
@@ -10981,6 +10984,8 @@ export function TreeShrubCloseoutBlock({
   const trunkInches = trunkInchesText(record.sizeClassOrDbh);
   const doseRange = labelRate ? injectionDoseText(labelRate, trunkInches) : null;
   const dose = parseDose(record.dose);
+  // A saved dose the form cannot read as tsp or fl oz: shown, to enter again.
+  const unreadableDose = String(record.dose || "").trim() && !dose.amount ? String(record.dose).trim() : "";
   const doseUnit = dose.unit || doseUnitPick;
   const overLabel = Boolean(labelRate) && doseOverLabel(labelRate, trunkInches, dose.amount, doseUnit);
   // One injection product on this visit: the record names it.
@@ -11220,6 +11225,11 @@ export function TreeShrubCloseoutBlock({
               </select>
             </div>
           </div>
+          {unreadableDose && (
+            <div style={{ fontSize: 13, color: colors.error }}>
+              {`The saved dose "${unreadableDose}" is not a number of tsp or fl oz. Enter it again.`}
+            </div>
+          )}
           {overLabel && (
             <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 13, lineHeight: 1.4 }}>
               {`${doseText(dose.amount, doseUnit)} is more than the label allows ${labelRate.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`} (${doseRange}). Check the label before you inject.`}

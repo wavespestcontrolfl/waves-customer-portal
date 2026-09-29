@@ -88,9 +88,17 @@ describe('the stored dose and trunk size', () => {
     expect(parseDose('1.5 tsp')).toEqual({ amount: '1.5', unit: 'tsp' });
     // A dot typed mid-number survives the round trip.
     expect(parseDose(doseText('2.', 'tsp'))).toEqual({ amount: '2.', unit: 'tsp' });
-    // A dose typed before this form, in mL or in words, reads empty.
+    // A dose typed before this form reads when it is a number of tsp or fl oz,
+    // fractions and unit words included.
+    expect(parseDose('½ fl oz')).toEqual({ amount: '0.5', unit: 'fl_oz' });
+    expect(parseDose('1½ tsp')).toEqual({ amount: '1.5', unit: 'tsp' });
+    expect(parseDose('1 1/2 tsp')).toEqual({ amount: '1.5', unit: 'tsp' });
+    expect(parseDose('2 teaspoons')).toEqual({ amount: '2', unit: 'tsp' });
+    expect(parseDose('3 oz')).toEqual({ amount: '3', unit: 'fl_oz' });
+    // Anything else reads empty, for the tech to enter again.
     expect(parseDose('20 mL')).toEqual({ amount: '', unit: '' });
-    expect(parseDose('½ fl oz')).toEqual({ amount: '', unit: '' });
+    expect(parseDose('a squirt')).toEqual({ amount: '', unit: '' });
+    expect(parseDose('fl oz')).toEqual({ amount: '', unit: '' });
   });
 
   it('reads the trunk inches back from the stored size', () => {

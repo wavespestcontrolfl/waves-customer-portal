@@ -112,6 +112,19 @@ describe('the injection record', () => {
     expect(screen.getByPlaceholderText('DBH / palm size')).toBeTruthy();
   });
 
+  it('reads a dose saved before this form, and shows one it cannot read', () => {
+    const { unmount } = render(<Block injectionProducts={[]} initial={{ injectionRecord: { product: 'Tree-age', dose: '½ fl oz' } }} />);
+    expect(screen.getByLabelText('Dose amount').value).toBe('0.5');
+    expect(screen.getByLabelText('Dose unit').value).toBe('fl_oz');
+    unmount();
+    render(<Block injectionProducts={[]} initial={{ injectionRecord: { product: 'Tree-age', dose: 'a squirt' } }} />);
+    expect(screen.getByLabelText('Dose amount').value).toBe('');
+    expect(screen.getByText('The saved dose "a squirt" is not a number of tsp or fl oz. Enter it again.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '2' } });
+    expect(record().dose).toBe('2 fl oz');
+    expect(screen.queryByText(/is not a number of tsp or fl oz/)).toBeNull();
+  });
+
   it('keeps a typed product when the visit has no injection product; the dose is still tsp or fl oz', () => {
     render(<Block injectionProducts={[]} />);
     expect(screen.queryByLabelText('Injection product')).toBeNull();

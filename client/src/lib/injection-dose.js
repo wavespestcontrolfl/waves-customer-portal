@@ -73,14 +73,38 @@ export function doseOverLabel(rate, trunkInches, amount, unit) {
   return flOz * ML_PER_FL_OZ > rate.high * inches * (1 + 1e-9);
 }
 
+const FRACTIONS = { "⅛": 0.125, "¼": 0.25, "⅜": 0.375, "½": 0.5, "⅝": 0.625, "¾": 0.75, "⅞": 0.875 };
+const UNIT_WORDS = [
+  [/^(tsp|teaspoons?)$/, "tsp"],
+  [/^(fl\.?\s*oz\.?|floz|fluid\s+ounces?|oz\.?|ounces?)$/, "fl_oz"],
+];
+
+// A typed quantity: "2", "1.5", "2." while typing (kept as typed), or a
+// fraction a dose typed before this form may hold: "½", "1½", "1 1/2".
+function quantityOf(text) {
+  const t = text.trim();
+  if (/^(\d+\.?\d*|\.\d+)$/.test(t)) return t;
+  let match = /^(?:(\d+)\s*)?([⅛¼⅜½⅝¾⅞])$/.exec(t);
+  if (match) return String(Number(match[1] || 0) + FRACTIONS[match[2]]);
+  match = /^(?:(\d+)\s+)?(\d+)\/(\d+)$/.exec(t);
+  if (match && Number(match[3]) > 0) {
+    return String(Math.round((Number(match[1] || 0) + Number(match[2]) / Number(match[3])) * 10000) / 10000);
+  }
+  return "";
+}
+
 /**
- * A stored dose ("1 fl oz", "1.5 tsp", "2." while typing) as { amount, unit };
- * any other text, such as a dose typed before this form, reads empty.
+ * A stored dose as { amount, unit } ("1 fl oz", "1.5 tsp", "½ fl oz", "2
+ * teaspoons"); a dose that is not a number of tsp or fl oz (such as "20 mL")
+ * reads empty, for the tech to enter again.
  */
 export function parseDose(text) {
-  const match = /^\s*(\d+\.?\d*|\.\d+)\s*(tsp|fl oz)\s*$/i.exec(String(text || ""));
+  const match = /^\s*(.*?)\s*([a-z][a-z.\s]*)$/i.exec(String(text || ""));
   if (!match) return { amount: "", unit: "" };
-  return { amount: match[1], unit: match[2].toLowerCase() === "tsp" ? "tsp" : "fl_oz" };
+  const amount = quantityOf(match[1]);
+  const words = match[2].trim().toLowerCase();
+  const unit = UNIT_WORDS.find(([pattern]) => pattern.test(words))?.[1] || "";
+  return amount && unit ? { amount, unit } : { amount: "", unit: "" };
 }
 
 /** The dose as the record stores it: "1 fl oz", "1.5 tsp"; blank with no amount. */
