@@ -17769,43 +17769,32 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
       // link from the visit to this invoice. hasColumn-guarded: the column
       // postdates some schemas.
       if (await conn.schema.hasTable('appointment_card_requests')
-        && await conn.schema.hasColumn('appointment_card_requests', 'prepay_invoice_id')) {
+        && await conn.schema.hasColumn('appointment_card_requests', 'prepay_invoice_id')
+        && await conn.schema.hasTable('annual_prepay_terms')) {
         // The prepay covers the WHOLE plan (secure-appointment-plans.js
         // mints visitCount applications), but the request row sits on ONE
-        // visit — so match a request on any visit in the same series (same
-        // template root) and attribute it to every visit here in that series.
-        const hasParentCol = await conn.schema.hasColumn('scheduled_services', 'recurring_parent_id');
-        const rootOf = new Map(ids.map((id) => [String(id), String(id)]));
-        if (hasParentCol) {
-          const seriesRows = await conn('scheduled_services').whereIn('id', ids).select('id', 'recurring_parent_id');
-          for (const row of seriesRows) rootOf.set(String(row.id), String(row.recurring_parent_id || row.id));
-        }
-        const roots = [...new Set(rootOf.values())];
-        const prepayQuery = conn('appointment_card_requests as acr')
+        // visit — so the join matches a request on any visit sharing this
+        // visit's series root, in SQL. Only a term still payment_pending
+        // counts (Codex r1 P1 on #5301): once paid, the term stamps
+        // annual_prepay_term_id on the covered visits and the canonical term
+        // read above owns it — a paid request link would otherwise block the
+        // series forever, past the term it covered.
+        const prepayLinked = await conn('appointment_card_requests as acr')
           .join('invoices as inv', 'inv.id', 'acr.prepay_invoice_id')
+          .join('annual_prepay_terms as apt', 'apt.id', 'acr.annual_prepay_term_id')
           .join('scheduled_services as rs', 'rs.id', 'acr.scheduled_service_id')
-          .whereNotIn('inv.status', [...NO_MONEY_HELD]);
-        if (hasParentCol) {
-          prepayQuery.where(function () { this.whereIn('rs.id', roots).orWhereIn('rs.recurring_parent_id', roots); });
-        } else {
-          prepayQuery.whereIn('rs.id', roots);
-        }
-        const prepayLinked = await prepayQuery.select(
-          'rs.id as req_visit_id',
-          ...(hasParentCol ? ['rs.recurring_parent_id as req_parent_id'] : []),
-          'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
-        );
-        for (const row of prepayLinked) {
-          const rowRoot = String(row.req_parent_id || row.req_visit_id);
-          for (const [visitId, root] of rootOf) {
-            if (root !== rowRoot) continue;
-            invoiced.push({
-              ...row,
-              scheduled_service_id: ids.find((id) => String(id) === visitId),
-              _openReason: 'on an annual prepay invoice from the card-confirmation page that is still open at the old price',
-            });
-          }
-        }
+          .joinRaw('JOIN scheduled_services AS tv ON COALESCE(tv.recurring_parent_id, tv.id) = COALESCE(rs.recurring_parent_id, rs.id)')
+          .whereIn('tv.id', ids)
+          .where('apt.status', 'payment_pending')
+          .whereNotIn('inv.status', [...NO_MONEY_HELD])
+          .select(
+            'tv.id as scheduled_service_id',
+            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+          );
+        invoiced.push(...prepayLinked.map((row) => ({
+          ...row,
+          _openReason: 'on an annual prepay invoice from the card-confirmation page that is still open at the old price',
+        })));
       }
       // Combined first-application invoice, non-anchor member (see the
       // comment above this function). scheduled_services.first_application_
