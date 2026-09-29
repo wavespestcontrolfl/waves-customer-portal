@@ -505,6 +505,15 @@ describe('model-switchboard', () => {
     expect(plantId.primary.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.primary.model);
     expect(plantId.fallback.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.fallback.model);
     expect(plantId.inbound).toBe(true);
+    // Codex #5307 r8: the plant lane shows the shared GEMINI_VISION_MODEL pin
+    // like pest_id, sits under Photos with a description, and the engine's
+    // own call-ledger rows carry these exact lane ids (hub-read joins on id).
+    expect(plantId.primary.pinEnv).toBe('GEMINI_VISION_MODEL');
+    for (const id of ['plant_id', 'plant_id_referee']) {
+      const lane = lanes.find((l) => l.id === id);
+      expect(lane.area).toBe('photos');
+      expect(lane.describe).toEqual(expect.any(String));
+    }
     const plantReferee = lanes.find((l) => l.id === 'plant_id_referee');
     expect(plantReferee.primary.model).toBe(MODELS.ROUTES.plantIdReferee.model);
     expect(plantReferee.primary.selector).toBe('PLANT_ID_REFEREE');

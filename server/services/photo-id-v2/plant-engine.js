@@ -1244,7 +1244,7 @@ async function callIdentityCandidates(images, subject, indexTexts, timeoutMs) {
     jsonSchema: CANDIDATES_A_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'photo_id_v2_plant_candidates',
+    laneId: 'plant_id',
     promptVersion: PROMPT_VERSION,
   });
 }
@@ -1259,7 +1259,7 @@ async function callIdentityVerify(images, candidateContext, timeoutMs) {
     jsonSchema: VERIFY_A_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'photo_id_v2_plant_verify',
+    laneId: 'plant_id',
     promptVersion: PROMPT_VERSION,
   });
 }
@@ -1274,7 +1274,7 @@ async function callConditionSelection(images, promptArgs, timeoutMs) {
     jsonSchema: CONDITIONS_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'photo_id_v2_plant_conditions',
+    laneId: 'plant_id',
     promptVersion: PROMPT_VERSION,
   });
 }
@@ -1289,7 +1289,7 @@ async function callEscalation(images, promptArgs, timeoutMs) {
     jsonSchema: ESCALATION_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'photo_id_v2_plant_escalation',
+    laneId: 'plant_id',
     promptVersion: PROMPT_VERSION,
   });
 }
@@ -1920,7 +1920,7 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
     jsonSchema: ESCALATION_SCHEMA,
     maxTokens: REFEREE_MAX_TOKENS,
     timeoutMs: Math.min(remainingMs, REFEREE_MAX_MS),
-    laneId: 'photo_id_v2_plant_referee',
+    laneId: 'plant_id_referee',
     promptVersion: PROMPT_VERSION,
   });
   const json = validJson(result, 'escalation');

@@ -1854,7 +1854,7 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
       expect(dispatch).toHaveBeenCalledTimes(4);
-      expect(dispatch.mock.calls[3][1].laneId).toBe('photo_id_v2_plant_referee');
+      expect(dispatch.mock.calls[3][1].laneId).toBe('plant_id_referee');
       // A tie-break never holds the request for the whole 4-minute ladder budget.
       expect(dispatch.mock.calls[3][1].timeoutMs).toBeLessThanOrEqual(engine._test.REFEREE_MAX_MS);
       // Settled on Gemini's own top — never pretty_sure, even though its own
@@ -1970,7 +1970,7 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
       expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
       const lanes = dispatch.mock.calls.map(([, payload]) => payload?.laneId);
-      expect(lanes).not.toContain('photo_id_v2_plant_referee');
+      expect(lanes).not.toContain('plant_id_referee');
     });
 
     test('Codex #5307 r6: a prior UNUSABLE read skips the billed referee call', async () => {

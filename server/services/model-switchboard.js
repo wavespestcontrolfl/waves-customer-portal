@@ -259,7 +259,7 @@ const secondSocialImageChainModel = nthSocialImageChainModel(1);
 // resolves to the same model as the one before it is not called: it is emitted
 // with `skipped: true` (kept for dependency math, hidden by the card); ladders
 // without the flag call every leg.
-const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by eight photo lanes';
+const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by nine photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
 // adapter (llm/call.js) folds the system prompt into the user turn, so moving
@@ -360,7 +360,7 @@ const LANES = [
   // low, or disagrees. L3 only — no route wires it in yet (Codex #5307 r7
   // finding 3: this lane previously had zero entries, so the switchboard
   // showed zero blast radius for both PLANT_ID_VISION legs).
-  L('plant_id', 'Plant/tree/shrub/palm photo ID (lawn + tree/shrub/palm)', 'photo-id-v2/plant-engine.js', 'multimodal', P('plantIdVision', 'primary'), P('plantIdVision', 'fallback'), { inbound: true, note: 'L3 only, no runtime caller yet; Gemini-first, Sol second opinion (owner ruling 2026-09-28)' }),
+  L('plant_id', 'Plant/tree/shrub/palm photo ID (lawn + tree/shrub/palm)', 'photo-id-v2/plant-engine.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('plantIdVision', 'fallback'), { inbound: true, note: `L3 only, no runtime caller yet; Gemini-first, Sol second opinion (owner ruling 2026-09-28) · ${SHARED_GEMINI_PIN}` }),
   // The gated tie-break referee (owner ruling 2026-09-29, narrowed from
   // 09-28): identify mode only, and only for an identity lane where Gemini
   // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
@@ -605,6 +605,8 @@ const LANE_AREA = {
   voice_relay_collections: 'voice',
   voice_relay_judge: 'voice',
   pest_id: 'photos',
+  plant_id: 'photos',
+  plant_id_referee: 'photos',
   lawn_assess: 'photos',
   lawn_visit_assessment: 'photos',
   tree_shrub: 'photos',
@@ -750,6 +752,8 @@ const LANE_DESCRIBE = {
   voice_relay_collections: 'Speaks with customers on collections calls',
   voice_relay_judge: 'Grades Sandy\'s eval calls against each scenario\'s spec',
   pest_id: 'Identifies the pest in a customer photo',
+  plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
+  plant_id_referee: 'Breaks a tie when the two photo models name different plants (dark)',
   lawn_assess: 'Assesses lawn health from a customer photo',
   lawn_visit_assessment: 'Assesses all lawn visit photos for technician review',
   tree_shrub: 'Assesses trees and shrubs from a photo',
