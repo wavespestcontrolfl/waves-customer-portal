@@ -122,13 +122,15 @@ describe('judgeWithModel', () => {
   const obligation = { party: 'waves', kind: 'other', description: 'Check on the warranty and let the caller know' };
   afterEach(() => dispatchWithFallback.mockReset());
 
-  test('asks the highStakes policy under its own lane, offering exactly the loaded witnesses', async () => {
+  test('asks the fastStructured policy (a verifier code consumes) under its own lane with a hard deadline, offering exactly the loaded witnesses', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${ID}`, quote: 'your warranty covers the retreatment' } });
     const verdict = await check.judgeWithModel(obligation, evidenceOf());
     expect(verdict).toMatchObject({ verdict: 'fulfilled', record_type: 'sms_log', record_id: ID });
-    const [policy, payload] = dispatchWithFallback.mock.calls[0];
-    expect(policy).toBe(require('../config/models').TEXT_POLICIES.highStakes);
-    expect(payload).toMatchObject({ laneId: 'call-commitment-contact-check', promptVersion: check.VERSION, maxTokens: 2048 });
+    const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
+    expect(policy).toBe(require('../config/models').TEXT_POLICIES.fastStructured);
+    expect(payload).toMatchObject({ laneId: 'call-commitment-contact-check', promptVersion: check.VERSION, maxTokens: 2048, timeoutMs: 60000 });
+    // Both providers share the one minute, enforced from the chain's side.
+    expect(options).toEqual({ reserveFallbackBudget: true, hardDeadline: true });
     expect(payload.jsonSchema.required).toEqual(['verdict', 'record_ref', 'quote']);
     expect(payload.text).toContain(`"witness_refs":["sms:${ID}","call:22222222-2222-4222-8222-222222222222"]`);
     // The promise is judged as one made on a call: delivery, not restating it or a thank-you.
@@ -165,7 +167,7 @@ describe('one contract with the texting lane, and the lane is registered', () =>
 
   test('the model call goes through the shared policy and dispatcher with no model id of its own', () => {
     const source = read('services/call-commitment-contact-check.js');
-    expect(source).toMatch(/dispatchWithFallback\(MODELS\.TEXT_POLICIES\.highStakes/);
+    expect(source).toMatch(/dispatchWithFallback\(MODELS\.TEXT_POLICIES\.fastStructured/);
     expect(source).not.toMatch(/claude-|gpt-|gemini-/i);
     expect(source).toMatch(/require\('\.\/staff-contact'\)/);
     for (const name of ['operatorReply', 'personCallBack', 'smsDelivered']) expect(source).not.toMatch(new RegExp(`(const|function|let|var)\\s+${name}\\b`));
@@ -173,8 +175,9 @@ describe('one contract with the texting lane, and the lane is registered', () =>
 
   test('the lane is in the switchboard and the lane policies, like the texting lane', () => {
     const board = read('services/model-switchboard.js');
-    for (const lane of ['sms-commitment-fulfillment', 'call-commitment-contact-check']) {
-      expect(board).toMatch(new RegExp(`L\\('${lane}',[^\\n]*P\\('highStakes', 'primary'\\), P\\('highStakes', 'fallback'\\)`));
+    // The texting lane stays on highStakes; this verifier runs on the fast tier.
+    for (const [lane, policy] of [['sms-commitment-fulfillment', 'highStakes'], ['call-commitment-contact-check', 'fastStructured']]) {
+      expect(board).toMatch(new RegExp(`L\\('${lane}',[^\\n]*P\\('${policy}', 'primary'\\), P\\('${policy}', 'fallback'\\)`));
       expect(board).toMatch(new RegExp(`'${lane}': '[a-z]+',`));
       expect(board).toMatch(new RegExp(`'${lane}': '[^']+`));
     }

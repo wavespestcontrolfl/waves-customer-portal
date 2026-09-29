@@ -306,7 +306,7 @@ const LANES = [
   L('churn_classify', 'Churn-reason classification', 'churn-classifier.js', 'fastText', R('churnClassify'), T('FAST'), { inbound: true }),
   L('email_classify', 'Inbound email classification', 'email/email-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('sms-commitment-fulfillment', 'SMS completion verification', 'sms-commitment-fulfillment.js', 'deep', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
-  L('call-commitment-contact-check', 'Call promise kept-by-contact check', 'call-commitment-contact-check.js', 'deep', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
+  L('call-commitment-contact-check', 'Call promise kept-by-contact check', 'call-commitment-contact-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('sms-operational-actions', 'SMS operational extraction', 'sms-operational-extractor.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_intent', 'SMS service-intent classification', 'sms-service-intent.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('review_topic', 'Day-0 review-ask topic classification', 'review-ask-topic.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),

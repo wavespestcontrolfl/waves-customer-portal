@@ -337,6 +337,17 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       expect(check.everyModelCallFailed({ model_calls: 0, provider_failed: 0 })).toBe(false);
     });
 
+    test('a provider that failed is not asked again in the same run: the rest wait for the next tick', async () => {
+      const [a, b] = [await world(), await world()];
+      await addSms(a); await addSms(b);
+      dispatchWithFallback.mockImplementation(async () => ({ ok: false, reason: 'openai_timeout' }));
+      const result = await run();
+      // Every promise the run reached shares the provider; after the first failure none is asked.
+      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+      expect(result.failed_run || result.deferred >= 1).toBeTruthy();
+      expect(asked(a).length + asked(b).length).toBeLessThanOrEqual(1);
+    });
+
     test('a run makes at most its budget of model calls; the rest wait', async () => {
       const [a, b] = [await world(), await world()];
       await addSms(a); await addSms(b);
