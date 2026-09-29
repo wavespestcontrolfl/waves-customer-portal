@@ -1144,10 +1144,11 @@ function buildWorkup(ctx) {
   // needs_more_evidence tier. A subject-conflicted one (providers split
   // `plant` vs `damage`) names nothing but keeps its symptom workup.
   const gate = namingGateFor(quality);
-  // A referee-settled majority (`refereeMajority`, Codex #5307 r2) leads
-  // regardless of raw confidence; everything else ranks by confidence.
+  // Referee rank before confidence (Codex #5307 r2 + r3): a settled 2-of-3
+  // majority always leads, a referee-only third answer always trails (one
+  // vote never outranks an earlier read), everything else by confidence.
   const allApprovedPossibilities = gate.unusable ? [] : possibilities.filter((p) => isApproved(p.entry))
-    .sort((a, b) => (Number(!!b.refereeMajority) - Number(!!a.refereeMajority)) || (b.confidence - a.confidence));
+    .sort((a, b) => (refereeRank(a) - refereeRank(b)) || (b.confidence - a.confidence));
   const approvedPossibilities = allApprovedPossibilities
     .slice(0, 3)
     .map((p) => ({ ...p, localCtx: { currentMonth, chips, context: ctx.context || {} } }));
@@ -1902,13 +1903,20 @@ const REFEREE_SETTLED_FLAGS = Object.freeze({
  * identity/slug) leaves the list untouched; otherwise it is appended, and
  * `cap` is kept by dropping the CURRENT list's own tail first — which entry
  * leads, and the order of the ones kept, never changes. */
+/** Sort key for a possibility's referee standing (0 majority, 1 ordinary,
+ * 2 referee-only) — `buildWorkup` ranks by this before confidence. */
+function refereeRank(p) {
+  if (p.refereeMajority) return 0;
+  return p.refereeOnly ? 2 : 1;
+}
+
 function appendRefereeCandidate(existing, extra, cap = 3) {
   if (!extra || existing.some((c) => sameCandidateKey(c, extra))) return existing;
-  return [...existing.slice(0, Math.max(0, cap - 1)), extra];
+  return [...existing.slice(0, Math.max(0, cap - 1)), { ...extra, refereeOnly: true }];
 }
 function appendRefereePossibility(existing, extra) {
   if (!extra || existing.some((p) => p.slug === extra.slug)) return existing;
-  return [...existing, extra];
+  return [...existing, { ...extra, refereeOnly: true }];
 }
 
 /** One identity slot's referee merge (2-of-3 majority, deterministic): `R`
@@ -1942,12 +1950,11 @@ function mergeIdentityScope(run, slot, escalation, refereeJson) {
   }
   // No disagreement — this scope is a referee candidate only because OpenAI
   // never answered it (blockPrettySure) or its confidence is still low.
-  if (!top || sameCandidateKey(topReferee, top)) {
-    return {
-      outcome: 'confirmed',
-      slots: top ? escalation.slots[slot] : dedupeCandidates([topReferee]),
-      flags: { ...flags, ...REFEREE_SETTLED_FLAGS },
-    };
+  // No earlier answer at all: the referee's lone vote is never a majority
+  // (Codex #5307 r3) — the scope stays as it was.
+  if (!top) return { outcome: 'unavailable' };
+  if (sameCandidateKey(topReferee, top)) {
+    return { outcome: 'confirmed', slots: escalation.slots[slot], flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
   }
   // The referee disagrees with the (undisputed, single earlier-read) top:
   // that is a fresh disagreement of its own, not the answer moving to the
@@ -2002,12 +2009,10 @@ function mergeConditionsScope(conditions, escalation, refereeJson) {
       },
     };
   }
-  if (!top || topReferee.slug === top.slug) {
-    return {
-      outcome: 'confirmed',
-      possibilities: top ? escalation.possibilities : dedupePossibilities([topReferee]),
-      flags: { ...flags, ...REFEREE_SETTLED_FLAGS },
-    };
+  // No earlier answer: one vote is not a majority (Codex #5307 r3).
+  if (!top) return { outcome: 'unavailable' };
+  if (topReferee.slug === top.slug) {
+    return { outcome: 'confirmed', possibilities: escalation.possibilities, flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
   }
   // The referee disagrees with the (undisputed, single earlier-read) top: a
   // fresh disagreement of its own, never the answer moving to the referee's
@@ -2050,9 +2055,11 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
   const conditionsApplies = run.mode !== 'identify' && !!escalation.conditionFlags.triggered;
   const candidateScopes = conditionsApplies ? [...candidateIdentitySlots, 'conditions'] : candidateIdentitySlots;
 
+  // A scope with no earlier answer at all can never reach a 2-of-3 majority
+  // (Codex #5307 r3), so it never draws the billed referee call either.
   const unsureScopes = candidateScopes.filter((scope) => (scope === 'conditions'
-    ? stillUnsureAfterEscalation(escalation.conditionFlags, escalation.possibilities[0]?.confidence)
-    : stillUnsureAfterEscalation(escalation.identityFlags[scope], escalation.slots[scope][0]?.confidence)));
+    ? !!escalation.possibilities[0] && stillUnsureAfterEscalation(escalation.conditionFlags, escalation.possibilities[0].confidence)
+    : !!escalation.slots[scope][0] && stillUnsureAfterEscalation(escalation.identityFlags[scope], escalation.slots[scope][0].confidence)));
   if (!unsureScopes.length) return unchanged;
 
   const promptArgs = escalationPromptArgs(run, identity, conditions, escalation.conditionIndex);

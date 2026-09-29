@@ -406,9 +406,14 @@ the referee's own top:
   (`disagreed: true`, `blockPrettySure: true`, a fresh `disagreementPair` of
   `[the scope's own pre-referee top, R]`) — the answer climbs or stays
   uncertain exactly like today's two-provider disagreement. `R` is appended
-  AFTER the existing candidate/possibility list (deduped by identity/slug);
-  it is never re-ranked by confidence, so it can join the visible list
-  without ever displacing the pre-referee top or reordering the rest.
+  AFTER the existing candidate/possibility list (deduped by identity/slug)
+  and marked `refereeOnly`; it can join the visible list but never displaces
+  the pre-referee top or reorders the rest. `buildWorkup` ranks
+  possibilities by referee standing before confidence: a settled majority
+  (`refereeMajority`) first, a referee-only pick last.
+- A scope with no earlier answer at all is never sent to the referee — one
+  vote can never be a 2-of-3 majority — and a merge that finds no earlier
+  top leaves the scope unchanged (`'unavailable'`).
 - The referee's own `quality`/`shows` verdict always joins the conservative
   photo-quality combine (`photoReadFor`), alongside every other leg's. When
   it says the photos are unusable (`quality.usable === false` or

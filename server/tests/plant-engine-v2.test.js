@@ -2161,6 +2161,57 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(workup.possibilities[0].slug).toBe('fixture-large-patch');
     });
 
+    test('Codex #5307 r3: a referee-only third answer never leads the workup, however confident', () => {
+      const index = engine.conditionIndexFor('lawn', null);
+      const cond = (slug, confidence) => engine.resolveConditionCandidate({
+        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, index);
+      const conditions = { possibilities: [cond('fixture-large-patch', 0.4)], index };
+      const escalation = {
+        conditionFlags: {
+          triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        },
+        possibilities: [cond('fixture-large-patch', 0.4)],
+        conditionIndex: index,
+        json: { conditions: [{ slug: 'fixture-large-patch', confidence: 0.4, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+      };
+      const refereeJson = { conditions: [{ slug: 'fixture-drought', confidence: 0.95, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
+      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
+      expect(merged.outcome).toBe('third_answer');
+      const workup = engine.buildWorkup({
+        subject: 'lawn', possibilities: merged.possibilities, conditionFlags: merged.flags, currentMonth: 6, photosCount: 1,
+      });
+      expect(workup.possibilities[0].slug).toBe('fixture-large-patch');
+      expect(workup.possibilities.map((p) => p.slug)).toContain('fixture-drought');
+    });
+
+    test('Codex #5307 r3: with no earlier answer the referee is never called, and a lone referee vote never confirms', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      try {
+        const emptyTriggered = {
+          triggered: true, disagreed: false, blockPrettySure: true, openaiAnswered: false, disagreementPair: null,
+        };
+        const escalation = {
+          slots: { turf: [], weeds: [], host: [] },
+          identityFlags: { turf: emptyTriggered, weeds: emptyTriggered, host: emptyTriggered },
+          possibilities: [],
+          conditionFlags: { ...emptyTriggered, triggered: false },
+        };
+        const run = { subject: 'lawn', mode: 'identify', deadline: Date.now() + 60000, images: [] };
+        dispatch.mockClear();
+        const out = await engine._test.runReferee(run, { slots: escalation.slots }, { possibilities: [], index: [] }, escalation);
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(out.refereeInfo.triggered).toBe(false);
+        const index = engine.turfIndexFor();
+        const merged = engine._test.mergeIdentityScope({ indexes: { turf: index } }, 'turf', escalation, {
+          turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.99 }],
+        });
+        expect(merged.outcome).toBe('unavailable');
+      } finally {
+        delete process.env.GATE_PLANT_ID_REFEREE;
+      }
+    });
+
     test('finding 2: earlierReadsFor\'s conditions "second" read is OpenAI\'s own ranked top, never the merged list\'s top', () => {
       const conditionIndex = engine.conditionIndexFor('lawn', null);
       const geminiTop = engine.resolveConditionCandidate({
