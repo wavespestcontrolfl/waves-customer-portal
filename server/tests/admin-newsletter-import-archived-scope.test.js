@@ -138,6 +138,59 @@ describe.each([
   });
 });
 
+// Codex #5165 P1 (:393): the per-mailbox lock — the SAME lock
+// subscribeOrResubscribe and the reconcile take — must be taken (on the
+// row's OWN address) before this admin unsubscribe write.
+describe('DELETE /subscribers/:subscriberId — takes the per-mailbox lock before the status write', () => {
+  let rawCalls;
+  let updateCalls;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    rawCalls = [];
+    updateCalls = [];
+    db.raw = jest.fn(async (...args) => { rawCalls.push(args); return { rowCount: 0 }; });
+    db.transaction = jest.fn(async (fn) => fn(db));
+    db.mockImplementation((table) => {
+      if (table !== 'newsletter_subscribers') throw new Error(`Unexpected table ${table}`);
+      const q = {};
+      q.where = jest.fn(() => q);
+      q.first = jest.fn(async () => ({ id: 7, email: 'reader@example.com' }));
+      q.update = jest.fn(async (payload) => { updateCalls.push(payload); return 1; });
+      return q;
+    });
+  });
+
+  test('the lock is taken on the subscriber\'s own address before the status write', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/newsletter/subscribers/7`, { method: 'DELETE' });
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ success: true });
+    });
+    expect(updateCalls).toEqual([expect.objectContaining({ status: 'unsubscribed' })]);
+    const lockCall = rawCalls.find(([sql]) => String(sql).includes('pg_advisory_xact_lock'));
+    expect(lockCall).toBeTruthy();
+    expect(lockCall[1]).toEqual(['customer-email:reader@example.com']);
+  });
+
+  test('a missing id is still a silent no-op success — no lock, no write', async () => {
+    db.mockImplementation((table) => {
+      if (table !== 'newsletter_subscribers') throw new Error(`Unexpected table ${table}`);
+      const q = {};
+      q.where = jest.fn(() => q);
+      q.first = jest.fn(async () => undefined);
+      q.update = jest.fn(async (payload) => { updateCalls.push(payload); return 0; });
+      return q;
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/newsletter/subscribers/999`, { method: 'DELETE' });
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ success: true });
+    });
+    expect(updateCalls).toEqual([]);
+    expect(rawCalls).toEqual([]);
+  });
+});
+
 describe('POST /subscribers/import routes the bulk first-link through the canonical picker', () => {
   let rawCalls;
   beforeEach(() => {

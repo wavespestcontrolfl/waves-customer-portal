@@ -18,6 +18,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
 const crypto = require('crypto');
 const { linkToCustomer, linkManyToCustomers, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
+const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 const NewsletterSubscribers = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const { wrapNewsletter } = require('../services/email-template');
@@ -337,11 +338,21 @@ router.delete('/subscribers/:subscriberId', async (req, res, next) => {
     if (!Number.isInteger(subscriberId) || subscriberId <= 0) {
       return res.status(400).json({ error: 'invalid subscriber id' });
     }
-    await db('newsletter_subscribers').where({ id: subscriberId }).update({
-      status: 'unsubscribed',
-      unsubscribed_at: new Date(),
-      updated_at: new Date(),
-    });
+    // Per-mailbox fence (codex #5165 P1, :393): the SAME lock
+    // subscribeOrResubscribe and the reconcile take — learn the address
+    // first (read-only), then lock BEFORE the actual status write. A
+    // missing id is still a silent no-op success, exactly as before.
+    const existing = await db('newsletter_subscribers').where({ id: subscriberId }).first('email');
+    if (existing) {
+      await db.transaction(async (trx) => {
+        await lockCustomerEmail(trx, existing.email);
+        await trx('newsletter_subscribers').where({ id: subscriberId }).update({
+          status: 'unsubscribed',
+          unsubscribed_at: new Date(),
+          updated_at: new Date(),
+        });
+      });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });

@@ -64,4 +64,25 @@ describe('excludeMarketingOptedOut', () => {
       expect(src.slice(Math.max(0, i - 'excludeMarketingOptedOut('.length), i)).toBe('excludeMarketingOptedOut(');
     }
   });
+
+  // Codex #5165 (:160) — newsletter-sunset.js has no excludeArchivedCustomers
+  // call to anchor on, so the contract is named-function-by-function: every
+  // audience/cohort/denominator read that decides who gets flagged, counted
+  // as awaiting a win-back, swept into sunset, or used as the valve's
+  // active-list denominator must carry excludeMarketingOptedOut — an
+  // opted-out subscriber the sender already skips at send time must never
+  // be flagged, counted as "awaiting", or drive the valve fraction, or the
+  // job stages a win-back draft it can never resolve (see the module's own
+  // comments on findFlagCandidates / cohortAwaitingWinback for why).
+  test('every sunset audience/cohort/denominator read in newsletter-sunset.js carries excludeMarketingOptedOut', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/newsletter-sunset.js'), 'utf8');
+    const FUNCTIONS = ['findFlagCandidates', 'cohortAwaitingWinback', 'findSunsetCandidates', 'runNewsletterSunset'];
+    for (const name of FUNCTIONS) {
+      const start = src.indexOf(`async function ${name}(`);
+      expect(start).toBeGreaterThanOrEqual(0); // the function still exists under this exact name
+      const nextFn = src.slice(start + 1).search(/\n(async )?function /);
+      const body = nextFn === -1 ? src.slice(start) : src.slice(start, start + 1 + nextFn);
+      expect(body).toContain('excludeMarketingOptedOut(');
+    }
+  });
 });

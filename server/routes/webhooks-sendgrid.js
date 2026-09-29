@@ -24,6 +24,7 @@ const logger = require('../services/logger');
 const bounceRecovery = require('../services/email-bounce-recovery');
 const bounceRescue = require('../services/email-bounce-rescue');
 const providerRetry = require('../services/transactional-email-provider-retry');
+const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
@@ -895,21 +896,21 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
         last_bounced_at: at,
         updated_at: at,
       });
-    } else if (updates.subscriberAction === 'force_unsubscribe') {
-      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+    } else if (updates.subscriberAction === 'force_unsubscribe' || updates.subscriberAction === 'unsubscribe_if_active') {
+      // Per-mailbox fence (codex #5165 P1, :393): the SAME lock
+      // subscribeOrResubscribe and the reconcile take, taken before this
+      // status write — `client` is already an open transaction (the
+      // caller's processWebhookEvent), so this just adds the one lock this
+      // writer needs, never a second transaction. delivery.email is the
+      // recipient snapshot on the delivery row itself, no extra lookup.
+      await lockCustomerEmail(client, delivery.email);
+      const query = client('newsletter_subscribers').where({ id: delivery.subscriber_id });
+      if (updates.subscriberAction === 'unsubscribe_if_active') query.whereNot({ status: 'unsubscribed' });
+      await query.update({
         status: 'unsubscribed',
         unsubscribed_at: at,
         updated_at: at,
       });
-    } else if (updates.subscriberAction === 'unsubscribe_if_active') {
-      await client('newsletter_subscribers')
-        .where({ id: delivery.subscriber_id })
-        .whereNot({ status: 'unsubscribed' })
-        .update({
-          status: 'unsubscribed',
-          unsubscribed_at: at,
-          updated_at: at,
-        });
     }
   }
 

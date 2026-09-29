@@ -391,6 +391,99 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     }
   });
 
+  // Codex P1 (:393) — "Fence concurrent subscriber aliases before activating
+  // the mailbox": every newsletter_subscribers STATE writer (subscribeOrResubscribe,
+  // the public unsubscribe/confirm routes, admin add/status, the sunset/
+  // unsubscribe webhook path) now takes the SAME per-mailbox lock
+  // (lockCustomerEmail) the reconcile takes, before it reads or writes the
+  // row — proven here directly against the shared advisory-lock primitive,
+  // in BOTH directions, on a genuine Google-mailbox ALIAS (a different
+  // literal spelling of the same inbox, never the exact address the
+  // reconcile itself is deciding).
+  test('an alias write (a different spelling of the SAME Google mailbox) genuinely waits while the import holds the mailbox lock, and proceeds only after it commits', async () => {
+    const tag = randomUUID().slice(0, 8).replace(/-/g, '');
+    const cust = synthCustomer({ email: `john${tag}@gmail.com` });
+    const aliasEmail = `j.o.h.n${tag}+news@gmail.com`; // same mailbox, different spelling
+    await db('customers').insert(cust);
+    await db('notification_prefs').insert({ customer_id: cust.id, marketing_offers: true, email_enabled: true });
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    const other = knexFactory({ client: 'pg', connection, pool: POOL });
+    try {
+      // Pause the write-phase decision right after it takes the email lock
+      // (decideAddress's classifyAddress read, its 2nd notification_prefs
+      // call, runs immediately after lockCustomerEmail) — traps the import
+      // mid-transaction, still holding the shared mailbox key.
+      const { conn: pausedA, reached, release } = pauseNthTableRead(connA, 'notification_prefs', 2);
+      const resultAPromise = reconcileCustomers({ dryRun: false, conn: pausedA });
+      await reached;
+
+      // Mirrors every now-fenced alias writer (subscribeOrResubscribe,
+      // public-newsletter.js's unsubscribe/confirm routes, the SendGrid/
+      // Resend webhooks): the mailbox lock taken BEFORE the write.
+      let aliasDone = false;
+      const aliasPromise = other.transaction(async (trx) => {
+        await lockCustomerEmail(trx, aliasEmail);
+        await trx('newsletter_subscribers').insert({ email: aliasEmail, status: 'pending', source: 'test_alias' });
+      }).then(() => { aliasDone = true; });
+
+      await new Promise((resolve) => { setTimeout(resolve, 250); });
+      expect(aliasDone).toBe(false); // genuinely blocked on the SAME shared mailbox key
+
+      release();
+      await resultAPromise;
+      await aliasPromise;
+      expect(aliasDone).toBe(true); // proceeded only after the import fully committed
+    } finally {
+      await other.destroy();
+      await connA.destroy();
+      await db('newsletter_subscribers').whereRaw('LOWER(TRIM(email)) IN (?, ?)', [cust.email.toLowerCase(), aliasEmail.toLowerCase()]).del();
+      await db('notification_prefs').where({ customer_id: cust.id }).del();
+      await db('customers').where({ id: cust.id }).del();
+    }
+  });
+
+  test('an alias unsubscribe holding the mailbox lock makes the import wait, then the import sees the committed alias unsubscribe and excludes the address', async () => {
+    const tag = randomUUID().slice(0, 8).replace(/-/g, '');
+    const cust = synthCustomer({ email: `john${tag}@gmail.com` });
+    const aliasEmail = `j.o.h.n${tag}+news@gmail.com`;
+    await db('customers').insert(cust);
+    await db('notification_prefs').insert({ customer_id: cust.id, marketing_offers: true, email_enabled: true });
+    const writer = knexFactory({ client: 'pg', connection, pool: POOL });
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    let writerTrx;
+    try {
+      writerTrx = await writer.transaction();
+      // Mirrors the now-fenced alias-unsubscribe writers: the mailbox lock
+      // taken BEFORE the write, held until this transaction commits.
+      await lockCustomerEmail(writerTrx, aliasEmail);
+      await writerTrx('newsletter_subscribers').insert({
+        email: aliasEmail, status: 'unsubscribed', source: 'test_alias', unsubscribed_at: new Date(),
+      });
+
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: connA }).then((r) => { settled = true; return r; });
+      await new Promise((resolve) => { setTimeout(resolve, 250); });
+      expect(settled).toBe(false); // waiting on the SAME shared mailbox key
+
+      await writerTrx.commit();
+      const result = await resultPromise;
+      expect(result.imported).toBe(0);
+      // The import's classify read runs strictly AFTER the alias's commit
+      // (never a stale pre-commit snapshot) — sameMailboxSql matches the
+      // alias's unsubscribed row across the spelling difference.
+      expect(result.excluded.previously_unsubscribed).toBe(1);
+      const rows = await db('newsletter_subscribers').whereRaw('LOWER(TRIM(email)) = ?', [cust.email.toLowerCase()]);
+      expect(rows).toHaveLength(0); // never imported
+    } finally {
+      if (writerTrx && !writerTrx.isCompleted()) await writerTrx.rollback();
+      await writer.destroy();
+      await connA.destroy();
+      await db('newsletter_subscribers').whereRaw('LOWER(TRIM(email)) IN (?, ?)', [cust.email.toLowerCase(), aliasEmail.toLowerCase()]).del();
+      await db('notification_prefs').where({ customer_id: cust.id }).del();
+      await db('customers').where({ id: cust.id }).del();
+    }
+  });
+
   test('two live candidates on equivalent Google spellings are ONE mailbox: the dry run projects one import and the write performs exactly one (real Postgres)', () => rollbackTest(async (trx) => {
     const tag = randomUUID().slice(0, 8).replace(/-/g, '');
     const a = synthCustomer({ email: `j.o.h.n${tag}+work@gmail.com` });

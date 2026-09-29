@@ -4,6 +4,11 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 
 const db = require('../models/db');
+// The route now takes the per-mailbox lock (codex #5165 P1, :393) inside a
+// transaction before its write — `trx` is the same mocked `db`/query chain,
+// matching the convention other suites use for this mock shape.
+db.raw = jest.fn(async () => ({ rowCount: 0 }));
+db.transaction = jest.fn(async (fn) => fn(db));
 const publicNewsletterRouter = require('../routes/public-newsletter');
 
 const TOKEN = '11111111-2222-3333-4444-555555555555';
@@ -75,6 +80,28 @@ describe('public newsletter unsubscribe scanner safety', () => {
     expect(q.where).toHaveBeenCalledWith({ unsubscribe_token: TOKEN });
     expect(q.whereNot).toHaveBeenCalledWith({ status: 'unsubscribed' });
     expect(q.where).not.toHaveBeenCalledWith(expect.objectContaining({ id: expect.anything() }));
+  });
+
+  // Codex #5165 P1 (:393): a per-mailbox lock — the SAME lock
+  // subscribeOrResubscribe and the reconcile take — must be taken on the
+  // token's own address BEFORE the CAS write, so a concurrent import
+  // decision for a differently-spelled alias of the same mailbox can't
+  // commit in the gap.
+  test('the per-mailbox lock is taken on the subscriber\'s address before the CAS write', async () => {
+    const q = query({ id: 'sub-1', email: 'reader@example.com', status: 'active' });
+    db.mockReturnValue(q);
+    await routeHandler('post')({
+      params: { token: TOKEN },
+      body: { confirm_unsubscribe: '1' },
+    }, response());
+    expect(db.raw).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      expect.arrayContaining(['customer-email:reader@example.com']),
+    );
+    // The lock call landed before the update it fences.
+    const lockCallOrder = db.raw.mock.invocationCallOrder[0];
+    const updateCallOrder = q.update.mock.invocationCallOrder[0];
+    expect(lockCallOrder).toBeLessThan(updateCallOrder);
   });
 
   test('a token rotated away mid-flight is a no-op with the expired page — never a retargeted opt-out', async () => {

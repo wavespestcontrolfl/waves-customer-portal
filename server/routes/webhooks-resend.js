@@ -33,6 +33,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 
 const SVIX_ID = 'svix-id';
 const SVIX_TIMESTAMP = 'svix-timestamp';
@@ -165,8 +166,15 @@ async function handleEvent(ev) {
         });
         await db('newsletter_sends').where({ id: delivery.send_id }).increment('complained_count', 1);
         if (delivery.subscriber_id) {
-          await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
-            status: 'unsubscribed', unsubscribed_at: now, updated_at: now,
+          // Per-mailbox fence (codex #5165 P1, :393): the SAME lock
+          // subscribeOrResubscribe and the reconcile take, taken before
+          // this status write. delivery.email is the recipient snapshot on
+          // the delivery row itself — no extra lookup needed.
+          await db.transaction(async (trx) => {
+            await lockCustomerEmail(trx, delivery.email);
+            await trx('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+              status: 'unsubscribed', unsubscribed_at: now, updated_at: now,
+            });
           });
         }
       }
