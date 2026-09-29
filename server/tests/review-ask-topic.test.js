@@ -619,3 +619,22 @@ describe('resolveReviewTopicForEnrollment', () => {
     await expect(resolveReviewTopicForEnrollment({ customerId: 'c1', completedAt: NOW, plan: RECURRING_PLAN })).resolves.toBeNull();
   });
 });
+
+describe('followupAreaWord — a place the customer named AND the tech treated (GATE_REVIEW_ASK_SERVICE_FACTS)', () => {
+  const { followupAreaWord, treatedAreaWords } = require('../services/review-ask-topic');
+
+  test('treated-area labels contribute their place words', () => {
+    expect([...treatedAreaWords(['Lanai / pool cage', 'Bathrooms', 'Perimeter', 'Ornamentals'])].sort()).toEqual(['bathroom', 'cage', 'lanai', 'perimeter', 'pool']);
+    expect(treatedAreaWords(null).size).toBe(0);
+  });
+
+  test('named in the topic and treated → the customer\'s own word; otherwise null', () => {
+    expect(followupAreaWord('ants in the kitchen', ['Kitchen', 'Garage'])).toBe('kitchen');
+    expect(followupAreaWord('bugs in my bathroom', ['Bathrooms'])).toBe('bathroom');
+    expect(followupAreaWord('roaches in the bathrooms', ['Bathrooms'])).toBe('bathrooms');
+    expect(followupAreaWord('ants in the kitchen', ['Garage'])).toBeNull();
+    expect(followupAreaWord('ants', ['Kitchen'])).toBeNull();
+    // A place word that does not read as "in the <area>" is never added.
+    expect(followupAreaWord('ants along the perimeter', ['Perimeter'])).toBeNull();
+  });
+});

@@ -4677,6 +4677,7 @@ const ReviewService = {
             techName,
             sequenceStep,
             serviceDate,
+            serviceFacts: await this._reviewServiceFacts(serviceRecordId),
           });
         if (drafted) persistedBody = drafted;
       }
@@ -4726,6 +4727,7 @@ const ReviewService = {
             techName,
             sequenceStep,
             serviceDate,
+            serviceFacts: await this._reviewServiceFacts(serviceRecordId),
           });
           if (drafted) persistedBody = drafted;
         }
@@ -4920,15 +4922,42 @@ const ReviewService = {
    * visit (stored on ask_context at enrollment). The caller only asks for the
    * account holder — the topic is their own words. Never throws.
    */
+  /**
+   * GATE_REVIEW_ASK_SERVICE_FACTS (owner 2026-09-29): the service report's
+   * treated areas for the review drafters — { treated, areasTreated }, where
+   * treated means the visit's outcome is completed (a missing outcome is not
+   * a treatment on record). Null when the gate is off, there is no record,
+   * or the read fails: the drafters then work exactly as before. Never
+   * products, findings, recommendations or billing. Never throws.
+   */
+  async _reviewServiceFacts(serviceRecordId) {
+    if (!serviceRecordId || !require("../config/feature-gates").isEnabled("reviewAskServiceFacts")) return null;
+    try {
+      const row = await db("service_records").where({ id: serviceRecordId }).first("structured_notes");
+      if (!row) return null;
+      const notes = parseDecision(row.structured_notes) || {};
+      const treated = notes.visitOutcome === "completed";
+      const areasTreated = treated && Array.isArray(notes.areasTreated)
+        ? notes.areasTreated.filter((a) => typeof a === "string")
+        : [];
+      return { treated, areasTreated };
+    } catch (err) {
+      logger.warn(`[review] service facts read failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      return null;
+    }
+  },
+
   async _topicFollowupBody({ sequenceId, customer, contact }) {
     try {
-      const seq = await db("review_sequences").where({ id: sequenceId }).first("ask_context");
+      const seq = await db("review_sequences").where({ id: sequenceId }).first("ask_context", "service_record_id");
       const askContext = parseDecision(seq?.ask_context);
       if (!askContext?.concern) return null;
       return await require("./review-ask-drafter").draftTopicFollowupBody({
         customerId: customer.id,
         recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
         concern: askContext.concern,
+        topic: askContext.topic,
+        serviceFacts: await this._reviewServiceFacts(seq.service_record_id),
       });
     } catch (err) {
       logger.warn(`[review] topic follow-up draft skipped (sequenceId=${sequenceId}): ${err.message}`);

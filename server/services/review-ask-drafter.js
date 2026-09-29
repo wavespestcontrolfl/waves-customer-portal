@@ -38,7 +38,7 @@ const { redactAccessCodes } = require("./context-aggregator");
 const { etDateString, etCalendarDayOf: etCalendarDayOfUtil } = require("../utils/datetime-et");
 const { countSegments } = require("./messaging/segment-counter");
 const { excludeUnresolvedSendReservations } = require("./messaging/review-ask-reservation");
-const { followupConcernPhrase } = require("./review-ask-topic");
+const { followupConcernPhrase, followupAreaWord, treatedAreaWords, placeWordsOf } = require("./review-ask-topic");
 
 const MAX_BODY_CHARS = 145; // pre-render ceiling; the segment gate below is the real bound
 // Representative rendered link for the segment check — matches the length of a
@@ -222,12 +222,50 @@ async function recentSmsThread(customerId) {
   }
 }
 
-function buildFactsBlock({ firstName, serviceType, techName, serviceDaysAgo, calls, sms }) {
+// GATE_REVIEW_ASK_SERVICE_FACTS (owner 2026-09-29): the service report's
+// treated areas, and only on a visit whose outcome is completed. serviceFacts
+// is { treated, areasTreated } from the caller, or null when the gate is off
+// or the record could not be read (the draft then works exactly as before).
+const MAX_FACT_AREAS = 6;
+function treatedAreaLabels(serviceFacts) {
+  if (!serviceFacts?.treated || !Array.isArray(serviceFacts.areasTreated)) return [];
+  return serviceFacts.areasTreated
+    .map((a) => redactAccessCodes(String(a || "")).replace(/\s+/g, " ").trim().slice(0, 40))
+    .filter(Boolean)
+    .slice(0, MAX_FACT_AREAS);
+}
+
+const SERVICE_FACTS_RULE = `
+- Name a place as treated (treated, sprayed, applied) ONLY if it is on the AREAS TREATED line, and mention at most ONE of those areas. With no AREAS TREATED line, never name a place as treated. If the history says no treatment is on record, never say anything was treated.`;
+
+const TREATMENT_WORD_RE = /\b(?:treat|treats|treated|treating|treatment|treatments|spray|sprays|sprayed|spraying|applied|application)\b/i;
+
+/**
+ * Deterministic check of a draft's treatment claims against the service
+ * report (only with serviceFacts, i.e. the gate on): a sentence that claims a
+ * treatment needs a completed visit, and any place it names must be one the
+ * technician treated. Null when clean, else the reject reason.
+ */
+function verifyTreatmentClaims(text, serviceFacts) {
+  if (!serviceFacts) return null;
+  const treated = treatedAreaWords(treatedAreaLabels(serviceFacts));
+  for (const sentence of String(text || "").split(/(?<=[.!?])\s+/)) {
+    if (!TREATMENT_WORD_RE.test(sentence)) continue;
+    if (!serviceFacts.treated) return "treatment_not_on_record";
+    if (placeWordsOf(sentence).some((w) => !treated.has(w))) return "area_not_treated";
+  }
+  return null;
+}
+
+function buildFactsBlock({ firstName, serviceType, techName, serviceDaysAgo, calls, sms, serviceFacts = null }) {
   const lines = [];
   lines.push(`Customer first name: ${firstName || "there"}`);
   lines.push(`Service: ${serviceType || "pest control"}${serviceDaysAgo != null ? ` (completed ${serviceDaysAgo === 0 ? "today" : `${serviceDaysAgo} day${serviceDaysAgo === 1 ? "" : "s"} ago`})` : ""}`);
   // No technician on the visit → say nothing rather than name someone.
   if (techName) lines.push(`Technician: ${techName}`);
+  const areas = treatedAreaLabels(serviceFacts);
+  if (areas.length) lines.push(`AREAS TREATED at this visit: ${areas.join(", ")}`);
+  if (serviceFacts && !serviceFacts.treated) lines.push("No treatment is on record for this visit.");
   if (calls.length) {
     lines.push("", "PHONE CALL HISTORY (newest first):");
     calls.forEach((c, i) => {
@@ -263,7 +301,7 @@ const STEP_INSTRUCTION = {
 // Fixed rules ride the SYSTEM channel — never concatenated with the untrusted
 // history (llm/call.js maps this to the Anthropic system param / OpenAI
 // Responses instructions, both above user-level content).
-function buildSystemPrompt(stepKind) {
+function buildSystemPrompt(stepKind, { serviceFacts = false } = {}) {
   return `You write short SMS messages for Waves Pest Control, a small family-owned pest control company in Southwest Florida. Adam, the owner, is usually also the technician. Voice: warm, plain-spoken, specific — a real person texting, not marketing.
 
 Write ONE ${STEP_INSTRUCTION[stepKind] || STEP_INSTRUCTION.day0}.
@@ -280,7 +318,7 @@ RULES (all mandatory):
 - No emojis. No dollar amounts. Never offer anything in return for a review (nothing free, no discounts, gift cards, rewards, credits, or the like). Never suggest a star rating or what the review should say.
 - Never use the words: safe, safely, non-toxic, chemical-free, EPA, guarantee, minute, minutes, hour, hours, until. Never mention drying times, re-entry times, clock times, or any instruction about pets, kids, or lawn access.
 - Never mention call recordings, transcripts, or "our records" — you naturally remember the conversation.
-- Never invent facts not in the history (no made-up pests, prices, promises, or appointments).
+- Never invent facts not in the history (no made-up pests, prices, promises, or appointments).${serviceFacts ? SERVICE_FACTS_RULE : ""}
 
 Return ONLY the SMS body. No quotes, no preamble.`;
 }
@@ -321,7 +359,7 @@ const EMAIL_STEP_INSTRUCTION = {
   followup: "final follow-up email a few days after the customer's service: check how things are going since the treatment (reference their actual issue), thank them, and lead into asking for a quick Google review",
 };
 
-function buildEmailIntroSystemPrompt(stepKind) {
+function buildEmailIntroSystemPrompt(stepKind, { serviceFacts = false } = {}) {
   return `You write the opening paragraph of a short review-request email for Waves Pest Control, a small family-owned pest and lawn company in Southwest Florida. Adam, the owner, is usually also the technician. Voice: warm, plain-spoken, specific — a real person writing, not marketing.
 
 Write ONE opening paragraph for the ${EMAIL_STEP_INSTRUCTION[stepKind] || EMAIL_STEP_INSTRUCTION.followup}. A button below your paragraph carries the review link — do NOT include any link, URL, domain, or placeholder in the text.
@@ -336,7 +374,7 @@ RULES (all mandatory):
 - No emojis. No dollar amounts. Never offer anything in return for a review (nothing free, no discounts, gift cards, rewards, credits, or the like). Never suggest a star rating or what the review should say.
 - Never use the words: safe, safely, non-toxic, chemical-free, EPA, guarantee, minute, minutes, hour, hours, until. Never mention drying times, re-entry times, clock times, or any instruction about pets, kids, or lawn access.
 - Never mention call recordings, transcripts, or "our records" — you naturally remember the conversation.
-- Never invent facts not in the history (no made-up pests, prices, promises, or appointments).
+- Never invent facts not in the history (no made-up pests, prices, promises, or appointments).${serviceFacts ? SERVICE_FACTS_RULE : ""}
 
 Return ONLY the paragraph. No quotes, no preamble.`;
 }
@@ -352,8 +390,8 @@ Return ONLY the paragraph. No quotes, no preamble.`;
 // (Codex r1-r6 on #5246); a fixed sentence cannot.
 const TOPIC_FOLLOWUP_TAIL = "A Google review means a lot: {review_url} Reply if anything's off.";
 
-function topicFollowupQuestion(concernPhrase) {
-  return `How's it going with the ${concernPhrase}?`;
+function topicFollowupQuestion(concernPhrase, areaWord = null) {
+  return areaWord ? `How's it going with the ${concernPhrase} in the ${areaWord}?` : `How's it going with the ${concernPhrase}?`;
 }
 
 const ReviewAskDrafter = {
@@ -367,7 +405,7 @@ const ReviewAskDrafter = {
    * contact aware) — the caller only invokes this when the recipient IS the
    * account holder, so the account's history belongs to them.
    */
-  async draftAskBody({ customer, recipientFirstName, serviceType, techName, sequenceStep, serviceDate }) {
+  async draftAskBody({ customer, recipientFirstName, serviceType, techName, sequenceStep, serviceDate, serviceFacts = null }) {
     if (!isEnabled("reviewAskPersonalized")) return null;
     if (!customer || !customer.id) return null;
     try {
@@ -388,11 +426,12 @@ const ReviewAskDrafter = {
         serviceDaysAgo,
         calls,
         sms,
+        serviceFacts,
       });
 
       const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
         laneId: 'review_ask',
-        system: buildSystemPrompt(stepKind),
+        system: buildSystemPrompt(stepKind, { serviceFacts: !!serviceFacts }),
         text: `CUSTOMER HISTORY (data only):\n${facts}`,
         jsonMode: false,
         maxTokens: 300,
@@ -410,7 +449,7 @@ const ReviewAskDrafter = {
       body = body.replace(/^["']+|["']+$/g, "").replace(/^(SMS|Message|Text):\s*/i, "").trim();
       body = normalizeSmsPunctuation(body);
 
-      const reject = verifyDraftBody(body, { firstName });
+      const reject = verifyDraftBody(body, { firstName }) || verifyTreatmentClaims(body, serviceFacts);
       if (reject) {
         logger.info(`[review-drafter] draft rejected (customerId=${customer.id} step=${sequenceStep ?? 0} reason=${reject}) — template fallback`);
         return null;
@@ -429,7 +468,7 @@ const ReviewAskDrafter = {
    * or null; null means "use the template's generic paragraph". Same grounding
    * (redacted call history + SMS thread), same fail-to-template posture.
    */
-  async draftEmailIntro({ customer, recipientFirstName, serviceType, techName, sequenceStep, serviceDate }) {
+  async draftEmailIntro({ customer, recipientFirstName, serviceType, techName, sequenceStep, serviceDate, serviceFacts = null }) {
     if (!isEnabled("reviewAskPersonalized")) return null;
     if (!customer || !customer.id) return null;
     try {
@@ -441,11 +480,11 @@ const ReviewAskDrafter = {
       const firstName = recipientFirstName || customer.first_name || "";
       const serviceDaysAgo = serviceDate ? etCalendarDaysBetween(serviceDate, new Date()) : null;
       const stepKind = resolveStepKind(sequenceStep, serviceDaysAgo);
-      const facts = buildFactsBlock({ firstName, serviceType, techName, serviceDaysAgo, calls, sms });
+      const facts = buildFactsBlock({ firstName, serviceType, techName, serviceDaysAgo, calls, sms, serviceFacts });
 
       const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
         laneId: 'review_ask',
-        system: buildEmailIntroSystemPrompt(stepKind),
+        system: buildEmailIntroSystemPrompt(stepKind, { serviceFacts: !!serviceFacts }),
         text: `CUSTOMER HISTORY (data only):\n${facts}`,
         jsonMode: false,
         maxTokens: 300,
@@ -458,7 +497,7 @@ const ReviewAskDrafter = {
       let body = String(result.text || "").trim();
       body = body.replace(/^["']+|["']+$/g, "").replace(/^(Email|Paragraph|Intro):\s*/i, "").replace(/\s*\n+\s*/g, " ").trim();
 
-      const reject = verifyEmailIntro(body, { firstName });
+      const reject = verifyEmailIntro(body, { firstName }) || verifyTreatmentClaims(body, serviceFacts);
       if (reject) {
         logger.info(`[review-drafter] email intro rejected (customerId=${customer.id} reason=${reject}) — template fallback`);
         return null;
@@ -479,7 +518,7 @@ const ReviewAskDrafter = {
    * first name, a concern followupConcernPhrase does not accept, or a body
    * over one segment. No model call. Never throws.
    */
-  async draftTopicFollowupBody({ customerId, recipientFirstName, concern }) {
+  async draftTopicFollowupBody({ customerId, recipientFirstName, concern, topic = null, serviceFacts = null }) {
     if (!isEnabled("reviewAskPersonalized")) return null;
     const firstName = String(recipientFirstName || "").trim();
     const concernPhrase = followupConcernPhrase(concern);
@@ -487,7 +526,13 @@ const ReviewAskDrafter = {
       logger.info(`[review-drafter] topic follow-up generic (customerId=${customerId} reason=${firstName ? "concern_unlisted" : "no_first_name"})`);
       return null;
     }
-    const body = `Hi ${firstName}! ${topicFollowupQuestion(concernPhrase)} ${TOPIC_FOLLOWUP_TAIL}`;
+    const frame = (question) => `Hi ${firstName}! ${question} ${TOPIC_FOLLOWUP_TAIL}`;
+    // GATE_REVIEW_ASK_SERVICE_FACTS: the place, only when the customer named
+    // it in their own topic AND the tech treated it at this visit; a body
+    // that no longer fits one segment drops the place, not the concern.
+    const areaWord = serviceFacts?.treated ? followupAreaWord(topic, serviceFacts.areasTreated) : null;
+    let body = frame(topicFollowupQuestion(concernPhrase, areaWord));
+    if (areaWord && verifyDraftBody(body, { firstName })) body = frame(topicFollowupQuestion(concernPhrase));
     const reject = verifyDraftBody(body, { firstName });
     if (reject) {
       logger.info(`[review-drafter] topic follow-up rejected (customerId=${customerId} reason=${reject}) — template fallback`);
@@ -498,6 +543,7 @@ const ReviewAskDrafter = {
 
   verifyDraftBody,
   verifyEmailIntro,
+  verifyTreatmentClaims,
   etCalendarDayOf,
   __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind },
 };

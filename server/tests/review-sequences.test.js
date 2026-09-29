@@ -193,6 +193,7 @@ beforeEach(() => {
   mockDraftTopicFollowup.mockReset().mockResolvedValue(null);
   mockResolveReviewTopic.mockReset().mockResolvedValue(null);
   mockGates.reviewDay0Context = false;
+  mockGates.reviewAskServiceFacts = false;
 });
 
 describe('review sequences — cadence engine', () => {
@@ -664,10 +665,19 @@ describe('review sequences — cadence engine', () => {
       const mock = setup({ seq: followupDue });
       await ReviewService.processReviewSequences();
 
-      expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'tf-1', recipientFirstName: 'Dee', concern: 'ants' }));
+      expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'tf-1', recipientFirstName: 'Dee', concern: 'ants', topic: 'ants in the kitchen', serviceFacts: null }));
       expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Dee! How's it going with the ants\? A Google review means a lot: \S+ Reply if anything's off\.$/);
       expect(lastTouch(mock).template_key).toBe('topic_followup_personalized');
       expect(seqRow(mock)).toMatchObject({ status: 'completed', current_step: 2 });
+    });
+
+    test('with GATE_REVIEW_ASK_SERVICE_FACTS on, the follow-up gets the visit\'s treated areas', async () => {
+      mockGates.reviewAskServiceFacts = true;
+      const mock = setup({ seq: followupDue });
+      mock.__state.rows.service_records[0].structured_notes = JSON.stringify({ visitOutcome: 'completed', areasTreated: ['Kitchen'] });
+      await ReviewService.processReviewSequences();
+
+      expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ topic: 'ants in the kitchen', serviceFacts: { treated: true, areasTreated: ['Kitchen'] } }));
     });
 
     test('a refused draft sends the generic follow-up text', async () => {
@@ -4977,6 +4987,39 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(sentBody).toContain('hope the ants are staying gone after Tuesday');
     expect(sentBody).toContain(`https://portal.test/rate/${touch.token}`);
     expect(sentBody).not.toContain('{review_url}');
+  });
+
+  // GATE_REVIEW_ASK_SERVICE_FACTS (owner 2026-09-29): the drafter gets the
+  // service report's treated areas, only for a completed visit.
+  describe('service facts for the drafter', () => {
+    const withRecord = (id, customer, notes) => {
+      const fx = reminderStepFixture(id, customer);
+      fx.review_sequences[0].service_record_id = `sr-${id}`;
+      fx.service_records = [{ id: `sr-${id}`, customer_id: customer.id, service_type: 'pest control', structured_notes: JSON.stringify(notes) }];
+      return fx;
+    };
+    const customer = { id: 'sf-1', first_name: 'Stan', last_name: 'Q', phone: '+19410000042', nearest_location_id: 'bradenton' };
+
+    test('gate on, completed visit → the treated areas', async () => {
+      mockGates.reviewAskServiceFacts = true;
+      db.mockImplementation(makeMock(withRecord('seq-sf1', customer, { visitOutcome: 'completed', areasTreated: ['Kitchen', 'Garage', 42] })));
+      await ReviewService.processReviewSequences();
+      expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceFacts: { treated: true, areasTreated: ['Kitchen', 'Garage'] } }));
+    });
+
+    test('gate on, not a completed visit (or no outcome) → no treatment on record, no areas', async () => {
+      mockGates.reviewAskServiceFacts = true;
+      db.mockImplementation(makeMock(withRecord('seq-sf2', customer, { visitOutcome: 'inspection_only', areasTreated: ['Kitchen'] })));
+      await ReviewService.processReviewSequences();
+      expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceFacts: { treated: false, areasTreated: [] } }));
+    });
+
+    test('gate off → no facts, the drafter works as before', async () => {
+      mockGates.reviewAskServiceFacts = false;
+      db.mockImplementation(makeMock(withRecord('seq-sf3', customer, { visitOutcome: 'completed', areasTreated: ['Kitchen'] })));
+      await ReviewService.processReviewSequences();
+      expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceFacts: null }));
+    });
   });
 
   test('a rejected/failed draft falls back to the standard template (reminder still sends)', async () => {

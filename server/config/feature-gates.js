@@ -830,6 +830,15 @@ const gates = {
   // Day-0 ask as before, and any follow-up not yet sent is cancelled.
   reviewDay0Context: process.env.GATE_REVIEW_DAY0_CONTEXT === 'true',
 
+  // Service-report facts for the review texts (owner 2026-09-29): the areas
+  // the tech treated (structured_notes.areasTreated), only on a visit whose
+  // outcome is completed. The personalized drafter may name one of them and
+  // may claim a treatment only then; the recurring topic follow-up adds the
+  // area when it is also in the customer's own topic. Never products,
+  // findings, recommendations or billing. Customer-facing: dark until the
+  // owner flips it. Off = no extra read, copy exactly as before.
+  reviewAskServiceFacts: process.env.GATE_REVIEW_ASK_SERVICE_FACTS === 'true',
+
   // Digital business card — the card.issued email a customer gets after their
   // FIRST completed visit (services/customer-card.js). The card row and the
   // /card/:token page are NOT behind this gate (tokenized, unlisted,

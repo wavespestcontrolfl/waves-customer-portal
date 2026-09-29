@@ -361,6 +361,42 @@ function followupConcernPhrase(concern) {
   return phrase.replace(/[A-Z]{2,}/g, (w) => w.toLowerCase());
 }
 
+// Place words a treated-area label contributes ("Lanai / pool cage" ->
+// lanai, pool, cage), singular forms. GATE_REVIEW_ASK_SERVICE_FACTS: a
+// drafted treatment claim may name only these when the tech treated them,
+// and the topic follow-up may add one.
+const AREA_WORDS = new Set([
+  "kitchen", "bathroom", "garage", "lanai", "pool", "cage", "attic", "bedroom", "pantry", "laundry", "eave",
+  "soffit", "perimeter", "yard", "fence", "patio", "deck", "porch", "driveway", "basement", "crawlspace",
+  "cabinet", "sink", "closet", "baseboard", "shed", "foundation", "trash", "entry", "window", "door",
+].map(singularForm));
+// The ones that read naturally as "the <concern> in the <area>".
+const FOLLOWUP_AREA_WORDS = new Set([
+  "kitchen", "bathroom", "garage", "lanai", "attic", "bedroom", "pantry", "laundry", "yard", "patio", "porch",
+  "shed", "closet", "cabinet",
+].map(singularForm));
+
+function placeWordsOf(text) {
+  return (String(text || "").toLowerCase().match(/[a-z]+/g) || []).map(singularForm).filter((w) => AREA_WORDS.has(w));
+}
+
+/** The place words (singular) of the tech's treated-area labels. */
+function treatedAreaWords(areasTreated) {
+  return new Set((Array.isArray(areasTreated) ? areasTreated : []).flatMap(placeWordsOf));
+}
+
+/**
+ * The place the topic follow-up may add ("the ants in the kitchen"): a place
+ * the customer named in their own topic that the tech also treated at the
+ * visit, in the customer's own spelling, lowercased. Null when none.
+ */
+function followupAreaWord(topic, areasTreated) {
+  const treated = treatedAreaWords(areasTreated);
+  const word = (String(topic || "").toLowerCase().match(/[a-z]+/g) || [])
+    .find((w) => FOLLOWUP_AREA_WORDS.has(singularForm(w)) && treated.has(singularForm(w)));
+  return word || null;
+}
+
 function hasEvidenceToClassify(ev) {
   const hasCompletion = !!ev?.completion?.concernText;
   const hasTexts = Array.isArray(ev?.texts) && ev.texts.length > 0;
@@ -495,6 +531,9 @@ module.exports = {
   TOPIC_VERSION,
   isRecurringAskPlan,
   followupConcernPhrase,
+  followupAreaWord,
+  treatedAreaWords,
+  placeWordsOf,
   readTopicEvidence,
   collectTopicEvidence,
   classifyTopic,

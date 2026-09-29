@@ -398,3 +398,80 @@ describe('draftTopicFollowupBody — the recurring topic follow-up', () => {
     expect(await draft({ recipientFirstName: 'Maximilianus-Bartholomew', concern: 'St Augustine grass' })).toBeNull();
   });
 });
+
+// GATE_REVIEW_ASK_SERVICE_FACTS (owner 2026-09-29): the service report's
+// treated areas, only on a completed visit. The caller passes serviceFacts
+// only with the gate on; null keeps every draft exactly as before.
+describe('service facts — treated areas from the service report', () => {
+  const FACTS = { treated: true, areasTreated: ['Perimeter', 'Kitchen', 'Garage', 'Lanai / pool cage'] };
+  const ask = (text, serviceFacts) => {
+    mockDispatch.mockResolvedValue({ ok: true, text });
+    return Drafter.draftAskBody({ customer: CUSTOMER, recipientFirstName: 'Aaron', serviceType: 'Quarterly Pest Control', sequenceStep: 1, serviceFacts });
+  };
+
+  test('the treated areas ride the history text and the rule rides the system prompt; nothing without facts', async () => {
+    await ask(CLEAN_BODY, FACTS);
+    let payload = mockDispatch.mock.calls[0][1];
+    expect(payload.text).toContain('AREAS TREATED at this visit: Perimeter, Kitchen, Garage, Lanai / pool cage');
+    expect(payload.system).toMatch(/ONLY if it is on the AREAS TREATED line/);
+
+    mockDispatch.mockClear();
+    await ask(CLEAN_BODY, null);
+    payload = mockDispatch.mock.calls[0][1];
+    expect(payload.text).not.toContain('AREAS TREATED');
+    expect(payload.system).not.toMatch(/AREAS TREATED/);
+  });
+
+  test('a visit that is not a completed treatment says so, and gets no areas', async () => {
+    await ask(CLEAN_BODY, { treated: false, areasTreated: ['Kitchen'] });
+    const payload = mockDispatch.mock.calls[0][1];
+    expect(payload.text).toContain('No treatment is on record for this visit.');
+    expect(payload.text).not.toContain('AREAS TREATED');
+  });
+
+  test('a treatment claim on a treated area passes; on an untreated one it falls back to the template', async () => {
+    expect(await ask('Hi Aaron, hope the ants are backing off since we treated the kitchen: {review_url}', FACTS)).not.toBeNull();
+    expect(await ask('Hi Aaron, hope the ants are backing off since we treated the attic: {review_url}', FACTS)).toBeNull();
+  });
+
+  test('verifyTreatmentClaims: only with facts, completed visits only, places must be treated ones', () => {
+    const v = Drafter.verifyTreatmentClaims;
+    expect(v('We sprayed the attic.', null)).toBeNull();
+    expect(v('We treated the kitchen and garage.', FACTS)).toBeNull();
+    expect(v('We treated the lanai.', FACTS)).toBeNull();
+    expect(v('We treated around the home.', FACTS)).toBeNull();
+    expect(v('We sprayed the attic.', FACTS)).toBe('area_not_treated');
+    expect(v('The kitchen looked great. We treated the bedroom.', FACTS)).toBe('area_not_treated');
+    // A place in a sentence with no treatment claim is not a claim.
+    expect(v('Hope the kitchen ants are backing off. Thanks for having us!', FACTS)).toBeNull();
+    expect(v('Hope things are better since the treatment.', { treated: false, areasTreated: [] })).toBe('treatment_not_on_record');
+  });
+
+  test('the email intro gets the same facts and the same check', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron, hope the ants are backing off since we treated the attic. If anything looks off, just reply. A quick review would mean a lot.' });
+    expect(await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron', serviceFacts: FACTS })).toBeNull();
+    expect(mockDispatch.mock.calls[0][1].text).toContain('AREAS TREATED at this visit');
+  });
+
+  describe('the topic follow-up adds the place when the customer named it and the tech treated it', () => {
+    const follow = (over) => Drafter.draftTopicFollowupBody({ customerId: 'c', recipientFirstName: 'Aaron', concern: 'ants', topic: 'ants in the kitchen', ...over });
+
+    test('named and treated → "the ants in the kitchen"', async () => {
+      expect(await follow({ serviceFacts: FACTS })).toBe("Hi Aaron! How's it going with the ants in the kitchen? A Google review means a lot: {review_url} Reply if anything's off.");
+      expect(await follow({ topic: 'bugs in my bathroom', concern: 'bugs', serviceFacts: { treated: true, areasTreated: ['Bathrooms'] } }))
+        .toContain("How's it going with the bugs in the bathroom?");
+    });
+
+    test('not treated, not a completed visit, no facts, or a place not in the topic → no place', async () => {
+      for (const serviceFacts of [{ treated: true, areasTreated: ['Garage'] }, { treated: false, areasTreated: ['Kitchen'] }, null]) {
+        expect(await follow({ serviceFacts })).toContain("How's it going with the ants? ");
+      }
+      expect(await follow({ topic: 'ants', serviceFacts: FACTS })).toContain("How's it going with the ants? ");
+    });
+
+    test('a body the place would push past one segment drops the place, not the concern', async () => {
+      const out = await follow({ recipientFirstName: 'Bartholomew', concern: 'Bermuda grass', topic: 'Bermuda grass in the yard', serviceFacts: { treated: true, areasTreated: ['Yard'] } });
+      expect(out).toContain("How's it going with the Bermuda grass? ");
+    });
+  });
+});
