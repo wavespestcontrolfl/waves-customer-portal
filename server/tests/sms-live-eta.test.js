@@ -33,6 +33,7 @@ const { resolveFreshTechPosition } = require('../services/tracking-vehicle-locat
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const {
   resolveLiveEtaFact, liveEtaDestination, liveEtaDedupeKey, liveEtaEligible,
+  _resetLiveEtaMemoForTests, _liveEtaMemoSizeForTests,
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
@@ -74,6 +75,11 @@ const ETA_RESULT = { minutes: 14, distanceMiles: 3.2, source: 'google', techUpda
 afterEach(() => {
   delete process.env[GATE];
   jest.clearAllMocks();
+  // The cross-request memo (Codex round-4 P2) is process-wide, keyed on
+  // (technician, destination) — every test below reuses baseRow()'s
+  // tech-1/27.4,-82.5 pair, so a cached result from one test would otherwise
+  // leak into the next one's mocked expectations.
+  _resetLiveEtaMemoForTests();
 });
 
 describe('resolveLiveEtaFact — fail-closed data source', () => {
@@ -195,6 +201,105 @@ describe('resolveLiveEtaFact — fail-closed data source', () => {
   });
 });
 
+describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334): concurrent lanes share one lookup', () => {
+  test('two concurrent callers for the SAME (technician, destination) share one lookup and get the same number', async () => {
+    process.env[GATE] = 'true';
+    let resolvePosition;
+    resolveFreshTechPosition.mockImplementation(() => new Promise((resolve) => { resolvePosition = resolve; }));
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    // Two different scheduled_services rows at the same physical stop — the
+    // exact twilio-webhook.js scenario: processInboundSms and
+    // draftShadowReply each independently build a context for the SAME
+    // inbound and each resolves the SAME row's LIVE ETA.
+    const p1 = resolveLiveEtaFact(baseRow({ id: 'svc-a' }), baseCustomer());
+    const p2 = resolveLiveEtaFact(baseRow({ id: 'svc-b' }), baseCustomer());
+    resolvePosition(FRESH_POSITION);
+    const [out1, out2] = await Promise.all([p1, p2]);
+
+    expect(out1).toEqual(out2);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+    expect(calculateBoundedTrackingEta).toHaveBeenCalledTimes(1);
+  });
+
+  test('a different technician never shares the memo — its own lookup runs', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    await Promise.all([
+      resolveLiveEtaFact(baseRow({ id: 'svc-a', technician_id: 'tech-1' }), baseCustomer()),
+      resolveLiveEtaFact(baseRow({ id: 'svc-b', technician_id: 'tech-2' }), baseCustomer()),
+    ]);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+  });
+
+  test('a different destination never shares the memo, even for the same technician', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    await Promise.all([
+      resolveLiveEtaFact(baseRow({ id: 'svc-a', service_lat: 27.4, service_lng: -82.5 }), baseCustomer()),
+      resolveLiveEtaFact(baseRow({ id: 'svc-b', service_lat: 27.9, service_lng: -82.1 }), baseCustomer()),
+    ]);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+  });
+
+  test('a second, later call within the 60s TTL reuses the cached result with no second lookup', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    const row = baseRow();
+    const out1 = await resolveLiveEtaFact(row, baseCustomer());
+    const out2 = await resolveLiveEtaFact(row, baseCustomer());
+    expect(out1).toEqual(out2);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failed/null lookup is memoized too — a second caller in the same window does not repeat it', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(null); // stale/missing GPS
+
+    const row = baseRow();
+    const out1 = await resolveLiveEtaFact(row, baseCustomer());
+    const out2 = await resolveLiveEtaFact(row, baseCustomer());
+    expect(out1).toBeNull();
+    expect(out2).toBeNull();
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+  });
+
+  test('a call after the 60s TTL expires runs a fresh lookup, not the stale cached one', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    let now = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const row = baseRow();
+      await resolveLiveEtaFact(row, baseCustomer());
+      now += 61 * 1000; // past the 60s TTL
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now.mockRestore();
+    }
+  });
+
+  test('the memo is bounded — many distinct keys never grow it past the cap', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    for (let i = 0; i < 250; i += 1) {
+      await resolveLiveEtaFact(baseRow({ id: `svc-${i}`, technician_id: `tech-${i}`, service_lat: 27 + i / 1000 }), baseCustomer());
+    }
+    expect(_liveEtaMemoSizeForTests()).toBeLessThanOrEqual(200);
+  });
+});
+
 describe('buildFactsBlock — LIVE ETA / TRACKING LINK rendering', () => {
   const liveEta = { minutes: 12, asOf: '2:45 PM ET', trackUrl: 'https://portal.wavespestcontrol.com/track/abc123' };
 
@@ -251,6 +356,72 @@ describe('buildFactsBlock — LIVE ETA / TRACKING LINK rendering', () => {
     });
     expect(block).toContain('LIVE STATUS: tech marked on site at this visit');
     expect(block).not.toContain('LIVE ETA');
+  });
+});
+
+describe('buildFactsBlock reads the customer-facing trackState, not raw status (Codex round-4 P2, PR #5334)', () => {
+  const liveEta = { minutes: 12, asOf: '2:45 PM ET', trackUrl: 'https://portal.wavespestcontrol.com/track/abc123' };
+
+  test('gate on: status says en_route but trackState (the tracker) says the admin flip never landed — NOT rendered as live, mirrors liveEtaEligible', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'en_route', trackState: 'scheduled', isToday: true, liveEta },
+      ],
+    });
+    expect(block).not.toContain('LIVE STATUS: tech marked en route');
+    expect(block).not.toContain('LIVE ETA');
+    expect(block).toContain('no live tech location known');
+  });
+
+  test('gate on: status says confirmed but trackState says en_route (status write lagged the tracker) — rendered live off trackState', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'confirmed', trackState: 'en_route', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked en route to this visit');
+    expect(block).toContain('LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)');
+  });
+
+  test('gate on: trackState says on_site even though status still says en_route — rendered on-site off trackState, never LIVE ETA', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'en_route', trackState: 'on_site', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked on site at this visit');
+    expect(block).not.toContain('LIVE ETA');
+  });
+
+  test('gate OFF: trackState is ignored entirely — rendering stays status-based, byte-identical to v11', () => {
+    delete process.env[GATE];
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'confirmed', trackState: 'en_route', isToday: true, liveEta },
+      ],
+    });
+    expect(block).not.toContain('LIVE STATUS');
+    expect(block).not.toContain('LIVE ETA');
+    expect(block).toContain('no live tech location known');
+  });
+
+  test('a context predating trackState (no field at all) falls back to status, gate on or off', () => {
+    process.env[GATE] = 'true';
+    const block = buildFactsBlock({
+      summary: 'Dana',
+      upcomingServices: [
+        { type: 'Quarterly Pest', date: '2026-09-29', window: null, tech: 'Sam', status: 'en_route', isToday: true, liveEta },
+      ],
+    });
+    expect(block).toContain('LIVE STATUS: tech marked en route to this visit');
+    expect(block).toContain('LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)');
   });
 });
 
@@ -511,7 +682,7 @@ describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (indep
 
   test('carries the exact groups context-aggregator collected, filtering out nullish ids', () => {
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1', null, 'svc-2'] }] }))
-      .toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'] }] });
+      .toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: [] }] });
   });
 
   test('two distinct stops (different technicians/destinations) persist as two separate entries', () => {
@@ -522,8 +693,8 @@ describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (indep
       ],
     })).toEqual({
       entries: [
-        { minutes: 9, scheduledServiceIds: ['svc-1'] },
-        { minutes: 20, scheduledServiceIds: ['svc-2'] },
+        { minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: [] },
+        { minutes: 20, scheduledServiceIds: ['svc-2'], trackTokens: [] },
       ],
     });
   });
@@ -531,5 +702,19 @@ describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (indep
   test('a group with no minutes or no ids is dropped rather than persisted as a bogus entry', () => {
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: null, scheduledServiceIds: ['svc-1'] }, { minutes: 12, scheduledServiceIds: [] }] }))
       .toBeNull();
+  });
+
+  // Codex round-4 P2 (PR #5334): the /track/:token(s) each entry covers,
+  // carried through unchanged — filtered of blanks the same way ids are —
+  // so sms-eta-freshness.js can revalidate a tracking-link-only reply.
+  test('carries each group\'s trackTokens through, filtering blanks', () => {
+    expect(buildLiveEtaSnapshot({
+      liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: ['tok-a', null, 'tok-b', ''] }],
+    })).toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: ['tok-a', 'tok-b'] }] });
+  });
+
+  test('a group with no trackTokens at all still persists (defaults to empty)', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] }))
+      .toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: [] }] });
   });
 });

@@ -571,6 +571,17 @@ function liveEtaEligible(row, todayStr = etDateString()) {
     && customerTrackState(row) === 'en_route';
 }
 
+// The customer-facing tracker state for one upcomingServices row, normalized
+// to buildFactsBlock's operational-style labels (Codex round-4 P2, PR
+// #5334): sms-shadow-drafter's LIVE STATUS/LIVE ETA rendering must read the
+// SAME source liveEtaEligible above already uses, never raw `status` alone
+// (see the track_state select comment above and customerTrackState's own
+// comment in track-transitions.js for why the two can disagree).
+function customerFacingTrackState(row) {
+  const { customerTrackState, operationalStatusForTrackState } = require('./track-transitions');
+  return operationalStatusForTrackState(customerTrackState(row));
+}
+
 // The (technician, destination) key grouped-stop siblings dedupe on: a
 // fan-out (visit-groups.js) advances every scheduled_services row at one
 // physical stop to en_route together, each with its OWN track_view_token —
@@ -607,12 +618,40 @@ function liveEtaDedupeKey(row, customer) {
 // scheduled_service id only, never customer PII. Called at most once per
 // unique (technician, destination) by getContextForCustomer — see the LIVE
 // ETA block there.
-async function resolveLiveEtaFact(row, customer) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
-  if (!row?.technician_id || !row?.track_view_token) return null;
+//
+// Cross-request memo (Codex round-4 P2, PR #5334): twilio-webhook.js fires
+// estimate-conversion-agent.processInboundSms and
+// sms-shadow-drafter.draftShadowReply for the SAME inbound message, and each
+// builds its OWN context (includeLiveEta: true) independently — without
+// this, that's two separate GPS + Distance Matrix lookups for what is
+// really one stop, which can (rarely) hand the two concurrent drafts two
+// different minute counts for the same tech. Keyed exactly like
+// liveEtaDedupeKey (technician + destination), with the in-flight PROMISE
+// stored (not just the resolved value) so a second caller arriving before
+// the first lookup finishes awaits that same request instead of starting
+// its own. A resolved null is cached too — a lookup that just failed/timed
+// out is unlikely to succeed a second time inside the same short window, and
+// repeating it would only cost another provider round-trip. 60s TTL: about
+// the cadence a technician's GPS position actually refreshes at, so a later
+// poll still gets a fresh number. Bounded (LIVE_ETA_MEMO_MAX_ENTRIES) so many
+// concurrent customers/technicians can never grow this without limit; the
+// oldest entries are evicted first.
+const LIVE_ETA_MEMO_TTL_MS = 60 * 1000;
+const LIVE_ETA_MEMO_MAX_ENTRIES = 200;
+const liveEtaMemo = new Map(); // key -> { expiresAt, promise }
+
+function pruneLiveEtaMemo(now) {
+  for (const [key, entry] of liveEtaMemo) {
+    if (entry.expiresAt <= now) liveEtaMemo.delete(key);
+  }
+  while (liveEtaMemo.size > LIVE_ETA_MEMO_MAX_ENTRIES) {
+    const oldestKey = liveEtaMemo.keys().next().value;
+    liveEtaMemo.delete(oldestKey);
+  }
+}
+
+async function resolveLiveEtaFactUncached(row, dest) {
   try {
-    const dest = liveEtaDestination(row, customer);
-    if (!dest) return null;
     const { lat: destLat, lng: destLng } = dest;
 
     const position = await resolveFreshTechPosition({
@@ -654,6 +693,39 @@ async function resolveLiveEtaFact(row, customer) {
     logger.warn(`[context] live ETA lookup failed for scheduled_service ${row?.id}: ${err.message}`);
     return null;
   }
+}
+
+async function resolveLiveEtaFact(row, customer) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  if (!row?.technician_id || !row?.track_view_token) return null;
+  const dest = liveEtaDestination(row, customer);
+  if (!dest) return null;
+
+  const memoKey = `${row.technician_id}:${dest.lat}:${dest.lng}`;
+  const now = Date.now();
+  const cached = liveEtaMemo.get(memoKey);
+  if (cached && cached.expiresAt > now) return cached.promise;
+
+  const promise = resolveLiveEtaFactUncached(row, dest);
+  liveEtaMemo.set(memoKey, { expiresAt: now + LIVE_ETA_MEMO_TTL_MS, promise });
+  // Pruned AFTER inserting (never before): an eviction pass that ran first
+  // would trim to the cap and then this insert would push it one back over —
+  // pruning last is what actually keeps the map at or under the cap.
+  pruneLiveEtaMemo(now);
+  return promise;
+}
+
+// Test-only: clears the cross-request memo so unrelated test cases sharing a
+// (technician, destination) key never see a previous test's cached lookup.
+// Never called from production code.
+function _resetLiveEtaMemoForTests() {
+  liveEtaMemo.clear();
+}
+
+// Test-only: the memo's current entry count, so a test can assert the bound
+// actually holds under many distinct keys. Never called from production code.
+function _liveEtaMemoSizeForTests() {
+  return liveEtaMemo.size;
 }
 
 class ContextAggregator {
@@ -963,10 +1035,22 @@ class ContextAggregator {
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = uniqueLiveEtaKeys
       .filter((key) => liveEtaResultByKey.get(key))
-      .map((key) => ({
-        minutes: liveEtaResultByKey.get(key).minutes,
-        scheduledServiceIds: upcomingServices.filter((s, i) => liveEtaKeys[i] === key).map((s) => s.id),
-      }));
+      .map((key) => {
+        const members = upcomingServices.filter((s, i) => liveEtaKeys[i] === key);
+        return {
+          minutes: liveEtaResultByKey.get(key).minutes,
+          scheduledServiceIds: members.map((s) => s.id),
+          // The customer-facing /track/:token link(s) this LIVE ETA covers
+          // (Codex round-4 P2, PR #5334): a grouped stop's siblings each mint
+          // their OWN track_view_token (visit-groups.js fan-out) even though
+          // they share one physical stop, so a reply may legitimately carry
+          // any one of them. sms-eta-freshness.js uses this to revalidate a
+          // reply that shares ONLY the tracking link — the token in the
+          // outgoing body must belong to a snapshot visit, never a
+          // stray/old link.
+          trackTokens: members.map((s) => s.track_view_token).filter(Boolean),
+        };
+      });
 
     return {
       known: true,
@@ -999,7 +1083,23 @@ class ContextAggregator {
         notes: customerSafeVisitNotes(s.technician_notes),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
       })),
-      upcomingServices: upcomingServices.map((s, i) => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString(), liveEta: liveEtas[i] || null })),
+      upcomingServices: upcomingServices.map((s, i) => ({
+        type: s.service_type,
+        date: s.scheduled_date,
+        window: this.deriveWindow(s),
+        status: s.status,
+        // The customer-facing tracker state (Codex round-4 P2, PR #5334),
+        // normalized to the same operational-style labels buildFactsBlock's
+        // status checks already use ('en_route' / 'on_site' / ...) — ONE
+        // source of truth shared with liveEtaEligible above, instead of
+        // buildFactsBlock re-deriving en-route/on-site from raw `status`,
+        // which can lag the tracker (see the track_state select comment
+        // above / customerTrackState's own comment in track-transitions.js).
+        trackState: customerFacingTrackState(s),
+        tech: s.technician_name || null,
+        isToday: this.calendarDay(s.scheduled_date) === etDateString(),
+        liveEta: liveEtas[i] || null,
+      })),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable
         unavailable: billingUnavailable,
@@ -1320,3 +1420,5 @@ module.exports.resolveLiveEtaFact = resolveLiveEtaFact;
 module.exports.liveEtaDestination = liveEtaDestination;
 module.exports.liveEtaDedupeKey = liveEtaDedupeKey;
 module.exports.liveEtaEligible = liveEtaEligible;
+module.exports._resetLiveEtaMemoForTests = _resetLiveEtaMemoForTests;
+module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

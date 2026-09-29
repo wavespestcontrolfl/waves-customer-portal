@@ -478,11 +478,25 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // claim, with no duration exclusion — arrival wording always wins. Only the
 // weak trigger "out" ("12 minutes out" vs "letting pets out") consults the
 // duration exclusions.
-const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in)\b/i;
-const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in)\b/i;
+// Round 4 (Codex round-4 P2, PR #5334): "20 minutes from you" / "from your
+// house" / "from the property", and "out from" — phrasing with no other
+// arrival word at all ("from you" alone has no "away"/"arriv"/"eta") was
+// missed entirely, so the reply passed both the draft-time verifier AND the
+// send-time freshness recheck with an unbound ETA claim.
+const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out\s+from|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property))\b/i;
+const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property))\b/i;
 const ETA_MINUTES_TOKEN_RE = /\b(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
 const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
 const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it)\b[^.?!\n]{0,20}$/i;
+// A bare "in <number>" with no minutes unit at all ("be at your place in
+// 20", "he'll be there in 20") right after one of these arrival phrases —
+// Codex round-4 P2 sibling: never writing the word "minutes" doesn't make it
+// any less a stated ETA. Scoped tightly to the phrase immediately before
+// "in <number>" (never a sentence-wide trigger) so an unrelated "in 20"
+// ("read the invoice in 20", "back in 2026") never false-positives, and
+// excluded when a unit word DOES follow (seconds/hours/etc., or "minutes" —
+// which the ordinary unit-based pass above already claims on its own).
+const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up)\s+in\s+(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
 // Sentence spans over raw sentence-boundary punctuation only (. ? ! or a
 // newline) — an em dash, comma, or "—" never splits a sentence, so "heading
 // your way — 12 minutes" is one sentence and the trigger/number share it.
@@ -574,6 +588,16 @@ function findEtaMinutesClaims(text) {
     if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
     maybeClaim(parseInt(m[1], 10), m.index, m[0].length, sentenceFor(m.index));
   }
+
+  // Implicit-minutes pass (round 4): "be at your place in 20" carries no
+  // "min(ute)s" unit at all, so it can never surface from the unit-based
+  // passes above however the trigger words are extended — the phrase itself
+  // IS the trigger here, matched narrowly right before the number.
+  const implicitRe = new RegExp(IMPLICIT_MINUTES_ARRIVAL_RE.source, IMPLICIT_MINUTES_ARRIVAL_RE.flags);
+  let im;
+  while ((im = implicitRe.exec(str))) {
+    claims.push({ minutes: parseInt(im[1], 10), index: im.index });
+  }
   return claims;
 }
 // The send-time freshness recheck (sms-eta-freshness.js) needs only "does
@@ -601,11 +625,18 @@ function replyClaimsEtaMinutes(reply) {
 // a missing snapshot plus a minutes claim in the outgoing body fails closed
 // there — and the old flat shape (no `entries`) fails closed too, since
 // nothing merged yet ever persisted it.
+// `trackTokens` (Codex round-4 P2, PR #5334): each entry's own
+// /track/:token(s), carried through so sms-eta-freshness.js can revalidate a
+// reply that shares ONLY the tracking link — never rendered into any prompt.
 function buildLiveEtaSnapshot(context) {
   const groups = Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups : [];
   const entries = groups
     .filter((g) => g && Number.isFinite(g.minutes) && Array.isArray(g.scheduledServiceIds))
-    .map((g) => ({ minutes: g.minutes, scheduledServiceIds: g.scheduledServiceIds.filter((id) => id != null) }))
+    .map((g) => ({
+      minutes: g.minutes,
+      scheduledServiceIds: g.scheduledServiceIds.filter((id) => id != null),
+      trackTokens: Array.isArray(g.trackTokens) ? g.trackTokens.filter(Boolean) : [],
+    }))
     .filter((g) => g.scheduledServiceIds.length);
   return entries.length ? { entries } : null;
 }
@@ -1584,6 +1615,16 @@ function buildFactsBlock(context, extras = {}) {
   // the #1 live judge failure was invented day-of ETAs on exactly these
   // messages. The status is only trusted (and only shown) on a TODAY visit;
   // when it's absent the drafter genuinely doesn't know where the tech is.
+  // Codex round-4 P2, PR #5334: this used to read raw `s.status` here while
+  // liveEtaEligible (context-aggregator) decided ELIGIBILITY off the
+  // customer-facing tracker state (s.trackState) instead — two different
+  // sources that CAN disagree (see the track_state select comment in
+  // context-aggregator.js), which could show "LIVE STATUS: en route" for a
+  // stop the public tracking page doesn't consider live, or the reverse.
+  // ONE source now: on the gate-on path, `s.trackState` (when present)
+  // decides en-route/on-site, same as liveEtaEligible; the gate-off path —
+  // and any caller whose context predates trackState — stays exactly
+  // status-based, so gate-off output is byte-identical to v11.
   const upcoming = (context.upcomingServices || []).filter((s) => s && s.date);
   const upcomingBlock = upcoming.length
     ? upcoming
@@ -1591,7 +1632,8 @@ function buildFactsBlock(context, extras = {}) {
           const parts = [`${s.type}${s.isToday ? ' TODAY' : ''} on ${formatEtDate(s.date)}`];
           parts.push(s.window ? `window ${s.window}` : 'no arrival window set');
           parts.push(s.tech ? `tech ${s.tech}` : 'tech not yet assigned');
-          if (s.isToday && s.status === 'en_route') {
+          const liveState = (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.trackState) ? s.trackState : s.status;
+          if (s.isToday && liveState === 'en_route') {
             parts.push('LIVE STATUS: tech marked en route to this visit');
             // LIVE ETA (GATE_SMS_REAL_ANSWERS): context-aggregator only
             // ever populates s.liveEta from a fresh GPS position + bounded
@@ -1614,7 +1656,7 @@ function buildFactsBlock(context, extras = {}) {
               const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
               parts.push(`TRACKING LINK: ${stripSmsUrlScheme(s.liveEta.trackUrl)}`);
             }
-          } else if (s.isToday && s.status === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
+          } else if (s.isToday && liveState === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
           else if (s.isToday) parts.push('no live tech location known');
           return `- ${parts.join(', ')}`;
         })

@@ -1589,6 +1589,12 @@ module.exports = {
   isFutureScheduledDate,
   isStaleLiveAttempt,
   customerTrackState,
+  // Exported for real use (Codex round-4 P2, PR #5334): context-aggregator's
+  // upcomingServices[].trackState normalizes customerTrackState's raw
+  // track_state value ('on_property', ...) to buildFactsBlock's
+  // operational-style labels ('on_site', ...) with this SAME function — not
+  // a second copy of the mapping.
+  operationalStatusForTrackState,
   _test: {
     operationalStatusForTrackState,
     classifyArrivalSend,
