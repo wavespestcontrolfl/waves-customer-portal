@@ -920,4 +920,28 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
     expect(preview.anchor).not.toBe(dateOnlyStr(second.scheduled_date));
   });
+
+  test('a rescheduled row whose tracker still reads complete is a pending reschedule, never an anchor', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const [, second] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc');
+    await trx('scheduled_services').where({ id: second.id }).update({ status: 'rescheduled', track_state: 'complete' });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.reasons).toContain('rider_reschedule_pending');
+    expect(preview.anchor).not.toBe(dateOnlyStr(second.scheduled_date));
+  });
+
+  test('an overdue unperformed row (still pending, dated before today) is reported overdue and never anchors', async () => {
+    const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+    const today = etDateString();
+    const lastDone = addDays(today, -200);
+    const overdueDate = addDays(today, -30);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ status: 'completed', scheduled_date: lastDone });
+    const overdue = await row({
+      recurring_parent_id: pestParent.id, status: 'pending', is_recurring: true, recurring_pattern: 'quarterly',
+      service_type: 'Quarterly Pest Control', scheduled_date: overdueDate,
+    });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.anchor).toBe(lastDone);
+    expect(preview.pinned).toEqual(expect.arrayContaining([expect.objectContaining({ id: overdue.id, why: 'overdue' })]));
+  });
 });

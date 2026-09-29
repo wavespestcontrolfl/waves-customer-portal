@@ -353,25 +353,38 @@ async function attributeReasonMap(conn, rowIds) {
 //    "when pest last actually happened" — so previewRiderPair excludes it
 //    from the anchor computation even though it is `pinned`, the one case
 //    where a pinned row does not anchor.
-function classifyRiderRow(row, reasonMap, nearTermCutoff) {
-  if (TERMINAL_TRACK_STATES.includes(row.track_state)) return { terminal: true };
+// Pins read straight off the row's own columns, checked in order.
+const OWN_FIELD_PINS = [
+  ['prepaid', (r) => r.prepaid_amount != null],
+  ['customer_confirmed', (r) => r.customer_confirmed === true],
+  ['field_confirmed', (r) => r.field_confirmed_at != null],
+  ['visit_id', (r) => r.visit_id != null],
+  ['arrival_sms_sent', (r) => r.arrival_sms_sent_at != null],
+  ['prep_sent', (r) => r.prep_sent_at != null],
+];
+
+function classifyRiderRow(row, reasonMap, nearTermCutoff, todayStr) {
+  // A tracker-cancelled visit is gone, whatever status says. A 'rescheduled'
+  // status wins over a stale 'complete' tracker (the legacy customer
+  // reschedule path flips only status), so check it before 'complete'.
+  if (row.track_state === 'cancelled') return { terminal: true };
   if (isPlanSeriesRow(row) && row.status === 'rescheduled') {
     return { pinned: true, why: 'rescheduled_pending' };
   }
+  if (TERMINAL_TRACK_STATES.includes(row.track_state)) return { terminal: true };
   if (JOIN_INELIGIBLE_STATUSES.includes(row.status)) return { terminal: true };
   if (!isPlanSeriesRow(row)) return { booster: true };
   if (IN_PROGRESS_STATUSES.includes(row.status) || LIVE_TRACK_STATES.includes(row.track_state)) {
     return { pinned: true, why: 'in_progress' };
   }
-  if (row.prepaid_amount != null) return { pinned: true, why: 'prepaid' };
-  if (row.customer_confirmed === true) return { pinned: true, why: 'customer_confirmed' };
-  if (row.field_confirmed_at != null) return { pinned: true, why: 'field_confirmed' };
-  if (row.visit_id != null) return { pinned: true, why: 'visit_id' };
-  if (row.arrival_sms_sent_at != null) return { pinned: true, why: 'arrival_sms_sent' };
-  if (row.prep_sent_at != null) return { pinned: true, why: 'prep_sent' };
+  const ownPin = OWN_FIELD_PINS.find(([, test]) => test(row));
+  if (ownPin) return { pinned: true, why: ownPin[0] };
   if (reasonMap.has(row.id)) return { pinned: true, why: reasonMap.get(row.id) };
   if (row.status == null) return { pinned: true, why: 'null_status' };
   const d = dateOnly(row.scheduled_date);
+  // A live row dated before today never happened (still pending/confirmed):
+  // report it as overdue, never as near-term.
+  if (d != null && todayStr && d < todayStr) return { pinned: true, why: 'overdue' };
   if (d != null && d <= nearTermCutoff) return { pinned: true, why: 'near_term' };
   if (MOVABLE_ROW_STATUSES.includes(row.status)) return { movable: true };
   return { pinned: true, why: 'other_status' };
@@ -589,7 +602,7 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
   let reschedulePending = false;
   const classifications = new Map();
   for (const r of riderRows) {
-    const c = classifyRiderRow(r, reasonMap, nearTermCutoff);
+    const c = classifyRiderRow(r, reasonMap, nearTermCutoff, todayStr);
     classifications.set(r.id, c);
     // Derived from the tracker-aware classification, never raw status: a
     // lagging status can say 'rescheduled' after the tracker cancelled the
@@ -600,10 +613,15 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
     // A cancelled/skipped/no-show status wins over a stale 'complete'
     // tracker, the same precedence classifyRiderRow applies: such a visit
     // never happened, so it never anchors.
-    const operationallyTerminal = ['cancelled', 'skipped', 'no_show'].includes(r.status);
+    const operationallyTerminal = ['cancelled', 'skipped', 'no_show', 'rescheduled'].includes(r.status);
     const performed = !operationallyTerminal && (r.track_state === 'complete'
       || (r.status === 'completed' && !TERMINAL_TRACK_STATES.includes(r.track_state)));
-    if (isPlanRow && !isReschedulePending && (performed || c.pinned === true)) {
+    // A pinned row anchors only when it's still ahead: a past row that was
+    // never performed (overdue, or pinned for any other reason) did not
+    // happen on that date.
+    const d0 = dateOnly(r.scheduled_date);
+    const pinnedAhead = c.pinned === true && d0 != null && d0 >= todayStr;
+    if (isPlanRow && !isReschedulePending && (performed || pinnedAhead)) {
       const d = dateOnly(r.scheduled_date);
       if (d && (!lastRiderDate || d > lastRiderDate)) lastRiderDate = d;
     }
