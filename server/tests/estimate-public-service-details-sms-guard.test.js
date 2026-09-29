@@ -24,6 +24,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('express-rate-limit', () => () => (req, res, next) => next());
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
+jest.mock('../services/short-url', () => ({
+  ...jest.requireActual('../services/short-url'),
+  createShortCode: jest.fn(),
+}));
 
 const ESTIMATE_ID = 'est-service-details-1';
 const TOKEN = 'sd-guard-token-abc123';
@@ -87,6 +91,13 @@ function makeDb(getRow) {
       builder.first = jest.fn(async () => (db.__recentPacketFound ? { id: 'log-1' } : null));
       return builder;
     }
+    if (table === 'short_codes') {
+      const builder = {};
+      builder.whereIn = jest.fn((col, vals) => { db.__shortCodeLog.push({ whereIn: [col, vals] }); return builder; });
+      builder.whereNull = jest.fn(() => builder);
+      builder.update = jest.fn(async (payload) => { db.__shortCodeLog.push({ update: payload }); return 1; });
+      return builder;
+    }
     if (table === 'sms_send_claims') {
       const builder = {};
       builder.where = jest.fn(() => builder);
@@ -106,6 +117,7 @@ function makeDb(getRow) {
   db.__claimOutcome = null;
   db.__recentPacketFound = false;
   db.__annualLookupThrows = false;
+  db.__shortCodeLog = [];
   return db;
 }
 
@@ -139,7 +151,7 @@ afterAll((done) => {
   server.close(done);
 });
 
-const GATE_KEYS = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
+const GATE_KEYS = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2', 'GATE_SMS_LINK_WRAP'];
 let priorGates;
 beforeEach(() => {
   jest.clearAllMocks();
@@ -158,6 +170,8 @@ beforeEach(() => {
   mockDb.__claimOutcome = null;
   mockDb.__recentPacketFound = false;
   mockDb.__annualLookupThrows = false;
+  mockDb.__shortCodeLog = [];
+  require('../services/short-url').createShortCode.mockReset();
   priorGates = GATE_KEYS.map((key) => process.env[key]);
   GATE_KEYS.forEach((key) => delete process.env[key]);
 });
@@ -281,6 +295,100 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(capturedVerdict).toEqual({ ok: true });
     expect(res.status).toBe(200);
     expect(body).toEqual({ ok: true, channel: 'sms' });
+  });
+
+  describe('GATE_SMS_LINK_WRAP (Codex round 3 on #5332, P2: this send bypasses the choke point)', () => {
+    const PDF_URL = `https://portal.wavespestcontrol.com/api/estimates/${TOKEN}/service-details/pest_control/pdf`;
+    function deliveredRow(phone) {
+      const draft = baseEstimateRow({ customer_phone: phone });
+      draft.status = 'sent';
+      draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(draft) };
+      return draft;
+    }
+    const post = () => fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const flushTimers = () => new Promise((resolve) => setImmediate(resolve));
+
+    test('gate off: the body carries the raw packet URL, nothing is minted', async () => {
+      const TwilioService = require('../services/twilio');
+      const { createShortCode } = require('../services/short-url');
+      TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: `SM${'c3'.repeat(16)}`, deliveryOutcome: 'accepted' });
+      currentRow = deliveredRow('+19415550311');
+      const res = await post();
+      expect(res.status).toBe(200);
+      expect(TwilioService.sendSMS.mock.calls[0][1]).toMatch(/details packet you requested/);
+      expect(TwilioService.sendSMS.mock.calls[0][1].endsWith(PDF_URL)).toBe(true);
+      expect(createShortCode).not.toHaveBeenCalled();
+    });
+
+    test('gate on: the packet link is wrapped to /l/<code> for the exact pdf target and the code is stamped after an accepted send', async () => {
+      process.env.GATE_SMS_LINK_WRAP = 'true';
+      const TwilioService = require('../services/twilio');
+      const { createShortCode } = require('../services/short-url');
+      const SID = `SM${'c4'.repeat(16)}`;
+      createShortCode.mockResolvedValue({ code: 'pktcode01', shortUrl: 'https://portal.wavespestcontrol.com/l/pktcode01' });
+      TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: SID, deliveryOutcome: 'accepted' });
+      currentRow = deliveredRow('+19415550312');
+      const res = await post();
+      await flushTimers();
+      expect(res.status).toBe(200);
+      const sentBody = TwilioService.sendSMS.mock.calls[0][1];
+      expect(sentBody).toMatch(/details packet you requested/);
+      expect(sentBody.endsWith('portal.wavespestcontrol.com/l/pktcode01')).toBe(true);
+      expect(sentBody).not.toContain(PDF_URL);
+      expect(createShortCode).toHaveBeenCalledWith(PDF_URL, expect.objectContaining({ channel: 'sms', purpose: 'sms_link_wrap' }));
+      expect(mockDb.__shortCodeLog).toContainEqual({ whereIn: ['code', ['pktcode01']] });
+      expect(mockDb.__shortCodeLog).toContainEqual({ update: expect.objectContaining({ message_ref: `twilio_sid:${SID}` }) });
+    });
+
+    test('gate on: a refused send (preSendCheck block) stamps nothing', async () => {
+      process.env.GATE_SMS_LINK_WRAP = 'true';
+      const TwilioService = require('../services/twilio');
+      const { createShortCode } = require('../services/short-url');
+      createShortCode.mockResolvedValue({ code: 'pktcode02', shortUrl: 'https://portal.wavespestcontrol.com/l/pktcode02' });
+      TwilioService.sendSMS.mockResolvedValueOnce({ success: false, sid: null, preSendBlocked: true, code: 'QUIET_HOURS_HOLD' });
+      currentRow = deliveredRow('+19415550313');
+      const res = await post();
+      await flushTimers();
+      expect(res.status).toBe(502);
+      expect(mockDb.__shortCodeLog).toEqual([]);
+    });
+
+    test('the cross-restart dedupe query also matches a wrapped body by the code minted for the exact pdf target', async () => {
+      process.env.GATE_SMS_LINK_WRAP = 'true';
+      const TwilioService = require('../services/twilio');
+      currentRow = deliveredRow('+19415550314');
+      mockDb.__recentPacketFound = true;
+      const smsLogCalls = [];
+      const realDb = mockDb.getMockImplementation();
+      mockDb.mockImplementation((table) => {
+        const b = realDb(table);
+        if (table === 'sms_log') {
+          const origWhere = b.where;
+          b.where = jest.fn((...args) => {
+            if (typeof args[0] === 'function') {
+              const inner = { whereRaw: jest.fn((sql, binds) => { smsLogCalls.push({ sql, binds }); return inner; }), orWhereRaw: jest.fn((sql, binds) => { smsLogCalls.push({ sql, binds }); return inner; }) };
+              args[0].call(inner);
+              return b;
+            }
+            return origWhere(...args);
+          });
+        }
+        return b;
+      });
+      try {
+        const res = await post();
+        expect(res.status).toBe(200);
+        expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+        expect(smsLogCalls).toContainEqual({ sql: expect.stringContaining('strpos(COALESCE(message_body'), binds: [PDF_URL] });
+        expect(smsLogCalls).toContainEqual({ sql: expect.stringMatching(/short_codes sc WHERE sc\.target_url = \?.*'\/l\/' \|\| sc\.code/), binds: [PDF_URL] });
+      } finally {
+        mockDb.mockImplementation(realDb);
+      }
+    });
   });
 
   test('P0 (Codex round 2 on #4608): two OVERLAPPING SMS requests for a withheld annual estimate both get the generic 404 — blocked at the early verdict gate for EACH, no provider call for either', async () => {

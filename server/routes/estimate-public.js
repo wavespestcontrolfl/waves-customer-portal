@@ -26739,7 +26739,13 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     const recentPacketSend = async () => db('sms_log')
       .where({ direction: 'outbound', message_type: 'estimate_service_details' })
       .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
-      .whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrl])
+      // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
+      // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
+      // so a row matches on the raw URL OR on a code minted for that exact URL.
+      .where(function packetLinkInBody() {
+        this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrl])
+          .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
+      })
       .whereRaw("created_at >= NOW() - interval '10 minutes'")
       .first();
     const sendPromise = (async () => {
@@ -26829,9 +26835,28 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         await markClaimWithheld();
         return { success: false, withheld: true };
       }
+      // GATE_SMS_LINK_WRAP: this send bypasses sendCustomerMessage on purpose
+      // (its own claim/dedupe, window + annual-offer preSendCheck and
+      // ANNUAL_OFFER_WITHHELD result contract all hang off TwilioService.sendSMS
+      // directly), so it applies the SAME shared wrapper at this call site
+      // rather than routing through the choke point. Gate off / any mint
+      // failure = the body below is byte-identical to today. The dedupe above
+      // matches the wrapped body by the code's target_url (the pre-wrap pdfUrl).
+      const packetBody = `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`;
+      const smsLinkWrap = require('../services/messaging/sms-link-wrap');
+      let wrappedPacket = { body: packetBody, codes: [] };
+      try {
+        wrappedPacket = await smsLinkWrap.wrapPortalLinks({
+          body: packetBody,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'estimate_service_details',
+          customerId: estimate.customer_id || null,
+        });
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS link wrap skipped: ${String((e && (e.code || e.name)) || 'error').slice(0, 40)}`); }
       const smsSendResult = await TwilioService.sendSMS(
         contact.customerPhone,
-        `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
+        wrappedPacket.body,
         {
           customerId: estimate.customer_id || null,
           messageType: 'estimate_service_details',
@@ -26874,6 +26899,19 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           },
         },
       );
+      // Fire-and-forget stamp of the codes this text carried. A throw above
+      // skips it (uncertain send: codes stay unstamped); a code the provider
+      // boundary stripped stays unstamped too. Log the code only.
+      if (wrappedPacket.codes.length && smsSendResult) {
+        void smsLinkWrap.settleWrappedLinks(wrappedPacket.codes, {
+          sent: smsSendResult.success === true,
+          deliveryOutcome: smsSendResult.deliveryOutcome,
+          deduped: smsSendResult.deduped,
+          provider: 'twilio',
+          providerMessageId: smsSendResult.sid,
+          withheldLinksRewritten: smsSendResult.withheldLinksRewritten,
+        }).catch((e) => logger.warn(`[estimate-public] service-details wrapped-link stamp failed: ${String((e && (e.code || e.name)) || 'error').slice(0, 40)}`));
+      }
       // Codex round 3 on #4608 (P0): the SAME durable stamp for the OTHER
       // withheld path — the composed preSendCheck's annual-offer block,
       // resolved above as a coded refusal rather than a throw.
