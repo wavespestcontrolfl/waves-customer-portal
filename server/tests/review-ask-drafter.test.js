@@ -434,16 +434,20 @@ describe('service facts — treated areas from the service report', () => {
     expect(await ask('Hi Aaron, hope the ants are backing off since we treated the attic: {review_url}', FACTS)).toBeNull();
   });
 
-  test('verifyTreatmentClaims: only with facts, completed visits only, places must be treated ones', () => {
-    const v = Drafter.verifyTreatmentClaims;
+  test('verifyTreatmentClaims: only with facts, completed visits only, a claim sentence stays in a closed vocabulary', () => {
+    const v = (text, facts = FACTS) => Drafter.verifyTreatmentClaims(text, facts, { names: ['Aaron', 'Adam'] });
     expect(v('We sprayed the attic.', null)).toBeNull();
-    expect(v('We treated the kitchen and garage.', FACTS)).toBeNull();
-    expect(v('We treated the lanai.', FACTS)).toBeNull();
-    expect(v('We treated around the home.', FACTS)).toBeNull();
-    expect(v('We sprayed the attic.', FACTS)).toBe('area_not_treated');
-    expect(v('The kitchen looked great. We treated the bedroom.', FACTS)).toBe('area_not_treated');
-    // A place in a sentence with no treatment claim is not a claim.
-    expect(v('Hope the kitchen ants are backing off. Thanks for having us!', FACTS)).toBeNull();
+    expect(v('We treated the kitchen and garage.')).toBeNull();
+    expect(v('We treated the lanai and pool cage.')).toBeNull();
+    expect(v('Hope the ants are backing off since Adam treated the kitchen, Aaron.')).toBeNull();
+    expect(v('Hope the roaches are settling down since the treatment.')).toBeNull();
+    // Any place not treated, however it is named (pre-push review on the first cut).
+    for (const t of ['We sprayed the attic.', 'We treated the dining room.', 'We treated the whole house.', 'We treated the shed out back.']) {
+      expect([t, v(t)]).toEqual([t, 'claim_word_outside_facts']);
+    }
+    expect(v('The kitchen looked great. We treated the bedroom.')).toBe('claim_word_outside_facts');
+    // A sentence with no treatment claim is not checked.
+    expect(v('Hope the kitchen ants are backing off. Thanks for having us!')).toBeNull();
     expect(v('Hope things are better since the treatment.', { treated: false, areasTreated: [] })).toBe('treatment_not_on_record');
   });
 

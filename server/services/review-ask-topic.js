@@ -376,6 +376,12 @@ const FOLLOWUP_AREA_WORDS = new Set([
   "shed", "closet", "cabinet",
 ].map(singularForm));
 
+/** Whether a word (any case, plural-aware) is on the concern head or modifier lists. */
+function isConcernWord(word) {
+  const w = singularForm(String(word || "").toLowerCase());
+  return CONCERN_HEADS.has(w) || CONCERN_MODIFIERS.has(w);
+}
+
 function placeWordsOf(text) {
   return (String(text || "").toLowerCase().match(/[a-z]+/g) || []).map(singularForm).filter((w) => AREA_WORDS.has(w));
 }
@@ -534,6 +540,8 @@ module.exports = {
   followupAreaWord,
   treatedAreaWords,
   placeWordsOf,
+  isConcernWord,
+  singularForm,
   readTopicEvidence,
   collectTopicEvidence,
   classifyTopic,

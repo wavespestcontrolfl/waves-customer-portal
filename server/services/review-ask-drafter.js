@@ -38,7 +38,7 @@ const { redactAccessCodes } = require("./context-aggregator");
 const { etDateString, etCalendarDayOf: etCalendarDayOfUtil } = require("../utils/datetime-et");
 const { countSegments } = require("./messaging/segment-counter");
 const { excludeUnresolvedSendReservations } = require("./messaging/review-ask-reservation");
-const { followupConcernPhrase, followupAreaWord, treatedAreaWords, placeWordsOf } = require("./review-ask-topic");
+const { followupConcernPhrase, followupAreaWord, isConcernWord, singularForm } = require("./review-ask-topic");
 
 const MAX_BODY_CHARS = 145; // pre-render ceiling; the segment gate below is the real bound
 // Representative rendered link for the segment check — matches the length of a
@@ -240,19 +240,42 @@ const SERVICE_FACTS_RULE = `
 
 const TREATMENT_WORD_RE = /\b(?:treat|treats|treated|treating|treatment|treatments|spray|sprays|sprayed|spraying|applied|application)\b/i;
 
+// The only words a sentence that claims a treatment may use besides the
+// treated areas' own words, pest/plant/condition words and the customer's
+// and technician's names: a closed vocabulary, so a claim can never name a
+// place the tech did not treat, whatever the place is called.
+const CLAIM_SENTENCE_WORDS = new Set([
+  "a", "an", "the", "and", "or", "in", "on", "at", "of", "to", "for", "with", "by", "from", "around", "along",
+  "under", "near", "we", "our", "us", "you", "your", "it", "its", "them", "they", "their", "this", "that",
+  "these", "those", "here", "there", "is", "are", "was", "were", "be", "been", "has", "have", "had", "did",
+  "do", "s", "t", "ll", "re", "ve", "d", "m", "i", "how", "hope", "hoping", "glad", "since", "after", "last",
+  "visit", "today", "yesterday", "week", "any", "more", "fewer", "less", "still", "seeing", "noticing",
+  "looking", "doing", "going", "holding", "up", "backing", "off", "settling", "down", "better", "now", "things",
+  "everything", "what", "about", "just", "out", "thanks", "thank", "having", "if", "anything", "reply", "let",
+  "know", "me", "so", "all", "again", "some", "hi", "hey", "google", "review", "quick", "earned", "would",
+  "mean", "means", "lot", "treat", "treats", "treated", "treating", "treatment",
+  "treatments", "spray", "sprays", "sprayed", "spraying", "applied", "application",
+]);
+
 /**
  * Deterministic check of a draft's treatment claims against the service
  * report (only with serviceFacts, i.e. the gate on): a sentence that claims a
- * treatment needs a completed visit, and any place it names must be one the
- * technician treated. Null when clean, else the reject reason.
+ * treatment needs a completed visit, and every word in it must be a closed
+ * check-in word, a treated area's own word, a pest/plant/condition word, or
+ * a name. Null when clean, else the reject reason.
  */
-function verifyTreatmentClaims(text, serviceFacts) {
+function verifyTreatmentClaims(text, serviceFacts, { names = [] } = {}) {
   if (!serviceFacts) return null;
-  const treated = treatedAreaWords(treatedAreaLabels(serviceFacts));
+  const allowed = new Set([
+    ...treatedAreaLabels(serviceFacts).flatMap((a) => (a.toLowerCase().match(/[a-z]+/g) || []).map(singularForm)),
+    ...names.flatMap((n) => String(n || "").toLowerCase().match(/[a-z]+/g) || []),
+  ]);
   for (const sentence of String(text || "").split(/(?<=[.!?])\s+/)) {
     if (!TREATMENT_WORD_RE.test(sentence)) continue;
     if (!serviceFacts.treated) return "treatment_not_on_record";
-    if (placeWordsOf(sentence).some((w) => !treated.has(w))) return "area_not_treated";
+    const outside = (sentence.replace(/\{review_url\}/g, " ").toLowerCase().match(/[a-z]+/g) || [])
+      .find((w) => !CLAIM_SENTENCE_WORDS.has(w) && !allowed.has(w) && !allowed.has(singularForm(w)) && !isConcernWord(w));
+    if (outside) return "claim_word_outside_facts";
   }
   return null;
 }
@@ -449,7 +472,7 @@ const ReviewAskDrafter = {
       body = body.replace(/^["']+|["']+$/g, "").replace(/^(SMS|Message|Text):\s*/i, "").trim();
       body = normalizeSmsPunctuation(body);
 
-      const reject = verifyDraftBody(body, { firstName }) || verifyTreatmentClaims(body, serviceFacts);
+      const reject = verifyDraftBody(body, { firstName }) || verifyTreatmentClaims(body, serviceFacts, { names: [firstName, techName] });
       if (reject) {
         logger.info(`[review-drafter] draft rejected (customerId=${customer.id} step=${sequenceStep ?? 0} reason=${reject}) — template fallback`);
         return null;
@@ -497,7 +520,7 @@ const ReviewAskDrafter = {
       let body = String(result.text || "").trim();
       body = body.replace(/^["']+|["']+$/g, "").replace(/^(Email|Paragraph|Intro):\s*/i, "").replace(/\s*\n+\s*/g, " ").trim();
 
-      const reject = verifyEmailIntro(body, { firstName }) || verifyTreatmentClaims(body, serviceFacts);
+      const reject = verifyEmailIntro(body, { firstName }) || verifyTreatmentClaims(body, serviceFacts, { names: [firstName, techName] });
       if (reject) {
         logger.info(`[review-drafter] email intro rejected (customerId=${customer.id} reason=${reject}) — template fallback`);
         return null;
