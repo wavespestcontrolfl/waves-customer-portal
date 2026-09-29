@@ -15,14 +15,15 @@
  * per estimate, so an accept retry can't double-send.
  *
  * ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL, dark): when the accept route
- * passes `signup`, this same email also carries the property, the plan
- * (membership.started's values) and the Auto Pay authorization
- * (autopay.enrollment_confirmation's payload), and the send result reports
- * which of those sections the RENDERED email actually carried
- * (`result.signup`) so the caller skips the separate emails only for what was
- * folded in. A later acceptance by the same customer the same ET day gets the
- * short per-property template instead. Gate off / no `signup`: exactly the
- * email described above, byte for byte.
+ * passes `signup`, the email is sent from the gate-on template
+ * (estimate.accepted_signup, transactional_required) and also carries the
+ * property, the plan (membership.started's values) and the Auto Pay
+ * authorization (autopay.enrollment_confirmation's payload). Before sending,
+ * the values each section carries are recorded on the durable owed-email rows
+ * (signup-single-email.js) so the delivery-time check can tell whether the
+ * DELIVERED message covered them. A later acceptance the same ET day for a
+ * DIFFERENT property gets the short per-property template. Gate off / no
+ * `signup`: exactly the email described above, byte for byte.
  */
 
 const db = require('../models/db');
@@ -32,7 +33,10 @@ const { TZ, parseETDateTime, etDateString, formatETDay, formatETDate, formatETTi
 const { portalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { withAccountPrimaryContact } = require('./customer-contact');
-const { signupGateLive } = require('./signup-single-email');
+const {
+  BASE_TEMPLATE_KEY, SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY, SIGNUP_FULL_CATEGORY, SIGNUP_SHORT_CATEGORY,
+  SENT_ISH, signupGateLive, sectionValues, recordExpected,
+} = require('./signup-single-email');
 const { propertyStreetAddress, propertyStreetLine } = require('../utils/property-display');
 
 function clean(value) {
@@ -47,46 +51,6 @@ function usableEmail(value) {
 
 
 // ── One signup email (GATE_SIGNUP_SINGLE_EMAIL) ───────────────────────────
-const BASE_TEMPLATE_KEY = 'estimate.accepted_onboarding';
-const SHORT_TEMPLATE_KEY = 'estimate.accepted_additional_property';
-const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
-// Sits in the "get the app" paragraph of the full template. The welcome queue
-// (new-recurring-welcome-sms.js) skips its email only when a delivered
-// combined email still carries these steps — reworded copy fails safe (the
-// welcome email then sends as it does today).
-const SIGNUP_APP_MARKER = 'enter your texted code';
-const SIGNUP_FULL_CATEGORY = 'signup_full';
-const SIGNUP_SHORT_CATEGORY = 'signup_short';
-
-function escapeHtml(value) {
-  return String(value == null ? '' : value)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-// Did the RENDERED email (or the stored snapshot of an earlier, deduped send)
-// carry this exact text? A section only counts as folded in when the customer
-// can actually read it — an admin can publish a template version without the
-// new blocks, and the separate email must then still go out.
-function renderedCarries(result, needle) {
-  const text = clean(needle);
-  if (!text) return false;
-  const plain = [result?.rendered?.text, result?.message?.text_snapshot].filter((b) => typeof b === 'string');
-  const html = [result?.rendered?.html, result?.message?.html_snapshot].filter((b) => typeof b === 'string');
-  return plain.some((b) => b.includes(text)) || html.some((b) => b.includes(escapeHtml(text)));
-}
-
-// The WHOLE section, not a sample of it: every non-empty value the section was
-// built with (headings aside — the text version upper-cases them) must be in
-// the delivered email, so an edited template that kept one row but dropped the
-// rate, the method or the charge timing does not count as having said it.
-function sectionCarried(result, variables = {}) {
-  const values = Object.entries(variables)
-    .filter(([key, value]) => !key.endsWith('_heading') && clean(value))
-    .map(([, value]) => value);
-  return values.length > 0 && values.every((value) => renderedCarries(result, value));
-}
-
 function isTemplateUnavailable(err) {
   return err?.code === 'EMAIL_TEMPLATE_UNAVAILABLE' || err?.code === 'EMAIL_TEMPLATE_DISABLED';
 }
@@ -133,25 +97,39 @@ async function accountCustomerIds(customerId) {
   return [...ids];
 }
 
-// Has this customer (or a customer on the same account) already been sent the
-// FULL signup email at this address earlier today, ET? Then a later acceptance
-// is an added property and gets the short email. Only a delivered full email
-// counts — if the first acceptance's email failed or was blocked, the next one
-// is the first the customer actually received and gets the full version.
-async function priorFullSignupEmailToday({ customerId, email, ownKey }) {
+const normalizeAddress = (value) => clean(value).toLowerCase().replace(/\s+/g, ' ');
+
+// Is this an ADDED property? Yes when the customer (or a customer on the same
+// account, same address) was already sent a DELIVERED full signup email
+// earlier today, ET, and no signup email today (full or short) already named
+// THIS property — a second estimate for a property already on the plan (pest
+// in the morning, lawn in the afternoon) is not an added property and gets the
+// full email. If the first acceptance's email failed or was blocked, the next
+// one is the first the customer actually received and gets the full version.
+async function isAddedPropertyToday({ customerId, email, ownKey, property }) {
   const start = parseETDateTime(`${etDateString()}T00:00`);
   if (!start || !customerId) return false;
   const ids = await accountCustomerIds(customerId);
-  const row = await db('email_messages')
-    .where({ template_key: BASE_TEMPLATE_KEY, recipient_type: 'customer' })
+  const rows = await db('email_messages')
+    .whereIn('template_key', [SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY])
+    .where({ recipient_type: 'customer' })
     .whereIn('recipient_id', ids)
     .whereIn('status', SENT_ISH)
     .whereRaw('lower(recipient_email_snapshot) = ?', [clean(email).toLowerCase()])
-    .whereRaw('categories @> ?::jsonb', [JSON.stringify([SIGNUP_FULL_CATEGORY])])
     .where('created_at', '>=', start)
     .whereNot('idempotency_key', ownKey)
-    .first('id');
-  return !!row;
+    .select('categories', 'payload_snapshot');
+  const parsed = (value, fallback) => {
+    if (typeof value !== 'string') return value ?? fallback;
+    try { return JSON.parse(value); } catch { return fallback; }
+  };
+  const earlier = (rows || []).map((r) => ({
+    full: (parsed(r.categories, []) || []).includes(SIGNUP_FULL_CATEGORY),
+    address: normalizeAddress(parsed(r.payload_snapshot, {})?.property_address),
+  }));
+  if (!earlier.some((e) => e.full)) return false;
+  const here = normalizeAddress(property?.full);
+  return !earlier.some((e) => e.address && e.address === here);
 }
 
 // Everything the combined email adds to the payload, plus which template
@@ -165,20 +143,22 @@ async function buildSignupEmail({ customerId, estimateId, appointment, email, si
     }
   };
   const property = await safe('property', () => propertyForEstimate({ estimateId, customerId, appointment }));
-  const priorFull = await safe('day check', () => priorFullSignupEmailToday({ customerId, email, ownKey }));
   const plan = signup.membershipEmail
     ? await safe('plan', () => require('./account-membership-email').buildMembershipStartedSection(signup.membershipEmail))
     : null;
   const payment = signup.paymentMethodRowId
     ? await safe('payment', () => require('./card-enrollment-email').buildAutopayPaymentSection({ customerId, paymentMethodRowId: signup.paymentMethodRowId }))
     : null;
-  // A later same-day acceptance is an ADDED property — but only when the
-  // email can name it; otherwise the full email (which names nothing it can't)
-  // is the honest one.
-  const short = !!priorFull && !!property?.street;
+  // A later same-day acceptance for a DIFFERENT property is an added property —
+  // but only when the email can name it; otherwise the full email (which names
+  // nothing it can't) is the honest one.
+  const added = property?.street
+    ? await safe('day check', () => isAddedPropertyToday({ customerId, email, ownKey, property }))
+    : false;
+  const short = !!added;
   return {
     short,
-    templateKey: short ? SHORT_TEMPLATE_KEY : BASE_TEMPLATE_KEY,
+    templateKey: short ? SHORT_TEMPLATE_KEY : SIGNUP_TEMPLATE_KEY,
     category: short ? SIGNUP_SHORT_CATEGORY : SIGNUP_FULL_CATEGORY,
     plan,
     payment,
@@ -269,10 +249,8 @@ function renderedCarriesAcceptanceCopy(result) {
 
 // `signup` (GATE_SIGNUP_SINGLE_EMAIL only — the accept route passes it for a
 // standard recurring signup): { membershipEmail: <sendMembershipStarted args>,
-// paymentMethodRowId: <the freshly enrolled in-charge method, or null> }. The
-// result then carries `signup: { short, planCovered, paymentCovered }` — what
-// the DELIVERED email actually contains — and the caller sends each separate
-// email unless its section is covered.
+// paymentMethodRowId: <the freshly enrolled in-charge method, or null>,
+// owed: { membershipId, autopayId } <the durable owed-email rows> }.
 async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment, acceptanceId = null, idempotencyKey, signup = null } = {}) {
   try {
     if (!estimateId) return null;
@@ -311,6 +289,17 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
     let combined = signup && signupGateLive()
       ? await buildSignupEmail({ customerId, estimateId, appointment, email, signup, ownKey })
       : null;
+    if (combined) {
+      // Durably note what this email will carry BEFORE it is sent, so the
+      // delivery-time check can hold the DELIVERED message to exactly these
+      // values (a failure here just leaves the separate email to send itself).
+      try {
+        await recordExpected(signup.owed?.membershipId, combined.plan ? sectionValues(combined.plan.variables) : []);
+        await recordExpected(signup.owed?.autopayId, combined.payment ? sectionValues(combined.payment.variables) : []);
+      } catch (err) {
+        logger.warn(`[estimate-accepted-email] could not record signup expectations for estimate ${estimateId}: ${EmailTemplateLibrary.redactEmailAddresses(err.message)}`);
+      }
+    }
     const sendOnboarding = (variant) => EmailTemplateLibrary.sendTemplate({
       templateKey: variant ? variant.templateKey : BASE_TEMPLATE_KEY,
       to: email,
@@ -344,15 +333,6 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       combined = null;
       result = await sendOnboarding(null);
     }
-    // What the DELIVERED email actually carries — decided from the rendered
-    // output (or the snapshot of a deduped earlier send), never from what was
-    // requested: a template version without the new blocks folds nothing in.
-    const coverage = combined ? {
-      short: combined.short,
-      planCovered: !!result?.sent && !!combined.plan && sectionCarried(result, combined.plan.variables),
-      paymentCovered: !!result?.sent && !!combined.payment && sectionCarried(result, combined.payment.variables),
-    } : null;
-    const withCoverage = (r) => (coverage ? { ...r, signup: coverage } : r);
     if (result?.sent) logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${estimateId}`);
     else logger.info(`[estimate-accepted-email] onboarding email NOT sent for estimate ${estimateId} (${result?.blocked ? 'suppression-blocked' : (result?.reason || 'not sent')})`);
     // The copy went out (a deduped sent-ish row counts) — but only stamp
@@ -368,10 +348,10 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
           .update({ copy_emailed_at: new Date() });
       } else {
         logger.error(`[estimate-accepted-email] onboarding email for estimate ${estimateId} rendered WITHOUT the acceptance copy — the active estimate.accepted_onboarding version lacks {{acceptance_note}}`);
-        return withCoverage({ ...result, copyMissing: true });
+        return { ...result, copyMissing: true };
       }
     }
-    return withCoverage(result);
+    return result;
   } catch (err) {
     const reason = err.status
       ? `SendGrid ${err.status}`
@@ -386,8 +366,6 @@ module.exports = {
   sendEstimateAcceptedOnboarding,
   acceptedOnboardingKey,
   ACCEPTANCE_COPY_MARKER,
-  SIGNUP_APP_MARKER,
-  SIGNUP_FULL_CATEGORY,
   accountCustomerIds,
-  _private: { appointmentLineFor, acceptanceNoteFor, renderedCarriesAcceptanceCopy, renderedCarries, propertyForEstimate, priorFullSignupEmailToday, buildSignupEmail },
+  _private: { appointmentLineFor, acceptanceNoteFor, renderedCarriesAcceptanceCopy, propertyForEstimate, isAddedPropertyToday, buildSignupEmail },
 };

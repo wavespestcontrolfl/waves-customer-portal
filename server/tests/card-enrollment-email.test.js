@@ -36,6 +36,7 @@ const {
   _private,
 } = require('../services/card-enrollment-email');
 const { CARD_CONSENT_TEXT } = require('../services/payment-method-consent-text');
+const mockLogger = require('../services/logger');
 
 const CUSTOMER = { id: 'cust-1', first_name: 'Taylor', email: 'taylor@example.com' };
 const CONSENT_V9 = {
@@ -568,5 +569,38 @@ describe('one-signup-email Payment section (buildAutopayPaymentSection)', () => 
   ])('%s: no payment section (the authorization copy is never fabricated)', async (_label, override) => {
     state.tables = { ...state.tables, ...override };
     expect(await buildAutopayPaymentSection({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' })).toBe(null);
+  });
+});
+
+// The resolver extraction (one-signup-email) must not change what the standalone
+// sender logs or keys: a changed idempotency key would double-send across a deploy.
+describe('standalone autopay confirmation: keys and log lines unchanged by the resolver extraction', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_CARD_ENROLLMENT_EMAILS = 'true';
+    state.tables = { customers: [CUSTOMER], payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_stripe_1', card_brand: 'visa', last_four: '4242', method_type: 'card' }], payment_method_consents: [CONSENT_V9] };
+  });
+  afterAll(() => { delete process.env.GATE_CARD_ENROLLMENT_EMAILS; });
+  const send = () => sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
+
+  test('sent: exact key, trigger id and success log', async () => {
+    await send();
+    const call = mockSendTemplate.mock.calls[0][0];
+    expect(call.idempotencyKey).toBe('autopay.enrollment_confirmation:cust-1:pm-1:v9_2026-07-12');
+    expect(call.triggerEventId).toBe('autopay.enrollment_confirmation:cust-1:pm-1:v9_2026-07-12');
+    expect(call.categories).toEqual(['autopay_enrollment_confirmation']);
+    expect(mockLogger.info).toHaveBeenCalledWith('[card-enrollment-email] autopay confirmation sent for customer cust-1 (card)');
+  });
+
+  test.each([
+    ['no usable email', { customers: [{ id: 'cust-1', first_name: 'T', email: '' }] }, '[card-enrollment-email] no usable email for customer cust-1; skipping autopay confirmation'],
+    ['unknown family', { payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'x', method_type: 'cashapp' }] }, '[card-enrollment-email] unknown method family (cashapp) for customer cust-1; autopay confirmation skipped (no matching template)'],
+    ['no pm row', { payment_methods: [] }, '[card-enrollment-email] no stripe payment method row for customer cust-1; autopay confirmation skipped (no agreement of record)'],
+    ['no consent', { payment_method_consents: [] }, '[card-enrollment-email] no enrollment-scoped consent for customer cust-1; autopay confirmation skipped (no agreement of record)'],
+  ])('%s: the same log line and no send', async (_l, override, line) => {
+    state.tables = { ...state.tables, ...override };
+    expect(await send()).toBe(null);
+    expect(mockLogger.info).toHaveBeenCalledWith(line);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 });

@@ -244,12 +244,16 @@ async function buildAutopayPaymentSection({ customerId, paymentMethodRowId } = {
   };
 }
 
-async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId } = {}) {
+// { outcome: 'sent' | 'skipped' | 'failed', result } — the same send as ever, with
+// the three endings told apart: a deterministic skip (gate off, no email, no
+// agreement of record) is final, a thrown failure is not. The durable owed-email
+// resolver (signup-single-email.js) retries on 'failed'.
+async function sendAutopayEnrollmentConfirmationDetailed({ customerId, paymentMethodRowId } = {}) {
   try {
     const resolved = await resolveAutopayConfirmation({ customerId, paymentMethodRowId });
     if (!resolved.ok) {
       if (!resolved.silent) logger.info(`[card-enrollment-email] ${resolved.reason}`);
-      return null;
+      return { outcome: 'skipped', result: null };
     }
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: resolved.templateKey,
@@ -263,14 +267,18 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
       suppressProviderErrorLog: true,
     });
     logger.info(`[card-enrollment-email] autopay confirmation sent for customer ${customerId} (${resolved.isBank ? 'bank' : 'card'})`);
-    return result;
+    return { outcome: 'sent', result };
   } catch (err) {
     const reason = err.status
       ? `SendGrid ${err.status}`
       : EmailTemplateLibrary.redactEmailAddresses(err.message);
     logger.error(`[card-enrollment-email] autopay confirmation failed for customer ${customerId}: ${reason}`);
-    return null;
+    return { outcome: 'failed', result: null };
   }
+}
+
+async function sendAutopayEnrollmentConfirmation(args = {}) {
+  return (await sendAutopayEnrollmentConfirmationDetailed(args)).result;
 }
 
 // Auto Pay setup INVITATION — the email leg of the appointment card-request
@@ -459,6 +467,7 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
 
 module.exports = {
   sendAutopayEnrollmentConfirmation,
+  sendAutopayEnrollmentConfirmationDetailed,
   buildAutopayPaymentSection,
   sendAutopaySetupInvitation,
   sendCardHoldConfirmation,

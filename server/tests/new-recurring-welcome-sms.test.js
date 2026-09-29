@@ -623,7 +623,7 @@ describe('new recurring welcome SMS', () => {
         { id: 'customer-1', email: 'Ada@Example.com' }, { created_at: new Date('2026-09-29T14:00:00Z') });
       expect(covered).toBe(true);
       const emailQuery = mockDb.mock.results.map((r) => r.value).find((c) => c.whereRaw.mock.calls.length);
-      expect(emailQuery.where).toHaveBeenCalledWith({ template_key: 'estimate.accepted_onboarding', recipient_type: 'customer' });
+      expect(emailQuery.where).toHaveBeenCalledWith({ template_key: 'estimate.accepted_signup', recipient_type: 'customer' });
       expect(emailQuery.whereIn).toHaveBeenCalledWith('recipient_id', ['customer-1']);
       expect(emailQuery.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked']);
       expect(emailQuery.whereRaw).toHaveBeenCalledWith('categories @> ?::jsonb', [JSON.stringify(['signup_full'])]);

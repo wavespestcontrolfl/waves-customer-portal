@@ -1,5 +1,7 @@
 // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): what the combined email carries,
-// when a separate email is skipped, and that every fallback still sends it.
+// which template it rides, and the property / same-day rules. The durable owed
+// records and their crash safety are proven against real Postgres in
+// signup-single-email-postgres.test.js.
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -14,14 +16,18 @@ jest.mock('../services/account-membership-email', () => ({
 jest.mock('../services/card-enrollment-email', () => ({
   buildAutopayPaymentSection: jest.fn(),
 }));
+jest.mock('../services/signup-single-email', () => ({
+  ...jest.requireActual('../services/signup-single-email'),
+  recordExpected: jest.fn(async () => {}),
+}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
 const Membership = require('../services/account-membership-email');
 const CardEmail = require('../services/card-enrollment-email');
+const Signup = require('../services/signup-single-email');
 const gates = require('../config/feature-gates');
 const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
-const { createSignupEmailLane, signupLaneEligible } = require('../services/signup-single-email');
 
 const AUTH_TEXT = 'By checking this box, I authorize Waves Pest Control, LLC to save this card and charge it for future service visits.';
 const PLAN = {
@@ -40,7 +46,7 @@ const PAYMENT = {
   },
 };
 const MEMBERSHIP_ARGS = { customerId: 'cust-1', membershipTier: 'Gold', monthlyRate: 89 };
-const SIGNUP = { membershipEmail: MEMBERSHIP_ARGS, paymentMethodRowId: 'pm-1' };
+const SIGNUP = { membershipEmail: MEMBERSHIP_ARGS, paymentMethodRowId: 'pm-1', owed: { membershipId: 'owed-m', autopayId: 'owed-a' } };
 
 function chain(result) {
   const qb = {};
@@ -50,35 +56,33 @@ function chain(result) {
   return qb;
 }
 
-// Table router. `state` overrides per test.
 function mockDb(state = {}) {
   const s = {
     customer: { id: 'cust-1', first_name: 'Taylor', email: 'taylor@example.com', account_id: null },
     estimate: { customer_name: 'Taylor Example', customer_email: 'taylor@example.com', address: '12 Palm Ave, Bradenton, FL 34205' },
     stamped: null,
-    priorFull: null,
-    acceptance: null,
+    earlier: [],
     ...state,
   };
+  const qbs = [];
   db.mockImplementation((table) => {
-    if (table === 'customers') return chain(s.customer);
-    if (table === 'estimates') return chain(s.estimate);
-    if (table === 'estimate_acceptances') return chain(s.acceptance);
-    if (table === 'scheduled_services') return chain(s.stamped);
-    if (table === 'email_messages') return chain(s.priorFull);
-    throw new Error(`unexpected table ${table}`);
+    let qb;
+    if (table === 'customers') qb = chain(s.customer);
+    else if (table === 'estimates') qb = chain(s.estimate);
+    else if (table === 'estimate_acceptances') qb = chain(null);
+    else if (table === 'scheduled_services') qb = chain(s.stamped);
+    else if (table === 'email_messages') qb = chain(s.earlier);
+    else throw new Error(`unexpected table ${table}`);
+    qb.table = table;
+    qbs.push(qb);
+    return qb;
   });
+  s.qbs = qbs;
   return s;
 }
 
-const valuesOf = (variables) => Object.entries(variables).filter(([k]) => !k.endsWith('_heading')).map(([, v]) => v);
-const PLAN_TEXT = valuesOf(PLAN.variables).join('\n');
-const PAYMENT_TEXT = valuesOf(PAYMENT.variables).join('\n');
-
-function renderedWith(...parts) {
-  const text = parts.join('\n');
-  return { sent: true, rendered: { text, html: `<p>${text}</p>` }, message: {} };
-}
+const earlierFull = (address = '99 Other Rd, Bradenton, FL 34205') => ({ categories: ['estimate_accepted_onboarding', 'signup_full'], payload_snapshot: { property_address: address } });
+const earlierShort = (address) => ({ categories: ['estimate_accepted_onboarding', 'signup_short'], payload_snapshot: { property_address: address } });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -87,7 +91,7 @@ beforeEach(() => {
   CardEmail.buildAutopayPaymentSection.mockResolvedValue(PAYMENT);
 });
 
-describe('gate reader', () => {
+describe('gate reader and lane eligibility', () => {
   test('on only for exactly "true", read at call time', () => {
     expect(gates.signupSingleEmailLive()).toBe(false);
     for (const v of ['1', 'on', 'TRUE', 'yes', '']) {
@@ -96,61 +100,57 @@ describe('gate reader', () => {
     }
     process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
     expect(gates.signupSingleEmailLive()).toBe(true);
-    delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
-    expect(gates.signupSingleEmailLive()).toBe(false);
   });
 
-  test('lane eligibility: gate + standard recurring signup only (annual prepay, skipped conversion, no customer stay out)', () => {
+  test('gate + standard recurring signup only (annual prepay, skipped conversion, no customer stay out)', () => {
     const standardConversion = { membershipEmail: MEMBERSHIP_ARGS };
     const args = { annualPrepaySelected: false, customerId: 'cust-1', standardConversion };
-    expect(signupLaneEligible(args)).toBe(false); // gate off
+    expect(Signup.signupLaneEligible(args)).toBe(false);
     process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
-    expect(signupLaneEligible(args)).toBe(true);
-    expect(signupLaneEligible({ ...args, annualPrepaySelected: true })).toBe(false);
-    expect(signupLaneEligible({ ...args, customerId: null })).toBe(false);
-    expect(signupLaneEligible({ ...args, standardConversion: null })).toBe(false);
-    expect(signupLaneEligible({ ...args, standardConversion: { membershipEmail: null } })).toBe(false);
-    expect(signupLaneEligible({ ...args, standardConversion: { ...standardConversion, recurringConversionSkipped: true } })).toBe(false);
+    expect(Signup.signupLaneEligible(args)).toBe(true);
+    expect(Signup.signupLaneEligible({ ...args, annualPrepaySelected: true })).toBe(false);
+    expect(Signup.signupLaneEligible({ ...args, customerId: null })).toBe(false);
+    expect(Signup.signupLaneEligible({ ...args, standardConversion: null })).toBe(false);
+    expect(Signup.signupLaneEligible({ ...args, standardConversion: { membershipEmail: null } })).toBe(false);
+    expect(Signup.signupLaneEligible({ ...args, standardConversion: { ...standardConversion, recurringConversionSkipped: true } })).toBe(false);
   });
 });
 
 describe('the onboarding email itself', () => {
   const base = { customerId: 'cust-1', estimateId: 'est-1', serviceLabel: 'Quarterly Pest Control', appointment: { id: 'ss-1', scheduled_date: '2026-10-06', window_start: '08:00:00' } };
 
-  test('no signup option (gate off, other callers, the sweep): the email is exactly what it always was', async () => {
+  test('no signup option (gate off, other callers, the sweep): the plain email exactly as it always was', async () => {
     mockDb();
     EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
     const res = await sendEstimateAcceptedOnboarding(base);
-    expect(res).toEqual({ sent: true }); // no `signup` key added
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ sent: true });
     const call = EmailTemplates.sendTemplate.mock.calls[0][0];
     expect(call.templateKey).toBe('estimate.accepted_onboarding');
     expect(call.categories).toEqual(['estimate_accepted_onboarding']);
     expect(Object.keys(call.payload).sort()).toEqual(['acceptance_note', 'appointment_line', 'company_phone', 'customer_portal_url', 'first_name', 'service_type']);
     expect(Membership.buildMembershipStartedSection).not.toHaveBeenCalled();
-    expect(CardEmail.buildAutopayPaymentSection).not.toHaveBeenCalled();
+    expect(Signup.recordExpected).not.toHaveBeenCalled();
   });
 
-  test('signup passed but the gate is off: still the plain email', async () => {
+  test('signup passed but the gate is off: still the plain email on the plain template', async () => {
     mockDb();
     EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
-    const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-    expect(res.signup).toBeUndefined();
+    await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_onboarding');
     expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.plan_name).toBeUndefined();
-    expect(Membership.buildMembershipStartedSection).not.toHaveBeenCalled();
+    expect(Signup.recordExpected).not.toHaveBeenCalled();
   });
 
   describe('gate on', () => {
     beforeEach(() => { process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true'; });
 
-    test('first acceptance today: full email with property, plan and payment; coverage from what was rendered', async () => {
+    test('the full email rides the transactional_required signup template with property, plan and payment', async () => {
       mockDb({ stamped: { service_address_line1: '77 Coral Way', service_address_line2: 'Unit 3', service_address_city: 'Venice', service_address_state: 'FL', service_address_zip: '34285' } });
-      EmailTemplates.sendTemplate.mockResolvedValue(renderedWith(PLAN_TEXT, PAYMENT_TEXT));
-      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+      await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
       const call = EmailTemplates.sendTemplate.mock.calls[0][0];
-      expect(call.templateKey).toBe('estimate.accepted_onboarding');
+      expect(call.templateKey).toBe('estimate.accepted_signup');
       expect(call.categories).toEqual(['estimate_accepted_onboarding', 'signup_full']);
-      // The stamped visit address wins over the estimate address.
       expect(call.payload).toMatchObject({
         property_heading: 'Property',
         property_address: '77 Coral Way Unit 3, Venice, FL 34285',
@@ -158,8 +158,20 @@ describe('the onboarding email itself', () => {
         payment_method_label: 'Visa ending 4242',
         authorization_text: AUTH_TEXT,
       });
-      expect(CardEmail.buildAutopayPaymentSection).toHaveBeenCalledWith({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
-      expect(res.signup).toEqual({ short: false, planCovered: true, paymentCovered: true });
+    });
+
+    test('what each section will carry is recorded on the owed rows BEFORE the email is sent', async () => {
+      mockDb();
+      const order = [];
+      Signup.recordExpected.mockImplementation(async (id, values) => { order.push(['expected', id, values]); });
+      EmailTemplates.sendTemplate.mockImplementation(async () => { order.push(['send']); return { sent: true }; });
+      await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+      expect(order.map((o) => o[0])).toEqual(['expected', 'expected', 'send']);
+      expect(order[0].slice(1)).toEqual(['owed-m', ['WaveGuard Gold', 'October 6, 2026', '$89.00', 'monthly', 'Quarterly Pest Control']]);
+      expect(order[1][1]).toBe('owed-a');
+      expect(order[1][2]).toContain(AUTH_TEXT);
+      expect(order[1][2]).toContain('Visa ending 4242');
+      expect(order[1][2]).not.toContain('Payment'); // headings are not values
     });
 
     test('property falls back to the estimate address, then the customer street address, never the nickname', async () => {
@@ -167,179 +179,112 @@ describe('the onboarding email itself', () => {
       EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
       await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
       expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.property_address).toBe('12 Palm Ave, Bradenton, FL 34205');
-
       jest.clearAllMocks();
       Membership.buildMembershipStartedSection.mockResolvedValue(PLAN);
-      // estimate has no address → the customer's own street address
       db.mockImplementation((table) => {
         if (table === 'customers') return chain({ id: 'cust-1', first_name: 'Taylor', email: 'taylor@example.com', address_line1: '9 Home St', city: 'Sarasota', state: 'FL', zip: '34236', profile_label: 'Primary' });
         if (table === 'estimates') return chain({ address: '' });
-        if (table === 'scheduled_services') return chain(null);
-        if (table === 'estimate_acceptances') return chain(null);
-        if (table === 'email_messages') return chain(null);
-        throw new Error(table);
+        return chain(null);
       });
       EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
       await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
       expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.property_address).toBe('9 Home St, Sarasota, FL 34236');
     });
 
-    test('a section the delivered email does not carry is not covered (older template version)', async () => {
+    test('no payment method to fold in: no payment section and nothing recorded for it', async () => {
       mockDb();
-      EmailTemplates.sendTemplate.mockResolvedValue(renderedWith('You are booked'));
-      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-      expect(res.signup).toEqual({ short: false, planCovered: false, paymentCovered: false });
-    });
-
-    test('a section counts only when EVERY one of its values is in the delivered email (an edit that kept one row is not enough)', async () => {
-      mockDb();
-      // plan name and rate present, cadence/services/date dropped; authorization present but not the method label or timing
-      EmailTemplates.sendTemplate.mockResolvedValue(renderedWith('WaveGuard Gold', '$89.00', AUTH_TEXT));
-      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-      expect(res.signup).toEqual({ short: false, planCovered: false, paymentCovered: false });
-    });
-
-    test('plan carried but authorization text missing: only the plan is covered', async () => {
-      mockDb();
-      EmailTemplates.sendTemplate.mockResolvedValue(renderedWith(PLAN_TEXT));
-      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-      expect(res.signup).toEqual({ short: false, planCovered: true, paymentCovered: false });
-    });
-
-    test('authorization text is matched word for word, including in the HTML-escaped copy', async () => {
-      mockDb();
-      const tricky = 'I authorize Waves & Co "as agreed" — it\'s <final>.';
-      CardEmail.buildAutopayPaymentSection.mockResolvedValue({ ...PAYMENT, authorizationText: tricky, variables: { ...PAYMENT.variables, authorization_text: tricky } });
-      const escaped = 'I authorize Waves &amp; Co &quot;as agreed&quot; — it&#39;s &lt;final&gt;.';
-      CardEmail.buildAutopayPaymentSection.mockResolvedValue({ authorizationText: tricky, variables: { authorization_text: tricky } });
-      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, rendered: { text: '', html: `<p>${PLAN_TEXT}</p><p>${escaped}</p>` } });
-      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-      expect(res.signup.paymentCovered).toBe(true);
-      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, rendered: { text: '', html: `<p>${PLAN_TEXT}</p><p>I authorize Waves</p>` } });
-      expect((await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP })).signup.paymentCovered).toBe(false);
-    });
-
-    test('a deduped earlier send counts from its stored snapshot', async () => {
-      mockDb();
-      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, deduped: true, message: { text_snapshot: `${PLAN_TEXT}\n${PAYMENT_TEXT}` } });
-      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-      expect(res.signup).toMatchObject({ planCovered: true, paymentCovered: true });
-    });
-
-    test('no payment method to fold in (already enrolled, gate off, other method in charge): no payment section', async () => {
-      mockDb();
-      EmailTemplates.sendTemplate.mockResolvedValue(renderedWith(PLAN_TEXT));
-      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: { membershipEmail: MEMBERSHIP_ARGS, paymentMethodRowId: null } });
+      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+      await sendEstimateAcceptedOnboarding({ ...base, signup: { ...SIGNUP, paymentMethodRowId: null, owed: { membershipId: 'owed-m', autopayId: null } } });
       expect(CardEmail.buildAutopayPaymentSection).not.toHaveBeenCalled();
       expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.authorization_text).toBeUndefined();
-      expect(res.signup.paymentCovered).toBe(false);
     });
 
-    test('a payment section that cannot be built (no enrollment-scoped consent) is simply absent', async () => {
+    test('a section that cannot be built, or a builder that throws, never blocks the email', async () => {
       mockDb();
       CardEmail.buildAutopayPaymentSection.mockResolvedValue(null);
-      EmailTemplates.sendTemplate.mockResolvedValue(renderedWith(PLAN_TEXT));
-      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-      expect(res.signup).toEqual({ short: false, planCovered: true, paymentCovered: false });
-    });
-
-    test('a section builder that throws never blocks the email', async () => {
-      mockDb();
       Membership.buildMembershipStartedSection.mockRejectedValue(new Error('boom'));
-      CardEmail.buildAutopayPaymentSection.mockRejectedValue(new Error('boom'));
-      EmailTemplates.sendTemplate.mockResolvedValue(renderedWith('hello'));
+      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
       const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
       expect(res.sent).toBe(true);
-      expect(res.signup).toEqual({ short: false, planCovered: false, paymentCovered: false });
+      expect(Signup.recordExpected).toHaveBeenCalledWith('owed-m', []);
     });
 
     describe('several properties on one day', () => {
-      test('a later acceptance the same ET day gets the short per-property email, no app section', async () => {
-        mockDb({ priorFull: { id: 'email-earlier' } });
-        EmailTemplates.sendTemplate.mockResolvedValue(renderedWith(PLAN_TEXT));
-        const res = await sendEstimateAcceptedOnboarding({ ...base, acceptanceId: 'acc-2', signup: { membershipEmail: MEMBERSHIP_ARGS, paymentMethodRowId: null } });
+      test('a later acceptance the same ET day for a DIFFERENT property gets the short email, no app section', async () => {
+        mockDb({ earlier: [earlierFull()] });
+        EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+        await sendEstimateAcceptedOnboarding({ ...base, acceptanceId: 'acc-2', signup: { ...SIGNUP, paymentMethodRowId: null } });
         const call = EmailTemplates.sendTemplate.mock.calls[0][0];
         expect(call.templateKey).toBe('estimate.accepted_additional_property');
         expect(call.categories).toEqual(['estimate_accepted_onboarding', 'signup_short']);
-        expect(call.payload).toMatchObject({ property_street: '12 Palm Ave', property_address: '12 Palm Ave, Bradenton, FL 34205', plan_name: 'WaveGuard Gold' });
-        // Same idempotency key scheme as the full email: one email per acceptance.
+        expect(call.payload).toMatchObject({ property_street: '12 Palm Ave', property_address: '12 Palm Ave, Bradenton, FL 34205' });
         expect(call.idempotencyKey).toBe('estimate.accepted_onboarding:est-1:acc:acc-2');
-        expect(res.signup).toMatchObject({ short: true, planCovered: true, paymentCovered: false });
       });
 
-      test('the same-day lookup only counts a delivered FULL signup email to this customer and address, excluding this acceptance', async () => {
-        const s = mockDb();
-        const qbs = [];
-        db.mockImplementation((table) => {
-          const qb = chain(table === 'customers' ? s.customer : table === 'estimates' ? s.estimate : null);
-          qb.table = table; qbs.push(qb);
-          return qb;
-        });
-        EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
-        await sendEstimateAcceptedOnboarding({ ...base, acceptanceId: 'acc-9', signup: SIGNUP });
-        const q = qbs.find((x) => x.table === 'email_messages');
-        expect(q.where).toHaveBeenCalledWith({ template_key: 'estimate.accepted_onboarding', recipient_type: 'customer' });
-        expect(q.whereIn).toHaveBeenCalledWith('recipient_id', ['cust-1']);
-        expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked']);
-        expect(q.whereRaw).toHaveBeenCalledWith('categories @> ?::jsonb', [JSON.stringify(['signup_full'])]);
-        expect(q.whereRaw).toHaveBeenCalledWith('lower(recipient_email_snapshot) = ?', ['taylor@example.com']);
-        expect(q.whereNot).toHaveBeenCalledWith('idempotency_key', 'estimate.accepted_onboarding:est-1:acc:acc-9');
+      test('a SAME-property add-on (pest in the morning, lawn in the afternoon) gets the full email, whether the earlier one was full or short', async () => {
+        for (const earlier of [[earlierFull('12 PALM Ave,  Bradenton, FL 34205')], [earlierFull(), earlierShort('12 Palm Ave, Bradenton, FL 34205')]]) {
+          mockDb({ earlier });
+          EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+          await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+          expect(EmailTemplates.sendTemplate.mock.calls.pop()[0].templateKey).toBe('estimate.accepted_signup');
+        }
       });
 
-      test('a later acceptance can carry a payment section when a NEW method was just made the one in charge', async () => {
-        mockDb({ priorFull: { id: 'email-earlier' } });
-        EmailTemplates.sendTemplate.mockResolvedValue(renderedWith(PLAN_TEXT, PAYMENT_TEXT));
-        const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_additional_property');
-        expect(res.signup).toMatchObject({ short: true, planCovered: true, paymentCovered: true });
-      });
-
-      test('if the earlier full email did not go out, the first acceptance the customer actually received is the full one', async () => {
-        mockDb({ priorFull: null });
+      test('no earlier full email today (or none delivered): the full email', async () => {
+        mockDb({ earlier: [] });
         EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
         await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_onboarding');
+        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_signup');
+      });
+
+      test('only short emails earlier (no full one delivered): the full email', async () => {
+        mockDb({ earlier: [earlierShort('99 Other Rd')] });
+        EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+        await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_signup');
+      });
+
+      test('the lookup counts only delivered signup-template emails to this customer/account and address, excluding this acceptance', async () => {
+        const s = mockDb({ earlier: [] });
+        EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+        await sendEstimateAcceptedOnboarding({ ...base, acceptanceId: 'acc-9', signup: SIGNUP });
+        const q = s.qbs.find((x) => x.table === 'email_messages');
+        expect(q.whereIn).toHaveBeenCalledWith('template_key', ['estimate.accepted_signup', 'estimate.accepted_additional_property']);
+        expect(q.whereIn).toHaveBeenCalledWith('recipient_id', ['cust-1']);
+        expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked']);
+        expect(q.whereRaw).toHaveBeenCalledWith('lower(recipient_email_snapshot) = ?', ['taylor@example.com']);
+        expect(q.whereNot).toHaveBeenCalledWith('idempotency_key', 'estimate.accepted_onboarding:est-1:acc:acc-9');
       });
 
       test('a later acceptance whose property cannot be named falls back to the full email', async () => {
         db.mockImplementation((table) => {
           if (table === 'customers') return chain({ id: 'cust-1', first_name: 'Taylor', email: 'taylor@example.com', account_id: null });
           if (table === 'estimates') return chain({ address: '' });
-          if (table === 'email_messages') return chain({ id: 'x' });
+          if (table === 'email_messages') return chain([earlierFull()]);
           return chain(null);
         });
         EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
         await sendEstimateAcceptedOnboarding({ ...base, appointment: null, signup: SIGNUP });
-        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_onboarding');
+        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_signup');
       });
 
       test('customers on the same account count as the same customer', async () => {
         const s = mockDb({ customer: { id: 'cust-1', first_name: 'Taylor', email: 'taylor@example.com', account_id: 'acct-1' } });
-        const qbs = [];
         db.mockImplementation((table) => {
-          const rows = table === 'customers' ? s.customer : table === 'estimates' ? s.estimate : null;
+          const rows = table === 'customers' ? s.customer : table === 'estimates' ? s.estimate : [];
           const qb = chain(rows);
           if (table === 'customers') qb.select = jest.fn(async () => [{ id: 'cust-1' }, { id: 'cust-2' }]);
-          qb.table = table; qbs.push(qb);
+          qb.table = table; s.qbs.push(qb);
           return qb;
         });
         EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
         await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-        const q = qbs.find((x) => x.table === 'email_messages');
-        expect(q.whereIn).toHaveBeenCalledWith('recipient_id', ['cust-1', 'cust-2']);
+        expect(s.qbs.find((x) => x.table === 'email_messages').whereIn).toHaveBeenCalledWith('recipient_id', ['cust-1', 'cust-2']);
       });
     });
 
-    describe('fallbacks: nothing folded in unless the email was accepted for sending', () => {
-      test('suppressed / blocked: no coverage', async () => {
-        mockDb();
-        EmailTemplates.sendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'unsubscribed', rendered: { text: `${PLAN_TEXT}\n${PAYMENT_TEXT}` } });
-        const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-        expect(res.sent).toBe(false);
-        expect(res.signup).toEqual({ short: false, planCovered: false, paymentCovered: false });
-      });
-
-      test('no email address anywhere: nothing sent, no coverage key', async () => {
+    describe('fallbacks', () => {
+      test('no email address anywhere: nothing sent, nothing recorded', async () => {
         db.mockImplementation((table) => {
           if (table === 'customers') return chain({ id: 'cust-1', first_name: 'Taylor', email: '', account_id: null, is_primary_profile: true });
           if (table === 'estimates') return chain({ customer_name: 'Taylor', customer_email: '' });
@@ -348,179 +293,31 @@ describe('the onboarding email itself', () => {
         const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
         expect(res).toEqual({ sent: false, outcome: 'no_address' });
         expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+        expect(Signup.recordExpected).not.toHaveBeenCalled();
       });
 
-      test('provider failure: failed outcome, no coverage key', async () => {
+      test('provider failure: failed outcome (the owed emails then resolve as not covered)', async () => {
         mockDb();
         EmailTemplates.sendTemplate.mockRejectedValue(Object.assign(new Error('nope'), { status: 503 }));
-        const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-        expect(res).toMatchObject({ sent: false, outcome: 'failed' });
-        expect(res.signup).toBeUndefined();
+        expect(await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP })).toMatchObject({ sent: false, outcome: 'failed' });
       });
 
-      test('the short template missing: the customer still gets the plain onboarding email, nothing folded in', async () => {
-        mockDb({ priorFull: { id: 'earlier' } });
+      test.each([
+        ['the signup template', 'estimate.accepted_signup', {}],
+        ['the short template', 'estimate.accepted_additional_property', { earlier: [earlierFull()] }],
+      ])('%s missing: the customer still gets the plain onboarding email', async (_label, key, state) => {
+        mockDb(state);
         EmailTemplates.sendTemplate
           .mockRejectedValueOnce(Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }))
-          .mockResolvedValueOnce({ sent: true, rendered: { text: 'plain' } });
+          .mockResolvedValueOnce({ sent: true });
         const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-        expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(2);
+        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe(key);
         const retry = EmailTemplates.sendTemplate.mock.calls[1][0];
         expect(retry.templateKey).toBe('estimate.accepted_onboarding');
         expect(retry.categories).toEqual(['estimate_accepted_onboarding']);
         expect(retry.payload.plan_name).toBeUndefined();
         expect(res.sent).toBe(true);
-        expect(res.signup).toBeUndefined(); // nothing covered → every separate email goes out
       });
-    });
-  });
-});
-
-describe('the accept route lane: hold, then send what the combined email did not carry', () => {
-  function makeLane(overrides = {}) {
-    const fired = { autopay: jest.fn() };
-    const sendMembershipStarted = jest.fn(async () => ({ ok: true }));
-    const enrollment = { sendEnrollmentConfirmation: fired.autopay, confirmationMethodRowId: 'pm-1', paymentMethodRowId: 'pm-1' };
-    const lane = createSignupEmailLane({
-      eligible: true, customerId: 'cust-1', membershipEmail: MEMBERSHIP_ARGS,
-      getEnrollment: () => enrollment, sendMembershipStarted, guardMs: 1000, ...overrides,
-    });
-    return { lane, fired, sendMembershipStarted };
-  }
-  const flush = () => new Promise((r) => setImmediate(r));
-
-  test('not eligible (gate off, prepay, no conversion): nothing is held and nothing extra ever fires', async () => {
-    const { lane, fired, sendMembershipStarted } = makeLane({ eligible: false });
-    expect(lane.holdEnrollmentConfirmation).toBe(false);
-    await lane.run(async () => ({ sent: true, signup: { planCovered: true, paymentCovered: true } }));
-    lane.settle();
-    await flush();
-    expect(sendMembershipStarted).not.toHaveBeenCalled();
-    expect(fired.autopay).not.toHaveBeenCalled();
-  });
-
-  test('combined email delivered with both sections: neither separate email is sent', async () => {
-    const { lane, fired, sendMembershipStarted } = makeLane();
-    expect(lane.holdEnrollmentConfirmation).toBe(true);
-    let seen;
-    await lane.run(async (signup) => { seen = signup; return { sent: true, signup: { planCovered: true, paymentCovered: true } }; });
-    await flush();
-    expect(seen).toEqual({ membershipEmail: MEMBERSHIP_ARGS, paymentMethodRowId: 'pm-1' });
-    expect(sendMembershipStarted).not.toHaveBeenCalled();
-    expect(fired.autopay).not.toHaveBeenCalled();
-  });
-
-  test('only the plan folded in: the Auto Pay confirmation still goes out, once', async () => {
-    const { lane, fired, sendMembershipStarted } = makeLane();
-    await lane.run(async () => ({ sent: true, signup: { planCovered: true, paymentCovered: false } }));
-    lane.settle();
-    await flush();
-    expect(sendMembershipStarted).not.toHaveBeenCalled();
-    expect(fired.autopay).toHaveBeenCalledTimes(1);
-  });
-
-  test.each([
-    ['suppressed / blocked', { sent: false, blocked: true }],
-    ['failed', { sent: false, outcome: 'failed' }],
-    ['no email on file', { sent: false, outcome: 'no_address' }],
-    ['null result', null],
-    ['sent but sections not rendered (template missing the blocks)', { sent: true, signup: { planCovered: false, paymentCovered: false } }],
-    ['sent by a plain fallback (no coverage info)', { sent: true }],
-  ])('%s: both separate emails go out exactly as they would have', async (_label, result) => {
-    const { lane, fired, sendMembershipStarted } = makeLane();
-    await lane.run(async () => result);
-    lane.settle();
-    await flush();
-    expect(sendMembershipStarted).toHaveBeenCalledTimes(1);
-    expect(sendMembershipStarted).toHaveBeenCalledWith(MEMBERSHIP_ARGS);
-    expect(fired.autopay).toHaveBeenCalledTimes(1);
-  });
-
-  test('the combined send throwing releases both', async () => {
-    const { lane, fired, sendMembershipStarted } = makeLane();
-    await lane.run(async () => { throw new Error('boom'); });
-    await flush();
-    expect(sendMembershipStarted).toHaveBeenCalledTimes(1);
-    expect(fired.autopay).toHaveBeenCalledTimes(1);
-  });
-
-  test('a payment method with no held confirmation (already enrolled): no payment section is requested and nothing extra fires', async () => {
-    const { lane, sendMembershipStarted } = makeLane({ getEnrollment: () => ({ enrolled: true, paymentMethodRowId: 'pm-1' }) });
-    let seen;
-    await lane.run(async (signup) => { seen = signup; return { sent: true, signup: { planCovered: true, paymentCovered: false } }; });
-    await flush();
-    expect(seen.paymentMethodRowId).toBeNull();
-    expect(sendMembershipStarted).not.toHaveBeenCalled();
-  });
-
-  test('enrollment refused / no enrollment: only membership is held and it follows the coverage', async () => {
-    const { lane, sendMembershipStarted } = makeLane({ getEnrollment: () => null });
-    await lane.run(async () => ({ sent: false }));
-    await flush();
-    expect(sendMembershipStarted).toHaveBeenCalledTimes(1);
-  });
-
-  test('settle after run is a no-op (each held email fires at most once)', async () => {
-    const { lane, fired, sendMembershipStarted } = makeLane();
-    await lane.run(async () => ({ sent: false }));
-    lane.settle();
-    lane.settle({ planCovered: false });
-    await flush();
-    expect(sendMembershipStarted).toHaveBeenCalledTimes(1);
-    expect(fired.autopay).toHaveBeenCalledTimes(1);
-  });
-
-  test('an accept that throws before the onboarding send still releases the held emails (route finally)', async () => {
-    const { lane, fired, sendMembershipStarted } = makeLane();
-    lane.settle();
-    await flush();
-    expect(sendMembershipStarted).toHaveBeenCalledTimes(1);
-    expect(fired.autopay).toHaveBeenCalledTimes(1);
-  });
-
-  test('a membership send failure is logged, never thrown', async () => {
-    const { lane } = makeLane({ sendMembershipStarted: jest.fn(async () => { throw new Error('smtp'); }) });
-    await expect(lane.run(async () => ({ sent: false }))).resolves.toBeUndefined();
-    await flush();
-  });
-
-  describe('safety timer', () => {
-    beforeEach(() => jest.useFakeTimers());
-    afterEach(() => jest.useRealTimers());
-
-    test('the held Auto Pay confirmation goes out on its own if the accept never reaches the send', () => {
-      const { lane, fired } = makeLane();
-      lane.armGuard();
-      jest.advanceTimersByTime(999);
-      expect(fired.autopay).not.toHaveBeenCalled();
-      jest.advanceTimersByTime(2);
-      expect(fired.autopay).toHaveBeenCalledTimes(1);
-    });
-
-    test('settling first clears the timer: no late duplicate', async () => {
-      const { lane, fired } = makeLane();
-      lane.armGuard();
-      await lane.run(async () => ({ sent: true, signup: { planCovered: true, paymentCovered: true } }));
-      jest.advanceTimersByTime(5000);
-      expect(fired.autopay).not.toHaveBeenCalled();
-    });
-
-    test('the timer is not running until enrollment has returned (armGuard), so it can never settle before a closure exists', () => {
-      const { lane, fired } = makeLane();
-      expect(jest.getTimerCount()).toBe(0);
-      jest.advanceTimersByTime(10000);
-      expect(fired.autopay).not.toHaveBeenCalled();
-      lane.armGuard();
-      lane.armGuard(); // idempotent
-      expect(jest.getTimerCount()).toBe(1);
-    });
-
-    test('an ineligible lane arms no timer', () => {
-      const { lane, fired } = makeLane({ eligible: false });
-      lane.armGuard();
-      jest.advanceTimersByTime(5000);
-      expect(fired.autopay).not.toHaveBeenCalled();
-      expect(jest.getTimerCount()).toBe(0);
     });
   });
 });

@@ -406,8 +406,9 @@ async function sendWelcomeEmail(customer) {
 // today. Any lookup error reads as "not covered".
 async function combinedSignupEmailCoversWelcome(customer, row) {
   try {
-    if (!require('./signup-single-email').signupGateLive()) return false;
-    const { SIGNUP_APP_MARKER, SIGNUP_FULL_CATEGORY, accountCustomerIds } = require('./estimate-accepted-email');
+    const { signupGateLive, SIGNUP_APP_MARKER, SIGNUP_FULL_CATEGORY, SIGNUP_TEMPLATE_KEY, SENT_ISH } = require('./signup-single-email');
+    if (!signupGateLive()) return false;
+    const { accountCustomerIds } = require('./estimate-accepted-email');
     // The sequence row is queued moments BEFORE the signup email is sent, so
     // the window opens an hour ahead of it — or at the start of that ET day,
     // whichever is earlier: the short same-day email (the second property
@@ -424,9 +425,9 @@ async function combinedSignupEmailCoversWelcome(customer, row) {
     // has the full signup email.
     const ids = await accountCustomerIds(customer.id);
     const query = db('email_messages')
-      .where({ template_key: 'estimate.accepted_onboarding', recipient_type: 'customer' })
+      .where({ template_key: SIGNUP_TEMPLATE_KEY, recipient_type: 'customer' })
       .whereIn('recipient_id', ids)
-      .whereIn('status', ['sent', 'delivered', 'opened', 'clicked'])
+      .whereIn('status', SENT_ISH)
       .whereRaw('categories @> ?::jsonb', [JSON.stringify([SIGNUP_FULL_CATEGORY])])
       .where('created_at', '>=', since)
       .whereRaw('text_snapshot ILIKE ?', [`%${SIGNUP_APP_MARKER}%`]);
