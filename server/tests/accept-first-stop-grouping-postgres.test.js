@@ -153,7 +153,7 @@ async function firstDayRows(estimateId) {
 postgres('first-day rows of a combined booking form one stop at accept (real accept route)', () => {
   beforeAll(async () => {
     const url = new URL(connection);
-    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) || !['localhost', '127.0.0.1'].includes(url.hostname)) {
+    if (!(/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) || url.pathname === '/waves_test') || !['localhost', '127.0.0.1'].includes(url.hostname)) {
       throw new Error('Use the verified private waves_qa dev database');
     }
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
@@ -259,7 +259,7 @@ postgres('a combined first stop with its accept invoice stays movable until real
 
   beforeAll(async () => {
     const url = new URL(connection);
-    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) || !['localhost', '127.0.0.1'].includes(url.hostname)) {
+    if (!(/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) || url.pathname === '/waves_test') || !['localhost', '127.0.0.1'].includes(url.hostname)) {
       throw new Error('Use the verified private waves_qa dev database');
     }
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
@@ -389,7 +389,7 @@ postgres('a combined first stop with its accept invoice stays movable until real
 postgres('createOrJoinVisit still refuses rows carrying a real completion artifact (codex #3590 r13)', () => {
   beforeAll(async () => {
     const url = new URL(connection);
-    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) || !['localhost', '127.0.0.1'].includes(url.hostname)) {
+    if (!(/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) || url.pathname === '/waves_test') || !['localhost', '127.0.0.1'].includes(url.hostname)) {
       throw new Error('Use the verified private waves_qa dev database');
     }
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 4 } });
