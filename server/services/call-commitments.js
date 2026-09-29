@@ -2517,21 +2517,29 @@ async function listSlotKeptCallIds(conn) {
 const LAPSE_SCAN_DAYS = 30;
 async function listLapsedEvidenceClosedCallIds(conn) {
   if (!promiseEvidenceCloseLive()) return [];
+  // The recent automatic closes first (a handful), then each joined to its
+  // visit or customer by the native uuid — a text-cast join would defeat the
+  // primary-key index and scan both tables on every watchdog run. The cast is
+  // guarded by the record type, so another kind of record id never reaches it.
   const rows = await conn.raw(
-    `SELECT DISTINCT cc.call_log_id
-       FROM call_commitments cc
+    `WITH closes AS MATERIALIZED (
+       SELECT cc.call_log_id, cc.fulfillment
+         FROM call_commitments cc
+        WHERE cc.human_state IS NULL AND cc.status IN ('fulfilled', 'dismissed')
+          AND (cc.fulfillment ->> 'closed_by') = ?
+          AND ${closedAtSql('cc')} > NOW() - make_interval(days => ?)
+     )
+     SELECT DISTINCT cc.call_log_id
+       FROM closes cc
        JOIN call_log cl ON cl.id = cc.call_log_id
-       LEFT JOIN scheduled_services ss ON (cc.fulfillment ->> 'record_type') = 'scheduled_service' AND ss.id::text = cc.fulfillment ->> 'record_id'
-       LEFT JOIN customers cu ON (cc.fulfillment ->> 'kind') = ? AND cu.id::text = cc.fulfillment ->> 'record_id'
-      WHERE cc.human_state IS NULL AND cc.status IN ('fulfilled', 'dismissed')
-        AND (cc.fulfillment ->> 'closed_by') = ?
-        AND ${closedAtSql('cc')} > NOW() - make_interval(days => ?)
-        AND ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
+       LEFT JOIN scheduled_services ss ON ss.id = CASE WHEN (cc.fulfillment ->> 'record_type') = 'scheduled_service' THEN (cc.fulfillment ->> 'record_id')::uuid END
+       LEFT JOIN customers cu ON cu.id = CASE WHEN (cc.fulfillment ->> 'kind') = ? THEN (cc.fulfillment ->> 'record_id')::uuid END
+      WHERE ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           OR ((cc.fulfillment ->> 'kind') = ?
               AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id)))`,
-    [CUSTOMER_LEFT, CLOSED_BY_EVIDENCE, LAPSE_SCAN_DAYS, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT],
+    [CLOSED_BY_EVIDENCE, LAPSE_SCAN_DAYS, CUSTOMER_LEFT, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT],
   );
   return (rows?.rows || []).map((r) => r.call_log_id);
 }
