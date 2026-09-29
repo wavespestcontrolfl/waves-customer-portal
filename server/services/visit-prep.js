@@ -666,6 +666,20 @@ function effectiveReadStatus(status, createdAt, now = Date.now()) {
   return Number.isFinite(at) && now - at > READ_PENDING_STALE_MS ? 'failed' : status;
 }
 
+// How the engine's answer is named, most specific first: an approved
+// species (entry), else its catalog group label (pest-engine.js
+// groupBlockFor), else for a category-level climb the engine's fixed
+// headline template ("Looks like <generic>", climbedOrDisagreedAnswer).
+// Never model text.
+function answerName(v2) {
+  if (v2.entry) return { commonName: v2.entry.common_name || null, groupLabel: null, groupHeadline: null };
+  const groupLabel = v2.group?.label || null;
+  const groupHeadline = !groupLabel && v2.answer?.wording === 'group_only' ? (v2.answer.headline || null) : null;
+  return { commonName: null, groupLabel, groupHeadline };
+}
+
+const asList = (value) => (Array.isArray(value) ? value : []);
+
 function readFactsFromContract(status, contract) {
   // A 'done' row whose stored result is gone or unreadable (a purge, the
   // FK's ON DELETE SET NULL) is shown as failed, never as an empty "done"
@@ -676,19 +690,11 @@ function readFactsFromContract(status, contract) {
   return {
     status,
     wordingTier: v2.answer?.wording || null,
-    commonName: v2.entry?.common_name || null,
-    // A group-only answer (no species) names its approved catalog group
-    // (pest-engine.js groupBlockFor: catalog label, never model text).
-    groupLabel: v2.entry ? null : (v2.group?.label || null),
-    // A category-level answer has no group block; its headline is the
-    // engine's fixed template over the catalog node's generic name
-    // ("Looks like <generic>", pest-engine.js climbedOrDisagreedAnswer).
-    groupHeadline: (!v2.entry && !v2.group?.label && v2.answer?.wording === 'group_only')
-      ? (v2.answer?.headline || null) : null,
+    ...answerName(v2),
     // v2.evidence is picked from the approved catalog entry's own traits
     // (pest-engine.js evidenceFor), never model prose.
-    matches: Array.isArray(v2.evidence?.matches) ? v2.evidence.matches : [],
-    stillNeed: Array.isArray(v2.evidence?.still_need) ? v2.evidence.still_need : [],
+    matches: asList(v2.evidence?.matches),
+    stillNeed: asList(v2.evidence?.still_need),
     referralKind: v2.referral?.kind || null,
     hazards: contract.safety || null,
   };
@@ -741,8 +747,12 @@ async function customerFlaggedFacts(svc, conn = db) {
   // A read shows only while the stop is STILL a pest stop: an office
   // reclassification (Pest → Lawn) after the upload hides an old pest read
   // (Codex #5305 r8). Checked before the membership recheck below.
-  const stillPest = readsLive && readRefs.length
-    ? await require('./visit-prep-pest-read')._internal.isPestStop(svc, conn)
+  // Checked for running reads too, so "Photo read pending" never outlives a
+  // reclassification (Codex #5305 r13). The lightweight applicability module
+  // never loads the vision engine on this request path.
+  const hasReadToShow = submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
+  const stillPest = readsLive && hasReadToShow
+    ? await require('./visit-prep-pest-applicability').isPestStop(svc, conn)
     : true;
 
   // The LAST await: members re-resolved after every read above.

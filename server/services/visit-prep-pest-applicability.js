@@ -1,0 +1,44 @@
+/**
+ * Visit prep pest read — applicability only (is this stop a pest stop?).
+ * Kept apart from visit-prep-pest-read.js so the technician's Visit Brief
+ * can ask the question without loading the vision engine, its catalog and
+ * validators on the request path (Codex #5305 r13).
+ */
+const db = require('../models/db');
+const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
+// Strict pest identity, not the revenue classifier's Pest Control catch-all
+// (which also takes WDO inspections and assessments; Codex #5305 r10 P1).
+const { isPestOnlyServiceType } = require('./pest-production-calibration');
+
+// Every LIVE (non-terminal) service_type on svc's CURRENT physical stop:
+// the same member set the technician's Visit Brief shows
+// (visit-prep.js techStopMemberIds — rowStillAtVisitStop plus the stop's
+// technician), so a sibling moved to another day or window but still
+// carrying the frozen visit_id never counts (Codex #5305 r1 P1).
+async function liveStopServiceTypes(svc, conn) {
+  // The anchor row is always re-read: the deferred trigger's snapshot can be
+  // stale (reclassified Pest -> Lawn, rescheduled or cancelled since the
+  // upload), and a stale pest type must not spend a paid read (Codex #5305
+  // r9). A join-ineligible anchor contributes nothing.
+  const anchor = svc?.id
+    ? await conn('scheduled_services').where({ id: svc.id }).first('service_type', 'status', 'visit_id')
+    : null;
+  const own = anchor && anchor.service_type && !JOIN_INELIGIBLE_STATUSES.includes(anchor.status)
+    ? [anchor.service_type] : [];
+  if (!anchor?.visit_id) return own;
+  const { techStopMemberIds } = require('./visit-prep');
+  const others = (await techStopMemberIds({ ...svc, visit_id: anchor.visit_id }, conn)).filter((id) => String(id) !== String(svc.id));
+  if (!others.length) return own;
+  const rows = await conn('scheduled_services').whereIn('id', others).select('service_type', 'status');
+  // Join-ineligible = terminal + 'rescheduled' (a row awaiting a new date
+  // keeps its old visit_id/date/window but is no longer at this stop;
+  // Codex #5305 r7 P2).
+  return [...own, ...rows.filter((r) => !JOIN_INELIGIBLE_STATUSES.includes(r.status)).map((r) => r.service_type)];
+}
+
+async function isPestStop(svc, conn = db) {
+  const types = await liveStopServiceTypes(svc, conn);
+  return types.some((t) => isPestOnlyServiceType(t));
+}
+
+module.exports = { isPestStop, liveStopServiceTypes };

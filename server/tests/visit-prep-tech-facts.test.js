@@ -175,6 +175,18 @@ describe('customerFlaggedFacts', () => {
     expect(facts[0].read).toEqual({ status: 'unsupported' });
   });
 
+  test('a PENDING read on a stop reclassified to lawn shows no pending line (unsupported)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Lawn Weed & Feed' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_ref: null },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
   test('pest-read gate off: stored reads are not served at all (the kill switch hides them)', async () => {
     delete process.env.GATE_VISIT_PREP_PEST_READ;
     delete process.env.GATE_VISIT_FACTS;
