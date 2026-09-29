@@ -161,6 +161,7 @@ const acceptanceTerms = require('../services/acceptance-terms-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
 const { buildEstimateConsultationOffer } = require('../services/estimate-consultation-offer');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
+const estimateMapImage = require('../services/estimate-map-image');
 const {
   parcelOverlayEnabled,
   buildParcelOverlayParam,
@@ -4440,7 +4441,12 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     complexity ? { label: 'Complexity', value: complexity } : null,
   ]);
 
-  const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
+  // Never the raw stored value: a Static Maps URL carries the server key. The
+  // public payload gets the token-scoped proxy path instead (no token -> null).
+  const satelliteUrl = estimateMapImage.publicSatelliteUrl(
+    estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null,
+    estimate.token,
+  );
   // One-time-ONLY estimate whose rows all resolve to one service copy pack
   // (roach cleanout, flea, wasp, bed bug, …): the card describes THAT
   // service instead of the generic "reviewed your property" line. Mixed
@@ -4525,13 +4531,11 @@ function showYourWorkCountyName(county) {
 // estimator's own Static Maps overlay builder. Read-only: ANY miss or
 // error returns null so the page falls back to the stored satellite_url,
 // and nothing here logs the address/parcel/coords (public-route PII rule).
-async function resolveShowYourWorkOverlayUrl(estimate = {}) {
+async function resolveShowYourWorkOverlayStaticUrl(estimate = {}) {
   try {
     if (!parcelOverlayEnabled()) return null;
     const address = estimate.address || null;
     if (!address) return null;
-    const googleKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
-    if (!googleKey) return null;
     const row = await getCachedLookup(address);
     if (!row) return null;
     let parcel = row.parcel;
@@ -4543,10 +4547,20 @@ async function resolveShowYourWorkOverlayUrl(estimate = {}) {
     if (!parcel?.polygon || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
     const overlayParam = buildParcelOverlayParam(parcel.polygon);
     if (!overlayParam) return null;
-    return `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&${overlayParam}&key=${googleKey}`;
+    // KEYLESS on purpose: the server key is appended only inside the
+    // token-scoped proxy fetch (GET /:token/map/overlay), never in a payload.
+    return `${estimateMapImage.STATIC_MAP_BASE}?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&${overlayParam}`;
   } catch {
     return null;
   }
+}
+
+// The public payload only ever carries the proxy path; the proxy route
+// re-resolves the keyless URL itself from the same cached lookup row.
+async function resolveShowYourWorkOverlayUrl(estimate = {}) {
+  if (!estimate.token || !estimateMapImage.serverMapsKey()) return null;
+  const staticUrl = await resolveShowYourWorkOverlayStaticUrl(estimate);
+  return staticUrl ? estimateMapImage.publicMapProxyPath(estimate.token, 'overlay') : null;
 }
 
 async function buildShowYourWork(estimate = {}, estData = {}) {
@@ -5901,7 +5915,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
   const intelligence = isRegulatedCertificateSurface
     ? null
-    : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+    : buildWaveGuardIntelligencePayload({ ...est, token: est.token || token }, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
   // image swaps in for the plain one when available, and the facts /
   // parcel-match / quality-note block lands after the metrics grid. All
@@ -8220,7 +8234,8 @@ function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) 
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
     .set('Content-Type', 'text/html; charset=utf-8')
-    .send(renderPage(token, estimate, estData, membership, opts));
+    // Defense in depth: no server Maps key in any SSR HTML, whatever blob it rode in on.
+    .send(estimateMapImage.scrubMapsKeysFromString(renderPage(token, estimate, estData, membership, opts)));
 }
 
 // Existing-customer estimate treatment — waived WaveGuard setup fee and no
@@ -8926,7 +8941,7 @@ async function handleEstimateView(req, res, next) {
       createdAt: estimate.created_at,
       // This property's own offer deadline (#4309 round 7).
       expiresAt: estimate.expires_at,
-      satelliteUrl: estimate.satellite_url || null,
+      satelliteUrl: estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token),
       showOneTimeOption: !!estimate.show_one_time_option,
       oneTimeChoicePrice,
       pricingFrequencies: Array.isArray(pricingBundleForView?.frequencies)
@@ -27823,15 +27838,18 @@ async function composeEstimateDataPayload(estimate, {
         // Pinned override only on a signed pdf render pass — see docRenderPin.
         expiresAt: docRenderPin?.validThrough || estimate.expires_at,
         status: estimate.status,
-        // On a pdf render pass the HEADLESS SERVER browser fetches this URL,
-        // so it must be a known-good public imagery host — satellite_url is
-        // staff-writable free text, and an internal/arbitrary URL here would
-        // let a saved estimate steer server-side GETs (SSRF; codex #3281 r1).
-        // The customer's own browser (normal page loads) keeps the stored
-        // value unfiltered, today's behavior.
+        // A stored Google Static Maps URL is served as the token-scoped proxy
+        // path (GET /:token/map/satellite) — the server key never rides in a
+        // customer payload. The proxy rebuilds the URL from allow-listed
+        // stored params and only ever fetches maps.googleapis.com, so the PDF
+        // render pass (headless browser) can no longer be steered at an
+        // internal/arbitrary URL either (SSRF; codex #3281 r1): on that pass
+        // a non-Google stored value is dropped, as before.
         satelliteUrl: isPdfRenderPass
-          ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
-          : (estimate.satellite_url || null),
+          ? (estimateMapImage.isGoogleStaticMapUrl(estimate.satellite_url)
+            ? estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token)
+            : null)
+          : estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token),
         intelligence,
         // The server's regulated-surface decision (WDO / pre-treatment
         // certificate — AGENTS.md: no AI narrative, no ask bar), computed from
@@ -28177,7 +28195,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    res.json(await composeEstimateDataPayload(estimate, {
+    // scrubMapsKeysDeep: last line of defense — no server Maps key in this
+    // public JSON even if a keyed URL sits in some blob the builders missed.
+    res.json(estimateMapImage.scrubMapsKeysDeep(await composeEstimateDataPayload(estimate, {
       adminDraftPreview,
       isPdfRenderPass,
       docRenderPin,
@@ -28185,9 +28205,73 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       currentViewRecorded,
       isInternalRefresh,
       includeConsultationOffer: true,
-    }));
+    })));
   } catch (err) { next(err); }
 });
+
+// ── Token-scoped satellite image proxy ─────────────────────────────
+// The customer page/JSON/PDF pass reference these paths instead of a Google
+// Static Maps URL, because that URL carried the server's Maps key (the same
+// key Geocoding/Routes use, so it cannot be referrer-restricted). The route
+// validates the estimate token like the other public reads, rebuilds the
+// Static Maps URL server-side from the estimate's OWN stored parameters — it
+// reads NOTHING from the caller's query string, so it cannot be steered into
+// an open proxy or an arbitrary map — appends the key, and streams the bytes.
+const mapImageLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
+async function handleEstimateMapImage(kind, req, res, next) {
+  try {
+    res.set('Referrer-Policy', 'no-referrer');
+    const notFound = () => res.status(404).set('Cache-Control', 'no-store').json({ error: 'Not found' });
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return notFound();
+    // Same viewability contract as GET /:token/data (minus the staff-preview
+    // and signed-pdf-pin bypasses: an <img> carries no Bearer/pin, so drafts
+    // and expired links simply have no map).
+    if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
+      return notFound();
+    }
+    const groupLinkViewBypass = Boolean(estimate.estimate_group_id)
+      && ['sent', 'viewed', 'expired'].includes(estimate.status)
+      && !estimate.archived_at
+      && !estimateOffCustomerSurface(estimate)
+      && groupLinkStillViewable(estimate);
+    if (!isEstimateCustomerViewable(estimate) && !groupLinkViewBypass) return notFound();
+
+    let keylessUrl = null;
+    if (kind === 'overlay') {
+      if (!featureGates.isEnabled('estimateShowYourWork')) return notFound();
+      keylessUrl = await resolveShowYourWorkOverlayStaticUrl(estimate);
+    } else {
+      const parsed = parseEstimateDataSafe(estimate);
+      keylessUrl = estimateMapImage.sanitizedStaticMapUrlFromStored(
+        estimate.satellite_url || parsed.satelliteUrl || null,
+      );
+    }
+    if (!keylessUrl) return notFound();
+
+    const image = await estimateMapImage.fetchStaticMapImage(keylessUrl, {
+      cacheKey: `${estimate.id}:${kind}:${keylessUrl}`,
+    });
+    if (!image) return res.status(502).set('Cache-Control', 'no-store').json({ error: 'Image unavailable' });
+    return res
+      .status(200)
+      .set('Content-Type', image.contentType)
+      .set('Content-Length', String(image.buffer.length))
+      .set('Cache-Control', 'private, max-age=3600')
+      .set('X-Content-Type-Options', 'nosniff')
+      .send(image.buffer);
+  } catch (err) { next(err); }
+}
+
+router.get('/:token/map/satellite', mapImageLimiter, (req, res, next) => handleEstimateMapImage('satellite', req, res, next));
+router.get('/:token/map/overlay', mapImageLimiter, (req, res, next) => handleEstimateMapImage('overlay', req, res, next));
 
 async function handleEstimateAsk(req, res, next) {
   try {
