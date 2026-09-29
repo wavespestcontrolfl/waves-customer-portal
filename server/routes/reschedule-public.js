@@ -65,6 +65,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 // reaches the SAME answer this page gives (codex #4293 r3 P2).
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
 const { visitInsideMoveNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
+const { selfServeArrivalGraceMinutes } = require('../services/scheduling/policy');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -887,6 +888,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             capacityPlacement: true,
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
+            // Self-serve arrival grace opt-in (owner ruling 2026-09-28) —
+            // same single-visit scope as capacityPlacement above.
+            arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date }),
           }
         );
     } catch (err) {

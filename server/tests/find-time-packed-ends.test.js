@@ -370,6 +370,73 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
   });
 });
 
+describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28, Parrish live miss)', () => {
+  const { packCapacityEnds } = require('../services/scheduling/find-time')._internals;
+  const GRACE_ENV = 'SELF_SERVE_ARRIVAL_GRACE_MINUTES';
+  const savedGrace = process.env[GRACE_ENV];
+  const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+  afterEach(() => {
+    if (savedGrace === undefined) delete process.env[GRACE_ENV]; else process.env[GRACE_ENV] = savedGrace;
+    if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+  });
+
+  // Same fixture the "route-feasible but travel-gap-rejected" test above
+  // already proves fails the STRICT buffer check: a co-located 09:00-10:00
+  // stop crediting its full window (0 padding) leaves 0 free minutes before
+  // the very next on-the-hour start against a 15-minute buffer. Grace is the
+  // whole-route simulation's OWN arrival delay for this exact slot
+  // (arrival_delay_minutes) — never recomputed here.
+  const prevRow = { startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60 };
+  const candidate = (delayMinutes, row = prevRow) => ({
+    date: '2026-10-01', technician: { id: 't1' }, start_time: '10:00', end_time: '11:00',
+    arrival_delay_minutes: delayMinutes,
+    _gap: { prevId: 's1', nextId: null, prevRow: row },
+  });
+
+  test('grace 90, a 6-minute simulated delay: the strict-rejected packed end is kept', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    const kept = packCapacityEnds([candidate(6)], { lat: 27.4, lng: -82.4, durationMinutes: 60 });
+    expect(kept.map((s) => s.start_time)).toEqual(['10:00']);
+  });
+
+  test('grace 0: the same slot is dropped — unchanged from today', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '0';
+    expect(packCapacityEnds([candidate(6)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+  });
+
+  test('capacity mode off: no grace to read, so the strict-rejected slot is still dropped', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    process.env[GRACE_ENV] = '90';
+    expect(packCapacityEnds([candidate(6)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+  });
+
+  test('a 100-minute simulated delay exceeds a 90-minute grace: still dropped', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    expect(packCapacityEnds([candidate(100)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+  });
+
+  test('a live estimate hold neighbour never gives grace, even at grace 90 with a tiny delay', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    const holdRow = { ...prevRow, reservation_expires_at: '2099-01-01T00:00:00Z', customer_id: null };
+    expect(packCapacityEnds([candidate(6, holdRow)], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
+  });
+
+  test('offer/commit parity: the grace-kept slot\'s own delay is exactly what verifyArrivalCapacity would compare against the same grace', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    const { arrivalExceedsGrace } = require('../services/scheduling/arrival-route')._internals;
+    const kept = packCapacityEnds([candidate(6)], { lat: 27.4, lng: -82.4, durationMinutes: 60 });
+    expect(kept).toHaveLength(1);
+    // The exact same delay number and the exact same grace value: the offer
+    // kept it, so the commit-time check (same inputs) must not refuse it.
+    expect(arrivalExceedsGrace({ arrivalDelayMinutes: kept[0].arrival_delay_minutes }, 90)).toBe(false);
+  });
+});
+
 describe('capacityGapNeighbours — unassigned blockers count as time-based anchors (Codex r3 P1)', () => {
   const { capacityGapNeighbours } = require('../services/scheduling/find-time')._internals;
 

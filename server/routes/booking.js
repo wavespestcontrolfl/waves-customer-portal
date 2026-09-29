@@ -17,7 +17,7 @@ const {
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
+const { capacityEnabled, applySchedulingPolicy, placementFitsShift, selfServeArrivalGraceMinutes } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -3936,6 +3936,8 @@ async function createSelfBooking(payload = {}) {
           windowEnd: endTime,
           durationMinutes: duration,
           serviceTypes: capacityServiceTypes,
+          // Self-serve /book confirm — owner ruling 2026-09-28 arrival grace.
+          arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date: slotDateStr }),
         })
         : null;
 

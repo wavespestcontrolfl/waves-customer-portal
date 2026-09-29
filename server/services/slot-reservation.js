@@ -43,7 +43,7 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
-const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
+const { capacityEnabled, placementFitsShift, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
 const {
   overlapsLunch, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
 } = require('./scheduling/customer-windows');
@@ -1079,6 +1079,8 @@ async function reserveSlot({
       const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
         conn: trx, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
         serviceTypes: serviceProfile.services.map(service => service.label || service.service),
+        // Self-serve estimate hold — owner ruling 2026-09-28 arrival grace.
+        arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date }),
       }) : null;
       // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
       // graduated visit carries it even if the profile can't be re-resolved
@@ -1822,6 +1824,8 @@ async function commitReservation({
     const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
       conn: client, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
       serviceTypes: serviceProfile?.services.map(service => service.label || service.service),
+      // Self-serve estimate accept — owner ruling 2026-09-28 arrival grace.
+      arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date: scheduledDate }),
     }) : null;
 
     if (windowEnd && !useCapacity) {

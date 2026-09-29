@@ -830,6 +830,25 @@ IS this window, replacing the flat 120-minute same-day lead). The old
 `max_self_books_per_day` cap is retired: its offer-time day filtering and
 commit-time re-checks run only while `GATE_SELF_BOOK_DAY_CAP` is set. Staff,
 admin and the voice agent's booking tools are unaffected.
+Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
+lenient than strict" — the Parrish live miss: a Tuesday 11:00 candidate hid
+because the strict travel-gap buffer measured a prior lawn stop's raw window
+rather than the whole-route simulation's actual ~6-minute arrival delay),
+`scheduling/policy.js`'s `selfServeArrivalGraceMinutes`,
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES`, default 0, capped at 120, capacity-mode
+only and never for a same-day pick: a self-serve (customer-picked) time
+names an ARRIVAL window, not a promised start, so a candidate the strict
+travel-gap buffer would reject is still offered — `find-time.js`'s
+`packCapacityEnds` — when the day's own route simulation already certifies
+the technician arrives within grace minutes of that slot's start (never for
+a live estimate hold neighbour, which may evaporate before it is ever
+committed), and still accepted at commit — `arrival-route.js`'s
+`verifyArrivalCapacity` — only while its certified delay stays within that
+same grace, tighter than but never wider than the existing 120-minute
+arrival promise every capacity booking already carries. Scoped to the
+estimate picker/`/book`/public-reschedule single-visit move only; staff,
+admin, voice and the assistant's booking tools never opt in and are
+unaffected. Default 0 is byte-identical to before this lane.
 Catalog-sized estimate offers resolve the primary appointment allowance from
 `services.scheduling_duration_policy`; independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.

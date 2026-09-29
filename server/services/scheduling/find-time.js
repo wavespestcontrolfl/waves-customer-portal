@@ -21,9 +21,9 @@ const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
-const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes } = require('./policy');
+const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
-const { travelGapEnabled, violatesTravelGap } = require('./travel-gap');
+const { travelGapEnabled, violatesTravelGap, isHoldStop } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
@@ -262,6 +262,11 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      // The simulation's own arrival delay past THIS slot's start (same field
+      // findArrivalWindowSlots already exposes) — packCapacityEnds' self-serve
+      // arrival grace (owner ruling 2026-09-28) reads it to decide whether a
+      // strict-travel-gap-rejected packed end is still within the leniency.
+      arrival_delay_minutes: fit.arrivalDelayMinutes,
       return_time: minutesToTime(Math.ceil(fit.finishMinute)),
       route_mode: 'arrival_windows', travel_source: fit.travelSource, travel_reasons: fit.travelReasons,
       stops_that_day: fit.arrivals.length - 1, latest_start_min: start,
@@ -375,6 +380,22 @@ function capacityNeighbourEntity(row) {
 // one the commit gate would also accept; a group with no survivors on a
 // side offers nothing from that side, same as every other packed-ends rule
 // in this codebase — never a synthesized fallback.
+//
+// Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
+// lenient than strict" — Parrish live miss): a customer-picked time names an
+// ARRIVAL window, so a candidate that fails the strict travel-gap buffer is
+// still offered when the day's own route simulation already proves the
+// technician arrives within selfServeArrivalGraceMinutes of THIS slot's
+// start (slot.arrival_delay_minutes — only ever set on a slot that already
+// passed evaluateArrivalPlacement's feasibility check, so "the simulation
+// found it feasible" is a precondition of the slot existing at all here).
+// Every caller of packCapacityEnds is itself customer-facing-only (findCapacitySlots
+// only runs it under opts.packEnds === true, which only booking.js's
+// buildBookingAvailability and estimate-slot-availability.js ever set — see
+// this module's own packEnds contract above); voice/staff/assistant
+// callers never reach this function. A live estimate hold neighbour NEVER
+// gives grace — it may evaporate before this slot is ever committed, unlike
+// a real committed stop the simulation already routed around.
 function packCapacityEnds(slots, caller = {}) {
   const groups = new Map();
   for (const slot of slots) {
@@ -382,6 +403,10 @@ function packCapacityEnds(slots, caller = {}) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(slot);
   }
+  const clearsGraceInsteadOfBuffer = (slot, row) => !isHoldStop(row)
+    && selfServeArrivalGraceMinutes({ date: slot.date }) > 0
+    && Number.isFinite(slot.arrival_delay_minutes)
+    && slot.arrival_delay_minutes <= selfServeArrivalGraceMinutes({ date: slot.date });
   const clearsTravelGap = (slot, row) => {
     if (!travelGapEnabled()) return true;
     const neighbour = capacityNeighbourEntity(row);
@@ -394,7 +419,7 @@ function packCapacityEnds(slots, caller = {}) {
       startMin, endMin, lat: caller.lat ?? null, lng: caller.lng ?? null, windowMinutes: ownWindow,
       expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
     };
-    return !violatesTravelGap(candidate, [neighbour]);
+    return !violatesTravelGap(candidate, [neighbour]) || clearsGraceInsteadOfBuffer(slot, row);
   };
   const keep = new Set();
   for (const group of groups.values()) {
