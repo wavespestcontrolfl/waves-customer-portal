@@ -91,7 +91,7 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
     const cases = {
       emails: { id: 'e', status: 'failed', subject_snapshot: 'S', recipient_email_snapshot: 'a@example.test', queued_at: at(0), ...stamps },
       'automation emails': { id: 'a', status: 'bounced', step_order: 0, template_key: 'k', email: 'a@example.test', ...stamps },
-      newsletters: { id: 'n', subject: 'S', subscriber_email: 'a@example.test', ...stamps },
+      newsletters: { id: 'n', subject: 'S', email: 'a@example.test', ...stamps },
       'estimate views': { id: 'v', viewed_at: t, address: '1 Way' },
       'prep guide views': { id: 'v', viewed_at: t, scheduled_service_id: 'ss' },
       'service report views': { id: 'v', report_viewed_at: t },
@@ -161,7 +161,7 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
       .toEqual(['Your estimate · to b***@example.test', 'Your estimate · to b***@example.test']);
     expect(detail('automation emails', { id: 'a', step_order: 1, template_name: 'Payment failed', email: '  AP.Desk@example.test ' })[0])
       .toBe('Payment failed (step 2) · to a***@example.test');
-    expect(detail('newsletters', { id: 'n', subject: 'September', subscriber_email: 'subscriber@example.test' })[0])
+    expect(detail('newsletters', { id: 'n', subject: 'September', email: 'subscriber@example.test' })[0])
       .toBe('Newsletter: September · to s***@example.test');
     // no recorded address: no recipient text, never a guess
     expect(detail('emails', { id: 'e', subject_snapshot: 'Your estimate', recipient_email_snapshot: null })[0]).toBe('Your estimate');

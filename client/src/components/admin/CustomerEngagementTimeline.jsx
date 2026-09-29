@@ -28,6 +28,24 @@ function fmtWhen(value) {
   });
 }
 
+// Informational only: neither of these is engagement, and each says why.
+function SummaryNotes({ summary }) {
+  return (
+    <>
+      {summary?.lastEmailOpenAt && (
+        <p className="mb-2 text-14 text-ink-secondary" data-testid="engagement-last-open">
+          Last email open {fmtWhen(summary.lastEmailOpenAt)} (unreliable — Apple Mail fakes opens, so it is not counted).
+        </p>
+      )}
+      {summary?.lastProviderClickAt && (
+        <p className="mb-2 text-14 text-ink-secondary" data-testid="engagement-last-provider-click">
+          Last email link click reported by the email provider {fmtWhen(summary.lastProviderClickAt)} (unfiltered — security scanners click links too, so it is not counted).
+        </p>
+      )}
+    </>
+  );
+}
+
 // `adminOnly` is the caller's isAdmin: technicians never fetch or see the feed.
 export default function CustomerEngagementTimeline({ customerId, adminOnly = true }) {
   const [state, setState] = useState({ scope: null, enabled: false, events: [], summary: null, hasMore: false, nextCursor: null, unavailable: [] });
@@ -107,16 +125,7 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
           </span>
         )}
       </div>
-      {summary?.lastEmailOpenAt && (
-        <p className="mb-2 text-14 text-ink-secondary" data-testid="engagement-last-open">
-          Last email open {fmtWhen(summary.lastEmailOpenAt)} (unreliable — Apple Mail fakes opens, so it is not counted).
-        </p>
-      )}
-      {summary?.lastProviderClickAt && (
-        <p className="mb-2 text-14 text-ink-secondary" data-testid="engagement-last-provider-click">
-          Last email link click reported by the email provider {fmtWhen(summary.lastProviderClickAt)} (unfiltered — security scanners click links too, so it is not counted).
-        </p>
-      )}
+      <SummaryNotes summary={summary} />
       {state.unavailable.length > 0 && (
         <p role="status" className="mb-2 text-14 text-ink-secondary">Some sources could not be read: {state.unavailable.join(", ")}.</p>
       )}

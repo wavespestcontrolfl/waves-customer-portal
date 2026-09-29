@@ -25,7 +25,7 @@ const TEMP_TABLES = `
   CREATE TEMP TABLE automation_step_sends (id uuid PRIMARY KEY, enrollment_id uuid, step_order int, status text, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, updated_at timestamp);
   CREATE TEMP TABLE newsletter_sends (id uuid PRIMARY KEY, subject text);
   CREATE TEMP TABLE newsletter_subscribers (id int PRIMARY KEY, customer_id uuid, email text);
-  CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY, send_id uuid, subscriber_id int, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
+  CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY, send_id uuid, subscriber_id int, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
   CREATE TEMP TABLE customer_page_views (id uuid PRIMARY KEY, customer_id uuid, page text, viewed_at timestamptz);
   CREATE TEMP TABLE estimates (id uuid PRIMARY KEY, customer_id uuid, address text);
   CREATE TEMP TABLE estimate_views (id uuid PRIMARY KEY, estimate_id uuid, viewed_at timestamp);
@@ -136,8 +136,9 @@ pg('getCustomerActivity on Postgres', () => {
     await db('automation_step_sends').insert({ id: randomUUID(), enrollment_id: enrBill, step_order: 0, status: 'clicked', email: 'accounts.payable@example.test', sent_at: T(87), delivered_at: T(88), opened_at: T(89), clicked_at: T(91) });
     const send = randomUUID();
     await db('newsletter_sends').insert({ id: send, subject: 'September news' });
-    await db('newsletter_subscribers').insert({ id: 7, customer_id: cust, email: 'Subscriber.Address@example.test' });
-    await db('newsletter_send_deliveries').insert({ id: randomUUID(), send_id: send, subscriber_id: 7, sent_at: T(33), delivered_at: T(34), opened_at: T(70) });
+    // the subscriber's CURRENT address differs from the one this issue was delivered to (email change since)
+    await db('newsletter_subscribers').insert({ id: 7, customer_id: cust, email: 'new.inbox@example.test' });
+    await db('newsletter_send_deliveries').insert({ id: randomUUID(), send_id: send, subscriber_id: 7, email: 'Subscriber.Address@example.test', sent_at: T(33), delivered_at: T(34), opened_at: T(70) });
 
     // page-type views
     const est = randomUUID(); const visit = randomUUID(); const proj = randomUUID();
@@ -257,10 +258,10 @@ pg('getCustomerActivity on Postgres', () => {
     // automation: the send row's own (trimmed, mixed-case) snapshot; the redirected billing send is not special
     expect(to('automation', (e) => e.kind === 'opened' && e.at === T(32).toISOString())).toEqual(['Welcome series (step 1) · to s***@example.test']);
     expect(to('automation', (e) => e.kind === 'sent' && e.at === T(87).toISOString())).toEqual(['Welcome series (step 1) · to a***@example.test']);
-    // newsletter: the subscriber row's address
+    // newsletter: the delivery row's own snapshot, not the subscriber's current address (changed since)
     expect(to('newsletter', (e) => e.kind === 'sent')).toEqual(['Newsletter: September news · to s***@example.test']);
     // the full address never leaves the server
-    expect(JSON.stringify(r.events)).not.toMatch(/synthetic\.person@|accounts\.payable@|accounts\.payable|subscriber\.address@/i);
+    expect(JSON.stringify(r.events)).not.toMatch(/synthetic\.person@|accounts\.payable|subscriber\.address@|new\.inbox/i);
     expect(r.events.some((e) => /billing contact/i.test(e.title))).toBe(false);
   });
 

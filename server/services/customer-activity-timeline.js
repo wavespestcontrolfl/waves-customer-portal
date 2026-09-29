@@ -31,8 +31,11 @@
  * short-link click. Portal-visit and outside-link sources join in a follow-up
  * PR once the PRs that create them have merged.
  *
- * RECIPIENTS. Every email event names the address the send row itself recorded,
- * masked ("to b***@example.com"): no guessing which sends were the customer's
+ * RECIPIENTS. Every email event names the address the send row itself recorded
+ * (email_messages.recipient_email_snapshot, automation_step_sends.email,
+ * newsletter_send_deliveries.email: each is a snapshot taken at send time, so a
+ * later address change does not rewrite history), masked
+ * ("to b***@example.com"): no guessing which sends were the customer's
  * own, so a third-party inbox (a payer, an accounts-payable desk) reads as one.
  *
  * PAGINATION. One query per source, each capped at `limit` rows (fetched as
@@ -302,11 +305,11 @@ const SOURCES = [
       .join('newsletter_sends as ns', 'ns.id', 'd.send_id')
       .where('sub.customer_id', ctx.customerId),
     select: ['d.id', 'd.sent_at', 'd.delivered_at', 'd.opened_at', 'd.clicked_at', 'd.bounced_at',
-      'd.complained_at', 'ns.subject', 'sub.email as subscriber_email', providerClickCollapsed('d.clicked_at')],
+      'd.complained_at', 'd.email', 'ns.subject', providerClickCollapsed('d.clicked_at')],
     ts: ['d.sent_at', 'd.delivered_at', 'd.opened_at', providerClickTime('d.clicked_at'), 'd.bounced_at', 'd.complained_at'],
     open: { expr: 'd.opened_at' },
     providerClick: { expr: 'd.clicked_at' },
-    toEvents: (r) => emailEvents('newsletter', r, `Newsletter: ${r.subject || 'issue'}`, r.subscriber_email, {
+    toEvents: (r) => emailEvents('newsletter', r, `Newsletter: ${r.subject || 'issue'}`, r.email, {
       sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, provider_clicked: r.clicked_collapsed ? null : r.clicked_at,
       bounced: r.bounced_at, complained: r.complained_at,
     }, 'newsletter_send_deliveries'),
