@@ -1,7 +1,9 @@
 const {
   baseQuantityUnit,
   convertInventoryQuantity,
+  isValidRateUnit,
 } = require('../services/inventory-units');
+const SHARED_RATE_UNITS = require('../../shared/rate-units.json');
 
 describe('baseQuantityUnit', () => {
   test('strips the /gal dilution suffix to the base quantity unit', () => {
@@ -70,5 +72,22 @@ describe('baseQuantityUnit', () => {
     expect(convertInventoryQuantity(3, 'lb', 'each')).toBe(null);
     expect(convertInventoryQuantity(3, 'oz', 'each')).toBe(null);
     expect(convertInventoryQuantity(3, 'each', 'oz')).toBe(null);
+  });
+});
+
+describe('isValidRateUnit', () => {
+  // shared/rate-units.json is the one list: /complete and the pest recap
+  // check it here, and the tech Fast Complete sheet sends rates from it.
+  test('accepts every unit on the shared list, trimmed and case-blind', () => {
+    for (const unit of SHARED_RATE_UNITS) {
+      expect(isValidRateUnit(unit)).toBe(true);
+      expect(isValidRateUnit(` ${unit.toUpperCase()} `)).toBe(true);
+    }
+  });
+
+  test('refuses units off the list, including tsp (the sheet sends fl oz)', () => {
+    expect(isValidRateUnit('tsp')).toBe(false);
+    expect(isValidRateUnit('percent_solution')).toBe(false);
+    expect(isValidRateUnit('')).toBe(false);
   });
 });

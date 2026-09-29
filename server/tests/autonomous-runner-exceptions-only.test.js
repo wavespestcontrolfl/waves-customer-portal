@@ -46,7 +46,7 @@ const STUB_CORPUS = [{
   body: '---\ntitle: Seasonal Ant Pressure in SWFL\nslug: /pest-control/seasonal-ant-pressure/\nprimary_keyword: seasonal ant pressure\n---\n\n## Why ants surge\n',
 }];
 
-function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, uniquenessGate, qualityGate, dbMock = makeDbMock() }) {
+function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, uniquenessGate, qualityGate, publisher, dbMock = makeDbMock() }) {
   jest.resetModules();
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/content/internal-link-planner', () => ({
@@ -65,6 +65,8 @@ function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, u
   else jest.dontMock('../services/content/uniqueness-gate');
   if (qualityGate) jest.doMock('../services/content/content-quality-gate', () => qualityGate);
   else jest.dontMock('../services/content/content-quality-gate');
+  if (publisher) jest.doMock('../services/content-astro/astro-publisher', () => publisher);
+  else jest.dontMock('../services/content-astro/astro-publisher');
   jest.dontMock('../services/content/comparison-table-gate');
   jest.dontMock('../services/content/claims-ledger-validator');
   const runner = require('../services/content/autonomous-runner');
@@ -282,6 +284,41 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     ]));
     expect(retryWrite.patch.signal_metadata.__raw).toContain('jsonb_set');
     expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('gate_retry');
+  });
+
+  test('a citability backfill early-gate retry carries its open planned gaps, judged against the live page', async () => {
+    const queue = makeQueue({
+      id: 'opp_gate_backfill', bucket: 'citability_backfill', action_type: 'refresh_existing_page',
+      claimed_at: claimedAt, signal_metadata: { citability_gaps: ['named_sources'] },
+    });
+    const publisher = {
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Experts say termites swarm after rain for 3 days.', frontmatter: {}, source_file: 'src/content/blog/termite/swarms.mdx' }),
+      resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/termite/swarms.mdx' }),
+    };
+    const { runner, dbMock } = loadRunner({
+      queue,
+      publisher,
+      briefBuilder: { compose: jest.fn().mockResolvedValue({
+        id: 'brief_gate_backfill', action_type: 'refresh_existing_page', page_type: 'refresh',
+        target_url: 'https://www.wavespestcontrol.com/termite/swarms/', human_review_required: false,
+        gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['named_sources'] },
+      }) },
+      dispatcher: makeDispatcher(),
+      // The quality gate's rendered-body helpers live in the real module.
+      contentGuardrails: { ...jest.requireActual('../services/content/content-guardrails'), evaluate: failingGuardrails.evaluate },
+    });
+    runner._deriveGuardrailOptions = jest.fn().mockResolvedValue({});
+
+    const result = await runner.runNext();
+
+    expect(result).toMatchObject({ outcome: 'deferred_gate_retry', skip_reason: 'content_guardrails_failed' });
+    expect(queue.defer).toHaveBeenCalledWith('opp_gate_backfill', expect.any(Date), { claimToken: claimedAt });
+    expect(queue.complete).not.toHaveBeenCalled();
+    const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
+    const gateRetry = JSON.parse(retryWrite.patch.signal_metadata.bindings[1]);
+    expect(gateRetry.findings.map((f) => f.code)).toEqual(['HARDCODED_PRICE', 'CITABILITY_BACKFILL_GAPS_CLEARED']);
+    expect(gateRetry.findings[1].message).toMatch(/^planned_gaps_unresolved:named_sources\(/);
+    expect(gateRetry.advisory_messages.map((m) => m.code)).toEqual(expect.arrayContaining(['CITABILITY_CONCRETE_SPECIFICS']));
   });
 
   test('an unattended blog delays one infrastructure retry, then skips without a writer directive', async () => {
