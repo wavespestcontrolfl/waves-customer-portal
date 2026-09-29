@@ -1268,6 +1268,39 @@ async function deriveVisitPrepEligibility(svc) {
 // visit can go en route, get cancelled, or a grouped sibling can push the
 // stop's state), and this is the one place that re-proves it, on the
 // connection that already owns the lock.
+// The generic CORE of the locked recheck: given a svc row that the caller
+// has ALREADY loaded fresh on `trx` (after its own row lock + identity
+// checks — token match for the public route below, or customer-ownership
+// match for the app route in schedule.js), locks any grouped members and
+// re-derives eligibility on that fresh state. Returns the row when eligible,
+// else null. Exported so schedule.js's app-authenticated POST /:id/prep-photos
+// can share this exact member-lock + eligibility recheck rather than growing
+// its own copy — schedule.js requires this module directly (never the
+// reverse), so there is no cycle the way there would be pulling this logic
+// into visit-prep.js (which this route already requires).
+async function reloadEligibleVisitPrepRowCore(svc, trx) {
+  if (!svc) return null;
+  let visitUnknown = false;
+  let visitInfo = {};
+  if (svc.visit_id) {
+    const { openMembers } = require('../services/visit-groups');
+    const members = await openMembers(trx, svc.visit_id, { forUpdate: true });
+    if (members.length >= 2) {
+      if (!membersOneStop(members)) {
+        visitUnknown = true;
+      } else {
+        const { state, phase } = groupedState(members);
+        visitInfo = { visit: { state, phase } };
+      }
+    }
+  }
+  const { state } = visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfo);
+  const eligibility = visitPrep.visitPrepEligibility({
+    svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+  });
+  return eligibility.eligible ? svc : null;
+}
+
 async function reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId, trx) {
   // The customer row FIRST (Codex r3 P1): loadByToken re-reads
   // customers.active / deleted_at, but without a lock a deactivation or
@@ -1290,25 +1323,7 @@ async function reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId,
   if (expectedId && String(svc.id) !== String(expectedId)) return null;
   if (String(svc.customer_id) !== String(expectedCustomerId)) return null;
 
-  let visitUnknown = false;
-  let visitInfo = {};
-  if (svc.visit_id) {
-    const { openMembers } = require('../services/visit-groups');
-    const members = await openMembers(trx, svc.visit_id, { forUpdate: true });
-    if (members.length >= 2) {
-      if (!membersOneStop(members)) {
-        visitUnknown = true;
-      } else {
-        const { state, phase } = groupedState(members);
-        visitInfo = { visit: { state, phase } };
-      }
-    }
-  }
-  const { state } = visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfo);
-  const eligibility = visitPrep.visitPrepEligibility({
-    svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
-  });
-  return eligibility.eligible ? svc : null;
+  return reloadEligibleVisitPrepRowCore(svc, trx);
 }
 
 // Office feed item — PR 3b (customer-visit-photos scope doc §5.4 item 3,
@@ -1534,3 +1549,12 @@ module.exports.pageStateForVisit = async function pageStateForVisit(svc, now = n
   const info = svc?.visit_id ? await visitServicesFor(svc) : {};
   return info.visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, info, now);
 };
+// Visit-prep photos (customer-visit-photos-scope-20260928.md PR 4, "app
+// entry"): schedule.js's customer-authenticated POST /:id/prep-photos
+// requires this module directly (never the reverse) to reuse the SAME
+// eligibility derivation, multer config, locked-recheck core, and office
+// feed item as the public token route — never a second copy of any of them.
+module.exports.deriveVisitPrepEligibility = deriveVisitPrepEligibility;
+module.exports.reloadEligibleVisitPrepRowCore = reloadEligibleVisitPrepRowCore;
+module.exports.visitPrepUpload = visitPrepUpload;
+module.exports.notifyOfficeVisitPrepSubmission = notifyOfficeVisitPrepSubmission;

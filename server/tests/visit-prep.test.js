@@ -50,6 +50,7 @@ function chain(table) {
   api.where = () => api;
   api.whereIn = () => api;
   api.join = () => api;
+  api.forShare = () => { queries.push({ table, lock: 'share' }); return api; };
   // No scheduled_services rows by default: stopMemberIds falls back to
   // [svc.id] (see its own "always including svc.id" fallback), so an
   // ungrouped/simple grouped test never needs to stub this.
@@ -355,6 +356,22 @@ describe('createVisitPrepSubmission', () => {
     });
     expect(result.created).toBe(true);
     expect(inserted[0]).toMatchObject({ customer_id: 'cust-RECHECKED', property_id: 'prop-RECHECKED', visit_id: 'visit-RECHECKED' });
+  });
+
+  test('the customer row is locked FOR SHARE before the stop lock (createOrJoinVisit order, Codex #5306 r2 P2)', async () => {
+    queries.length = 0;
+    const order = [];
+    mockLockStopForRow.mockImplementationOnce(async (trx, id) => { order.push('stop'); return id; });
+    mockDb.mockImplementation((table) => {
+      const api = chain(table);
+      if (table === 'customers') api.forShare = () => { order.push('customer'); return api; };
+      return api;
+    });
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({
+      svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck({ ...RECURRING_SVC }),
+    });
+    expect(order.slice(0, 2)).toEqual(['customer', 'stop']);
   });
 
   test('recheck is called with the SAME transaction the write uses (Finding 1) — never the global pool', async () => {
