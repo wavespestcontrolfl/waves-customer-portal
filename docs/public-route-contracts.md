@@ -799,6 +799,19 @@ absent bearer also keeps public behavior. An expired
 access token gets the refreshable 401 only when the customers-only gate needs
 that identity. An estimate-linked request keeps the estimate account instead
 of inheriting an ambient portal session.
+Quote-wizard handoff identity at `/api/booking/confirm` (customers-only gate
+on): the wizard links its draft estimate to any existing customer matching
+the unverified phone/email the anonymous quoter typed, and hands the token
+back to that same caller, so a token-verified pricing handoff (`pricing_
+estimate_id` + `estimate_token`) whose draft is linked to an ESTABLISHED
+customer is not identity and the confirm is refused with 409 telling the
+customer to sign in with the portal code — a typed phone plus a street match
+never books on someone else's account. Preserved: a verified portal bearer
+still books (identity from the token, address-bound to the account); the
+staff/system accept link (`source_estimate_id` + namespaced `accept_token`)
+still books as the estimate's customer; a draft linked to a row still in a
+pre-customer pipeline stage (the quoter's own freshly minted lead) or to no
+customer keeps the quoter's own booking. No message is sent on the refusal.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
