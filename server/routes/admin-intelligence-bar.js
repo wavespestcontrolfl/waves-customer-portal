@@ -62,7 +62,10 @@ const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligenc
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
-const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+const {
+  UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
+  FULL_ACCESS_TWO_STEP_TOOL_NAMES,
+} = require('../services/intelligence-bar/write-gates');
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -153,6 +156,10 @@ const INFRA_TOOLS = [
   ...DATAFORSEO_OPS_TOOLS, ...GBP_OPS_TOOLS, ...GA4_OPS_TOOLS,
   ...META_ADS_OPS_TOOLS, ...BOUNCIE_OPS_TOOLS, ...APIFY_OPS_TOOLS,
   ...SOCIAL_OPS_TOOLS, ...MANAGED_AGENTS_OPS_TOOLS, ...JOB_HEALTH_TOOLS,
+  // The sitemap submit is advertised with the other outside-service writes in
+  // the global infrastructure prompt, so it rides the global infra set too —
+  // not only the seo/blog contexts' SEO_TOOLS (Codex r4 on #5275).
+  ...SEO_TOOLS.filter(t => t.name === 'submit_gsc_sitemap'),
 ];
 const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
@@ -444,6 +451,14 @@ function ibWritesDisabled() {
   return process.env.IB_WRITES_DISABLED === 'true';
 }
 const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work; make the change on the normal admin screen.';
+
+// tool_health_events.error_message is a separate telemetry sink from
+// intelligence_bar_queries (the redacted prompt/response above) — a PII or
+// outside-write tool's refusal text (a GitHub PR title, a Sentry issue
+// title, a customer name) must not land there verbatim either (Codex r3 P1
+// on #5275). The operator-visible result.error in the tool_result content is
+// never touched by this — only this health-event copy.
+const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
 
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
@@ -878,9 +893,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
     // Two-step executors are contract-tested to be mutation-free without
     // confirmed — run them for the rich preview (on a copy: the stored
-    // params gain execution pins after this call).
-    preview = await executeToolByName(toolUse.name, { ...params }, null);
+    // params gain execution pins after this call). fullAccess travels here
+    // too (owner ruling 2026-09-28): under GATE_IB_PLATFORM this is what
+    // lets ActionRegistry.execute's own allowed() check pass for an outside-
+    // service write proposed by the full-access owner, and correctly refuse
+    // one from anyone else even if a forged tool_use reached this far.
+    preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req) });
     if (isToolFailure(preview)) {
+      return { failed: true, modelResult: preview };
+    }
+    // An unconfigured integration ({ configured: false } — a missing token)
+    // is a refusal, not a card: confirming it could only fail (Codex r1 on
+    // #5275, P2).
+    if (preview?.configured === false) {
       return { failed: true, modelResult: preview };
     }
     // A duplicate phone/email makes create_customer a no-op: the preview
@@ -1987,14 +2012,15 @@ RESPONSE STYLE:
 // context (getToolsForContext), so this block is appended for every admin
 // request rather than living inside one context prompt. Tech and non-admin
 // requests never load the tools, so their prompts must not describe them.
-const INFRA_PROMPT = `INFRASTRUCTURE (all READ-ONLY):
+const INFRA_PROMPT = `INFRASTRUCTURE (read-only, except the owner-only preview actions listed below):
 The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; email is SendGrid; ads run on Google Ads; the four local listings are Google Business Profiles; site analytics is GA4; rank tracking is DataForSEO; code lives on GitHub.
-- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
-- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
-- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
+A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card, and each is preview-only for now (the card cannot yet be confirmed — say so plainly if the operator tries). Never claim any of this for anyone else, and never claim any of these cards can be confirmed yet — point the operator to the relevant dashboard for everything else.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a card (owner-only, preview-only).
+- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces). resolve_sentry_issue / ignore_sentry_issue / assign_sentry_issue prepare a card (owner-only, preview-only).
+- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone). purge_cloudflare_cache / retry_cloudflare_pages_build prepare a card (owner-only, preview-only).
 - Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
 - Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed), get_stripe_payment_intents (live payment attempts — the ONLY view of incomplete/abandoned drafts, which never reach the local database; requires_capture = card hold awaiting capture, not a draft). COMPLETED revenue questions use the revenue tools, not these.
-- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
+- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit). rerun_failed_github_checks / add_github_pr_label / request_codex_review prepare a card (owner-only, preview-only); request_codex_review always posts the exact text "@codex review".
 - App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
 - GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
 - Google Ads: get_google_ads_serving_status (LIVE serving state + why a campaign is limited/not serving + daily budget), get_google_ads_disapprovals (policy-disapproved ads). Budget CHANGES go through /admin/ads only; spend/ROAS analysis uses the revenue tools.
@@ -2012,7 +2038,7 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) + tokens healthy = healthy.
 - Combine infra with business data when useful ("did we miss calls while the server was erroring?")
 - If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
-- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
+- Beyond the short owner-only preview list above, you CANNOT restart, redeploy, purge caches, resolve issues, or change configuration for anyone — never claim otherwise. Point the operator to the relevant dashboard for any other change.`;
 
 
 // Default-off capability gates applied to EVERY context's list in one place
@@ -2026,13 +2052,23 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 // full-access request that sees the tool listed can only ever be told to
 // use the owner-only /execute confirm flow. A request without full access
 // never sees it at all, so the bar never proposes it there.
+//
+// The same fullAccess gate ALSO applies to FULL_ACCESS_TWO_STEP_TOOL_NAMES
+// (IB scope expansion item 1, owner ruling 2026-09-28: outside-service
+// writes — Sentry/Cloudflare/Railway/GitHub/Search Console — are yellow-tier
+// (a card, via WRITE_TWO_STEP_TOOL_NAMES) but STILL full-access-only, unlike
+// every other yellow-tier tool, which any admin gets. Infra ops modules load
+// on EVERY admin context regardless of role (INFRA_TOOLS below), so this
+// filter is the ONLY place that keeps these out of a non-full-access list —
+// there is no per-module QUERY-only export to fall back to.
 function getToolsForContext(context, isAdmin = false, fullAccess = false) {
   const tools = toolsForContextUngated(context, isAdmin, fullAccess)
     // Defense in depth: catches a future red tool reaching a context list
     // through a module that forgot its own write-free "query" export
     // (banking-tools.js / seo-tools.js already build one for the branches
     // below) — never offered without full access, whatever module it rides.
-    .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name));
+    .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name))
+    .filter(t => fullAccess || !FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(t.name));
   return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
 }
 
@@ -2071,7 +2107,9 @@ function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
     return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...closeoutRepair, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...base, ...(fullAccess ? SEO_TOOLS : SEO_QUERY_TOOLS), ...infra];
+    // Minus anything the global infra set already carries (submit_gsc_sitemap)
+    // — a duplicate tool name is rejected by the API.
+    return [...base, ...(fullAccess ? SEO_TOOLS : SEO_QUERY_TOOLS).filter(t => !INFRA_TOOL_NAMES.has(t.name)), ...infra];
   }
   if (context === 'procurement' || context === 'inventory') {
     return [...base, ...PROCUREMENT_TOOLS, ...infra];
@@ -2380,7 +2418,13 @@ async function runQuery(req, res, next) {
     const context = req.techRole === 'admin' ? requestedContext : 'tech';
     const platformEnabled = gateEnvValue('GATE_IB_PLATFORM') && req.techRole === 'admin'
       && context !== 'agent_estimate' && context !== 'tech';
-    const actionScope = { role: req.techRole, context };
+    // fullAccess (owner ruling 2026-09-28): the ActionRegistry-path mirror of
+    // getToolsForContext's fullAccess filter above — allowed() in
+    // action-registry.js refuses FULL_ACCESS_TWO_STEP_TOOL_NAMES (the
+    // outside-service writes) without it, so a non-full-access admin never
+    // sees or can invoke one through initialTools/discover/validateInput
+    // either, whatever GATE_IB_PLATFORM is set to.
+    const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
     let taskContext = null;
     if (platformEnabled) {
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
@@ -2481,7 +2525,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - Adding confirmed: true does nothing; it is ignored. Only the operator's Confirm click on the card executes the write.
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
-- Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.`;
+- Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.
+- EXCEPTION — preview-only outside-service actions (Sentry, Cloudflare, Railway, GitHub, Search Console): their card CANNOT be confirmed yet. Never say they will run on Confirm; say the preview is shown and executing it is not available yet.`;
     }
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
@@ -2617,7 +2662,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const results = [];
       for (const toolUse of toolUses) {
         // PII-bearing tool inputs (name/phone/email/address/SMS search terms) — log keys only
-        const loggableInput = platformEnabled || PII_TOOL_NAMES.has(toolUse.name)
+        // Outside-service writes too (Codex r1 on #5275, P1): assign_sentry_issue
+        // takes an account email, and their scope is 'none' so they are never
+        // in PII_TOOL_NAMES.
+        const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name);
+        const loggableInput = toolTelemetrySensitive
           ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, loggableInput);
@@ -2658,6 +2707,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           errorMessage = result.error;
         } else if (ADMIN_ONLY_TOOL_NAMES.has(toolUse.name) && req.techRole !== 'admin') {
           result = { error: 'Admin access required for this action' };
+          failed = true;
+          errorMessage = result.error;
+        } else if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name) && !ibFullAccess(req)) {
+          // Outside-service writes (owner ruling 2026-09-28) are full-access
+          // only, whatever GATE_IB_PLATFORM is set to — this guard runs
+          // whether or not the tool was ever actually offered in `tools`
+          // (a forced/hallucinated call under the legacy, non-platform path
+          // has no "was this offered" check at all), so it is the one place
+          // that cannot be bypassed by either mode.
+          result = { error: 'This action is limited to the owner account.' };
           failed = true;
           errorMessage = result.error;
         } else if (!isToolAllowedForRole(toolUse.name, req.techRole)) {
@@ -2740,6 +2799,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // Only a card that exists blocks further writes; a proposal refused at
         // preflight left nothing to reconcile, so a corrected call may follow.
         if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) writeFrontierBlocked = true;
+        // Codex r3 P1 on #5275: a github-ops refusal (no failed checks / label
+        // already present) embeds the PR title in `error`, and this sink is
+        // NOT the redacted intelligence_bar_queries telemetry (finding above)
+        // — it is a separate table this route writes unconditionally, so the
+        // same sensitivity test applies here too, on the health-event copy
+        // only. The operator-visible result.error (in the tool_result content
+        // below) is untouched.
         recordToolEvent({
           source: context === 'tech' ? 'tech-intelligence-bar' : 'intelligence-bar',
           context: context || null,
@@ -2747,7 +2813,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           success: !failed,
           durationMs: Date.now() - toolStartedAt,
           circuitOpen,
-          errorMessage,
+          // Only PII and outside-write tools lose their health-event error
+          // text — not every tool under GATE_IB_PLATFORM (which redacts
+          // logged INPUTS wholesale): tool-health triage keeps real errors.
+          errorMessage: (PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)) && errorMessage
+            ? REDACTED_TOOL_HEALTH_ERROR
+            : errorMessage,
         });
         gapCollector?.toolResult(toolUse.name, result, failed);
 
@@ -2820,8 +2891,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // or an earlier image turn is still in the window and its OCR-derived
     // answer can be echoed by a follow-up that carries no images itself.
     // Either way Claude can surface a customer's name/address/phone with no
-    // tool call at all.
-    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
+    // tool call at all. Outside-write tools (Sentry/Cloudflare/Railway/GitHub/
+    // GSC, #5275 Codex r2 P1) have scope 'none' — with GATE_IB_PLATFORM off
+    // that keeps them out of PII_TOOL_NAMES entirely, so their raw
+    // prompt/response (assignee email, Sentry titles/culprits, GitHub PR
+    // titles, Pages branch names) would otherwise persist unredacted.
+    // FULL_ACCESS_TWO_STEP_TOOL_NAMES already isolates exactly that set.
+    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name));
     const piiTainted = platformEnabled || usedPiiTool || piiTaintedHistory;
     const redactPii = platformEnabled || piiTainted || imageTainted || context === 'agent_estimate';
     const redactNote = context === 'agent_estimate'
@@ -3098,7 +3174,7 @@ router.post('/execute', async (req, res, next) => {
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action)
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action)
       ? { fields: Object.keys(executionParams) }
       : {
         ...executionParams,
@@ -3169,6 +3245,16 @@ router.post('/confirm-action', async (req, res, next) => {
     if (ADMIN_ONLY_TOOL_NAMES.has(action.tool_name) && req.techRole !== 'admin') {
       await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'Admin access required for this action' });
       return res.status(403).json({ error: 'Admin access required for this action' });
+    }
+
+    // Outside-service writes (owner ruling 2026-09-28) are full-access only.
+    // The propose step already required full access (same guard in the
+    // /query loop) and claimForConfirm above already bound this pending
+    // action to that same actor, so this is defense in depth — never the
+    // only thing stopping a commit.
+    if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.tool_name) && !ibFullAccess(req)) {
+      await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'This action is limited to the owner account.' });
+      return res.status(403).json({ error: 'This action is limited to the owner account.' });
     }
 
     // Default-deny catch-all: a technician may confirm/execute only the tech
@@ -3327,6 +3413,7 @@ router.post('/confirm-action', async (req, res, next) => {
         const livePreview = await executeApprovedTool(action.tool_name, { ...execParams }, techContextForExecution(req), {
           isAdmin: req.techRole === 'admin',
           technicianId: req.technicianId || req.technician?.id || null,
+          fullAccess: ibFullAccess(req),
           confirmed: false,
         });
         if (isToolFailure(livePreview) || AuthorizationContract.previewFingerprint(livePreview) !== approvedTwoStep) {
@@ -3410,6 +3497,7 @@ router.post('/confirm-action', async (req, res, next) => {
       operationId: action.id,
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
+      fullAccess: ibFullAccess(req),
       confirmed: true,
       ...(approvedAgentEstimateFingerprint
         ? { approvedPreviewFingerprint: approvedAgentEstimateFingerprint }

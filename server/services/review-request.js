@@ -2135,6 +2135,12 @@ const ReviewService = {
     //   3. canonical sms_templates.review_request.
     // If none resolves, requeue.
     let body = null;
+    // Set true only when body renders from the canonical sms_templates
+    // 'review_request' row below — custom_body (operator-edited) and
+    // outreachTpl (the code-defined review-outreach-templates.js registry,
+    // a separate system from sms_templates) are not sms_templates renders,
+    // so their sends carry no templateKey (never guessed).
+    let usedCanonicalReviewTemplate = false;
     const outreachTpl = request.template_key
       ? OUTREACH.getOutreachTemplate(request.template_key)
       : null;
@@ -2182,6 +2188,7 @@ const ReviewService = {
           // suppresses the whole send.
           reservice_line: await require("./reservice-link").reserviceLineForCustomer(customer.id),
         });
+        usedCanonicalReviewTemplate = !!body;
       } catch {
         /* template lookup failed → null */
       }
@@ -2297,7 +2304,10 @@ const ReviewService = {
           purpose: "review_request",
           customerId: customer.id,
           entryPoint: "review_request_send",
-          metadata: { review_request_id: requestId },
+          metadata: {
+            review_request_id: requestId,
+            ...(usedCanonicalReviewTemplate ? { templateKey: "review_request" } : {}),
+          },
           preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
           withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId, claimRef: sendClaim }),
         });
@@ -4248,6 +4258,7 @@ const ReviewService = {
               metadata: {
                 original_message_type: "review_followup",
                 review_request_id: request.id,
+                templateKey: "review_request_followup",
               },
             });
             result = request.service_record_id
@@ -4949,6 +4960,11 @@ const ReviewService = {
           // Stamped onto the sms_log row at send time so the stranded-send
           // reconciliation can prove this touch left regardless of template.
           review_request_id: request.id,
+          // Only the canonical fallback (`prerendered`) is an sms_templates
+          // render — a custom body or the code-defined outreach-templates
+          // registry (OUTREACH.getOutreachTemplate) is neither, so it never
+          // gets a guessed templateKey.
+          ...(prerendered ? { templateKey: "review_request" } : {}),
         },
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
         withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId: request.id, claimRef: sendClaim }),

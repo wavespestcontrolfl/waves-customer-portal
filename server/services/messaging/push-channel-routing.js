@@ -488,7 +488,7 @@ async function repairPushProof({ appNotification, body, customerId, notification
   }
 }
 
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory, templateKey, templateVariantId }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
   let bell = {};
@@ -617,6 +617,11 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // readers that scope by property (SMS commitment evidence) need
         // it on the proof row itself (Codex #4816 r40).
         ...proofScope,
+        // Same rendering-template evidence the SMS leg's sms_log row gets
+        // (services/twilio.js buildSmsLogRow) — never inferred, only
+        // carried through when the caller supplied it.
+        ...(templateKey ? { template_key: templateKey } : {}),
+        ...(templateVariantId ? { template_variant_id: templateVariantId } : {}),
         ...extra,
       }),
     });

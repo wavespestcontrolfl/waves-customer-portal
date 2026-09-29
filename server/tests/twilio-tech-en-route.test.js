@@ -352,6 +352,7 @@ describe("TwilioService.sendTechEnRoute", () => {
           original_message_type: "tech_arrived",
           appointment_progress_event: "tech_arrived",
           useCustomerChannel: true,
+          templateKey: "tech_arrived",
         },
       }),
     );
@@ -976,6 +977,7 @@ describe("TwilioService legacy customer SMS helpers", () => {
         metadata: {
           original_message_type: "service_complete",
           serviceRecordId: "record-1",
+          templateKey: "service_complete",
         },
       }),
     );
