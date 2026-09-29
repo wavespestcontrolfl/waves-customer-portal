@@ -76,6 +76,11 @@ function fakeConn(tables = {}) {
     return q;
   };
   conn.raw = (sql) => `RAW(${sql})`;
+  // Transactions run on the same fake; the advisory lock is a no-op here.
+  conn.transaction = async (fn) => fn(conn);
+  conn._rawCalls = [];
+  const baseRaw = conn.raw;
+  conn.raw = (sql, bindings) => { conn._rawCalls.push({ sql, bindings }); return baseRaw(sql); };
   conn._store = store;
   conn._writes = writes;
   return conn;
@@ -264,6 +269,8 @@ describe('daily cap (VISIT_PREP_READ_DAILY_CAP)', () => {
       submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
+    // The count and the pending claim ran under the cap's advisory lock.
+    expect(conn._rawCalls.some((c) => /pg_advisory_xact_lock/.test(c.sql))).toBe(true);
   });
 
   test('a cap reached by OTHER submissions never blocks THEIR photos from being delivered — this module writes only read_status', async () => {
@@ -320,6 +327,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
       return q;
     };
     wrapped.raw = base.raw;
+    wrapped.transaction = async (fn) => fn(wrapped);
     wrapped._store = base._store;
     wrapped._writes = base._writes;
     mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });

@@ -111,6 +111,20 @@ async function readsToday(conn, now = new Date()) {
   return Number(row?.count || 0);
 }
 
+// Count and claim in ONE transaction under an advisory lock, so two
+// submissions at the same moment can't both pass the cap check. The
+// 'pending' write IS the claim: it is what readsToday counts.
+const CAP_LOCK_KEY = 'visit-prep-pest-read-cap';
+
+async function claimReadSlot(conn, submissionId) {
+  return conn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
+    if (await readsToday(trx) >= dailyCap()) return false;
+    await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', read_ref: null });
+    return true;
+  });
+}
+
 async function setReadStatus(conn, submissionId, status, readRef = null) {
   try {
     await conn('visit_prep_submissions').where({ id: submissionId }).update({
@@ -194,21 +208,19 @@ async function triggerVisitPrepPestRead({
     return;
   }
 
-  let capCount;
+  let claimed;
   try {
-    capCount = await readsToday(conn);
+    claimed = await claimReadSlot(conn, submissionId);
   } catch (err) {
-    logger.error(`[visit-prep-pest-read] daily-cap count failed submission=${submissionId}: ${err.message}`);
+    logger.error(`[visit-prep-pest-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');
     return;
   }
-  if (capCount >= dailyCap()) {
+  if (!claimed) {
     logger.warn(`[visit-prep-pest-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
     await setReadStatus(conn, submissionId, 'failed');
     return;
   }
-
-  await setReadStatus(conn, submissionId, 'pending');
 
   let result;
   try {
