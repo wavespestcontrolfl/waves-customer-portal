@@ -17,7 +17,8 @@
  *     carries a price (estimated_price / primary_line_price). Children
  *     legitimately ride with NULL price and inherit from their parent at
  *     invoice time, so only a series with no price ANYWHERE pages. One bell
- *     per series (root id), not per visit.
+ *     per series (root id), not per visit. A visit priced by a live combined
+ *     first-application invoice (first_application_invoice_id) never pages.
  *  2. LAWN-EMAIL AUDIENCE GAP — a customer with live recurring-lawn
  *     evidence who cannot receive the Monday irrigation email (no email /
  *     no coordinates / lead-stage / inactive). The email's audience is
@@ -42,6 +43,20 @@
  * dedupe keys make the remainder ring on subsequent ticks. Dark by default
  * behind GATE_SCHEDULE_INTEGRITY_WATCHDOG. Read-only against
  * scheduled_services; writes nothing but admin notifications.
+ *
+ * ALERT EPISODES (ALERT_EPISODES, live unless killed — see feature-gates):
+ * every bell here now clears itself when its problem is fixed and rings again
+ * when the problem comes back. Each run computes each class's COMPLETE live
+ * key set (independent of the per-run cap), raises every live finding through
+ * notification-service's raiseAdminAlertWithReopen (a standing row is a silent
+ * dedupe; an auto-cleared one is reopened and re-rings), and closes every
+ * open bell of the class whose key is absent (closeAdminAlertKeys — read rows
+ * too, so a person's read never blocks a comeback). The cap counts only rows
+ * newly created or re-rung. A stale-scan race — the problem reappearing right
+ * after this run's scan — heals on the next run through the same reopen.
+ * Prepay-coverage reviews are the exception to "absent = close": a visit that
+ * COMPLETED with the gap still there stays open for a person, because
+ * completion is exactly when the prepay billing mistake happens.
  */
 
 const db = require('../models/db');
@@ -58,6 +73,20 @@ const UPCOMING_WINDOW_DAYS = 14;
 // A first enable can scan a real backlog across the remaining classes; cap
 // the bells per run so it drains over ticks instead of flooding.
 const MAX_ALERTS_PER_RUN = 10;
+
+// The four bell classes, by dedupeKey prefix. Only the watchdog raises under
+// these prefixes, so an open row under one is this module's to close.
+const UNPRICED_PREFIX = 'unpriced-series:';
+const LAWN_GAP_PREFIX = 'lawn-email-gap:';
+const PREPAY_PREFIX = 'prepay-coverage:';
+const ACCEPTED_PREFIX = 'accepted-schedule:';
+// A prepay-coverage visit in these statuses stays open for a person even with
+// the gap gone from the scan: a completed visit is where the billing mistake
+// happens, and a rescheduled one moved its coverage question elsewhere.
+const PREPAY_HOLD_OPEN_STATUSES = ['completed', 'rescheduled'];
+// A visit that never ran: its coverage review is moot.
+const NEVER_RAN_STATUSES = ['cancelled', 'canceled', 'skipped', 'no_show'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function toMoney(value) {
   const n = Number(value);
@@ -135,12 +164,25 @@ function manualSeriesStampIssue(row) {
   return allocationsMatch && inferredMatch ? null : 'manual_series_stamp_conflict';
 }
 
+// A visit stamped onto a combined first-application invoice (a new customer's
+// same-trip second service; estimate-converter.js stamps the anchor and every
+// covered sibling) is priced by that invoice, not by its own row — the one
+// stamp billing-lane.js and first-application-sibling-split.js both read. Live
+// = the invoice exists and has not gone terminal (billing-lane.js's
+// TERMINAL_STATUSES); a voided combined invoice leaves the visit uncovered.
+const DEAD_INVOICE_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
+function coveredByFirstApplicationInvoice(row) {
+  return !!row?.first_application_invoice_id && !!row.first_application_invoice_status
+    && !DEAD_INVOICE_STATUSES.includes(String(row.first_application_invoice_status));
+}
+
 function isUnpricedSeriesVisit(row) {
   // Preserve the original pricing query's status eligibility; the broader
   // coverage scan also handles legacy null-status visits.
   if (row?.status == null) return false;
   if (rowHasPrice(row)) return false;
   if (hasOutOfBandPrepaidStamp(row)) return false;
+  if (coveredByFirstApplicationInvoice(row)) return false;
   const inheritsFromParent = !!row.recurring_parent_id && row.is_recurring !== false;
   if (!inheritsFromParent) return true;
   return toMoney(row.parent_estimated_price) == null && toMoney(row.parent_primary_line_price) == null;
@@ -177,6 +219,7 @@ async function runInner({ now = new Date() } = {}) {
     .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
     .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.id', 'ss.annual_prepay_term_id')
     .leftJoin('invoices as prepay_invoice', 'prepay_invoice.id', 'prepay_term.prepay_invoice_id')
+    .leftJoin('invoices as first_application_invoice', 'first_application_invoice.id', 'ss.first_application_invoice_id')
     .where(function whereLive() {
       this.whereNull('ss.status').orWhereNotIn('ss.status', LIVE_STATUS_EXCLUSIONS);
     })
@@ -197,7 +240,8 @@ async function runInner({ now = new Date() } = {}) {
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
       'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount',
       'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.recurring_parent_id',
-      'ss.created_at', 'ss.prepaid_at',
+      'ss.created_at', 'ss.prepaid_at', 'ss.first_application_invoice_id',
+      'first_application_invoice.status as first_application_invoice_status',
       db.raw('ss.xmin::text as row_revision'),
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',
@@ -254,6 +298,7 @@ async function runInner({ now = new Date() } = {}) {
     .orderByRaw('ss.scheduled_date >= ? DESC', [todayET])
     .orderBy('ss.scheduled_date', 'asc');
   const unpricedByRoot = new Map();
+  const overdueUnpricedRoots = new Set();
   const prepayGaps = [];
   // Same validator the completion-billing gate uses (fail-closed): an
   // annual-prepay stamp suppresses only when its linked term is live,
@@ -277,13 +322,17 @@ async function runInner({ now = new Date() } = {}) {
     if (annualCoverageGap) prepayGaps.push({ row, issue: 'annual_coverage_unverified' });
     const manualIssue = manualSeriesStampIssue(row);
     if (manualIssue) prepayGaps.push({ row, issue: manualIssue });
-    if (row.service_date < todayET) continue;
     if (!isUnpricedSeriesVisit(row)) continue;
     if (annualCovered) continue;
     const root = seriesRootId(row);
+    // An OVERDUE unpriced visit never pages (the class is upcoming-only), but
+    // it is still an unpriced series: its standing bell must not close on it.
+    if (row.service_date < todayET) { overdueUnpricedRoots.add(String(root)); continue; }
     if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
   }
 
+  // Lazy require, like isEnabled above; read at call time so the env is a live kill switch.
+  const episodes = require('../config/feature-gates').alertEpisodesLive();
   let alerted = 0;
   const capped = () => {
     if (alerted < MAX_ALERTS_PER_RUN) return false;
@@ -299,14 +348,19 @@ async function runInner({ now = new Date() } = {}) {
     // through notifyAdmin's own advisory-locked dedupe — passing dedupeKey
     // here instead of a local read-then-insert (the old alreadyAlerted())
     // that raced across overlapping ticks and could double-ring.
-    const created = await NotificationService.notifyAdmin('alert', title, body, {
+    const alertOpts = {
       link,
       bell: true,
       dedupeKey,
       ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
       ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
       metadata: { dedupeKey, ...metadata },
-    });
+    };
+    // Episodes: the reopen wrapper (an auto-cleared row rings again; a
+    // standing one is a silent dedupe). Killed: exactly the pre-episode call.
+    const created = episodes
+      ? await NotificationService.raiseAdminAlertWithReopen('alert', title, body, alertOpts)
+      : await NotificationService.notifyAdmin('alert', title, body, alertOpts);
     // NotificationService.create swallows insert errors into a null result;
     // this job's ONLY output is the bell, so a lost bell must fail the run
     // loudly instead of logging success. Internal-test suppression
@@ -315,8 +369,10 @@ async function runInner({ now = new Date() } = {}) {
       throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
     }
     // A deduped result (the standing row already exists and either matched
-    // or was just refreshed) is not a NEW alert for this run's count.
-    if (created.deduped) return false;
+    // or was just refreshed) is not a NEW alert for this run's count. Under
+    // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
+    // or a refresh that rang) — never a silent dedupe onto a standing row.
+    if (episodes ? !created.rang : created.deduped) return false;
     alerted += 1;
     return true;
   };
@@ -441,9 +497,33 @@ async function runInner({ now = new Date() } = {}) {
       { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}`, refreshOnDedupe: true, dedupeVersion: gap.evidenceKey },
   ]));
 
+  // Live keys per class, from the COMPLETE findings above — computed before
+  // the loop so the per-run cap (which only limits new rings) never changes
+  // what a close pass judges.
+  const liveKeys = new Set(alerts.map((alert) => alert[0]));
+
   for (const alert of alerts) {
     if (capped()) break;
     await ring(...alert);
+  }
+
+  let closed = 0;
+  let closePassFailed = false;
+  if (episodes) {
+    try {
+      closed = await closeResolvedAlerts({
+        now, liveKeys, overdueUnpricedRoots,
+        // A class whose check failed has an unknown live set: closing on it
+        // would clear every standing bell of the class.
+        skipPrefixes: [
+          ...(lawnGapCheckFailed ? [LAWN_GAP_PREFIX] : []),
+          ...(acceptedScheduleCheckFailed ? [ACCEPTED_PREFIX] : []),
+        ],
+      });
+    } catch (err) {
+      closePassFailed = true;
+      logger.error(`[schedule-integrity] alert close pass failed: ${err.message}`);
+    }
   }
 
   return {
@@ -457,7 +537,54 @@ async function runInner({ now = new Date() } = {}) {
     acceptedScheduleGaps: acceptedGaps.length,
     acceptedScheduleCheckFailed,
     alerted,
+    ...(episodes ? { closed, closePassFailed } : {}),
   };
+}
+
+// Episodes close pass: per class, open bells (by prefix) minus the live keys
+// are the absent ones — their problem is fixed (or, for prepay, the visit is
+// moot). Read-only against scheduled_services: it reads a visit's status and
+// writes nothing but admin notifications. A problem that returns after this
+// scan is re-raised, and re-rung, by the next run.
+async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, skipPrefixes }) {
+  const absentOf = async (prefix) => {
+    if (skipPrefixes.includes(prefix)) return [];
+    return (await NotificationService.openAdminAlertKeys(db, prefix)).filter((key) => !liveKeys.has(key));
+  };
+  const close = async (keys, reason) => (keys.length
+    ? Number(await NotificationService.closeAdminAlertKeys(db, keys, reason, { now })) || 0
+    : 0);
+  let closed = 0;
+
+  const unpriced = (await absentOf(UNPRICED_PREFIX))
+    .filter((key) => !overdueUnpricedRoots.has(key.slice(UNPRICED_PREFIX.length)));
+  closed += await close(unpriced, 'no longer unpriced');
+  closed += await close([...await absentOf(LAWN_GAP_PREFIX), ...await absentOf(ACCEPTED_PREFIX)], 'gap resolved');
+
+  // Prepay: key = prepay-coverage:<visit>:<issue>:<evidence hash>.
+  const prepayAbsent = await absentOf(PREPAY_PREFIX);
+  if (prepayAbsent.length) {
+    const visitOf = (key) => key.split(':')[1];
+    const visitIds = [...new Set(prepayAbsent.map(visitOf).filter((id) => UUID_RE.test(id || '')))];
+    const statusRows = visitIds.length
+      ? await db('scheduled_services').whereIn('id', visitIds).select('id', 'status') : [];
+    const statusById = new Map(statusRows.map((r) => [String(r.id), r.status]));
+    // A visit that still has a live prepay key was superseded by a new
+    // evidence key rather than resolved.
+    const supersededVisits = new Set([...liveKeys].filter((k) => k.startsWith(PREPAY_PREFIX)).map(visitOf));
+    const byReason = { 'visit did not run': [], superseded: [], 'gap resolved': [] };
+    for (const key of prepayAbsent) {
+      const id = visitOf(key);
+      const known = statusById.has(id);
+      const status = statusById.get(id);
+      if (known && PREPAY_HOLD_OPEN_STATUSES.includes(status)) continue;
+      if (!known || NEVER_RAN_STATUSES.includes(status)) byReason['visit did not run'].push(key);
+      else if (supersededVisits.has(id)) byReason.superseded.push(key);
+      else byReason['gap resolved'].push(key);
+    }
+    for (const [reason, keys] of Object.entries(byReason)) closed += await close(keys, reason);
+  }
+  return closed;
 }
 
 module.exports = {
