@@ -68,10 +68,11 @@ describe('adoptV2PrimaryFields — Gmail dot-only equivalence (2026-09-29)', () 
 });
 
 describe('downstream consumers do not re-open the hold', () => {
-  test('applyEmailDisagreementHold is a no-op on a dot-only Gmail pair, still holds a real disagreement', () => {
+  test('applyEmailDisagreementHold saves the one address on a dot-only Gmail pair, still holds a real disagreement', () => {
     const same = { email: null, email_candidates: ['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com'] };
     const out = applyEmailDisagreementHold(same, null);
-    expect(out.extracted).toBe(same);
+    expect(out.extracted.email).toBe('jqsample1990@gmail.com');
+    expect(out.extracted.email_candidates).toBeUndefined();
     expect(out.dictationEmailPayload).toBeNull();
     const diff = applyEmailDisagreementHold({ email: null, email_candidates: ['a@gmail.com', 'b@gmail.com'] }, null);
     expect(diff.dictationEmailPayload.email_disagreement).toEqual({ v1: 'a@gmail.com', v2: 'b@gmail.com' });
