@@ -1,8 +1,8 @@
 /**
  * Visit prep photos — automatic pest read (PR 5, GATE_VISIT_PREP_PEST_READ,
  * dark). Second-order feature on top of PR 1's visit-prep foundation
- * (services/visit-prep.js): when a customer's visit-prep submission is (or
- * defaults to) the pest topic, this runs the SAME pest v2 engine the app's
+ * (services/visit-prep.js): when a customer sends photos for a pest visit,
+ * this runs the SAME pest v2 engine the app's
  * Photo ID route calls (identifyPestV2, server/routes/photo-id.js ~line
  * 477) over the just-uploaded photos and stores the result in
  * `pest_identifications` with `source = 'visit_prep'`, `mode = 'internal'`
@@ -12,16 +12,11 @@
  * NEVER sees this read.
  *
  * Trigger rule (owner delta on scope doc §5.3 — the topic chips were
- * removed, so most submissions carry `topic: null`):
- *   - submission.topic === 'pest'  → run the read.
- *   - submission.topic === null AND the visit's service line is Pest
- *     Control (server/services/service-line.js's classifyServiceLine on
- *     scheduled_services.service_type; a grouped stop is pest if ANY LIVE
- *     — non-terminal — member is) → run the read.
- *   - submission.topic is 'lawn' / 'tree_shrub' / 'other', OR topic is null
- *     and the service line is anything else → read_status 'unsupported',
- *     no engine call, no cap spent. Lawn and tree & shrub have no engine
- *     yet (scope doc §5.3, "being rebuilt").
+ * removed): the visit's service line decides. A stop whose live members
+ * include Pest Control (service-line.js classifyServiceLine; members from
+ * visit-prep.js techStopMemberIds) is read; anything else is
+ * 'unsupported' — no engine call, no cap spent. Lawn and tree & shrub have
+ * no engine yet (scope doc §5.3, "being rebuilt").
  *
  * Called from visit-prep.js's createVisitPrepSubmission — the ONE place a
  * submission is created, never from a route — so every entry point (the
@@ -30,13 +25,14 @@
  * own transaction has already committed, fire-and-forget: the caller does
  * `void triggerVisitPrepPestRead(...)` and never awaits it, so a slow or
  * failing vision call can never add latency to, or fail, the customer's
- * upload response. Every error here is caught and logged; `read_status`
- * is written 'failed' rather than left stuck on 'pending'.
+ * upload response. Every error here is caught and logged: an attempt that
+ * reached the engine ends 'failed', never stuck on 'pending'; one that never
+ * claimed a cap slot ends 'none'.
  *
  * Own daily cap, `VISIT_PREP_READ_DAILY_CAP` (default 40, env, read fresh
  * per call) — separate from the app Photo ID route's own per-customer/
  * shared budgets. A capped submission never blocks: the photos still reach
- * the technician, only the read line is withheld (read_status 'failed').
+ * the technician, only the read line is withheld (read_status 'none').
  */
 
 const db = require('../models/db');
@@ -55,26 +51,21 @@ function dailyCap() {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_DAILY_CAP;
 }
 
-// Every LIVE (non-terminal) service_type on svc's CURRENT stop, resolved
-// fresh from scheduled_services — same "read current membership, never a
-// snapshot" rule visit-prep.js's own stopMemberIds/techStopMemberIds
-// follow, kept as its own small query here rather than importing either
-// (this module has no need for their tech-ownership or customer-cap
-// scoping, only "is any live member a pest visit"). Ungrouped: just svc's
-// own type.
+// Every LIVE (non-terminal) service_type on svc's CURRENT physical stop:
+// the same member set the technician's Visit Brief shows
+// (visit-prep.js techStopMemberIds — rowStillAtVisitStop plus the stop's
+// technician), so a sibling moved to another day or window but still
+// carrying the frozen visit_id never counts (Codex #5305 r1 P1).
 async function liveStopServiceTypes(svc, conn) {
-  if (!svc?.visit_id) return svc?.service_type ? [svc.service_type] : [];
-  const rows = await conn('scheduled_services')
-    .where({ visit_id: svc.visit_id })
-    .select('service_type', 'status');
-  const live = rows.filter((r) => !TERMINAL_ROW_STATUSES.includes(r.status));
-  // svc itself always counts — it just committed as part of THIS write, so
-  // a stale read of its own row (a status not yet visible on this
-  // connection) must never drop it from its own stop.
-  if (svc.service_type && !live.some((r) => r.service_type === svc.service_type)) {
-    live.push({ service_type: svc.service_type, status: svc.status || null });
-  }
-  return live.map((r) => r.service_type);
+  // svc is the row this submission just committed against (rechecked
+  // under the stop lock), so it always counts for itself.
+  const own = svc?.service_type ? [svc.service_type] : [];
+  if (!svc?.visit_id) return own;
+  const { techStopMemberIds } = require('./visit-prep');
+  const others = (await techStopMemberIds(svc, conn)).filter((id) => String(id) !== String(svc.id));
+  if (!others.length) return own;
+  const rows = await conn('scheduled_services').whereIn('id', others).select('service_type', 'status');
+  return [...own, ...rows.filter((r) => !TERMINAL_ROW_STATUSES.includes(r.status)).map((r) => r.service_type)];
 }
 
 async function isPestStop(svc, conn = db) {
@@ -82,20 +73,14 @@ async function isPestStop(svc, conn = db) {
   return types.some((t) => classifyServiceLine(t) === 'Pest Control');
 }
 
-// Decide 'pest' | 'unsupported' BEFORE any engine call or cap check —
-// 'unsupported' spends neither.
-async function resolveApplicability(topic, svc, conn) {
-  if (topic === 'pest') return 'pest';
-  if (topic === 'lawn' || topic === 'tree_shrub' || topic === 'other') return 'unsupported';
-  // topic === null (the common case since the topic chips were removed):
-  // infer from the visit's own service line.
+// The read follows the VISIT's service line only. The appointment page and
+// app no longer ask for a topic (owner 2026-09-28), so a topic on the row is
+// not an input here, and a resubmit that edits it changes nothing
+// (Codex #5305 r1 P2).
+async function resolveApplicability(svc, conn) {
   return (await isPestStop(svc, conn)) ? 'pest' : 'unsupported';
 }
 
-// Every read ATTEMPTED today, not only the ones that stored a result: an
-// engine call that failed still cost a vision call. pending/done/failed are
-// the statuses a pest-applicable submission can reach (unsupported never
-// calls the engine and never counts).
 // The cap's day is the America/New_York calendar day (AGENTS.md), not
 // the DB session's UTC day: midnight ET as an instant, bound as a param.
 function etDayStart(now = new Date()) {
@@ -177,7 +162,6 @@ async function storeIdentification(conn, { svc, submissionId, result }) {
  * @param {object} opts.svc                 the RECHECKED visit row (createVisitPrepSubmission's
  *                                           own `result.current`) — id, customer_id, service_type,
  *                                           visit_id, status
- * @param {string|null} opts.topic           the submission's normalized topic
  * @param {Array<{s3Key:string, mimeType:string}>} opts.photos  the NEW photos this submission stored
  * @param {object} [opts.conn]               defaults to the global pool — this ALWAYS runs after
  *                                            the write transaction has already committed, so it
@@ -188,7 +172,7 @@ async function storeIdentification(conn, { svc, submissionId, result }) {
  *          read_status='failed' so the row never sticks on 'pending'.
  */
 async function triggerVisitPrepPestRead({
-  submissionId, svc, topic, photos, conn = db,
+  submissionId, svc, photos, conn = db,
 } = {}) {
   if (!submissionId || !svc?.id) return;
   if (!visitPrepPestReadLive()) return; // gate off — leave read_status at its 'none' default
@@ -196,10 +180,11 @@ async function triggerVisitPrepPestRead({
 
   let applicability;
   try {
-    applicability = await resolveApplicability(topic, svc, conn);
+    applicability = await resolveApplicability(svc, conn);
   } catch (err) {
     logger.error(`[visit-prep-pest-read] applicability check failed submission=${submissionId}: ${err.message}`);
-    await setReadStatus(conn, submissionId, 'failed');
+    // Never reached the engine: 'none', so it never counts against the cap.
+    await setReadStatus(conn, submissionId, 'none');
     return;
   }
 
@@ -213,12 +198,15 @@ async function triggerVisitPrepPestRead({
     claimed = await claimReadSlot(conn, submissionId);
   } catch (err) {
     logger.error(`[visit-prep-pest-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
-    await setReadStatus(conn, submissionId, 'failed');
+    await setReadStatus(conn, submissionId, 'none');
     return;
   }
   if (!claimed) {
     logger.warn(`[visit-prep-pest-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
-    await setReadStatus(conn, submissionId, 'failed');
+    // 'none', not 'failed': a cap rejection never claimed a slot, so it
+    // must not hold the count up if the cap is raised the same day
+    // (Codex #5305 r1 P2). The tech sees no read line either way.
+    await setReadStatus(conn, submissionId, 'none');
     return;
   }
 

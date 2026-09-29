@@ -224,7 +224,9 @@ function formatVisitPrepReadLine(read) {
   if (!read || read.status !== 'done') return null;
   const parts = [];
   const wordingLabel = VISIT_PREP_READ_WORDING_LABELS[read.wordingTier] || 'AI read';
-  parts.push(read.commonName ? `${wordingLabel}: ${read.commonName}.` : 'No species named from these photos.');
+  if (read.commonName) parts.push(`${wordingLabel}: ${read.commonName}.`);
+  else if (read.groupLabel) parts.push(`Looks like: ${read.groupLabel}.`);
+  else parts.push('No species named from these photos.');
   if (read.matches?.length) parts.push(`Matches: ${read.matches.join('; ')}.`);
   if (read.stillNeed?.length) parts.push(`Still need: ${read.stillNeed.join('; ')}.`);
   const hazards = Object.keys(VISIT_PREP_READ_HAZARD_LABELS).filter((k) => read.hazards?.[k]).map((k) => VISIT_PREP_READ_HAZARD_LABELS[k]);
@@ -314,9 +316,27 @@ function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
   return fresh ? links.byId : {};
 }
 
-function CustomerFlaggedSection({ serviceId, customerFlagged, request }) {
+// While a photo read is running the brief says "Photo read pending"; nothing
+// pushes the finished read, so re-read the brief every 30 s (the parent's
+// retry keeps the loaded data on screen) for at most the 15 minutes after
+// which the server stops calling a read pending (Codex #5305 r1 P2).
+const READ_PENDING_POLL_MS = 30 * 1000;
+const READ_PENDING_MAX_POLLS = 30;
+
+function useRefreshWhileReadPending(customerFlagged, onRefresh) {
+  const pending = (customerFlagged || []).some((entry) => entry.read?.status === 'pending');
+  const polls = useRef(0);
+  useEffect(() => {
+    if (!pending || typeof onRefresh !== 'function' || polls.current >= READ_PENDING_MAX_POLLS) return undefined;
+    const timer = setTimeout(() => { polls.current += 1; onRefresh(); }, READ_PENDING_POLL_MS);
+    return () => clearTimeout(timer);
+  }, [pending, onRefresh, customerFlagged]);
+}
+
+function CustomerFlaggedSection({ serviceId, customerFlagged, request, onRefresh }) {
   const photoSignature = (customerFlagged || []).flatMap((entry) => entry.photoIds || []).join(',');
   const photoUrls = useVisitPrepPhotoUrls(serviceId, !!customerFlagged?.length, request, photoSignature);
+  useRefreshWhileReadPending(customerFlagged, onRefresh);
   if (!customerFlagged?.length) return null;
   return (
     <>
@@ -925,6 +945,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         serviceId={customerFlaggedMember?.service?.id}
         customerFlagged={customerFlagged}
         request={request}
+        onRefresh={onRetry}
       />
 
       {memberBits.map((m) => (m.wdo ? (

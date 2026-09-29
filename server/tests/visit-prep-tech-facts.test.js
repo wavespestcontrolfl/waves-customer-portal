@@ -61,6 +61,16 @@ function fakeConn(tables) {
 }
 
 describe('customerFlaggedFacts', () => {
+  // The read line rides only while the pest-read gate is live.
+  beforeEach(() => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+  });
+  afterEach(() => {
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+    delete process.env.GATE_VISIT_PREP_PEST_READ;
+  });
+
   beforeEach(() => jest.clearAllMocks());
 
   test('no CURRENT-membership submissions → null (never an empty array)', async () => {
@@ -150,6 +160,20 @@ describe('customerFlaggedFacts', () => {
     }]);
   });
 
+  test('pest-read gate off: stored reads are not served at all (the kill switch hides them)', async () => {
+    delete process.env.GATE_VISIT_PREP_PEST_READ;
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_ref: 'pi-1' },
+      ],
+      visit_prep_photos: [],
+      pest_identifications: [{ id: 'pi-1', report_contract: JSON.stringify({ v2: { entry: { common_name: 'German cockroach' } } }) }],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0]).not.toHaveProperty('read');
+  });
+
   test('a DONE read merges ONLY the fixed engine fields from the stored contract, batched in one query', async () => {
     const conn = fakeConn({
       scheduled_services: [{ id: 'svc-1', visit_id: null }],
@@ -192,6 +216,7 @@ describe('customerFlaggedFacts', () => {
       status: 'done',
       wordingTier: 'likely',
       commonName: 'German cockroach',
+      groupLabel: null,
       matches: ['Two dark stripes behind the head'],
       stillNeed: ['A clear top-down photo'],
       referralKind: null,
@@ -207,6 +232,13 @@ describe('customerFlaggedFacts', () => {
 
 describe('readFactsFromContract', () => {
   const { readFactsFromContract } = visitPrep._internal;
+  test('a group-only answer carries the catalog group label, never an entry name', () => {
+    const facts = readFactsFromContract('done', {
+      v2: { answer: { wording: 'group_only' }, entry: null, group: { id: 'ants', label: 'Ants' }, evidence: { matches: [], still_need: [] } },
+    });
+    expect(facts.commonName).toBeNull();
+    expect(facts.groupLabel).toBe('Ants');
+  });
   test('a done read with no stored contract reads as failed, never an empty result', () => {
     expect(readFactsFromContract('done', null)).toEqual({ status: 'failed' });
   });

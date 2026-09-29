@@ -497,7 +497,6 @@ async function createVisitPrepSubmission({
     void triggerVisitPrepPestRead({
       submissionId: result.submissionId,
       svc: result.current,
-      topic: fields.topic,
       photos: result.photos,
     }).catch((err) => logger.error(`[visit-prep] pest read trigger failed for submission ${result.submissionId}: ${err.message}`));
   }
@@ -648,6 +647,9 @@ function readFactsFromContract(status, contract) {
     status,
     wordingTier: v2.answer?.wording || null,
     commonName: v2.entry?.common_name || null,
+    // A group-only answer (no species) names its approved catalog group
+    // (pest-engine.js groupBlockFor: catalog label, never model text).
+    groupLabel: v2.entry ? null : (v2.group?.label || null),
     // v2.evidence is picked from the approved catalog entry's own traits
     // (pest-engine.js evidenceFor), never model prose.
     matches: Array.isArray(v2.evidence?.matches) ? v2.evidence.matches : [],
@@ -693,7 +695,10 @@ async function customerFlaggedFacts(svc, conn = db) {
   // purge, or the FK's ON DELETE SET NULL racing this read) just falls
   // back to `{ status }` with no fixed fields — never a thrown error over
   // an otherwise-informative section.
-  const readRefs = [...new Set(kept.filter((s) => s.read_status === 'done' && s.read_ref).map((s) => s.read_ref))];
+  const readsLive = require('../config/feature-gates').visitPrepPestReadLive();
+  const readRefs = readsLive
+    ? [...new Set(kept.filter((s) => s.read_status === 'done' && s.read_ref).map((s) => s.read_ref))]
+    : [];
   const contractsByRef = new Map();
   if (readRefs.length) {
     const rows = await conn('pest_identifications').whereIn('id', readRefs).select('id', 'report_contract');
@@ -707,7 +712,10 @@ async function customerFlaggedFacts(svc, conn = db) {
     locationOnProperty: s.location_on_property || null,
     note: s.note || null,
     photoIds: photoIdsBySubmission.get(s.id) || [],
-    read: readFactsFromContract(effectiveReadStatus(s.read_status || 'none', s.created_at), s.read_ref ? contractsByRef.get(s.read_ref) : null),
+    // The read's own kill switch hides stored reads too (Codex #5305 r1 P1).
+    ...(readsLive ? {
+      read: readFactsFromContract(effectiveReadStatus(s.read_status || 'none', s.created_at), s.read_ref ? contractsByRef.get(s.read_ref) : null),
+    } : {}),
   }));
 }
 

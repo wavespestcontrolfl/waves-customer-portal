@@ -14,6 +14,13 @@ jest.mock('../services/photo-id-v2/pest-engine', () => ({
   identifyPestV2: (...args) => mockIdentifyPestV2(...args),
 }));
 
+// The stop's member ids come from visit-prep.js techStopMemberIds (the
+// technician's own physical-stop rule); stubbed per test.
+const mockTechStopMemberIds = jest.fn(async (svc) => [svc.id]);
+jest.mock('../services/visit-prep', () => ({
+  techStopMemberIds: (...args) => mockTechStopMemberIds(...args),
+}));
+
 const mockGetPhotoBase64 = jest.fn();
 jest.mock('../services/photos', () => ({
   getPhotoBase64: (...args) => mockGetPhotoBase64(...args),
@@ -132,7 +139,7 @@ describe('gate', () => {
     const conn = fakeConn();
     mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(conn._writes).toHaveLength(0);
@@ -141,7 +148,7 @@ describe('gate', () => {
   test('no photos: returns immediately, no write, gate on', async () => {
     const conn = fakeConn();
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: [], conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: [], conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(conn._writes).toHaveLength(0);
@@ -149,46 +156,27 @@ describe('gate', () => {
 });
 
 describe('trigger rule', () => {
-  test("topic === 'pest': runs the engine regardless of the visit's own service", async () => {
+  test('a pest visit: runs the engine', async () => {
     const conn = fakeConn();
     mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
     mockIdentifyPestV2.mockResolvedValue(okEngineResult());
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Lawn Weed & Feed' }, topic: 'pest', photos: PHOTOS, conn,
-    });
-    expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
-    expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'done']);
-  });
-
-  test('topic null + the visit classifies as Pest Control: runs the engine', async () => {
-    const conn = fakeConn();
-    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
-    mockIdentifyPestV2.mockResolvedValue(okEngineResult());
-    await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Quarterly Pest Control' }, topic: null, photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Quarterly Pest Control' }, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
   });
 
-  test('topic null + a lawn visit: unsupported, no engine call', async () => {
+  test('a lawn visit: unsupported, no engine call', async () => {
     const conn = fakeConn();
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Lawn Weed & Feed' }, topic: null, photos: PHOTOS, conn,
-    });
-    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
-  });
-
-  test.each(['lawn', 'tree_shrub', 'other'])("topic === '%s' (explicit): unsupported, no engine call even on a pest visit", async (topic) => {
-    const conn = fakeConn();
-    await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic, photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Lawn Weed & Feed' }, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
   });
 
   test('grouped stop: pest if ANY LIVE member is pest, even when the requested row itself is lawn', async () => {
+    mockTechStopMemberIds.mockResolvedValueOnce(['svc-1', 'svc-2']);
     const conn = fakeConn({
       scheduled_services: [
         { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
@@ -202,7 +190,6 @@ describe('trigger rule', () => {
       svc: {
         id: 'svc-1', customer_id: 'cust-1', service_type: 'Lawn Weed & Feed', visit_id: 'visit-9',
       },
-      topic: null,
       photos: PHOTOS,
       conn,
     });
@@ -210,6 +197,7 @@ describe('trigger rule', () => {
   });
 
   test('grouped stop: a TERMINAL (cancelled) pest sibling does not count — unsupported', async () => {
+    mockTechStopMemberIds.mockResolvedValueOnce(['svc-1', 'svc-2']);
     const conn = fakeConn({
       scheduled_services: [
         { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
@@ -221,12 +209,40 @@ describe('trigger rule', () => {
       svc: {
         id: 'svc-1', customer_id: 'cust-1', service_type: 'Lawn Weed & Feed', visit_id: 'visit-9',
       },
-      topic: null,
       photos: PHOTOS,
       conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
+  });
+});
+
+describe('trigger rule: moved siblings and topics', () => {
+  test('a pest sibling that moved to another day or window (off the physical stop) does not count', async () => {
+    // techStopMemberIds drops it even though it keeps the frozen visit_id.
+    mockTechStopMemberIds.mockResolvedValueOnce(['svc-1']);
+    const conn = fakeConn({
+      scheduled_services: [
+        { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
+        { id: 'svc-2', service_type: 'Quarterly Pest Control', status: 'confirmed', visit_id: 'visit-9' },
+      ],
+    });
+    await triggerVisitPrepPestRead({
+      submissionId: 'sub-1',
+      svc: { id: 'svc-1', customer_id: 'cust-1', service_type: 'Lawn Weed & Feed', visit_id: 'visit-9' },
+      photos: PHOTOS,
+      conn,
+    });
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
+  });
+
+  test('a topic on the submission is not an input: a lawn visit stays unsupported', async () => {
+    const conn = fakeConn();
+    await triggerVisitPrepPestRead({
+      submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Lawn Weed & Feed' }, topic: 'pest', photos: PHOTOS, conn,
+    });
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
   });
 });
 
@@ -254,10 +270,11 @@ describe('daily cap (VISIT_PREP_READ_DAILY_CAP)', () => {
       ],
     });
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'failed', read_ref: null }]);
+    // 'none': a cap rejection never claimed a slot, so it never counts.
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_ref: null }]);
   });
 
   test('under the cap: proceeds', async () => {
@@ -266,7 +283,7 @@ describe('daily cap (VISIT_PREP_READ_DAILY_CAP)', () => {
     mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
     mockIdentifyPestV2.mockResolvedValue(okEngineResult());
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
     // The count and the pending claim ran under the cap's advisory lock.
@@ -277,7 +294,7 @@ describe('daily cap (VISIT_PREP_READ_DAILY_CAP)', () => {
     process.env.VISIT_PREP_READ_DAILY_CAP = '1';
     const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-a', read_status: 'done' }, { id: 'sub-c', read_status: 'unsupported' }] });
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     const patch = readStatusWrites(conn, 'sub-1')[0];
     expect(Object.keys(patch)).toEqual(['read_status', 'read_ref']);
@@ -290,7 +307,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
     mockIdentifyPestV2.mockRejectedValue(new Error('vision provider down'));
     await expect(triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     })).resolves.toBeUndefined();
     expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
@@ -300,7 +317,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
     mockIdentifyPestV2.mockResolvedValue({ ok: false, reason: 'vision_unavailable' });
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
@@ -309,7 +326,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     const conn = fakeConn();
     mockGetPhotoBase64.mockRejectedValue(new Error('S3 unavailable'));
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
@@ -333,7 +350,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
     mockIdentifyPestV2.mockResolvedValue(okEngineResult());
     await expect(triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn: wrapped,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: wrapped,
     })).resolves.toBeUndefined();
     expect(readStatusWrites(wrapped, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
@@ -345,7 +362,7 @@ describe('a successful read', () => {
     mockGetPhotoBase64.mockResolvedValue({ data: 'base64bytes', mimeType: 'image/jpeg' });
     mockIdentifyPestV2.mockResolvedValue(okEngineResult());
     await triggerVisitPrepPestRead({
-      submissionId: 'sub-1', svc: BASE_SVC, topic: 'pest', photos: PHOTOS, conn,
+      submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(mockGetPhotoBase64).toHaveBeenCalledWith('visitprep/a.jpg');
     const stored = conn._store.pest_identifications.find((r) => r.source === 'visit_prep');

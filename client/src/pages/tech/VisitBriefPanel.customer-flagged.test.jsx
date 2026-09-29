@@ -41,7 +41,7 @@ const CUSTOMER_FLAGGED = [{
   photoIds: ['photo-a', 'photo-b'],
 }];
 
-function renderPanel({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async () => ({ photos: [] })) } = {}) {
+function renderPanel({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async () => ({ photos: [] })), onRetry = vi.fn() } = {}) {
   const detail = detailFor({
     'svc-1': { estimate: null, brief: { brief: null, facts: { access: null, last_visit: null, customerFlagged } } },
   });
@@ -50,10 +50,10 @@ function renderPanel({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async
       stop={stopOf(BASE_SERVICE)}
       detail={detail}
       request={request}
-      onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      onRetry={onRetry} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
     />,
   );
-  return { request };
+  return { request, onRetry };
 }
 
 describe('VisitBriefPanel — Customer flagged section', () => {
@@ -170,6 +170,30 @@ describe('VisitBriefPanel — Customer flagged section', () => {
       renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status } }] });
       expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
       cleanup();
+    }
+  });
+
+  it('a group-only read names the catalog group', () => {
+    renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', wordingTier: 'group_only', commonName: null, groupLabel: 'Ants' } }] });
+    expect(screen.getByText('Photo read (AI suggestion, not confirmed): Looks like: Ants.')).toBeInTheDocument();
+  });
+
+  it('re-reads the brief every 30 s while a read is pending, and stops once it is not', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }], onRetry });
+      await act(async () => { vi.advanceTimersByTime(29 * 1000); });
+      expect(onRetry).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(2 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      cleanup();
+      const onRetryDone = vi.fn();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', commonName: 'German cockroach' } }], onRetry: onRetryDone });
+      await act(async () => { vi.advanceTimersByTime(60 * 1000); });
+      expect(onRetryDone).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
     }
   });
 
