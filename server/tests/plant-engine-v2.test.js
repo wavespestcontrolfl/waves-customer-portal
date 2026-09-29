@@ -1838,6 +1838,15 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       },
     });
 
+    test('Codex #5307 r2: a run with no usable vision leg fails BEFORE the billed referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      dispatch.mockResolvedValue({ ok: false, reason: 'gemini_503' });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
+      const lanes = dispatch.mock.calls.map(([, payload]) => payload?.laneId);
+      expect(lanes).not.toContain('photo_id_v2_plant_referee');
+    });
+
     test('gate off: no 4th dispatch, result identical to the pre-referee disagreement outcome', async () => {
       delete process.env.GATE_PLANT_ID_REFEREE;
       [candidatesLeg, verifyLeg, disagreeingEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
@@ -2095,6 +2104,61 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(merged.outcome).toBe('settled');
       expect(merged.possibilities[0].slug).toBe('fixture-drought');
       expect(merged.flags.disagreed).toBe(false);
+    });
+
+    test('Codex #5307 r2: Sol\'s vote resolves against the index Sol was shown, never a rerun\'s expanded one', () => {
+      const expanded = engine.conditionIndexFor('lawn', null);
+      const shown = expanded.filter((e) => e.slug !== 'fixture-drought');
+      const cond = (slug, confidence, index) => engine.resolveConditionCandidate({
+        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, index);
+      // Gemini read large patch; Sol returned drought (not in the index it
+      // was shown) above herbicide injury; the referee picks drought.
+      const conditions = { possibilities: [cond('fixture-large-patch', 0.6, shown)], index: shown };
+      const escalation = {
+        conditionFlags: {
+          triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        },
+        possibilities: [cond('fixture-large-patch', 0.6, shown), cond('fixture-herbicide-injury', 0.5, shown)],
+        conditionIndex: expanded,
+        json: {
+          conditions: [
+            { slug: 'fixture-drought', confidence: 0.9, elements_visible: [], signs_visible: [], symptoms_visible: [] },
+            { slug: 'fixture-herbicide-injury', confidence: 0.5, elements_visible: [], signs_visible: [], symptoms_visible: [] },
+          ],
+        },
+      };
+      const reads = engine._test.earlierReadsFor({ slots: { turf: [], weeds: [], host: [] } }, conditions, escalation, ['conditions']);
+      expect(reads[0].second.slug).toBe('fixture-herbicide-injury');
+      const refereeJson = { conditions: [{ slug: 'fixture-drought', confidence: 0.8, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
+      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
+      // Only the referee voted for drought: no majority, never "settled".
+      expect(merged.outcome).toBe('third_answer');
+      expect(merged.flags.disagreed).toBe(true);
+    });
+
+    test('Codex #5307 r2: a referee-settled majority stays first through buildWorkup, whatever the raw confidences', () => {
+      const index = engine.conditionIndexFor('lawn', null);
+      const cond = (slug, confidence) => engine.resolveConditionCandidate({
+        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, index);
+      // Gemini (large patch 0.5) and the referee agree; Sol read drought at 0.9.
+      const conditions = { possibilities: [cond('fixture-large-patch', 0.5)], index };
+      const escalation = {
+        conditionFlags: {
+          triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        },
+        possibilities: [cond('fixture-drought', 0.9), cond('fixture-large-patch', 0.5)],
+        conditionIndex: index,
+        json: { conditions: [{ slug: 'fixture-drought', confidence: 0.9, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+      };
+      const refereeJson = { conditions: [{ slug: 'fixture-large-patch', confidence: 0.7, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
+      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
+      expect(merged.outcome).toBe('settled');
+      const workup = engine.buildWorkup({
+        subject: 'lawn', possibilities: merged.possibilities, conditionFlags: merged.flags, currentMonth: 6, photosCount: 1,
+      });
+      expect(workup.possibilities[0].slug).toBe('fixture-large-patch');
     });
 
     test('finding 2: earlierReadsFor\'s conditions "second" read is OpenAI\'s own ranked top, never the merged list\'s top', () => {

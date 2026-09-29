@@ -1144,8 +1144,10 @@ function buildWorkup(ctx) {
   // needs_more_evidence tier. A subject-conflicted one (providers split
   // `plant` vs `damage`) names nothing but keeps its symptom workup.
   const gate = namingGateFor(quality);
+  // A referee-settled majority (`refereeMajority`, Codex #5307 r2) leads
+  // regardless of raw confidence; everything else ranks by confidence.
   const allApprovedPossibilities = gate.unusable ? [] : possibilities.filter((p) => isApproved(p.entry))
-    .sort((a, b) => b.confidence - a.confidence);
+    .sort((a, b) => (Number(!!b.refereeMajority) - Number(!!a.refereeMajority)) || (b.confidence - a.confidence));
   const approvedPossibilities = allApprovedPossibilities
     .slice(0, 3)
     .map((p) => ({ ...p, localCtx: { currentMonth, chips, context: ctx.context || {} } }));
@@ -1846,6 +1848,10 @@ function describePossibilityRead(possibility) {
  * ranked top. The referee prompt (`earlierReadsFor`) and the 2-of-3 merge
  * (`mergeConditionsScope`) read this ONE value, so the referee is judged
  * against the vote it was actually shown (pre-push audit on Codex #5307 r1). */
+function openaiConditionVote(conditions, escalation) {
+  return resolvePossibilities(escalation.json?.conditions, conditions.index)[0] || null;
+}
+
 function firstConditionRead(conditions, escalation) {
   return escalation.rerun?.top || [...conditions.possibilities].sort(byConfidenceDesc)[0] || null;
 }
@@ -1857,16 +1863,16 @@ function earlierReadsFor(identity, conditions, escalation, unsureScopes) {
   return unsureScopes.map((scope) => {
     if (scope === 'conditions') {
       const flags = escalation.conditionFlags;
-      const conditionIndex = escalation.conditionIndex || conditions.index;
       // A corrected-host rerun's own top (against the EXPANDED index) IS the
       // "first" read from here on — the narrower pre-rerun Gemini top it
       // replaced is stale (Codex #5307 r1 finding 3).
       const first = firstConditionRead(conditions, escalation);
-      // OpenAI's own ranked top, resolved against the SAME index the merge
-      // uses — never the merged (Gemini+OpenAI) list's top, which can read
-      // as Gemini's own pick when OpenAI's answer lost the tie-break
-      // (Codex #5307 r1 finding 2).
-      const second = flags.openaiAnswered ? (resolvePossibilities(escalation.json?.conditions, conditionIndex)[0] || null) : null;
+      // OpenAI's own ranked top — never the merged (Gemini+OpenAI) list's
+      // top (Codex #5307 r1 finding 2) — resolved against the index OpenAI
+      // was actually SHOWN (`conditions.index`), never a corrected-host
+      // rerun's expanded one (Codex #5307 r2, the same rule
+      // reconcileCorrectedHost applies to OpenAI's picks).
+      const second = flags.openaiAnswered ? openaiConditionVote(conditions, escalation) : null;
       return { scope, first: describePossibilityRead(first), second: describePossibilityRead(second) };
     }
     const flags = escalation.identityFlags[scope];
@@ -1972,12 +1978,17 @@ function mergeConditionsScope(conditions, escalation, refereeJson) {
   const top = escalation.possibilities[0] || null;
   if (flags.disagreed) {
     const geminiTop = firstConditionRead(conditions, escalation);
-    const openaiTop = resolvePossibilities(escalation.json?.conditions, index)[0] || null;
+    const openaiTop = openaiConditionVote(conditions, escalation);
     const matched = geminiTop && topReferee.slug === geminiTop.slug ? geminiTop
       : (openaiTop && topReferee.slug === openaiTop.slug ? openaiTop : null);
     if (matched) {
       const rest = escalation.possibilities.filter((p) => p.slug !== matched.slug);
-      return { outcome: 'settled', possibilities: [matched, ...rest], flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
+      // `refereeMajority` keeps the 2-of-3 winner first through
+      // `buildWorkup`'s confidence sort (Codex #5307 r2): a settled scope has
+      // no uncertainty guard left, so a re-sort would name the losing vote.
+      return {
+        outcome: 'settled', possibilities: [{ ...matched, refereeMajority: true }, ...rest], flags: { ...flags, ...REFEREE_SETTLED_FLAGS },
+      };
     }
     // Still no majority — the disagreement now sits between this scope's
     // OWN current top and the referee's read, marked explicitly unresolved
@@ -2283,9 +2294,11 @@ async function identifyPlantV2({
   const photosUnusable = irrevocablyUnusable(identity.candidatesJson);
   const conditions = photosUnusable ? NO_CONDITIONS : await runConditionLadder(run, identity);
   const escalation = await runEscalation(run, identity, conditions, { skip: photosUnusable });
-  const refereed = await runReferee(run, identity, conditions, escalation, { skip: photosUnusable });
-  const failure = legFailureReason(run, identity, conditions, refereed);
+  // A run with nothing usable to build from fails BEFORE the billed referee
+  // (Codex #5307 r2): its answer could never be returned anyway.
+  const failure = legFailureReason(run, identity, conditions, escalation);
   if (failure) return { ok: false, reason: failure };
+  const refereed = await runReferee(run, identity, conditions, escalation, { skip: photosUnusable });
 
   const quality = photoReadFor(identity, conditions, refereed);
   const lane = mode === 'identify' ? identifyLaneFor(subject, refereed.slots, refereed.identityFlags) : null;
