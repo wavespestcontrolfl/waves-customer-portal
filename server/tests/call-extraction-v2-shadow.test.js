@@ -151,7 +151,13 @@ describe('v2 extraction prompt', () => {
   test('includes the reschedule language-judgement rules (schema 1.20.0, owner direction 2026-09-30)', () => {
     const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
     expect(prompt).toContain('- definite_commitment: for a slot the call agreed');
-    expect(prompt).toContain('PREFER false when unsure');
+    expect(prompt).toContain('PREFER false when genuinely unsure');
+    // Real-call replay: firm bookings with a courtesy/contingency line stay definite.
+    expect(prompt).toContain('FALSE only when a hedge or condition applies to WHETHER or WHEN the appointment happens');
+    expect(prompt).toContain('A courtesy or contingency line about a LATER follow-up does NOT make it false');
+    expect(prompt).toContain("if anything comes up I'll let you know");
+    expect(prompt).toContain("we'll text you a confirmation");
+    expect(prompt).toContain('the clause that states the slot, not the courtesy line after it');
     expect(prompt).toContain('"upon ..."');
     expect(prompt).toContain('- relative_date_used: for a slot the call agreed');
     expect(prompt).toContain('RESOLVE it against the call date');

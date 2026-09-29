@@ -332,6 +332,27 @@ const OFFSET_PATTERNS = [
   { src: String.raw`in ${OFFSET_N} (days?|weeks?)`, days: countedDays },
   { src: String.raw`${OFFSET_N} (days?|weeks?) from (?:now|today)`, days: countedDays },
 ];
+// Quantity-bound modifiers directly around a recorded offset phrase make it
+// a range, not a date ("at least two days from now", "within two days").
+// A finite closed set of English bound words, looked for in the three words
+// before the phrase and directly after it.
+const BOUND_BEFORE = [
+  'at least', 'at most', 'more than', 'less than', 'fewer than', 'over', 'under', 'within', 'by', 'up to', 'about',
+  'around', 'roughly', 'approximately', 'no later than', 'no sooner than', 'before', 'after',
+];
+const BOUND_AFTER = ['or so', 'or more', 'or two'];
+function boundedPhrase(quote, phrase) {
+  const toks = normalize(quote).split(' ');
+  const said = normalize(phrase).split(' ');
+  for (let i = 0; i + said.length <= toks.length; i += 1) {
+    if (said.every((w, k) => toks[i + k] === w)) {
+      const before = ` ${toks.slice(Math.max(0, i - 3), i).join(' ')} `;
+      const after = ` ${toks.slice(i + said.length, i + said.length + 2).join(' ')} `;
+      if (BOUND_BEFORE.some((m) => before.includes(` ${m} `)) || BOUND_AFTER.some((m) => after.startsWith(` ${m} `))) return true;
+    }
+  }
+  return false;
+}
 // The days an ENTIRE recorded phrase names: it must be exactly one form, so
 // "at least two days from now", "half of a day from now", "within two days"
 // or "by the day after tomorrow" name none.
@@ -363,7 +384,7 @@ function namesRelativeDate(words, date, started, relativeQuotes = []) {
     // date the code computes must equal the extraction's resolved date.
     const days = phraseOffsetDays(words);
     return withinHorizon && days !== null && etDateString(addETDays(started, days)) === date
-      && relativeQuotes.some((q) => holds(q, words) && quoteOffsetDays(q) === days);
+      && relativeQuotes.some((q) => holds(q, words) && quoteOffsetDays(q) === days && !boundedPhrase(q, words));
   }
   if (said.month !== undefined || said.day !== undefined || said.year !== undefined) return false;
   if (new Date(`${date}T12:00:00Z`).getUTCDay() !== said.weekday) return false;
@@ -477,10 +498,10 @@ const EXACT_LEADS = new Set(['at', 'to', 'for', 'between']);
 const EXACT_TAILS = new Set(['o', 'oclock', 'on', 'then', 'this', 'next', 'please', 'sharp']);
 // Judged over the whole turns that hold the quote, and EVERY place a turn
 // says the hour must be exact: "at two" cut from "at two or four" fails.
-function saidExactly(quote, words, turns) {
+function saidExactly(quote, words, turns, relative = false) {
   const nq = padded(normalize(quote));
   const holding = turns.filter((t) => padded(t.ns).includes(nq));
-  return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words, !t.agent));
+  return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words, !t.agent, relative));
 }
 
 // Days that may lead straight into an hour ("Tuesday, 2 to 4"). Never a
@@ -550,7 +571,19 @@ function exactHourAt(toks, [ha, end], dayIdx, explained, callerTurn) {
 }
 
 const ABBREVIATED_MONTH_PERIOD_RE = /\b(jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.(?=\s*\d)/g;
-function hourExactIn(text, words, callerTurn = false) {
+// The token indexes of a day/week count and its tail: "eight days from now",
+// "two weeks away", "in 3 weeks".
+function relativeOffsetIndexes(toks) {
+  const out = [];
+  toks.forEach((t, k) => {
+    if (!(/^\d+$/.test(t) || hourNumber(t) != null || OFFSET_NUMBER_WORDS[t]) || !/^(?:days?|weeks?)$/.test(toks[k + 1] || '')) return;
+    out.push(k, k + 1);
+    if (toks[k + 2] === 'from' && /^(?:now|today)$/.test(toks[k + 3] || '')) out.push(k + 2, k + 3);
+    else if (/^(?:away|out|later|hence)$/.test(toks[k + 2] || '')) out.push(k + 2);
+  });
+  return out;
+}
+function hourExactIn(text, words, callerTurn = false, relative = false) {
   // Tokens keeping clause punctuation, so "at two, a tech will call" ends
   // the hour at the comma.
   // The period of an abbreviated month ("Oct. 10") belongs to the date, not
@@ -564,6 +597,9 @@ function hourExactIn(text, words, callerTurn = false) {
   const dayIdx = new Set((typeof words.day === 'string' ? spans(toks, words.day) : [])
     .filter(([, b]) => !/^(?:appointment|appointments|visit|visits|treatment|service|time)$/.test(toks[b] || ''))
     .flatMap(([a, b]) => Array.from({ length: b - a }, (_, k) => a + k)));
+  // A flagged relative date's offset ("eight days from now", "two weeks away")
+  // is date, not a second clock hour.
+  if (relative) relativeOffsetIndexes(toks).forEach((k) => dayIdx.add(k));
   const at = spans(toks, words.hour).filter(([a]) => !dayIdx.has(a));
   const explained = new Set(dayIdx);
   const exact = at.length > 0 && at.every((span) => exactHourAt(toks, span, dayIdx, explained, callerTurn));
@@ -578,7 +614,7 @@ function statesSlotWords(quote, words, turns, agreementQuotes = [], relative = f
     // unless the extraction resolved that relative date itself and said so
     // (relative_date_used), which grounds() and wordsStateSlot verify.
     && (relative || !/ (?:next|week|weeks|following) /.test(padded(sentencesHolding(turns, quote))))
-    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns, relative))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
     // at two" cut from "Thursday at two in the morning" never falls back.
@@ -612,7 +648,7 @@ function mayStatePeriod(text) {
 // the recorded hour, on the hour (periodIsTheHours's minute check), any day
 // words the slot records (none at all for a same-day change), and no am/pm
 // or part of the day but the slot's.
-function commitsToSlot(quote, words, hour24, turns) {
+function commitsToSlot(quote, words, hour24, turns, relative = false) {
   const withoutPeriod = { ...words, period: null };
   const around = sentencesHolding(turns, quote);
   const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
@@ -628,7 +664,7 @@ function commitsToSlot(quote, words, hour24, turns) {
     && (typeof words.day === 'string' ? holds(around, words.day) || plainCommitment(around, words) : !namesAnyDay(around))
     // An hour read as business hours must be said exactly by the agent too
     // ("we should arrive around two" fails).
-    && (!unstatedHour || saidExactly(quote, words, turns))
+    && (!unstatedHour || saidExactly(quote, words, turns, relative))
     // Read in the sentences it sits in: "at two" cut from "at two AM".
     && halvesSaid(sentencesHolding(turns, quote)).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
 }
@@ -759,7 +795,7 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes, relative))) return fail('agreed_slot_ungrounded');
   // The agent committed to THIS slot: the commitment quote says its hour,
   // on the hour, and no day but the slot's.
-  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24, turns))) return fail('agent_commitment_not_the_slot');
+  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24, turns, relative))) return fail('agent_commitment_not_the_slot');
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 

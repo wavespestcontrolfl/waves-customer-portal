@@ -649,6 +649,19 @@ describe('groundRescheduleAgreement', () => {
         flags: relativeTrue, relativeQuote: 'We will see you in two days at two PM.' }).ok).toBe(false);
       expect(judged({ said: 'We will see you in two days at two PM, not tomorrow.', slot: at('2026-09-25'), words: { day: 'in two days', hour: 'two', period: 'PM' },
         flags: relativeTrue }).ok).toBe(false);
+      // A quantity bound around the recorded phrase makes it a range, not a date.
+      for (const before of ['at least', 'at most', 'more than', 'less than', 'fewer than', 'over', 'under', 'within', 'by', 'up to',
+        'about', 'around', 'roughly', 'approximately', 'no later than', 'no sooner than', 'before', 'after']) {
+        const said = `We will see you ${before} two days from now at two PM.`;
+        expect([said, judged({ said, slot: at('2026-09-25'), words: { day: 'two days from now', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+      for (const after of ['or so', 'or more', 'or two']) {
+        const said = `We will see you two days from now ${after} at two PM.`;
+        expect([said, judged({ said, slot: at('2026-09-25'), words: { day: 'two days from now', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+      for (const said of ['We will see you by the day after tomorrow at two PM.', 'We will see you before tomorrow at two PM.']) {
+        expect([said, judged({ said, slot: at('2026-09-25'), words: { day: said.includes('after') ? 'the day after tomorrow' : 'tomorrow', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
       // Everything else weekday-less stays manual.
       for (const [said, day] of [
         ['We will see you sometime next month at two PM.', 'sometime next month'],
@@ -669,6 +682,24 @@ describe('groundRescheduleAgreement', () => {
       ]) {
         expect([said, judged({ said, slot: at('2026-09-25'), words: { day, hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
       }
+    });
+
+    // The offset's number is part of the date, never a second clock hour.
+    test('a relative offset\'s number is not read as a clock hour', () => {
+      const bare = { day: 'Thursday', hour: 'two', period: null };
+      for (const said of [
+        'We will see you Thursday eight days from now at two.',
+        'We will see you Thursday two weeks from now at two.',
+        'We will see you Thursday in 8 days at two.',
+        'We will see you Thursday eight days away at two.',
+      ]) {
+        const days = /two weeks/.test(said) ? '2026-10-08' : '2026-10-01';
+        expect([said, judged({ said, slot: `${days}T14:00:00-04:00`, words: bare, flags: relativeTrue }).ok]).toEqual([said, true]);
+      }
+      // Unflagged, the same number still counts as a second hour.
+      expect(judged({ said: 'We will see you Thursday eight days from now at two.', relativeQuote: null, words: bare }).ok).toBe(false);
+      // A relative phrase with no hour of its own still needs the hour.
+      expect(judged({ said: 'We will see you Thursday two weeks from now.', slot: '2026-10-08T14:00:00-04:00', words: bare, flags: relativeTrue }).ok).toBe(false);
     });
 
     test('a weekday-less relative moved appointment follows the same closed forms', () => {
