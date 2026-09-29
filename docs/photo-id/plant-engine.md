@@ -148,7 +148,11 @@ condition disagreement is explained. `internal.identity` (per slot
 `{ disagreed, openai_answered }`, `trigger_reasons`, `lane`) and
 `internal.conditions` (`disagreed`, `openai_answered`, `trigger_reasons`,
 `host_union`, `corrected_host`) break the same flags out per scope;
-`escalation_reasons` is the union.
+`escalation_reasons` is the union. `internal.referee` (see the Referee
+section below) is a separate top-level key — the per-slot `disagreed` /
+`openai_answered` flags above already reflect a referee-settled outcome
+(e.g. `disagreed: false` after the referee sides with one earlier read), but
+never carry the referee's own diagnostics.
 
 ## The naming gate (§6.3)
 
@@ -352,6 +356,50 @@ bahiagrass.
   so two weeds are not rival answers.
 - **Output budget 4096**: Gemini's reasoning shares the output budget with
   the JSON answer, and at 2048 one lawn read came back cut off (a miss).
+
+## Referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-28)
+
+Owner ruling 2026-09-28 replaces the 09-26 "Gemini → GPT-6 Astra, no Claude"
+ruling **for the plant engine only** (the pest engine's `photoIdVision`
+ladder in `pest-engine.js` / `pest-identification.js` is unchanged): the
+plant engine's second opinion moves from `OPENAI_FRONTIER` (Astra) to
+`OPENAI_PLANT_ID` (Sol) — `TEXT_POLICIES.plantIdVision` — and a scope still
+unsure after that second opinion may get one more look from Claude Fable 5.1
+at effort `high` (`MODELS.ROUTES.plantIdReferee`) as a deciding vote. Ships
+DARK behind `GATE_PLANT_ID_REFEREE` (off unless exactly `'true'`); off, the
+ladder is byte-identical to Gemini → Sol with no third call.
+
+`runReferee` runs between `runEscalation` and the leg-failure check, only
+when the run is not `photosUnusable`, the total budget (`PHOTO_ID_V2_TIMEOUT_MS`)
+has room for one more leg, and at least one scope that **triggered**
+escalation is still unsure after it: the providers disagreed, OpenAI never
+answered that scope (`blockPrettySure`), or the combined top confidence is
+still below `PHOTO_ID_ESCALATE_BELOW`. One call covers every still-unsure
+scope at once — same photos, the same `ESCALATION_SCHEMA` output (so the
+existing resolvers/validators apply unchanged), with an appended "earlier
+reads" block (`buildRefereePrompt`) naming each still-unsure scope's first
+read and second opinion (slug + confidence) and asking the referee to look
+at the photos fresh, since either earlier read may be wrong.
+
+**Merge (2-of-3 majority, deterministic)**, per still-unsure scope, `R` =
+the referee's own top:
+
+- A disagreement scope (`disagreementPair` = `[A, B]`) where `R` matches `A`
+  or `B` → that candidate goes first, `disagreed: false`; wording is capped
+  at `likely` — a referee-settled split never reads `pretty_sure`.
+- A scope with an undisputed combined top (no second opinion, or still low
+  confidence) where `R` agrees → the referee stands in for the missing
+  second opinion; order is kept, also capped at `likely`.
+- `R` is a third answer (agrees with neither) → the scope stays exactly as
+  unsure as it was (today's disagreement flags untouched), and `R` joins the
+  candidate/possibility list, deduped.
+- Referee missing, schema-invalid, or out of budget → that scope's
+  escalation result stands unchanged.
+
+Diagnostics land in `internal` only (never `v2`): `internal.models.referee`
+(the leg, like every other model call) and `internal.referee: { triggered,
+scopes, outcome }` — `outcome` maps each scope the referee actually looked
+at to `'settled' | 'confirmed' | 'third_answer' | 'unavailable'`.
 
 ## What L4 must do
 

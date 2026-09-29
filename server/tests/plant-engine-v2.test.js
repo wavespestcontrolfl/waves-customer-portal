@@ -28,8 +28,8 @@ function loadFixtureEngine() {
       ...actual,
       TEXT_POLICIES: {
         ...actual.TEXT_POLICIES,
-        photoIdVision: {
-          name: 'photoIdVision',
+        plantIdVision: {
+          name: 'plantIdVision',
           primary: { provider: 'gemini', model: 'gemini-3.8-flash-test' },
           fallback: { provider: 'openai', model: 'gpt-6-astra-test' },
         },
@@ -1796,6 +1796,129 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(dispatch).toHaveBeenCalledTimes(3);
       expect(result.internal.escalation_reasons).toEqual(['close_call']);
       expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+    });
+  });
+
+  // ── referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-28) ────────────
+  describe('referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-28)', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const idItem = (slug, confidence) => ({
+      slug, off_catalog_name: '', group_id: null, confidence,
+    });
+    const savedGate = process.env.GATE_PLANT_ID_REFEREE;
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_PLANT_ID_REFEREE;
+      else process.env.GATE_PLANT_ID_REFEREE = savedGate;
+    });
+
+    // Same close-call setup as the photo-eval describe above: Gemini's own
+    // top (st-augustine, verified 0.95) vs. OpenAI's escalation top (bahia,
+    // 0.9) — a genuine disagreement, disagreementPair = [st-augustine, bahia].
+    const candidatesLeg = { ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [idItem('fixture-st-augustine', 0.95), idItem('fixture-bahia', 0.30)], weeds: [], host: [] } };
+    const verifyLeg = {
+      ok: true,
+      json: {
+        candidates: [
+          { slug: 'fixture-st-augustine', confidence: 0.95, cues_visible: [1], cues_not_visible: [] },
+          { slug: 'fixture-bahia', confidence: 0.30, cues_visible: [1], cues_not_visible: [] },
+        ],
+      },
+    };
+    const disagreeingEscalationLeg = {
+      ok: true,
+      json: {
+        quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.9, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+      },
+    };
+    const refereeTurf = (slug, confidence) => ({
+      ok: true,
+      json: {
+        quality: OK_QUALITY, shows: 'plant', turf: [{ slug, off_catalog_name: '', group_id: null, confidence, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+      },
+    });
+
+    test('gate off: no 4th dispatch, result identical to the pre-referee disagreement outcome', async () => {
+      delete process.env.GATE_PLANT_ID_REFEREE;
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+      expect(result.internal.models.referee).toBeNull();
+    });
+
+    test('gate on + disagreement: the referee sides with one earlier read -> that answer first, not disagreed, wording capped at likely', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      // Settled on Gemini's own top — never pretty_sure, even though its own
+      // confidence (0.95) clears the threshold, because a referee-settled
+      // split is capped (owner ruling 2026-09-28).
+      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-st-augustine', wording: 'likely' });
+      expect(result.internal.identity.turf.disagreed).toBe(false);
+      expect(result.internal.referee.triggered).toBe(true);
+      expect(result.internal.referee.scopes).toContain('turf');
+      expect(result.internal.referee.outcome.turf).toBe('settled');
+      expect(result.internal.models.referee).toMatchObject({ ok: true });
+    });
+
+    test('gate on + referee third answer: the scope stays disagreed, and the third answer joins the candidate list', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-seashore-paspalum', 0.7)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      // Still no majority: the disagreement stands exactly as it did before
+      // the referee (group-level answer, never named).
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+      expect(result.internal.identity.turf.disagreed).toBe(true);
+      expect(result.internal.referee.outcome.turf).toBe('third_answer');
+      // The referee's own read is visible in the candidate list (deduped).
+      expect(result.v2.candidates.map((c) => c.slug)).toContain('fixture-seashore-paspalum');
+    });
+
+    test('gate on + referee invalid/unavailable: the escalation result stands unchanged', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, { ok: false, reason: 'provider_error' }].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+      expect(result.internal.identity.turf.disagreed).toBe(true);
+      expect(result.internal.referee.triggered).toBe(true);
+      expect(result.internal.referee.outcome.turf).toBe('unavailable');
+      expect(result.internal.models.referee).toMatchObject({ ok: false });
+    });
+
+    test('gate on + no second opinion (OpenAI left the scope empty): the referee confirming the Gemini top counts as answered', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const emptyTurfEscalationLeg = {
+        ok: true,
+        json: { quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [], observed_terms: [], conditions: [] },
+      };
+      [candidatesLeg, verifyLeg, emptyTurfEscalationLeg, refereeTurf('fixture-st-augustine', 0.9)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-st-augustine', wording: 'likely' });
+      // Before the referee this scope read openai_answered: false
+      // (`blockPrettySure`, Codex #5186 r6 finding 2); the referee standing
+      // in for the missing second opinion flips it to true.
+      expect(result.internal.identity.turf.openai_answered).toBe(true);
+      expect(result.internal.referee.outcome.turf).toBe('confirmed');
+    });
+
+    test('gate on + nothing unsure after escalation: no referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const agreeingEscalationLeg = {
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', group_id: null, confidence: 0.92, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+        },
+      };
+      [candidatesLeg, verifyLeg, agreeingEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
     });
   });
 });
