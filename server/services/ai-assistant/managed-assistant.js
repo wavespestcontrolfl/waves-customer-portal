@@ -289,7 +289,10 @@ class ManagedAssistant {
           const escResult = await this.escalate(
             conversation,
             toolInput.reason || 'AI-initiated escalation',
-            toolInput.reason || 'AI-initiated escalation'
+            toolInput.reason || 'AI-initiated escalation',
+            // Only the agent's own "no category fits" escalation is a gap;
+            // every other category is a staff workflow by design.
+            { gap: toolInput.category === 'unsupported_or_uncertain' },
           );
           // Send the tool result back so the agent knows it escalated
           await apiCall('POST', `/sessions/${sessionId}/events`, {
@@ -414,7 +417,7 @@ class ManagedAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason) {
+  async escalate(conversation, customerMessage, reason, { gap = false } = {}) {
     const customer = conversation.customer_id
       ? await db('customers').where('id', conversation.customer_id).first()
       : null;
@@ -425,11 +428,10 @@ class ManagedAssistant {
     if (lower.includes('cancel') || lower.includes('lawsuit') || lower.includes('bbb')) priority = 'urgent';
     if (lower.includes('complaint') || lower.includes('not happy') || lower.includes('refund')) priority = 'urgent';
 
-    const escalationReason = this.classifyEscalation(customerMessage);
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
-      reason: escalationReason,
+      reason: this.classifyEscalation(customerMessage),
       summary: reason,
       customer_message: customerMessage,
       ai_draft_response: null,
@@ -437,14 +439,15 @@ class ManagedAssistant {
       status: 'pending',
     }).returning('*');
 
-    // Gap reports (server/services/agent-gap-reports.js): 'ai_uncertain' is
-    // the one classification with no dedicated escalation path (cancellation,
-    // schedule_change, complaint, billing_dispute and manager_request are
-    // staff-handled by design, not a capability gap). Fire-and-forget — a
-    // failed write must never affect the escalation reply.
-    if (escalationReason === 'ai_uncertain') {
+    // Gap reports (server/services/agent-gap-reports.js): the caller says
+    // whether this escalation is the assistant not knowing how to help
+    // (`gap`), since classifyEscalation's keyword buckets can't tell a
+    // missing feature from a staff workflow. Fire-and-forget — a failed write
+    // must never affect the escalation reply.
+    if (gap) {
       const gapSummary = (reason && String(reason).trim()) || customerMessage;
-      recordGap({ source: 'texting-ai', summary: gapSummary, attempted: `Customer text: ${customerMessage}` }).catch(() => {});
+      const attempted = customerMessage && customerMessage !== reason ? `Customer text: ${customerMessage}` : 'Escalated to staff';
+      recordGap({ source: 'texting-ai', summary: gapSummary, attempted }).catch(() => {});
     }
 
     // The ai_escalations row above is the source of truth. Once it exists,

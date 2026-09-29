@@ -2,12 +2,12 @@
  * Texting AI → gap reports (server/services/agent-gap-reports.js).
  *
  * escalate() in both ai-assistant/assistant.js and
- * ai-assistant/managed-assistant.js records a gap ONLY when
- * classifyEscalation() lands on 'ai_uncertain' — every other reason
- * (cancellation, schedule_change, complaint, billing_dispute,
- * manager_request) is staff-handled by design, not a capability gap. The
- * call is fire-and-forget: a rejected write must never affect the
- * escalation reply.
+ * ai-assistant/managed-assistant.js records a gap ONLY when its caller
+ * passes { gap: true }: the model's own escalate call in assistant.js (the
+ * keyword pre-filter has already routed staff topics), and the managed
+ * agent's unsupported_or_uncertain category. classifyEscalation's keyword
+ * buckets play no part. The call is fire-and-forget: a rejected write must
+ * never affect the escalation reply.
  */
 
 const mockRecordGap = jest.fn(async () => []);
@@ -42,17 +42,17 @@ describe.each([
 
   beforeEach(() => jest.clearAllMocks());
 
-  test('a message with no classification keyword (ai_uncertain) records a gap with the escalation summary text', async () => {
-    await target.escalate(conversation, 'the fish are dying, what do I do', 'AI-initiated escalation: unclear ask');
+  test('a gap escalation records the escalation reason with the customer text', async () => {
+    await target.escalate(conversation, 'the fish are dying, what do I do', 'Unclear ask about fish', { gap: true });
     expect(mockRecordGap).toHaveBeenCalledWith({
       source: 'texting-ai',
-      summary: 'AI-initiated escalation: unclear ask',
+      summary: 'Unclear ask about fish',
       attempted: 'Customer text: the fish are dying, what do I do',
     });
   });
 
   test('an empty reason falls back to the customer message as the summary', async () => {
-    await target.escalate(conversation, 'the fish are dying, what do I do', '');
+    await target.escalate(conversation, 'the fish are dying, what do I do', '', { gap: true });
     expect(mockRecordGap).toHaveBeenCalledWith({
       source: 'texting-ai',
       summary: 'the fish are dying, what do I do',
@@ -60,23 +60,26 @@ describe.each([
     });
   });
 
+  test('a message the keyword classifier would bucket as a staff topic still records when the caller marks it a gap', async () => {
+    await target.escalate(conversation, 'change the email on my account', 'Cannot update account email', { gap: true });
+    expect(mockRecordGap).toHaveBeenCalledWith(expect.objectContaining({ summary: 'Cannot update account email' }));
+  });
+
+  test('when the reason IS the customer text (managed agent), attempted does not repeat it', async () => {
+    await target.escalate(conversation, 'Needs a pool quote', 'Needs a pool quote', { gap: true });
+    expect(mockRecordGap).toHaveBeenCalledWith({ source: 'texting-ai', summary: 'Needs a pool quote', attempted: 'Escalated to staff' });
+  });
+
   test.each([
-    // Phrased to avoid escalate()'s own urgent-priority keywords (cancel,
-    // lawsuit, bbb, complaint, not happy, refund) — priority is orthogonal
-    // to classification, and an urgent reply would also try a live Twilio
-    // owner-alert send this harness does not mock.
-    ['please stop service on my account'],
+    ['the fish are dying, what do I do'],
     ['I need to reschedule my appointment'],
-    ['the service was terrible this time'],
-    ['I want to dispute this charge on my card'],
-    ['let me speak to your supervisor'],
-  ])('a classified reason ("%s") records no gap — staff-handled by design', async (message) => {
+  ])('without { gap: true } nothing is recorded ("%s")', async (message) => {
     await target.escalate(conversation, message, 'Sensitive topic detected in customer message');
     expect(mockRecordGap).not.toHaveBeenCalled();
   });
 
   test('never throws when the gap write rejects', async () => {
     mockRecordGap.mockRejectedValueOnce(new Error('db down'));
-    await expect(target.escalate(conversation, 'something ai_uncertain here', 'x')).resolves.toMatchObject({ escalated: true });
+    await expect(target.escalate(conversation, 'something unclear here', 'x', { gap: true })).resolves.toMatchObject({ escalated: true });
   });
 });

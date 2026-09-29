@@ -2850,7 +2850,7 @@ class RelayConversation {
     if (!superseded && isTransferAvailable(toolCtx?.officeOpenNow())) {
       try {
         const { executeTool } = require('./relay-tools');
-        const out = await executeTool('transfer_to_office', { intent: 'system trouble', summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
+        const out = await executeTool('transfer_to_office', { intent: require('./relay-transfer').RECOVERY_INTENT, summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
         this._recordTurn('tool', 'transfer_to_office');
         if (/Transferring the caller/.test(String(out))) return true;
       } catch (err) {

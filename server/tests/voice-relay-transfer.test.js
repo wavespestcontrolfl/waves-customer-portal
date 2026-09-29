@@ -181,6 +181,16 @@ describe('executeTool transfer_to_office', () => {
     await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx);
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
+    expect(mockRecordGap).not.toHaveBeenCalled(); // a dry run is not a gap
+  });
+
+  test('the provider-failure recovery transfer records no gap (an outage, not a missing feature)', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { RECOVERY_INTENT } = require('../services/voice-agent/relay-transfer');
+    const { ctx } = ctxFor();
+    await executeTool('transfer_to_office', { intent: RECOVERY_INTENT, summary: 'Sandy had repeated system trouble on this call' }, ctx);
+    expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
+    expect(mockRecordGap).not.toHaveBeenCalled();
   });
 
   test('one transfer per call — a second call is a no-op', async () => {

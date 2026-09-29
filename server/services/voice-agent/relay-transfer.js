@@ -35,6 +35,8 @@ const logger = require('../logger');
 const { recordGap } = require('../agent-gap-reports');
 
 const TRANSFER_TOOL_NAME = 'transfer_to_office';
+// The intent relay-conversation.js passes on its provider-failure recovery transfer.
+const RECOVERY_INTENT = 'system trouble';
 const WHISPER_MAX_WORDS = 20;
 const SUMMARY_MAX_WORDS = 20;
 const NAME_MAX_CHARS = 60;
@@ -308,10 +310,14 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   }
   if (noContext) ringNoContextBell(ctx, facts);
   // Gap reports (server/services/agent-gap-reports.js): a live human handoff
-  // is Sandy's own admission she couldn't finish it. Fire-and-forget — never
-  // on the hot path that just spoke and ended the relay leg.
-  recordGap({ source: 'phone-agent', summary: packet.summary || packet.intent || 'Caller requested a transfer',
-    attempted: 'Handed to the office' }).catch(() => {});
+  // is Sandy's own admission she couldn't finish it. Not on the sandbox (a
+  // dry run), and not the provider-failure recovery transfer (an outage is
+  // Tool Health's, not a missing feature). Fire-and-forget — never on the
+  // hot path that just spoke and ended the relay leg.
+  if (ctx.sandbox !== true && input.intent !== RECOVERY_INTENT) {
+    recordGap({ source: 'phone-agent', summary: packet.summary || packet.intent || 'Caller requested a transfer',
+      attempted: 'Handed to the office' }).catch(() => {});
+  }
   return 'Transferring the caller to the office now. Your part of the call is over — do not say anything else and do not call any more tools.';
 }
 
@@ -483,6 +489,7 @@ function composeRelaySegment(call) {
 module.exports = {
   composeRelaySegment,
   TRANSFER_TOOL_NAME,
+  RECOVERY_INTENT,
   TRANSFER_TOOLS,
   WHISPER_MAX_WORDS,
   NO_CONTEXT_BELL,

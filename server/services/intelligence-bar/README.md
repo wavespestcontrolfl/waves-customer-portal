@@ -77,13 +77,16 @@ anywhere in this list):
   search ran'`. A decline that did collect signals is unaffected — `ask` is
   ignored whenever there is anything to record already.
 - `texting-ai` — `recordGap()` called from `escalate()` in
-  `services/ai-assistant/assistant.js` and `managed-assistant.js`, but only
-  when `classifyEscalation()` returns `ai_uncertain` (every other reason —
-  cancellation, schedule change, complaint, billing dispute, manager
-  request — is staff-handled by design, not a capability gap).
+  `services/ai-assistant/assistant.js` and `managed-assistant.js`, only when
+  the caller passes `{ gap: true }`: the model's own escalate call in
+  `assistant.js` (the keyword pre-filter has already routed cancellations,
+  reschedules, complaints, refunds and manager requests to staff), and the
+  managed agent's `unsupported_or_uncertain` category. The keyword
+  classifier plays no part.
 - `phone-agent` — `recordGap()` called from Sandy's human handoff
   (`voice-agent/relay-transfer.js`, right after a confirmed
-  `transfer_to_office`). Tool timeouts and model-provider failures are not
+  `transfer_to_office`), except on the sandbox and on the provider-failure
+  recovery transfer (`RECOVERY_INTENT`). Tool timeouts and model-provider failures are not
   recorded: slow or broken tools are Tool Health's job, not a missing
   feature. The call fires and forgets (`recordGap(...).catch(() => {})`) so
   a write, slow or failed, never touches the live call.
