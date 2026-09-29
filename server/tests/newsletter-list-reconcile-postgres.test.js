@@ -4,7 +4,10 @@
  * reproduce: a real UNIQUE constraint racing two connections, and the
  * write itself being unable to touch a pre-existing row. Run with
  * RECONCILE_TEST_DATABASE_URL pointing to a disposable local, managed
- * worktree QA, or isolated CI database. Every fixture rolls back (except
+ * worktree QA, or isolated CI database. Deliberately NOT gated on
+ * DATABASE_URL: the reconcile scans the whole customer/subscriber tables, so
+ * it needs a database holding only migration seeds — CI runs it in its own
+ * step right after the migration (.github/workflows/tests.yml). Every fixture rolls back (except
  * the genuine-concurrency case, which commits on a scratch email and
  * cleans up explicitly, since two real connections can't share one
  * uncommitted transaction).

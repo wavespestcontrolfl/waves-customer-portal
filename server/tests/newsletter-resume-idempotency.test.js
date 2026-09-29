@@ -566,14 +566,14 @@ describe('resumeCampaign — preconditions', () => {
     });
   });
 
-  test('hasOutstandingDeliveries applies the resume precheck\'s own eligibility: active subscriber, not globally suppressed, not archived, retryable (codex round 17 P2)', async () => {
+  test('hasOutstandingDeliveries applies the resume precheck\'s own eligibility: active subscriber, not globally suppressed, not archived, not explicitly opted out, retryable (codex round 17 P2; #5165)', async () => {
     const q = chain({ first: { id: 'd-1' } });
     db.mockImplementation((table) => { if (table !== 'newsletter_send_deliveries') throw new Error(`unexpected ${table}`); return q; });
     await expect(hasOutstandingDeliveries('s')).resolves.toBe(true);
     expect(q.join).toHaveBeenCalledWith('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id');
     expect(q.where).toHaveBeenCalledWith({ 'newsletter_subscribers.status': 'active' });
     expect(q.whereIn).toHaveBeenCalledWith('newsletter_send_deliveries.status', ['queued', 'failed', 'sending']);
-    expect(q.whereNotExists).toHaveBeenCalledTimes(2); // global suppression + archived customer
+    expect(q.whereNotExists).toHaveBeenCalledTimes(3); // global suppression + archived customer + explicit marketing opt-out
   });
 
   test('the correction-eligibility read and the resume precheck relink archived links BEFORE judging outstanding rows (codex round 18 P2)', async () => {

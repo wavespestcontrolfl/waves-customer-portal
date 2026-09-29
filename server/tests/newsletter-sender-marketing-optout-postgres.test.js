@@ -4,19 +4,21 @@
  * linked customer OR any live profile on the same mailbox (exact, or the
  * Google dot/+tag/googlemail identity), explicit false / 'sms' only — and
  * the resume path terminalizing an opted-out recipient's ledger row instead
- * of mailing it. Run with RECONCILE_TEST_DATABASE_URL pointing to a
- * disposable local / worktree QA database (same variable as
- * newsletter-list-reconcile-postgres.test.js). Fixtures commit (the sender
- * reads through the shared db module) and are removed explicitly.
+ * of mailing it. Self-skips unless DATABASE_URL is set (CI's "DB-gated
+ * suites" step runs it against the migrated database). Safe on a shared
+ * database: every fixture is synthetic and uniquely named, every audience
+ * read is narrowed to this file's own subscriber ids, the resume runs on its
+ * own send's ledger only, and fixtures commit (the sender reads through the
+ * shared db module) and are removed in afterEach.
  */
 jest.setTimeout(30000);
 
-const connection = process.env.RECONCILE_TEST_DATABASE_URL;
-const postgres = connection ? describe : describe.skip;
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
 
 jest.mock('../models/db', () => require('knex')({
   client: 'pg',
-  connection: process.env.RECONCILE_TEST_DATABASE_URL,
+  connection: process.env.DATABASE_URL,
   pool: { min: 0, max: 4 },
 }));
 const mockSendBroadcast = jest.fn(async ({ recipients }) => ({ messageId: 'sg-test', recipientCount: recipients.length }));
@@ -32,7 +34,9 @@ const { randomUUID } = require('crypto');
 
 postgres('newsletter sender — explicit marketing opt-out at send time (real Postgres)', () => {
   const db = require('../models/db');
-  const { buildSubscriberQuery, resumeCampaign } = require('../services/newsletter-sender');
+  const {
+    buildSubscriberQuery, resumeCampaign, outstandingEligibleDeliveries, hasOutstandingDeliveries,
+  } = require('../services/newsletter-sender');
 
   const created = { customers: [], subscribers: [], sends: [] };
   const tag = () => randomUUID().slice(0, 8);
@@ -121,6 +125,28 @@ postgres('newsletter sender — explicit marketing opt-out at send time (real Po
       await subscriber(`bob${t}@example.invalid`),
     ];
     expect((await audienceIds(subs.map((s) => s.id))).sort()).toEqual(subs.map((s) => s.id).sort());
+  });
+
+  // #5187's "correctable" predicate and GET /sends' correlated EXISTS must
+  // agree with what a resume would mail: a campaign whose only outstanding
+  // recipient opted out has nothing outstanding.
+  test('hasOutstandingDeliveries and the GET /sends correlated EXISTS read false when the only outstanding recipient opted out', async () => {
+    const c = await customer({}, { marketing_offers: true, email_enabled: true });
+    const sub = await subscriber(c.email, { customer_id: c.id });
+    const [send] = await db('newsletter_sends').insert({
+      subject: 'Synthetic outstanding', html_body: '<p>B</p>', text_body: 'B', status: 'failed', auto_share_social: false,
+    }).returning(['id']);
+    created.sends.push(send.id);
+    await db('newsletter_send_deliveries').insert({ send_id: send.id, subscriber_id: sub.id, email: sub.email, status: 'failed' });
+    const correlated = async () => (await db('newsletter_sends').where({ id: send.id }).select(db.raw('EXISTS (?) AS has_outstanding', [
+      outstandingEligibleDeliveries('newsletter_sends.id', { correlate: true }).select(db.raw('1')),
+    ])).first()).has_outstanding;
+
+    expect(await hasOutstandingDeliveries(send.id)).toBe(true);
+    expect(await correlated()).toBe(true);
+    await db('notification_prefs').where({ customer_id: c.id }).update({ marketing_channel: 'sms' });
+    expect(await hasOutstandingDeliveries(send.id)).toBe(false);
+    expect(await correlated()).toBe(false);
   });
 
   test('resume: a retryable ledger row for an opted-out recipient is terminalized as skipped, never mailed', async () => {
