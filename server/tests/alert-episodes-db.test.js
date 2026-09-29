@@ -352,7 +352,7 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
 maybeDescribe('churned customer with live work: the finder (live Postgres)', () => {
   let db;
   let watchdog;
-  const made = { invoices: [], scheduled_services: [], customers: [] };
+  const made = { invoices: [], scheduled_services: [], customers: [], annual_prepay_terms: [] };
   const RUN = `w${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const TODAY = '2026-09-29';
   let n = 0;
@@ -364,7 +364,7 @@ maybeDescribe('churned customer with live work: the finder (live Postgres)', () 
   });
   beforeEach(() => { mine = []; });
   afterAll(async () => {
-    for (const table of ['invoices', 'scheduled_services', 'customers']) {
+    for (const table of ['annual_prepay_terms', 'invoices', 'scheduled_services', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
     }
   });
@@ -390,10 +390,11 @@ maybeDescribe('churned customer with live work: the finder (live Postgres)', () 
   // Only this test's customers, so a shared dev database's own rows never matter.
   const found = async () => Object.fromEntries((await watchdog._findChurnedLiveWork(TODAY))
     .filter((r) => mine.includes(r.id)).map((r) => [r.id, [r.live_visits, r.unsent_invoices]]));
+  const legsOf = async (c) => (await watchdog._findChurnedLiveWork(TODAY)).find((r) => r.id === c.id) || null;
 
   test('churned with a future pending visit and/or an unsent invoice is found, with counts', async () => {
     const visitOnly = await customer();
-    await visit(visitOnly); await visit(visitOnly, { status: null, scheduled_date: TODAY });
+    await visit(visitOnly); await visit(visitOnly, { status: 'confirmed', scheduled_date: TODAY });
     const invoiceOnly = await customer();
     await invoice(invoiceOnly, 'draft'); await invoice(invoiceOnly, 'scheduled');
     const both = await customer();
@@ -403,13 +404,50 @@ maybeDescribe('churned customer with live work: the finder (live Postgres)', () 
     });
   });
 
-  test('churned with only past, cancelled or completed visits and only sent, paid, void or archived invoices is not found', async () => {
+  test('churned with only past, finished or unknown-status visits and only sent, paid, void or archived invoices is not found', async () => {
     const c = await customer();
     await visit(c, { scheduled_date: '2026-09-28' }); // yesterday, still pending: not upcoming
-    for (const status of ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show']) await visit(c, { status });
+    for (const status of ['cancelled', 'completed', 'skipped', 'no_show']) await visit(c, { status });
+    await visit(c, { status: null }); // no status: not live by the guard's rule
     for (const status of ['sent', 'viewed', 'overdue', 'paid', 'void', 'refunded', 'sending']) await invoice(c, status);
     await invoice(c, 'draft', { archived_at: new Date('2026-09-01T12:00:00Z') });
     expect(await found()).toEqual({});
+  });
+
+  test('the churn guard\'s own live work counts: a rescheduled row (whatever its old date), a tracker-live row, an ongoing series anchor', async () => {
+    const rescheduled = await customer();
+    await visit(rescheduled, { status: 'rescheduled', scheduled_date: '2026-08-01' });
+    const tracked = await customer();
+    await visit(tracked, { status: 'confirmed', scheduled_date: '2026-09-20', track_state: 'on_property' });
+    const series = await customer();
+    await visit(series, { status: 'completed', scheduled_date: '2026-09-01', recurring_ongoing: true, is_recurring: true });
+    expect((await legsOf(rescheduled)).live_visits).toBe(1);
+    expect((await legsOf(tracked)).live_visits).toBe(1);
+    expect(await legsOf(series)).toMatchObject({ live_visits: 0, ongoing_series: 1 });
+  });
+
+  test('a paid prepay term still covering, or an unpaid prepay invoice, counts; a void one does not', async () => {
+    const term = await customer();
+    await insert('annual_prepay_terms', { customer_id: term.id, term_start: '2026-01-01', term_end: '2026-12-31', status: 'active' });
+    const pending = await customer();
+    const pendingInvoice = await invoice(pending, 'sent', { sent_at: new Date('2026-09-20T12:00:00Z') });
+    await insert('annual_prepay_terms', { customer_id: pending.id, term_start: '2026-10-01', term_end: '2027-09-30', status: 'payment_pending', prepay_invoice_id: pendingInvoice.id });
+    const voided = await customer();
+    const voidInvoice = await invoice(voided, 'void');
+    await insert('annual_prepay_terms', { customer_id: voided.id, term_start: '2026-10-01', term_end: '2027-09-30', status: 'payment_pending', prepay_invoice_id: voidInvoice.id });
+    expect(await legsOf(term)).toMatchObject({ prepay_terms: 1 });
+    expect(await legsOf(pending)).toMatchObject({ pending_prepay_invoices: 1 });
+    expect(await legsOf(voided)).toBeNull();
+  });
+
+  test('an invoice that already reached the customer is not unsent: any delivery stamp, or Text/App accepted with only the email retrying', async () => {
+    const c = await customer();
+    await invoice(c, 'scheduled', { sms_sent_at: new Date('2026-09-20T12:00:00Z') });
+    await invoice(c, 'scheduled', { scheduled_send_error: 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED' });
+    await invoice(c, 'draft', { viewed_at: new Date('2026-09-21T12:00:00Z') });
+    expect(await legsOf(c)).toBeNull();
+    await invoice(c, 'scheduled');
+    expect(await legsOf(c)).toMatchObject({ unsent_invoices: 1 });
   });
 
   test('an active or reactivated customer (stale churned_at) with drafts and future visits is not found; nor is a soft-deleted churned one', async () => {

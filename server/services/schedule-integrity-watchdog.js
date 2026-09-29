@@ -358,56 +358,79 @@ async function judgePrepayGaps(row, paidTermById) {
   return { annualCovered, issues };
 }
 
-// Class 4 finder: churned customers who still have live work on the books.
-// Set-based (one query, EXISTS legs, counts as correlated subselects) — no
-// per-customer reads. `pipeline_stage = 'churned'` is the live churn marker
-// (churned_at can outlive a reactivation, as call-commitments'
-// customerLeftProof also holds); a merge soft-deletes, so deleted_at must be
-// null. Live upcoming visit = the file's null-or-not-excluded status rule on or
-// after today ET; unsent invoice = never reached the customer, not archived.
-// Internal test customers are not filtered here: the alert carries
-// customer_id in its metadata, so notification-service's own central
-// suppression (isInternalTestCustomerId) keeps them off the bell.
+// Class 5: a churned customer the app's own churn guard would have refused
+// to churn (customer-lifecycle-guard.js churnGuardForRow), which a churn made
+// outside the app's cancel path never ran:
+//   - a live visit by the guard's tracker-aware rule (whereVisitRowLive: an
+//     upcoming or in-progress row, a rescheduled one whatever its old date);
+//   - a series anchor still marked recurring_ongoing (the guard's second leg);
+//   - a paid prepay term still covering (coveredTermsAsOf with a term_end
+//     floor, as findActivePrepayTerm reads it);
+//   - a payment_pending prepay term whose invoice is still payable (the rule
+//     findPendingPrepayInvoice applies);
+// plus, the owner's addition, an invoice that never reached the customer:
+// draft or scheduled, not archived, with no delivery stamp at all and not
+// parked on invoice.js's BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED marker
+// (Text/App already delivered, only the email leg retrying). Set-based: one
+// query, an EXISTS per leg, the counts as correlated subselects. The live
+// pipeline_stage is the churn marker (churned_at can outlive a reactivation);
+// a merge soft-deletes, so deleted_at must be null.
+const CHANNEL_ACCEPTED_MARKER = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
 async function findChurnedLiveWork(todayET) {
-  const statusPlaceholders = LIVE_STATUS_EXCLUSIONS.map(() => '?').join(', ');
-  const unsentPlaceholders = UNSENT_INVOICE_STATUSES.map(() => '?').join(', ');
-  const visitsSql = `FROM scheduled_services ss WHERE ss.customer_id = c.id AND ss.scheduled_date >= ?
-    AND (ss.status IS NULL OR ss.status NOT IN (${statusPlaceholders}))`;
-  const invoicesSql = `FROM invoices inv WHERE inv.customer_id = c.id AND inv.archived_at IS NULL
-    AND inv.status IN (${unsentPlaceholders})`;
-  const visitBindings = [todayET, ...LIVE_STATUS_EXCLUSIONS];
+  const { whereVisitRowLive } = require('./customer-lifecycle-guard');
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
+  const cancelled = [...INVOICE_CANCELLED_STATUSES];
+  const legs = {
+    live_visits: () => db('scheduled_services as sv').whereRaw('sv.customer_id = c.id')
+      .where(function liveRow() { whereVisitRowLive(this, todayET); }),
+    ongoing_series: () => db('scheduled_services as so').whereRaw('so.customer_id = c.id').where('so.recurring_ongoing', true),
+    prepay_terms: () => coveredTermsAsOf(db, null).whereRaw('t.customer_id = c.id').where('t.term_end', '>=', todayET),
+    pending_prepay_invoices: () => db('annual_prepay_terms as pt').join('invoices as pi', 'pi.id', 'pt.prepay_invoice_id')
+      .whereRaw('pt.customer_id = c.id').where('pt.status', 'payment_pending')
+      .whereRaw(`lower(COALESCE(pi.status, '')) NOT IN (${cancelled.map(() => '?').join(', ')})`, cancelled),
+    unsent_invoices: () => db('invoices as inv').whereRaw('inv.customer_id = c.id').whereNull('inv.archived_at')
+      .whereIn('inv.status', UNSENT_INVOICE_STATUSES)
+      .whereNull('inv.sent_at').whereNull('inv.sms_sent_at').whereNull('inv.email_sent_at').whereNull('inv.viewed_at')
+      .whereRaw("COALESCE(inv.scheduled_send_error, '') NOT LIKE ?", [`${CHANNEL_ACCEPTED_MARKER}%`]),
+  };
+  const names = Object.keys(legs);
   return db('customers as c')
     .where('c.pipeline_stage', 'churned')
     .whereNull('c.deleted_at')
-    .whereRaw(`(EXISTS (SELECT 1 ${visitsSql}) OR EXISTS (SELECT 1 ${invoicesSql}))`,
-      [...visitBindings, ...UNSENT_INVOICE_STATUSES])
-    .select(
-      'c.id',
-      db.raw(`(SELECT count(*)::int ${visitsSql}) as live_visits`, visitBindings),
-      db.raw(`(SELECT count(*)::int ${invoicesSql}) as unsent_invoices`, UNSENT_INVOICE_STATUSES),
-    )
+    .where(function anyLiveWork() {
+      names.forEach((name, i) => this[i ? 'orWhereExists' : 'whereExists'](legs[name]().select(db.raw('1'))));
+    })
+    .select('c.id', ...names.map((name) => legs[name]().select(db.raw('count(*)::int')).as(name)))
     .orderBy('c.id');
 }
 
+// What each count names in the bell, most pressing first.
+const LIVE_WORK_WORDS = [
+  ['live_visits', 'live visit'],
+  ['ongoing_series', 'ongoing series'],
+  ['prepay_terms', 'active prepay term'],
+  ['pending_prepay_invoices', 'unpaid prepay invoice'],
+  ['unsent_invoices', 'unsent invoice'],
+];
+
 // The class's alerts, or a failed flag when the check threw (an unknown live
-// set: the close pass then leaves the class's standing bells alone).
+// set: the close pass then leaves the class's standing bells alone). The bell
+// is one per customer; its text follows the work that is left through a quiet
+// refresh that never re-rings it.
 async function churnedLiveWorkAlerts(todayET) {
   try {
     const rows = await findChurnedLiveWork(todayET);
-    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
     const alerts = rows.map((r) => {
-      const visits = Number(r.live_visits) || 0;
-      const invoices = Number(r.unsent_invoices) || 0;
-      const parts = [];
-      if (visits) parts.push(plural(visits, 'upcoming visit'));
-      if (invoices) parts.push(plural(invoices, 'unsent invoice'));
+      const counts = Object.fromEntries(LIVE_WORK_WORDS.map(([name]) => [name, Number(r[name]) || 0]));
+      const parts = LIVE_WORK_WORDS.filter(([name]) => counts[name] > 0)
+        .map(([name, word]) => `${counts[name]} ${word}${counts[name] === 1 ? '' : (word.endsWith('series') ? '' : 's')}`);
       return [
         `${CHURNED_PREFIX}${r.id}`,
         'Churned customer still has live work',
-        `${parts.join(' and ')} ${visits + invoices === 1 ? 'is' : 'are'} still on the books for a churned customer — ` +
-        'cancel or void them through the app.',
-        { customer_id: r.id, live_visits: visits, unsent_invoices: invoices },
-        { link: `/admin/customers?customerId=${encodeURIComponent(r.id)}` },
+        `Still on the books for a churned customer: ${parts.join(', ')}. Cancel or void it through the app ("Cancel plan…" and the invoice tools).`,
+        { customer_id: r.id, ...counts },
+        { link: `/admin/customers?customerId=${encodeURIComponent(r.id)}`, refreshOnDedupe: true, ringOnRefresh: () => false },
       ];
     });
     return { alerts, failed: false };

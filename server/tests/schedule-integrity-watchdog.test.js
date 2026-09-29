@@ -119,7 +119,7 @@ function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], comp
     let completedCheck = false;
     const c = {};
     if (table === 'customers as c') churnedChain = c;
-    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'join', 'select', 'count', 'as', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
       c[m] = jest.fn(() => c);
     }
     c.where = jest.fn((...args) => { if (args[0] === 'ss.status' && args[1] === 'completed') completedCheck = true; return c; });
@@ -983,23 +983,24 @@ describe('churned customer with live work (class 4)', () => {
     const [category, title, body, opts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls[0];
     expect(category).toBe('alert');
     expect(title).toBe('Churned customer still has live work');
-    expect(body).toContain('2 upcoming visits');
-    expect(body).not.toContain('invoice');
-    expect(body).toContain('cancel or void them through the app');
-    // No dedupeVersion / refresh: a standing alert stays a silent dedupe.
+    expect(body).toBe('Still on the books for a churned customer: 2 live visits. Cancel or void it through the app ("Cancel plan…" and the invoice tools).');
+    // No dedupeVersion (a standing alert is never re-rung); a QUIET refresh keeps its text on the work that is left.
     expect(opts).toEqual({
       link: '/admin/customers?customerId=cust-churned-1', bell: true, dedupeKey: 'churned-live-work:cust-churned-1',
-      metadata: { dedupeKey: 'churned-live-work:cust-churned-1', customer_id: 'cust-churned-1', live_visits: 2, unsent_invoices: 0 },
+      refreshOnDedupe: true, ringOnRefresh: expect.any(Function),
+      metadata: { dedupeKey: 'churned-live-work:cust-churned-1', customer_id: 'cust-churned-1',
+        live_visits: 2, ongoing_series: 0, prepay_terms: 0, pending_prepay_invoices: 0, unsent_invoices: 0 },
     });
+    expect(opts.ringOnRefresh()).toBe(false);
   });
 
   test('only an unsent invoice also rings, and both counts share one bell', async () => {
     makeDbMock({ churnedRows: [churned({ live_visits: 0, unsent_invoices: 1 }), churned({ id: 'cust-churned-2', live_visits: 1, unsent_invoices: 3 })] });
     await runInner({ now: NOW });
     const bodies = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[2]);
-    expect(bodies[0]).toContain('1 unsent invoice is still on the books');
+    expect(bodies[0]).toContain('churned customer: 1 unsent invoice.');
     expect(bodies[0]).not.toContain('visit');
-    expect(bodies[1]).toContain('1 upcoming visit and 3 unsent invoices are still on the books');
+    expect(bodies[1]).toContain('churned customer: 1 live visit, 3 unsent invoices.');
     expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls[1][3].metadata).toMatchObject({ live_visits: 1, unsent_invoices: 3 });
   });
 
@@ -1009,11 +1010,11 @@ describe('churned customer with live work (class 4)', () => {
     expect(result).toMatchObject({ churnedLiveWork: 0, alerted: 0 });
     expect(churnedChain.where).toHaveBeenCalledWith('c.pipeline_stage', 'churned');
     expect(churnedChain.whereNull).toHaveBeenCalledWith('c.deleted_at');
-    // Today ET and the file's live-status exclusions bind into the visit leg (the real SQL is proven on Postgres).
-    const [sql, bindings] = churnedChain.whereRaw.mock.calls[0];
-    expect(sql).toContain('scheduled_services');
-    expect(sql).toContain('invoices');
-    expect(bindings).toEqual(['2026-08-04', 'cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show', 'draft', 'scheduled']);
+    // Every leg of the churn guard's live work, plus unsent invoices (the real SQL is proven on Postgres).
+    for (const table of ['scheduled_services as sv', 'scheduled_services as so', 'annual_prepay_terms as pt', 'invoices as inv']) {
+      expect(db).toHaveBeenCalledWith(table);
+    }
+    expect(require('../services/annual-prepay-renewals').coveredTermsAsOf).toHaveBeenCalledWith(db, null);
     expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 
