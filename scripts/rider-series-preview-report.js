@@ -33,6 +33,7 @@ const db = require('../server/models/db');
 const { previewRiderPair, resolveSeriesPropertyScope, seriesPropertyVerdict } = require('../server/services/rider-series-preview');
 const { familyOfServiceRow } = require('../server/services/cancellation-processor');
 const { overlayRecurringTemplateOverrides } = require('../server/services/recurring-template-overrides');
+const { NON_CANCELLED_ROOT_STATUSES } = require('../server/services/recurring-appointment-seeder');
 
 const json = process.argv.includes('--json');
 const eligibleOnly = process.argv.includes('--eligible-only');
@@ -159,10 +160,23 @@ async function findCandidatePairs(trx) {
     .whereNull('s.recurring_parent_id')
     .where('s.is_recurring', true)
     .where('s.recurring_ongoing', true)
+    // Same non-cancelled-root predicate findActiveRecurringSeries applies
+    // to ITS own candidate set (Codex P2 round #2 on PR #5290) — a
+    // cancelled root's recurring_ongoing flag can still read true (nothing
+    // clears it on cancel), so without this a cancelled series still
+    // surfaced as a candidate pair.
+    .whereNotIn('s.status', NON_CANCELLED_ROOT_STATUSES)
     .whereIn('s.recurring_pattern', [LAWN_PATTERN, PEST_PATTERN])
     .select(
       's.id', 's.customer_id', 's.property_id', 's.recurring_pattern', 's.service_type', 's.service_id',
       's.recurring_template_overrides', 's.source_estimate_id',
+      // Codex P2 round #2 on PR #5290: resolveSeriesPropertyScope (via
+      // topUpScopeInput) reads these stamped address fields too — omitting
+      // them collapsed every root with a distinct visit-level address stamp
+      // (never an unstamped root's own estimate/customer fallback) onto the
+      // primary/customer address, mis-bucketing distinct properties as one.
+      's.service_address_line1', 's.service_address_line2', 's.service_address_city',
+      's.service_address_state', 's.service_address_zip',
       'sv.service_key', 'sv.name as service_name',
     );
   if (!rows.length) return [];

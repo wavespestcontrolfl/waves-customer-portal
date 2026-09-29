@@ -159,6 +159,18 @@ commits nothing. As with the customer gates, the top-up's own first-hit
 looped without the early return). `admin-schedule.js` gained these exports
 — see "What changed in admin-schedule.js" below.
 
+**Reads the OVERLAID rider parent (Codex P2 round #2 on PR #5290):** these
+gates are called with `overlayRecurringTemplateOverrides(riderParent, cols)`,
+not the raw row — the same overlay `topUpRecurringSeriesLocked` applies to
+`parent` BEFORE calling `topupSeriesSkipReason` itself. `isFamilyOnPlanHold`
+and `isDuplicateActiveSeries` both classify the series' family straight off
+whichever `parent` object they're handed (`service_id`/`service_type`); a
+series-scope price/service edit (`recurring_template_overrides`, gated by
+`GATE_EDIT_APPT_PRICE_SERVICE_SCOPE`) redirects those fields, so reading the
+raw, pre-override row here would classify the series by a service it no
+longer is — the one thing this preview exists to never disagree with the
+top-up about.
+
 ### Property scope
 
 `different_property` and `property_unresolved` (above) are decided by
@@ -186,13 +198,32 @@ silently passing the gate.
 Base rows only (`is_recurring = true`), null-safe status (a legacy row with
 no stamped status still counts as a live host date — a bare `whereNotIn` on
 a nullable column silently drops every NULL-status row otherwise), same
-property as the host parent per row (a host recurring-child row whose own
-`property_id` has drifted from the parent's is never read as a host date —
-the per-row twin of the `different_property` pair gate), future
+EFFECTIVE property scope as the host parent per row, future
 (`scheduled_date >= today`), not join-ineligible (completed / cancelled /
 skipped / no_show / rescheduled). A host **booster** row (`is_recurring =
 false` — a one-off extra visit riding the host's cadence, never part of it)
 is never read as a host date.
+
+**"Same EFFECTIVE property scope" (Codex P1 round #2 on PR #5290):** the
+host's own resolved scope (`hostScope` — the SAME `resolveSeriesPropertyScope`
+call the pair's own `different_property` gate makes, computed once in
+`evaluatePairGates` and handed to `loadHostDates`) is compared against each
+CANDIDATE ROW's own resolved scope (`rowPropertyScope` — the row's own
+`property_id` + stamped `service_address_*` columns, reduced with the same
+normalized key, but never falling back to an estimate or the customer's
+primary address the way a series ROOT's own scope resolution does) via the
+same `seriesPropertyVerdict` comparator. The host PARENT's own row always
+matches — it IS the effective scope, however stale its own raw columns are.
+A candidate row with no resolved scope of its own (no `property_id`, no
+stamped address — the ordinary case for most child rows) still inherits the
+host's scope, exactly as the old null-safe rule did; only a row whose OWN
+resolved scope actively disagrees is dropped. This replaces the earlier rule
+(compare each child row's raw `property_id` against the host PARENT's own
+raw `property_id` column), which was stale the moment the host moved via
+`recurring_template_overrides.appointment_address` (the parent's own column
+never changes; only its effective, override-aware scope does) and skipped
+filtering entirely whenever the parent's raw column happened to be null (a
+drifted child row on ANY other property still counted as a host date).
 
 ### Rider rows and movability
 
@@ -256,7 +287,14 @@ anchors**: it's a live row, but its `scheduled_date` is the STALE date it's
 waiting to be moved off of, not "when this last actually happened" — reading
 it as the anchor would plan the next date from a date that was never really
 kept. No completed/pinned-and-anchor-eligible row at all falls back to the
-rider parent's own `scheduled_date`.
+rider parent's own `scheduled_date` — **unless the rider PARENT ROW ITSELF is
+the one awaiting reschedule** (Codex P2 round #2 on PR #5290): its own
+`scheduled_date` is exactly the stale date it's waiting to be moved off of,
+the same reason a rescheduled CHILD row never anchors, so falling back to it
+here would silently reintroduce that stale date as "when this last actually
+happened." With no other anchor-eligible row at all, this case reports no
+anchor at all (`anchor: null`, empty plan) and `previewRiderPair` adds
+`no_anchor` to `reasons` alongside `rider_reschedule_pending`.
 
 ## What the preview reports
 
@@ -270,6 +308,24 @@ prints `previewRiderPair`'s answer for each: eligible or not (and every
 reason), the anchor/horizon/plan, and the keep/move/insert/cancel/pinned
 breakdown. Prints customer and series **ids only, never a customer name** —
 same convention as `server/scripts/dunning-adopt-orphans-dry-run.js`.
+
+**Candidate discovery excludes cancelled roots (Codex P2 round #2 on PR
+#5290)**: the candidate query applies
+`recurring-appointment-seeder.js#NON_CANCELLED_ROOT_STATUSES` (the exact
+status list `findActiveRecurringSeries` excludes on ITS own candidate
+roots, exported and reused rather than hand-rolled here) — a cancelled
+root's `recurring_ongoing` flag is never cleared on cancel, so without this
+a cancelled series still surfaced as a candidate pair.
+
+**Candidate projection selects every field the shared resolver reads (Codex
+P2 round #2 on PR #5290)**: the query now also selects
+`service_address_line1/2/city/state/zip` — `resolveSeriesPropertyScope`
+(via `admin-schedule.js#topUpScopeInput`) reads these stamped fields on an
+already-stamped root, not just `property_id`; without them, every root with
+a distinct visit-level address stamp (never an unstamped root's own
+estimate/customer fallback, which reads from the DB directly) collapsed
+onto the primary/customer address and mis-bucketed distinct properties as
+one.
 
 **Candidate classification (Codex P2 round, PR #5290) reads the CURRENT
 template**: `overlayRecurringTemplateOverrides`

@@ -220,6 +220,29 @@ function seriesPropertyVerdict(a, b) {
   return 'different';
 }
 
+// Pure, per-ROW twin of resolveSeriesPropertyScope (Codex P1 round #2 on PR
+// #5290 — loadHostDates' own host-date filter, below): a plain child row's
+// own stamped `property_id` and `service_address_*` columns, reduced to the
+// same {propertyId, key, resolved} shape with the SAME normalized key
+// (`estimate-property-linkage.js#normalizedEstimatePropertyKey`), but never
+// falling back to an estimate or the customer's primary address — that
+// fallback only makes sense for resolving a SERIES ROOT's own scope
+// (topUpScopeInput), never for a plain child row mid-series. `resolved:
+// false` (no property_id, no stamped address on the row itself) is the
+// ordinary case for most child rows — the caller reads that as "this row
+// carries no scope of its own" and inherits the host's effective scope,
+// exactly as the old raw-property_id compare treated a NULL property_id.
+function rowPropertyScope(row) {
+  const { normalizedEstimatePropertyKey } = require('./estimate-property-linkage');
+  const propertyId = row.property_id ? String(row.property_id) : null;
+  const address = [
+    row.service_address_line1, row.service_address_line2, row.service_address_city,
+    `${row.service_address_state || ''} ${row.service_address_zip || ''}`.trim(),
+  ].filter(Boolean).join(', ');
+  const key = address ? normalizedEstimatePropertyKey(address) : null;
+  return { propertyId, key, resolved: !!(propertyId || key) };
+}
+
 // Batched "is this rider row pinned by a durable record" lookup — same
 // tables and same DEAD/NON_PINNING exclusions the write engine's
 // immovableRowIdSet applies, but returns WHICH category matched (for the
@@ -402,9 +425,12 @@ async function loadPairContext(conn, riderParentId, hostParentId) {
   };
 }
 
-// Phase 2: every pair/customer/series gate. Returns the full reasons array
-// (every applicable gate, never first-hit) — the caller decides whether a
-// STRUCTURAL_BLOCKERS hit skips plan computation.
+// Phase 2: every pair/customer/series gate. Returns { reasons, hostScope }
+// — reasons is the full array (every applicable gate, never first-hit; the
+// caller decides whether a STRUCTURAL_BLOCKERS hit skips plan computation),
+// hostScope is the host's own resolved property scope (Codex P1 round #2 on
+// PR #5290 — computed here once, alongside the pair's own property compare,
+// and handed to loadHostDates below so it never re-resolves it).
 async function evaluatePairGates(conn, ctx) {
   const {
     cols, riderParent, hostParent, riderParentId,
@@ -416,11 +442,13 @@ async function evaluatePairGates(conn, ctx) {
   // different customers' addresses is not a "same property" question at
   // all — skip the extra reads for that case).
   const sameCustomer = String(riderParent.customer_id) === String(hostParent.customer_id);
+  let hostScope = null;
   if (cols.property_id && sameCustomer) {
-    const [riderScope, hostScope] = await Promise.all([
+    const [riderScope, resolvedHostScope] = await Promise.all([
       resolveSeriesPropertyScope(conn, riderParent),
       resolveSeriesPropertyScope(conn, hostParent),
     ]);
+    hostScope = resolvedHostScope;
     const verdict = seriesPropertyVerdict(riderScope, hostScope);
     if (verdict === 'unresolved') reasons.push('property_unresolved');
     else if (verdict === 'different') reasons.push('different_property');
@@ -447,40 +475,74 @@ async function evaluatePairGates(conn, ctx) {
   // Series gates — admin-schedule.js's all-hits topupAllSeriesSkipReasons
   // (annual prepay / family plan hold / duplicate active series), reused
   // READ-ONLY: no advisory lock taken (see this module's own header and
-  // that export's own comment in admin-schedule.js).
+  // that export's own comment in admin-schedule.js). Passed the OVERLAID
+  // rider parent (Codex P2 round #2 on PR #5290), same as
+  // topUpRecurringSeriesLocked overlays parent BEFORE calling
+  // topupSeriesSkipReason itself: a series-scope price/service edit
+  // (recurring_template_overrides, GATE_EDIT_APPT_PRICE_SERVICE_SCOPE)
+  // redirects service_id/service_type, which plan_hold's own family
+  // classification and duplicate_series' own family/address match both
+  // read straight off `parent` — reading the STALE raw parent here would
+  // classify the series by a service it no longer is (or isn't yet), the
+  // one thing this preview exists to never disagree with the top-up about.
   try {
     const { topupAllSeriesSkipReasons } = require('../routes/admin-schedule');
+    const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
+    const overlaidRiderParent = overlayRecurringTemplateOverrides(riderParent, cols);
     // Savepoint: a failed read here must not abort the caller's
     // transaction (25P02) for every read after it.
-    const seriesSkips = await conn.transaction((sp) => topupAllSeriesSkipReasons(sp, riderParent, riderParentId, cols));
+    const seriesSkips = await conn.transaction((sp) => topupAllSeriesSkipReasons(sp, overlaidRiderParent, riderParentId, cols));
     reasons.push(...seriesSkips);
   } catch {
     reasons.push('series_check_error');
   }
 
-  return reasons;
+  return { reasons, hostScope };
 }
 
-// Phase 3: host dates — base rows only, null-safe status, same property per
-// row, future, not join-ineligible. Unchanged from the original read.
-async function loadHostDates(conn, hostParent, cols, todayStr) {
+// Phase 3: host dates — base rows only, null-safe status, same EFFECTIVE
+// property scope per row, future, not join-ineligible.
+//
+// Codex P1 round #2 on PR #5290: the old filter compared each child row's
+// raw `property_id` against the host PARENT's own raw `property_id` column
+// — stale the moment the host moved via
+// `recurring_template_overrides.appointment_address` (the parent's own
+// column never changes; only its EFFECTIVE, override-aware scope does, the
+// same one the pair's own `different_property` gate resolves), and
+// entirely skipped (every child counted, drifted or not) whenever the
+// parent's raw column happened to be null. Both are fixed by resolving the
+// host's effective scope ONCE (`hostScope`, evaluatePairGates — the exact
+// same resolveSeriesPropertyScope call the pair gate uses, over the
+// OVERLAID parent) and comparing each candidate row's own resolved scope
+// (`rowPropertyScope`, above — its own property_id/service_address_*
+// columns) against it with the SAME comparator, `seriesPropertyVerdict`.
+// The host PARENT's own row always matches (it IS the effective scope,
+// however stale its own raw columns are). A child row with no resolved
+// scope of its own (no property_id, no stamped address — the ordinary case
+// for most child rows) still inherits the host's scope, same as the old
+// null-safe behavior; only a row whose OWN resolved scope actively
+// disagrees is dropped.
+async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
+  const addressCols = [
+    'service_address_line1', 'service_address_line2', 'service_address_city',
+    'service_address_state', 'service_address_zip',
+  ].filter((c) => cols[c]);
   const hostRowsRaw = await conn('scheduled_services')
     .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
     .where('is_recurring', true)
     .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
     .where('scheduled_date', '>=', todayStr)
-    .modify((q) => {
-      // "same property per row" (design doc) — a host recurring-child row
-      // whose own property_id has drifted from the host parent's is never
-      // read as a host date, the same per-row property guard the pair
-      // gate above applies at the parent level.
-      if (cols.property_id && hostParent.property_id) {
-        q.where((qq) => { qq.whereNull('property_id').orWhere('property_id', hostParent.property_id); });
-      }
-    })
     .orderBy('scheduled_date', 'asc')
-    .select('id', 'scheduled_date');
-  return Array.from(new Set(hostRowsRaw.map((r) => dateOnly(r.scheduled_date)).filter(Boolean))).sort();
+    .select('id', 'scheduled_date', ...(cols.property_id ? ['property_id'] : []), ...addressCols);
+  const filtered = (cols.property_id && hostScope?.resolved)
+    ? hostRowsRaw.filter((r) => {
+      if (String(r.id) === String(hostParent.id)) return true;
+      const rowScope = rowPropertyScope(r);
+      if (!rowScope.resolved) return true;
+      return seriesPropertyVerdict(rowScope, hostScope) === 'same';
+    })
+    : hostRowsRaw;
+  return Array.from(new Set(filtered.map((r) => dateOnly(r.scheduled_date)).filter(Boolean))).sort();
 }
 
 // Phase 4: every rider row (parent + children), classified, with the
@@ -508,7 +570,18 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
       if (d && (!lastRiderDate || d > lastRiderDate)) lastRiderDate = d;
     }
   }
-  if (!lastRiderDate) lastRiderDate = dateOnly(riderParent.scheduled_date);
+  // Codex P2 round #2 on PR #5290: when the RIDER PARENT ROW ITSELF is the
+  // one awaiting reschedule (status 'rescheduled') and nothing else in the
+  // series anchors, its own `scheduled_date` is exactly the stale date it
+  // is waiting to be moved off of — the same reason a rescheduled CHILD row
+  // never anchors (see classifyRiderRow's own comment). Falling back to it
+  // here would silently reintroduce that stale date as "when this last
+  // actually happened." No other anchor-eligible row at all means no
+  // anchor — previewRiderPair reports `no_anchor` alongside
+  // `rider_reschedule_pending` rather than planning off a date that was
+  // never really kept.
+  const parentIsReschedulePending = riderParent.is_recurring === true && riderParent.status === 'rescheduled';
+  if (!lastRiderDate && !parentIsReschedulePending) lastRiderDate = dateOnly(riderParent.scheduled_date);
   return {
     riderRows, classifications, lastRiderDate, reschedulePending,
   };
@@ -564,12 +637,12 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     if (loaded.blocked) return empty([loaded.blocked]);
     const { cols, riderParent, hostParent } = loaded;
 
-    const reasons = await evaluatePairGates(conn, loaded);
+    const { reasons, hostScope } = await evaluatePairGates(conn, loaded);
     if (reasons.some((r) => STRUCTURAL_BLOCKERS.has(r))) return empty(reasons);
 
     // --- Plan computation (read-only, same rules as buildRiderSyncPlan) ---
     const todayStr = etDateString();
-    const hostDates = await loadHostDates(conn, hostParent, cols, todayStr);
+    const hostDates = await loadHostDates(conn, hostParent, cols, todayStr, hostScope);
     const {
       riderRows, classifications, lastRiderDate, reschedulePending,
     } = await classifyRiderRows(conn, riderParentId, riderParent, todayStr);

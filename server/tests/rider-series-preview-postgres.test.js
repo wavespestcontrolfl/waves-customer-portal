@@ -679,4 +679,109 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       expect(preview.plan.length).toBeGreaterThan(0);
     });
   });
+
+  // --- Codex P2 round #2 on PR #5290 --------------------------------------
+  describe('host dates use the EFFECTIVE (override-aware) host scope, not the raw stale property_id', () => {
+    test('a moved host (override to a new address) keeps the new-address lawn dates and drops the old-address ones', async () => {
+      const propOld = await property();
+      const propNew = await property();
+      const lawnParent = await row({
+        status: 'confirmed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'every_6_weeks', service_type: 'Lawn Care - Every 6 Weeks',
+        scheduled_date: LAWN_START, property_id: propOld,
+        // The host's raw property_id column is left at the OLD address —
+        // exactly what an override move looks like: only
+        // recurring_template_overrides.appointment_address changes, never
+        // the parent row's own stamped columns (see this module's own
+        // header on why the completed first visit stays historical).
+        recurring_template_overrides: JSON.stringify({ appointment_address: { property_id: propNew } }),
+      });
+      // Spawned BEFORE the move: stamped with the OLD property (the shape
+      // copyStampedServiceAddressFields leaves on a pre-move child row).
+      const oldDate = addDays(LAWN_START, 81);
+      await row({
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_pattern: 'every_6_weeks', scheduled_date: oldDate, property_id: propOld,
+      });
+      // Spawned AFTER the move: stamped with the NEW property.
+      const newDate = addDays(LAWN_START, 96);
+      await row({
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_pattern: 'every_6_weeks', scheduled_date: newDate, property_id: propNew,
+      });
+      const pestParent = await row({
+        status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control',
+        scheduled_date: ANCHOR, property_id: propNew,
+      });
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      // Both dates fall inside the SAME walk window (MIN_GAP_DAYS 77..
+      // MAX_WAIT_DAYS 105 past the first lawn date); only the property
+      // filter decides which one the plan picks.
+      expect(preview.plan).toContain(newDate);
+      expect(preview.plan).not.toContain(oldDate);
+    });
+
+    test('a host row with no property_id or address of its own (the ordinary case) still inherits the host scope', async () => {
+      const propNew = await property();
+      const lawnParent = await row({
+        status: 'confirmed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'every_6_weeks', service_type: 'Lawn Care - Every 6 Weeks',
+        scheduled_date: LAWN_START, property_id: propNew,
+      });
+      const unstampedDate = addDays(LAWN_START, 96);
+      await row({
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_pattern: 'every_6_weeks', scheduled_date: unstampedDate, // no property_id at all
+      });
+      const pestParent = await row({
+        status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control',
+        scheduled_date: ANCHOR, property_id: propNew,
+      });
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.plan).toContain(unstampedDate);
+    });
+  });
+
+  describe('series gates read the OVERLAID rider parent, same as the top-up (Codex P2 round #2 on PR #5290)', () => {
+    test('a price/service override that redirects the series into a HOLDABLE family is caught by plan_hold', async () => {
+      const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+      // Raw service_type stays 'Quarterly Pest Control' (pest_control is
+      // NOT a HOLDABLE_FAMILIES member); the override redirects it to a
+      // holdable family, exactly like a real series-scope price/service
+      // edit under GATE_EDIT_APPT_PRICE_SERVICE_SCOPE would.
+      await trx('scheduled_services').where({ id: pestParent.id }).update({
+        recurring_template_overrides: JSON.stringify({ service_type: 'Tree and Shrub Quarterly' }),
+      });
+      await trx('plan_holds').insert({
+        customer_id: customerId, family_key: 'tree_shrub', status: 'active',
+        starts_on: addDays(ANCHOR, -30), resume_on: addDays(ANCHOR, 100),
+      });
+      const previous = process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE;
+      process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = 'true';
+      try {
+        await jest.isolateModulesAsync(async () => {
+          const { previewRiderPair: freshPreviewRiderPair } = require('../services/rider-series-preview');
+          const preview = await freshPreviewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+          expect(preview.reasons).toContain('plan_hold');
+        });
+      } finally {
+        if (previous === undefined) delete process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE;
+        else process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = previous;
+      }
+    });
+  });
+
+  describe('a rider PARENT that is itself the pending-reschedule row (Codex P2 round #2 on PR #5290)', () => {
+    test('never falls back to its own stale scheduled_date: no_anchor alongside rider_reschedule_pending, empty plan', async () => {
+      const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({ status: 'rescheduled' });
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.reasons).toEqual(expect.arrayContaining(['rider_reschedule_pending', 'no_anchor']));
+      expect(preview.anchor).toBeNull();
+      expect(preview.plan).toEqual([]);
+      expect(preview.eligible).toBe(false);
+    });
+  });
 });
