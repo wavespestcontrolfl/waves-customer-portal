@@ -80,4 +80,18 @@ function suppressionCoversEmail(email, column = 'email') {
   };
 }
 
-module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, GOOGLE_DOT_INSENSITIVE_DOMAINS };
+/**
+ * The same rule as a correlated SQL predicate, for bulk sends that anti-join
+ * suppressions against a table of recipients (the newsletter blast): the
+ * suppression column covers the recipient column when they are equal, or both
+ * are Google addresses on the same mailbox. Column names come from hardcoded
+ * callers only — never user input.
+ */
+function suppressionCoversColumnSql(suppressionColumn, recipientColumn) {
+  const { GOOGLE_MAILBOX_SQL } = require('./customer-comms-lock');
+  return `(LOWER(${suppressionColumn}) = LOWER(${recipientColumn})`
+    + ` OR (${GOOGLE_MAILBOX_SQL.isGoogle(suppressionColumn)} AND ${GOOGLE_MAILBOX_SQL.isGoogle(recipientColumn)}`
+    + ` AND ${GOOGLE_MAILBOX_SQL.mailbox(suppressionColumn)} = ${GOOGLE_MAILBOX_SQL.mailbox(recipientColumn)}))`;
+}
+
+module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, GOOGLE_DOT_INSENSITIVE_DOMAINS };

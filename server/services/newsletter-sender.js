@@ -84,7 +84,8 @@ function excludeGloballySuppressed(query) {
     this.select(db.raw('1'))
       .from('email_suppressions as es')
       .where('es.status', 'active')
-      .whereRaw('LOWER(es.email) = LOWER(newsletter_subscribers.email)')
+      // Any spelling of the same Gmail inbox counts (owner decision 2026-09-29).
+      .whereRaw(require('../utils/email-equivalence').suppressionCoversColumnSql('es.email', 'newsletter_subscribers.email'))
       .whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES);
   });
 }

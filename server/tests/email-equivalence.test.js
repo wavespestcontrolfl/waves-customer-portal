@@ -190,3 +190,20 @@ describe('suppressionCoversEmail — one Gmail inbox, any spelling', () => {
     expect(src).not.toMatch(/email_suppressions'\)\s*\.whereRaw\('LOWER\(email\) = \?'/);
   });
 });
+
+// Codex #5323 r7 P1: the newsletter blast's bulk anti-join uses the same rule.
+describe('suppressionCoversColumnSql — bulk anti-join form', () => {
+  const { suppressionCoversColumnSql } = require('../utils/email-equivalence');
+  test('equal addresses OR the same Google mailbox on both sides', () => {
+    const sql = suppressionCoversColumnSql('es.email', 'newsletter_subscribers.email');
+    expect(sql).toContain('LOWER(es.email) = LOWER(newsletter_subscribers.email)');
+    expect(sql).toContain("SPLIT_PART(LOWER(es.email), '@', 2) IN ('gmail.com', 'googlemail.com')");
+    expect(sql).toContain("SPLIT_PART(LOWER(newsletter_subscribers.email), '@', 2) IN ('gmail.com', 'googlemail.com')");
+    expect(sql).toContain("REPLACE(SPLIT_PART(SPLIT_PART(LOWER(es.email), '@', 1), '+', 1), '.', '') = REPLACE(SPLIT_PART(SPLIT_PART(LOWER(newsletter_subscribers.email), '@', 1), '+', 1), '.', '')");
+  });
+  test('newsletter-sender excludeGloballySuppressed uses it', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/newsletter-sender.js'), 'utf8');
+    expect(src).toContain("suppressionCoversColumnSql('es.email', 'newsletter_subscribers.email')");
+    expect(src).not.toContain("whereRaw('LOWER(es.email) = LOWER(newsletter_subscribers.email)')");
+  });
+});
