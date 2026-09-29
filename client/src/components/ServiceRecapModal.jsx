@@ -17,6 +17,7 @@ import { createPortal } from 'react-dom';
 import useIsMobile from '../hooks/useIsMobile';
 import useModalFocus from '../hooks/useModalFocus';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
+import { isMlUnit } from '../lib/measure-units';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
@@ -179,6 +180,12 @@ export default function ServiceRecapModal({
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
             if (rp.application_rate != null && Number(rp.application_rate) > 0) {
+              // Except a rate recorded in mL, which is never shown (owner
+              // ruling 2026-09-29: nothing a tech sees on a completion is in
+              // mL). With no rate row the submission leaves the rate
+              // unconfirmed, and the server keeps the recorded one (see
+              // rate_confirmed below).
+              if (isMlUnit(rp.rate_unit)) return;
               // A recorded rate missing its unit (legacy rows) falls back
               // to the catalog unit — an empty unit would hide the rate
               // editor while rate_confirmed still marked the field

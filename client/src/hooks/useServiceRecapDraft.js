@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { completionDraftKey } from '../lib/completion-drafts';
 import { getAdminUser } from '../lib/adminAuth';
+import { isMlUnit } from '../lib/measure-units';
 
 const STORAGE_ERROR = 'Draft could not be saved on this device. Keep this visit open until completion succeeds.';
 const UNVERIFIABLE_ERROR = 'Draft cannot be saved on this device because the visit record could not be fully loaded. Keep this visit open until completion succeeds.';
@@ -82,13 +83,16 @@ export function recapDraftSnapshot({ note, message, rates, sendText, includeComm
 // ceilingFor(id, unit) returns the CURRENT catalog label ceiling for a
 // restored rate in its own unit, so the over-label warning on a reopened
 // draft reflects the live catalog rather than the one saved with it.
+// A rate saved in mL (by a build from before the owner ruling of 2026-09-29:
+// nothing a tech sees on a completion is in mL) is dropped: the product
+// restores without a rate row, so the completion leaves its rate unconfirmed.
 export function restoredRecapForm(saved, hasPhone, ceilingFor = () => null) {
   const selectedProducts = Array.isArray(saved?.selectedProducts) ? saved.selectedProducts : [];
   const savedRates = saved?.rates || {};
   return {
     note: saved?.note || '',
     message: saved?.message || '',
-    rates: Object.fromEntries(selectedProducts.filter((p) => savedRates[p.id]).map((p) => {
+    rates: Object.fromEntries(selectedProducts.filter((p) => savedRates[p.id] && !isMlUnit(savedRates[p.id].unit)).map((p) => {
       const { rate, unit } = savedRates[p.id];
       const max = ceilingFor(p.id, unit);
       return [p.id, { rate, unit, ...(max != null ? { max } : {}) }];
