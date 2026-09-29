@@ -193,13 +193,6 @@ async function probeMoveConflicts({
   return { rows, snapshot: sortConflictSnapshot(rows.map((row) => conflictSnapshotItem(target, row))) };
 }
 
-// A clash that is only the arrival-window route check's own verdict: every
-// row carries its warning. An interview merged into the same probe, or any
-// other occupant of the window, is a real overlap.
-function routeReviewOnly(rows) {
-  return Array.isArray(rows) && rows.length > 0 && rows.every((row) => Boolean(row?.warning));
-}
-
 function assertConflictSnapshot(actual, options) {
   if (!Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) return;
   if (!conflictSnapshotsMatch(actual, options.expectConflictSnapshot)) throw conflictsChanged();
@@ -2094,10 +2087,6 @@ class SmartRebooker {
       });
     }
     const arrivalWarnings = new Map();
-    // Dates with an overlap that is more than an arrival-window route review
-    // (another appointment or an interview on the window, a tech-window
-    // clash): the operator card rings for these (arrivalOnlyDates below).
-    const realOverlapDates = new Set();
     const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
@@ -3052,7 +3041,6 @@ class SmartRebooker {
                 });
               }
               overlapWarnDates.add(String(date).split('T')[0]);
-              realOverlapDates.add(String(date).split('T')[0]);
             }
           }
         }
@@ -3093,7 +3081,6 @@ class SmartRebooker {
               });
             }
             overlapWarnDates.add(String(date).split('T')[0]);
-            if (!routeReviewOnly(anchorOccClash)) realOverlapDates.add(String(date).split('T')[0]);
           }
         }
         if (anchorCleared) {
@@ -3178,7 +3165,6 @@ class SmartRebooker {
               // Staff-advisory mode (admin dispatch): overlaps never block a
               // save — collect the date for the warnings[] the route returns.
               overlapWarnDates.add(String(date).split('T')[0]);
-              if (!routeReviewOnly(occClash)) realOverlapDates.add(String(date).split('T')[0]);
             } else if (siblingClashWithinHorizon(date) || !occClash.every(isSeededPlaceholderRow)) {
               // A near-term projection onto an occupied window is a real
               // double-booking — and so is a far-out one whose occupant is
@@ -3422,9 +3408,6 @@ class SmartRebooker {
         // P1), never an in-memory alert a dying pass can lose.
         overlapDates: [...overlapWarnDates].sort(),
         arrivalWindowDates: [...arrivalWarnings.keys()].sort(),
-        // The dates whose every overlap was only an arrival-window route
-        // review — a heads-up, not work (admin-dispatch's operator card).
-        arrivalOnlyDates: [...arrivalWarnings.keys()].filter((d) => !realOverlapDates.has(d)).sort(),
         followUpOccurrences,
         // Rows whose tracker lifecycle this move rewound — the replay /
         // reconciler cleanup set (replaySeriesMoveCleanup).
@@ -3833,8 +3816,6 @@ module.exports = new SmartRebooker();
 // (same status/hold/window rules, narrowed to one technician_id).
 module.exports.probeMoveConflicts = probeMoveConflicts;
 module.exports.occupancyProbeEnd = occupancyProbeEnd;
-// Exported for tests: which clashes are only an arrival-window route review.
-module.exports.routeReviewOnly = routeReviewOnly;
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;

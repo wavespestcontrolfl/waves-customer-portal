@@ -4508,15 +4508,6 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    // A date the move only flagged for arrival-window route review (every
-    // overlap on it was the route check's own verdict — rebooker.js
-    // arrivalOnlyDates, an explicit per-date verdict; a date that ALSO has a
-    // real overlap is not in it) is a heads-up, not work: with nothing
-    // preserved, untimed or truly overlapping, that card is written into the
-    // bell already read — visible in its list, never counted or rung. A move
-    // recorded before that verdict existed carries none, so it rings.
-    const arrivalOnlyDates = new Set((Array.isArray(result.arrivalOnlyDates) ? result.arrivalOnlyDates : []).map((d) => String(d).split('T')[0]));
-    const bellWorthy = dueConflicts.length || preserved.length || overlapDates.some((d) => !arrivalOnlyDates.has(d));
     if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {
       try {
         const NotificationService = require('../services/notification-service');
@@ -4548,10 +4539,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
         );
         if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
-        else {
-          if (!bellWorthy) await db('notifications').where({ id: notif.id }).whereNull('read_at').update({ read_at: new Date() });
-          await stampMarker('conflict_card_at');
-        }
+        else await stampMarker('conflict_card_at');
       } catch (err) {
         logger.error(`[dispatch] schedule_conflict notification failed for ${serviceId}: ${err.message}`);
       }

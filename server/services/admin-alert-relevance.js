@@ -30,13 +30,15 @@
  * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
  * — never dedupeVersion/autoCleared/invoiceId, so every emitter's own dedupe
  * and recovery logic still sees the row exactly as a human dismissal. The one
- * exception is a class marked `rearm` (unpriced series, estimate hot view):
- * its emitter dedupes on a stable key (forever, or a rolling day), so the key
- * moves into the stamp (`retired.dedupeKey`, `dedupeKey: null`) and a
- * condition that comes back (the price removed again, an estimate restored)
- * raises a fresh bell instead of finding this row. An emitter that knows its
- * whole current set can also clear on absence (retireKeysNoLongerRaised, the
- * schedule-integrity watchdog's prepay and accepted-plan reviews).
+ * exception is a class marked `rearm` (unpriced series, estimate hot view,
+ * prepaid-coverage and accepted-plan reviews): its emitter dedupes on a key
+ * the subject's return need not change (forever, or a rolling day), so the
+ * key moves into the stamp (`retired.dedupeKey`, `dedupeKey: null`) and a
+ * condition that comes back (the price removed again, an estimate restored,
+ * a customer reactivated) raises a fresh bell instead of finding this row.
+ * An emitter that knows its whole current set can also clear on absence
+ * (retireKeysNoLongerRaised, the schedule-integrity watchdog's prepay and
+ * accepted-plan reviews), re-arming the same way.
  * A genuine state change can still re-bell a refreshOnDedupe row once; the
  * next sweep retires it again if its subject is still gone. Read-only apart
  * from notification rows.
@@ -275,11 +277,13 @@ const CLASSES = [
   { // emitter removed in #5223; unread rows remain
     key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: (s) => customerLeft(s) || visitClosed(s),
   },
-  { // schedule-integrity-watchdog.js prepaid-coverage + manual-series-stamp reviews
-    key: 'prepay_coverage', categories: ['alert'], prefix: 'prepay-coverage:', rule: (s) => customerLeft(s) || visitClosed(s),
+  { // schedule-integrity-watchdog.js prepaid-coverage + manual-series-stamp reviews — a
+    // forever dedupe on an evidence key a reactivation need not change, so a retire re-arms it
+    key: 'prepay_coverage', categories: ['alert'], prefix: 'prepay-coverage:', rule: (s) => customerLeft(s) || visitClosed(s), rearm: true,
   },
-  { // schedule-integrity-watchdog.js accepted-plan review
-    key: 'accepted_schedule', categories: ['alert'], prefix: 'accepted-schedule:', rule: customerLeft,
+  { // schedule-integrity-watchdog.js accepted-plan review — a stable key refreshed only when
+    // its schedule evidence changes, so a reactivated customer's gap needs the key back
+    key: 'accepted_schedule', categories: ['alert'], prefix: 'accepted-schedule:', rule: customerLeft, rearm: true,
   },
   { // admin-dispatch.js applySeriesMoveEffects
     key: 'series_move', categories: ['schedule_conflict'], match: (meta) => !!meta.seriesMoveId, rule: seriesMoveMovedOn,
@@ -387,8 +391,11 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
 // An emitter's clear-on-absence (schedule-integrity-watchdog.js): after a
 // COMPLETE scan, every unread bell under `prefix` whose key the scan no longer
 // raised is retired with the sweep's own stamp — the gap was fixed, or its
-// evidence changed and the scan raised a new key beside it. A pure read_at +
-// stamp like every other retire; no row locks; a person's read is untouched.
+// evidence changed and the scan raised a new key beside it. It re-arms, as a
+// `rearm` class does: the key moves into the stamp, so the same gap raised
+// again later (a customer reactivated, an estimate restored) is a new bell.
+// A pure read_at + stamp like every other retire; no row locks; a person's
+// read is untouched.
 async function retireKeysNoLongerRaised({ category = 'alert', prefix, liveKeys, reason, now = new Date() }) {
   if (!adminAlertRelevanceLive()) return 0;
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
@@ -397,7 +404,10 @@ async function retireKeysNoLongerRaised({ category = 'alert', prefix, liveKeys, 
     .whereNull('read_at')
     .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [prefix.length, prefix])
     .whereRaw("NOT (metadata->>'dedupeKey' = ANY(?::text[]))", [liveKeys])
-    .update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]) })
+    .update({
+      read_at: new Date(),
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('retired', ?::jsonb || jsonb_build_object('dedupeKey', metadata->'dedupeKey'), 'dedupeKey', NULL)", [JSON.stringify(stamp)]),
+    })
     .returning(['id']);
   return retired.length;
 }

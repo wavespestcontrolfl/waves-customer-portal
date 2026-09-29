@@ -50,70 +50,6 @@ describe('preserved recurring visit staff alert', () => {
   );
 });
 
-// Admin alerts check the live record (owner ruling 2026-09-28): a date the move
-// only flagged for arrival-window route review (rebooker.js arrivalOnlyDates —
-// every overlap on it was the route check's own verdict) is a heads-up, not
-// work, so with nothing preserved, untimed or truly overlapping it is written
-// into the bell already read: visible in the list, never counted or rung.
-describe('series move card rings only when there is something to act on', () => {
-  let tableUpdates;
-  beforeEach(() => {
-    jest.clearAllMocks();
-    tableUpdates = [];
-    db.fn = { now: () => new Date() };
-    db.mockImplementation((table) => ({
-      where: jest.fn().mockReturnThis(),
-      whereNull: jest.fn().mockReturnThis(),
-      first: jest.fn().mockResolvedValue({
-        status: 'committed', conflict_card_at: null, reminders_synced_at: new Date(), notified_at: new Date(),
-      }),
-      update: jest.fn(async (patch) => { tableUpdates.push({ table, patch }); return 1; }),
-    }));
-    notifyAdmin.mockResolvedValue({ id: 'staff-alert' });
-  });
-  const readOnInsert = () => tableUpdates.some((u) => u.table === 'notifications' && u.patch.read_at instanceof Date);
-
-  const move = (result) => applySeriesMoveEffects({
-    result: { seriesMoveId: 'move-1', notifyRequested: false, rescheduledOccurrences: [], ...result },
-    serviceId: 'visit-1', newDate: '2099-01-01', newWindow: { start: '09:00', end: '10:00' },
-  });
-  const cardOpts = () => notifyAdmin.mock.calls[0][3];
-
-  test('a pure route-review move (only arrival-window dates, nothing preserved or untimed) is written into the bell already read', async () => {
-    await move({ overlapDates: ['2099-02-01', '2099-03-01'], arrivalWindowDates: ['2099-02-01', '2099-03-01'], arrivalOnlyDates: ['2099-02-01', '2099-03-01'] });
-    expect(notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(notifyAdmin.mock.calls[0][1]).toBe('Series move needs route review');
-    // In the bell list (no Activity-only feed, which shows ops digests only), never unread.
-    expect(cardOpts().metadata).toMatchObject({ seriesMoveId: 'move-1' });
-    expect(cardOpts().metadata.feed).toBeUndefined();
-    expect(readOnInsert()).toBe(true);
-  });
-
-  test.each([
-    ['a real overlap with another appointment', { overlapDates: ['2099-02-01'], arrivalWindowDates: [], arrivalOnlyDates: [] }],
-    ['a real overlap beside a route-review date', { overlapDates: ['2099-02-01', '2099-03-01'], arrivalWindowDates: ['2099-02-01'], arrivalOnlyDates: ['2099-02-01'] }],
-    // The route check warned on the date AND another occupant (an interview, an
-    // appointment) sits on it: the per-date verdict leaves it out, so it rings.
-    ['a date with a route review and a real overlap together', { overlapDates: ['2099-02-01'], arrivalWindowDates: ['2099-02-01'], arrivalOnlyDates: [] }],
-    // Recorded before the per-date verdict existed: no arrivalOnlyDates, so it rings.
-    ['a move recorded before the per-date verdict', { overlapDates: ['2099-02-01'], arrivalWindowDates: ['2099-02-01'] }],
-    ['a preserved future visit beside a route-review date', {
-      overlapDates: ['2099-02-01'], arrivalWindowDates: ['2099-02-01'], arrivalOnlyDates: ['2099-02-01'], preservedOccurrences: [{ id: 'visit-2', date: '2099-04-01' }],
-    }],
-    ['a visit left without a time window', {
-      overlapDates: ['2099-02-01'], arrivalWindowDates: ['2099-02-01'], arrivalOnlyDates: ['2099-02-01'],
-      rescheduledOccurrences: [{ id: 'visit-3', date: '2099-05-01', conflicted: true }],
-    }],
-  ])('still rings for %s', async (_label, result) => {
-    await move(result);
-    expect(notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(cardOpts().metadata.quiet).toBeUndefined();
-    expect(cardOpts().metadata.feed).toBeUndefined();
-    expect(cardOpts()).toMatchObject({ bell: true });
-    expect(readOnInsert()).toBe(false);
-  });
-});
-
 describe('recurring confirmation describes the recorded placement policy', () => {
   test.each([
     [3, 'appointment_recurring_placement_confirmed'],
@@ -140,17 +76,5 @@ describe('recurring confirmation describes the recorded placement policy', () =>
     });
     expect(render).toHaveBeenCalledWith(templateKey, expect.objectContaining({ first_name: 'Test' }), expect.any(Object));
     render.mockRestore();
-  });
-});
-
-describe('rebooker per-date verdict: a clash is only a route review when every row is the route check\'s own warning', () => {
-  const { routeReviewOnly } = require('../services/rebooker');
-  test.each([
-    ['the route check alone', [{ id: 'visit-1', warning: 'The route on 2099-02-01 cannot keep every promised arrival window…' }], true],
-    ['the route check plus a booked interview on the window', [{ id: 'visit-1', warning: 'route…' }, { id: 'interview-1' }], false],
-    ['another appointment on the window', [{ id: 'visit-9' }], false],
-    ['no clash at all', [], false],
-  ])('%s → %p', (_label, rows, expected) => {
-    expect(routeReviewOnly(rows)).toBe(expected);
   });
 });

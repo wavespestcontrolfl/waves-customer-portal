@@ -82,7 +82,11 @@ jest.mock('../models/db', () => {
         applied.forEach((r) => {
           const { metadata, ...rest } = patch;
           Object.assign(r, rest);
-          if (metadata && metadata.__raw && /- 'retired'/.test(metadata.__raw)) {
+          if (metadata && metadata.__raw && /jsonb_build_object\('retired'/.test(metadata.__raw)) {
+            // Clear-on-absence: the stamp takes the row's own key, and the key is freed.
+            const meta = parse(r.metadata);
+            r.metadata = JSON.stringify({ ...meta, retired: { ...JSON.parse(metadata.bindings[0]), dedupeKey: meta.dedupeKey ?? null }, dedupeKey: null });
+          } else if (metadata && metadata.__raw && /- 'retired'/.test(metadata.__raw)) {
             const { retired: _dropped, ...kept } = parse(r.metadata);
             r.metadata = JSON.stringify({ ...kept, ...(metadata.bindings?.[0] ? JSON.parse(metadata.bindings[0]) : {}) });
           } else if (metadata && metadata.__raw) r.metadata = JSON.stringify({ ...parse(r.metadata), ...JSON.parse(metadata.bindings[0]) });
@@ -747,12 +751,44 @@ describe('retireKeysNoLongerRaised (an emitter\'s clear-on-absence)', () => {
     mockTables.notifications = [live, gone, theirs, other, quiet];
     expect(await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: ['prepay-coverage:v1:annual_coverage_unverified:aaa'], reason: REASON, now: NOW })).toBe(1);
     expect(gone.read_at).toBeInstanceOf(Date);
-    expect(JSON.parse(gone.metadata).retired).toEqual({ by: 'alert-relevance', reason: REASON, at: NOW.toISOString() });
+    // Re-armed: the key moves into the stamp, so the same gap raised again later is a new bell.
+    expect(JSON.parse(gone.metadata)).toMatchObject({
+      dedupeKey: null, retired: { by: 'alert-relevance', reason: REASON, at: NOW.toISOString(), dedupeKey: 'prepay-coverage:v1:annual_coverage_unverified:old' },
+    });
     for (const r of [live, other, quiet]) {
       expect(r.read_at).toBeNull();
       expect(JSON.parse(r.metadata).retired).toBeUndefined();
     }
     expect(theirs.read_at).toEqual(new Date('2026-09-28T10:00:00Z'));
+  });
+
+  test('a reactivated customer\'s accepted-plan gap rings again: cleared while they were churned (absent from the scan), the same key and evidence raised after reactivation is a fresh bell', async () => {
+    const key = `accepted-schedule:${EST}:pest_control`;
+    const raise = () => NotificationService.notifyAdmin('alert', 'Accepted recurring plan needs schedule review', 'body', {
+      bell: true, link: `/admin/customers?customerId=${CUST}`, dedupeKey: key, refreshOnDedupe: true, dedupeVersion: 'evidence-1',
+      metadata: { estimate_id: EST, customer_id: CUST, issues: ['missing_schedule'] },
+    });
+    mockTables.customers = [customer()];
+    expect((await raise()).deduped).toBe(false);
+    // Churned: the scan leaves the customer out, so the run clears the bell on absence.
+    expect(await retireKeysNoLongerRaised({ prefix: 'accepted-schedule:', liveKeys: [], reason: REASON, now: NOW })).toBe(1);
+    // Reactivated with no schedule edit: the same key and the same evidence version.
+    const again = await raise();
+    expect(again.deduped).toBe(false);
+    expect(mockTables.notifications).toHaveLength(2);
+    expect(mockTables.notifications.map((r) => JSON.parse(r.metadata))).toEqual(expect.arrayContaining([expect.objectContaining({ dedupeKey: key, rungAt: expect.any(String) })]));
+  });
+
+  test('the sweep re-arms an accepted-plan or prepaid-coverage bell it retires because the customer left', async () => {
+    mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
+    mockTables['scheduled_services as ss'] = [visit()];
+    const plan = standing(uid(586), `accepted-schedule:${EST}:pest_control`, { estimate_id: EST, customer_id: CUST });
+    const prepay = standing(uid(587), `prepay-coverage:${VISIT}:annual_coverage_unverified:abc`, { customer_id: CUST });
+    mockTables.notifications = [plan, prepay];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 2, byClass: { accepted_schedule: 1, prepay_coverage: 1 } });
+    for (const [row, key] of [[plan, `accepted-schedule:${EST}:pest_control`], [prepay, `prepay-coverage:${VISIT}:annual_coverage_unverified:abc`]]) {
+      expect(JSON.parse(row.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: key, reason: 'Customer left' } });
+    }
   });
 
   test('switch off: nothing is touched', async () => {
