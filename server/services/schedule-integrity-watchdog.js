@@ -86,6 +86,9 @@ const ACCEPTED_PREFIX = 'accepted-schedule:';
 const PREPAY_HOLD_OPEN_STATUSES = ['completed', 'rescheduled'];
 // A visit that never ran: its coverage review is moot.
 const NEVER_RAN_STATUSES = ['cancelled', 'canceled', 'skipped', 'no_show'];
+// An invoice in these statuses bills nothing: a completed visit whose only
+// invoices are dead is still unbilled.
+const DEAD_INVOICE_STATUSES_FOR_HOLD = ['void', 'cancelled', 'canceled'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function toMoney(value) {
@@ -208,34 +211,17 @@ async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
   return runExclusive('schedule-integrity-watchdog', () => runInner({ now }));
 }
 
-async function runInner({ now = new Date() } = {}) {
-  const todayET = etDateString(now);
-
-  // Coverage can still be lost on an overdue visit that staff complete later.
-  // Match the annual writer's null-or-live status predicate. The existing
-  // unpriced-series class keeps its upcoming-only window below.
-  const horizon = new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 24 * 3600 * 1000);
-  const coverageCandidates = await db('scheduled_services as ss')
+// The coverage scan's shared FROM/joins/select: the main scan adds its own
+// live-status, look-ahead and recurring filters; the unpriced close pass's
+// completed-visit check adds its own. One definition, so both judge a visit
+// on exactly the same columns (price, parent price, first-application invoice,
+// prepay evidence).
+function coverageScanQuery() {
+  return db('scheduled_services as ss')
     .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
     .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.id', 'ss.annual_prepay_term_id')
     .leftJoin('invoices as prepay_invoice', 'prepay_invoice.id', 'prepay_term.prepay_invoice_id')
     .leftJoin('invoices as first_application_invoice', 'first_application_invoice.id', 'ss.first_application_invoice_id')
-    .where(function whereLive() {
-      this.whereNull('ss.status').orWhereNotIn('ss.status', LIVE_STATUS_EXCLUSIONS);
-    })
-    .where('ss.scheduled_date', '<=', etDateString(horizon))
-    .where(function whereRecurring() {
-      this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_parent_id')
-        .orWhere('ss.prepaid_method', ANNUAL_PREPAY_METHOD).orWhereNotNull('ss.annual_prepay_term_id')
-        .orWhereExists(function hasFamily() {
-          this.select(db.raw('1')).from('scheduled_services as child')
-            .whereRaw('child.recurring_parent_id = ss.id AND child.customer_id = ss.customer_id');
-        }).orWhereExists(function hasAllocation() {
-          this.select(db.raw('1')).from('audit_log as allocation')
-            .where({ 'allocation.action': 'prepaid_series.allocated', 'allocation.resource_type': 'scheduled_service' })
-            .whereRaw('allocation.resource_id = ss.id');
-        });
-    })
     .select(
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
       'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount',
@@ -293,7 +279,33 @@ async function runInner({ now = new Date() } = {}) {
           GROUP BY paid.prepaid_at, paid.prepaid_method HAVING count(*) >= 2
         ) g) as manual_series_payment_evidence`, LIVE_STATUS_EXCLUSIONS),
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date"),
-    )
+    );
+}
+
+async function runInner({ now = new Date() } = {}) {
+  const todayET = etDateString(now);
+
+  // Coverage can still be lost on an overdue visit that staff complete later.
+  // Match the annual writer's null-or-live status predicate. The existing
+  // unpriced-series class keeps its upcoming-only window below.
+  const horizon = new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 24 * 3600 * 1000);
+  const coverageCandidates = await coverageScanQuery()
+    .where(function whereLive() {
+      this.whereNull('ss.status').orWhereNotIn('ss.status', LIVE_STATUS_EXCLUSIONS);
+    })
+    .where('ss.scheduled_date', '<=', etDateString(horizon))
+    .where(function whereRecurring() {
+      this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_parent_id')
+        .orWhere('ss.prepaid_method', ANNUAL_PREPAY_METHOD).orWhereNotNull('ss.annual_prepay_term_id')
+        .orWhereExists(function hasFamily() {
+          this.select(db.raw('1')).from('scheduled_services as child')
+            .whereRaw('child.recurring_parent_id = ss.id AND child.customer_id = ss.customer_id');
+        }).orWhereExists(function hasAllocation() {
+          this.select(db.raw('1')).from('audit_log as allocation')
+            .where({ 'allocation.action': 'prepaid_series.allocated', 'allocation.resource_type': 'scheduled_service' })
+            .whereRaw('allocation.resource_id = ss.id');
+        });
+    })
     // Preserve near-term coverage alert priority while adding past backlog.
     .orderByRaw('ss.scheduled_date >= ? DESC', [todayET])
     .orderBy('ss.scheduled_date', 'asc');
@@ -543,6 +555,46 @@ async function deliverAlerts({ alerts, episodes, now, overdueUnpricedRoots, hori
   }
 }
 
+// Roots (of the given absent `unpriced-series:<root>` keys) that have a visit
+// which completed during the alert's current episode and is still unpriced
+// and uninvoiced. The episode starts at the later of the bell's created_at and
+// its rungAt (a reopen or refresh that rang), so a visit completed before the
+// bell rang last does not hold it. "Still unpriced" is the scan's own rule
+// (isUnpricedSeriesVisit on the shared coverage select, annual-prepay coverage
+// validated the same way); "uninvoiced" is no invoice in any live status,
+// linked directly or through the visit's service record. Read-only.
+async function completedUnpricedRoots(absentKeys, now) {
+  const held = new Set();
+  const roots = absentKeys.map((key) => key.slice(UNPRICED_PREFIX.length)).filter((id) => UUID_RE.test(id));
+  if (!roots.length) return held;
+  const bells = await db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [absentKeys])
+    .select(db.raw("metadata->>'dedupeKey' as dedupe_key"), 'created_at', db.raw("metadata->>'rungAt' as rung_at"));
+  const episodeStart = new Map();
+  for (const bell of bells) {
+    const root = String(bell.dedupe_key).slice(UNPRICED_PREFIX.length);
+    const starts = [bell.created_at, bell.rung_at].map((v) => (v ? new Date(v).getTime() : NaN)).filter(Number.isFinite);
+    episodeStart.set(root, Math.max(...starts, episodeStart.get(root) ?? -Infinity));
+  }
+  const completed = await coverageScanQuery()
+    .where('ss.status', 'completed')
+    .where(function inRoots() { this.whereIn('ss.id', roots).orWhereIn('ss.recurring_parent_id', roots); })
+    .select(db.raw('COALESCE(ss.completed_at, ss.updated_at) as completed_time'));
+  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
+  const { anyInvoiceLinkedToVisit } = require('./invoice');
+  for (const row of completed) {
+    const root = String(seriesRootId(row));
+    if (held.has(root) || !episodeStart.has(root)) continue;
+    if (!(new Date(row.completed_time).getTime() >= episodeStart.get(root))) continue;
+    if (!isUnpricedSeriesVisit(row)) continue;
+    if (row.prepaid_method === ANNUAL_PREPAY_METHOD && await annualPrepayCoversVisit(row, db)) continue;
+    const invoice = await anyInvoiceLinkedToVisit(db, row.id)
+      .whereNotIn('status', DEAD_INVOICE_STATUSES_FOR_HOLD).first('id');
+    if (!invoice) held.add(root);
+  }
+  return held;
+}
+
 // Episodes close pass: per class, open bells (by prefix) minus the live keys
 // are the absent ones — their problem is fixed (or, for prepay, the visit is
 // moot). Read-only against scheduled_services: it reads a visit's status and
@@ -558,8 +610,13 @@ async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, horizo
     : 0);
   let closed = 0;
 
-  const unpriced = (await absentOf(UNPRICED_PREFIX))
+  const unpricedAbsent = (await absentOf(UNPRICED_PREFIX))
     .filter((key) => !overdueUnpricedRoots.has(key.slice(UNPRICED_PREFIX.length)));
+  // A series whose alerted visit COMPLETED still unpriced and uninvoiced is
+  // the money loss the bell warned about, not a fix: it stays open until the
+  // visit is invoiced or priced (the next run then closes it).
+  const heldRoots = await completedUnpricedRoots(unpricedAbsent, now);
+  const unpriced = unpricedAbsent.filter((key) => !heldRoots.has(key.slice(UNPRICED_PREFIX.length)));
   // Priced, done, cancelled, or moved past the look-ahead window: a visit
   // that comes back into the window unpriced re-rings.
   closed += await close(unpriced, 'no longer unpriced in the look-ahead window');
@@ -604,6 +661,7 @@ module.exports = {
   hasOutOfBandPrepaidStamp,
   hasAnnualPrepaidStamp,
   seriesRootId,
+  _completedUnpricedRoots: completedUnpricedRoots,
   UPCOMING_WINDOW_DAYS,
   MAX_ALERTS_PER_RUN,
 };

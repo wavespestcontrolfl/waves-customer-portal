@@ -40,6 +40,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   serviceMatchesCoverage: jest.fn((row, type) => row.service_type === type),
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
 }));
+jest.mock('../services/invoice', () => ({ anyInvoiceLinkedToVisit: jest.fn() }));
 jest.mock('../services/irrigation-weekly-email', () => ({
   findLawnEmailAudienceGaps: jest.fn(async () => []),
   findUnstampedRecurringLawnMembers: jest.fn(async () => []),
@@ -54,6 +55,7 @@ const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled, alertEpisodesLive } = require('../config/feature-gates');
 const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+const { anyInvoiceLinkedToVisit } = require('../services/invoice');
 const { findLawnEmailAudienceGaps, findUnstampedRecurringLawnMembers } = require('../services/irrigation-weekly-email');
 const {
   runScheduleIntegrityWatchdog,
@@ -94,16 +96,25 @@ function unpricedChild(over = {}) {
 // dedupeKey to notifyAdmin's own advisory-locked dedupe) — `alertedKeys`
 // instead configures the notifyAdmin mock below to answer `deduped: true`
 // for those keys, the same contract the real service relies on.
-function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], alertedKeys = new Set() } = {}) {
+// completedRows: what the unpriced close pass's completed-visit check reads
+// (the same 'scheduled_services as ss' table, told apart by its
+// where('ss.status', 'completed')); bellRows: the standing bells' created_at /
+// rungAt it reads from 'notifications'.
+function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], completedRows = [], bellRows = [], alertedKeys = new Set() } = {}) {
   db.mockImplementation((table) => {
-    const rows = table === 'scheduled_services' ? staleRows
-      : table === 'scheduled_services as ss' ? coverageRows
-        : table === 'annual_prepay_terms' ? coveredTerms : null;
+    let completedCheck = false;
     const c = {};
-    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
+    for (const m of ['whereIn', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
       c[m] = jest.fn(() => c);
     }
-    c.then = (res, rej) => Promise.resolve(rows || []).then(res, rej);
+    c.where = jest.fn((...args) => { if (args[0] === 'ss.status' && args[1] === 'completed') completedCheck = true; return c; });
+    c.then = (res, rej) => {
+      const rows = table === 'scheduled_services' ? staleRows
+        : table === 'scheduled_services as ss' ? (completedCheck ? completedRows : coverageRows)
+          : table === 'annual_prepay_terms' ? coveredTerms
+            : table === 'notifications' ? bellRows : null;
+      return Promise.resolve(rows || []).then(res, rej);
+    };
     return c;
   });
   NotificationService.notifyAdmin.mockImplementation(async (_category, _title, _body, opts) => (
@@ -124,7 +135,19 @@ beforeEach(() => {
   NotificationService.raiseAdminAlertWithReopen.mockImplementation(delegatingRaise);
   NotificationService.openAdminAlertKeys.mockImplementation(async () => []);
   NotificationService.closeAdminAlertKeys.mockImplementation(async (_conn, keys) => keys.length);
+  invoicesByVisit({});
 });
+
+// anyInvoiceLinkedToVisit(db, visitId) is a builder: the check adds
+// whereNotIn(status, dead statuses) and first(). `byVisit` maps a visit id to
+// its invoice rows; the stub applies the status filter the way SQL would.
+function invoicesByVisit(byVisit) {
+  anyInvoiceLinkedToVisit.mockImplementation((_conn, visitId) => ({
+    whereNotIn: (_col, dead) => ({
+      first: async () => (byVisit[visitId] || []).find((inv) => !dead.includes(inv.status)),
+    }),
+  }));
+}
 
 describe('classifiers', () => {
   test('rowHasPrice: either price field counts; zero and null do not', () => {
@@ -728,4 +751,133 @@ describe('alertEpisodesLive (the real reader)', () => {
       if (value === undefined) delete process.env.ALERT_EPISODES; else process.env.ALERT_EPISODES = value;
       expect(real()).toBe(live);
     });
+});
+
+
+describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds its bell open', () => {
+  const ROOT = '0000000a-0000-4000-8000-000000000000';
+  const CHILD = '0000000b-0000-4000-8000-000000000000';
+  const SIBLING_ROOT = '0000000c-0000-4000-8000-000000000000';
+  const KEY = `unpriced-series:${ROOT}`;
+  const BELL = { dedupe_key: KEY, created_at: '2026-08-01T12:00:00Z', rung_at: null };
+  const completed = (over = {}) => unpricedChild({
+    id: CHILD, status: 'completed', recurring_parent_id: ROOT, service_date: '2026-08-03',
+    completed_time: '2026-08-03T15:00:00Z', ...over,
+  });
+  const openKeys = (...keys) => NotificationService.openAdminAlertKeys.mockImplementation(async (_conn, prefix) => keys.filter((k) => k.startsWith(prefix)));
+  const closedKeys = () => NotificationService.closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys);
+  const run = async (rows, extra = {}) => {
+    makeDbMock({ completedRows: rows, bellRows: [BELL], ...extra });
+    openKeys(KEY);
+    return runInner({ now: NOW });
+  };
+
+  test('completed unpriced + uninvoiced: the bell stays open, and a closed-by-absence sibling key still closes', async () => {
+    openKeys(KEY, `unpriced-series:${SIBLING_ROOT}`);
+    makeDbMock({ completedRows: [completed()], bellRows: [BELL, { ...BELL, dedupe_key: `unpriced-series:${SIBLING_ROOT}` }] });
+    const result = await runInner({ now: NOW });
+    expect(closedKeys()).toEqual([`unpriced-series:${SIBLING_ROOT}`]);
+    expect(result.closed).toBe(1);
+    // The check reads the shared coverage select restricted to completed visits in the alerted roots.
+    const scan = db.mock.results.map((r) => r.value).find((c) => c.where.mock.calls.some(([a, b]) => a === 'ss.status' && b === 'completed'));
+    expect(scan.leftJoin).toHaveBeenCalledWith('invoices as first_application_invoice', 'first_application_invoice.id', 'ss.first_application_invoice_id');
+    expect(scan.whereIn).not.toHaveBeenCalledWith('ss.id', expect.anything()); // root membership lives in the where(fn) group
+  });
+
+  test('a completed visit invoiced in any live status is closed; a void/cancelled invoice does not count', async () => {
+    invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: 'draft' }] });
+    await run([completed()]);
+    expect(closedKeys()).toEqual([KEY]);
+
+    NotificationService.closeAdminAlertKeys.mockClear();
+    invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: 'void' }, { id: 'inv-2', status: 'cancelled' }, { id: 'inv-3', status: 'canceled' }] });
+    await run([completed()]);
+    expect(closedKeys()).toEqual([]);
+  });
+
+  test('the check asks the invoice module for the visit\'s linked invoices (direct or via service record)', async () => {
+    await run([completed()]);
+    expect(anyInvoiceLinkedToVisit).toHaveBeenCalledWith(db, CHILD);
+  });
+
+  test('completed but priced (own row or parent) is closed', async () => {
+    await run([completed({ estimated_price: '99.45' })]);
+    expect(closedKeys()).toEqual([KEY]);
+    NotificationService.closeAdminAlertKeys.mockClear();
+    await run([completed({ parent_primary_line_price: '72.00' })]);
+    expect(closedKeys()).toEqual([KEY]);
+  });
+
+  test('covered by a live combined first-application invoice is closed', async () => {
+    await run([completed({ recurring_parent_id: null, id: ROOT, first_application_invoice_id: 'inv-1', first_application_invoice_status: 'sent' })]);
+    expect(closedKeys()).toEqual([KEY]);
+  });
+
+  test('completed before the episode started is closed; at or after the bell\'s last ring holds', async () => {
+    await run([completed({ completed_time: '2026-07-30T15:00:00Z' })]);
+    expect(closedKeys()).toEqual([KEY]);
+
+    // Exactly at the start holds (>=).
+    NotificationService.closeAdminAlertKeys.mockClear();
+    await run([completed({ completed_time: BELL.created_at })]);
+    expect(closedKeys()).toEqual([]);
+
+    // A reopen re-rang the bell later (rungAt): the episode starts there, so an older completion no longer holds.
+    makeDbMock({ completedRows: [completed({ completed_time: '2026-08-03T15:00:00Z' })],
+      bellRows: [{ ...BELL, rung_at: '2026-08-04T10:00:00Z' }] });
+    openKeys(KEY);
+    await runInner({ now: NOW });
+    expect(closedKeys()).toEqual([KEY]);
+  });
+
+  test('annual-prepay covered (validator confirms) is closed; an unconfirmed stamp holds', async () => {
+    const stamped = completed({ prepaid_amount: '559.20', prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1' });
+    annualPrepayCoversVisit.mockResolvedValueOnce(true);
+    await run([stamped]);
+    expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: CHILD }), db);
+    expect(closedKeys()).toEqual([KEY]);
+
+    NotificationService.closeAdminAlertKeys.mockClear();
+    annualPrepayCoversVisit.mockResolvedValue(false);
+    await run([stamped]);
+    annualPrepayCoversVisit.mockResolvedValue(false);
+    expect(closedKeys()).toEqual([]);
+  });
+
+  test('only the alerted series holds: a completed unpriced visit of another root, or a booster child, does not', async () => {
+    // Booster child (is_recurring=false under the root) is its own subject.
+    await run([completed({ is_recurring: false })]);
+    expect(closedKeys()).toEqual([KEY]);
+    NotificationService.closeAdminAlertKeys.mockClear();
+    await run([completed({ recurring_parent_id: SIBLING_ROOT })]);
+    expect(closedKeys()).toEqual([KEY]);
+  });
+
+  test('a run with nothing absent, or only overdue-held roots, never reads completed visits', async () => {
+    makeDbMock({ coverageRows: [unpricedChild({ id: ROOT, recurring_parent_id: null, service_date: '2026-07-30' })] });
+    openKeys(KEY);
+    await runInner({ now: NOW });
+    expect(anyInvoiceLinkedToVisit).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalledWith('notifications');
+  });
+});
+
+describe('raiseAdminAlertWithReopen row lock', () => {
+  test('the standing-row read takes a row lock (forUpdate) inside the transaction after the advisory lock, and notifyAdmin runs on that transaction', async () => {
+    const real = jest.requireActual('../services/notification-service');
+    const order = [];
+    const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain) };
+    chain.forUpdate = jest.fn(() => { order.push('forUpdate'); return chain; });
+    chain.first = jest.fn(async () => { order.push('first'); return { metadata: { autoCleared: true, recurrenceGeneration: 1 } }; });
+    const trx = jest.fn(() => chain);
+    trx.raw = jest.fn(async () => { order.push('advisory'); });
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const notifyAdmin = jest.fn(async () => ({ id: 1, deduped: true, refreshed: true, rung: true }));
+    const result = await real.raiseAdminAlertWithReopen.call({ notifyAdmin }, 'alert', 't', 'b', { dedupeKey: 'k', dedupeVersion: 'v', metadata: { dedupeKey: 'k' } });
+    expect(order).toEqual(['advisory', 'forUpdate', 'first']);
+    expect(chain.forUpdate).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][3]).toMatchObject({ trx, dedupeVersion: 'v::g2', refreshOnDedupe: true, metadata: { autoCleared: false, recurrenceGeneration: 2 } });
+    expect(result.rang).toBe(true);
+    delete db.transaction;
+  });
 });

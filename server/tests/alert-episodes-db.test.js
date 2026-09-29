@@ -11,6 +11,9 @@
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
+// Both suites share the pool; it closes once, after the last of them.
+afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
+
 maybeDescribe('alert episodes (live Postgres)', () => {
   let db;
   let NotificationService;
@@ -23,7 +26,6 @@ maybeDescribe('alert episodes (live Postgres)', () => {
   });
   afterAll(async () => {
     await db('notifications').whereRaw("starts_with(metadata->>'dedupeKey', ?)", [RUN]).del();
-    await db.destroy();
   });
 
   const bell = async (name, { read = false, meta = {} } = {}) => {
@@ -123,5 +125,114 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect((await raise('versioned', { dedupeVersion: 'ev1', refreshOnDedupe: true })).rang).toBe(false);
     expect((await raise('versioned', { dedupeVersion: 'ev2', refreshOnDedupe: true })).rang).toBe(true);
     expect((await get(row.id)).metadata.dedupeVersion).toBe('ev2::g1');
+  });
+
+  test('a dismissal racing the watchdog\'s refresh is never overwritten back to unread (the standing-row read takes a row lock)', async () => {
+    const row = await bell('race', { meta: { dedupeVersion: 'ev1', autoCleared: true } });
+    await db('notifications').where({ id: row.id }).update({ read_at: new Date('2026-09-01T12:00:00Z') });
+    const trx = await db.transaction();
+    try {
+      // The wrapper reopens the row (rung) inside trx and holds its row lock until commit.
+      const raised = await raise('race', { dedupeVersion: 'ev1', refreshOnDedupe: true, trx });
+      expect(raised.rang).toBe(true);
+      // A person dismisses it now: queued behind the lock, not lost.
+      let dismissed = false;
+      const dismissal = NotificationService.markReadAdmin(row.id).then((r) => { dismissed = true; return r; });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(dismissed).toBe(false);
+      await trx.commit();
+      expect(await dismissal).toBe(true);
+    } catch (err) {
+      if (!trx.isCompleted()) await trx.rollback();
+      throw err;
+    }
+    // The dismissal landed on top of the refresh.
+    expect((await get(row.id)).read_at).not.toBeNull();
+  });
+});
+
+/**
+ * The watchdog's completed-visit check for the unpriced-series close pass, on
+ * the real shared coverage select and the real invoice linkage (direct, or
+ * through the visit's service record): a visit that completed during the
+ * alert's episode, is still unpriced and has no live invoice holds the bell
+ * open.
+ */
+maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)', () => {
+  let db;
+  let watchdog;
+  const made = { invoices: [], service_records: [], notifications: [], scheduled_services: [], customers: [] };
+  const RUN = `h${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const NOW = new Date('2026-09-29T16:00:00Z');
+  let n = 0;
+
+  beforeAll(() => {
+    db = require('../models/db');
+    watchdog = require('../services/schedule-integrity-watchdog');
+  });
+  afterAll(async () => {
+    for (const table of ['invoices', 'service_records', 'notifications', 'scheduled_services', 'customers']) {
+      if (made[table].length) await db(table).whereIn('id', made[table]).del();
+    }
+  });
+
+  const insert = async (table, row) => {
+    const [r] = await db(table).insert(row).returning('*');
+    made[table].push(r.id);
+    return r;
+  };
+  // A series: unpriced root + a completed, unpriced child, and the root's bell.
+  const series = async ({ completedAt = '2026-09-28T15:00:00Z', childOver = {}, bellCreatedAt = '2026-09-25T12:00:00Z', rungAt = null } = {}) => {
+    n += 1;
+    const customer = await insert('customers', { first_name: 'Hold', phone: `+1555555${String(8000 + n)}` });
+    const root = await insert('scheduled_services', { customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'General Pest Control', status: 'pending', is_recurring: true });
+    const child = await insert('scheduled_services', {
+      customer_id: customer.id, scheduled_date: '2026-09-28', service_type: 'General Pest Control', status: 'completed',
+      is_recurring: true, recurring_parent_id: root.id, completed_at: completedAt, ...childOver,
+    });
+    const key = `unpriced-series:${root.id}`;
+    await insert('notifications', {
+      recipient_type: 'admin', category: 'alert', title: RUN, created_at: bellCreatedAt,
+      metadata: JSON.stringify({ dedupeKey: key, ...(rungAt ? { rungAt } : {}) }),
+    });
+    return { customer, root, child, key };
+  };
+  const held = async (s) => [...await watchdog._completedUnpricedRoots([s.key], NOW)];
+
+  test('completed, unpriced, no invoice: held', async () => {
+    const s = await series();
+    expect(await held(s)).toEqual([s.root.id]);
+  });
+
+  test('an invoice through the visit\'s service record, or directly on the visit, releases it; a void one does not', async () => {
+    const viaRecord = await series();
+    const record = await insert('service_records', { customer_id: viaRecord.customer.id, service_date: '2026-09-28', service_type: 'General Pest Control', scheduled_service_id: viaRecord.child.id });
+    const inv = await insert('invoices', { customer_id: viaRecord.customer.id, token: `${RUN}-a`, invoice_number: `${RUN}-a`, service_record_id: record.id, status: 'void' });
+    expect(await held(viaRecord)).toEqual([viaRecord.root.id]);
+    await db('invoices').where({ id: inv.id }).update({ status: 'sent' });
+    expect(await held(viaRecord)).toEqual([]);
+
+    const direct = await series();
+    await insert('invoices', { customer_id: direct.customer.id, token: `${RUN}-b`, invoice_number: `${RUN}-b`, scheduled_service_id: direct.child.id, status: 'draft' });
+    expect(await held(direct)).toEqual([]);
+  });
+
+  test('priced (own row or parent), completed before the episode, or episode restarted by a later ring: released', async () => {
+    expect(await held(await series({ childOver: { estimated_price: 99 } }))).toEqual([]);
+    const pricedParent = await series();
+    await db('scheduled_services').where({ id: pricedParent.root.id }).update({ primary_line_price: 72 });
+    expect(await held(pricedParent)).toEqual([]);
+    expect(await held(await series({ completedAt: '2026-09-24T15:00:00Z' }))).toEqual([]);
+    expect(await held(await series({ rungAt: '2026-09-29T10:00:00Z' }))).toEqual([]);
+  });
+
+  test('a first-application combined invoice covering the visit releases it; a void one does not', async () => {
+    const s = await series();
+    const covering = await insert('invoices', { customer_id: s.customer.id, token: `${RUN}-c`, invoice_number: `${RUN}-c`, status: 'sent' });
+    await db('scheduled_services').where({ id: s.child.id }).update({ first_application_invoice_id: covering.id });
+    expect(await held(s)).toEqual([]);
+    await db('invoices').where({ id: covering.id }).update({ status: 'void' });
+    expect(await held(s)).toEqual([s.root.id]);
+    await db('scheduled_services').where({ id: s.child.id }).update({ first_application_invoice_id: null });
   });
 });

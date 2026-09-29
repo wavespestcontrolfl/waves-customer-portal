@@ -895,8 +895,15 @@ const NotificationService = {
     if (!dedupeKey) throw new Error('raiseAdminAlertWithReopen requires a dedupeKey');
     const run = async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+      // .forUpdate(): the advisory lock is cooperative — markReadAdmin (a
+      // person's dismissal) never takes it — so the standing row is
+      // row-locked here, exactly as first-application-sibling-split.js's
+      // raise does. A dismissal then either commits and is visible in this
+      // read, or queues behind this whole transaction and lands on top of
+      // the refresh; the refresh can never overwrite a dismissal back to
+      // unread.
       const existing = await trx('notifications').where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('metadata');
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('metadata');
       let existingMeta = existing?.metadata;
       if (typeof existingMeta === 'string') { try { existingMeta = JSON.parse(existingMeta); } catch { existingMeta = null; } }
       const priorGeneration = Number(existingMeta?.recurrenceGeneration) || 0;
