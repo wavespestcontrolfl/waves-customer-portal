@@ -32,6 +32,11 @@ jest.mock('../services/sms-shadow-drafter', () => ({
     );
     return amounts.some((a) => !authorized.has(a));
   }),
+  // Codex round-3 P2: generateLlmReviewDraft re-runs validateReserviceOffer
+  // to persist the promised re-service lane(s), if any, on the review
+  // card's input_snapshot. None of this file's fixtures promise a
+  // re-service, so the stub reports no promise.
+  validateReserviceOffer: jest.fn(() => ({ ok: true, violations: [], promisedLanes: undefined })),
 }));
 
 jest.mock('../services/context-aggregator', () => ({

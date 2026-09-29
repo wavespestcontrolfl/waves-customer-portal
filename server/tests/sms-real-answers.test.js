@@ -1016,6 +1016,86 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(result.factsBlock).toBe('FROZEN FACTS BLOCK');
   });
+
+  // Codex round-3 P2: "they're back" (the PEST REPORTS bullet's own example)
+  // names no pest noun, so it dodges PEST_REPORT_TEXT_RE — it must still
+  // fetch OPEN TIMES when the customer's own context shows a pest
+  // relationship, so the "not eligible" branch has real times to offer.
+  test('gate on: a bare pronoun return ("they\'re back") with a completed pest-family visit on file fetches OPEN TIMES', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
+    }));
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: {
+        summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [],
+        serviceHistory: [{ type: 'General Pest Control' }],
+      },
+      inboundMessage: "they're back",
+      intent: { intent: 'general_customer_sms_needs_review' },
+      schedulingIntent: false,
+      city: 'Venice',
+      voiceProfile: null,
+    });
+
+    // serviceType is resolved from the SAME serviceHistory entry by the
+    // existing service-identity ladder (unnamedServiceIdentity's
+    // "last_completed" branch) — unrelated to this fix, but real, so the
+    // assertion reflects it.
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'General Pest Control' });
+    expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
+  });
+
+  test('gate on: a bare pronoun return ("they\'re back") with NO pest relationship on file does not fetch OPEN TIMES', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn();
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], serviceHistory: [] },
+      inboundMessage: "they're back",
+      intent: { intent: 'general_customer_sms_needs_review' },
+      schedulingIntent: false,
+      city: 'Venice',
+      voiceProfile: null,
+    });
+
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(result.factsBlock).not.toContain('OPEN TIMES');
+  });
+
+  test('gate on: a bare pronoun return with a recurring plan tier (no serviceHistory) still fetches OPEN TIMES', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
+    }));
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: { summary: 'Test customer', customer: { id: 'cust-1', tier: 'Gold' }, upcomingServices: [] },
+      inboundMessage: 'still there',
+      intent: { intent: 'general_customer_sms_needs_review' },
+      schedulingIntent: false,
+      city: 'Venice',
+      voiceProfile: null,
+    });
+
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
+    expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
+  });
 });
 
 describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version stamps per gate', () => {
@@ -1738,6 +1818,84 @@ describe('free re-service is an entitlement resolved through the existing mechan
     expect(reserviceLanesForCustomer).toHaveBeenCalled();
   });
 
+  // Codex round-3 P2: liveReserviceLanes (fetchReserviceLanes's underlying
+  // live-lane check, also used by reservicePromiseStillEligible below) must
+  // consult the live mechanism with NO dependency on GATE_SMS_REAL_ANSWERS —
+  // a send-time recheck must still revalidate an already-drafted promise
+  // even if the gate were flipped off in between.
+  test('liveReserviceLanes: consults the mechanism even with GATE_SMS_REAL_ANSWERS off', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const { drafter, reserviceLanesForCustomer } = loadWith({ lanes: ['pest'] });
+    await expect(drafter.liveReserviceLanes('cust-1')).resolves.toEqual(['pest']);
+    expect(reserviceLanesForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }));
+  });
+
+  test('liveReserviceLanes fails closed the same way fetchReserviceLanes does', async () => {
+    await expect(loadWith({ selfServe: false }).drafter.liveReserviceLanes('cust-1')).resolves.toEqual([]);
+    await expect(loadWith({}).drafter.liveReserviceLanes(null)).resolves.toEqual([]);
+    await expect(loadWith({ throws: true }).drafter.liveReserviceLanes('cust-1')).resolves.toEqual([]);
+  });
+
+  // Codex round-3 P2: send-time revalidation of an already-reviewed/queued
+  // re-service promise — agentDecisionSendBlockReason and the scheduler's
+  // queued-send recheck both call this.
+  describe('reservicePromiseStillEligible — send-time revalidation of a re-service promise', () => {
+    const PROMISE_BODY = "Good news — we'll send your free re-service link now.";
+
+    test('no re-service promise in the outgoing body → null (nothing to revalidate)', async () => {
+      const { drafter } = loadWith({ lanes: ['pest'] });
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: 'Your balance is $95, due at the next visit.', customerId: 'cust-1', promisedLanes: ['pest'],
+      })).resolves.toBeNull();
+    });
+
+    test('promised lane still live-eligible → null', async () => {
+      const { drafter } = loadWith({ lanes: ['pest', 'lawn'] });
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: PROMISE_BODY, customerId: 'cust-1', promisedLanes: ['pest'],
+      })).resolves.toBeNull();
+    });
+
+    test('promised lane no longer live-eligible → blocks with a reason naming it', async () => {
+      const { drafter } = loadWith({ lanes: ['lawn'] }); // pest dropped since drafting
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: PROMISE_BODY, customerId: 'cust-1', promisedLanes: ['pest'],
+      })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+    });
+
+    test('no promised lane recorded (legacy/missing snapshot) → fails CLOSED', async () => {
+      const { drafter } = loadWith({ lanes: ['pest'] });
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: PROMISE_BODY, customerId: 'cust-1', promisedLanes: null,
+      })).resolves.toMatch(/no promised re-service lane/);
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: PROMISE_BODY, customerId: 'cust-1', promisedLanes: [],
+      })).resolves.toMatch(/no promised re-service lane/);
+    });
+
+    test('no customer on record → fails CLOSED', async () => {
+      const { drafter } = loadWith({ lanes: ['pest'] });
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: PROMISE_BODY, customerId: null, promisedLanes: ['pest'],
+      })).resolves.toMatch(/no customer on record/);
+    });
+
+    test('a live lookup error fails CLOSED (liveReserviceLanes\'s own fail-closed propagates)', async () => {
+      const { drafter } = loadWith({ throws: true });
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: PROMISE_BODY, customerId: 'cust-1', promisedLanes: ['pest'],
+      })).resolves.toMatch(/no longer eligible/);
+    });
+
+    test('revalidates even with the gate off — a stale reservice promise from before the gate flipped still blocks', async () => {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      const { drafter } = loadWith({ lanes: ['lawn'] });
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: PROMISE_BODY, customerId: 'cust-1', promisedLanes: ['pest'],
+      })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+    });
+  });
+
   test('validateReserviceOffer: a free-visit offer is a violation unless the facts say eligible', () => {
     const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
     const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
@@ -1768,6 +1926,29 @@ describe('free re-service is an entitlement resolved through the existing mechan
     expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'ants', intendedActions: [] }).ok).toBe(false);
     expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'ants', intendedActions: [{ type: 'escalate' }] }).ok).toBe(false); // escalate with the WRONG/no note
     expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'ants', intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(true);
+  });
+
+  // Codex round-3 P2: the resolved lane(s) ride the ok:true result so the
+  // caller can persist them (reserviceLanesSnapshot) for a later send-time
+  // recheck (reservicePromiseStillEligible) — never re-derived from a
+  // possibly-edited outgoing body.
+  test('validateReserviceOffer: an ok result carries the resolved promisedLanes; a non-promise reply carries none', () => {
+    const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+    const eligible = `X\n${reserviceFactLine(['pest', 'lawn'])}\nBILLING:`;
+    expect(validateReserviceOffer({
+      reply: 'We will come back for a free pest re-service.', factsBlock: eligible, inboundMessage: 'ants',
+      intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }],
+    }).promisedLanes).toEqual(['pest']);
+    // Generic offer with no lane named in the reply resolves from the
+    // inbound text (Codex round-1 P2 (d))'s reported lane.
+    expect(validateReserviceOffer({
+      reply: "Good news — we'll send you the free re-service link now.", factsBlock: eligible, inboundMessage: 'the ants are back',
+      intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }],
+    }).promisedLanes).toEqual(['pest']);
+    // No promise at all → violations: [] and no lanes to persist.
+    const noPromise = validateReserviceOffer({ reply: 'Thanks for reaching out!', factsBlock: eligible });
+    expect(noPromise.ok).toBe(true);
+    expect(noPromise.promisedLanes).toBeUndefined();
   });
 
   // Codex round-1 P2 (d): a GENERIC offer (no lane named in the reply) must
@@ -1836,6 +2017,41 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(isReserviceOfferPromise('We can come back for a free re-service.')).toBe(true);
       expect(isReserviceOfferPromise('Your pest re-service is covered; we will text the link now.')).toBe(true);
       expect(isReserviceOfferPromise('Your balance is $95, due at the next visit.')).toBe(false);
+    });
+  });
+
+  // Codex round-3 P2: "revisit" as an ORDINARY business-admin verb ("revisit
+  // your options/the schedule/an estimate") tripped RESERVICE_COVERAGE_RE
+  // whenever it landed near "link" — never a promise to send anyone back
+  // out. Fixed by requiring "revisit" to have no non-visit administrative
+  // object; a bare "revisit" (no object) or one governing a visit/pest-
+  // shaped noun still counts (regression coverage for the round-2 fixture
+  // that legitimately relies on the bare form).
+  describe('isReserviceOfferPromise / RESERVICE_COVERAGE_RE — "revisit" false positives (Codex round-3 P2)', () => {
+    const { isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
+
+    test.each([
+      'Use the estimate link to revisit your options.',
+      'Check your portal link if you would like to revisit your account details.',
+      'Log into the portal link to revisit your account history.',
+      'We can revisit the schedule next week if that works better.',
+      'Feel free to revisit your estimate any time.',
+    ])('%s → NOT detected as a re-service promise', (reply) => {
+      expect(isReserviceOfferPromise(reply)).toBe(false);
+    });
+
+    test('a genuine re-service promise phrased with "revisit" still counts (regression: round-2 fixture)', () => {
+      expect(isReserviceOfferPromise('Your revisit is included — the booking link is on its way.')).toBe(true);
+    });
+
+    test('"revisit" governing a visit/pest-shaped noun still counts', () => {
+      expect(isReserviceOfferPromise('We can schedule a revisit visit for free.')).toBe(true);
+      expect(isReserviceOfferPromise('No charge to revisit the property this week.')).toBe(true);
+    });
+
+    test('other re-service nouns are unaffected by the "revisit" narrowing', () => {
+      expect(isReserviceOfferPromise('Your pest re-service is covered; we will text the link now.')).toBe(true);
+      expect(isReserviceOfferPromise('No charge for the re-service — come back out this week.')).toBe(true);
     });
   });
 });
@@ -1942,6 +2158,54 @@ describe('PEST_REPORT_TEXT_RE — the pest-report signal for the OPEN TIMES fetc
   // pointless even though harmless.
   test('negative control: a gratitude close naming a pest but no activity verb does not fire', () => {
     expect(PEST_REPORT_TEXT_RE.test('thanks, no bugs since!')).toBe(false);
+  });
+});
+
+// Codex round-3 P2: "they're back" — the PEST REPORTS bullet's OWN example —
+// names no pest noun at all, so PEST_REPORT_TEXT_RE structurally (and, by
+// design per the test above, correctly) does not fire on it alone. This is
+// the context-gated branch that closes that specific gap.
+describe('PRONOUN_RETURN_TEXT_RE + customerHasPestRelationship — the pronoun-only pest-report signal (Codex round-3 P2)', () => {
+  const { PRONOUN_RETURN_TEXT_RE, customerHasPestRelationship } = require('../services/sms-shadow-drafter');
+
+  test('matches bare pronoun/return phrasings with no pest noun', () => {
+    for (const text of [
+      "they're back", 'it\'s back', 'they came back', 'they come back',
+      'they returned', 'back again', 'still there', 'still here',
+      "They're Back!",
+    ]) {
+      expect(PRONOUN_RETURN_TEXT_RE.test(text)).toBe(true);
+    }
+  });
+
+  test('does not match unrelated "back"/"again" phrasings with no return-of-pests meaning', () => {
+    for (const text of ['call me back', "I'll be back tomorrow", 'talk to you again', 'text me back when you can', 'see you again soon']) {
+      expect(PRONOUN_RETURN_TEXT_RE.test(text)).toBe(false);
+    }
+  });
+
+  describe('customerHasPestRelationship', () => {
+    test('true for any recurring plan tier on file', () => {
+      expect(customerHasPestRelationship({ customer: { tier: 'Gold' } })).toBe(true);
+    });
+
+    test('true for a completed pest-family visit in serviceHistory', () => {
+      expect(customerHasPestRelationship({ serviceHistory: [{ type: 'General Pest Control' }] })).toBe(true);
+      expect(customerHasPestRelationship({ serviceHistory: [{ type: 'WaveGuard Pest' }] })).toBe(true);
+    });
+
+    test('false for a rodent/termite/mosquito/tree/shrub-only history with no tier', () => {
+      expect(customerHasPestRelationship({ serviceHistory: [{ type: 'Rodent Pest Control' }] })).toBe(false);
+      expect(customerHasPestRelationship({ serviceHistory: [{ type: 'Termite Bait Stations' }] })).toBe(false);
+      expect(customerHasPestRelationship({ serviceHistory: [{ type: 'Mosquito Misting' }] })).toBe(false);
+      expect(customerHasPestRelationship({ serviceHistory: [{ type: 'Tree & Shrub Care' }] })).toBe(false);
+    });
+
+    test('false with no history and no tier', () => {
+      expect(customerHasPestRelationship({})).toBe(false);
+      expect(customerHasPestRelationship(null)).toBe(false);
+      expect(customerHasPestRelationship({ serviceHistory: [] })).toBe(false);
+    });
   });
 });
 

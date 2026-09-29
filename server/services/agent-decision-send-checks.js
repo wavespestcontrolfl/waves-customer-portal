@@ -67,6 +67,28 @@ async function amountsBlock({ decision, outgoingBody }) {
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 
+// RE-SERVICE PROMISE (Codex round-3 P2): a reviewed card can promise a free
+// re-service and then sit — in the composer, or in the scheduled-send
+// window — long enough for the customer's eligibility to change (their
+// plan cancelled, they already used the re-service through another
+// channel) before it actually fires. Revalidates against LIVE eligibility
+// via reservicePromiseStillEligible (reservice-scheduler.js, the same
+// mechanism the composer's /reservice-link route uses), keyed on the
+// lane(s) validateReserviceOffer resolved at DRAFT time (input_snapshot's
+// reservice_lanes_snapshot) — never re-derived from the (possibly edited)
+// outgoing body, and fails closed on no snapshot, no customer, or a lookup
+// error.
+async function reserviceBlock({ decision, outgoingBody }) {
+  const { reservicePromiseStillEligible } = require('./sms-shadow-drafter');
+  const snapshot = parseInputSnapshot(decision.input_snapshot);
+  const reason = await reservicePromiseStillEligible({
+    outgoingBody,
+    customerId: decision.customer_id,
+    promisedLanes: snapshot?.reservice_lanes_snapshot || null,
+  });
+  return reason ? `re-service promise unsendable (${reason})` : null;
+}
+
 /**
  * Returns null when the body may go out, else a short reason string the
  * caller logs before superseding the decision.
@@ -74,7 +96,8 @@ async function amountsBlock({ decision, outgoingBody }) {
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
     || followupBlock({ decision, outgoingBody })
-    || (await amountsBlock({ decision, outgoingBody }));
+    || (await amountsBlock({ decision, outgoingBody }))
+    || (await reserviceBlock({ decision, outgoingBody }));
 }
 
 module.exports = { agentDecisionSendBlockReason, parseInputSnapshot };
