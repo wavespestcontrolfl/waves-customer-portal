@@ -253,6 +253,7 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
   const searches = []; // { query, domain, closestTool, surfaced:Set, relatedToolRan }
   const unknownTools = new Set();
   const refusedCases = new Map(); // registered tool -> its own unsupported-case message
+  let toolBroke = false; // a genuine tool failure this request (Tool Health's, not a gap)
 
   function discovery(input, result) {
     const status = result?.status;
@@ -277,6 +278,8 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
       // revision). Keep the tool's own description of the latter.
       if (isRegisteredTool(name)) refusedCases.set(name, result.error || 'This case is not supported');
       else unknownTools.add(name);
+    } else {
+      toolBroke = true;
     }
   }
 
@@ -305,6 +308,9 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
       if (!gapReportsEnabled() || !DECLINE_RE.test(String(reply || ''))) return;
       const signals = pendingSignals();
       if (!signals.length) {
+        // A decline after a tool broke is an outage talking, not a missing
+        // feature — the failure is already in tool_health_events.
+        if (toolBroke) return;
         const asked = cleanText(ask);
         if (asked) await writeGapRows([{ source, kind: 'missing_capability', summary: asked,
           attempted: 'The bar declined; no capability search ran' }]);

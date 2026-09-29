@@ -74,19 +74,20 @@ anywhere in this list):
   discovery loop to sample, so `flush()` takes an extra `ask` (the
   operator's own request text): a decline with no signals collected records
   `ask` itself, trimmed, with `attempted: 'The bar declined; no capability
-  search ran'`. A decline that did collect signals is unaffected — `ask` is
+  search ran'` — unless a tool genuinely failed on that request (an outage,
+  already in Tool Health). A decline that did collect signals is unaffected — `ask` is
   ignored whenever there is anything to record already.
 - `texting-ai` — `recordGap()` called from `escalate()` in
   `services/ai-assistant/assistant.js` and `managed-assistant.js`, only when
-  the caller passes `{ gap: true }`: the model's own escalate call in
-  `assistant.js` (the keyword pre-filter has already routed cancellations,
-  reschedules, complaints, refunds and manager requests to staff), and the
-  managed agent's `unsupported_or_uncertain` category. The keyword
-  classifier plays no part.
+  the caller passes `{ gap: true }`. Today that is only the managed agent's
+  `unsupported_or_uncertain` category; the older assistant's escalate tool
+  has no category to tell a missing feature from a staff workflow, so it
+  never records. The keyword classifier plays no part.
 - `phone-agent` — `recordGap()` called from Sandy's human handoff
   (`voice-agent/relay-transfer.js`, right after a confirmed
-  `transfer_to_office`), except on the sandbox and on the provider-failure
-  recovery transfer (`RECOVERY_INTENT`). Tool timeouts and model-provider failures are not
+  `transfer_to_office`), except on the sandbox and when anything broke on
+  the call (the provider-failure recovery transfer, `RECOVERY_INTENT`, or
+  any failed tool in the handoff packet). Tool timeouts and model-provider failures are not
   recorded: slow or broken tools are Tool Health's job, not a missing
   feature. The call fires and forgets (`recordGap(...).catch(() => {})`) so
   a write, slow or failed, never touches the live call.

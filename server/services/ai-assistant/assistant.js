@@ -244,9 +244,7 @@ class WavesAssistant {
         for (const toolUse of toolUses) {
           // Check if it's an escalation
           if (toolUse.name === 'escalate') {
-            // The model's own escalate call (the keyword pre-filter above has already
-            // routed the by-design staff topics) is the gap-report signal.
-            const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation', { gap: true });
+            const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation');
             return escResult;
           }
 

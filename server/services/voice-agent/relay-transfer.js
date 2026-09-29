@@ -311,10 +311,13 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   if (noContext) ringNoContextBell(ctx, facts);
   // Gap reports (server/services/agent-gap-reports.js): a live human handoff
   // is Sandy's own admission she couldn't finish it. Not on the sandbox (a
-  // dry run), and not the provider-failure recovery transfer (an outage is
-  // Tool Health's, not a missing feature). Fire-and-forget — never on the
-  // hot path that just spoke and ended the relay leg.
-  if (ctx.sandbox !== true && input.intent !== RECOVERY_INTENT) {
+  // dry run), and not when anything broke on the call — the provider-failure
+  // recovery transfer, or any tool that failed before a model-chosen
+  // transfer: an outage is Tool Health's, not a missing feature.
+  // Fire-and-forget — never on the hot path that just spoke and ended the
+  // relay leg.
+  const somethingBroke = input.intent === RECOVERY_INTENT || packet.tools.some((tool) => !tool.ok);
+  if (ctx.sandbox !== true && !somethingBroke) {
     recordGap({ source: 'phone-agent', summary: packet.summary || packet.intent || 'Caller requested a transfer',
       attempted: 'Handed to the office' }).catch(() => {});
   }

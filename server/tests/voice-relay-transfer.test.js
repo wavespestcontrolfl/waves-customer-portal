@@ -112,9 +112,16 @@ describe('executeTool transfer_to_office', () => {
     expect(ctx.say).toHaveBeenCalledWith(expect.stringMatching(/connect you with a Waves team member/));
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
     expect(triggerNotification).not.toHaveBeenCalled();
-    // Gap reports (server/services/agent-gap-reports.js): a confirmed human
-    // handoff records what the caller wanted, fire-and-forget.
-    expect(mockRecordGap).toHaveBeenCalledWith({ source: 'phone-agent', summary: p.summary, attempted: 'Handed to the office' });
+    // Gap reports: get_invoice_history failed on this call, so the handoff is
+    // an outage talking — no gap.
+    expect(mockRecordGap).not.toHaveBeenCalled();
+  });
+
+  test('a confirmed transfer with no failed tool records what the caller wanted', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { ctx, writes } = ctxFor({ handoffFacts: () => ({ verificationTier: 'full', from: '+19415551234', tools: [{ name: 'get_account_overview', ok: true }], turnCount: 2 }) });
+    await executeTool('transfer_to_office', { intent: 'pool service', summary: 'Wants a quote for pool cleaning' }, ctx);
+    expect(mockRecordGap).toHaveBeenCalledWith({ source: 'phone-agent', summary: writes[0].summary, attempted: 'Handed to the office' });
   });
 
   test('a long summary is clamped to twenty words', () => {

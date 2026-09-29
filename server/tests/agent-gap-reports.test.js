@@ -288,6 +288,14 @@ describe('agent-gap-reports', () => {
         summary: 'Can you add a note to my next stop?', attempted: 'The bar declined; no capability search ran' });
     });
 
+    test('a decline after a tool genuinely failed records no ask — an outage, not a missing feature', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'tech-bar' });
+      collector.toolResult('get_weather_conditions', { error: 'Weather API unavailable' }, true);
+      await collector.flush({ reply: DECLINE, ask: 'what is the weather at my next stop' });
+      expect(insertedRows).toHaveLength(0);
+    });
+
     test('declined with no signals and no ask records nothing', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'tech-bar' });

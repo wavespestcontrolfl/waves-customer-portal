@@ -3,9 +3,9 @@
  *
  * escalate() in both ai-assistant/assistant.js and
  * ai-assistant/managed-assistant.js records a gap ONLY when its caller
- * passes { gap: true }: the model's own escalate call in assistant.js (the
- * keyword pre-filter has already routed staff topics), and the managed
- * agent's unsupported_or_uncertain category. classifyEscalation's keyword
+ * passes { gap: true } — today only the managed agent's
+ * unsupported_or_uncertain category (the older assistant has no category to
+ * tell a missing feature from a staff workflow, so it never passes it). classifyEscalation's keyword
  * buckets play no part. The call is fire-and-forget: a rejected write must
  * never affect the escalation reply.
  */
