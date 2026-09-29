@@ -161,6 +161,20 @@ maybeDescribe('Cancel plan prepay coverage (live Postgres, real renewals module)
       .resolves.toMatchObject({ completedVisits: 3, amount: 100 });
   });
 
+  test('a renewal whose plan lineage cannot be traced is manual, never a full refund off an empty covered set', async () => {
+    const c = await customer();
+    n += 1;
+    const invoice = await insert('invoices', { customer_id: c.id, token: `${RUN}-${n}`, invoice_number: `${RUN}-${n}`, status: 'paid', paid_at: new Date('2026-01-02T12:00:00Z'), total: 400 });
+    // The chain names neither an estimate nor a property: unresolvable.
+    const original = await insert('annual_prepay_terms', { customer_id: c.id, term_start: day(-465), term_end: day(-100), status: 'renewed',
+      coverage_service_type: 'General Pest Control', coverage_visit_count: 4, prepay_amount: 400 });
+    const successor = await insert('annual_prepay_terms', { customer_id: c.id, term_start: day(-99), term_end: day(265), status: 'active',
+      renewed_from_term_id: original.id, prepay_invoice_id: invoice.id, coverage_service_type: 'General Pest Control', coverage_visit_count: 4, prepay_amount: 400 });
+    await visit(c, day(-50), { status: 'completed', annual_prepay_term_id: successor.id });
+    await expect(cancellation.computePrepayRefund({ ...successor, customer_id: c.id }))
+      .resolves.toMatchObject({ needsManualCalc: true, amount: null, reason: 'coverage_lineage_unresolved' });
+  });
+
   test('a scoped cancel of another family reads the term\'s covered rows instead of refusing; one over the covered family still refuses', async () => {
     const { c } = await prepayCustomer();
     await visit(c, day(20), { service_type: 'Lawn Care' });
