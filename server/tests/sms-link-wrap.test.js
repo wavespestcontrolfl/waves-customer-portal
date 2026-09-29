@@ -27,7 +27,7 @@ const base = { channel: 'sms', audience: 'customer', customerId: CUSTOMER_ID };
 // A chainable short_codes/sms_log query double. `rows` is what a .first() returns.
 function queryBuilder(table, log, rows = {}) {
   const b = {};
-  for (const m of ['where', 'whereNull', 'orderBy']) {
+  for (const m of ['where', 'whereNull', 'orderBy', 'whereRaw']) {
     b[m] = jest.fn((...args) => { log.push({ table, [m]: args }); return b; });
   }
   b.whereIn = jest.fn((col, vals) => { log.push({ table, whereIn: [col, vals] }); return b; });
@@ -216,6 +216,8 @@ describe('settleWrappedLinks', () => {
   test('an accepted send stamps every code with the sms_log row (only where still unstamped)', async () => {
     await settleWrappedLinks(['c1', 'c2'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID });
     expect(log).toContainEqual({ table: 'sms_log', where: [{ twilio_sid: SID }] });
+    // Reservation placeholders are excluded (sms_log general-reader source guard).
+    expect(log.some((e) => e.table === 'sms_log' && e.whereRaw)).toBe(true);
     expect(log).toContainEqual({ table: 'short_codes', whereIn: ['code', ['c1', 'c2']] });
     expect(log).toContainEqual({ table: 'short_codes', whereNull: ['message_ref'] });
     expect(log).toContainEqual({ table: 'short_codes', update: expect.objectContaining({ message_ref: 'sms_log:log-uuid-1' }) });

@@ -185,7 +185,10 @@ async function settleWrappedLinks(codes, outcome = {}) {
     const db = require('../../models/db');
     let ref = `twilio_sid:${outcome.providerMessageId}`;
     try {
-      const row = await db('sms_log').where({ twilio_sid: outcome.providerMessageId }).first('id');
+      const { excludeUnresolvedSendReservations } = require('./review-ask-reservation');
+      const row = await excludeUnresolvedSendReservations(db('sms_log'))
+        .where({ twilio_sid: outcome.providerMessageId })
+        .first('id');
       if (row && row.id) ref = `sms_log:${row.id}`;
     } catch (err) {
       logger.warn(`[sms-link-wrap] sms_log lookup failed, stamping the provider id: ${errLabel(err)}`);

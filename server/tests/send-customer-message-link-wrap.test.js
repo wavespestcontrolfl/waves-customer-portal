@@ -109,6 +109,7 @@ function fakeDb(table) {
   b.whereIn = jest.fn((col, vals) => { dbLog.push({ table, whereIn: [col, vals] }); return b; });
   b.whereNull = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
+  b.whereRaw = jest.fn(() => b);
   b.first = jest.fn(async () => (table === 'sms_log' ? { id: 'sms-log-9' } : null));
   b.update = jest.fn(async (payload) => { dbLog.push({ table, update: payload }); return 1; });
   return b;
