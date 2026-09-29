@@ -1757,14 +1757,15 @@ function initScheduledJobs() {
   cron.schedule('0 */15 * * * *', async () => {
     try {
       if (!require('../config/feature-gates').visitPrepReadSweepLive()) return;
+      const tickStartedAt = Date.now();
       const result = await runExclusive('visit-prep-read-sweep', () => require('./visit-prep-pest-read-sweep').sweepVisitPrepPestReads());
+      // A tick that got no DB connection: record the miss through
+      // recordMissedTick (writes only if this tick's window has no start or
+      // success yet, so another replica's run and runExclusive's own record
+      // are never overwritten or double-counted). lease_held is not a miss.
       if (result?.skipped && result.reason !== 'lease_held') {
-        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
-        const startedAt = Date.now();
-        const error = new Error(`Visit-prep read sweep tick skipped: ${result.reason || 'no_connection'}`);
-        await recordJobStart('visit-prep-read-sweep').catch(() => {});
-        await recordJobEnd('visit-prep-read-sweep', startedAt, error).catch(() => {});
-        throw error;
+        await recordMissedTick('visit-prep-read-sweep', tickStartedAt, `tick skipped: ${result.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`Visit-prep read sweep tick skipped: ${result.reason || 'no_connection'}`);
       }
     } catch (err) {
       logger.error(`[visit-prep-read-sweep] tick failed (${err.code || err.name || 'error'})`);
