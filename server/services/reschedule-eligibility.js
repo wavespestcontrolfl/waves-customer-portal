@@ -7,7 +7,7 @@
 // copy of the missed-appointment rule would drift (codex #4293 r3 P2).
 // Grouped-visit membership needs a query and stays with each caller.
 
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
 const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
@@ -64,15 +64,13 @@ function visitTimeElapsed(svc, now = new Date()) {
   const candidates = [new Date(startInstant.getTime() + ARRIVAL_PROMISE_MINUTES * 60000)];
   const end = hhmm(svc.window_end);
   if (end) {
-    let endInstant = parseETDateTime(`${dateStr}T${end}`);
-    if (!Number.isNaN(endInstant.getTime())) {
-      // window_end's clock time before window_start's means the job block
-      // crosses midnight onto the next calendar day.
-      if (endInstant.getTime() < startInstant.getTime()) {
-        endInstant = new Date(endInstant.getTime() + 24 * 60 * 60 * 1000);
-      }
-      candidates.push(endInstant);
-    }
+    // window_end's clock time before window_start's means the job block
+    // crosses midnight: parse it as a wall clock on the NEXT ET calendar
+    // date (never +24h of elapsed time, which drifts an hour across a DST
+    // change — codex round-6 P2 on PR #5308).
+    const endDateStr = end < start ? etDateString(addETDays(startInstant, 1)) : dateStr;
+    const endInstant = parseETDateTime(`${endDateStr}T${end}`);
+    if (!Number.isNaN(endInstant.getTime())) candidates.push(endInstant);
   }
   const worstInstant = candidates.reduce((a, b) => (b.getTime() > a.getTime() ? b : a));
   return now.getTime() >= worstInstant.getTime();

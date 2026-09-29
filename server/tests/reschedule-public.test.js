@@ -116,6 +116,25 @@ describe('reschedule-public eligibility', () => {
     }, new Date('2026-07-02T05:05:00.000Z'))).toEqual({ ok: true, missed: true });
   });
 
+  // codex round-6 P2: the overnight end is the stored WALL CLOCK on the next
+  // ET calendar date, not start-date wall clock + 24h of elapsed time,
+  // which drifts an hour across a DST change.
+  test('an overnight window across spring-forward ends at its stored wall clock', () => {
+    // 2026-03-07 23:00 EST -> end 03:30 EDT on 03-08 = 07:30Z (the arrival
+    // promise ends earlier, 06:00Z). +24h would have said 04:30 EDT (08:30Z).
+    const svc = { status: 'confirmed', scheduled_date: '2026-03-07', window_start: '23:00:00', window_end: '03:30:00' };
+    expect(eligibility(svc, new Date('2026-03-08T07:20:00.000Z'))).toEqual({ ok: true });
+    expect(eligibility(svc, new Date('2026-03-08T07:45:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
+  test('an overnight window across fall-back ends at its stored wall clock', () => {
+    // 2026-10-31 23:00 EDT -> end 03:30 EST on 11-01 = 08:30Z. +24h would
+    // have said 02:30 EST (07:30Z) and called it missed an hour early.
+    const svc = { status: 'confirmed', scheduled_date: '2026-10-31', window_start: '23:00:00', window_end: '03:30:00' };
+    expect(eligibility(svc, new Date('2026-11-01T08:00:00.000Z'))).toEqual({ ok: true });
+    expect(eligibility(svc, new Date('2026-11-01T08:35:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
   test('same-day appointment with a window still ahead stays reschedulable', () => {
     expect(eligibility({
       status: 'confirmed',
