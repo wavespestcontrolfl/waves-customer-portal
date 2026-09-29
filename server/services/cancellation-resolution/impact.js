@@ -14,7 +14,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, dateOnlyString } = require('../../utils/datetime-et');
 const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('../cancellation-eligibility');
 const { familyLabel } = require('./templates');
 
@@ -63,7 +63,10 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
       if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null, pulledKeys: [] });
       slot = perFamily.get(family);
     }
-    const d = String(row.scheduled_date).slice(0, 10);
+    // pg hydrates a DATE column as a Date, and String() of one reads
+    // "Mon Oct 05 …": compared as text against the ISO keep-through boundary
+    // it kept nothing, and it ordered visits by weekday name.
+    const d = dateOnlyString(row.scheduled_date);
     const upcoming = CANCELLABLE_STATUSES.includes(String(row.status)) && (d >= today || row.status === 'rescheduled');
     if (upcoming) {
       slot.upcoming += 1;
@@ -141,7 +144,7 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     if (term) {
       prepay = {
         covered: true,
-        endsAt: term.term_end ? String(term.term_end).slice(0, 10) : null,
+        endsAt: term.term_end ? dateOnlyString(term.term_end) : null,
         planLabel: term.plan_label || null,
         prepaidAmount: term.prepay_amount == null ? null : Number(term.prepay_amount),
         visitsRemaining: null,
