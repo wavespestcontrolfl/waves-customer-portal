@@ -54,40 +54,60 @@ function enabled() {
   return visitPrepTechAlertsLive() && visitPrepPhotosLive();
 }
 
-// Fresh read, never the caller's row (see file header).
-async function currentTechnicianId(scheduledServiceId, conn) {
-  const row = await conn('scheduled_services').where({ id: scheduledServiceId }).first('technician_id');
-  return row?.technician_id ? String(row.technician_id) : null;
+// The visit row, read under FOR SHARE inside the card's own transaction
+// (the same pattern tech-visit-notifications.js writeCard uses): a
+// reassignment or regroup either commits before this read — and the card
+// follows it — or waits for the card to land. Recipient, visit key and
+// date all come from this ONE read (Codex #5303 r1 P2 x2).
+async function loadVisitLocked(scheduledServiceId, trx) {
+  return trx('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .forShare()
+    .first('id', 'technician_id', 'visit_id', 'scheduled_date');
+}
+
+function isoDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+// Writes the card and returns the recipient, or null when there is no one
+// to tell. Throws only on a database error (the caller logs it).
+async function writeCard(scheduledServiceId) {
+  return db.transaction(async (trx) => {
+    const row = await loadVisitLocked(scheduledServiceId, trx);
+    if (!row?.technician_id) return null;
+    const technicianId = String(row.technician_id);
+    const tech = await trx('technicians').where({ id: technicianId })
+      .first('id', 'employment_status', 'field_dispatchable');
+    if (!isAssignable(tech)) return null;
+    await trx('tech_notifications').insert({
+      technician_id: technicianId,
+      type: TYPE,
+      message: PUSH_TITLE,
+      payload: JSON.stringify({
+        scheduled_service_id: row.id,
+        visit_id: row.visit_id || null,
+        scheduled_date: isoDate(row.scheduled_date),
+      }),
+    });
+    return technicianId;
+  });
 }
 
 /**
  * @param {object} args
  * @param {string} args.scheduledServiceId  the row the photos were stored
- *   against (persistLocked's `current.id`) — the recipient is resolved
- *   fresh from this id, not passed in.
- * @param {string|null} [args.visitId]  scheduled_services.visit_id at
- *   submission time, carried on the card payload for a future deep link
- *   only — never used to pick the recipient.
+ *   against (persistLocked's `current.id`). The recipient, visit key and
+ *   date are all re-read from this id under lock — never passed in.
  */
-async function notifyTechVisitPrepPhotos({ scheduledServiceId, visitId = null } = {}) {
+async function notifyTechVisitPrepPhotos({ scheduledServiceId } = {}) {
   if (!scheduledServiceId) return;
   try {
     if (!enabled()) return;
-
-    const technicianId = await currentTechnicianId(scheduledServiceId, db);
+    const technicianId = await writeCard(scheduledServiceId);
     if (!technicianId) return;
-
-    const tech = await db('technicians').where({ id: technicianId })
-      .first('id', 'employment_status', 'field_dispatchable');
-    if (!isAssignable(tech)) return;
-
-    await db('tech_notifications').insert({
-      technician_id: technicianId,
-      type: TYPE,
-      message: PUSH_TITLE,
-      payload: JSON.stringify({ scheduled_service_id: scheduledServiceId, visit_id: visitId || null }),
-    });
-
     try {
       const PushService = require('./push-notifications');
       await PushService.sendToAdminUser(technicianId, {
@@ -111,5 +131,5 @@ module.exports = {
   PUSH_TITLE,
   notifyTechVisitPrepPhotos,
   isEnabled: enabled,
-  _internal: { currentTechnicianId },
+  _internal: { loadVisitLocked, writeCard },
 };

@@ -693,15 +693,6 @@ export default function TechHomePage({ section = 'today' }) {
             service_type: payload.service_type || null,
           });
         }}
-        onOpenVisit={(payload) => {
-          // Customer visit-prep photos card (visit-prep-tech-alert.js) →
-          // open that stop's Visit Brief. Same key shape as
-          // routeStops.js's stopKeyOf: a grouped visit's members share one
-          // key, an ungrouped row keys off itself.
-          if (navigationBusy) return;
-          const key = payload.visit_id ? `visit:${payload.visit_id}` : `row:${payload.scheduled_service_id}`;
-          navigate(`/tech?visit=${encodeURIComponent(key)}`);
-        }}
       />
       {fieldWorkspace ? (
         <TechFieldHome

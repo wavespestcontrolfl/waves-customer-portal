@@ -383,7 +383,7 @@ describe('createVisitPrepSubmission', () => {
   // page and any future customer-auth route inherit it with no per-caller
   // wiring. visit-prep-tech-alert.js owns its own gate and silence rules —
   // here we only prove the hook fires exactly when a submission actually
-  // stored something new, with the RECHECKED row's id/visit_id, and never
+  // stored something new, with the RECHECKED row's id, and never
   // for a duplicate-only resubmit.
   describe('tech alert hook (visit-prep-tech-alert.js)', () => {
     test('a new submission triggers the hook with the RECHECKED row', async () => {
@@ -394,9 +394,9 @@ describe('createVisitPrepSubmission', () => {
       });
       expect(result.created).toBe(true);
       expect(mockNotifyTechVisitPrepPhotos).toHaveBeenCalledTimes(1);
+      // Only the id: the alert re-reads technician, visit key and date live.
       expect(mockNotifyTechVisitPrepPhotos).toHaveBeenCalledWith({
         scheduledServiceId: 'svc-RECHECKED',
-        visitId: 'visit-9',
       });
     });
 

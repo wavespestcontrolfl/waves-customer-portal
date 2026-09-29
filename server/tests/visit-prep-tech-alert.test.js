@@ -20,18 +20,29 @@ const TECH = { id: 'tech-1', employment_status: 'active', field_dispatchable: tr
 
 function chain(firstImpl) {
   const c = {};
-  for (const m of ['where']) c[m] = jest.fn(() => c);
+  for (const m of ['where', 'forShare']) c[m] = jest.fn(() => c);
   c.first = jest.fn(firstImpl);
   return c;
 }
+
+let mockLastSvcChain = null;
 
 // scheduled_services.technician_id and technicians rows are independently
 // stubbed per test — the module re-reads BOTH fresh on every call, never
 // from any value the caller passed in (there is none to pass: the function
 // takes only scheduledServiceId/visitId).
-function prime({ svcTechnicianId = 'tech-1', techs = { 'tech-1': TECH } } = {}) {
+function prime({
+  svcTechnicianId = 'tech-1', techs = { 'tech-1': TECH }, visitId = 'visit-9', scheduledDate = '2026-10-02',
+} = {}) {
+  // The card is written inside db.transaction; the trx is the same stub.
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.mockImplementation((table) => {
-    if (table === 'scheduled_services') return chain(async () => ({ technician_id: svcTechnicianId }));
+    if (table === 'scheduled_services') {
+      mockLastSvcChain = chain(async () => ({
+        id: 'svc-1', technician_id: svcTechnicianId, visit_id: visitId, scheduled_date: scheduledDate,
+      }));
+      return mockLastSvcChain;
+    }
     if (table === 'technicians') {
       const c = chain(null);
       c.where = jest.fn((arg) => { c.first = jest.fn(async () => techs[arg.id] || null); return c; });
@@ -93,12 +104,15 @@ describe('notifyTechVisitPrepPhotos', () => {
     test('both gates true → card written and pushed', async () => {
       process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
       process.env.GATE_VISIT_PREP_PHOTOS = 'true';
-      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1', visitId: 'visit-9' });
+      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
       expect(mockInsertCard).toHaveBeenCalledWith('tech-1', expect.objectContaining({
         type: 'customer_visit_photos',
         message: 'A customer sent photos for a visit on your route',
-        payload: { scheduled_service_id: 'svc-1', visit_id: 'visit-9' },
+        payload: { scheduled_service_id: 'svc-1', visit_id: 'visit-9', scheduled_date: '2026-10-02' },
       }));
+      // The visit row is read FOR SHARE inside the card's transaction.
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(mockLastSvcChain.forShare).toHaveBeenCalled();
       expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
         title: 'A customer sent photos for a visit on your route',
         body: '',
@@ -125,6 +139,14 @@ describe('notifyTechVisitPrepPhotos', () => {
       await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
       expect(mockInsertCard).toHaveBeenCalledWith('tech-2', expect.anything());
       expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-2', expect.anything());
+    });
+
+    test('the visit key and date come from the LIVE row (a regroup after submission is followed)', async () => {
+      prime({ visitId: null, scheduledDate: new Date('2026-10-05T00:00:00Z') });
+      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
+      expect(mockInsertCard).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+        payload: { scheduled_service_id: 'svc-1', visit_id: null, scheduled_date: '2026-10-05' },
+      }));
     });
 
     test('no technician assigned → no card, no push', async () => {

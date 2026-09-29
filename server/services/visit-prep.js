@@ -475,7 +475,6 @@ async function createVisitPrepSubmission({
   if (result.created) {
     void require('./visit-prep-tech-alert').notifyTechVisitPrepPhotos({
       scheduledServiceId: result.current.id,
-      visitId: result.current.visit_id || null,
     });
   }
 

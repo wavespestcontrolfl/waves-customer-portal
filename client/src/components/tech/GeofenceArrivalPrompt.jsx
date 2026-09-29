@@ -126,7 +126,7 @@ function getPosition() {
   });
 }
 
-export default function GeofenceArrivalPrompt({ onStormReview, onOpenVisit }) {
+export default function GeofenceArrivalPrompt({ onStormReview }) {
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
 
@@ -310,7 +310,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, onOpenVisit }) {
             <OpenVisitsCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
           {PHOTO_TYPES.has(n.type) && (
-            <PhotoCard n={n} onOpen={() => onOpenVisit?.(n.payload || {})} onDismiss={() => dismissVisitCard(n.id)} />
+            <PhotoCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
           {n.type === 'storm_watch_alert' && (
             <StormCard
@@ -455,21 +455,30 @@ function VisitCard({ n, onDismiss }) {
 
 // A customer's visit-prep photo submission (visit-prep-tech-alert.js,
 // GATE_VISIT_PREP_TECH_ALERTS). No customer name/address/note here — that
-// same lock-screen discipline extends to the card, not just the push: the
-// tech opens the stop for the details. Tapping the card (not "Got it")
-// deep-links to the stop via onOpenVisit, same shape as onStormReview.
-function PhotoCard({ n, onOpen, onDismiss }) {
+// same lock-screen discipline extends to the card, not just the push. The
+// visit is usually days out and the tech app only opens today's route, so
+// the card names the visit's DATE instead of a tap-through that would dead-
+// end (Codex #5303 r1 P1); the photos are in that stop's Visit Brief.
+function formatPhotoVisitDate(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function PhotoCard({ n, onDismiss }) {
+  const visitDate = formatPhotoVisitDate(n.payload?.scheduled_date);
   return (
     <div style={cardStyle(COLORS.teal)} data-testid="photo-notice">
-      <button
-        onClick={onOpen}
-        style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
-      >
-        <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📷 Photos from a customer</div>
-        <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>
-          {n.message || 'A customer sent photos for a visit on your route'}
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📷 Photos from a customer</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: visitDate ? 4 : 12 }}>
+        {n.message || 'A customer sent photos for a visit on your route'}
+      </div>
+      {visitDate && (
+        <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 12 }}>
+          Visit on {visitDate}. The photos are in that stop&apos;s Visit Brief.
         </div>
-      </button>
+      )}
       <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
     </div>
   );

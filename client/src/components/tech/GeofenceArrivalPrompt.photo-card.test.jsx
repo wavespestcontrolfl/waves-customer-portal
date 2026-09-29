@@ -2,7 +2,8 @@
 // A customer's visit-prep photo submission (customer_visit_photos —
 // visit-prep-tech-alert.js) renders as its own persistent card: stays
 // until "Got it" like a visit card, exact copy, no customer detail on the
-// card, and tapping it deep-links via onOpenVisit.
+// card, and the visit's date instead of a tap-through (the tech app only
+// opens today's route; Codex #5303 r1 P1).
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,7 +13,7 @@ function notification(type, payload, id = `n-${type}`) {
   return { id, type, message: 'A customer sent photos for a visit on your route', payload, created_at: '2026-09-28T18:41:00Z' };
 }
 
-const PHOTOS = notification('customer_visit_photos', { scheduled_service_id: 'svc-1', visit_id: 'visit-9' });
+const PHOTOS = notification('customer_visit_photos', { scheduled_service_id: 'svc-1', visit_id: 'visit-9', scheduled_date: '2026-10-02' });
 const PHOTOS_UNGROUPED = notification('customer_visit_photos', { scheduled_service_id: 'svc-2', visit_id: null }, 'n-photos-2');
 
 function stubFeed(notifications, { failPosts = false } = {}) {
@@ -73,26 +74,24 @@ describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
     expect(calls.some((c) => c.method === 'POST' && c.url.endsWith(`/${PHOTOS.id}/dismiss`))).toBe(true);
   });
 
-  it('tapping the card calls onOpenVisit with the payload, keyed like a grouped stop (visit:<id>)', async () => {
+  it('names the visit date and has exactly one action, "Got it" (no dead-end tap-through)', async () => {
     stubFeed([PHOTOS]);
-    const onOpenVisit = vi.fn();
-    render(<GeofenceArrivalPrompt onOpenVisit={onOpenVisit} />);
+    render(<GeofenceArrivalPrompt />);
     await act(async () => { await Promise.resolve(); });
 
     const card = await screen.findByTestId('photo-notice');
-    fireEvent.click(card.querySelector('button'));
-    expect(onOpenVisit).toHaveBeenCalledWith({ scheduled_service_id: 'svc-1', visit_id: 'visit-9' });
+    expect(card).toHaveTextContent("Visit on Fri, Oct 2. The photos are in that stop's Visit Brief.");
+    expect(card.querySelectorAll('button')).toHaveLength(1);
   });
 
-  it('an ungrouped stop (no visit_id) still calls onOpenVisit, with visit_id null', async () => {
+  it('an older card with no date still renders the copy and "Got it"', async () => {
     stubFeed([PHOTOS_UNGROUPED]);
-    const onOpenVisit = vi.fn();
-    render(<GeofenceArrivalPrompt onOpenVisit={onOpenVisit} />);
+    render(<GeofenceArrivalPrompt />);
     await act(async () => { await Promise.resolve(); });
 
     const card = await screen.findByTestId('photo-notice');
-    fireEvent.click(card.querySelector('button'));
-    expect(onOpenVisit).toHaveBeenCalledWith({ scheduled_service_id: 'svc-2', visit_id: null });
+    expect(card).toHaveTextContent('A customer sent photos for a visit on your route');
+    expect(card).not.toHaveTextContent('Visit on');
   });
 
   it('shares the visit-card cap and slot: a photo card and a visit card together are capped at two, newest first', async () => {
