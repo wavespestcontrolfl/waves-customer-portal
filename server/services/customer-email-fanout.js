@@ -508,7 +508,24 @@ async function propagateCustomerEmailChange({
             .update({ customer_id: customerId, updated_at: now });
         }
         // Status CAS (r44): an unsubscribe committing after the snapshot
-        // wins — the opt-out record is never deleted.
+        // wins — the opt-out record is never deleted. oldSub is the FOR UPDATE
+        // re-read, so its status cannot change under us before the del below.
+        if (['pending', 'active'].includes(String(oldSub.status || ''))) {
+          // newsletter_send_deliveries.subscriber_id is ON DELETE SET NULL:
+          // deleting the redundant row would orphan the person's send history
+          // (the activity timeline joins deliveries through the subscriber).
+          // Re-point it at the surviving row first, in this same transaction.
+          // (Delivery rows carry their own email snapshot, so each keeps the
+          // address it was actually mailed at.)
+          // UNIQUE (send_id, subscriber_id): an issue the surviving row already
+          // has its own delivery for cannot be re-pointed (it would abort the
+          // whole edit), so those rows are skipped and fall to SET NULL as before.
+          await conn('newsletter_send_deliveries')
+            .where({ subscriber_id: oldSub.id })
+            .whereNotIn('send_id', conn('newsletter_send_deliveries')
+              .where({ subscriber_id: targetSub.id }).select('send_id'))
+            .update({ subscriber_id: targetSub.id, updated_at: now });
+        }
         counts.newsletter += await conn('newsletter_subscribers')
           .where({ id: oldSub.id })
           .whereIn('status', ['pending', 'active'])

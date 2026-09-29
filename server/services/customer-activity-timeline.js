@@ -247,17 +247,26 @@ const SOURCES = [
       .whereRaw("COALESCE(em.recipient_type, '') NOT IN ('admin', 'test')")
       .where((w) => {
         w.where((k) => k.where('em.recipient_type', 'customer').where('em.recipient_id', String(ctx.customerId)));
-        // Address match only for mail that is genuinely unowned or owned by a
-        // customer PRECURSOR: recipient_type NULL/'' (nobody claimed it) or
-        // 'lead' (a prospect who may be this customer; email-bounce-recovery
-        // treats lead rows the same way). Mail owned by a customer row (two
-        // customers sharing one address must not inherit each other's mail) or
-        // by another kind of recipient ('job_application' recruiting mail,
-        // 'payer', 'referral_promoter', 'admin', 'test') never rides an address
-        // match. This is an allowlist: a new owned type stays out by default.
+        // Lead-typed (or untyped) mail is owned by whoever recipient_id names:
+        // the estimate events keep recipient_type 'lead' even when recipient_id
+        // is this CUSTOMER's id (email-template-automation-executor), and a
+        // lead row linked to this customer (leads.customer_id) is the same
+        // person's precursor. Ownership by id survives an email change.
+        w.orWhere((k) => k.whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')")
+          .where((o) => o.where('em.recipient_id', String(ctx.customerId))
+            .orWhereIn('em.recipient_id', dbh('leads').where('customer_id', ctx.customerId).select(dbh.raw('id::text')))));
+        // Address match only for mail nobody claimed: recipient_type NULL/''/
+        // 'lead' AND no recipient_id at all. A lead-typed row that names some
+        // other lead/customer id (another prospect sharing this inbox) never
+        // rides the address. Mail owned by a customer row (two customers
+        // sharing one address must not inherit each other's mail) or by another
+        // kind of recipient ('job_application' recruiting mail, 'payer',
+        // 'referral_promoter', 'admin', 'test') never rides an address match.
+        // This is an allowlist: a new owned type stays out by default.
         if (ctx.emails.length) {
           w.orWhere((k) => k.whereIn('em.recipient_email_snapshot', ctx.emails)
-            .whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')"));
+            .whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')")
+            .whereRaw("COALESCE(em.recipient_id, '') = ''"));
         }
       }),
     select: ['em.id', 'em.status', 'em.template_key', 'em.subject_snapshot', 'em.recipient_email_snapshot', 'em.queued_at',

@@ -221,6 +221,27 @@ pg('getCustomerActivity on Postgres', () => {
     expect(r.events.some((e) => /recruiting mail/.test(e.detail || ''))).toBe(false);
   });
 
+  test('lead-typed mail is owned by recipient_id: kept after an email change, and never pulled in by a shared inbox', async () => {
+    const owner = randomUUID(); const owner2 = randomUUID(); const ownLead = randomUUID(); const strangerLead = randomUUID();
+    await db('customers').insert([{ id: owner, email: 'changed.address@example.test' }, { id: owner2, email: 'shared.inbox@example.test' }]);
+    await db('leads').insert([{ id: ownLead, customer_id: owner }, { id: strangerLead, customer_id: null }]);
+    await db('email_messages').insert([
+      // estimate events keep type 'lead' while recipient_id is the CUSTOMER id; old address no longer on the customer
+      { id: randomUUID(), recipient_type: 'lead', recipient_id: owner, recipient_email_snapshot: 'old.address@example.test', status: 'sent', subject_snapshot: 'lead-typed, customer id', sent_at: T(1) },
+      // lead linked to this customer, old address
+      { id: randomUUID(), recipient_type: 'lead', recipient_id: ownLead, recipient_email_snapshot: 'old.address@example.test', status: 'sent', subject_snapshot: 'lead-typed, linked lead', sent_at: T(2) },
+      // another prospect (unlinked lead) sharing the customer's current inbox
+      { id: randomUUID(), recipient_type: 'lead', recipient_id: strangerLead, recipient_email_snapshot: 'changed.address@example.test', status: 'sent', subject_snapshot: 'other lead, same inbox', sent_at: T(3) },
+      // lead-typed row naming a different customer's id on the same inbox
+      { id: randomUUID(), recipient_type: 'lead', recipient_id: owner2, recipient_email_snapshot: 'changed.address@example.test', status: 'sent', subject_snapshot: 'other customer id, same inbox', sent_at: T(4) },
+      // truly unowned lead-typed row (no recipient_id): the address still matches
+      { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'changed.address@example.test', status: 'sent', subject_snapshot: 'unowned lead mail', sent_at: T(5) },
+    ]);
+    const r = await timeline.getCustomerActivity(owner, { limit: 50 }, db);
+    const subjects = r.events.filter((e) => e.source === 'email').map((e) => e.detail.split(' · ')[0]).sort();
+    expect(subjects).toEqual(['lead-typed, customer id', 'lead-typed, linked lead', 'unowned lead mail']);
+  });
+
   test('a failed email is dated at its failure time, after the queue time; automation bounces and complaints show', async () => {
     const r = await run({ limit: 200 });
     const failed = r.events.find((e) => e.source === 'email' && e.kind === 'failed');
