@@ -1060,10 +1060,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // only be a concurrent dispatch of the same (promise, ET day) that
     // already pushed.
     let dedupedNoPush = false;
-    // The bell row was written to the Activity feed only, because its subject
-    // had already moved on (admin-alert-relevance.js ring-time check): nothing
-    // rang, so no phone buzzes either.
-    let quietNoPush = false;
+    // The bell row this event wrote, for the relevance verdict on its push.
+    let bellRow = null;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
     // banners, some are bells"): the bell policy is evaluated ONCE per event,
@@ -1108,7 +1106,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           );
           if (created && !created.suppressed) bellWritten = true;
           if (created?.deduped && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
-          if (created && !created.suppressed && require('./admin-alert-relevance').quietedAtRingTime(created)) quietNoPush = true;
+          bellRow = created;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -1122,7 +1120,13 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (dedupedNoPush) return { ...stats, deduped: true };
-    if (quietNoPush) return { ...stats, quiet: true };
+    // Its subject had already moved on (admin-alert-relevance.js): the bell was
+    // written activity-only, or — push-only admins, no bell row — judged
+    // directly. Nothing rang, so no phone buzzes either.
+    if (await require('./admin-alert-relevance').pushIsMovedOn({ bellRow, bellWritten, pushTo: pushEnabledIds, category: trigger.category,
+      link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload, ...(dedupeKey ? { dedupeKey } : {}) } })) {
+      return { ...stats, quiet: true };
+    }
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
     // preference suppression, not a delivery failure — report it so

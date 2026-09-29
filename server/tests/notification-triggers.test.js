@@ -340,6 +340,26 @@ describe('triggerNotification bell outcome', () => {
     expect(await triggerNotification('new_lead', { leadId: 'fixture-lead-2', name: 'Fixture Lead', service: 'Pest Control' })).not.toHaveProperty('quiet');
   });
 
+  test('push-only admins: with no bell row written, the relevance verdict is judged directly and a moved-on event does not push', async () => {
+    const PushService = require('../services/push-notifications');
+    const relevance = require('../services/admin-alert-relevance');
+    const verdict = jest.spyOn(relevance, 'pushIsMovedOn').mockResolvedValueOnce(true);
+    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
+      : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));
+    try {
+      expect(await triggerNotification('new_lead', { leadId: 'fixture-lead-3', name: 'Fixture Lead', service: 'Pest Control' }))
+        .toMatchObject({ bellWritten: false, quiet: true, push: null });
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      expect(verdict).toHaveBeenCalledWith(expect.objectContaining({
+        bellRow: null, bellWritten: false, pushTo: ['admin-1'], category: 'new_lead',
+        metadata: expect.objectContaining({ triggerKey: 'new_lead', payload: expect.objectContaining({ leadId: 'fixture-lead-3' }) }),
+      }));
+      expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    } finally {
+      verdict.mockRestore();
+    }
+  });
+
   test('push-only SMS recovery retains its message tag and avoids renotification', async () => {
     db.mockImplementation(table => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
       : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));

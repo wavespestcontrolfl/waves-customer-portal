@@ -407,6 +407,40 @@ describe('class rules', () => {
   });
 });
 
+describe('pushIsMovedOn (the push verdict for the trigger dispatcher)', () => {
+  const { pushIsMovedOn } = require('../services/admin-alert-relevance');
+  const leadEvent = { category: 'new_lead', link: null, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } } };
+  const leadRow = (over = {}) => ({ id: LEAD, status: 'new', converted_at: null, deleted_at: null, created_at: new Date('2026-09-28T12:00:00Z'), customer_id: CUST, estimate_id: null, ...over });
+
+  test('a bell row written activity-only at ring time stays silent; a rung or sweep-retired row pushes', async () => {
+    const quiet = { metadata: { feed: 'activity', quiet: true, retired: { by: 'alert-relevance', reason: 'x' } } };
+    expect(await pushIsMovedOn({ bellRow: quiet, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(true);
+    expect(await pushIsMovedOn({ bellRow: { metadata: { retired: { by: 'alert-relevance' } } }, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
+    expect(await pushIsMovedOn({ bellRow: { metadata: JSON.stringify({ triggerKey: 'new_lead' }) }, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
+  });
+
+  test('push-only (no bell row): judged directly — a worked lead stays silent, a new one pushes, nobody to push or the switch off never reads', async () => {
+    mockTables.leads = [leadRow({ status: 'won' })];
+    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(true);
+    mockTables.leads = [leadRow()];
+    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(false);
+    db.mockClear();
+    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: [], ...leadEvent })).toBe(false);
+    process.env.ADMIN_ALERT_RELEVANCE = 'off';
+    mockTables.leads = [leadRow({ status: 'won' })];
+    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(false);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a failed read fails open (pushes); an event outside the table is never judged', async () => {
+    mockTables.leads = [leadRow({ status: 'won' })];
+    mockFailTable = 'leads';
+    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(false);
+    mockFailTable = null;
+    expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], category: 'inbound_sms', metadata: { customerId: CUST } })).toBe(false);
+  });
+});
+
 describe('runAdminAlertRelevanceSweep', () => {
   const staleNote = (id, over = {}) => note({ id, category: 'alert', metadata: { dedupeKey: `stale-visit:${id}`, scheduled_service_id: VISIT, customer_id: CUST, ...over } });
 
@@ -466,6 +500,24 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(locked.indexOf('invoices')).toBeLessThan(locked.indexOf('notifications'));
   });
 
+  test('the unpriced recheck locks every row its verdict reads — the visit, its parent, the combined invoice and the prepay term — before reading them', async () => {
+    const TERM = uid(11);
+    const family = { id: VISIT, customer_id: CUST, recurring_parent_id: PARENT, first_application_invoice_id: INV, annual_prepay_term_id: TERM };
+    mockTables.scheduled_services = [family];
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed', recurring_parent_id: PARENT, first_application_invoice_id: INV, first_application_invoice_status: 'draft' })];
+    const row = note({ id: uid(570), category: 'alert', metadata: { dedupeKey: `unpriced-series:${PARENT}`, scheduled_service_id: VISIT, customer_id: CUST } });
+    mockTables.notifications = [row];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 1 });
+    const locks = mockQueries.filter((q) => q.calls.some(([m]) => m === 'forShare'));
+    const lockedIds = (table) => locks.filter((q) => q.table === table).flatMap((q) => q.calls.filter(([m]) => m === 'whereIn').map(([, , ids]) => ids)).flat();
+    expect(lockedIds('scheduled_services')).toEqual(expect.arrayContaining([VISIT, PARENT]));
+    expect(lockedIds('invoices')).toContain(INV);
+    expect(lockedIds('annual_prepay_terms')).toContain(TERM);
+    // Locks first, then the joined read the verdict uses.
+    const order = mockQueries.map((q) => q.table);
+    expect(order.lastIndexOf('annual_prepay_terms')).toBeLessThan(order.lastIndexOf('scheduled_services as ss'));
+  });
+
   test('a row a refresh rewrote after the batch read is left for the next sweep', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
     const row = staleNote(uid(560));
@@ -504,10 +556,11 @@ describe('runAdminAlertRelevanceSweep', () => {
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toMatchObject({ scanned: 205, retired: 205 });
     expect(mockTables.notifications.every((r) => r.read_at === 'NOW')).toBe(true);
-    const visitReads = mockQueries.filter((q) => q.table === 'scheduled_services as ss');
     const lockedRead = (q) => q.calls.some(([m]) => m === 'forShare');
-    expect(visitReads.filter((q) => !lockedRead(q))).toHaveLength(2); // the batched first pass, one per page
-    expect(visitReads.filter(lockedRead)).toHaveLength(205); // one locked recheck per retirement
+    // The batched first pass reads visits once per page; each retirement then
+    // locks its visit family once and re-reads it once.
+    expect(mockQueries.filter((q) => q.table === 'scheduled_services as ss')).toHaveLength(2 + 205);
+    expect(mockQueries.filter((q) => q.table === 'scheduled_services' && lockedRead(q))).toHaveLength(205);
   });
 
   test('one unreadable row is skipped, not fatal', async () => {

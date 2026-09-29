@@ -127,10 +127,26 @@ const emptyData = () => ({
 });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
+// Every row a visit verdict reads, locked FOR SHARE before it is read (the
+// retirement recheck): the visits, the parent whose price a child inherits,
+// the combined first-application invoice that covers a sibling, and the
+// annual-prepay term that validates a stamp. The joined read that follows
+// then sees a state no concurrent write can change until the recheck commits.
+async function lockVisitFamily(conn, visitIds) {
+  const own = await conn('scheduled_services').whereIn('id', visitIds).forShare()
+    .select('id', 'recurring_parent_id', 'first_application_invoice_id', 'annual_prepay_term_id');
+  const idsOf = (col) => [...new Set(own.map((r) => r[col]).filter(Boolean).map(String))];
+  const family = [['scheduled_services', 'recurring_parent_id'], ['invoices', 'first_application_invoice_id'], ['annual_prepay_terms', 'annual_prepay_term_id']];
+  for (const [table, col] of family) {
+    const ids = idsOf(col);
+    if (ids.length) await conn(table).whereIn('id', ids).forShare().select('id');
+  }
+}
+
 // The live records for a batch of notification rows: one query per table per
 // batch (the estimate and customer ids are only known once visits, invoices
 // and leads are loaded, so those two run second). `lock` takes FOR SHARE on
-// every subject row read (the retirement recheck, inside its transaction).
+// every row a verdict reads (the retirement recheck, inside its transaction).
 async function loadSubjects(rows, conn = db, { lock = false } = {}) {
   const shared = (q) => { if (lock) q.forShare(); };
   const data = emptyData();
@@ -140,11 +156,11 @@ async function loadSubjects(rows, conn = db, { lock = false } = {}) {
   const invoiceIds = ids((r) => r.invoiceIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
   if (visitIds.length) {
+    if (lock) await lockVisitFamily(conn, visitIds);
     data.visits = byId(await conn('scheduled_services as ss')
       .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
       .leftJoin('invoices as fa_invoice', 'fa_invoice.id', 'ss.first_application_invoice_id')
       .whereIn('ss.id', visitIds)
-      .modify((q) => { if (lock) q.forShare('ss'); })
       .select('ss.id', 'ss.customer_id', 'ss.status', 'ss.is_recurring', 'ss.recurring_parent_id',
         'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount', 'ss.prepaid_method',
         'ss.annual_prepay_term_id', 'ss.prepaid_at', 'ss.service_type', 'ss.scheduled_date', 'ss.completed_at',
@@ -416,17 +432,36 @@ function ringTimeCheck({ category, link, metadata }) {
 }
 
 // A row the ring-time check wrote activity-only (its subject had already
-// moved on): nothing rang, so the trigger dispatcher sends no push for it.
-// A sweep retirement never sets feed 'activity', and a later ringing refresh
-// replaces the row's feed, so neither reads as quieted here.
+// moved on): nothing rang. A sweep retirement never sets feed 'activity', and
+// a later ringing refresh replaces the row's feed, so neither reads as
+// quieted here.
 function quietedAtRingTime(row) {
   const meta = parseMeta(row?.metadata);
   return meta.feed === 'activity' && meta.retired?.by === RETIRED_BY;
 }
 
+// Whether a trigger's push stays silent because the event's subject has
+// already moved on: its bell row was written activity-only at ring time, or —
+// when no bell row was written at all (every admin who gets the event has the
+// bell off and push on) — the same verdict judged here directly, so the
+// push-only path is as quiet as the bell would have been. Fails open (pushes).
+async function pushIsMovedOn({ bellRow, bellWritten, pushTo, category, link, metadata }) {
+  if (bellRow && quietedAtRingTime(bellRow)) return true;
+  if (bellWritten || !pushTo?.length) return false;
+  try {
+    const row = { category, link, metadata };
+    const cls = classify(row);
+    if (!cls || !adminAlertRelevanceLive()) return false;
+    return !!cls.rule(subjectFor(row, await loadSubjects([row]), etDateString(new Date())));
+  } catch (err) {
+    logger.warn(`[alert-relevance] push-only check failed: ${err.message}`);
+    return false;
+  }
+}
+
 module.exports = {
   runAdminAlertRelevanceSweep,
-  quietedAtRingTime,
+  pushIsMovedOn,
   ringTimeCheck,
   classify,
   loadSubjects,
