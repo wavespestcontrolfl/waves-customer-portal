@@ -11099,6 +11099,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       };
       let customerId = estimate.customer_id;
+      // True only when THIS accept minted the profile below (no linked,
+      // sibling, or phone-matched customer). Handed to the converter so the
+      // insert's own defaults (pipeline_stage 'active_customer' + the quoted
+      // monthly_rate) are never read as a pre-existing monthly membership.
+      let customerCreatedThisAccept = false;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -11246,11 +11251,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // explicit non-membership tier (the column defaults to 'Bronze'
             // if omitted, so it must be set).
             waveguard_tier: treatAsOneTime ? 'One-Time' : (estimate.waveguard_tier || 'Bronze'),
-            monthly_rate: treatAsOneTime ? null : effectiveMonthlyTotal,
+            // A termite-annual sign-before-pay accept PARKS in the converter
+            // before any customer write (activation, after signature, replays
+            // the whole conversion and re-stamps monthly_rate from the
+            // estimate's own monthly_total). Minting the profile with the
+            // quoted rate here would leave a bundled estimate's customer for
+            // up to 45 days with monthly_rate > 0 and billing_mode NULL —
+            // read as a monthly member by a second accept's phone match and
+            // admitted to the 1st-of-month charge sweep. NULL keeps it a
+            // non-member until the signature commits.
+            monthly_rate: (treatAsOneTime || isTermiteAnnualSignBeforePay) ? null : effectiveMonthlyTotal,
             member_since: etDateString(),
             referral_code: code,
           })).returning('*');
           customerId = newCust.id;
+          customerCreatedThisAccept = true;
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
@@ -12041,6 +12056,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          // IDENTITY of the profile this accept minted (null otherwise); the
+          // converter honors it only for that same row while its lane is
+          // still unstamped (see holdsExistingMembership).
+          createdCustomerId: customerCreatedThisAccept ? customerId : null,
           skipAutoSchedule: true,
           skipMembershipEmail: true,
           // Labeled manual-discount itemization on the prepay invoice (owner
@@ -12218,6 +12237,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          // IDENTITY of the profile this accept minted (null otherwise); the
+          // converter honors it only for that same row while its lane is
+          // still unstamped (see holdsExistingMembership).
+          createdCustomerId: customerCreatedThisAccept ? customerId : null,
           firstApplicationRowAmounts: firstApplicationRowAmounts.length ? firstApplicationRowAmounts : null,
           // The converter's own STANDARD draft-invoice branch runs on the
           // GLOBAL pool (its internal db.transaction + ledger reads), which

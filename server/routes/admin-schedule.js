@@ -29,7 +29,7 @@ const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
-const { AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
+const { seriesCustomerSkipReason } = require('../services/series-customer-eligibility');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -18660,7 +18660,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // its own plan_ending alert path — never topped up here); the customer must
 // have no deleted_at, no GENUINE service hold (service_paused_at set with
 // any reason other than the billing-only, auto-clearable
-// 'autopay_final_failure' — see TOPUP_CUSTOMER_INELIGIBILITY_RULES),
+// 'autopay_final_failure' — see series-customer-eligibility.js),
 // active !== false, and a pipeline_stage outside FORMER_CUSTOMER_STAGES
 // (customer-stages.js — the one churned/former vocabulary every KPI/
 // eligibility surface shares) — read with FOR UPDATE, the same row lock
@@ -18682,34 +18682,12 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
 // number of rows in one run.
 const TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN = 24;
 
-// Table-driven customer eligibility for the top-up (one independent check
-// per row, evaluated in order) — dedupes the branch-per-reason shape into a
-// single loop so a new disqualifying condition is one more row, not one more
-// `if`. Reused nowhere else today; kept next to its one caller.
-// service_paused_at is set two ways, and only one of them is a genuine
-// scheduling hold (Codex GitHub round 2 P1). billing-cron sets it with
-// reason 'autopay_final_failure' when the 3-retry ladder exhausts — that
-// stops the DUES CRON only; migration 20260801200000 (billing-copy-no-
-// false-interruption) is explicit that this reason has "no scheduling
-// consumer" anywhere in the app, and visits continue on schedule. An
-// operator can also set the SAME column by hand for a genuine whole-
-// account hold (any OTHER reason value, e.g. the 2026-09-11 owner-directed
-// pause) — billing-pause.js's own contract already draws this exact line
-// ("ONLY 'autopay_final_failure' pauses auto-clear... a pause an operator
-// set by hand is a human decision"). Reuse that constant rather than
-// hand-rolling a second copy of the distinction. An unset/unknown reason
-// on a paused row is treated as a hold (fail closed — never top up a
-// customer someone paused without a legible, auto-clearable reason).
-const TOPUP_CUSTOMER_INELIGIBILITY_RULES = [
-  ['customer_deleted', (c) => !!c.deleted_at],
-  ['customer_service_held', (c) => !!c.service_paused_at && c.service_pause_reason !== AUTO_CLEARABLE_REASON],
-  ['customer_inactive', (c) => c.active === false],
-  ['customer_churned', (c) => FORMER_CUSTOMER_STAGES.includes(c.pipeline_stage)],
-];
+// Customer eligibility for the top-up: the shared table in
+// services/series-customer-eligibility.js (deleted, genuinely held,
+// inactive, churned), which the pest-rides-lawn preview also reads, so the
+// two can never disagree about who is eligible.
 function topupCustomerSkipReason(customer) {
-  if (!customer) return 'customer_not_found';
-  const hit = TOPUP_CUSTOMER_INELIGIBILITY_RULES.find(([, test]) => test(customer));
-  return hit ? hit[0] : null;
+  return seriesCustomerSkipReason(customer);
 }
 
 // Top-up v1 scope cut (Codex GitHub rounds 2-3): the customer-wide,
@@ -18989,6 +18967,19 @@ async function topupSeriesSkipReason(conn, parent, parentId, cols) {
     if (await test(conn, parent, parentId, cols)) return reason;
   }
   return null;
+}
+
+// All-hits variant for the pest-rides-lawn preview (Codex P2 round on PR
+// #5290): topupSeriesSkipReason itself stays first-hit and byte-identical
+// (the nightly top-up only ever needs ONE reason to skip a write), but the
+// preview's `reasons` array documents that it lists EVERY applicable gate.
+// Same table, same sequential DB-read order, just never short-circuited.
+async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
+  const hits = [];
+  for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
+    if (await test(conn, parent, parentId, cols)) hits.push(reason);
+  }
+  return hits;
 }
 
 // Reads a pg_try_advisory_xact_lock(...)::AS locked result the same way
@@ -19327,7 +19318,7 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 //     'recurring_cancel_reseed' stamp, written in the adding transaction);
 //   - the root's window is unplaceable even after the top-up's floor;
 //   - the customer is deleted / held / inactive / churned
-//     (TOPUP_CUSTOMER_INELIGIBILITY_RULES, FOR UPDATE like the top-up);
+//     (series-customer-eligibility.js, FOR UPDATE like the top-up);
 //   - annual-prepay series, family on plan hold, duplicate series
 //     (TOPUP_SERIES_INELIGIBILITY_RULES);
 //   - the annual-prepay namespace is busy (a term is being created);
@@ -26077,3 +26068,23 @@ module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVis
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
+// Read-only reuse for the pest-rides-the-lawn-rhythm READ-ONLY PREVIEW
+// (services/rider-series-preview.js — the write engine itself is #5268,
+// paused): the SAME series-eligibility table the nightly top-up already
+// applies (annual prepay / family plan hold / duplicate active series),
+// consumed with NO lock taken — the preview never writes, so it skips the
+// per-customer annual-prepay advisory try-lock this file's own cancel-reseed
+// path takes (above, inline) before calling this same function on that
+// path; a lock is meaningless (and misleading — it would silently no-op)
+// for a read that commits nothing. Lazy require only, same avoid-a-route-
+// load-cycle reason as every other export in this block.
+module.exports.topupSeriesSkipReason = topupSeriesSkipReason;
+// All-hits twin of the above, same read-only posture — see its own comment.
+module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
+// The override-aware address resolver the duplicate-series guard scopes on
+// (see its own header comment above topUpScopeInput): read-only reuse for
+// the preview's AND the ops report script's own property-scope resolution
+// (resolveSeriesPropertyScope, services/rider-series-preview.js) — one
+// address resolver, so "same property" can never mean something different
+// in the duplicate guard than it does in the pest-rides-lawn preview.
+module.exports.topUpScopeInput = topUpScopeInput;

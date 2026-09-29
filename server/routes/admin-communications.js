@@ -2638,7 +2638,18 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     const svc = await soonestUpcomingVisit(customerIds);
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
-    const { url, line } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+    const { url, line, tooSoonToMove } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+    // A dead-link-guard refusal (C3/C6) is not the same problem as a
+    // missing link: the visit is eligible, just too close to its own start
+    // to move online right now — a distinct 409 so the composer doesn't
+    // tell the operator this appointment has no reschedule link at all
+    // (independent-reviewer finding on PR #5308).
+    if (tooSoonToMove) {
+      return res.status(409).json({
+        error: 'This visit is too close to move online — ask them to reply or call.',
+        code: 'too_close_to_move_online',
+      });
+    }
     // Null url = legacy pre-backfill row without a token (or shortener +
     // portal-url both unavailable) — nothing usable to insert.
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });

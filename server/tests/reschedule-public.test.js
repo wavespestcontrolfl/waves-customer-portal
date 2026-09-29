@@ -90,6 +90,69 @@ describe('reschedule-public eligibility', () => {
     }, NOW)).toEqual({ ok: true });
   });
 
+  // codex round-5 P2: an overnight window (window_end's clock time before
+  // window_start's, e.g. 23:00-00:30) must be judged on real INSTANTS, not
+  // "is the calendar date before today" — the old shortcut called the
+  // visit missed the instant the calendar flipped to the next day, well
+  // before either the job block or the quoted 2-hour arrival promise had
+  // actually elapsed.
+  test('an overnight window crossing midnight is judged by real instants, not the calendar date alone', () => {
+    // 23:00 start on 07-01, 00:30 end (rolls to 07-02) — viewed at 00:10 ET
+    // on 07-02: only 70 minutes past start, inside both the job block and
+    // the arrival promise (01:00 on 07-02). Not missed.
+    expect(eligibility({
+      status: 'confirmed',
+      scheduled_date: '2026-07-01',
+      window_start: '23:00:00',
+      window_end: '00:30:00',
+    }, new Date('2026-07-02T04:10:00.000Z'))).toEqual({ ok: true });
+    // Same visit viewed at 01:05 ET on 07-02: past both window_end (00:30)
+    // and the arrival promise (01:00) — genuinely missed.
+    expect(eligibility({
+      status: 'confirmed',
+      scheduled_date: '2026-07-01',
+      window_start: '23:00:00',
+      window_end: '00:30:00',
+    }, new Date('2026-07-02T05:05:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
+  // codex round-6 P2: the overnight end is the stored WALL CLOCK on the next
+  // ET calendar date, not start-date wall clock + 24h of elapsed time,
+  // which drifts an hour across a DST change.
+  test('an overnight window across spring-forward ends at its stored wall clock', () => {
+    // 2026-03-07 23:00 EST -> end 03:30 EDT on 03-08 = 07:30Z (the arrival
+    // promise ends earlier, 06:00Z). +24h would have said 04:30 EDT (08:30Z).
+    const svc = { status: 'confirmed', scheduled_date: '2026-03-07', window_start: '23:00:00', window_end: '03:30:00' };
+    expect(eligibility(svc, new Date('2026-03-08T07:20:00.000Z'))).toEqual({ ok: true });
+    expect(eligibility(svc, new Date('2026-03-08T07:45:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
+  test('an overnight window across fall-back ends at its stored wall clock', () => {
+    // 2026-10-31 23:00 EDT -> end 03:30 EST on 11-01 = 08:30Z. +24h would
+    // have said 02:30 EST (07:30Z) and called it missed an hour early.
+    const svc = { status: 'confirmed', scheduled_date: '2026-10-31', window_start: '23:00:00', window_end: '03:30:00' };
+    expect(eligibility(svc, new Date('2026-11-01T08:00:00.000Z'))).toEqual({ ok: true });
+    expect(eligibility(svc, new Date('2026-11-01T08:35:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
+  // codex round-7 P2: the 2-hour arrival cutoff is the displayed WALL CLOCK
+  // (window_start + 2h), not start + 120 elapsed minutes.
+  test('the arrival cutoff across spring-forward is the displayed wall clock', () => {
+    // 2026-03-08 01:00 EST start, displayed 01:00-03:00 -> 03:00 EDT = 07:00Z
+    // (elapsed +120 would have said 04:00 EDT = 08:00Z).
+    const svc = { status: 'confirmed', scheduled_date: '2026-03-08', window_start: '01:00:00', window_end: '01:30:00' };
+    expect(eligibility(svc, new Date('2026-03-08T06:50:00.000Z'))).toEqual({ ok: true });
+    expect(eligibility(svc, new Date('2026-03-08T07:30:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
+  test('the arrival cutoff across fall-back is the displayed wall clock', () => {
+    // 2026-11-01 00:00 EDT start, displayed 00:00-02:00 -> 02:00 EST = 07:00Z
+    // (elapsed +120 would have said 01:00 EST = 06:00Z, an hour early).
+    const svc = { status: 'confirmed', scheduled_date: '2026-11-01', window_start: '00:00:00', window_end: '00:30:00' };
+    expect(eligibility(svc, new Date('2026-11-01T06:30:00.000Z'))).toEqual({ ok: true });
+    expect(eligibility(svc, new Date('2026-11-01T07:05:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
   test('same-day appointment with a window still ahead stays reschedulable', () => {
     expect(eligibility({
       status: 'confirmed',
@@ -570,11 +633,15 @@ describe('codex #3429 r2 P1 — dispatch-owned unreviewed bookings', () => {
     });
 
     // Eligible visit: the existing code is returned, nothing is minted.
+    // scheduled_date is deliberately far out (real wall clock, not the
+    // fixture NOW above — buildRescheduleLink's own dead-link check reads
+    // the actual clock) so it never lands inside the move-notice window.
     mockDb.mockImplementation(() => ({
       where: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue({
         id: 'svc-1', customer_id: 'cust-1', reschedule_token: 'a'.repeat(64),
         source_action: null, status: 'confirmed', customer_confirmed: true, visit_id: null,
+        scheduled_date: '2099-01-01', window_start: '09:00:00',
       }),
     }));
     await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({

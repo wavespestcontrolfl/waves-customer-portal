@@ -3936,6 +3936,12 @@ async function createSelfBooking(payload = {}) {
           windowEnd: endTime,
           durationMinutes: duration,
           serviceTypes: capacityServiceTypes,
+          // GRACE-EXEMPT: no arrivalGraceMinutes here (owner ruling 2026-09-28, scope cut
+          // Codex r1 P1 #5314): /book runs a STRICT pre-verify travel probe
+          // (findConflictingVisits below, with `travel`) that a grace-kept
+          // slot would fail before ever reaching this check — grace is
+          // estimate-picker-only. See scheduling/policy.js and
+          // scheduling/find-time.js's packCapacityEnds header.
         })
         : null;
 

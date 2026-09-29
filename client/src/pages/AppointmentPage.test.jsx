@@ -47,6 +47,10 @@ function upcomingPayload(overrides = {}) {
     plan: { isRecurring: true, collectiveAnchor: true },
     weather: { rainChance: 15, stormy: false },
     rescheduleToken: 'deadbeef',
+    // Dead-link guard (C3/C6): true unless the visit already starts inside
+    // the self-serve move-notice window, where /reschedule/:token would
+    // refuse the move.
+    canMoveOnline: true,
     // Server-computed ICS servability (codex r33 P2) — the page renders the
     // Add-to-calendar action only when the .ics route would serve it.
     calendarEligible: true,
@@ -229,6 +233,19 @@ describe('AppointmentPage upcoming visit', () => {
     const cal = await screen.findByText('Add to calendar');
     expect(cal.closest('a')).toHaveAttribute('href', expect.stringContaining('/calendar.ics'));
     expect(screen.getByText('See open times').closest('a')).toHaveAttribute('href', '/reschedule/deadbeef');
+  });
+
+  it('a visit already too close to move online (canMoveOnline: false) hides the See open times card and the pre-confirm hint, but keeps the token-independent Questions card (C3/C6)', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ canMoveOnline: false })) });
+
+    renderPage();
+
+    await screen.findByRole('button', { name: 'Confirm this appointment' });
+    expect(screen.queryByText('See open times')).toBeNull();
+    expect(screen.queryByText('Need a different time?')).toBeNull();
+    expect(screen.getByText("Time doesn't work? Text or call us and we'll sort it out.")).toBeTruthy();
+    // The always-present contact fallback still renders.
+    expect(screen.getByText('Questions?')).toBeInTheDocument();
   });
 });
 
