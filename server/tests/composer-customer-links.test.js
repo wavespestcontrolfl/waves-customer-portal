@@ -3025,3 +3025,152 @@ describe('checkConsultationLinkSend (send-time re-check of a consultation short 
     expect(await bearerLinkSendCheck(BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, consultationLeadId: 'lead-1' });
   });
 });
+
+// GATE_SMS_LINK_WRAP mints kind 'other' /l/<code> wrappers whose target is a
+// bearer page (messaging/sms-link-wrap.js). Staff can copy one out of the
+// thread into another customer's composer, a scheduled text, a draft or the
+// lead sender, so EVERY seam resolves an owned code to its target_url and
+// judges it exactly as if the long link had been pasted (expandedRuns). Each
+// case below runs the long form and the wrapped form against the SAME data
+// and requires the identical verdict.
+describe('wrapped /l/ codes are judged by their target (SMS link wrap)', () => {
+  const {
+    bearerLinkSendCheck, immediateOnlyLinkSendCheck, autopayLinkSendCheck, recheckPrepLinks,
+  } = require('../services/composer-customer-links');
+  const { hashContractToken } = jest.requireActual('../services/contracts');
+  const { resolvePrepSource } = require('../routes/prep-public');
+  const PORTAL = 'https://portal.wavespestcontrol.com';
+  const PREP = 'b'.repeat(32);
+  const SECURE = 'abcDEF123_-xyz789QWERTY';
+  const CONTRACT = 'zyxWVU987_-cba321POINTER';
+  const STMT = 'f'.repeat(64);
+  const PROJECT = `dana-lee-${'f'.repeat(12)}`;
+  const OWNER = { id: 'c1', phone: '+1 (941) 555-0100' };
+  const SAME = '9415550100';
+  const OTHER = '5551234567';
+
+  // A wrapped code + the same page's data: `shortRow` is what short_codes returns.
+  function wire({ target, kind = 'other', card = null, contract = null, stmt = null, payer = null, owners = [OWNER] } = {}) {
+    isEnabled.mockImplementation((g) => ['payerStatements', 'autopayCustomerSms'].includes(g));
+    mockBuilders = {
+      short_codes: chainBuilder({ firstRow: target ? { code: 'wrapabc123', kind, target_url: target, expires_at: null } : null }),
+      customers: chainBuilder({ firstRow: OWNER, rows: owners }),
+      appointment_card_requests: chainBuilder({ firstRow: card, rows: card ? [card] : [] }),
+      customer_contracts: chainBuilder({ firstRow: contract }),
+      payer_statements: chainBuilder({ firstRow: stmt }),
+      payers: chainBuilder({ firstRow: payer }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    resolvePrepSource.mockReset().mockResolvedValue({ templateKey: 'prep.flea', customerId: 'c1' });
+    loadTemplateByKey.mockReset().mockResolvedValue({ template: { id: 't1' }, activeVersion: { id: 'tv1' } });
+    requestCardForAppointment.mockReset().mockResolvedValue({ requested: false, action: 'link_created', reason: 'request_exists', secureUrl: `${PORTAL}/secure/${SECURE}` });
+    setupLinkIneligibility.mockReset().mockResolvedValue({ reason: null, customer: { phone: '(941) 555-0100' } });
+  }
+  const WRAPPED = ['wavespest.co/l/wrapabc123', `${PORTAL}/l/wrapabc123`, 'https://wavespest.co/l/WRAPABC123/'];
+
+  const live = { id: 'k1', customer_id: 'c1', status: 'sent', share_token_expires_at: new Date(Date.now() + 86400e3) };
+  const visitCard = { id: 'r1', kind: 'visit', status: 'pending', customer_id: 'c1', scheduled_service_id: 'v1' };
+  const cases = [
+    { name: 'prep guide', target: `${PORTAL}/prep/${PREP}`, long: `Checklist: portal.wavespestcontrol.com/prep/${PREP}`, label: 'Prep guide', data: {} },
+    { name: 'contract signing', target: `${PORTAL}/contract/${CONTRACT}`, long: `Please sign: portal.wavespestcontrol.com/contract/${CONTRACT}`, label: 'Contract signing', data: { contract: live } },
+    { name: 'statement pay', target: `${PORTAL}/pay/statement/${STMT}`, long: `Pay here: portal.wavespestcontrol.com/pay/statement/${STMT}`, label: 'Statement pay', data: { stmt: { id: 31, payer_id: 7, status: 'sent' }, payer: { id: 7, ap_phone: '(941) 555-0100' } } },
+    { name: 'visit card request', target: `${PORTAL}/secure/${SECURE}`, long: `Secure your visit: portal.wavespestcontrol.com/secure/${SECURE}`, label: 'Card request', data: { card: visitCard } },
+    { name: 'project report', target: `${PORTAL}/report/project/${PROJECT}`, long: `Your report: portal.wavespestcontrol.com/report/project/${PROJECT}`, label: 'Project report', data: {} },
+  ];
+
+  describe.each(cases)('$name', ({ target, long, label, data }) => {
+    test.each(WRAPPED)('immediate-only fence (schedule + draft): %s is present exactly like the long link', async (short) => {
+      wire({ target, ...data });
+      expect(await immediateOnlyLinkSendCheck(long)).toEqual({ present: true, label });
+      expect(await immediateOnlyLinkSendCheck(`See ${short} thanks`)).toEqual({ present: true, label });
+    });
+  });
+
+  describe.each(cases.filter((c) => c.label !== 'Project report'))('send seam: $name', ({ target, long, label, data }) => {
+    test.each(WRAPPED)('send seam to the SAME customer: %s is allowed exactly like the long link', async (short) => {
+      wire({ target, ...data });
+      const opts = { trustedCustomerId: label === 'Statement pay' ? null : 'c1' };
+      const longResult = await bearerLinkSendCheck(long, SAME, opts);
+      expect(longResult.ok).toBe(true);
+      wire({ target, ...data });
+      expect(await bearerLinkSendCheck(`See ${short} thanks`, SAME, opts)).toEqual(longResult);
+    });
+
+    test.each(WRAPPED)('send seam to a DIFFERENT customer: %s is refused exactly like the long link', async (short) => {
+      wire({ target, ...data });
+      const opts = { trustedCustomerId: label === 'Statement pay' ? null : 'c1' };
+      const longResult = await bearerLinkSendCheck(long, OTHER, opts);
+      expect(longResult.ok).toBe(false);
+      wire({ target, ...data });
+      expect(await bearerLinkSendCheck(`See ${short} thanks`, OTHER, opts)).toEqual(longResult);
+    });
+  });
+
+  test('a wrapped project report is treated as a project report at the send seam (refused like the long form, not skipped)', async () => {
+    const target = `${PORTAL}/report/project/${PROJECT}`;
+    wire({ target });
+    mockBuilders.projects = chainBuilder({ firstRow: null });
+    const longResult = await bearerLinkSendCheck(`Your report: portal.wavespestcontrol.com/report/project/${PROJECT}`, OTHER, { trustedCustomerId: 'c1' });
+    expect(longResult.ok).toBe(false);
+    wire({ target });
+    mockBuilders.projects = chainBuilder({ firstRow: null });
+    expect(await bearerLinkSendCheck('Your report: wavespest.co/l/wrapabc123', OTHER, { trustedCustomerId: 'c1' })).toEqual(longResult);
+  });
+
+  test('the in-lock prep re-check resolves a wrapped prep code too', async () => {
+    wire({ target: `${PORTAL}/prep/${PREP}` });
+    const longResult = await recheckPrepLinks(`Checklist: portal.wavespestcontrol.com/prep/${PREP}`, OTHER, { trustedCustomerId: 'c1' });
+    expect(longResult.error).toMatch(/different customer/);
+    wire({ target: `${PORTAL}/prep/${PREP}` });
+    expect(await recheckPrepLinks('Checklist: wavespest.co/l/wrapabc123', OTHER, { trustedCustomerId: 'c1' })).toEqual(longResult);
+    wire({ target: `${PORTAL}/prep/${PREP}` });
+    expect((await recheckPrepLinks('Checklist: wavespest.co/l/wrapabc123', SAME, { trustedCustomerId: 'c1' })).ok).toBe(true);
+    expect(resolvePrepSource).toHaveBeenCalledWith(PREP);
+  });
+
+  test('a wrapped Auto Pay setup link (customer-kind /secure): present, refused for another customer, allowed for the owner — like the long link', async () => {
+    const target = `${PORTAL}/secure/${SECURE}`;
+    const row = { id: 'r1', kind: 'customer', token: SECURE, status: 'pending', expires_at: new Date(Date.now() + 86400e3), customer_id: 'c1' };
+    const long = `Set it up: portal.wavespestcontrol.com/secure/${SECURE}`;
+    wire({ target, card: row });
+    expect(await autopayLinkSendCheck(long, OTHER)).toMatchObject({ present: true, ok: false, error: expect.stringMatching(/different customer/) });
+    wire({ target, card: row });
+    expect(await autopayLinkSendCheck('Set it up: wavespest.co/l/wrapabc123', OTHER)).toMatchObject({ present: true, ok: false, error: expect.stringMatching(/different customer/) });
+    wire({ target, card: row });
+    expect(await autopayLinkSendCheck('Set it up: wavespest.co/l/wrapabc123', SAME, { trustedCustomerId: 'c1' })).toEqual({ present: true, ok: true, tokens: [SECURE] });
+    // Scheduled / draft: presence alone refuses, wrapped or not.
+    wire({ target, card: row });
+    expect((await autopayLinkSendCheck('Set it up: wavespest.co/l/wrapabc123', null)).present).toBe(true);
+    // An expired setup link refuses the same way through the wrapper.
+    wire({ target, card: { ...row, expires_at: new Date(Date.now() - 1000) } });
+    expect((await autopayLinkSendCheck('Set it up: wavespest.co/l/wrapabc123', SAME, { trustedCustomerId: 'c1' })).error).toMatch(/expired or no longer live/);
+  });
+
+  test('a wrapped contract whose signing link has since rotated refuses at the send, like the long form (expiry / eligibility come along)', async () => {
+    wire({ target: `${PORTAL}/contract/${CONTRACT}`, contract: null });
+    const longResult = await bearerLinkSendCheck(`Please sign: portal.wavespestcontrol.com/contract/${CONTRACT}`, SAME, { trustedCustomerId: 'c1' });
+    expect(longResult.error).toMatch(/expired or no longer live/);
+    wire({ target: `${PORTAL}/contract/${CONTRACT}`, contract: null });
+    expect(await bearerLinkSendCheck('Please sign: wavespest.co/l/wrapabc123', SAME, { trustedCustomerId: 'c1' })).toEqual(longResult);
+    expect(mockBuilders.customer_contracts.where).toHaveBeenCalledWith({ share_token_hash: hashContractToken(CONTRACT) });
+  });
+
+  test('unresolvable / non-bearer codes behave as before: an unknown code, an estimate target and a foreign-host target add nothing', async () => {
+    wire({ target: null });
+    expect(await immediateOnlyLinkSendCheck('See wavespest.co/l/unknowncode1')).toEqual({ present: false });
+    expect(await bearerLinkSendCheck('See wavespest.co/l/unknowncode1', OTHER, { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    wire({ target: `${PORTAL}/estimate/${'e'.repeat(24)}` });
+    expect(await immediateOnlyLinkSendCheck('See wavespest.co/l/wrapabc123')).toEqual({ present: false });
+    expect(await bearerLinkSendCheck('See wavespest.co/l/wrapabc123', OTHER, { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+    wire({ target: `https://evil.example/prep/${PREP}` });
+    expect(await immediateOnlyLinkSendCheck('See wavespest.co/l/wrapabc123')).toEqual({ present: false });
+    expect(resolvePrepSource).not.toHaveBeenCalled();
+  });
+
+  test('the kind column never hides a bearer target: a code labelled with a protected kind but aiming at a prep page is judged as a prep page too', async () => {
+    wire({ target: `${PORTAL}/prep/${PREP}`, kind: 'receipt' });
+    expect(await immediateOnlyLinkSendCheck('See wavespest.co/l/wrapabc123')).toMatchObject({ present: true });
+    wire({ target: `${PORTAL}/prep/${PREP}`, kind: 'service_report' });
+    expect((await bearerLinkSendCheck('See wavespest.co/l/wrapabc123', OTHER, { trustedCustomerId: 'c1' })).ok).toBe(false);
+  });
+});

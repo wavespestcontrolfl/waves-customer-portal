@@ -21,6 +21,7 @@ const HOST = 'portal.wavespestcontrol.com';
 const TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'; // 32 hex, the prep token shape
 const CUSTOMER_ID = '11111111-2222-4333-8444-555555555555';
 const LEAD_ID = '66666666-7777-4888-9999-000000000000';
+const SID = 'SM' + 'a1'.repeat(16); // a real Twilio message sid shape
 const base = { channel: 'sms', audience: 'customer', customerId: CUSTOMER_ID };
 
 // A chainable short_codes/sms_log query double. `rows` is what a .first() returns.
@@ -213,8 +214,8 @@ describe('settleWrappedLinks', () => {
   beforeEach(() => { rows.sms_log = { id: 'log-uuid-1' }; });
 
   test('an accepted send stamps every code with the sms_log row (only where still unstamped)', async () => {
-    await settleWrappedLinks(['c1', 'c2'], { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM123' });
-    expect(log).toContainEqual({ table: 'sms_log', where: [{ twilio_sid: 'SM123' }] });
+    await settleWrappedLinks(['c1', 'c2'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID });
+    expect(log).toContainEqual({ table: 'sms_log', where: [{ twilio_sid: SID }] });
     expect(log).toContainEqual({ table: 'short_codes', whereIn: ['code', ['c1', 'c2']] });
     expect(log).toContainEqual({ table: 'short_codes', whereNull: ['message_ref'] });
     expect(log).toContainEqual({ table: 'short_codes', update: expect.objectContaining({ message_ref: 'sms_log:log-uuid-1' }) });
@@ -226,14 +227,17 @@ describe('settleWrappedLinks', () => {
       if (t === 'sms_log') b.first = jest.fn(async () => { throw new Error('nope'); });
       return b;
     });
-    await settleWrappedLinks(['c1'], { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM123' });
-    expect(log).toContainEqual({ table: 'short_codes', update: expect.objectContaining({ message_ref: 'twilio_sid:SM123' }) });
+    await settleWrappedLinks(['c1'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID });
+    expect(log).toContainEqual({ table: 'short_codes', update: expect.objectContaining({ message_ref: `twilio_sid:${SID}` }) });
   });
 
   test.each([
     ['blocked / never sent', { sent: false, deliveryOutcome: 'not_sent' }],
     ['uncertain delivery', { sent: false, deliveryOutcome: 'uncertain' }],
-    ['provider dedupe (no new text went out)', { sent: true, deliveryOutcome: 'accepted', deduped: true, providerMessageId: 'SM-old' }],
+    ['provider dedupe (no new text went out)', { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', deduped: true, providerMessageId: SID }],
+    ['push-routed send (accepted, but no text carried the links)', { sent: true, provider: 'push', deliveryOutcome: 'accepted', providerMessageId: 'push:delivered' }],
+    ['push id under a twilio-shaped outcome', { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'push:delivered' }],
+    ['a well-formed sid from a non-twilio provider', { sent: true, provider: 'push', deliveryOutcome: 'accepted', providerMessageId: SID }],
   ])('%s: codes stay unstamped and are never deleted', async (_l, outcome) => {
     await settleWrappedLinks(['c1'], outcome);
     expect(log).toEqual([]);
@@ -241,7 +245,7 @@ describe('settleWrappedLinks', () => {
 
   test('a database error never throws', async () => {
     db.mockImplementation(() => { throw new Error('pool exhausted'); });
-    await expect(settleWrappedLinks(['c1'], { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM1' })).resolves.toBeUndefined();
+    await expect(settleWrappedLinks(['c1'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID })).resolves.toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('stamp failed'));
   });
 });

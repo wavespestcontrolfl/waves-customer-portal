@@ -1317,10 +1317,12 @@ async function sendCustomerMessageCore(input) {
     }
     throw err;
   } finally {
-    // Fire-and-forget: stamping never adds latency to the send path and
-    // settleWrappedLinks never throws.
+    // Fire-and-forget: stamping never adds latency to the send path. The
+    // .catch is a backstop (settleWrappedLinks never throws); code only, never
+    // the message — a Knex error embeds the bound target_url.
     if (wrappedLinkCodes.length) {
-      require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome);
+      void require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome)
+        .catch((err) => logger.warn(`[send_customer_message] wrapped-link stamp failed: ${String((err && (err.code || err.name)) || 'error').slice(0, 40)}`));
     }
   }
 }

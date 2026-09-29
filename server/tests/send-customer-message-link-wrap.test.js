@@ -5,7 +5,8 @@
  * is rewritten to a /l/<code> short link BEFORE countSegments, so the audit
  * row's body, its segment count and the text handed to the provider all
  * describe the same wrapped body; the minted code is stamped with the sms_log
- * row after an accepted send and deleted when nothing left; a shortener
+ * row after an accepted Twilio send (a blocked or failed attempt leaves it
+ * unstamped — codes are never deleted); a shortener
  * failure keeps the original link and still sends; gate off / MMS bodies are
  * byte-identical to today.
  */
@@ -46,7 +47,7 @@ jest.mock('../services/messaging/audit', () => ({
   persistAudit: jest.fn(async () => ({ id: 'audit-1' })),
 }));
 jest.mock('../services/messaging/providers/twilio-sms', () => ({
-  sendViaTwilio: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' })),
+  sendViaTwilio: jest.fn(async () => ({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: `SM${'b2'.repeat(16)}` })),
   mapPurposeToMessageType: jest.fn(() => 'manual'),
   mediaUrlsAllowed: jest.fn((input) => input.metadata?.allowMediaUrls === true),
 }));
@@ -98,6 +99,7 @@ const BASE_INPUT = {
   purpose: 'conversational',
   customerId: '11111111-2222-4333-8444-555555555555',
 };
+const SID = `SM${'b2'.repeat(16)}`;
 const WRAPPED_BODY = `${LEAD_IN}${HOST}/l/wrap1abcde`;
 
 let dbLog;
@@ -119,7 +121,7 @@ beforeEach(() => {
   dbLog = [];
   db.mockImplementation(fakeDb);
   process.env.GATE_SMS_LINK_WRAP = 'true';
-  sendViaTwilio.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' });
+  sendViaTwilio.mockResolvedValue({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: SID });
   persistAudit.mockResolvedValue({ id: 'audit-1' });
   createShortCode.mockResolvedValue({ code: 'wrap1abcde', shortUrl: `https://${HOST}/l/wrap1abcde` });
 });
@@ -146,9 +148,29 @@ test('gate on: the provider body, the audit body and the segment count all descr
 test('an accepted send stamps the minted code with the sms_log row (after the send, off the send path)', async () => {
   await sendCustomerMessage(BASE_INPUT);
   await flush();
-  expect(dbLog).toContainEqual({ table: 'sms_log', where: { twilio_sid: 'SM-real' } });
+  expect(dbLog).toContainEqual({ table: 'sms_log', where: { twilio_sid: SID } });
   expect(dbLog).toContainEqual({ table: 'short_codes', whereIn: ['code', ['wrap1abcde']] });
   expect(dbLog).toContainEqual({ table: 'short_codes', update: expect.objectContaining({ message_ref: 'sms_log:sms-log-9' }) });
+});
+
+test('a push-routed accepted send (no Twilio sid) leaves the code unstamped', async () => {
+  sendViaTwilio.mockResolvedValue({ sent: true, provider: 'push', deliveryOutcome: 'accepted', providerMessageId: 'push:delivered' });
+  await sendCustomerMessage(BASE_INPUT);
+  await flush();
+  expect(dbLog).toEqual([]);
+});
+
+test('a rejecting stamp is caught and logged by code only (no unhandled rejection, no send failure)', async () => {
+  const wrap = require('../services/messaging/sms-link-wrap');
+  const spy = jest.spyOn(wrap, 'settleWrappedLinks').mockRejectedValue(Object.assign(new Error('insert ... https://x/prep/secret-token'), { code: 'ECONNRESET' }));
+  const result = await sendCustomerMessage(BASE_INPUT);
+  await flush();
+  expect(result).toMatchObject({ sent: true });
+  expect(spy).toHaveBeenCalled();
+  const warned = logger.warn.mock.calls.map((c) => c[0]).find((m) => String(m).includes('stamp failed'));
+  expect(warned).toContain('ECONNRESET');
+  expect(warned).not.toContain('secret-token');
+  spy.mockRestore();
 });
 
 test('a send that never leaves stamps nothing and deletes nothing', async () => {

@@ -23,6 +23,12 @@
  *   - review_request and missed_call_followup sends are skipped whole
  *     (BODY_RECONCILED_PURPOSES): they stamp their exact body before the send
  *     and later search the provider for it to reconcile a stranded send.
+ *   - A wrapped link must not launder a bearer past the send fences: the
+ *     wrapper code is kind 'other', so composer-customer-links.js's
+ *     expandedRuns resolves any owned /l/<code> to its target_url and judges
+ *     that target through the same long-form checks as a pasted link (prep,
+ *     secure, contract, project report, statement pay, ...), in every seam
+ *     (/sms, schedule, drafts, Auto Pay, lead send).
  *   - NEVER blocks a send. Any mint failure (or a recognition failure) keeps
  *     the original link and logs a warn. Bearer-token links (prep, pay,
  *     secure, ...) mint through createShortCode directly rather than the
@@ -163,13 +169,17 @@ async function wrapPortalLinks({ body, channel, audience, purpose = null, hasMed
 /**
  * After an accepted send: stamp every code with the carrying message. Any
  * other outcome leaves the codes unstamped (inert; a retry mints its own).
- * Best-effort and self-contained — never throws, callers do not await it on
- * the send path.
+ * Best-effort and self-contained — never throws; callers run it as
+ * `void settleWrappedLinks(...).catch(...)`, not awaited on the send path.
  */
 async function settleWrappedLinks(codes, outcome = {}) {
   if (!Array.isArray(codes) || !codes.length) return;
+  // A real Twilio SMS/MMS sid only (recordReceiptSmsDelivery's same rule): a
+  // push-routed send reports 'accepted' with a 'push:delivered' id — no text
+  // carried the links, so they stay unstamped.
   const accepted = outcome.sent === true && outcome.deliveryOutcome === 'accepted'
-    && outcome.deduped !== true && !!outcome.providerMessageId;
+    && outcome.deduped !== true && outcome.provider === 'twilio'
+    && /^(SM|MM)[a-f0-9]{32}$/i.test(outcome.providerMessageId || '');
   if (!accepted) return;
   try {
     const db = require('../../models/db');

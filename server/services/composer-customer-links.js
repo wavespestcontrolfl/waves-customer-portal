@@ -680,7 +680,7 @@ function canonicalSecureToken(run, hosts, opts) {
  * gates — they are neither judged nor reclassified here.
  */
 async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) {
-  const runs = decodedRuns(body);
+  const runs = await expandedRuns(body);
   const text = runs.join(' ');
   const refuse = (error) => ({ present: true, ok: false, error });
   const hosts = ownedPortalHosts();
@@ -883,6 +883,54 @@ function ownedPortalLinkSpans(body) {
   }
   return spans;
 }
+// ONE resolver for every owned /l/<code> in a body (the SMS link wrap's
+// wrapper codes — messaging/sms-link-wrap.js — are kind 'other' and carry a
+// bearer page as their target, e.g. /prep/, /secure/, /contract/,
+// /report/project/, /pay/statement/). What /l/:code opens is its target_url,
+// so each code's target is judged as if that long link had been pasted: the
+// target is appended to the body's runs and every long-form check below
+// (ownership / recipient binding, expiry, immediate-only, eligibility) runs
+// on it unchanged. Called by every seam that derives its runs from a body
+// (Auto Pay, immediate-only, bearer, prep re-check, consultation rows).
+// Not expanded: a code whose target the short-row logic already judges by
+// target (appointment / service report / receipt / pay page —
+// shortRowDestination) or a consultation code (judged by its own row), so
+// those never get double-judged. An unknown code (no row) adds nothing —
+// exactly what shortCodeRows does with it; a lookup error propagates the
+// same way. Codes are looked up lower-case, like the public resolver.
+const SHORT_CODE_PATH_RE = /^\/l\/([A-Za-z0-9_-]+)$/i;
+function targetOnOwnedHost(target, hosts) {
+  try {
+    const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(target) ? target : `https://${target}`);
+    return hosts.includes(url.host.toLowerCase().replace(/\.$/, ''));
+  } catch {
+    return false;
+  }
+}
+function targetJudgedAsShortRow(target, hosts) {
+  return [APPOINTMENT_TOKEN_RE, REPORT_TOKEN_RE, RECEIPT_TOKEN_PATH_RE, RECEIPT_PAY_TARGET_RE]
+    .some((re) => canonicalPortalToken(target, hosts, re, ANY_SCHEME));
+}
+async function expandedRuns(body, conn = db) {
+  const runs = decodedRuns(body);
+  const shortRuns = linkRuns(runs, /\/l\//i);
+  if (!shortRuns.length) return runs;
+  const hosts = ownedPortalHosts();
+  const codes = [...new Set(shortRuns
+    .map((run) => canonicalPortalToken(run, hosts, SHORT_CODE_PATH_RE, ANY_SCHEME))
+    .filter(Boolean)
+    .map((code) => code.toLowerCase()))];
+  const extra = [];
+  for (const code of codes) {
+    const row = await conn('short_codes').where({ code }).first('code', 'kind', 'target_url');
+    const target = decodeLinkText(String(row?.target_url || '').trim());
+    // A target on a host we do not own is no portal bearer (and never one of
+    // our redirects): left to shortRowDestination's kind-based judgement.
+    if (!target || row.kind === 'consultation' || !targetOnOwnedHost(target, hosts) || targetJudgedAsShortRow(target, hosts)) continue;
+    extra.push(...target.split(/\s+/).filter(Boolean));
+  }
+  return extra.length ? [...runs, ...extra] : runs;
+}
 async function shortCodeRows(runs, scheme = {}) {
   const shortRuns = linkRuns(runs, /\/l\//i);
   if (!shortRuns.length) return [];
@@ -979,7 +1027,7 @@ function reportLinkPresent(runs, hosts, shortRows, scheme = {}) {
 }
 
 async function immediateOnlyLinkSendCheck(body) {
-  const runs = decodedRuns(body);
+  const runs = await expandedRuns(body);
   const hosts = ownedPortalHosts();
   for (const kind of IMMEDIATE_ONLY_LINK_KINDS) {
     for (const run of linkRuns(runs, kind.fragment)) {
@@ -1525,7 +1573,7 @@ async function checkContractLinks(ctx, contracts) {
 // strayConsultationCredentialPresent) must land on THAT connection rather
 // than checking out a second one that may not be available.
 async function consultationLinkRows(body, conn = db) {
-  const runs = decodedRuns(body);
+  const runs = await expandedRuns(body, conn);
   const hosts = ownedPortalHosts();
   // An explicit http:// link is remembered as plaintext (Codex #4709 r7
   // P2): the 14-day bearer would ride the first unencrypted request before
@@ -1747,7 +1795,7 @@ async function bearerLinkSendCheck(body, toLast10, {
   trustedCustomerId, usDestination = true, contractId = null, expectedLeadId = null,
 } = {}) {
   const ctx = {
-    runs: decodedRuns(body),
+    runs: await expandedRuns(body),
     body,
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
@@ -1826,7 +1874,7 @@ async function bearerLinkSendCheck(body, toLast10, {
  */
 async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
   const ctx = {
-    runs: decodedRuns(body),
+    runs: await expandedRuns(body),
     body,
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
