@@ -35,7 +35,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { isTrackTokenLive } = require('../services/track-token-expiry');
 const logger = require('../services/logger');
-const { recordPageView } = require('../services/customer-page-views');
+const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const PhotoService = require('../services/photos');
 const {
@@ -650,7 +650,7 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
 // Answers 204 immediately; the insert is fire-and-forget (bots, staff
 // browsers and repeat opens inside the dedupe window are skipped by the
 // recorder).
-router.post('/:token/view', async (req, res, next) => {
+router.post('/:token/view', async (req, res) => {
   res.set(PRIVACY_HEADERS);
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -667,7 +667,11 @@ router.post('/:token/view', async (req, res, next) => {
     });
     return res.status(204).end();
   } catch (err) {
-    next(err);
+    // Never forward the raw error: Knex text can carry the bound
+    // track_view_token and the global handler logs err.message/stack.
+    // Code-only log; the beacon is best-effort telemetry, so answer 204.
+    logViewFailure('lookup', 'track', 'scheduled_service', err);
+    return res.status(204).end();
   }
 });
 

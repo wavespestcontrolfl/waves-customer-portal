@@ -79,7 +79,7 @@ function getHandler(router, method = 'get', path = '/:token') {
   return stack[stack.length - 1].handle;
 }
 
-async function drive(router, request, method = 'get', path = '/:token') {
+async function drive(router, request, method = 'get', path = '/:token', next = jest.fn()) {
   const res = {
     statusCode: 200,
     set: jest.fn(() => res),
@@ -89,7 +89,7 @@ async function drive(router, request, method = 'get', path = '/:token') {
     send: jest.fn(() => res),
     end: jest.fn(() => res),
   };
-  await getHandler(router, method, path)(request, res, jest.fn());
+  await getHandler(router, method, path)(request, res, next);
   return res;
 }
 
@@ -193,6 +193,30 @@ describe('customer page view wiring', () => {
     const real = jest.requireActual('../services/customer-page-views');
     expect(real.shouldRecord(req(TOKEN, { get: () => 'Slackbot-LinkExpanding 1.0' }))).toBe(false);
     expect(real.shouldRecord(req(TOKEN))).toBe(true);
+  });
+
+  test('track: POST /:token/view lookup failure is logged code-only and never forwarded', async () => {
+    const err = Object.assign(new Error(`select ... where track_view_token = '${TOKEN}'`), { code: '57014' });
+    mockRows = { get scheduled_services() { throw err; } };
+    const next = jest.fn();
+    const res = await drive(trackRouter, req(TOKEN), 'post', '/:token/view', next);
+    expect(res.statusCode).toBe(204);
+    expect(next).not.toHaveBeenCalled();
+    expect(mockLogViewFailure).toHaveBeenCalledWith('lookup', 'track', 'scheduled_service', err);
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
+  test('track: privacy headers are mounted ahead of the global /api limiter', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../index.js'), 'utf8');
+    const headers = src.indexOf("app.use('/api/public/track', (req, res, next) => {");
+    const limiter = src.indexOf("app.use('/api/', limiter);");
+    expect(headers).toBeGreaterThan(-1);
+    expect(limiter).toBeGreaterThan(-1);
+    expect(headers).toBeLessThan(limiter);
+    const block = src.slice(headers, headers + 300);
+    expect(block).toContain("'Cache-Control', 'private, no-store'");
+    expect(block).toContain("'X-Robots-Tag', 'noindex, nofollow'");
+    expect(block).toContain("'Referrer-Policy', 'no-referrer'");
   });
 
   test('track: POST /:token/view is rate-limited like stops-ahead (router-level limiter)', () => {
