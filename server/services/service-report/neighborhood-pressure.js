@@ -1,6 +1,9 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const {
+  TECH_RATING_CUTOVER_DATE, SCALE_BLENDED, SCALE_TECHNICIAN_RATING, SCALE_UNKNOWN, isComparable,
+} = require('../pest-pressure/score-scale');
 
 async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
   if (!record?.id) return undefined;
@@ -26,14 +29,30 @@ async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
       avgPressureIndex: customerVisiblePressureIndex(row.avg_pressure_index),
       medianPressureIndex: row.median_pressure_index == null ? undefined : customerVisiblePressureIndex(row.median_pressure_index),
       sampleSize: Number(row.sample_size || 0),
+      scoreScale: row.score_scale || null,
     }))
     .filter((point) => Number.isFinite(point.avgPressureIndex))
     .sort((a, b) => Date.parse(a.periodStart) - Date.parse(b.periodStart));
 
   if (!points.length) return undefined;
-  const latest = points[points.length - 1];
+  // #4741 (2026-09-24): an aggregate is only comparable with windows of the
+  // same scale. The builder averages one scale per window by score-row
+  // provenance and stores it in score_scale. A row from before that column
+  // (null) is blended only when its window ended before the cutover; otherwise
+  // it may mix scales and is unknown. Chart windows comparable to the newest;
+  // when the newest is unknown there is no honest average to show yet.
+  const ymd = (value) => String(value).slice(0, 10);
+  const windowScale = (point) => {
+    if ([SCALE_BLENDED, SCALE_TECHNICIAN_RATING].includes(point.scoreScale)) return point.scoreScale;
+    return ymd(point.periodEnd) <= TECH_RATING_CUTOVER_DATE ? SCALE_BLENDED : SCALE_UNKNOWN;
+  };
+  const newest = points[points.length - 1];
+  const newestScale = windowScale(newest);
+  if (newestScale === SCALE_UNKNOWN) return undefined;
+  const sameScale = points.filter((point) => point === newest || isComparable(windowScale(point), newestScale));
+  const latest = sameScale[sameScale.length - 1];
   return {
-    points,
+    points: sameScale,
     sampleSize: latest.sampleSize,
     customerSummary: `Nearby WaveGuard homes averaged ${latest.avgPressureIndex.toFixed(1)} this month.`,
   };

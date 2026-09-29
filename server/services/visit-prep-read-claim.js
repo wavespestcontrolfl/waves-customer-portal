@@ -1,15 +1,14 @@
 /**
  * Visit prep reads — the ONE daily cap and claim shared by every read
  * engine (pest: visit-prep-pest-read.js; lawn / tree & shrub:
- * visit-prep-plant-read.js). One cap (VISIT_PREP_READ_DAILY_CAP, counted over
- * visit_prep_submissions.read_status for the ET day), one advisory lock key,
+ * visit-prep-plant-read.js). One cap (VISIT_PREP_READ_DAILY_CAP, engine
+ * attempts counted on the ET day each read is claimed), one advisory lock key,
  * one claim transaction, so the engines can never drift apart on budget
  * rules.
  *
  * claimReadSlot proves applicability under the stop lock (withLockedStop:
  * the canonical stop lock plus share locks on the stop's rows), then takes
- * the cap lock last, only for the count and the claim. Only a submission from TODAY (ET)
- * may claim: the cap counts by submission day.
+ * the cap lock last, only for the count and the claim.
  */
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
@@ -31,19 +30,28 @@ function etDayStart(now = new Date()) {
 
 // Every engine ATTEMPT today, not only the ones that stored a result: an
 // engine call that failed, or whose result was released because the stop
-// changed mid-read, still cost a vision call. Each claim bumps
-// read_attempts; rows claimed before that column existed count once while
-// they sit in a claimed status (pending/done/failed). Summed in Postgres
-// over the created_at index (Codex #5320 r10 P2).
+// changed mid-read, still cost a vision call. Counted on the ET day the
+// read was CLAIMED (read_claimed_at), so the sweep re-reading an older
+// submission is charged to today (Codex #5320 r12): a row claimed today
+// counts all its attempts (at least one) — conservative when an older
+// attempt of the same row fell on an earlier day, never an undercount. A
+// row claimed before read_claimed_at existed counts by its submission day
+// as before: its attempts, or one while it sits in a claimed status.
+// Summed in Postgres over the read_claimed_at and created_at indexes
+// (Codex #5320 r10 P2).
 const CLAIMED_STATUSES = ['pending', 'done', 'failed'];
-const ATTEMPTS_SUM_SQL = 'COALESCE(SUM(GREATEST(read_attempts, CASE WHEN read_status IN '
-  + "('pending', 'done', 'failed') THEN 1 ELSE 0 END)), 0)::int AS count";
+const ATTEMPTS_SUM_SQL = 'COALESCE(SUM(CASE'
+  + ' WHEN read_claimed_at IS NOT NULL THEN (CASE WHEN read_claimed_at >= ? THEN GREATEST(read_attempts, 1) ELSE 0 END)'
+  + " ELSE GREATEST(read_attempts, CASE WHEN read_status IN ('pending', 'done', 'failed') THEN 1 ELSE 0 END)"
+  + ' END), 0)::int AS count';
 async function readsToday(conn, now = new Date()) {
+  const day = etDayStart(now);
   const row = await conn('visit_prep_submissions')
-    .where('created_at', '>=', etDayStart(now))
-    .first(conn.raw(ATTEMPTS_SUM_SQL));
+    .whereRaw('(read_claimed_at >= ? OR (read_claimed_at IS NULL AND created_at >= ?))', [day, day])
+    .first(conn.raw(ATTEMPTS_SUM_SQL, [day]));
   return Number(row?.count || 0);
 }
+
 
 /**
  * @param {object} conn
@@ -95,8 +103,11 @@ async function claimReadSlot(conn, submissionId, svc, {
       const value = await applicable(svc, trx);
       if (!value) return 'unsupported';
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
-      const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at', 'read_attempts');
-      if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
+      const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('read_attempts');
+      // Any submission day may claim: the cap counts the day the read runs
+      // (readsToday), and only the recovery sweep reaches an older one, for
+      // a visit that is still upcoming (Codex #5320 r12).
+      if (!own) return 'refused';
       if (await readsToday(trx, now) >= dailyCap()) return 'refused';
       // Claimed only from a status the caller expected (no engine holds the
       // row): a row another engine already claimed is never taken twice

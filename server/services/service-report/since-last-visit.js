@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { loadScaleMap, scaleForVisit, isComparable } = require('../pest-pressure/score-scale');
 const { reserviceReportCopyGateOn } = require('./reservice-report');
 
 function pressureValue(value) {
@@ -69,20 +70,28 @@ async function buildSinceLastVisitContext({ record, currentPressureIndexOverride
   const prior = await soft(priorQuery
     .orderBy('service_date', 'desc')
     .orderBy('started_at', 'desc')
-    .first('id', 'pressure_index'), null);
+    .first('id', 'pressure_index', 'started_at', 'ended_at', 'service_date', 'created_at'), null);
 
   const currentFindings = await soft(knex('service_findings')
     .where({ service_record_id: record.id })
     .select('id', 'service_record_id', 'title', 'detail', 'recommendation', 'severity'), []);
   const currentPressure = pressureValue(currentPressureIndexOverride !== undefined ? currentPressureIndexOverride : record.pressure_index);
   const priorPressure = pressureValue(prior?.pressure_index);
+  // #4741 (2026-09-24): a technician tap became the score directly while older
+  // scores were blended, so "Pressure: 0.9 -> 3.0" across the change compares
+  // two scales. Show the line only when both readings share one (no new copy).
+  let sameScale = true;
+  if (priorPressure && currentPressure && prior) {
+    const scaleMap = await loadScaleMap(knex, [record.id, prior.id]);
+    sameScale = isComparable(scaleForVisit(scaleMap, record), scaleForVisit(scaleMap, prior));
+  }
   const recommendation = firstRecommendation(currentFindings);
 
   if (!prior && !currentFindings.length && !recommendation) return undefined;
 
   return {
     priorServiceRecordId: prior?.id,
-    pressureLine: priorPressure && currentPressure ? `Pressure: ${priorPressure} -> ${currentPressure}` : undefined,
+    pressureLine: priorPressure && currentPressure && sameScale ? `Pressure: ${priorPressure} -> ${currentPressure}` : undefined,
     activityLine: readableActivityLine(currentFindings),
     actionLine: recommendation?.recommendation
       ? `Customer action: ${String(recommendation.recommendation).trim()}`

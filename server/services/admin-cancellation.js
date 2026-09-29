@@ -38,7 +38,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const CancellationResolution = require('./cancellation-resolution');
 const { REASON_CODE_VALUES, isReasonCode } = require('./cancellation-resolution/reason-codes');
 const { buildCancellationImpact } = require('./cancellation-resolution/impact');
@@ -201,9 +201,11 @@ async function resolveLiveTerm(customerId, wholeAccount) {
     .where('t.term_end', '>=', etDateString())
     .where('t.customer_id', customerId)
     .orderBy('t.term_end', 'desc')
-    .select('t.id', 't.term_start', 't.term_end', 't.plan_label', 't.prepay_amount',
-      't.coverage_visit_count', 't.coverage_service_type', 't.status', 't.renewal_decision',
-      't.prepay_invoice_id');
+    // The full row: coverageRowsForTerm reads the term's own identity (a
+    // termite installation anchor, a renewal successor's lineage, estimate
+    // provenance), and a partial row drops an anchored installation or
+    // widens a successor to the whole account.
+    .select('t.*');
   if (!terms || !terms.length) return null;
   if (terms.length > 1) {
     throw new CancelPlanError(409, 'multiple_prepay_terms',
@@ -401,7 +403,7 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFee
  * count is not on the term the refund is recorded as needing a manual
  * calculation — never invented.
  */
-async function computePrepayRefund(term) {
+async function computePrepayRefund(term, { coveredIds = null } = {}) {
   const prepaidAmount = term && term.prepay_amount != null ? Number(term.prepay_amount) : null;
   const includedVisits = Number.parseInt(term && term.coverage_visit_count, 10);
   const base = {
@@ -457,9 +459,20 @@ async function computePrepayRefund(term) {
     // invoice is settled/credited at reconciliation), so the stamp-based
     // count missed it and inflated remainingVisits — refunding a slice the
     // customer already consumed.
-    const { coverageRowsForTerm } = require('./annual-prepay-renewals');
-    const rows = await coverageRowsForTerm({ ...term });
-    completedRows = (Array.isArray(rows) ? rows : []).filter((r) =>
+    // coveredIds (the post-sweep recount): the covered rows as the approved
+    // refund counted them. The sweep cancels the upcoming ones, and deriving
+    // the set again afterwards would let a same-service visit outside it (a
+    // separately billed one-off) take a freed slot and read as consumed.
+    const renewals = require('./annual-prepay-renewals');
+    // A renewal whose plan lineage cannot be traced reads as an EMPTY covered
+    // set (coverageRowsForTerm selects nothing rather than guess the
+    // property): what the customer consumed is unknown there, never zero.
+    const lineage = await renewals._private.successorCoverageScope(term);
+    if (lineage && !lineage.resolved) return { ...base, reason: 'coverage_lineage_unresolved' };
+    const rows = Array.isArray(coveredIds)
+      ? await db('scheduled_services').whereIn('id', coveredIds).select('id', 'status', 'annual_prepay_term_id')
+      : await renewals.coverageRowsForTerm({ ...term });
+    completedRows = rows.filter((r) =>
       String(r.status || '').toLowerCase() === 'completed'
       // Overlapping terms: a visit committed to ANOTHER term never consumes
       // THIS term's slices (rows predating the term-id stamp stay counted).
@@ -477,6 +490,19 @@ async function computePrepayRefund(term) {
   const prepaidCents = Math.round(base.prepaidAmount * 100);
   const amount = Math.round((prepaidCents * remainingVisits) / base.includedVisits) / 100;
   return { ...base, completedVisits, remainingVisits, amount, needsManualCalc: false };
+}
+
+// The term's covered visit ids as the approved refund counts them, read before
+// the sweep so the post-sweep recount judges the same visits. Null when
+// unreadable: the recount then derives the set again, as before.
+async function refundCoveredIds(term, customerId) {
+  try {
+    const { coverageRowsForTerm } = require('./annual-prepay-renewals');
+    return (await coverageRowsForTerm({ ...term, customer_id: customerId })).map((r) => r.id);
+  } catch (err) {
+    logger.warn(`[admin-cancellation] covered-visit snapshot failed for term ${term.id}: ${err.message}`);
+    return null;
+  }
 }
 
 // The LIVE term's canonical covered visit ids (coverageRowsForTerm — the
@@ -522,7 +548,9 @@ async function liveCoveredKeepIds(term, customerId) {
 // covered visit falls inside the scope (fail closed — a failed covered-row
 // read also refuses).
 async function scopedCoverageConflict(customerId, scope) {
-  const { coveredTermsAsOf, coverageRowsForTerm } = require('./annual-prepay-renewals');
+  const renewals = require('./annual-prepay-renewals');
+  const { coveredTermsAsOf, coverageRowsForTerm } = renewals;
+  const { successorCoverageScope } = renewals._private;
   // A pending, still-payable prepay invoice for a selected family is the
   // scoped twin of the whole-account refusal: the scoped cancel would pull
   // the family's visits and recurrence, and the payment landing later
@@ -533,7 +561,7 @@ async function scopedCoverageConflict(customerId, scope) {
   const terms = await coveredTermsAsOf(db, null)
     .where('t.term_end', '>=', etDateString())
     .where('t.customer_id', customerId)
-    .select('t.id', 't.term_start', 't.term_end', 't.coverage_service_type', 't.coverage_visit_count');
+    .select('t.*'); // the full row, as resolveLiveTerm reads it
   if (!terms || !terms.length) return false;
   const { familyOfServiceRow } = require('./cancellation-processor');
   const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
@@ -551,6 +579,9 @@ async function scopedCoverageConflict(customerId, scope) {
     if (identityFamily && scope.includes(identityFamily)) return true;
     let covered;
     try {
+      // An untraceable renewal's covered set reads EMPTY: unknown coverage.
+      const lineage = await successorCoverageScope({ ...t, customer_id: customerId });
+      if (lineage && !lineage.resolved) return true;
       covered = await coverageRowsForTerm({ ...t, customer_id: customerId });
     } catch (err) {
       logger.error(`[admin-cancellation] scoped coverage check failed for term ${t.id}: ${err.message}`);
@@ -558,7 +589,7 @@ async function scopedCoverageConflict(customerId, scope) {
     }
     const upcoming = (Array.isArray(covered) ? covered : []).filter((r) =>
       CANCELLABLE_STATUSES.includes(String(r.status))
-      && (String(r.scheduled_date).slice(0, 10) >= today || r.status === 'rescheduled'));
+      && (dateOnlyString(r.scheduled_date) >= today || r.status === 'rescheduled'));
     if (!upcoming.length) continue;
     // Catalog identity improves family classification when present.
     const serviceIds = [...new Set(upcoming.map((r) => r.service_id).filter(Boolean))];
@@ -1274,6 +1305,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
+  const coveredForRefund = refund && !refund.needsManualCalc ? await refundCoveredIds(term, customerId) : null;
   // The LIVE term's covered visit ids — resolved BEFORE any write; an
   // unresolvable set refuses the commit (liveCoveredKeepIds throws 409).
   const keepVisitIds = prepayPlan.keepThrough ? await liveCoveredKeepIds(term, customerId) : null;
@@ -2032,7 +2064,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           // the manual-calculation wording, and a changed amount flags the
           // run for office review instead of silently recording numbers the
           // operator never approved.
-          const recount = await computePrepayRefund({ ...term, customer_id: customerId });
+          const recount = await computePrepayRefund({ ...term, customer_id: customerId }, { coveredIds: coveredForRefund });
           if (refund && !refund.needsManualCalc
             && (recount.needsManualCalc || recount.amount !== refund.amount)) {
             errors.push('refund_recomputed_after_sweep');

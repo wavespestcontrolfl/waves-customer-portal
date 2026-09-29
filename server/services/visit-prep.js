@@ -735,6 +735,10 @@ function plantTopFields(v2) {
     fits: asList(top.fits),
     notYet: asList(top.not_yet),
     plantCommonName: plant.common_name || null,
+    // The approved weeds the engine named (at most two; plant-engine.js
+    // workupSubjectFor): a weed-focused photo whose headline is only "Weeds
+    // in the lawn" still tells the tech which ones.
+    weedNames: [...new Set(asList(v2.subject && v2.subject.weeds).map((w) => w && w.common_name).filter(Boolean))],
     safetyLines: plantSafetyLines(v2),
     hazards: top.safety || plant.safety || null,
   };

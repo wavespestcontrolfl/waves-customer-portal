@@ -84,10 +84,20 @@ function fakeConn(tables = {}) {
     q.forShare = () => { (store._shareLocked = store._shareLocked || []).push(q._whereIn ? q._whereIn.vals : q._where.id); return baseForShare ? baseForShare() : q; };
     q.count = () => ({ first: async () => ({ count: rowsMatching().length }) });
     // readsToday's Postgres attempt sum, computed the same way here.
+    // (claim day: read_claimed_at today; a row with no claim stamp by its
+    // submission day), computed the same way here.
+    q.whereRaw = () => q;
     q.first = async (...cols) => {
-      if (typeof cols[0] === 'string' && cols[0].includes('SUM(GREATEST')) {
+      if (typeof cols[0] === 'string' && cols[0].includes('SUM(CASE')) {
+        const day = jest.requireActual('../services/visit-prep-read-claim').etDayStart();
         const claimed = ['pending', 'done', 'failed'];
-        return { count: rowsMatching().reduce((n, r) => n + Math.max(Number(r.read_attempts) || 0, claimed.includes(r.read_status) ? 1 : 0), 0) };
+        const attemptsToday = (r) => {
+          const n = Number(r.read_attempts) || 0;
+          if (r.read_claimed_at) return new Date(r.read_claimed_at) >= day ? Math.max(n, 1) : 0;
+          if (r.created_at && new Date(r.created_at) < day) return 0;
+          return Math.max(n, claimed.includes(r.read_status) ? 1 : 0);
+        };
+        return { count: rowsMatching().reduce((sum, r) => sum + attemptsToday(r), 0) };
       }
       return rowsMatching()[0] || null;
     };
@@ -387,12 +397,39 @@ describe('_internal.resolveApplicability', () => {
   });
 });
 
-describe('claim day', () => {
-  test('a submission from before today\'s ET midnight never claims a slot (photos still delivered)', async () => {
+describe('claim day (Codex #5320 r12): the cap counts the day a read runs', () => {
+  test('an older submission (the recovery sweep re-reading it) claims, and its attempt counts on today\'s cap', async () => {
     const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000), read_status: 'none' }] });
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    mockIdentifyPlantV2.mockResolvedValue({ ok: false, reason: 'blurry' });
     await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
-    expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
+    expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(1);
+    const { readsToday } = jest.requireActual('../services/visit-prep-read-claim');
+    expect(await readsToday(conn)).toBe(1);
+  });
+
+  test('with today\'s cap already spent, an older submission is refused like any other', async () => {
+    process.env.VISIT_PREP_READ_DAILY_CAP = '1';
+    try {
+      const conn = fakeConn({ visit_prep_submissions: [
+        { id: 'sub-0', created_at: new Date(Date.now() - 72 * 3600 * 1000), read_status: 'done', read_attempts: 1, read_claimed_at: new Date() },
+        { id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000), read_status: 'none' },
+      ] });
+      mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+      await expect(triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn })).resolves.toBe('capped');
+      expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.VISIT_PREP_READ_DAILY_CAP;
+    }
+  });
+
+  test('an attempt claimed on an earlier day no longer counts today', async () => {
+    const conn = fakeConn({ visit_prep_submissions: [
+      { id: 'sub-0', created_at: new Date(), read_status: 'done', read_attempts: 1, read_claimed_at: new Date(Date.now() - 48 * 3600 * 1000) },
+    ] });
+    const { readsToday } = jest.requireActual('../services/visit-prep-read-claim');
+    // sub-1 (seeded unclaimed today) and sub-0 (claimed two days ago) — nothing today.
+    expect(await readsToday(conn)).toBe(0);
   });
 });
 
