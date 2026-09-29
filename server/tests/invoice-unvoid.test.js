@@ -692,6 +692,41 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
       .rejects.toThrow(/also bills other upcoming visits/);
   });
 
+  // Codex r8 P1 on #5301: an unitemized "First service application"
+  // replacement bills the anchor's whole combined group, whose stamps point
+  // at the ORIGINAL invoice — the read must also match members stamped with
+  // any invoice on this anchor.
+  test('an unitemized base-application invoice matches every member of its anchor group', async () => {
+    const group = { where: jest.fn(), orWhereIn: jest.fn() };
+    let svcReads = 0;
+    const conn = jest.fn(() => {
+      svcReads += 1;
+      if (svcReads === 1) return chain({ first: { id: 'anchor', status: 'confirmed', is_callback: false, estimated_price: 129 } });
+      const q = chain({ first: { id: 'member-2' } });
+      q.where = jest.fn((fn) => { if (typeof fn === 'function') fn.call(group); return q; });
+      return q;
+    });
+    const aggregate = { id: 'inv-9', scheduled_service_id: 'anchor', line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 400, amount: 400 }]) };
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, aggregate)).rejects.toThrow(/also bills other upcoming visits/);
+    expect(group.where).toHaveBeenCalledWith('first_application_invoice_id', 'inv-9');
+    expect(group.orWhereIn).toHaveBeenCalledWith('first_application_invoice_id', expect.any(Function));
+  });
+
+  test("an itemized anchor-only invoice doesn't add the anchor-group match", async () => {
+    const group = { where: jest.fn(), orWhereIn: jest.fn() };
+    let svcReads = 0;
+    const conn = jest.fn(() => {
+      svcReads += 1;
+      if (svcReads === 1) return chain({ first: { id: 'anchor', status: 'confirmed', is_callback: false, estimated_price: 129 } });
+      const q = noRow();
+      q.where = jest.fn((fn) => { if (typeof fn === 'function') fn.call(group); return q; });
+      return q;
+    });
+    const anchorOnly = { id: 'inv-8', scheduled_service_id: 'anchor', line_items: JSON.stringify([{ client_id: 'scheduled_anchor_primary', description: 'Pest Control', quantity: 1, unit_price: 200, amount: 200 }]) };
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, anchorOnly)).resolves.toBeUndefined();
+    expect(group.orWhereIn).not.toHaveBeenCalled();
+  });
+
   test('the other-visits read failing closed refuses the restore', async () => {
     let svcReads = 0;
     const conn = jest.fn((table) => {

@@ -459,15 +459,25 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 async function invoiceBillsAnotherUpcomingVisit(conn, invoiceRow) {
   let items = invoiceRow.line_items;
   if (typeof items === "string") { try { items = JSON.parse(items); } catch { items = []; } }
-  const lineIds = (Array.isArray(items) ? items : [])
-    .map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ""))?.[1])
-    .filter((id) => id && id !== String(invoiceRow.scheduled_service_id));
+  const lines = Array.isArray(items) ? items : [];
+  const itemized = lines.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ""))?.[1]).filter(Boolean);
+  const lineIds = itemized.filter((id) => id !== String(invoiceRow.scheduled_service_id));
+  // An unitemized base-application invoice on an anchor bills every member
+  // of that anchor's combined group (the re-price side reads it the same
+  // way — Codex r8 P1 on #5301), whichever stamp those members carry.
+  const aggregateOnAnchor = itemized.length === 0 && invoiceRow.scheduled_service_id
+    && lines.some((li) => lineIsBaseApplication(li));
   if (!invoiceRow.id && !lineIds.length) return false; // nothing to match on
   try {
     const row = await conn("scheduled_services")
       .where(function () {
         this.where("first_application_invoice_id", invoiceRow.id);
         if (lineIds.length) this.orWhereIn("id", lineIds);
+        if (aggregateOnAnchor) {
+          this.orWhereIn("first_application_invoice_id", function () {
+            this.select("id").from("invoices").where("scheduled_service_id", invoiceRow.scheduled_service_id);
+          });
+        }
       })
       .whereNot("id", invoiceRow.scheduled_service_id)
       .whereNotIn("status", ["cancelled", "canceled", "completed", "no_show", "skipped", "rescheduled"])
