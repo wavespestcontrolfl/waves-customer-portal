@@ -84,13 +84,17 @@ async function recoverStaleLocks({ invoiceId = null } = {}) {
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
     .where('locked_by', 'like', 'operator:%');
   const ownEmailSent = "email_result->>'operator_claim' = locked_by";
-  // 1. The claim's own email went out (recordOperatorReceiptEmail): the
-  //    invoice is stamped receipted (it may have died before its own stamp)
-  //    and the job closed — requeueing would email the receipt again.
+  const ownSmsSent = "sms_result->>'operator_claim' = locked_by";
+  // 1. Any leg the claim itself delivered (recordOperatorReceiptDelivered)
+  //    stamps the invoice receipted — it may have died before its own stamp
+  //    — so a job requeued below never texts the receipt again.
   await db('invoices')
     .whereNull('receipt_sent_at')
-    .whereIn('id', staleOperatorClaims().whereRaw(ownEmailSent).select('invoice_id'))
+    .whereIn('id', staleOperatorClaims().whereRaw(`(${ownEmailSent} OR ${ownSmsSent})`).select('invoice_id'))
     .update({ receipt_sent_at: db.fn.now() });
+  // 2. The claim's own email went out: the job is closed too — requeueing
+  //    would email the receipt again. (Text only: it falls through to the
+  //    rules below, since a queued job may still owe its email.)
   const closedDelivered = await staleOperatorClaims()
     .whereRaw(ownEmailSent)
     .update({
@@ -101,7 +105,7 @@ async function recoverStaleLocks({ invoiceId = null } = {}) {
       locked_by: null,
       updated_at: db.fn.now(),
     });
-  // 2. A row the claim itself created, which no enqueue took over: no
+  // 3. A row the claim itself created, which no enqueue took over: no
   //    automatic receipt was ever owed, so it goes away rather than becoming
   //    one (the operator's failed request is theirs to retry).
   await staleOperatorClaims().where({ source: 'operator_send' }).del();
@@ -392,13 +396,13 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // an enqueue either dedupes on it or, on a row the claim created, takes that
 // row over for release to re-queue — and hands it back afterwards
 // (releaseOperatorReceiptClaim). A job the drain is delivering right now
-// refuses the operator send ({ inFlight: true }) rather than racing it, and
+// refuses the operator send ({ inFlight: true, byOperator }) rather than racing it, and
 // one whose stale claim this call finds already delivered refuses it too
 // ({ alreadySent: true }).
 // A short transaction only: never held across the sends. A process that dies
 // holding the claim is settled by recoverStaleLocks after
 // STALE_LOCK_MINUTES: closed when its own email was recorded as sent
-// (recordOperatorReceiptEmail), removed when the claim created the row, and
+// (recordOperatorReceiptDelivered), removed when the claim created the row, and
 // otherwise handed back to the drain.
 // sawUnsent: the caller read the invoice with receipt_sent_at still null.
 // If it is stamped by the time the claim runs, another path (the drain, or
@@ -444,9 +448,12 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
       const job = await trx('receipt_delivery_jobs')
         .where({ invoice_id: invoiceId })
         .forUpdate()
-        .first('id', 'status', 'next_attempt_at');
+        .first('id', 'status', 'next_attempt_at', 'locked_by');
       if (!job) throw new Error(`receipt job for invoice ${invoiceId} vanished during the operator claim`);
-      if (job.status === 'running') return { inFlight: true };
+      // byOperator: another operator send holds it (not the drain) — it
+      // delivers only the legs that operator chose, so it is no promise that
+      // this caller's receipt goes out.
+      if (job.status === 'running') return { inFlight: true, byOperator: String(job.locked_by || '').startsWith('operator:') };
       if (await stampedSinceRead()) return { alreadySent: true };
       // A completed or failed job sends nothing more: no claim to hold.
       if (!QUEUED_STATUSES.includes(job.status)) return { id: null };
@@ -462,16 +469,21 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
   }
 }
 
-// Right after the operator's email leg delivers: claim-specific evidence on
-// the row, so a claim that is never released is closed by recoverStaleLocks
-// rather than requeued to email again. Best effort — without it the stale
-// claim is requeued (a possible repeat email, never a lost one).
-async function recordOperatorReceiptEmail(claim) {
+// Right after an operator leg delivers ('email' | 'sms'): claim-specific
+// evidence on the row, so a claim that is never released (a failed release,
+// or a process that dies before it) is settled by recoverStaleLocks without
+// repeating that leg — the invoice stamped, and on a delivered email the job
+// closed. Best effort — without it the stale claim is settled as undelivered
+// (a possible repeat, never a lost receipt).
+async function recordOperatorReceiptDelivered(claim, leg) {
   if (!claim?.id) return;
+  const evidence = leg === 'email'
+    ? { email_result: { ok: true, operator_claim: claim.token } }
+    : { sms_result: { sent: true, operator_claim: claim.token } };
   await db('receipt_delivery_jobs')
     .where({ id: claim.id, status: 'running', locked_by: claim.token })
-    .update({ email_result: { ok: true, operator_claim: claim.token }, updated_at: db.fn.now() })
-    .catch((err) => logger.warn(`[receipt-delivery-queue] operator receipt email evidence failed for job ${claim.id}: ${err.message}`));
+    .update({ ...evidence, updated_at: db.fn.now() })
+    .catch((err) => logger.warn(`[receipt-delivery-queue] operator receipt ${leg} evidence failed for job ${claim.id}: ${err.message}`));
 }
 
 // After the operator send: a delivered receipt EMAIL completes the job (the
@@ -542,7 +554,7 @@ module.exports = {
   processReceiptDeliveryJob,
   scheduleReceiptDeliveryDrain,
   claimReceiptJobForOperatorSend,
-  recordOperatorReceiptEmail,
+  recordOperatorReceiptDelivered,
   releaseOperatorReceiptClaim,
   _internals: {
     recoverStaleLocks,

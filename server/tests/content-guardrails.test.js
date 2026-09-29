@@ -5377,6 +5377,17 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(hyphenated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const fractional = guardrails.evaluate({ body: 'Wait half an hour before re-entering.' }, {});
     expect(fractional.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Worded fractions of an hour are figures too (PR #5187 codex r11).
+    for (const body of [
+      'Keep pets off the treated lawn for a quarter hour.',
+      'Keep pets off the lawn for a quarter-hour.',
+      'Wait a quarter of an hour before re-entering.',
+      'Wait three quarters of an hour before re-entering.',
+    ]) {
+      expect(guardrails.evaluate({ body }, {}).findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    const quarterOfCustomers = guardrails.evaluate({ body: 'A quarter of homeowners call us about ants.' }, {});
+    expect(quarterOfCustomers.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
     const requires = guardrails.evaluate({ body: 'Applications require 30 minutes before people can re-enter.' }, {});
     expect(requires.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const until = guardrails.evaluate({ body: 'Keep children away until 30 minutes after application.' }, {});

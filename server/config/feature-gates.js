@@ -3353,6 +3353,14 @@ const gates = {
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 
+  // Pest Insider monthly proof-approval (email division fact register lane).
+  // Ships DARK: off unless exactly 'true'. On, pest-insider-autopilot.js
+  // calls sendNewsletterProof after drafting, same as the weekly flagship —
+  // still subject to GATE_NEWSLETTER_PROOF_APPROVAL underneath. This entry
+  // is for logGateStatus only; services/pest-insider-autopilot.js reads
+  // GATE_PEST_INSIDER_PROOF at call time. Kill = unset — today's behavior:
+  // draft + notification only, no proof attempt.
+  pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
   // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
   // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
   // version for what this deliberately leaves out). Ships DARK: off unless
@@ -3398,6 +3406,17 @@ const gates = {
 // truth: '1' / 'true' / 'on', case-insensitive.
 function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
+
+// Pest Insider proof approval — read at CALL time so turning the gate off
+// takes effect without a redeploy at every point that matters: proofing
+// (pest-insider-autopilot.js), approval (newsletter-proof.js
+// maybeHandleProofApproval) and dispatch of an already-approved issue
+// (newsletter-sender.js processScheduledSends). Off = draft-only, which is
+// what "kill switch" has to mean: a proof that went out while the gate was
+// on cannot be approved or dispatched after it is turned off.
+function pestInsiderProofLive() {
+  return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
 
 // GATE_DISCOUNT_STACKING read at CALL time — strict `=== 'true'`, NOT
@@ -3670,5 +3689,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, emailTemplateAutomationsMode };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode };
 // gates 1775330914
