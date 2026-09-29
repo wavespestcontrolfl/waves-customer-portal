@@ -74,8 +74,7 @@ async function repair(trx, { customerId, estimateId }) {
     email: `${technicianId}@example.invalid`, password_hash: 'synthetic-not-a-login-hash', role: 'technician',
     active: true, employment_status: 'active', field_dispatchable: true });
   const invoice = await require('../services/invoice').create({ database: trx, customerId, title: 'First Service Application',
-    lineItems: [{ description: 'Quarterly Pest Control', quantity: 1, unit_price: 150 },
-      { description: 'Lawn Care', quantity: 1, unit_price: 100 }], dueDate: '2026-10-04' });
+    lineItems: [{ description: 'First service application', quantity: 1, unit_price: 250 }], dueDate: '2026-10-04' });
   const day0 = rows.map(dayOf).sort()[0];
   for (const row of rows) {
     const firstDayParent = dayOf(row) === day0 && !row.recurring_parent_id;
@@ -177,6 +176,49 @@ postgres('combined-booking check through the real conversion', () => {
       await trx('scheduled_services').whereIn('id', (await rowsOf(trx, churned.estimateId)).map((row) => row.id)).update({ status: 'cancelled' });
       await runCombinedBookingCheck({ conn: trx });
       expect(await alertsOf(trx, churned.estimateId)).toHaveLength(0);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a schedule-shape gap is left to the accepted-schedule classifier: no second bell, no OK', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const est = await acceptedEstimate(trx, lines);
+      await repair(trx, est);
+      const parents = await trx('scheduled_services').where({ source_estimate_id: est.estimateId }).whereNull('recurring_parent_id');
+      await trx('scheduled_services').whereIn('recurring_parent_id', parents.filter((row) => /pest/i.test(row.service_type)).map((row) => row.id)).del();
+      const gaps = await require('../services/recurring-schedule-audit')
+        .findAcceptedRecurringScheduleGaps({ settleMs: 0, estimateIds: [est.estimateId] }, trx);
+      expect(gaps.map((gap) => gap.serviceFamily)).toEqual(['pest_control']);
+      // The watchdog's own 24h-settled call does not see a 20-minute-old accept yet.
+      expect(await require('../services/recurring-schedule-audit').findAcceptedRecurringScheduleGaps({}, trx)
+        .then((all) => all.filter((gap) => gap.estimateId === est.estimateId))).toEqual([]);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, deferred: 1, problems: 0, ok: 0, failed: 0 });
+      expect(await alertsOf(trx, est.estimateId)).toHaveLength(0);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
+  test('a standing problem never starves a newer accept: only newly posted rows count against the cap', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const older = [await acceptedEstimate(trx, lines), await acceptedEstimate(trx, lines)];
+      expect(await runCombinedBookingCheck({ conn: trx, maxNew: 1 })).toMatchObject({ problems: 1 });
+      expect(await runCombinedBookingCheck({ conn: trx, maxNew: 1 })).toMatchObject({ problems: 2 });
+      const newest = await acceptedEstimate(trx, lines);
+      expect(await alertsOf(trx, newest.estimateId)).toHaveLength(0);
+      // Two older problems are re-checked first and are NOT counted; the newest still posts.
+      expect(await runCombinedBookingCheck({ conn: trx, maxNew: 1 })).toMatchObject({ problems: 3 });
+      expect(await alertsOf(trx, newest.estimateId)).toHaveLength(1);
+      for (const est of older) expect(await alertsOf(trx, est.estimateId)).toHaveLength(1);
     } finally {
       mockPg = pool;
       await trx.rollback();

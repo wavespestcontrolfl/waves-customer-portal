@@ -516,16 +516,20 @@ async function readStoppedRecurringRoots(conn, customerIds) {
   return new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
 }
 
-async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn = db) {
+// `settleMs` and `estimateIds` let the combined-booking check ask the SAME
+// classifier about specific just-accepted estimates without the 24h wait; the
+// watchdog's own call passes neither and is unchanged.
+async function findAcceptedRecurringScheduleGaps({ now = new Date(), settleMs = 24 * 60 * 60 * 1000, estimateIds = null } = {}, conn = db) {
   // Let the accept/conversion transaction settle before paging. A real Date
   // binds a timestamptz cutoff independently of Railway's UTC process zone.
-  const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const cutoff = new Date(now.getTime() - settleMs);
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const estimates = await conn('estimates as e')
     .join('customers as c', 'c.id', 'e.customer_id')
     .where('e.status', 'accepted').whereNull('e.archived_at')
     .where('e.accepted_at', '<=', cutoff).where('c.active', true)
     .whereNull('c.deleted_at')
+    .modify((query) => { if (estimateIds) query.whereIn('e.id', estimateIds); })
     .where(function includeUnconvertedStage() {
       this.whereNotIn('c.pipeline_stage', FORMER_CUSTOMER_STAGES).orWhereNull('c.pipeline_stage');
     })

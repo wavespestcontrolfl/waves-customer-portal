@@ -1,5 +1,5 @@
 const check = require('../services/combined-booking-check');
-const { evaluateCombinedBooking, composeAlert, postAlert, ringOnNewProblem } = check;
+const { evaluateCombinedBooking, composeAlert, postAlert, ringOnNewProblem, markPrepaidCoverage } = check;
 
 const DAY0 = '2026-10-04';
 const TECH = 'tech-1';
@@ -34,7 +34,9 @@ const lawnRows = (o = {}) => series({ key: 'lawn_care_recurring', type: 'Lawn Ca
 const treeRows = (o = {}) => series({ key: 'tree_shrub_6week', type: 'Tree & Shrub', visits: 9, price: 60, spacing: 42, ...o });
 const invoice = (items, status = 'sent') => ({ id: 'inv-1', status, line_items: items });
 const setupFee = { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 49, amount: 49 };
-const firstApp = (amount, description = 'First service application') => ({ description, quantity: 1, unit_price: amount, amount });
+const firstApp = (amount, description = 'First service application') => ({
+  description, quantity: 1, unit_price: amount, amount, client_id: `scheduled_${description.replace(/\W+/g, '_')}_primary`,
+});
 const goodInvoice = () => invoice([setupFee, firstApp(150, 'Quarterly Pest Control'), firstApp(100, 'Lawn Care')]);
 
 function run(lines, rows, extra = {}) {
@@ -42,7 +44,7 @@ function run(lines, rows, extra = {}) {
     estimate: estimate(lines), rows,
     invoices: new Map([['inv-1', extra.invoice || goodInvoice()]]),
     technicians: new Map([[TECH, 'Casey Synthetic']]),
-    customerName: 'J. Sample', excludedFamilies: extra.excludedFamilies,
+    customerName: 'J. Sample', excludedFamilies: extra.excludedFamilies, scheduleGaps: extra.scheduleGaps,
   });
 }
 const codes = (verdict) => verdict.problems.map((problem) => problem.code);
@@ -150,17 +152,20 @@ describe('evaluateCombinedBooking', () => {
     expect(codes(verdict)).toEqual(['first_invoice_missing']);
   });
 
-  test('visit counts more than one off the plan are reported', () => {
+  test('the visit count is the shared accepted-plan classifier\'s call: a gap defers, never OK and never a second bell', () => {
     const lawn = lawnRows().slice(0, 3);
-    const verdict = run([PEST, LAWN], [...pestRows(), ...lawn]);
-    expect(codes(verdict)).toEqual(['visit_count']);
-    expect(verdict.problems[0].text).toBe('visits off plan: lawn 3 of 6');
+    const gap = { estimateId: 'estimate-1', serviceFamily: 'lawn_care', issues: ['missing_applications'] };
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawn], { scheduleGaps: [gap] });
+    expect(verdict.problems).toEqual([]);
+    expect(verdict.deferred).toBe(true);
+    expect(verdict.ok).toBe(false);
+    expect(evaluateCombinedBooking({ estimate: estimate([PEST, LAWN]), rows: [...pestRows(), ...lawn], invoices: new Map([['inv-1', goodInvoice()]]) }).ok).toBe(true);
   });
 
-  test('a count one off the plan is tolerated; cancelled visits do not count', () => {
-    const lawn = lawnRows();
-    lawn[lawn.length - 1] = { ...lawn[lawn.length - 1], status: 'cancelled' };
-    expect(run([PEST, LAWN], [...pestRows(), ...lawn]).ok).toBe(true);
+  test('a gap does not hide this check\'s own problems', () => {
+    const gap = { estimateId: 'estimate-1', serviceFamily: 'lawn_care', issues: ['missing_applications'] };
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows({ price: 0 })], { scheduleGaps: [gap] });
+    expect(codes(verdict)).toEqual(['price_missing']);
   });
 
   test('a plan whose every visit was cancelled is not judged (customer churned)', () => {
@@ -181,14 +186,14 @@ describe('evaluateCombinedBooking', () => {
     expect(codes(verdict)).toEqual(['first_invoice_missing']);
   });
 
-  test('a cancelled-and-parked mix with nothing live still says no visits', () => {
-    const rows = [...pestRows(), ...lawnRows()].map((row, i) => ({ ...row, status: i % 2 ? 'cancelled' : 'rescheduled' }));
-    expect(codes(run([PEST, LAWN], rows))).toEqual(['no_visits']);
-  });
-
-  test('no scheduled visits at all is a problem', () => {
-    const verdict = run([PEST, LAWN], []);
-    expect(codes(verdict)).toEqual(['no_visits']);
+  test('nothing live (parked) or no rows at all is left to the accepted-plan alert', () => {
+    const parked = [...pestRows(), ...lawnRows()].map((row, i) => ({ ...row, status: i % 2 ? 'cancelled' : 'rescheduled' }));
+    for (const rows of [parked, []]) {
+      const verdict = run([PEST, LAWN], rows);
+      expect(verdict.problems).toEqual([]);
+      expect(verdict.deferred).toBe(true);
+      expect(verdict.ok).toBe(false);
+    }
   });
 
   test('several problems fold into one short summary', () => {
@@ -231,8 +236,51 @@ describe('evaluateCombinedBooking', () => {
   });
 
   test('prepaid visits are not judged on price', () => {
-    const lawn = lawnRows({ price: 0, childOverrides: { prepaid_amount: 100, estimated_price: null } });
+    const lawn = lawnRows({ price: 0, childOverrides: { prepaid_covered: true, estimated_price: null } });
     expect(run([PEST, LAWN], [...pestRows(), ...lawn]).ok).toBe(true);
+  });
+
+  test('a prepay term id or unverified stamp alone is not prepaid coverage', () => {
+    const lawn = lawnRows({ price: 0, childOverrides: { prepaid_amount: 100, annual_prepay_term_id: 'term-1', estimated_price: null } });
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawn]))).toEqual(['price_missing']);
+  });
+
+  test('a deposit credit line is a payment allocation, not service dollars', () => {
+    const deposit = { description: 'Estimate deposit credit', category: 'deposit_credit', quantity: 1, unit_price: -50, amount: -50 };
+    expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: invoice([setupFee, firstApp(150), firstApp(100), deposit]) }).ok).toBe(true);
+  });
+
+  test('a real price discount line does count, so an unexplained credit is a mismatch', () => {
+    const discount = { description: 'Promo', quantity: 1, unit_price: -10, amount: -10 };
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: invoice([firstApp(150), firstApp(100), discount]) });
+    expect(verdict.problems[0]).toMatchObject({ code: 'first_invoice_mismatch', text: 'first invoice $240.00 \u2260 $250.00' });
+  });
+
+  test('an invoice with no readable service lines is reported, never silently OK', () => {
+    for (const items of [null, [], 'not json', [setupFee]]) {
+      const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: invoice(items) });
+      expect(codes(verdict)).toEqual(['first_invoice_malformed']);
+    }
+  });
+
+  test('a seasonal companion whose first visit is later is still covered by, and judged against, the shared invoice', () => {
+    const tree = treeRows({ invoiceId: 'inv-1' }).map((row) => ({ ...row, scheduled_date: addDays(row.scheduled_date, 120) }));
+    const lines = [PEST, LAWN, TREE];
+    const three = invoice([setupFee, firstApp(150), firstApp(100), firstApp(60)]);
+    expect(run(lines, [...pestRows(), ...lawnRows(), ...tree], { invoice: three }).ok).toBe(true);
+    // Invoice that only carries the first-day pair no longer matches the three stamped rows.
+    const verdict = run(lines, [...pestRows(), ...lawnRows(), ...tree], { invoice: goodInvoice() });
+    expect(verdict.problems[0]).toMatchObject({ code: 'first_invoice_mismatch', text: 'first invoice $250.00 \u2260 $310.00' });
+  });
+
+  test('the termite station-rental rider is folded into the bait price before per-visit prices are derived', () => {
+    const bait = { service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4, frequency: 'quarterly', annual: 480, mo: 40 };
+    // The rider carries no cadence of its own; only the fold gives the bait row its full price.
+    const rental = { service: 'termite_station_rental', name: 'Termite Station Rental', annual: 120, mo: 10, perTreatment: 30 };
+    const termite = (price) => series({ key: 'termite_bait', type: 'Termite Bait', visits: 4, price, spacing: 91 });
+    const inv = invoice([firstApp(150), firstApp(150, 'Termite')]);
+    expect(run([PEST, bait, rental], [...pestRows(), ...termite(150)], { invoice: inv }).problems).toEqual([]);
+    expect(codes(run([PEST, bait, rental], [...pestRows(), ...termite(120)], { invoice: inv }))).toContain('price_mismatch');
   });
 });
 
@@ -290,5 +338,33 @@ describe('postAlert', () => {
     const conn = (found) => () => ({ where: () => ({ whereRaw: () => ({ whereRaw: () => ({ first: async () => found }) }) }) });
     expect(await opts.ringGate(conn({ id: 'earlier' }))).toBe(false); // an OK already exists: quiet
     expect(await opts.ringGate(conn(undefined))).toBe(true); // the first OK ever rings once
+  });
+});
+
+describe('markPrepaidCoverage', () => {
+  const renewals = require('../services/annual-prepay-renewals');
+  afterEach(() => jest.restoreAllMocks());
+
+  test('an out-of-band stamp counts; an annual stamp counts only when the coverage validator says so; a bare term id never does', async () => {
+    const validator = jest.spyOn(renewals, 'annualPrepayCoversVisit').mockImplementation(async (row) => row.id === 'valid');
+    const rows = [
+      { id: 'cash', prepaid_amount: 100, prepaid_method: 'cash' },
+      { id: 'valid', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1' },
+      { id: 'stale', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't2' },
+      { id: 'termonly', annual_prepay_term_id: 't3' },
+      { id: 'none' },
+    ];
+    await markPrepaidCoverage({}, rows);
+    expect(Object.fromEntries(rows.map((row) => [row.id, row.prepaid_covered]))).toEqual({
+      cash: true, valid: true, stale: false, termonly: false, none: false,
+    });
+    expect(validator).toHaveBeenCalledTimes(3);
+  });
+
+  test('a validator that throws reads as not covered', async () => {
+    jest.spyOn(renewals, 'annualPrepayCoversVisit').mockRejectedValue(new Error('unverifiable'));
+    const rows = [{ id: 'x', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1' }];
+    await markPrepaidCoverage({}, rows);
+    expect(rows[0].prepaid_covered).toBe(false);
   });
 });

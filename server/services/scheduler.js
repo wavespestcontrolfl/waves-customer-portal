@@ -3561,28 +3561,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 5 MIN — Combined-booking check (owner request 2026-09-29). An
-  // accepted estimate with more than one recurring service gets its schedule
-  // and pricing verified once it has settled (time + technician on every
-  // visit, per-visit prices, first-day invoice, visit counts) and ONE admin
-  // note: a problem rings the bell, an OK goes to the Activity feed (the very
-  // first OK rings once). A sweep over committed rows, not a hook in the
-  // accept route: it cannot slow or fail an accept and a crash loses nothing.
-  // Read-only apart from that one admin notification. See
-  // server/services/combined-booking-check.js.
-  // =========================================================================
-  cron.schedule('*/5 * * * *', async () => {
-    try {
-      const result = await runExclusive('combined-booking-check', () => require('./combined-booking-check').runCombinedBookingCheck());
-      if (result && (result.problems > 0 || result.failed > 0)) {
-        logger.info(`[combined-booking-check] checked=${result.checked} ok=${result.ok} problems=${result.problems} failed=${result.failed}`);
-      }
-    } catch (err) {
-      logger.error(`[combined-booking-check] tick failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
   // the post to build_failed if it blows up. runExclusive: this tick
@@ -7721,8 +7699,8 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
-        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
+      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.combinedBookingCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''}${result.combinedBookingCheckFailed ? ' COMBINED-BOOKING-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);

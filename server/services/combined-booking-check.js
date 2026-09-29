@@ -7,14 +7,22 @@
  * The 2026-09-28 defect it guards: companion services were booked with no
  * time and no technician.
  *
- * WHERE IT RUNS: a scheduler sweep (scheduler.js, every 5 minutes, under
- * runExclusive) over accepted estimates that settled at least SETTLE_MINUTES
- * ago, not a hook in the accept route. The accept route is a money path — a
- * hook there could only add latency or a new way to fail it — and a
- * post-commit hook is lost if the process dies right after the commit. The
- * sweep derives everything from committed rows: a crash just means the next
- * tick checks the estimate. No new state is stored beyond the notification
- * row itself (its dedupeKey is the "already checked" marker).
+ * WHERE IT RUNS: inside the schedule-integrity watchdog (its daily tick, under
+ * that job's runExclusive and GATE_SCHEDULE_INTEGRITY_WATCHDOG), over accepted
+ * estimates that settled at least SETTLE_MINUTES ago — not a hook in the
+ * accept route (a money path: a hook could only add latency or a new way to
+ * fail it, and is lost if the process dies right after the commit) and not a
+ * second sweep beside the watchdog's own accepted-plan check. The sweep derives
+ * everything from committed rows: a crash just means the next run checks the
+ * estimate. No state is stored beyond the notification row itself (its
+ * dedupeKey is the "already checked" marker).
+ *
+ * ONE CLASSIFIER FOR THE SCHEDULE SHAPE: whether the right number of visits
+ * exist is decided by recurring-schedule-audit's acceptedScheduleFindings (via
+ * findAcceptedRecurringScheduleGaps), the same function behind the watchdog's
+ * `accepted-schedule:*` alerts. This check never re-derives it: an estimate
+ * with such a gap is left to that alert (no second bell for the same problem)
+ * and is not declared OK until the gap is gone.
  *
  * WHAT IT CHECKS (each live scheduled_services row from the estimate, its
  * series children included):
@@ -24,8 +32,6 @@
  *   3. first day: each first-day service is covered, either priced itself or
  *      stamped with ONE shared first_application_invoice_id whose
  *      first-application lines total the first-day per-visit prices.
- *   4. visit counts: live visits per service over the 12 months from the
- *      first day match the plan's visits per year (+/- 1).
  * The accepted per-visit price comes from the same lines and rule the
  * converter's own split uses (acceptedRecurringBillingLines +
  * lineAnnualPerVisitAmount). When the lines do not reconcile to the accepted
@@ -36,13 +42,13 @@
  * ALERTS reuse the admin ops_digest seam (notifyAdmin + the row shape
  * services/ops-digest.js writes): a <=60 char headline, a <=110 char summary,
  * the whole finding in `detail`, a deep link to the customer, dedupeKey per
- * estimate, ring-only-on-news. See OK_RESULT_RINGS to change how OK results
- * surface.
+ * estimate, ring-only-on-news. OK results go to the Activity feed quietly,
+ * except the first OK ever, which rings once.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 const OPS_KEY = 'combined-booking-check';
 const CATEGORY = 'ops_digest';
@@ -50,22 +56,15 @@ const HEADLINE_OK = 'Combined booking OK';
 const HEADLINE_PROBLEM = 'Combined booking needs a look';
 const MAX_SUMMARY_CHARS = 110;
 
-// How OK results surface (the owner's open design choice, one line to flip):
-//   'first'  - the first OK result ever rings once (so the owner sees it
-//              working after deploy); every later OK goes to the Activity
-//              feed quietly. DEFAULT.
-//   'always' - every OK result rings the bell.
-//   'never'  - OK results are always quiet (Activity feed only).
-// Problems always ring; a re-check that finds the same problems stays quiet.
-const OK_RESULT_RINGS = 'first';
-
 // Let the accept transaction and its follow-on writes settle before judging.
 const SETTLE_MINUTES = 3;
 // Estimates accepted longer ago than this are never (re)checked: an old
 // problem the office has lived with is not news, and a first run after
 // deploy must not turn into a backlog scan.
 const LOOKBACK_HOURS = 72;
-const MAX_PER_RUN = 25;
+// Cap on NEWLY posted rows per run; a standing problem being re-checked never
+// counts against it, so it cannot starve a fresh accept.
+const MAX_NEW_PER_RUN = 25;
 
 const PRICE_TOLERANCE = 0.02;
 const CANCELLED = new Set(['cancelled', 'canceled']);
@@ -113,8 +112,11 @@ function rowPrice(row) {
   const primary = Number(row.primary_line_price);
   return primary > 0 ? primary : 0;
 }
+// Prepaid coverage is proven by loadContext (prepaidCoverage): a positive
+// out-of-band stamp, or an annual-prepay stamp annualPrepayCoversVisit
+// validated against a live paid term. A term id alone proves nothing.
 function isPrepaid(row) {
-  return Number(row.prepaid_amount) > 0 || !!row.annual_prepay_term_id;
+  return row.prepaid_covered === true;
 }
 
 /**
@@ -126,10 +128,15 @@ function isPrepaid(row) {
 function acceptedPrograms(estimate) {
   const converter = require('./estimate-converter');
   const { acceptedRecurringBillingLines } = require('./plan-rate-ledger');
-  const { inferFrequencyKeyFromEstimateData } = require('./billing-cadence');
+  const { inferFrequencyKeyFromEstimateData, legacyRodentRowPredicateFor } = require('./billing-cadence');
   const data = parseJson(estimate.estimate_data);
   if (estimate.accepted_service_mode === 'one_time') return null;
-  const lines = acceptedRecurringBillingLines(data);
+  // The converter's own service set: the termite station-rental rider is
+  // folded into the bait row's price, and legacy rodent rows are dropped,
+  // exactly as conversion does before it schedules and prices anything.
+  const isLegacyRodentRow = legacyRodentRowPredicateFor(data);
+  const lines = converter.foldTermiteRentalIntoBait(acceptedRecurringBillingLines(data))
+    .filter((line) => !isLegacyRodentRow(line));
   if (converter.shouldSuppressRecurringConversion({
     monthlyRate: estimate.monthly_total, annualTotal: estimate.annual_total,
     oneTimeTotal: estimate.onetime_total, recurringServices: lines, estimateData: data,
@@ -173,14 +180,23 @@ function rowFamilies(row) {
     : [converter.seedingFamilyKey({ service: identity, name: row.service_type })];
 }
 
+// The service dollars a combined first-application invoice bills: the base
+// application lines (the shared invoice.js identity — client_id
+// scheduled_<id>_primary, or the "First service application" line) plus the
+// price discounts riding beside them. Setup-fee lines, add-ons and payment
+// allocations (the deposit_credit line) are not service dollars. null when
+// the invoice carries no readable base-application line at all.
 function firstApplicationAmount(invoice) {
-  const items = parseJson(invoice.line_items, []);
-  if (!Array.isArray(items) || !items.length) return null;
-  return Math.round(items.reduce((sum, item) => {
-    if (/set-?up fee/i.test(String(item?.description || ''))) return sum;
-    const amount = item?.amount ?? (Number(item?.unit_price) * Number(item?.quantity ?? 1));
-    return sum + (Number.isFinite(Number(amount)) ? Number(amount) : 0);
-  }, 0) * 100) / 100;
+  const InvoiceService = require('./invoice');
+  const items = InvoiceService._parseInvoiceLineItems(invoice.line_items);
+  const amountOf = (item) => {
+    const raw = item?.amount != null ? Number(item.amount) : Number(item?.unit_price) * Number(item?.quantity ?? 1);
+    return Number.isFinite(raw) ? raw : 0;
+  };
+  const base = items.filter((item) => InvoiceService.lineIsBaseApplication(item) && amountOf(item) > 0);
+  if (!base.length) return null;
+  const discounts = items.filter((item) => item?.category !== 'deposit_credit' && amountOf(item) < 0);
+  return Math.round([...base, ...discounts].reduce((sum, item) => sum + amountOf(item), 0) * 100) / 100;
 }
 
 function listFamilies(counts, programs) {
@@ -268,16 +284,19 @@ function checkLaterPrices(dated, programs, firstDay) {
 function checkStampedFirstDay(stamped, programs, invoices, facts) {
   const invoiceIds = new Set(stamped.map((row) => String(row.first_application_invoice_id)));
   if (invoiceIds.size > 1) {
-    return [{ code: 'first_invoice_split', text: `first-day services are on ${invoiceIds.size} different invoices` }];
+    return [{ code: 'first_invoice_split', text: `covered services are on ${invoiceIds.size} different invoices` }];
   }
   const invoice = invoices.get([...invoiceIds][0]);
   if (!invoice || ['void', 'voided', 'cancelled', 'canceled'].includes(String(invoice.status || '').toLowerCase())) {
     return [{ code: 'first_invoice_missing', text: 'first invoice is missing or void' }];
   }
   const billed = firstApplicationAmount(invoice);
+  if (billed == null) {
+    return [{ code: 'first_invoice_malformed', text: 'first invoice has no readable service lines' }];
+  }
   const expected = expectedTotal(stamped, programs);
   facts.firstVisitTotal = expected ?? billed;
-  if (expected != null && billed != null && Math.abs(billed - expected) > PRICE_TOLERANCE) {
+  if (expected != null && Math.abs(billed - expected) > PRICE_TOLERANCE) {
     return [{ code: 'first_invoice_mismatch', text: `first invoice ${money(billed)} \u2260 ${money(expected)}` }];
   }
   return [];
@@ -307,20 +326,6 @@ function checkUnstampedFirstDay(unstamped, programs, facts) {
   return perRowOff ? [{ code: 'first_day_price_mismatch', text: `first visit priced ${money(paid)} \u2260 ${money(expected)}` }] : [];
 }
 
-// 4. live visits over the 12 months from the first day match visits per year.
-function checkVisitCounts(dated, programs, firstDay) {
-  const yearEnd = etDateString(addETDays(parseETDateTime(`${firstDay}T12:00`), 365));
-  const counts = new Map();
-  for (const row of dated.filter((r) => r.day < yearEnd)) bump(counts, programRowFamilies(row, programs));
-  const off = [];
-  for (const [family, program] of programs) {
-    if (!(program.visits > 0)) continue;
-    const have = counts.get(family) || 0;
-    if (Math.abs(have - program.visits) > 1) off.push(`${lowerLabel(family)} ${have} of ${program.visits}`);
-  }
-  return off.length ? [{ code: 'visit_count', text: `visits off plan: ${off.join(', ')}` }] : [];
-}
-
 /**
  * Pure verdict for one accepted estimate.
  *   ctx: { estimate, rows, invoices: Map(id -> invoice), technicians: Map(id -> name),
@@ -347,8 +352,13 @@ function evaluateCombinedBooking(ctx) {
     customerName: ctx.customerName || null,
     firstDate: null, firstTime: null, tech: null, firstVisitTotal: null,
   };
-  // Only reached when no rows were ever created (or every one is parked).
-  if (!rows.length) return { ok: false, problems: [{ code: 'no_visits', text: 'no visits scheduled' }], facts };
+  // Whether the right visits exist at all is the shared accepted-plan
+  // classifier's call (ctx.scheduleGaps, from findAcceptedRecurringScheduleGaps
+  // — the source of the watchdog's accepted-schedule alerts). A gap there, or
+  // no live rows to inspect, means this check says nothing about the schedule
+  // shape and never declares the booking OK.
+  const deferred = !rows.length || (ctx.scheduleGaps || []).length > 0;
+  if (!rows.length) return { ok: false, deferred, problems: [], facts };
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
     a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
@@ -359,16 +369,18 @@ function evaluateCombinedBooking(ctx) {
   facts.firstTime = anchor.window_start ? String(anchor.window_start).slice(0, 5) : null;
   facts.tech = anchor.technician_id ? technicians.get(anchor.technician_id) || null : null;
 
-  const stamped = firstDayRows.filter((row) => row.first_application_invoice_id);
+  // The converter stamps EVERY program a combined first-application invoice
+  // covers, even a seasonal companion whose first visit lands on a later date,
+  // so the invoice is judged against all live top-level rows carrying a stamp.
+  const stamped = dated.filter((row) => !row.recurring_parent_id && row.first_application_invoice_id);
   const unstamped = firstDayRows.filter((row) => !row.first_application_invoice_id && !isPrepaid(row));
   const problems = [
     ...checkTimeAndTech(dated, programs),
     ...checkLaterPrices(dated, programs, firstDay),
     ...(stamped.length ? checkStampedFirstDay(stamped, programs, invoices, facts) : []),
     ...(unstamped.length ? checkUnstampedFirstDay(unstamped, programs, facts) : []),
-    ...checkVisitCounts(dated, programs, firstDay),
   ];
-  return { ok: problems.length === 0, problems, facts };
+  return { ok: problems.length === 0 && !deferred, deferred, problems, facts };
 }
 
 function shortName(customer) {
@@ -410,6 +422,25 @@ function composeAlert(verdict, { customerName }) {
 
 // --- database side ---------------------------------------------------------
 
+// Sets row.prepaid_covered from the same authorities the completion path
+// trusts: a positive out-of-band stamp (cash/check/Zelle) or an annual-prepay
+// stamp that annualPrepayCoversVisit validates against a live, paid term
+// (fail-closed: an unverifiable stamp reads as not covered).
+async function markPrepaidCoverage(conn, rows) {
+  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
+  const { hasOutOfBandPrepaidStamp } = require('./schedule-integrity-watchdog');
+  for (const row of rows) {
+    row.prepaid_covered = false;
+    if (hasOutOfBandPrepaidStamp(row)) { row.prepaid_covered = true; continue; }
+    if (!row.annual_prepay_term_id && !(Number(row.prepaid_amount) > 0)) continue;
+    try {
+      row.prepaid_covered = await annualPrepayCoversVisit(row, conn) === true;
+    } catch (err) {
+      logger.warn(`[combined-booking-check] prepay coverage unverifiable for a visit: ${err.message}`);
+    }
+  }
+}
+
 async function loadContext(conn, estimate) {
   const estimateId = estimate.id;
   const customerId = estimate.customer_id;
@@ -435,11 +466,10 @@ async function loadContext(conn, estimate) {
         this.select('id').from('scheduled_services').where({ source_estimate_id: estimateId, customer_id: customerId });
       });
     })
-    .select('s.id', 's.status', 's.window_start', 's.technician_id', 's.estimated_price', 's.primary_line_price',
-      's.prepaid_amount', 's.annual_prepay_term_id', 's.first_application_invoice_id', 's.is_callback',
-      's.followup_included', 's.is_recurring', 's.recurring_parent_id', 's.service_type', 's.service_key_snapshot',
-      'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
+    // Whole row: annualPrepayCoversVisit validates coverage from the row itself.
+    .select('s.*', 'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
+  await markPrepaidCoverage(conn, rows);
   const invoiceIds = [...new Set(rows.map((row) => row.first_application_invoice_id).filter(Boolean))];
   const invoices = new Map();
   if (invoiceIds.length) {
@@ -460,8 +490,8 @@ async function loadContext(conn, estimate) {
   };
 }
 
-async function checkEstimate(conn, estimate) {
-  const ctx = await loadContext(conn, estimate);
+async function checkEstimate(conn, estimate, { scheduleGaps = [] } = {}) {
+  const ctx = { ...await loadContext(conn, estimate), scheduleGaps };
   const verdict = evaluateCombinedBooking(ctx);
   return verdict ? { verdict, ctx } : null;
 }
@@ -470,10 +500,10 @@ function dedupeKeyFor(estimateId) {
   return `${OPS_KEY}:${estimateId}`;
 }
 
-// A fresh OK result rings only per OK_RESULT_RINGS.
+// A fresh OK result rings only if no OK was ever posted before: the first one
+// after deploy shows the owner it is working, every later one is a quiet
+// Activity-feed row.
 function okRingGate() {
-  if (OK_RESULT_RINGS === 'always') return async () => true;
-  if (OK_RESULT_RINGS === 'never') return async () => false;
   return async (conn) => {
     const prior = await conn('notifications')
       .where({ recipient_type: 'admin', category: CATEGORY })
@@ -559,7 +589,7 @@ async function postAlert(conn, estimate, verdict, ctx, { notifier } = {}) {
  * One sweep. Returns counts; never throws for a single bad estimate.
  * `conn` and `notifier` are injectable for tests.
  */
-async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier } = {}) {
+async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier, maxNew = MAX_NEW_PER_RUN } = {}) {
   const settled = new Date(now.getTime() - SETTLE_MINUTES * 60 * 1000);
   const since = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
   const candidates = await conn('estimates as e')
@@ -573,10 +603,10 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier }
     .select('e.id', 'e.customer_id', 'e.property_id', 'e.estimate_data', 'e.accepted_service_mode', 'e.accepted_at',
       'e.monthly_total', 'e.annual_total', 'e.onetime_total')
     .orderBy('e.accepted_at', 'asc');
-  const result = { candidates: candidates.length, checked: 0, ok: 0, problems: 0, skipped: 0, failed: 0 };
+  const result = { candidates: candidates.length, checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0 };
   if (!candidates.length) return result;
 
-  // An OK verdict is final; a problem is re-checked each sweep (inside the
+  // An OK verdict is final; a posted problem is re-checked each run (inside the
   // lookback window) so a fix clears the bell.
   const keys = candidates.map((estimate) => dedupeKeyFor(estimate.id));
   const standing = await conn('notifications')
@@ -586,22 +616,59 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier }
   const finished = new Set(standing.filter((row) => row.check_result === 'ok').map((row) => row.dedupe_key));
   const standingProblems = new Set(standing.filter((row) => row.check_result === 'problem').map((row) => row.dedupe_key));
 
+  // Multi-service accepts still to judge. Fresh accepts first (oldest first),
+  // then standing problems: the cap below counts only rows newly posted, so
+  // an old unresolved problem can never starve a newer accept.
+  const work = [];
   for (const estimate of candidates) {
-    if (result.checked >= MAX_PER_RUN) break;
     if (finished.has(dedupeKeyFor(estimate.id))) continue;
     try {
-      const checked = await checkEstimate(conn, estimate);
+      const accepted = acceptedPrograms(estimate);
+      if (accepted && accepted.programs.size >= 2) work.push(estimate);
+      else result.skipped += 1;
+    } catch (err) {
+      result.failed += 1;
+      logger.warn(`[combined-booking-check] estimate ${estimate.id} could not be read: ${err.message}`);
+    }
+  }
+  work.sort((a, b) => Number(standingProblems.has(dedupeKeyFor(a.id))) - Number(standingProblems.has(dedupeKeyFor(b.id))));
+  if (!work.length) return result;
+
+  // The shared accepted-plan classifier, with no 24h wait: the same findings
+  // the watchdog's accepted-schedule alerts are built from.
+  const gaps = await require('./recurring-schedule-audit')
+    .findAcceptedRecurringScheduleGaps({ now, settleMs: 0, estimateIds: work.map((estimate) => estimate.id) }, conn);
+  const gapsByEstimate = new Map();
+  for (const gap of gaps) gapsByEstimate.set(String(gap.estimateId), [...(gapsByEstimate.get(String(gap.estimateId)) || []), gap]);
+
+  let posted = 0;
+  for (const estimate of work) {
+    const key = dedupeKeyFor(estimate.id);
+    const isNew = !standingProblems.has(key);
+    if (isNew && posted >= maxNew) continue; // the rest post next run
+    try {
+      const checked = await checkEstimate(conn, estimate, { scheduleGaps: gapsByEstimate.get(String(estimate.id)) || [] });
       if (!checked) {
         result.skipped += 1;
         // A standing problem bell for a plan that has since been cancelled has
         // nothing left to act on: retire it the way a fixed problem is.
-        if (standingProblems.has(dedupeKeyFor(estimate.id))) await retireStanding(conn, estimate.id);
+        if (!isNew) await retireStanding(conn, estimate.id);
+        continue;
+      }
+      const { verdict } = checked;
+      if (!verdict.ok && !verdict.problems.length) {
+        // Nothing of this check's own to say (the schedule shape belongs to the
+        // accepted-schedule alert). A bell rung earlier for problems that have
+        // since been fixed is retired.
+        result.deferred += 1;
+        if (!isNew) await retireStanding(conn, estimate.id);
         continue;
       }
       result.checked += 1;
-      const row = await postAlert(conn, estimate, checked.verdict, checked.ctx, { notifier });
+      const row = await postAlert(conn, estimate, verdict, checked.ctx, { notifier });
       if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${estimate.id}`); continue; }
-      if (checked.verdict.ok) result.ok += 1; else result.problems += 1;
+      if (isNew) posted += 1;
+      if (verdict.ok) result.ok += 1; else result.problems += 1;
     } catch (err) {
       result.failed += 1;
       logger.warn(`[combined-booking-check] estimate ${estimate.id} check failed: ${err.message}`);
@@ -616,11 +683,11 @@ module.exports = {
   evaluateCombinedBooking,
   composeAlert,
   postAlert,
+  markPrepaidCoverage,
   ringOnNewProblem,
   acceptedPrograms,
   firstApplicationAmount,
   shortName,
-  OK_RESULT_RINGS,
   OPS_KEY,
   HEADLINE_OK,
   HEADLINE_PROBLEM,
