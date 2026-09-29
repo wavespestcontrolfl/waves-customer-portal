@@ -132,20 +132,10 @@ async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {})
 }
 
 // estimate_data.noEngagementAutomation — the durable per-estimate opt-out
-// stamped by publish-without-delivery mints. Deliberately the SAME key the
-// engagement engine honors (estimateOptedOutOfEngagement there); duplicated
-// rather than imported because that module requires this one, and a require
-// cycle would hand one of them a partially initialized export.
-function estimateOptedOutOfFollowups(est) {
-  try {
-    const data = typeof est.estimate_data === 'string'
-      ? JSON.parse(est.estimate_data)
-      : est.estimate_data;
-    return data?.noEngagementAutomation === true;
-  } catch {
-    return false;
-  }
-}
+// stamped by publish-without-delivery mints. The ONE shared rule
+// (estimate-comms-eligibility.js) — a dependency-free leaf, so importing it
+// creates no cycle with the engagement engine (which requires this module).
+const { estimateOptedOutOfEngagement: estimateOptedOutOfFollowups } = require('./estimate-comms-eligibility');
 
 // Unified gate. Returns { skip: true, reason } if the send should be
 // blocked, else { skip: false }. Keeps the per-stage loops readable.

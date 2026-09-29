@@ -680,9 +680,15 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
       if (table === 'scheduled_services') {
         const q = {
           where: jest.fn(() => q),
+          // Codex #5244 r7 P0: create()'s bare advisory-lock branch now
+          // re-reads the visit under FOR UPDATE before minting (a live
+          // status here — 'confirmed' — matches this describe's
+          // still-scheduled completion visit; a terminal status would
+          // correctly 409 SCHEDULED_VISIT_NOT_LIVE instead).
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => ({
             payer_id: 9, po_number: null, self_pay_override: false,
-            source_estimate_id: sourceEstimateId,
+            source_estimate_id: sourceEstimateId, status: 'confirmed',
           })),
         };
         return q;
