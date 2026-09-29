@@ -134,6 +134,12 @@ describe('notification trigger push tags', () => {
   });
 
   test('KB audit trigger summarizes flagged entries for the admin bell', () => {
+    const notDispatched = TRIGGER_REGISTRY.newsletter_send_not_dispatched.build({ sendId: 'send-42', subject: 'Pest Insider' });
+    expect(notDispatched.link).toBe('/admin/newsletter?tab=compose&draftId=send-42'); // codex round 14 P2: THE affected draft
+    // the proof notices deep-link their draft too (codex round 16 P2); without an id the generic tab stays
+    expect(TRIGGER_REGISTRY.newsletter_proof_sent.build({ sendId: 'send-7', subject: 'x', recipient: 'r', recipientCount: 1 }).link).toBe('/admin/newsletter?tab=compose&draftId=send-7');
+    expect(TRIGGER_REGISTRY.newsletter_proof_blocked.build({ sendId: 'send-7', subject: 'x', errors: ['e'] }).link).toBe('/admin/newsletter?tab=compose&draftId=send-7');
+    expect(TRIGGER_REGISTRY.newsletter_proof_blocked.build({ subject: 'x', errors: ['e'] }).link).toBe('/admin/newsletter?tab=compose');
     const built = TRIGGER_REGISTRY.kb_audit_flagged.build({
       count: 2,
       entries: [

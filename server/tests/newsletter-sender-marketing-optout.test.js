@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const db = require('../models/db');
-const { buildSubscriberQuery, excludeMarketingOptedOut } = require('../services/newsletter-sender');
+const { buildSubscriberQuery, excludeMarketingOptedOut, outstandingEligibleDeliveries } = require('../services/newsletter-sender');
 
 describe('excludeMarketingOptedOut', () => {
   test('buildSubscriberQuery anti-joins explicit opt-outs on the linked customer or any live same-mailbox profile', () => {
@@ -31,6 +31,17 @@ describe('excludeMarketingOptedOut', () => {
     expect(sql).toMatch(/"notification_prefs" as "mop"/);
   });
 
+  // #5187's outstandingEligibleDeliveries backs the resume precheck,
+  // hasOutstandingDeliveries ("correctable"), and GET /sends' correlated
+  // EXISTS — all must agree with what a resume would actually mail.
+  test('outstandingEligibleDeliveries carries the predicate, including its correlated EXISTS form (GET /sends)', () => {
+    expect(outstandingEligibleDeliveries('send-1').toSQL().sql).toMatch(/"notification_prefs" as "mop"/);
+    const { sql } = db('newsletter_sends').select(db.raw('EXISTS (?) AS has_outstanding', [
+      outstandingEligibleDeliveries('newsletter_sends.id', { correlate: true }).select(db.raw('1')),
+    ])).toSQL();
+    expect(sql).toMatch(/EXISTS \(select .*"notification_prefs" as "mop".*moc\.id = newsletter_subscribers\.customer_id/is);
+  });
+
   // Every audience read (fresh selection, resume refetch, per-chunk
   // re-check, resume precheck — and any added later) goes through
   // excludeArchivedCustomers; each such call must be wrapped by the opt-out
@@ -39,7 +50,7 @@ describe('excludeMarketingOptedOut', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/newsletter-sender.js'), 'utf8');
     const calls = [...src.matchAll(/excludeArchivedCustomers\(/g)].map((m) => m.index)
       .filter((i) => !src.slice(Math.max(0, i - 9), i).endsWith('function '));
-    expect(calls.length).toBeGreaterThanOrEqual(4);
+    expect(calls.length).toBeGreaterThanOrEqual(4); // selection, refetch, chunk re-check, outstandingEligibleDeliveries
     for (const i of calls) {
       expect(src.slice(Math.max(0, i - 'excludeMarketingOptedOut('.length), i)).toBe('excludeMarketingOptedOut(');
     }

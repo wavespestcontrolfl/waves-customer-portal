@@ -43,7 +43,10 @@ const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
-const { inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY, truncateAtWord, alertClassFor, decideRingForNewRow, ringOnRefreshFrom } = require('../services/ops-digest');
+const {
+  inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY, truncateAtWord, alertClassFor,
+  decideRingForNewRow, ringOnRefreshFrom, normalizeItemKeys, itemSetHashFor, itemKeysMetaFor,
+} = require('../services/ops-digest');
 const { ACTIVITY_LINK, routeFor } = require('../config/ops-alert-routes');
 
 const router = express.Router();
@@ -157,12 +160,14 @@ function validateDigest(body) {
   if (count.error) return count;
   const newCount = validateCount(body.newCount, 'newCount');
   if (newCount.error) return newCount;
+  const itemIds = validateItemIds(body.itemIds);
+  if (itemIds.error) return itemIds;
   return {
     value: {
       key, kind, subject, text, link: link.value, metadata: metadata.value,
       observedAt: observedAtFrom(body.observedAt),
       headline: headline.value, summary: summary.value, audience: audience.value,
-      count: count.value, newCount: newCount.value,
+      count: count.value, newCount: newCount.value, itemIds: itemIds.value,
     },
   };
 }
@@ -238,6 +243,31 @@ function validateCount(raw, label) {
   return { value: raw };
 }
 
+// Follow-up to #5269 (codex r8 P1): a date-only ops-cron key (e.g. e22's
+// "N overlapping visits") carries no identity of its own once its run date
+// is stripped, so the key-derived same-set test can't tell today's finding
+// from a different one tomorrow. `itemIds` lets such a check hand over its
+// own item identity — the same shape and semantics as an in-process
+// sender's `itemKeys` (ops-digest.js's deliverOpsDigest): deduped, sorted,
+// capped at 500 for the stored list; the full-set hash is kept regardless
+// of size. Only an OMITTED field falls back (leaves prior identity alone,
+// same convention as count/newCount); an explicit null is malformed, like
+// count.
+const MAX_ITEM_IDS = 2000;
+const MAX_ITEM_ID_CHARS = 200;
+function validateItemIds(raw) {
+  if (raw === undefined) return { value: undefined };
+  if (!Array.isArray(raw) || raw.length > MAX_ITEM_IDS) return { error: `itemIds must be an array of at most ${MAX_ITEM_IDS} strings` };
+  const cleaned = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') return { error: 'itemIds entries must be strings' };
+    const trimmed = entry.trim();
+    if (!trimmed || trimmed.length > MAX_ITEM_ID_CHARS) return { error: `itemIds entries must be 1-${MAX_ITEM_ID_CHARS} chars after trim` };
+    cleaned.push(trimmed);
+  }
+  return { value: cleaned };
+}
+
 // Admin-relative only: a digest never deep-links off the portal, and a
 // stored absolute URL would be a phishing seam in the bell.
 function validateLink(raw) {
@@ -280,7 +310,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const { error, value } = validateDigest(req.body);
   if (error) return res.status(400).json({ ok: false, reason: 'invalid_payload', error });
 
-  const { key, kind, subject, text, link, metadata, observedAt, headline, summary, audience, count, newCount } = value;
+  const { key, kind, subject, text, link, metadata, observedAt, headline, summary, audience, count, newCount, itemIds } = value;
   // The check → destination map fills in what an unconverted ops-crons
   // check doesn't send itself: a fallback title area, where the bell should
   // land, and who it's for. A caller's own headline/summary/audience/link
@@ -304,6 +334,14 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   // the check-map's own counts(subject), else the subject's first integer.
   const alertClass = alertClassFor(key, SOURCE);
   const { count: resolvedCount, newCount: resolvedNewCount } = resolveCounts({ count, newCount, subject, route });
+  // Follow-up to #5269 (codex r8 P1): a date-only key's identity is UNKNOWN
+  // (ops-digest.js's decideRingForNewRow) — `itemIds` lets the check hand
+  // over its own item identity instead, normalized/capped/hashed exactly
+  // like an in-process sender's `itemKeys` (deliverOpsDigest), so the same
+  // ring test can tell a genuinely repeated finding from a different one.
+  const itemKeys = normalizeItemKeys(itemIds);
+  const itemSetHash = itemSetHashFor(itemIds);
+  const itemKeysMeta = itemKeysMetaFor(itemIds, itemKeys, itemSetHash);
   let outcome = null;
   try {
     // ONE transaction under the dedupe's advisory lock — the same lock
@@ -331,7 +369,9 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       // standing row yet for this dedupeKey); a REFRESH of an existing row
       // is decided by ringOnRefresh below, against that row's own content.
       const quiet = resolvedAudience === 'owner'
-        ? !(await decideRingForNewRow(trx, { alertClass, source: SOURCE, key: null, opsKey: key, count: resolvedCount, newCount: resolvedNewCount }))
+        ? !(await decideRingForNewRow(trx, {
+          alertClass, source: SOURCE, key: null, opsKey: key, count: resolvedCount, newCount: resolvedNewCount, itemKeys, itemSetHash,
+        }))
         : false;
       // A later run's recurrence changes dedupeVersion and refreshes the
       // standing row. A repeat of the same observation remains deduped.
@@ -352,7 +392,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
         refreshOnDedupe: true,
         // Owner rows only: an engineering/fyi refresh keeps notifyAdmin's
         // default (any content change re-surfaces it), same as in-process.
-        ...(resolvedAudience === 'owner' ? { ringOnRefresh: ringOnRefreshFrom({ count: resolvedCount, newCount: resolvedNewCount }) } : {}),
+        ...(resolvedAudience === 'owner' ? { ringOnRefresh: ringOnRefreshFrom({ count: resolvedCount, newCount: resolvedNewCount, itemKeys, itemSetHash }) } : {}),
         // Without a caller timestamp, identical content has no new event
         // identity. Let content changes refresh; retries keep their read state.
         dedupeVersion: req.body.observedAt == null ? undefined : effectiveObservedAt,
@@ -367,6 +407,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
           alertClass,
           ...(Number.isFinite(resolvedCount) ? { count: resolvedCount } : {}),
           ...(Number.isFinite(resolvedNewCount) ? { newCount: resolvedNewCount } : {}),
+          ...itemKeysMeta,
           // Written LAST and unconditionally: a check whose kind flips
           // between runs under the SAME dedupeKey must have notifyAdmin's
           // refresh merge actually overwrite a stale feed value — an
@@ -467,5 +508,5 @@ module.exports._private = {
   validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound,
   observedAtFrom, standingObservation, laterOf, KINDS, RESERVED_METADATA_KEYS,
   validateHeadline, validateSummary, validateAudience, MAX_HEADLINE_CHARS, MAX_SUMMARY_CHARS,
-  validateCount, resolveCounts, firstIntegerInSubject,
+  validateCount, resolveCounts, firstIntegerInSubject, validateItemIds,
 };
