@@ -99,9 +99,18 @@ function parseAddress(str) {
 }
 const streetOfAddress = (address) => parseAddress(address).street;
 
+// An office's accepted cities come from locations.js only: the postal city parsed from its
+// address, plus its display name (the bradenton office is "Lakewood Ranch"; for the others the
+// name equals the city, so it adds nothing).
 const officeOf = (loc) => {
   const a = parseAddress(loc.address);
-  return { locationId: loc.id, name: BRAND_NAME, phone: loc.phone, phoneKey: phoneKey(loc.phone), address: loc.address, cityLabel: String(loc.address).split(',')[1]?.trim() || '', ...a, full: [a.street, a.city, a.region, a.postal].join(' ') };
+  const labels = [String(loc.address).split(',')[1]?.trim(), loc.name].filter(Boolean);
+  const cities = [...new Set([a.city, normalizeStreet(loc.name)].filter(Boolean))];
+  return {
+    locationId: loc.id, name: BRAND_NAME, phone: loc.phone, phoneKey: phoneKey(loc.phone), address: loc.address, ...a,
+    cities, cityLabel: labels.filter((l, i) => cities.includes(normalizeStreet(l)) && labels.findIndex((x) => normalizeStreet(x) === normalizeStreet(l)) === i).join(' or '),
+    fulls: cities.map((city) => [a.street, city, a.region, a.postal].join(' ')),
+  };
 };
 // The office a row is assigned to, else the default office (WAVES_LOCATIONS[0]) — the dashboard's reference NAP.
 function expectedNapFor(row) {
@@ -193,7 +202,7 @@ const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s
 // normalized street (not a substring), and any locality / postal code / region it states must
 // equal the office's; each stated field that differs is its own mismatch and page text cannot
 // change that. Without a stated street, the visible text confirms only when it contains the
-// office's whole normalized address ("<number> <street> <suffix> [directional] <city> fl <zip5>")
+// office's whole normalized address ("<number> <street> <suffix> [directional] <city> fl <zip5>"; the city may be the postal city or the office's display name)
 // contiguously on word boundaries. Other address-like strings leave it unconfirmed (a sidebar
 // may list other businesses, so never a mismatch); none at all means the page shows no address.
 // `observed` is always what the page said, never the office's canonical address.
@@ -203,14 +212,15 @@ function judgeAddress(nap, office) {
     const { parsed, raw } = a;
     const mismatches = [];
     if (parsed.street && parsed.street !== office.street) mismatches.push({ field: 'address', expected: office.address, seen: a.display });
-    if (parsed.city && parsed.city !== office.city) mismatches.push({ field: 'city', expected: office.cityLabel, seen: raw.city });
+    if (parsed.city && !office.cities.includes(parsed.city)) mismatches.push({ field: 'city', expected: office.cityLabel, seen: raw.city });
     if (parsed.postal && parsed.postal !== office.postal) mismatches.push({ field: 'postal_code', expected: office.postal, seen: raw.postal });
     if (parsed.region && parsed.region !== office.region) mismatches.push({ field: 'region', expected: 'FL', seen: raw.region });
     if (mismatches.length) return { confirmed: false, checked: true, mismatches, unconfirmed: null, observed: a.display };
     if (parsed.street) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: a.display };
   }
   const seen = nap.text.match(ADDRESS_LIKE_RE) || [];
-  if (hasSequence(normalizeStreet(nap.text), office.full)) {
+  const normalizedText = normalizeStreet(nap.text);
+  if (office.fulls.some((full) => hasSequence(normalizedText, full))) {
     const ours = seen.find((m) => normalizeStreet(m) === office.street) || seen[0] || null;
     return { confirmed: true, checked: true, mismatches: [], unconfirmed: null, observed: ours };
   }

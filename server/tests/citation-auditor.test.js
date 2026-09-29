@@ -51,7 +51,7 @@ describe('classifyListing', () => {
     expect(r.status).toBe('mismatched');
     expect(r.detail.mismatches).toEqual([
       { field: 'address', expected: BRAND.address, seen: '99 Old Rd, Tampa, 33601' },
-      { field: 'city', expected: 'Bradenton', seen: 'Tampa' },
+      { field: 'city', expected: 'Bradenton or Lakewood Ranch', seen: 'Tampa' },
       { field: 'postal_code', expected: '34211', seen: '33601' },
     ]);
   });
@@ -148,6 +148,21 @@ describe('classifyListing', () => {
 
     test('text with our street and city but no ZIP is not confirmed', () => {
       expect(viaText('13649 Luxe Ave, Bradenton, FL').status).toBe('unverified');
+    });
+
+    test('the bradenton office also answers to its display name, Lakewood Ranch (entity and text)', () => {
+      expect(viaEntity({ streetAddress: '13649 Luxe Ave #110', addressLocality: 'Lakewood Ranch', addressRegion: 'FL', postalCode: '34211' }).status).toBe('verified');
+      expect(viaText('13649 Luxe Ave #110, Lakewood Ranch, FL 34211')).toMatchObject({ status: 'verified', detail: { address_checked: true } });
+      expect(viaText('13649 Luxe Ave #110, Lakewood Ranch, FL 34211').nap.nap_address).toBe('13649 Luxe Ave');
+    });
+
+    test('other offices accept only their own city: Sarasota for the bradenton office is still a mismatch', () => {
+      const r = viaEntity({ streetAddress: '13649 Luxe Ave #110', addressLocality: 'Sarasota', postalCode: '34211' });
+      expect(r.status).toBe('mismatched');
+      expect(r.detail.mismatches).toEqual([{ field: 'city', expected: 'Bradenton or Lakewood Ranch', seen: 'Sarasota' }]);
+      expect(viaText('13649 Luxe Ave #110, Sarasota, FL 34211').status).toBe('unverified');
+      const parrish = classifyListing(page(`<h1>Waves Pest Control</h1><p>${PARRISH.phone}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: PARRISH.phone, address: { streetAddress: '5155 115th Cir E', addressLocality: 'Lakewood Ranch' } })}`), candidatesFor({}));
+      expect(parrish.detail.mismatches).toEqual([{ field: 'city', expected: 'Parrish', seen: 'Lakewood Ranch' }]);
     });
 
     test('an entity with the correct street but postalCode 34212 is mismatched on the postal code', () => {
