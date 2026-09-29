@@ -1,5 +1,5 @@
 /**
- * Alert episodes (notification-service closeAdminAlertKeys /
+ * Alert episodes (admin-alert-episodes closeAdminAlertKeys /
  * openAdminAlertKeys / raiseAdminAlertWithReopen) against live Postgres, the
  * SQL as the schedule-integrity watchdog runs it: a close marks the row read
  * and auto-cleared (a row a person already read keeps its own read_at), a
@@ -9,7 +9,6 @@
  * covered by schedule-integrity-watchdog.test.js.
  */
 const SKIP = !process.env.DATABASE_URL;
-// The episode helpers live in the schedule-integrity watchdog (private to it).
 const maybeDescribe = SKIP ? describe.skip : describe;
 
 // Both suites share the pool; it closes once, after the last of them.
@@ -25,7 +24,7 @@ maybeDescribe('alert episodes (live Postgres)', () => {
   beforeAll(() => {
     db = require('../models/db');
     NotificationService = require('../services/notification-service');
-    ({ _private: helpers } = require('../services/schedule-integrity-watchdog'));
+    helpers = require('../services/admin-alert-episodes');
   });
   afterAll(async () => {
     await db('notifications').whereRaw("starts_with(metadata->>'dedupeKey', ?)", [RUN]).del();
@@ -306,7 +305,7 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     const [raise] = watchdog._unpricedSeriesAlerts({ upcomingByRoot: new Map(), overdueByRoot: new Map(),
       completedByRoot: await watchdog._completedUnpricedSince(since), bellSince: since, episodes: true, now: NOW });
     const [dedupeKey, title, body, metadata] = raise;
-    const result = await watchdog._private.raiseAdminAlertWithReopen('alert', title, body, { dedupeKey, bell: true, metadata: { dedupeKey, ...metadata } });
+    const result = await require('../services/admin-alert-episodes').raiseAdminAlertWithReopen('alert', title, body, { dedupeKey, bell: true, metadata: { dedupeKey, ...metadata } });
     expect(result.rang).toBe(true);
     const bell = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [s.key]).orderBy('created_at', 'desc').first('metadata', 'read_at');
     const meta = typeof bell.metadata === 'string' ? JSON.parse(bell.metadata) : bell.metadata;

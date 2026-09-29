@@ -5456,6 +5456,14 @@ function initScheduledJobs() {
         await EngagementEngine.sweepTimeRules();
         await EngagementEngine.processDueJobs();
       });
+      // Best-effort, AFTER the engine's own work and outside its lock: close
+      // hot-estimate bells whose estimate settled (ALERT_EPISODES). Never
+      // fails or delays the tick's result.
+      try {
+        await require('./estimate-hot-view-alert').closeSettledHotViewAlerts();
+      } catch (err) {
+        logger.warn(`[est-engage] hot-view settle pass failed: ${err.message}`);
+      }
     } catch (err) {
       logger.error(`[est-engage] cron failed: ${err.message}`);
     }
