@@ -624,6 +624,11 @@ describe('groundRescheduleAgreement', () => {
         ['We will see you two weeks from now at two PM.', 'two weeks from now', '2026-10-07'],
         ['We will see you in 3 weeks at two PM.', 'in 3 weeks', '2026-10-14'],
         ['We will see you one week from today at two PM.', 'one week from today', '2026-09-30'],
+        ['We will see you in a week at two PM.', 'in a week', '2026-09-30'],
+        ['We will see you a week from now at two PM.', 'a week from now', '2026-09-30'],
+        ['We will see you a week from today at two PM.', 'a week from today', '2026-09-30'],
+        ['We will see you in a day at two PM.', 'in a day', '2026-09-24'],
+        ['We will see you in one day at two PM.', 'in one day', '2026-09-24'],
       ];
       for (const [said, day, date] of FORMS) {
         const words = { day, hour: 'two', period: 'PM' };
@@ -643,6 +648,8 @@ describe('groundRescheduleAgreement', () => {
         ['We will see you sometime next month at two PM.', 'sometime next month'],
         ['We will see you in a few days at two PM.', 'in a few days'],
         ['We will see you in a couple of weeks at two PM.', 'in a couple of weeks'],
+        ['We will see you half a day from now at two PM.', 'half a day from now'],
+        ['We will see you in a week or two at two PM.', 'in a week or two'],
         ['We will see you in nine days at two PM.', 'in nine days'],
         ['We will see you eight days away at two PM.', 'eight days away'],
         ['We will see you in two days or three days at two PM.', 'in two days'],

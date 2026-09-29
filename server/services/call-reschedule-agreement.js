@@ -321,10 +321,11 @@ const RELATIVE_DATE_HORIZON_DAYS = 60;
 // Weekday-less relative dates are accepted only in this closed arithmetic set,
 // computed from the pinned verbatim relative quote and the call's day:
 // tomorrow, the day after tomorrow, in N days/weeks, N days/weeks from
-// now/today (N digits, or a number word one to eight). Anything else
+// now/today (N digits, "a"/"one", or a number word two to eight). Anything else
 // ("sometime next month", "a few days") stays manual.
-const OFFSET_NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };
-const OFFSET_NUMBER = String.raw`(\d{1,2}|${Object.keys(OFFSET_NUMBER_WORDS).join('|')})`;
+const OFFSET_NUMBER_WORDS = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };
+// "half a day from now" is not a whole day.
+const OFFSET_NUMBER = String.raw`(?<!half )(\d{1,2}|${Object.keys(OFFSET_NUMBER_WORDS).join('|')})`;
 const OFFSET_FORMS = [
   new RegExp(String.raw`\bin ${OFFSET_NUMBER} (days?|weeks?)\b`, 'g'),
   new RegExp(String.raw`\b${OFFSET_NUMBER} (days?|weeks?) from (?:now|today)\b`, 'g'),
