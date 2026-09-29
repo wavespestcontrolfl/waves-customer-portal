@@ -4086,26 +4086,18 @@ const InvoiceService = {
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
-          const { acquireScheduledInvoiceMintLock, assertScheduledVisitLive } = require("./scheduled-invoice-mint");
-          await acquireScheduledInvoiceMintLock(database, linkedScheduledServiceId);
-          // Codex #5244 r7 P0: this bare-advisory-lock path is every linked
-          // create() caller that does NOT route through the shared
-          // acquireScheduledMintLockChain (a manual admin invoice, a
-          // project/WDO invoice, the annual-prepay-switch undo restore,
-          // …) — it took the SAME mint lock above but never re-read the
-          // visit under it, so a cancellation that won this lock FIRST and
-          // committed while this create() waited behind it left this mint
-          // to resume blind and bill a visit that will never happen. One
-          // extra FOR UPDATE read, gated by the SAME canonical status set
-          // and error shape the shared lock-chain chokepoint uses
-          // (scheduled-invoice-mint.js's assertScheduledVisitLive) — never
-          // a second hand-rolled check. A row that no longer exists is a
-          // different caller's concern, not this one's.
-          const lockedVisitForMint = await database('scheduled_services')
-            .where({ id: linkedScheduledServiceId })
-            .forUpdate()
-            .first('id', 'status');
-          if (lockedVisitForMint) assertScheduledVisitLive(lockedVisitForMint);
+          // The SHARED lock chain (mint advisory lock → customer KEY SHARE →
+          // visit row FOR UPDATE + the never-ran status refusal), not a bare
+          // visit FOR UPDATE: this path is every linked create() caller that
+          // does not otherwise route through the chain (manual admin, project/
+          // WDO, prepay-switch undo, estimate converter). A cancellation that
+          // won the mint lock and committed while this waited must not be
+          // billed past (Codex #5244 r7), and the customer key-share must come
+          // BEFORE the visit lock — the invoice insert's customer FK would
+          // otherwise take it after, inverting the order the chain exists to
+          // hold against the extension accept (ABBA deadlock).
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(database, { scheduledServiceId: linkedScheduledServiceId, customerId });
         }
         if (stampedEstimateIdInNotes) {
           await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
