@@ -228,23 +228,28 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
   // The visit's base application on an invoice (the line every service mint writes).
   const baseLines = (visitId) => JSON.stringify([{ client_id: `scheduled_${visitId}_primary`, description: 'General Pest Control', quantity: 1, unit_price: 120, amount: 120 }]);
 
-  test('an invoice billing the visit\'s base application, through its service record or directly on the visit, releases it; void, refunded, canceled and cancelled ones do not, nor does an unrelated add-on invoice', async () => {
+  test('no invoice releases a completed, still-unpriced visit, whatever it bills: whether it was billed right is a person\'s call', async () => {
     const viaRecord = await series();
     const record = await insert('service_records', { customer_id: viaRecord.customer.id, service_date: '2026-09-28', service_type: 'General Pest Control', scheduled_service_id: viaRecord.child.id });
-    const inv = await insert('invoices', { customer_id: viaRecord.customer.id, token: `${RUN}-a`, invoice_number: `${RUN}-a`, service_record_id: record.id, status: 'void', line_items: baseLines(viaRecord.child.id) });
-    for (const dead of ['void', 'refunded', 'canceled', 'cancelled']) {
-      await db('invoices').where({ id: inv.id }).update({ status: dead });
-      expect(await held(viaRecord)).toEqual([viaRecord.root.id]);
-    }
-    await db('invoices').where({ id: inv.id }).update({ status: 'sent' });
-    expect(await held(viaRecord)).toEqual([]);
+    await insert('invoices', { customer_id: viaRecord.customer.id, token: `${RUN}-a`, invoice_number: `${RUN}-a`, service_record_id: record.id, status: 'sent', line_items: baseLines(viaRecord.child.id) });
+    expect(await held(viaRecord)).toEqual([viaRecord.root.id]);
 
     const direct = await series();
-    const addOn = await insert('invoices', { customer_id: direct.customer.id, token: `${RUN}-b`, invoice_number: `${RUN}-b`, scheduled_service_id: direct.child.id, status: 'draft',
-      line_items: JSON.stringify([{ client_id: 'manual_1', description: 'Irrigation valve repair', quantity: 1, unit_price: 85, amount: 85 }]) });
+    await insert('invoices', { customer_id: direct.customer.id, token: `${RUN}-b`, invoice_number: `${RUN}-b`, scheduled_service_id: direct.child.id, status: 'paid', line_items: baseLines(direct.child.id) });
     expect(await held(direct)).toEqual([direct.root.id]);
-    await db('invoices').where({ id: addOn.id }).update({ line_items: baseLines(direct.child.id) });
-    expect(await held(direct)).toEqual([]);
+  });
+
+  test('an authoritative $0 stamp (GATE_STAMPED_ZERO_FREE on) is a price and releases it; with the gate off a bare 0 still holds', async () => {
+    const saved = process.env.GATE_STAMPED_ZERO_FREE;
+    try {
+      const free = await series({ childOver: { estimated_price: 0 } });
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      expect(await held(free)).toEqual([]);
+      delete process.env.GATE_STAMPED_ZERO_FREE;
+      expect(await held(free)).toEqual([free.root.id]);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_STAMPED_ZERO_FREE; else process.env.GATE_STAMPED_ZERO_FREE = saved;
+    }
   });
 
   test('priced (own row or parent), completed before the episode, or episode restarted by a later ring: released', async () => {

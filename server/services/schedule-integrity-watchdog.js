@@ -325,9 +325,7 @@ async function loadPaidTerms(rows) {
 }
 
 // One visit's prepay-coverage judgement: the issues it has right now, and
-// whether a validated annual stamp covers it. THE one place both the main scan
-// and the close pass's completed-visit re-check decide "is there still a gap",
-// so they cannot disagree. Same validator the completion-billing gate uses
+// whether a validated annual stamp covers it. Same validator the completion-billing gate uses
 // (fail-closed): an annual-prepay stamp suppresses only when its linked term
 // is live, customer-matched, and coverage-service-matched. Lazy require
 // mirrors the feature-gates pattern and keeps module load light.
@@ -617,17 +615,18 @@ async function deliverAlerts({ alerts, episodes, now, overdueUnpricedRoots, hori
   }
 }
 
-// Roots (of the given absent `unpriced-series:<root>` keys) that have a visit
-// which completed during the alert's current episode and is still unpriced
-// and uninvoiced. The episode starts at the bell's metadata.episode_started_at
-// (the run's pre-scan time, so a completion racing the bell insert still
-// holds); a bell written before that field falls back to the later of its
-// created_at and rungAt. "Still unpriced" is the scan's own rule
-// (isUnpricedSeriesVisit on the shared coverage select, annual-prepay coverage
-// validated the same way, billing's sibling-invoice verdict); "uninvoiced" is
-// no invoice in a status that bills — void, refunded, canceled and cancelled
-// (InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES) leave a visit unbilled —
-// linked directly or through the visit's service record. Read-only.
+// Roots (of the given absent `unpriced-series:<root>` keys) with a visit that
+// completed during the alert's current episode while still unpriced by its own
+// row: the scan's own rule (isUnpricedSeriesVisit, annual-prepay coverage
+// validated the same way), with an authoritative $0 (billing-lane's
+// hasAuthoritativeZeroPrice, under GATE_STAMPED_ZERO_FREE) counting as a price.
+// Whether such a visit was then billed right (a combined first-visit invoice,
+// an invoice by hand) is a person's call, never this pass's: the bell stays up
+// until the visit is priced or a person clears it, as before episodes. The
+// episode starts at the bell's metadata.episode_started_at (the run's pre-scan
+// time, so a completion racing the bell insert still holds); a bell written
+// before that field falls back to the later of its created_at and rungAt.
+// Read-only.
 async function completedUnpricedRoots(absentKeys) {
   const held = new Set();
   const roots = absentKeys.map((key) => key.slice(UNPRICED_PREFIX.length)).filter((id) => UUID_RE.test(id));
@@ -650,37 +649,46 @@ async function completedUnpricedRoots(absentKeys) {
     .where(function inRoots() { this.whereIn('ss.id', roots).orWhereIn('ss.recurring_parent_id', roots); })
     .select(db.raw('COALESCE(ss.completed_at, ss.updated_at) as completed_time'));
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
+  const { hasAuthoritativeZeroPrice } = require('./billing-lane');
   for (const row of completed) {
     const root = String(seriesRootId(row));
     if (held.has(root) || !episodeStart.has(root)) continue;
     if (!(new Date(row.completed_time).getTime() >= episodeStart.get(root))) continue;
-    if (!isUnpricedSeriesVisit(row)) continue;
+    if (!isUnpricedSeriesVisit(row) || hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) continue;
     if (row.prepaid_method === ANNUAL_PREPAY_METHOD && await annualPrepayCoversVisit(row, db)) continue;
-    if (await coveredByFirstApplicationInvoice(row)) continue;
-    if (!(await ownInvoiceBillsBaseApplication(row))) held.add(root);
+    held.add(root);
   }
   return held;
-}
-
-// Of these completed/rescheduled visit ids, the ones whose prepay-coverage gap
-// is still there — re-judged through the shared coverage select and the SAME
-// gap judgement the main scan applies (judgePrepayGaps). A gap staff since
-// reconciled (payment, term, stamp) is gone and its bell may close.
-async function visitsStillGapped(visitIds) {
-  if (!visitIds.length) return new Set();
-  const rows = await coverageScanQuery().whereIn('ss.id', visitIds);
-  const paidTermById = await loadPaidTerms(rows);
-  const gapped = new Set();
-  for (const row of rows) {
-    if ((await judgePrepayGaps(row, paidTermById)).issues.length) gapped.add(String(row.id));
-  }
-  return gapped;
 }
 
 // Prepay: key = prepay-coverage:<visit>:<issue>:<evidence hash>.
 const prepayVisitOf = (key) => key.split(':')[1];
 // The visit and the issue: the evidence hash is what a replacement changes.
 const prepaySubjectOf = (key) => key.split(':').slice(1, 3).join(':');
+
+// Why an absent prepay key's bell closes, or null to leave it up.
+function prepayCloseReason(key, { statusById, dayById, replacedSubjects, undeliveredSubjects, horizonDay }) {
+  const id = prepayVisitOf(key);
+  if (!statusById.has(id)) return 'visit did not run';
+  const status = statusById.get(id);
+  // Completion is when the prepay billing mistake happens, and the scan
+  // drops completed visits: a completed or rescheduled visit's review is a
+  // person's to clear, never this pass's, gap or not.
+  if (PREPAY_HOLD_OPEN_STATUSES.includes(status)) return null;
+  if (NEVER_RAN_STATUSES.includes(status)) return 'visit did not run';
+  // The SAME issue still has a live key: superseded by a new evidence key
+  // rather than resolved — closed only once every live key for that visit
+  // and issue was delivered this run. One the cap held back has no bell
+  // yet, so the old warning stays until it does. Matched per issue: a visit
+  // can carry several prepay issues at once, and delivering one must not
+  // clear another's old warning.
+  const subject = prepaySubjectOf(key);
+  if (replacedSubjects.has(subject)) return undeliveredSubjects.has(subject) ? null : 'superseded';
+  // Out of the scan by date, not fixed: it re-rings once back in the window.
+  if (horizonDay && dayById.get(id) > horizonDay) return 'moved past the look-ahead window';
+  return 'gap resolved';
+}
+
 async function closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, horizonDay }) {
   const prepayAbsent = await absentOf(PREPAY_PREFIX);
   if (!prepayAbsent.length) return 0;
@@ -688,35 +696,18 @@ async function closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, hor
   const statusRows = visitIds.length
     ? await db('scheduled_services').whereIn('id', visitIds)
       .select('id', 'status', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as service_date")) : [];
-  const statusById = new Map(statusRows.map((r) => [String(r.id), r.status]));
-  const dayById = new Map(statusRows.map((r) => [String(r.id), r.service_date]));
-  // A completed/rescheduled visit stays open only while its gap is still there.
-  const gapped = await visitsStillGapped(statusRows
-    .filter((r) => PREPAY_HOLD_OPEN_STATUSES.includes(r.status)).map((r) => String(r.id)));
-  // A visit whose SAME issue still has a live prepay key was superseded by a
-  // new evidence key rather than resolved — closed only once every live key
-  // for that visit and issue was delivered this run. One the cap held back
-  // has no bell yet: the old warning stays until it does, or the review would
-  // be lost if the visit completed first (the scan drops completed visits).
-  // Matched per issue: a visit can carry several prepay issues at once, and
-  // delivering one must not clear another's old warning.
   const livePrepay = [...liveKeys].filter((k) => k.startsWith(PREPAY_PREFIX));
-  const replacedSubjects = new Set(livePrepay.map(prepaySubjectOf));
-  const undeliveredSubjects = new Set(livePrepay.filter((k) => !deliveredKeys.has(k)).map(prepaySubjectOf));
-  const byReason = { 'visit did not run': [], superseded: [], 'moved past the look-ahead window': [], 'gap resolved': [] };
+  const context = {
+    statusById: new Map(statusRows.map((r) => [String(r.id), r.status])),
+    dayById: new Map(statusRows.map((r) => [String(r.id), r.service_date])),
+    replacedSubjects: new Set(livePrepay.map(prepaySubjectOf)),
+    undeliveredSubjects: new Set(livePrepay.filter((k) => !deliveredKeys.has(k)).map(prepaySubjectOf)),
+    horizonDay,
+  };
+  const byReason = {};
   for (const key of prepayAbsent) {
-    const id = prepayVisitOf(key);
-    const known = statusById.has(id);
-    const status = statusById.get(id);
-    if (known && PREPAY_HOLD_OPEN_STATUSES.includes(status)) {
-      if (!gapped.has(id)) byReason['gap resolved'].push(key);
-    } else if (!known || NEVER_RAN_STATUSES.includes(status)) byReason['visit did not run'].push(key);
-    else if (replacedSubjects.has(prepaySubjectOf(key))) {
-      if (!undeliveredSubjects.has(prepaySubjectOf(key))) byReason.superseded.push(key);
-    }
-    // Out of the scan by date, not fixed: it re-rings once back in the window.
-    else if (horizonDay && dayById.get(id) > horizonDay) byReason['moved past the look-ahead window'].push(key);
-    else byReason['gap resolved'].push(key);
+    const reason = prepayCloseReason(key, context);
+    if (reason) (byReason[reason] ||= []).push(key);
   }
   let closed = 0;
   for (const [reason, keys] of Object.entries(byReason)) closed += await close(keys, reason);
@@ -761,9 +752,9 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, overdueUnpric
 
   const unpricedAbsent = (await absentOf(UNPRICED_PREFIX))
     .filter((key) => !overdueUnpricedRoots.has(key.slice(UNPRICED_PREFIX.length)));
-  // A series whose alerted visit COMPLETED still unpriced and uninvoiced is
-  // the money loss the bell warned about, not a fix: it stays open until the
-  // visit is invoiced or priced (the next run then closes it).
+  // A series whose visit COMPLETED during the bell while still unpriced is
+  // the money loss the bell warned about, not a fix: it stays open until
+  // that visit is priced or a person clears it.
   const heldRoots = await completedUnpricedRoots(unpricedAbsent);
   const unpriced = unpricedAbsent.filter((key) => !heldRoots.has(key.slice(UNPRICED_PREFIX.length)));
   // Priced, done, cancelled, or moved past the look-ahead window: a visit

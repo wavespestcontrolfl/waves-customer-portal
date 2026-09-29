@@ -34,7 +34,11 @@ jest.mock('../services/invoice', () => ({
 }));
 // billing-lane's canonical sibling-coverage verdict: mocked at its boundary
 // (its own logic is covered by its suites); default = nothing covers.
-jest.mock('../services/billing-lane', () => ({ siblingInvoiceCoverageVerdict: jest.fn(async () => ({ status: 'none' })) }));
+jest.mock('../services/billing-lane', () => ({
+  siblingInvoiceCoverageVerdict: jest.fn(async () => ({ status: 'none' })),
+  // A stamped 0 (never null or '') is an authoritative price: GATE_STAMPED_ZERO_FREE on.
+  hasAuthoritativeZeroPrice: jest.fn((price) => price != null && price !== '' && Number(price) === 0),
+}));
 jest.mock('../services/irrigation-weekly-email', () => ({
   findLawnEmailAudienceGaps: jest.fn(async () => []),
   findUnstampedRecurringLawnMembers: jest.fn(async () => []),
@@ -103,22 +107,19 @@ function unpricedChild(over = {}) {
 // for those keys, the same contract the real service relies on.
 // completedRows: what the unpriced close pass's completed-visit check reads
 // (the same 'scheduled_services as ss' table, told apart by its
-// where('ss.status', 'completed')); recheckRows: the prepay hold's re-check by id; bellRows: the standing bells' created_at /
+// where('ss.status', 'completed')); bellRows: the standing bells' created_at /
 // rungAt it reads from 'notifications'.
-function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], completedRows = [], bellRows = [], recheckRows = [], alertedKeys = new Set() } = {}) {
+function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], completedRows = [], bellRows = [], alertedKeys = new Set() } = {}) {
   db.mockImplementation((table) => {
     let completedCheck = false;
-    let recheck = false;
     const c = {};
-    for (const m of ['whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
+    for (const m of ['whereIn', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
       c[m] = jest.fn(() => c);
     }
-    // The prepay hold's re-check reads the shared select by visit id: whereIn('ss.id', ids).
-    c.whereIn = jest.fn((...args) => { if (args[0] === 'ss.id') recheck = true; return c; });
     c.where = jest.fn((...args) => { if (args[0] === 'ss.status' && args[1] === 'completed') completedCheck = true; return c; });
     c.then = (res, rej) => {
       const rows = table === 'scheduled_services' ? staleRows
-        : table === 'scheduled_services as ss' ? (completedCheck ? completedRows : recheck ? recheckRows : coverageRows)
+        : table === 'scheduled_services as ss' ? (completedCheck ? completedRows : coverageRows)
           : table === 'annual_prepay_terms' ? coveredTerms
             : table === 'notifications' ? bellRows : null;
       return Promise.resolve(rows || []).then(res, rej);
@@ -754,33 +755,13 @@ describe('alert episodes (ALERT_EPISODES)', () => {
       });
     });
 
-    test('a completed or rescheduled visit stays open only while the scan\'s own gap judgement still finds a gap; a reconciled one closes', async () => {
-      // V(1) completed + unverifiable annual stamp (gap), V(2) rescheduled + manual stamp conflict (gap),
-      // V(3) completed and reconciled (no gap), V(4) rescheduled and reconciled.
-      const stampedGap = (id) => unpricedChild({ id: V(id), status: 'completed', estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100, annual_prepay_term_id: 'term-1' });
-      const conflict = unpricedChild({ id: V(2), status: 'rescheduled', estimated_price: 100, prepaid_method: 'cash', prepaid_amount: 50, prepaid_at: '2026-07-01T00:00:00Z',
-        manual_series_allocation_evidence: [['2026-07-02T00:00:00Z', 'cash', 'a-1', 50]] });
-      const reconciled = (id) => unpricedChild({ id: V(id), status: 'completed', estimated_price: 100 });
-      makeDbMock({
-        staleRows: [1, 2, 3, 4].map((n) => ({ id: V(n), status: n % 2 ? 'completed' : 'rescheduled' })),
-        recheckRows: [stampedGap(1), conflict, reconciled(3), { ...reconciled(4), status: 'rescheduled' }],
-      });
+    test('a completed or rescheduled visit\'s review is never closed by the pass, gap or not: a person clears it', async () => {
+      makeDbMock({ staleRows: [1, 2, 3, 4].map((n) => ({ id: V(n), status: n % 2 ? 'completed' : 'rescheduled' })) });
       openKeysByPrefix({ 'prepay-coverage:': [1, 2, 3, 4].map((n) => key(V(n))) });
       await runInner({ now: NOW });
-      expect(closedBy()).toEqual({ 'gap resolved': [key(V(3)), key(V(4))] });
-      // The re-check goes through the shared select, by visit id.
-      expect(db.mock.results.map((r) => r.value).some((c) => c.whereIn.mock.calls.some(([col, ids]) => col === 'ss.id' && ids.length === 4))).toBe(true);
-    });
-
-    test('a completed visit whose annual stamp the validator now confirms has no gap and closes', async () => {
-      makeDbMock({
-        staleRows: [{ id: V(1), status: 'completed' }],
-        recheckRows: [unpricedChild({ id: V(1), status: 'completed', estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100, annual_prepay_term_id: 'term-1' })],
-      });
-      annualPrepayCoversVisit.mockResolvedValueOnce(true);
-      openKeysByPrefix({ 'prepay-coverage:': [key(V(1))] });
-      await runInner({ now: NOW });
-      expect(closedBy()).toEqual({ 'gap resolved': [key(V(1))] });
+      expect(closedBy()).toEqual({});
+      // No gap re-check of those visits: the pass reads their status only.
+      expect(annualPrepayCoversVisit).not.toHaveBeenCalled();
     });
 
     test('a key superseded by a new evidence key for the same visit closes as superseded; the new key stays', async () => {
@@ -926,31 +907,21 @@ describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds i
     expect(scan.whereIn).not.toHaveBeenCalledWith('ss.id', expect.anything()); // root membership lives in the where(fn) group
   });
 
-  test('a completed visit invoiced in a billing status is closed; void, REFUNDED, canceled and cancelled invoices leave it unbilled and hold', async () => {
-    invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: 'draft', line_items: [baseLine(CHILD)] }] });
-    await run([completed()]);
+  test('invoices and billing\'s coverage verdict are never consulted: a completed, still-unpriced visit holds whatever it was billed (a person\'s call)', async () => {
+    invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: 'sent', line_items: [baseLine(CHILD)] }] });
+    siblingInvoiceCoverageVerdict.mockResolvedValue({ status: 'covered', invoice: { id: 'inv-2' } });
+    await run([completed({ source_estimate_id: 'est-1', first_application_invoice_id: 'inv-9' })]);
+    expect(closedKeys()).toEqual([]);
+    expect(anyInvoiceLinkedToVisit).not.toHaveBeenCalled();
+    expect(siblingInvoiceCoverageVerdict).not.toHaveBeenCalled();
+  });
+
+  test('an authoritative $0 stamp (GATE_STAMPED_ZERO_FREE) counts as a price: the bell closes; an unstamped row holds', async () => {
+    await run([completed({ estimated_price: 0 })]);
     expect(closedKeys()).toEqual([KEY]);
-
-    for (const dead of ['void', 'refunded', 'canceled', 'cancelled']) {
-      episodeHelpers.closeAdminAlertKeys.mockClear();
-      invoicesByVisit({ [CHILD]: [{ id: 'inv-1', status: dead, line_items: [baseLine(CHILD)] }] });
-      await run([completed()]);
-      expect(closedKeys()).toEqual([]);
-    }
-  });
-
-  test('only an invoice that bills the base application counts: an unrelated add-on invoice, or a $0 base line, leaves the visit unbilled and holds', async () => {
-    invoicesByVisit({ [CHILD]: [{ id: 'inv-repair', status: 'sent', line_items: [repairLine] }] });
-    await run([completed()]);
+    episodeHelpers.closeAdminAlertKeys.mockClear();
+    await run([completed({ estimated_price: null })]);
     expect(closedKeys()).toEqual([]);
-    invoicesByVisit({ [CHILD]: [{ id: 'inv-zero', status: 'sent', line_items: [baseLine(CHILD, 0)] }] });
-    await run([completed()]);
-    expect(closedKeys()).toEqual([]);
-  });
-
-  test('the check asks the invoice module for the visit\'s linked invoices (direct or via service record)', async () => {
-    await run([completed()]);
-    expect(anyInvoiceLinkedToVisit).toHaveBeenCalledWith(db, CHILD);
   });
 
   test('completed but priced (own row or parent) is closed', async () => {
@@ -959,17 +930,6 @@ describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds i
     episodeHelpers.closeAdminAlertKeys.mockClear();
     await run([completed({ parent_primary_line_price: '72.00' })]);
     expect(closedKeys()).toEqual([KEY]);
-  });
-
-  test('covered by a first-application invoice (billing\'s verdict) is closed; an uncovered verdict holds', async () => {
-    const row = completed({ recurring_parent_id: null, id: ROOT, source_estimate_id: 'est-1', first_application_invoice_id: 'inv-1' });
-    siblingInvoiceCoverageVerdict.mockResolvedValue({ status: 'covered', invoice: { id: 'inv-2' } });
-    await run([row]);
-    expect(closedKeys()).toEqual([KEY]);
-    episodeHelpers.closeAdminAlertKeys.mockClear();
-    siblingInvoiceCoverageVerdict.mockResolvedValue({ status: 'needs_review' });
-    await run([row]);
-    expect(closedKeys()).toEqual([]);
   });
 
   test('episode_started_at (the run\'s pre-scan time) is the episode start: a visit that completed after the scan but before the bell landed still holds', async () => {
