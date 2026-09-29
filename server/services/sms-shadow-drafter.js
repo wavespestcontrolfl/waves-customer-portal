@@ -1168,7 +1168,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
-  // v13 LIVE ETA (GATE_SMS_REAL_ANSWERS only — gate-off stays the exact v11
+  // LIVE ETA (GATE_SMS_REAL_ANSWERS only — gate-off stays the exact v11
   // literal, matching every other conditional in this function): the
   // facts block now carries a LIVE ETA + TRACKING LINK line on a TODAY
   // en-route visit whenever context-aggregator resolved one (same
@@ -1403,7 +1403,7 @@ function buildFactsBlock(context, extras = {}) {
           parts.push(s.tech ? `tech ${s.tech}` : 'tech not yet assigned');
           if (s.isToday && s.status === 'en_route') {
             parts.push('LIVE STATUS: tech marked en route to this visit');
-            // v13 LIVE ETA (GATE_SMS_REAL_ANSWERS): context-aggregator only
+            // LIVE ETA (GATE_SMS_REAL_ANSWERS): context-aggregator only
             // ever populates s.liveEta from a fresh GPS position + bounded
             // ETA (same functions + staleness/timeout the customer tracking
             // page uses) — a stale/missing position, missing destination

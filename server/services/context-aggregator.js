@@ -7,7 +7,7 @@ const { technicianReportCustomerCopy } = require('./service-report/technician-re
 const { etDateString, formatETTime } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
-// v13 LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
+// LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
 // the public tracking page uses (server/routes/track-public.js) — never
 // reimplemented here — so the minutes the AI states match what the
 // customer would see on their own tracking link.
@@ -517,7 +517,7 @@ async function fetchDuesChargeCandidates(customer) {
   return rows;
 }
 
-// v13 LIVE ETA (GATE_SMS_REAL_ANSWERS, owner ruling 2026-09-29): a TODAY
+// LIVE ETA (GATE_SMS_REAL_ANSWERS, owner ruling 2026-09-29): a TODAY
 // en-route visit gets a live GPS ETA + tracking link in the SMS facts block,
 // so the texting AI can answer "where's the tech" instead of always handing
 // off. Reuses the exact public-tracking-page path (resolveFreshTechPosition
@@ -612,7 +612,7 @@ class ContextAggregator {
       db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
       db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select(
         'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name',
-        // LIVE ETA inputs (v13, GATE_SMS_REAL_ANSWERS) — technician_id + the
+        // LIVE ETA inputs (GATE_SMS_REAL_ANSWERS) — technician_id + the
         // tech's Bouncie IMEI to resolve a fresh GPS position, the visit's
         // own track_view_token for the SAME "Track live" link the en-route
         // SMS sends, and the stamped-vs-primary destination coords
@@ -822,7 +822,7 @@ class ContextAggregator {
 
     const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance, billingLane);
 
-    // v13 LIVE ETA: only a visit that's TODAY and en_route has a tech worth
+    // LIVE ETA: only a visit that's TODAY and en_route has a tech worth
     // tracking — every other row resolves instantly to null with no lookup.
     const liveEtas = await Promise.all(
       upcomingServices.map((s) => (
