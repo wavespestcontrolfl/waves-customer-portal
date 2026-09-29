@@ -3044,7 +3044,13 @@ write), privacy headers and router rate limit; ignores its body; records ONE
 `customer_page_views` row (`page: 'track'`, subject = the visit, bots / staff
 skipped, 10-minute dedupe) fire-and-forget and answers 204 with no body. The
 page calls it once per token on its first successful load, never on the 30 s
-poll. Neither companion may grow beyond its single bounded write).
+poll. A lookup failure on `/view` is logged code-only (`logViewFailure`,
+never `err.message`, which can carry the bound token) and still answers 204;
+it is never forwarded to the global error handler. The privacy headers are
+also stamped by an `app.use('/api/public/track', …)` mount in
+`server/index.js` AHEAD of the global `/api/` limiter, so a limiter 429 on the
+bearer URL carries them too. Neither companion may grow beyond its single
+bounded write).
 `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
 + `POST /:token/confirm`; the destination the 24h reminder and booking
 confirmation texts link to. Gated by `scheduled_services.reschedule_token`

@@ -385,6 +385,15 @@ app.use('/api/public/secure-card', (req, res, next) => {
   res.set('X-Robots-Tag', 'noindex');
   next();
 });
+// Live-tracking privacy headers, same reasoning as secure-card above: the
+// GLOBAL /api limiter's 429s fire before track-public's own res.set, and the
+// URL carries a bearer track token. Values mirror track-public PRIVACY_HEADERS.
+app.use('/api/public/track', (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('X-Robots-Tag', 'noindex, nofollow');
+  res.set('Referrer-Policy', 'no-referrer');
+  next();
+});
 // The public agent surfaces (MCP + A2A) carry the same unobservable-when-
 // dark contract as the funnels above: while their gates are off they must
 // read 404 even for an IP that already exhausted the global /api/ limiter
