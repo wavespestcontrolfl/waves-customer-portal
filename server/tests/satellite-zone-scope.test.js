@@ -8,6 +8,8 @@
 //    schematic house-diagram rects: once any zone is marked, unmarked zones
 //    drop from the photo overlay.
 
+// The customer map URL is HMAC-signed with the server secret (signed-map-image.js).
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-signed-map-images';
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const { buildSatelliteTreatmentMapContext } = require('../services/service-report/satellite-treatment-map');
 

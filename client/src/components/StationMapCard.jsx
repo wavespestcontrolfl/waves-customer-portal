@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { COLORS as B } from '../theme-brand';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
 // Bait station map (station-map-v1) — numbered station pins over the live
 // satellite image. Extracted verbatim from ReportViewPage so the customer
@@ -394,7 +395,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
           aria-label={programMeta.ariaLabel}
           style={{ display: 'block', width: '100%' }}
         >
-          <image href={stationMap.image.url} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
+          <image href={resolveApiAssetUrl(stationMap.image.url)} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
           {useTrapPins && <style>{TRAP_PIN_STYLES}</style>}
           {useStationPinAnim && <style>{STATION_PIN_STYLES}</style>}
           {stations.map((station, index) => {

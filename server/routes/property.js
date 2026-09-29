@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const TermiteStations = require('../services/termite-stations');
+const { signedMapImagePathFromLiveConfig } = require('../services/signed-map-image');
 const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
 
 // Cap the JSON body for this route family. The global limit is generous;
@@ -379,7 +380,10 @@ router.get('/station-map', async (req, res, next) => {
       height: 340,
       mapType: 'satellite',
     });
-    if (!liveConfig?.imageUrl) {
+    // The provider's keyed image URL embeds the server Maps key; the portal gets a
+    // short-lived signed proxy path instead (routes/public-map-image.js).
+    const liveImagePath = liveConfig?.imageUrl ? signedMapImagePathFromLiveConfig(liveConfig) : null;
+    if (!liveImagePath) {
       return res.json({ available: false, reason: 'provider_config_unavailable', programs: {} });
     }
 
@@ -408,7 +412,7 @@ router.get('/station-map', async (req, res, next) => {
     const satelliteMap = {
       available: true,
       live: {
-        url: liveConfig.imageUrl,
+        url: liveImagePath,
         width: liveConfig.width || 640,
         height: liveConfig.height || 340,
       },

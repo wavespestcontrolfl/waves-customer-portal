@@ -32,6 +32,12 @@ function serverMapsKey() {
   return process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
 }
 
+// The Static Maps provider (services/maps/providers/google-maps-provider.js)
+// prefers a dedicated GOOGLE_STATIC_MAPS_API_KEY when one is configured.
+function staticMapsKey() {
+  return process.env.GOOGLE_STATIC_MAPS_API_KEY || serverMapsKey();
+}
+
 function parseUrl(raw) {
   try {
     return new URL(String(raw));
@@ -98,8 +104,9 @@ function scrubMapsKeysFromString(text) {
   }
   // Any `key=AIza...` token (any separator, any host) and any bare key shape.
   out = out.replace(/key=AIza[0-9A-Za-z_-]{20,}/gi, '').replace(GOOGLE_KEY_SHAPE, '');
-  const key = serverMapsKey();
-  if (key && key.length >= 8 && out.includes(key)) out = out.split(key).join('');
+  for (const key of [serverMapsKey(), process.env.GOOGLE_STATIC_MAPS_API_KEY || '']) {
+    if (key && key.length >= 8 && out.includes(key)) out = out.split(key).join('');
+  }
   return out;
 }
 
@@ -205,10 +212,10 @@ function clearImageCache() {
 // Fetch the image for a KEYLESS Static Maps URL that the server itself built.
 // The key is appended here and never leaves this function. Returns
 // { buffer, contentType } or null on any failure (caller answers 404/502).
-async function fetchStaticMapImage(keylessUrl, { cacheKey = null, fetchImpl = fetch } = {}) {
+async function fetchStaticMapImage(keylessUrl, { cacheKey = null, fetchImpl = fetch, key: keyOverride = null } = {}) {
   if (typeof keylessUrl !== 'string' || !keylessUrl.startsWith(`${STATIC_MAP_BASE}?`)) return null;
   if (/[?&]key=/i.test(keylessUrl)) return null;
-  const key = serverMapsKey();
+  const key = keyOverride || serverMapsKey();
   if (!key) return null;
   if (cacheKey) {
     const cached = cacheGet(cacheKey);
@@ -236,6 +243,7 @@ async function fetchStaticMapImage(keylessUrl, { cacheKey = null, fetchImpl = fe
 module.exports = {
   STATIC_MAP_BASE,
   serverMapsKey,
+  staticMapsKey,
   isGoogleStaticMapUrl,
   redactMapsKeyFromUrl,
   scrubMapsKeysFromString,

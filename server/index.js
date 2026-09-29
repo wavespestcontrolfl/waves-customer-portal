@@ -466,6 +466,13 @@ app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 // no-store/CORP) from a route that is supposed to be dark / generic.
 app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 
+// Signed satellite image proxy (lead-form lookup, service report, portal
+// station map): serves Google imagery WITHOUT the server Maps key ever
+// reaching a customer. Mounted before the global limiter like the estimate map
+// proxy above — it carries its own limiter and stamps its privacy headers on
+// every response including 404/429.
+app.use('/api/public/map-image', require('./routes/public-map-image'));
+
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints

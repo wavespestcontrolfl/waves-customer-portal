@@ -15,6 +15,8 @@ const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
 const { isEnabled } = require('../config/feature-gates');
+const { scrubMapsKeysDeep } = require('../services/estimate-map-image');
+const { signedMapImagePathFromStaticUrl } = require('../services/signed-map-image');
 
 // Aggressive rate limit — each lookup spends real AI + Google Maps dollars.
 // 5 per IP per hour is enough for a real lead to iterate on
@@ -51,6 +53,23 @@ function normalizePhone(raw) {
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
   if (digits.length === 10) return `+1${digits}`;
   return null;
+}
+
+// A keyed Static Maps URL becomes an absolute, short-lived, signed proxy URL
+// (or null when it cannot be signed — the form then simply shows no image).
+function publicSatelliteImageUrl(raw) {
+  if (!raw) return null;
+  return signedMapImagePathFromStaticUrl(raw, { absolute: true });
+}
+
+function publicSatellitePayload(satellite) {
+  if (!satellite) return null;
+  return {
+    closeUrl: publicSatelliteImageUrl(satellite.closeUrl),
+    microCloseUrl: publicSatelliteImageUrl(satellite.microCloseUrl),
+    wideUrl: publicSatelliteImageUrl(satellite.wideUrl),
+    inServiceArea: satellite.inServiceArea,
+  };
 }
 
 function publicPropertySummary(record) {
@@ -685,24 +704,24 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
 
-    res.json({
+    res.json(scrubMapsKeysDeep({
       lead_id: lead.id,
       enriched,
       propertyRecord,
       rentcast: propertyRecord,
-      satellite: result.satellite ? {
-        closeUrl: result.satellite.closeUrl,
-        microCloseUrl: result.satellite.microCloseUrl,
-        wideUrl: result.satellite.wideUrl,
-        inServiceArea: result.satellite.inServiceArea,
-      } : null,
+      // The lookup builds keyed Static Maps URLs (the server key, which also
+      // serves Geocoding/Routes and so cannot be referrer-restricted). An
+      // anonymous caller only ever gets short-lived signed proxy URLs
+      // (absolute: the marketing site renders them cross-origin); the
+      // response is also scrubbed of any Maps key as a last line.
+      satellite: publicSatellitePayload(result.satellite),
       aiAnalysis: result.aiAnalysis ? {
         sources: result.aiAnalysis._sources,
         confidence: result.aiAnalysis._claudeConfidence || result.aiAnalysis.confidenceScore,
       } : null,
       errors: publicLookupErrors(result.errors),
       meta: publicLookupMeta(result.meta),
-    });
+    }));
   } catch (err) {
     logger.error(`[public-property-lookup] failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: 'Property lookup failed. Please call (941) 297-5749 to speak with our team.' });
@@ -711,6 +730,8 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._test = {
+  publicSatelliteImageUrl,
+  publicSatellitePayload,
   publicLookupErrors,
   publicLookupMeta,
   publicEnrichedProfile,

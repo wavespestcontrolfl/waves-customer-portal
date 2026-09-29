@@ -1,4 +1,5 @@
 const { getBasemapProvider, isSatelliteTreatmentMapEnabled } = require('../maps/basemap-provider');
+const { signedMapImagePathFromLiveConfig } = require('../signed-map-image');
 
 const VIEWBOX_W = 640;
 const VIEWBOX_H = 340;
@@ -128,6 +129,11 @@ async function buildSatelliteTreatmentMapContext({
     mapType: 'satellite',
   });
   if (!liveConfig?.imageUrl) return { available: false, fallbackReason: 'provider_config_unavailable' };
+  // The provider's keyed image URL embeds the server Maps key, so it never reaches the
+  // customer report: the payload carries a short-lived signed proxy path
+  // instead (routes/public-map-image.js). No signing secret -> no map.
+  const liveImagePath = signedMapImagePathFromLiveConfig(liveConfig);
+  if (!liveImagePath) return { available: false, fallbackReason: 'provider_config_unavailable' };
 
   // Once ANY zone carries a technician-marked image shape, only marked zones
   // overlay the photo: schematic rects live in house-diagram space and would
@@ -152,7 +158,7 @@ async function buildSatelliteTreatmentMapContext({
     capabilities: provider.capabilities,
     live: {
       type: 'image',
-      url: liveConfig.imageUrl,
+      url: liveImagePath,
       width: liveConfig.width || VIEWBOX_W,
       height: liveConfig.height || VIEWBOX_H,
       center: liveConfig.center,

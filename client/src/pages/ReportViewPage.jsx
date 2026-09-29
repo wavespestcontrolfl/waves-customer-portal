@@ -63,6 +63,7 @@ import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -4444,7 +4445,7 @@ function ServiceCoverageMap({
       !hasRenderableCoverageGeometry(location)
       || hasRenderableCoverageGeometry(coverageImageDisplayLocation(location))
     ));
-  const activeMapBackgroundUrl = canUseImageGeometry ? mapBackgroundUrl : null;
+  const activeMapBackgroundUrl = canUseImageGeometry ? resolveApiAssetUrl(mapBackgroundUrl) : null;
   const displayLocations = useMemo(
     () => locations.map((location) => coverageDisplayLocation(location, canUseImageGeometry)),
     [locations, canUseImageGeometry],
