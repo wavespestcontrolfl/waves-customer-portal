@@ -323,11 +323,18 @@ function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
 // which the server stops calling a read pending (Codex #5305 r1 P2).
 const READ_PENDING_POLL_MS = 30 * 1000;
 const READ_PENDING_MAX_POLLS = 30;
+const READ_START_GRACE_MS = 2 * 60 * 1000;
 
 function useRefreshWhileReadPending(customerFlagged, onRefresh) {
   // The budget belongs to the set of reads being waited on: a new pending
   // read (another submission, another visit) starts a fresh 30 polls.
-  const pendingKey = (customerFlagged || []).filter((entry) => entry.read?.status === 'pending')
+  // A submission sent in the last two minutes whose read has not started
+  // yet ('none' — the deferred trigger hasn't claimed a slot) is waited on
+  // too, so a brief fetched in that gap still picks up the result
+  // (Codex #5305 r11). Nothing extra is shown for it.
+  const now = Date.now();
+  const pendingKey = (customerFlagged || []).filter((entry) => entry.read?.status === 'pending'
+    || (entry.read?.status === 'none' && now - new Date(entry.sentAt).getTime() < READ_START_GRACE_MS))
     .map((entry) => entry.id).join(',');
   const polls = useRef({ key: '', count: 0 });
   if (polls.current.key !== pendingKey) polls.current = { key: pendingKey, count: 0 };

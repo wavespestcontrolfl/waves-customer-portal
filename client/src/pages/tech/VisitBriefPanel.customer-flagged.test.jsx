@@ -197,6 +197,24 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     }
   });
 
+  it('a just-sent submission whose read has not started yet is polled, silently', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], sentAt: new Date().toISOString(), read: { status: 'none' } }], onRetry });
+      expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      cleanup();
+      const onRetryOld = vi.fn();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], sentAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(), read: { status: 'none' } }], onRetry: onRetryOld });
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetryOld).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a parent re-render with a new retry callback does not restart the 30 s timer', async () => {
     vi.useFakeTimers();
     try {
