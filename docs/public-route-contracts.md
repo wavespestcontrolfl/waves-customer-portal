@@ -905,6 +905,13 @@ reserved at grace 90 with an 80-minute delay is accepted regardless of what
 Accept. A grace change between the OFFER and the RESERVE tap is likewise
 inert for that specific offer (its signed `arrivalGrace` is fixed at mint
 time); only a FRESH availability fetch picks up a changed env value.
+Redeeming a graced offer at RESERVE also re-checks the strict travel-gap
+buffer against every CURRENT live hold on the same technician's route or
+unassigned (excluding the estimate's own hold): a rival estimate may have
+taken a nearby hold during the offer's lifetime, and a live hold never
+receives the waiver, so any buffer violation refuses the reserve with the
+usual 409 SLOT_UNAVAILABLE (`refuseGracedOfferOnRivalHoldConflict`; grace 0
+never queries).
 `extendReservation` (the 15-minute hold countdown) never re-verifies
 whole-route capacity fitness at all under capacity mode — a pre-existing gap
 unrelated to grace (a live hold's certified route order is trusted as-is
