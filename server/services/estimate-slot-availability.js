@@ -1728,13 +1728,29 @@ function stampSlotRainChances(slots, outlook) {
 // Runs LAST (after dedupe/spread/selection, which key off the base slotId).
 //
 // arrivalGrace (owner ruling 2026-09-28, Codex round 2 on #5314): the exact
-// grace value THIS slot was offered under, resolved fresh per slot's own
-// date (today's ET exclusion, capacity-mode check) — never re-derived live
-// at reserve/accept time, which could read a since-changed env value for a
+// grace value THIS slot was offered under — never re-derived live at
+// reserve/accept time, which could read a since-changed env value for a
 // hold that was already validly certified under the value at THIS instant.
+// Signed as 0 (no grace) for anything OTHER than a find-time/packCapacityEnds
+// capacity slot (`slot.routeMode === 'arrival_windows'`, stamped by
+// classifySlot from find-time's own route_mode, deleted below before the
+// slot ever reaches the client) — the ONLY generator that runs every
+// candidate through packCapacityEnds' grace-aware buffer waiver and
+// withinArrivalGrace filter before a slot survives to be signed at all
+// (Codex r2 P1 fallback-audit finding on 95e1f84fdb: signing the live grace
+// onto EVERY slot regardless of origin would let a future non-route-mode
+// generator's slot carry a leniency it was never checked against, and
+// reserveSlot's real whole-route re-simulation could then refuse it with
+// 'arrival_grace' at a bound TIGHTER than the 120-minute promise such a
+// slot was always meant to keep — grace must only ever ADD leniency, never
+// subtract it). buildAsapCapacitySlots already self-guards to `[]` under
+// capacity mode today (so this is not a live gap), but signing must not
+// depend on staying correct by accident in a different function.
 function signCustomerFacingSlots(slots, estimateId) {
   return (Array.isArray(slots) ? slots : []).map((slot) => {
-    const arrivalGrace = selfServeArrivalGraceMinutes({ date: slot.date });
+    const arrivalGrace = slot.routeMode === 'arrival_windows'
+      ? selfServeArrivalGraceMinutes({ date: slot.date })
+      : 0;
     const offer = signSlotOffer({
       surface: 'estimate',
       scopeId: String(estimateId),

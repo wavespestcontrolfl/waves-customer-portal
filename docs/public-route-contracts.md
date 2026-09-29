@@ -875,7 +875,16 @@ own field in the estimate surface's signed slot offer
 (`utils/slot-offer-token.js` — canonical string bumped to v3, the value also
 carried in cleartext inside the slotId, `<base>.<exp>.<arrivalGrace>.<sig>`,
 so `reserveSlot` can read it back and `verifySlotOffer` still catches any
-tamper). `commitReservation` keeps only the pre-existing 120-minute arrival
+tamper). `signCustomerFacingSlots` signs a non-zero grace only for a slot
+carrying `routeMode: 'arrival_windows'` (stamped by `classifySlot` from
+find-time's own `route_mode`, stripped before the slot ever reaches the
+client) — the one marker proving a slot actually passed through
+`packCapacityEnds`' grace-aware filter; anything else (today, nothing under
+capacity mode — `buildAsapCapacitySlots` self-guards to `[]` — but signing
+must not depend on staying correct by accident in a different function)
+signs 0, so a future non-route-mode generator's slot can never inherit a
+leniency it was never checked against. `commitReservation` keeps only the
+pre-existing 120-minute arrival
 promise as its bound, byte-identical to before this whole lane — a hold
 reserved at grace 90 with an 80-minute delay is accepted regardless of what
 `SELF_SERVE_ARRIVAL_GRACE_MINUTES` reads by the time the customer taps
