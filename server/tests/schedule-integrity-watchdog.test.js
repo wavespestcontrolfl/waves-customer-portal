@@ -141,6 +141,7 @@ beforeEach(() => {
   episodeHelpers.closeAdminAlertKeys.mockImplementation(async (_conn, keys) => keys.length);
   invoicesByVisit({});
   siblingInvoiceCoverageVerdict.mockImplementation(async () => ({ status: 'none' }));
+  invoicesByVisit({});
 });
 
 // anyInvoiceLinkedToVisit(db, visitId) is a builder: the check adds
@@ -280,6 +281,17 @@ describe('runInner alerting', () => {
       makeDbMock({ coverageRows: [sibling()] });
       expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1, alerted: 1 });
       expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey).toBe('unpriced-series:ss-second-service');
+    });
+
+    test('the ANCHOR carrying the combined invoice (or its live replacement) on its own row is billed and rings no bell; a dead own invoice falls back to the verdict', async () => {
+      invoicesByVisit({ 'ss-anchor': [{ id: 'inv-1', status: 'sent' }] });
+      makeDbMock({ coverageRows: [sibling({ id: 'ss-anchor' })] });
+      expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 0, alerted: 0 });
+      // Billing's sibling verdict reads 'none' for the anchor; it is never asked once the own invoice is live.
+      expect(siblingInvoiceCoverageVerdict).not.toHaveBeenCalled();
+      invoicesByVisit({ 'ss-anchor': [{ id: 'inv-1', status: 'void' }] });
+      makeDbMock({ coverageRows: [sibling({ id: 'ss-anchor' })] });
+      expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1 });
     });
 
     test('a voided combined invoice with no replacement pages', async () => {

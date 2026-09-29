@@ -181,8 +181,17 @@ function manualSeriesStampIssue(row) {
 // sibling as covered. So this asks billing-lane's canonical verdict — only for
 // a visit that reached this check unpriced with a source estimate (a handful).
 // Only 'covered' suppresses; 'needs_review', 'none' and 'error' keep paging
-// (fail toward the alert).
-async function coveredBySiblingInvoice(row) {
+// (fail toward the alert). The ANCHOR is the other half: it carries the
+// combined invoice (or its live replacement) on its own row — billing reuses
+// that invoice at completion, and its sibling verdict reads 'none' for it —
+// so a stamped visit with a live invoice of its own is billed.
+async function coveredByFirstApplicationInvoice(row) {
+  if (row?.first_application_invoice_id) {
+    const { anyInvoiceLinkedToVisit, CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+    const own = await anyInvoiceLinkedToVisit(db, row.id)
+      .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES).first('id');
+    if (own) return true;
+  }
   if (!row?.source_estimate_id) return false;
   const { siblingInvoiceCoverageVerdict } = require('./billing-lane');
   const verdict = await siblingInvoiceCoverageVerdict({
@@ -366,7 +375,7 @@ async function runInner({ now = new Date() } = {}) {
     for (const issue of issues) prepayGaps.push({ row, issue });
     if (!isUnpricedSeriesVisit(row)) continue;
     if (annualCovered) continue;
-    if (await coveredBySiblingInvoice(row)) continue;
+    if (await coveredByFirstApplicationInvoice(row)) continue;
     const root = seriesRootId(row);
     // An OVERDUE unpriced visit never pages (the class is upcoming-only), but
     // it is still an unpriced series: its standing bell must not close on it.
@@ -636,7 +645,7 @@ async function completedUnpricedRoots(absentKeys) {
     if (!(new Date(row.completed_time).getTime() >= episodeStart.get(root))) continue;
     if (!isUnpricedSeriesVisit(row)) continue;
     if (row.prepaid_method === ANNUAL_PREPAY_METHOD && await annualPrepayCoversVisit(row, db)) continue;
-    if (await coveredBySiblingInvoice(row)) continue;
+    if (await coveredByFirstApplicationInvoice(row)) continue;
     const invoice = await anyInvoiceLinkedToVisit(db, row.id)
       .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES).first('id');
     if (!invoice) held.add(root);
