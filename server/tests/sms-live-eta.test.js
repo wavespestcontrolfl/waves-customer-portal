@@ -173,6 +173,26 @@ describe('resolveLiveEtaFact — fail-closed data source', () => {
     const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
     expect(out).toBeNull();
   });
+
+  // Codex round-2 P2: calculateBoundedTrackingEta falls back to a
+  // straight-line haversine guess (30mph average, source: 'haversine')
+  // whenever Google Distance Matrix times out, fails, or is unconfigured —
+  // that guess must never publish as a customer-facing "X minutes away".
+  test('a haversine fallback result (Distance Matrix timeout/failure/unconfigured) is rejected, not published as a customer fact', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ minutes: 22, distanceMiles: 8.1, source: 'haversine', techUpdatedAt: FRESH_POSITION.lastReportedAt });
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+  });
+
+  test('a resolved ETA with no source at all (unexpected shape) is also rejected, never assumed real', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ minutes: 14, distanceMiles: 3.2 });
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out).toBeNull();
+  });
 });
 
 describe('buildFactsBlock — LIVE ETA / TRACKING LINK rendering', () => {
@@ -188,7 +208,11 @@ describe('buildFactsBlock — LIVE ETA / TRACKING LINK rendering', () => {
     });
     expect(block).toContain('LIVE STATUS: tech marked en route to this visit');
     expect(block).toContain('LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)');
-    expect(block).toContain('TRACKING LINK: https://portal.wavespestcontrol.com/track/abc123');
+    // SMS-safe, scheme-free form (comms-lint's portal-link-scheme rule fails
+    // any SMS carrying https://) — the fact itself must never carry a
+    // scheme a model that echoes it verbatim would then fail lint on.
+    expect(block).toContain('TRACKING LINK: portal.wavespestcontrol.com/track/abc123');
+    expect(block).not.toContain('https://portal.wavespestcontrol.com/track/abc123');
   });
 
   test('gate on but liveEta is null (stale/missing/timeout upstream): LIVE STATUS still renders, no ETA/link line', () => {
@@ -401,6 +425,50 @@ describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes 
       factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)',
     });
     expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  // Codex round-2 P2: a range states TWO bounds — validating only the
+  // endpoint next to "min(s)/minutes" silently dropped the other one.
+  describe('range claims: every bound is its own claim', () => {
+    test('digit hyphen range: "10-12 minutes away"', () => {
+      expect(findEtaMinutesClaims('The tech is 10-12 minutes away.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('en dash range: "10–12 minutes away"', () => {
+      expect(findEtaMinutesClaims('The tech is 10–12 minutes away.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('"to" range, written-out number words: "ten to twelve minutes away"', () => {
+      expect(findEtaMinutesClaims('The tech is ten to twelve minutes away.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('"or" range: "10 or 12 minutes out"', () => {
+      expect(findEtaMinutesClaims('He\'s 10 or 12 minutes out.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('"between N and M minutes"', () => {
+      expect(findEtaMinutesClaims('He\'ll be there in between 10 and 12 minutes.').map((c) => c.minutes).sort()).toEqual([10, 12]);
+    });
+
+    test('a duration range never false-positives: "takes 10-12 minutes to dry"', () => {
+      expect(findEtaMinutesClaims('The treatment takes 10-12 minutes to dry.')).toEqual([]);
+    });
+
+    test('validateLiveEtaMinutes rejects a reply stating a range when only ONE bound is grounded', () => {
+      process.env[GATE] = 'true';
+      const result = validateLiveEtaMinutes({
+        reply: 'The tech is 10-12 minutes away.',
+        factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.violations[0]).toMatch(/10 minute/);
+    });
+
+    test('validateLiveEtaMinutes passes a range reply only when EVERY bound is grounded (two distinct LIVE ETA lines)', () => {
+      process.env[GATE] = 'true';
+      const factsBlock = 'UPCOMING SERVICES:\n- Pest TODAY LIVE ETA: about 10 minutes\n- Lawn TODAY LIVE ETA: about 12 minutes';
+      expect(validateLiveEtaMinutes({ reply: 'The tech is 10-12 minutes away.', factsBlock }).ok).toBe(true);
+    });
   });
 });
 

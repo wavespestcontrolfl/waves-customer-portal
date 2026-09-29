@@ -229,3 +229,61 @@ describe('round 4 (audit P1): written-out minutes and unparsed arrival wording s
   });
 });
 
+describe('range claims (Codex round-2 P2): every bound is bound and rechecked, not just one', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    drafter.findEtaMinutesClaims.mockReset().mockImplementation(real.findEtaMinutesClaims);
+    drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
+  });
+
+  test('"10-12 minutes away" with only the 12 entry live and the 10 entry no longer en_route: fails closed', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: {
+        entries: [
+          { minutes: 10, scheduledServiceIds: ['svc-1'] },
+          { minutes: 12, scheduledServiceIds: ['svc-2'] },
+        ],
+      },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'The tech is 10-12 minutes away.',
+      now: NOW,
+      dbh: fakeDb([
+        { id: 'svc-1', status: 'completed', track_state: 'complete' },
+        { id: 'svc-2', status: 'en_route', track_state: 'en_route' },
+      ]),
+    });
+    expect(reason).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('"10-12 minutes away" with no snapshot entry for either bound at all: fails closed unbound', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'The tech is 10-12 minutes away.',
+      now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_unbound');
+  });
+
+  test('"10-12 minutes away" with BOTH bounds still en_route: passes', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: {
+        entries: [
+          { minutes: 10, scheduledServiceIds: ['svc-1'] },
+          { minutes: 12, scheduledServiceIds: ['svc-2'] },
+        ],
+      },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'The tech is 10-12 minutes away.',
+      now: NOW,
+      dbh: fakeDb([
+        { id: 'svc-1', status: 'en_route', track_state: 'en_route' },
+        { id: 'svc-2', status: 'en_route', track_state: 'en_route' },
+      ]),
+    });
+    expect(reason).toBeNull();
+  });
+});
+

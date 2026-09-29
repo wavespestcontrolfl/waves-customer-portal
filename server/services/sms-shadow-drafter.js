@@ -515,24 +515,64 @@ function normalizeNumberWords(text) {
 function bodyMentionsArrival(text) {
   return STRONG_ARRIVAL_TRIGGER_RE.test(String(text || ''));
 }
+// Range claims ("10–12 minutes away", "ten to twelve minutes away", "10 or
+// 12 minutes", "between 10 and 12 minutes") — Codex round-2 P2: the old
+// single-number pass matched only the bound sitting right next to
+// "min(s)/minutes" ("10-12 minutes" recorded 12 alone), so a reply stating
+// an unsupported OTHER bound was never caught by validateLiveEtaMinutes or
+// the send-time freshness recheck. Matched over the SAME number-words-read
+// string, BEFORE the single-number pass below, so every bound of a range
+// becomes its own claim; the range's own sentence/trigger/duration-exclusion
+// verdict (computed once, off the whole range span) applies to BOTH bounds
+// alike — they share one clause ("takes 10-12 minutes to dry" excludes both,
+// "10-12 minutes out" includes both) — and the span is marked `consumed` so
+// the single-number pass never double-claims the bound already covered.
+const RANGE_MINUTES_RE = /\b(\d{1,3})\s*(?:[-–—]|to|or)\s*(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
+const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,3})\s+and\s+(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
 function findEtaMinutesClaims(text) {
   const claims = [];
   const str = normalizeNumberWords(text);
   const spans = sentenceSpans(str);
+  const sentenceFor = (index) => {
+    const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+    return str.slice(span[0], span[1]);
+  };
+  // Shared claim/exclusion logic for both the range pass and the
+  // single-number pass below — one definition, so a range bound and a lone
+  // number are judged by the exact same rule.
+  const maybeClaim = (minutes, matchIndex, matchLength, sentence) => {
+    if (!ARRIVAL_TRIGGER_RE.test(sentence)) return false;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) {
+      claims.push({ minutes, index: matchIndex });
+      return true;
+    }
+    const after = str.slice(matchIndex + matchLength, matchIndex + matchLength + 30);
+    const before = str.slice(Math.max(0, matchIndex - 30), matchIndex);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) return false;
+    claims.push({ minutes, index: matchIndex });
+    return true;
+  };
+
+  const consumed = []; // [start, end) spans a range match already judged
+  for (const rangeRe of [RANGE_MINUTES_RE, BETWEEN_MINUTES_RE]) {
+    const re = new RegExp(rangeRe.source, rangeRe.flags);
+    let rm;
+    while ((rm = re.exec(str))) {
+      const sentence = sentenceFor(rm.index);
+      const addedFirst = maybeClaim(parseInt(rm[1], 10), rm.index, rm[0].length, sentence);
+      const addedSecond = maybeClaim(parseInt(rm[2], 10), rm.index, rm[0].length, sentence);
+      if (addedFirst || addedSecond) consumed.push([rm.index, rm.index + rm[0].length]);
+    }
+  }
+
   const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
   let m;
   while ((m = re.exec(str))) {
-    const span = spans.find(([s, e]) => m.index >= s && m.index < e) || spans[spans.length - 1];
-    const sentence = str.slice(span[0], span[1]);
-    if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
-    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) {
-      claims.push({ minutes: parseInt(m[1], 10), index: m.index });
-      continue;
-    }
-    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
-    const before = str.slice(Math.max(0, m.index - 30), m.index);
-    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) continue;
-    claims.push({ minutes: parseInt(m[1], 10), index: m.index });
+    // Already judged (and claimed, if warranted) as one bound of a range —
+    // never re-judge it stand-alone, which could either drop the exclusion
+    // context a range shares or double-push the same claim.
+    if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
+    maybeClaim(parseInt(m[1], 10), m.index, m[0].length, sentenceFor(m.index));
   }
   return claims;
 }
@@ -1558,7 +1598,15 @@ function buildFactsBlock(context, extras = {}) {
             // keeping this block byte-identical to v11 when the gate is off.
             if (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.liveEta && Number.isFinite(s.liveEta.minutes) && s.liveEta.trackUrl) {
               parts.push(`LIVE ETA: about ${s.liveEta.minutes} minutes (GPS, as of ${s.liveEta.asOf})`);
-              parts.push(`TRACKING LINK: ${s.liveEta.trackUrl}`);
+              // SMS-safe, scheme-free form (comms-lint's portal-link-scheme
+              // rule fails any SMS carrying https:// — the send path itself
+              // strips it via the same helper, but that strip runs AFTER
+              // comms-lint already ran on the raw draft, so a model that
+              // just echoes this fact verbatim would fail lint at draft
+              // time). Same helper the send path uses — never a second
+              // normalizer.
+              const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+              parts.push(`TRACKING LINK: ${stripSmsUrlScheme(s.liveEta.trackUrl)}`);
             }
           } else if (s.isToday && s.status === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
           else if (s.isToday) parts.push('no live tech location known');
@@ -2354,9 +2402,14 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // The webhook already matched a single active customer (deleted_at +
     // shared-number protection) — build context from that row instead of
     // re-looking-up by phone, which could pick a different account.
+    // includeLiveEta (Codex round-2 P2, PR #5334): getContextForCustomer
+    // defaults to NOT resolving LIVE ETA (a GPS + Distance Matrix call) —
+    // this is one of the two SMS drafting paths that actually renders the
+    // fact into the prompt (buildFactsBlock, below via generateGroundedDraft),
+    // so it opts in explicitly.
     const context = customer
-      ? await ContextAggregator.getContextForCustomer(customer)
-      : await ContextAggregator.getFullCustomerContext(fromPhone);
+      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: true })
+      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: true });
     // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
     const liveEtaSnapshot = buildLiveEtaSnapshot(context);
 

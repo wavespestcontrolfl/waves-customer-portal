@@ -594,11 +594,14 @@ function liveEtaDedupeKey(row, customer) {
 // FAILS CLOSED on every edge: no technician, no destination coordinates
 // (stamped-address divergence with no visit-level pin — "no pin beats a
 // wrong pin", same rule track-transitions.js applies), no track token, a
-// stale/missing GPS position, or a provider timeout/error all resolve to
-// null — the caller then falls back to today's LIVE STATUS-only line with
-// no invented ETA. Errors are logged with the scheduled_service id only,
-// never customer PII. Called at most once per unique (technician,
-// destination) by getContextForCustomer — see the LIVE ETA block there.
+// stale/missing GPS position, a provider timeout/error, or a resolved ETA
+// that isn't a real route-provider result (calculateBoundedTrackingEta's own
+// haversine straight-line fallback, source: 'haversine' — see the check
+// below) all resolve to null — the caller then falls back to today's LIVE
+// STATUS-only line with no invented ETA. Errors are logged with the
+// scheduled_service id only, never customer PII. Called at most once per
+// unique (technician, destination) by getContextForCustomer — see the LIVE
+// ETA block there.
 async function resolveLiveEtaFact(row, customer) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
   if (!row?.technician_id || !row?.track_view_token) return null;
@@ -623,6 +626,19 @@ async function resolveLiveEtaFact(row, customer) {
       logPrefix: 'sms-shadow-live-eta',
     });
     if (!eta || !Number.isFinite(eta.minutes)) return null;
+    // Real route-provider result ONLY (Codex round-2 P2): calculateBoundedTrackingEta
+    // (customer-tracking-eta.js) falls back to a straight-line haversine
+    // estimate — a 30mph-average, 1.4x-road-factor guess, source: 'haversine'
+    // — whenever Google Distance Matrix times out, fails, or is unconfigured
+    // (mirrors bouncie.js#calculateETAFromCoords, whose OWN haversine
+    // fallback is also 'haversine'; only a genuine provider hit is
+    // source: 'google'). That guess is fine as a floor for the live map
+    // (never showing "—"), but a customer text stating an exact minutes
+    // figure must never publish it — "never compute, round, or invent one"
+    // applies to a distance-formula guess exactly like it applies to the
+    // model doing its own math. Fails closed to null, same as every other
+    // edge above, and the caller falls back to the LIVE STATUS-only line.
+    if (eta.source !== 'google') return null;
 
     return {
       minutes: eta.minutes,
@@ -636,7 +652,7 @@ async function resolveLiveEtaFact(row, customer) {
 }
 
 class ContextAggregator {
-  async getFullCustomerContext(phone) {
+  async getFullCustomerContext(phone, options = {}) {
     const clean = (phone || '').replace(/\D/g, '');
     const variants = [clean, `1${clean}`, `+1${clean}`, clean.slice(-10)];
 
@@ -646,20 +662,26 @@ class ContextAggregator {
 
     if (!customer) return { known: false, phone: clean, summary: 'Unknown number — no customer record.' };
 
-    return this.getContextForCustomer(customer);
+    return this.getContextForCustomer(customer, options);
   }
 
   // Build context from an already-matched customer row. Callers like the
   // inbound SMS webhook resolve a single active customer with deleted_at and
   // shared-number protection — re-looking up by phone here could silently
   // pick a different (or deleted) account that shares the number.
-  // `skipLiveEta` (independent review finding #4, PR #5334): a caller that
-  // only reads context.billing — sms-amount-recheck's send-time revalidation
-  // is the one today — never needs the LIVE ETA fact, which is the one leg
-  // here that makes an external GPS + Distance Matrix call. Skipping it
-  // drops upcomingServices[].liveEta and liveEtaGroups to their
+  // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
+  // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +
+  // Distance Matrix call, so it defaults OFF and every caller that discards
+  // the fact — sms-amount-recheck's send-time revalidation, the legacy
+  // response-drafter path, previsit-brief, lead-response-tools,
+  // sms-shadow-backfill, the managed-assistant snapshot, email-reply-context
+  // — pays nothing for it. Only the SMS drafting paths that actually render
+  // context.upcomingServices[].liveEta / liveEtaGroups into a prompt
+  // (sms-shadow-drafter's draftShadowReply, estimate-conversion-agent's
+  // generateLlmReviewDraft) opt in explicitly with { includeLiveEta: true }.
+  // false leaves upcomingServices[].liveEta and liveEtaGroups at their
   // empty/null defaults; every other field is unaffected.
-  async getContextForCustomer(customer, { skipLiveEta = false } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false } = {}) {
     // Parallel data fetch
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
@@ -906,10 +928,10 @@ class ContextAggregator {
     // every sibling that shares it (liveEtaDedupeKey/liveEtaDestination
     // above), so the facts block can never carry two different minute
     // counts for what is really one stop.
-    // skipLiveEta (finding #4): every key resolves to null, so the
+    // includeLiveEta default false: every key resolves to null, so the
     // Promise.all below has nothing to await and resolveLiveEtaFact is
     // never called — no GPS or Distance Matrix request at all.
-    const liveEtaKeys = upcomingServices.map((s) => (!skipLiveEta && liveEtaEligible(s) ? liveEtaDedupeKey(s, customer) : null));
+    const liveEtaKeys = upcomingServices.map((s) => (includeLiveEta && liveEtaEligible(s) ? liveEtaDedupeKey(s, customer) : null));
     const uniqueLiveEtaKeys = [...new Set(liveEtaKeys.filter((k) => k != null))];
     const uniqueLiveEtaResults = await Promise.all(uniqueLiveEtaKeys.map((key) => {
       // Prefer a sibling that actually carries a track_view_token as the

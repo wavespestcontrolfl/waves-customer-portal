@@ -617,7 +617,12 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const drafter = require('./sms-shadow-drafter');
     const ContextAggregator = require('./context-aggregator');
     const { hasSchedulingIntent } = require('./sms-intent');
-    const context = await ContextAggregator.getContextForCustomer(customer);
+    // includeLiveEta (Codex round-2 P2, PR #5334): this Agent Review draft
+    // renders the SAME buildFactsBlock the shadow drafter does (via
+    // generateGroundedDraft below) — one of the two SMS drafting paths that
+    // actually surfaces the LIVE ETA fact — so it opts in explicitly rather
+    // than relying on getContextForCustomer's default (no LIVE ETA lookup).
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: true });
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
