@@ -22,6 +22,7 @@ import api, { tokenSessionIdentity, sameRequestSession } from '../utils/api';
 import { isNativeApp, nativePlatform } from './platform';
 import { navigateToCustomerUrl } from './nativeLinks';
 import { reportError } from '../lib/reportError';
+import { reportPushOpen } from '../lib/portalActivity';
 
 export { isNativeApp };
 
@@ -127,6 +128,10 @@ async function bindPushListeners(PushNotifications) {
       console.error('[nativePush] push registration error:', err?.error || err);
     });
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+      // Best-effort "opened from a push" beacon (server-gated by
+      // GATE_PORTAL_ACTIVITY). It goes out BEFORE the navigation below (which
+      // replaces the page) and can never block or break the tap handling.
+      try { reportPushOpen(action?.notification?.data); } catch { /* best-effort */ }
       const url = action?.notification?.data?.url;
       if (url && typeof window !== 'undefined') navigateToCustomerUrl(url);
     });

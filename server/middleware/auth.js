@@ -95,6 +95,12 @@ const CANCELLED_READ_ROUTES = [
   // notifications kept reaching a signed-out device. Narrow write: it only
   // deactivates the caller's own token.
   ['POST', '/api/push/native-unsubscribe'],
+  // Activity beacons (GATE_PORTAL_ACTIVITY): the cancelled portal still
+  // opens tabs and taps billing pushes, and a 401 here would churn the
+  // refresh token on every tab change. Write-only analytics rows for the
+  // caller's own session — nothing is read back.
+  ['POST', '/api/customer/activity/page-view'],
+  ['POST', '/api/customer/activity/push-open'],
 ];
 
 function cancelledReadRoute(req) {
@@ -522,6 +528,9 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
     req.customerInactive = customer.active !== true;
     req.accountId = decoded.accountId || customerAccountId;
     req.authSessionId = decoded.sessionId || null;
+    // GATE_PORTAL_ACTIVITY: throttled, fire-and-forget last_seen_at stamp.
+    // Skips staff browsers/bots; never slows or fails the request.
+    try { require('../services/customer-activity').stampLastSeen(req, customer.id); } catch { /* activity is best-effort */ }
     // Selected saved property (GATE_APP_PROPERTY_SCOPE). Honored only when
     // the row is THIS customer's and active; anything else — another
     // customer's property, a row the office retired, gate off — resolves to

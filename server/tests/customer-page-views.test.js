@@ -45,8 +45,9 @@ describe('recordPageView', () => {
     expect(sql).toMatch(/WHERE NOT EXISTS/);
     const expectedHash = crypto.createHash('sha256').update('203.0.113.9').digest('hex');
     expect(params.slice(0, 6)).toEqual(['cust-1', 'appointment', 'scheduled_service', '42', expectedHash, longUa.slice(0, 500)]);
-    // the dedupe probe repeats page/subject/ip and carries the window
-    expect(params.slice(6)).toEqual(['appointment', 'scheduled_service', '42', expectedHash, DEDUPE_MINUTES]);
+    // the dedupe probe repeats page/subject/ip/customer and carries the window
+    expect(sql).toMatch(/customer_id IS NOT DISTINCT FROM/);
+    expect(params.slice(6)).toEqual(['appointment', 'scheduled_service', '42', expectedHash, 'cust-1', DEDUPE_MINUTES]);
   });
 
   test('a caller-supplied dedupe window replaces the default; a bad one falls back', async () => {

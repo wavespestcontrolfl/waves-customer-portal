@@ -20,6 +20,7 @@ const nativeMocks = vi.hoisted(() => {
 
 const navigateToCustomerUrl = vi.hoisted(() => vi.fn());
 const reportError = vi.hoisted(() => vi.fn());
+const reportPushOpen = vi.hoisted(() => vi.fn());
 
 vi.mock('./platform', () => ({
   isNativeApp: () => true,
@@ -27,6 +28,7 @@ vi.mock('./platform', () => ({
 }));
 vi.mock('./nativeLinks', () => ({ navigateToCustomerUrl }));
 vi.mock('../lib/reportError', () => ({ reportError }));
+vi.mock('../lib/portalActivity', () => ({ reportPushOpen }));
 vi.mock('../utils/api', async (importOriginal) => ({ ...await importOriginal(), default: { request: vi.fn(async () => ({})) } }));
 vi.mock('@capacitor/push-notifications', () => ({
   PushNotifications: nativeMocks.PushNotifications,
@@ -49,6 +51,7 @@ beforeEach(() => {
   nativeMocks.state.requestResult = 'granted';
   navigateToCustomerUrl.mockClear();
   reportError.mockClear();
+  reportPushOpen.mockReset();
   nativeMocks.PushNotifications.then.mockClear();
   nativeMocks.PushNotifications.checkPermissions.mockClear();
   nativeMocks.PushNotifications.requestPermissions.mockClear();
@@ -101,6 +104,21 @@ describe('nativePush permission and tap handling', () => {
       notification: { data: { url: 'https://evil.example/phish' } },
     });
     expect(navigateToCustomerUrl).toHaveBeenCalledWith('https://evil.example/phish');
+  });
+
+  it('beacons a push open with the payload ids, and a failing beacon never breaks the tap', async () => {
+    await initNativePush();
+    const data = { url: '/?tab=billing', notificationId: '22222222-2222-4222-8222-222222222222', category: 'billing', tag: 'push-routed:receipt' };
+    nativeMocks.state.listeners.pushNotificationActionPerformed({ notification: { data } });
+    expect(reportPushOpen).toHaveBeenCalledWith(data);
+    expect(navigateToCustomerUrl).toHaveBeenCalledWith('/?tab=billing');
+    // The beacon is issued before the page-replacing navigation.
+    expect(reportPushOpen.mock.invocationCallOrder[0]).toBeLessThan(navigateToCustomerUrl.mock.invocationCallOrder[0]);
+
+    reportPushOpen.mockImplementation(() => { throw new Error('beacon down'); });
+    navigateToCustomerUrl.mockClear();
+    expect(() => nativeMocks.state.listeners.pushNotificationActionPerformed({ notification: { data } })).not.toThrow();
+    expect(navigateToCustomerUrl).toHaveBeenCalledTimes(1);
   });
 
   it('requests the OS permission directly and respects a saved denial', async () => {

@@ -13,7 +13,8 @@
  *     staff browsers carrying the signed `waves_admin` marker cookie (set by
  *     admin-auth at login), and IPs in WAVES_ADMIN_IPS. No row for those.
  *   - Dedupes in the SAME statement: a view is skipped when the same
- *     page + subject + ip_hash already has a row inside the dedupe window
+ *     page + subject + ip_hash + customer_id (null-safe: a lead's null
+ *     customer only matches null) already has a row inside the dedupe window
  *     (default DEDUPE_MINUTES; callers may pass `dedupeMinutes`). The track
  *     page polls its data endpoint every 30s while a tech is en route, so it
  *     passes a longer window (a whole tracking session is one view). The
@@ -111,9 +112,10 @@ function recordPageView({
            AND subject_type IS NOT DISTINCT FROM ?::text
            AND subject_id IS NOT DISTINCT FROM ?::text
            AND ip_hash IS NOT DISTINCT FROM ?::text
+           AND customer_id IS NOT DISTINCT FROM ?::uuid
            AND viewed_at > now() - (?::int * interval '1 minute')
        )`,
-      [custId, page, subjType, subjId, ipHash, ua, page, subjType, subjId, ipHash, windowMinutes],
+      [custId, page, subjType, subjId, ipHash, ua, page, subjType, subjId, ipHash, custId, windowMinutes],
     )).then((res) => !!(res && (res.rowCount === undefined || res.rowCount > 0)))
       .catch((err) => {
         logger.warn(`[page-views] insert failed (${page}): ${err.message}`);
