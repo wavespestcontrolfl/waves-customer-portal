@@ -449,7 +449,7 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       await trx('messaging_audit_log').insert({
         id: randomUUID(), to_hash: 'x'.repeat(64), to_last4: '1234', body_hash: 'y'.repeat(64), customer_id: customerId,
         appointment_id: messaged.id, audience: 'customer', purpose: 'appointment_reminder_72h',
-        channel: 'sms', sent_at: new Date(),
+        channel: 'sms', sent_at: new Date(), provider_message_id: `SM${'a'.repeat(32)}`,
       });
       // Bookkeeping-only: every appointment_reminders flag stamped true, but
       // NO messaging_audit_log row at all for this appointment — the exact
@@ -993,5 +993,32 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       }
     });
     jest.dontMock('../services/scheduling/blackout-dates');
+  });
+
+  test.each([
+    ['owner-silence', null],
+    [`SM${'b'.repeat(32)}`, 'undelivered'],
+  ])('a send with provider id %s (sms_log status %s) never pins the row', async (providerId, smsStatus) => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const [target] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc');
+    await trx('messaging_audit_log').insert({
+      id: randomUUID(), to_hash: 'x'.repeat(64), to_last4: '1234', body_hash: 'y'.repeat(64), customer_id: customerId,
+      appointment_id: target.id, audience: 'customer', purpose: 'appointment_confirmation',
+      channel: 'sms', sent_at: new Date(), provider_message_id: providerId,
+    });
+    if (smsStatus) {
+      await trx('sms_log').insert({ id: randomUUID(), customer_id: customerId, twilio_sid: providerId, status: smsStatus, direction: 'outbound', message_body: 'synthetic', from_phone: '+19415550000', to_phone: '+19415550001' });
+    }
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.pinned.find((p) => p.id === target.id)).toBeUndefined();
+  });
+
+  test('a lawn visit awaiting reschedule blocks the pair (host_reschedule_pending)', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const [lawnChild] = await trx('scheduled_services').where({ recurring_parent_id: lawnParent.id }).orderBy('scheduled_date', 'asc');
+    await trx('scheduled_services').where({ id: lawnChild.id }).update({ status: 'rescheduled' });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.reasons).toContain('host_reschedule_pending');
+    expect(preview.eligible).toBe(false);
   });
 });

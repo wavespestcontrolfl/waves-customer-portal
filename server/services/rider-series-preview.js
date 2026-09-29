@@ -267,11 +267,23 @@ function rowPropertyScope(row) {
 // preview's own `pinned[].why`) instead of a flat boolean set. Read-only:
 // plain SELECTs, no lock of any kind.
 async function messagedRowIds(conn, ids) {
-  return conn('messaging_audit_log')
-    .whereIn('appointment_id', ids.map(String))
-    .whereNotIn('purpose', NON_PINNING_MESSAGE_PURPOSES)
-    .whereNotNull('sent_at')
-    .pluck('appointment_id');
+  // A non-null sent_at alone isn't delivery: a suppressed send (owner
+  // silence, a disabled gate or template) records a synthetic provider id
+  // and sent_at, and a real text can end undelivered. Apply the same
+  // real-send checks as no-show-detector.js#loadPromiseEvents
+  // (textActuallyWentOut: push, a live sms_log delivery state, or an
+  // unlinked real Twilio SM/MM sid; not blocked; no provider error).
+  const { textActuallyWentOut } = require('./no-show-detector');
+  return conn('messaging_audit_log as a')
+    .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
+    .whereIn('a.appointment_id', ids.map(String))
+    .whereNotIn('a.purpose', NON_PINNING_MESSAGE_PURPOSES)
+    .whereNotNull('a.sent_at')
+    .whereNull('a.blocked_code')
+    .whereNull('a.provider_error')
+    .where(textActuallyWentOut)
+    .distinct()
+    .pluck('a.appointment_id');
 }
 
 // Reuses no-show-detector.js's canonical "was the customer told" evidence
@@ -556,6 +568,18 @@ async function evaluatePairGates(conn, ctx) {
 // for most child rows) still inherits the host's scope, same as the old
 // null-safe behavior; only a row whose OWN resolved scope actively
 // disagrees is dropped.
+// A host plan visit waiting to be rescheduled has a stale date, so it's left
+// out of the host dates; but until the rebooker places it, the rider's plan
+// could still change. Report it so the pair is never shown as approvable.
+async function hostReschedulePending(conn, hostParent, cols) {
+  const rows = await conn('scheduled_services')
+    .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
+    .where('status', 'rescheduled')
+    .modify((q) => { if (cols.track_state) q.whereNot('track_state', 'cancelled'); })
+    .select('id', 'is_recurring', 'recurring_parent_id', ...['is_callback', 'followup_included'].filter((c) => cols[c]));
+  return rows.some(isPlanSeriesRow);
+}
+
 async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
   const addressCols = [
     'service_address_line1', 'service_address_line2', 'service_address_city',
@@ -711,6 +735,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     // --- Plan computation (read-only, same rules as buildRiderSyncPlan) ---
     const todayStr = etDateString();
     const hostDates = await loadHostDates(conn, hostParent, cols, todayStr, hostScope);
+    if (await hostReschedulePending(conn, hostParent, cols)) reasons.push('host_reschedule_pending');
     const {
       riderRows, classifications, lastRiderDate, reschedulePending,
     } = await classifyRiderRows(conn, riderParentId, riderParent, todayStr);
