@@ -537,9 +537,13 @@ async function deliverAlerts({ alerts, episodes, now, overdueUnpricedRoots, hori
   // loop so the per-run cap (which only limits new rings) never changes
   // what the close pass judges.
   const liveKeys = new Set(alerts.map((alert) => alert[0]));
+  // Keys this run actually delivered (created, re-rung, or standing): a
+  // finding the cap held back has no bell yet.
+  const deliveredKeys = new Set();
   for (const alert of alerts) {
     if (capped()) break;
     await ring(...alert);
+    deliveredKeys.add(alert[0]);
   }
   if (!episodes) return { alerted };
   // A class whose check failed has an unknown live set: closing on it would
@@ -548,7 +552,7 @@ async function deliverAlerts({ alerts, episodes, now, overdueUnpricedRoots, hori
   if (lawnGapCheckFailed) skipPrefixes.push(LAWN_GAP_PREFIX);
   if (acceptedScheduleCheckFailed) skipPrefixes.push(ACCEPTED_PREFIX);
   try {
-    return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, horizonDay, skipPrefixes }), closePassFailed: false };
+    return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, overdueUnpricedRoots, horizonDay, skipPrefixes }), closePassFailed: false };
   } catch (err) {
     logger.error(`[schedule-integrity] alert close pass failed: ${err.message}`);
     return { alerted, closed: 0, closePassFailed: true };
@@ -600,7 +604,7 @@ async function completedUnpricedRoots(absentKeys, now) {
 // moot). Read-only against scheduled_services: it reads a visit's status and
 // writes nothing but admin notifications. A problem that returns after this
 // scan is re-raised, and re-rung, by the next run.
-async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, horizonDay, skipPrefixes }) {
+async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, overdueUnpricedRoots, horizonDay, skipPrefixes }) {
   const absentOf = async (prefix) => {
     if (skipPrefixes.includes(prefix)) return [];
     return (await NotificationService.openAdminAlertKeys(db, prefix)).filter((key) => !liveKeys.has(key));
@@ -633,8 +637,13 @@ async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, horizo
     const statusById = new Map(statusRows.map((r) => [String(r.id), r.status]));
     const dayById = new Map(statusRows.map((r) => [String(r.id), r.service_date]));
     // A visit that still has a live prepay key was superseded by a new
-    // evidence key rather than resolved.
-    const supersededVisits = new Set([...liveKeys].filter((k) => k.startsWith(PREPAY_PREFIX)).map(visitOf));
+    // evidence key rather than resolved — closed only once that replacement
+    // was delivered this run. One the cap held back has no bell yet: the old
+    // warning stays until it does, or the review would be lost if the visit
+    // completed first (the scan drops completed visits).
+    const prepayVisitsOf = (keys) => new Set([...keys].filter((k) => k.startsWith(PREPAY_PREFIX)).map(visitOf));
+    const replacedVisits = prepayVisitsOf(liveKeys);
+    const deliveredVisits = prepayVisitsOf(deliveredKeys);
     const byReason = { 'visit did not run': [], superseded: [], 'moved past the look-ahead window': [], 'gap resolved': [] };
     for (const key of prepayAbsent) {
       const id = visitOf(key);
@@ -642,7 +651,7 @@ async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, horizo
       const status = statusById.get(id);
       if (known && PREPAY_HOLD_OPEN_STATUSES.includes(status)) continue;
       if (!known || NEVER_RAN_STATUSES.includes(status)) byReason['visit did not run'].push(key);
-      else if (supersededVisits.has(id)) byReason.superseded.push(key);
+      else if (replacedVisits.has(id)) { if (deliveredVisits.has(id)) byReason.superseded.push(key); }
       // Out of the scan by date, not fixed: it re-rings once back in the window.
       else if (horizonDay && dayById.get(id) > horizonDay) byReason['moved past the look-ahead window'].push(key);
       else byReason['gap resolved'].push(key);

@@ -703,6 +703,31 @@ describe('alert episodes (ALERT_EPISODES)', () => {
       expect(closedBy()).toEqual({ superseded: [oldKey] });
     });
 
+    test('a replacement the per-run cap held back keeps the old warning open; the run that delivers it closes the old one', async () => {
+      const row = unpricedChild({ id: V(7), estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100,
+        annual_prepay_term_id: 'term-1', prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-01T12:00:00Z']] });
+      makeDbMock({ coverageRows: [row], staleRows: [{ id: V(7), status: 'scheduled' }] });
+      await runInner({ now: NOW });
+      const liveKey = NotificationService.raiseAdminAlertWithReopen.mock.calls[0][3].dedupeKey;
+      const oldKey = key(V(7), 'annual_coverage_unverified:oldhash');
+      // Lawn gaps ring before prepay: MAX new lawn bells fill the cap, so the
+      // prepay replacement is not delivered this run.
+      findLawnEmailAudienceGaps.mockResolvedValueOnce(Array.from({ length: MAX_ALERTS_PER_RUN }, (_, i) => (
+        { customerId: `cust-cap-${i}`, fixable: ['no_coordinates'] }
+      )));
+      openKeysByPrefix({ 'prepay-coverage:': [oldKey] });
+      NotificationService.raiseAdminAlertWithReopen.mockClear();
+      NotificationService.closeAdminAlertKeys.mockClear();
+      const capped = await runInner({ now: NOW });
+      expect(capped.alerted).toBe(MAX_ALERTS_PER_RUN);
+      expect(NotificationService.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).not.toContain(liveKey);
+      expect(closedBy()).toEqual({});
+      // Next run: the replacement is delivered, and only then is the old one superseded.
+      NotificationService.closeAdminAlertKeys.mockClear();
+      await runInner({ now: NOW });
+      expect(closedBy()).toEqual({ superseded: [oldKey] });
+    });
+
     test('a key whose visit id is not a uuid is treated as a visit that is gone, never sent to the database', async () => {
       makeDbMock();
       openKeysByPrefix({ 'prepay-coverage:': [key('not-a-uuid')] });
