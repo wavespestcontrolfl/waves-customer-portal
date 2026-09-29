@@ -944,4 +944,26 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     expect(preview.anchor).toBe(lastDone);
     expect(preview.pinned).toEqual(expect.arrayContaining([expect.objectContaining({ id: overdue.id, why: 'overdue' })]));
   });
+
+  test('an in-progress visit that crossed midnight still anchors', async () => {
+    const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+    const today = etDateString();
+    const lastDone = addDays(today, -200);
+    const yesterday = addDays(today, -1);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ status: 'completed', scheduled_date: lastDone });
+    await row({
+      recurring_parent_id: pestParent.id, status: 'on_site', is_recurring: true, recurring_pattern: 'quarterly',
+      service_type: 'Quarterly Pest Control', scheduled_date: yesterday,
+    });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.anchor).toBe(yesterday);
+  });
+
+  test('an overdue parent (still pending, dated before today) never becomes the fallback anchor', async () => {
+    const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ status: 'pending', scheduled_date: addDays(etDateString(), -30) });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.reasons).toContain('no_anchor');
+    expect(preview.plan).toEqual([]);
+  });
 });

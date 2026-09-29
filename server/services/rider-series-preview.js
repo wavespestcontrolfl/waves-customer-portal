@@ -591,6 +591,25 @@ async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
 // pinned (see classifyRiderRow) but explicitly excluded from anchoring —
 // its date is stale, it is waiting to be replaced, not a real "last pest
 // happened here" date.
+// One rider row's role in the anchor decision, from its tracker-aware
+// classification (never raw status: a lagging status can say 'rescheduled'
+// after the tracker cancelled the visit, or 'confirmed' after it completed).
+// A row anchors when it was performed, or when it's pinned and still live:
+// ahead of today, or in progress (even across midnight). A cancelled,
+// skipped, no-show or rescheduled status wins over a stale 'complete'
+// tracker, and an overdue unperformed row never anchors.
+function anchorRole(r, c, todayStr) {
+  if (!isPlanSeriesRow(r)) return { reschedule: false, anchorDate: null };
+  if (c.why === 'rescheduled_pending') return { reschedule: true, anchorDate: null };
+  const operationallyTerminal = ['cancelled', 'skipped', 'no_show', 'rescheduled'].includes(r.status);
+  const performed = !operationallyTerminal && (r.track_state === 'complete'
+    || (r.status === 'completed' && !TERMINAL_TRACK_STATES.includes(r.track_state)));
+  const d = dateOnly(r.scheduled_date);
+  const pinnedLive = c.pinned === true && c.why !== 'overdue'
+    && ((d != null && d >= todayStr) || c.why === 'in_progress');
+  return { reschedule: false, anchorDate: (performed || pinnedLive) ? d : null };
+}
+
 async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
   const riderRows = await conn('scheduled_services')
     .where((q) => { q.where('id', riderParentId).orWhere('recurring_parent_id', riderParentId); })
@@ -604,27 +623,9 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
   for (const r of riderRows) {
     const c = classifyRiderRow(r, reasonMap, nearTermCutoff, todayStr);
     classifications.set(r.id, c);
-    // Derived from the tracker-aware classification, never raw status: a
-    // lagging status can say 'rescheduled' after the tracker cancelled the
-    // visit, or 'confirmed' after the tracker completed it.
-    const isPlanRow = isPlanSeriesRow(r);
-    const isReschedulePending = isPlanRow && c.why === 'rescheduled_pending';
-    if (isReschedulePending) reschedulePending = true;
-    // A cancelled/skipped/no-show status wins over a stale 'complete'
-    // tracker, the same precedence classifyRiderRow applies: such a visit
-    // never happened, so it never anchors.
-    const operationallyTerminal = ['cancelled', 'skipped', 'no_show', 'rescheduled'].includes(r.status);
-    const performed = !operationallyTerminal && (r.track_state === 'complete'
-      || (r.status === 'completed' && !TERMINAL_TRACK_STATES.includes(r.track_state)));
-    // A pinned row anchors only when it's still ahead: a past row that was
-    // never performed (overdue, or pinned for any other reason) did not
-    // happen on that date.
-    const d0 = dateOnly(r.scheduled_date);
-    const pinnedAhead = c.pinned === true && d0 != null && d0 >= todayStr;
-    if (isPlanRow && !isReschedulePending && (performed || pinnedAhead)) {
-      const d = dateOnly(r.scheduled_date);
-      if (d && (!lastRiderDate || d > lastRiderDate)) lastRiderDate = d;
-    }
+    const { reschedule, anchorDate } = anchorRole(r, c, todayStr);
+    if (reschedule) reschedulePending = true;
+    if (anchorDate && (!lastRiderDate || anchorDate > lastRiderDate)) lastRiderDate = anchorDate;
   }
   // Codex P2 round #2 on PR #5290: when the RIDER PARENT ROW ITSELF is the
   // one awaiting reschedule (status 'rescheduled') and nothing else in the
@@ -640,8 +641,12 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
   // series whose first visit is still live. A skipped, no-show, cancelled or
   // rescheduled parent never happened on that date, so it never anchors
   // (completed already anchored above).
+  // An overdue parent (still pending/confirmed, dated before today) never
+  // happened either, so it can't be the fallback anchor.
+  const parentClass = classifications.get(riderParent.id);
   const parentAnchorable = !JOIN_INELIGIBLE_STATUSES.includes(riderParent.status)
-    && !TERMINAL_TRACK_STATES.includes(riderParent.track_state);
+    && !TERMINAL_TRACK_STATES.includes(riderParent.track_state)
+    && !(parentClass && parentClass.why === 'overdue');
   if (!lastRiderDate && parentAnchorable) lastRiderDate = dateOnly(riderParent.scheduled_date);
   return {
     riderRows, classifications, lastRiderDate, reschedulePending,
