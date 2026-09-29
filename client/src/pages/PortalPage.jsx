@@ -44,6 +44,7 @@ import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcas
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
+import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
 import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
@@ -2715,6 +2716,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   }, [nextService, calendarWindowTick]);
   const nextServiceStatus = nextRead.error ? 'error' : nextRead.data ? 'ready' : 'loading';
   const [confirmingVisit, setConfirmingVisit] = useState(false);
+  // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): the sheet mounts
+  // as a separate component (VisitPrepPhotoSheet) rather than growing this
+  // file further — see its own header. The button only shows while the
+  // server's own eligibility says so (nextService.prepPhotos.eligible),
+  // never inferred client-side.
+  const [visitPrepSheetOpen, setVisitPrepSheetOpen] = useState(false);
   const [stats, setStats] = useState(null);
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
@@ -3184,6 +3191,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                   position: 'relative',
                 }}>Add to Calendar</button>
               )}
+              {/* GATE_VISIT_PREP_PHOTOS (dark): shown only when the server's
+                  own eligibility says this visit currently takes photos —
+                  the same rule the appointment page's own block uses. */}
+              {nextService.prepPhotos?.eligible && (
+                <button type="button" onClick={() => setVisitPrepSheetOpen(true)} data-glass-accent="" style={{
+                  ...dashboardSecondaryButton,
+                  position: 'relative',
+                }}>Send photos</button>
+              )}
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
@@ -3201,6 +3217,21 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             </div>
           )}
         </section>}
+
+        {/* GATE_VISIT_PREP_PHOTOS (dark): fixed-position overlay, so its
+            place in the tree doesn't affect layout. `photosRemaining`
+            defaults to the form's own full allowance when the read hasn't
+            landed yet — VisitPrepPhotoForm re-derives the real cap from it,
+            and the button itself only shows once eligible is true. */}
+        {nextService && (
+          <VisitPrepPhotoSheet
+            open={visitPrepSheetOpen}
+            onClose={() => setVisitPrepSheetOpen(false)}
+            scheduledServiceId={nextService.id}
+            photosRemaining={nextService.prepPhotos?.photosRemaining}
+            onSent={() => { void nextRead.refresh(); }}
+          />
+        )}
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div data-glass="chip" style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
