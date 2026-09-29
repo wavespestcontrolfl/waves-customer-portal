@@ -53,7 +53,7 @@ const express = require('express');
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
-const { renderPage, buildShowYourWork } = require('../routes/estimate-public');
+const { renderPage } = require('../routes/estimate-public');
 const estimatePublicRouter = require('../routes/estimate-public');
 
 // ── db chain mock ────────────────────────────────────────────────
@@ -264,6 +264,8 @@ describe('GET /:token/map/satellite', () => {
       expect(res.status).toBe(200);
       expect(res.headers.get('content-type')).toBe('image/png');
       expect(res.headers.get('cache-control')).toMatch(/private/);
+      expect(res.headers.get('cross-origin-resource-policy')).toBe('cross-origin');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
       expect(Buffer.from(await res.arrayBuffer()).equals(PNG)).toBe(true);
     });
     expect(upstreamCalls).toHaveLength(1);
@@ -328,13 +330,14 @@ describe('GET /:token/map/satellite', () => {
     expect(upstreamCalls).toHaveLength(0);
   });
 
-  test('upstream failure -> 502 with no key or URL in the body', async () => {
+  test('upstream failure -> generic 404 with no key or URL in the body', async () => {
     upstreamResponder = () => ({ ok: false, status: 403, headers: { get: () => 'text/html' }, arrayBuffer: async () => Buffer.from('nope') });
     dbRows = { estimates: estimateRow({ satellite_url: STORED_KEYED }) };
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/estimates/${TOKEN}/map/satellite`);
-      expect(res.status).toBe(502);
+      expect(res.status).toBe(404);
       const text = await res.text();
+      expect(JSON.parse(text)).toEqual({ error: 'Estimate not found' });
       expect(text).not.toMatch(/key|maps\.googleapis|test-maps-key/i);
     });
   });
@@ -344,7 +347,7 @@ describe('GET /:token/map/satellite', () => {
     dbRows = { estimates: estimateRow({ satellite_url: STORED_KEYED }) };
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/estimates/${TOKEN}/map/satellite`);
-      expect(res.status).toBe(502);
+      expect(res.status).toBe(404);
     });
   });
 });
@@ -375,6 +378,19 @@ describe('GET /:token/map/overlay', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/estimates/${TOKEN}/map/overlay`);
       expect(res.status).toBe(404);
+    });
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('gate off: repeated requests stay a generic 404, never 429 (dark route skips its limiter)', async () => {
+    getCachedLookup.mockResolvedValue(cacheRowFixture());
+    dbRows = { estimates: estimateRow() };
+    await withServer(async (baseUrl) => {
+      for (let i = 0; i < 45; i += 1) {
+        const res = await fetch(`${baseUrl}/estimates/${TOKEN}/map/overlay`);
+        expect(res.status).toBe(404);
+        await res.arrayBuffer();
+      }
     });
     expect(upstreamCalls).toHaveLength(0);
   });

@@ -28225,28 +28225,54 @@ const mapImageLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
+// Headers every map response carries (404s included). Cross-Origin-Resource-
+// Policy is `cross-origin` because helmet defaults to same-origin, which would
+// block these <img> loads when the SPA is built against a separate API origin
+// (VITE_API_URL). The image is the estimate's own satellite view, already
+// behind the bearer token.
+function stampMapImageHeaders(res) {
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.set('X-Content-Type-Options', 'nosniff');
+}
+
+function mapImageNotFound(res) {
+  // ONE 404 body for every branch (gate off, malformed/unknown token,
+  // non-viewable row, no usable stored map, upstream failure): the route must
+  // not become an existence oracle for bearer-token links.
+  stampMapImageHeaders(res);
+  return res.status(404).set('Cache-Control', 'no-store').json({ error: 'Estimate not found' });
+}
+
+// The overlay route is dark while estimateShowYourWork is off: answer the
+// generic 404 BEFORE the limiter (a dark route must not 429) and before any
+// database work.
+function overlayGateOpen(req, res, next) {
+  if (!featureGates.isEnabled('estimateShowYourWork')) return mapImageNotFound(res);
+  return next();
+}
+
 async function handleEstimateMapImage(kind, req, res, next) {
   try {
-    res.set('Referrer-Policy', 'no-referrer');
-    const notFound = () => res.status(404).set('Cache-Control', 'no-store').json({ error: 'Not found' });
+    stampMapImageHeaders(res);
+    // (router.param('token') already 404s a malformed token before this.)
     const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (!estimate) return notFound();
+    if (!estimate) return mapImageNotFound(res);
     // Same viewability contract as GET /:token/data (minus the staff-preview
     // and signed-pdf-pin bypasses: an <img> carries no Bearer/pin, so drafts
     // and expired links simply have no map).
     if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
-      return notFound();
+      return mapImageNotFound(res);
     }
     const groupLinkViewBypass = Boolean(estimate.estimate_group_id)
       && ['sent', 'viewed', 'expired'].includes(estimate.status)
       && !estimate.archived_at
       && !estimateOffCustomerSurface(estimate)
       && groupLinkStillViewable(estimate);
-    if (!isEstimateCustomerViewable(estimate) && !groupLinkViewBypass) return notFound();
+    if (!isEstimateCustomerViewable(estimate) && !groupLinkViewBypass) return mapImageNotFound(res);
 
     let keylessUrl = null;
     if (kind === 'overlay') {
-      if (!featureGates.isEnabled('estimateShowYourWork')) return notFound();
       keylessUrl = await resolveShowYourWorkOverlayStaticUrl(estimate);
     } else {
       const parsed = parseEstimateDataSafe(estimate);
@@ -28254,24 +28280,26 @@ async function handleEstimateMapImage(kind, req, res, next) {
         estimate.satellite_url || parsed.satelliteUrl || null,
       );
     }
-    if (!keylessUrl) return notFound();
+    if (!keylessUrl) return mapImageNotFound(res);
 
     const image = await estimateMapImage.fetchStaticMapImage(keylessUrl, {
       cacheKey: `${estimate.id}:${kind}:${keylessUrl}`,
     });
-    if (!image) return res.status(502).set('Cache-Control', 'no-store').json({ error: 'Image unavailable' });
+    if (!image) {
+      logger.warn(`[estimate-map] ${kind} image unavailable upstream`);
+      return mapImageNotFound(res);
+    }
     return res
       .status(200)
       .set('Content-Type', image.contentType)
       .set('Content-Length', String(image.buffer.length))
       .set('Cache-Control', 'private, max-age=3600')
-      .set('X-Content-Type-Options', 'nosniff')
       .send(image.buffer);
   } catch (err) { next(err); }
 }
 
 router.get('/:token/map/satellite', mapImageLimiter, (req, res, next) => handleEstimateMapImage('satellite', req, res, next));
-router.get('/:token/map/overlay', mapImageLimiter, (req, res, next) => handleEstimateMapImage('overlay', req, res, next));
+router.get('/:token/map/overlay', overlayGateOpen, mapImageLimiter, (req, res, next) => handleEstimateMapImage('overlay', req, res, next));
 
 async function handleEstimateAsk(req, res, next) {
   try {
