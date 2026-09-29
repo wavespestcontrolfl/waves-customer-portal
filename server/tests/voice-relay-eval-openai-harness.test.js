@@ -57,7 +57,14 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     expect(h.modelFaultInjection).toBe(true); // the Anthropic patch is unaffected by adding the OpenAI one
   });
 
-  test('a real OpenAIRelayClient instance built AFTER installHarness() still gets the patched stream (shared prototype)', async () => {
+  test.each([
+    ['cached', { input_tokens: 50, input_tokens_details: { cached_tokens: 20 }, output_tokens: 5 },
+      { input_tokens: 30, output_tokens: 5, cached_input_tokens: 20, cacheReadRounds: 1 }],
+    ['uncached', { input_tokens: 50, output_tokens: 5 },
+      { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cacheReadRounds: 0 }],
+    ['measured zero', { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0 },
+      { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cacheReadRounds: 0 }],
+  ])('a real OpenAI %s round built AFTER installHarness() retains complete measured usage', async (_label, providerUsage, measured) => {
     const replay = require('../services/eval/voice-relay-replay');
     const h = replay.installHarness();
     const { OpenAIRelayClient } = require('../services/voice-agent/relay-openai-client');
@@ -67,11 +74,14 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     const client = new OpenAIRelayClient({
       apiKey: 'x',
       fetchImpl: fetchStub([
-        { type: 'response.completed', response: { id: 'r1', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi' }] }] } },
+        { type: 'response.completed', response: { id: 'r1', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi' }] }], usage: providerUsage } },
       ]),
     });
 
-    const record = { modelCalls: 0, modelRounds: 0, modelErrors: [], modelAborts: 0, injected: [], interruptInFlight: false };
+    const record = {
+      modelCalls: 0, modelRounds: 0, modelErrors: [], modelAborts: 0, injected: [], interruptInFlight: false,
+      usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 },
+    };
     h.state.record = record;
     h.state.modelFailuresLeft = 0;
 
@@ -81,6 +91,38 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     expect(msg.content[0].text).toBe('hi');
     expect(record.modelRounds).toBe(1);
     expect(record.modelErrors).toEqual([]);
+    expect(record.usage).toEqual({
+      ...measured, cache_write_tokens: 0, rounds: 1, incompleteRounds: 0,
+    });
+  });
+
+  test('a completed OpenAI round with a malformed usage object is marked incomplete, not free', async () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const h = replay.installHarness();
+    const { OpenAIRelayClient } = require('../services/voice-agent/relay-openai-client');
+    const client = new OpenAIRelayClient({
+      apiKey: 'x',
+      fetchImpl: fetchStub([
+        { type: 'response.completed', response: { id: 'r-bad-usage', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi' }] }], usage: {} } },
+      ]),
+    });
+    const record = {
+      modelCalls: 0, modelRounds: 0, modelErrors: [], modelAborts: 0, injected: [], interruptInFlight: false,
+      usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 },
+    };
+    h.state.record = record;
+    h.state.modelFailuresLeft = 0;
+
+    const msg = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage();
+
+    expect(msg.usage).toEqual({
+      input_tokens: null, cache_read_input_tokens: null, cache_creation_input_tokens: null, output_tokens: null,
+    });
+    expect(record.modelRounds).toBe(1);
+    expect(record.usage).toEqual({
+      input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0,
+      rounds: 0, cacheReadRounds: 0, incompleteRounds: 1,
+    });
   });
 
   test('fixtures.modelFailures fault injection works on the OpenAI client exactly like the Anthropic one', () => {
