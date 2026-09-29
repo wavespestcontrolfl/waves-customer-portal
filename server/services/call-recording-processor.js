@@ -9129,35 +9129,6 @@ const CallRecordingProcessor = {
         callerPhone: contactPhone,
       });
       extracted = adoption.merged;
-      // Gmail dot-only V1/V2 pair (owner ruling 2026-09-29): adoption saved
-      // the undotted spelling. Keep it only when that Google mailbox has no
-      // active email suppression under ANY spelling (suppression reads match
-      // the exact address, so a suppressed dotted variant would not block the
-      // undotted one) and is not on file for another customer; otherwise, or
-      // on any lookup failure, fall back to the read-back hold exactly as a
-      // real disagreement would.
-      if (Array.isArray(extracted.email_gmail_variants)) {
-        const variants = extracted.email_gmail_variants;
-        delete extracted.email_gmail_variants;
-        const { GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
-        const mailbox = String(extracted.email).split('@')[0].split('+')[0];
-        const suppressed = await db('email_suppressions')
-          .whereRaw(`${GOOGLE_MAILBOX_SQL.isGoogle('email')} AND ${GOOGLE_MAILBOX_SQL.mailbox('email')} = ?`, [mailbox])
-          .where({ status: 'active' })
-          .first('id')
-          .then((row) => !!row, () => true);
-        const ownCustomerId = suppressed ? null : (call.customer_id
-          || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
-          || null);
-        const ownedElsewhere = suppressed || await require('./email-bounce-recovery')
-          .gmailMailboxOwnedByOther(extracted.email, ownCustomerId)
-          .catch(() => true);
-        if (suppressed || ownedElsewhere) {
-          extracted.email = null;
-          extracted.email_candidates = variants;
-          logger.info(`[call-proc] Gmail dot-equivalent email held for read-back on ${maskSid(callSid)} (${suppressed ? 'suppressed mailbox' : 'mailbox on file elsewhere'})`);
-        }
-      }
       if (adoption.adoptedFields.length) {
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
         logger.info(`[call-proc] V2-primary adopted ${adoption.adoptedFields.length} field(s) for ${maskSid(callSid)}: ${adoption.adoptedFields.join(', ')}`);
