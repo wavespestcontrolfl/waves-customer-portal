@@ -1,8 +1,9 @@
 /**
  * Citability backfill seeder (2026-09-25 owner directive, re-cut 09-29 from
  * #4845): corpus scan with the quality gate's own four signals → paced,
- * page-anchored refresh rows. The refresh consumer (brief sections, evidence
- * exemption, CITABILITY MODE) is a separate PR; the lane stays gated off.
+ * page-anchored refresh rows, plus the consumer parity checks (brief
+ * sections, evidence exemption, completion check, CITABILITY MODE). The lane
+ * stays gated off.
  */
 
 jest.mock('../models/db', () => {
@@ -272,5 +273,60 @@ describe('seedAll — gated, idempotent upsert', () => {
       expect(where).toHaveBeenCalledWith({ id: 'existing-seed' });
       expect(update).toHaveBeenCalledWith({ page_url: 'https://www.wavespestcontrol.com/termite/bait-vs-liquid/' });
     } finally { check.mockRestore(); }
+  });
+});
+
+describe('consumer parity — every seeder gap id is consumed', () => {
+  const { CITABILITY_GAP_SECTIONS } = require('../services/content/content-brief-builder')._internals;
+  const { REFRESH_AGENT_CONFIG } = require('../services/content/agents/refresh-agent-config');
+  const { GATE_RETRY_INSTRUCTIONS } = require('../services/content/gate-retry-directives');
+  const gateInternals = require('../services/content/content-quality-gate')._internals;
+  const ids = seeder._internals.GAP_CHECKS.map(([id]) => id);
+
+  test('every seeder gap id has a binding required_sections line naming its guidance code', () => {
+    expect(ids).toEqual(['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose']);
+    expect(Object.keys(CITABILITY_GAP_SECTIONS).sort()).toEqual([...ids].sort());
+    for (const id of ids) {
+      expect(CITABILITY_GAP_SECTIONS[id]).toContain(`[CITABILITY_${id.toUpperCase()}]`);
+      expect(GATE_RETRY_INSTRUCTIONS[`CITABILITY_${id.toUpperCase()}`]).toEqual(expect.any(String));
+    }
+    expect(CITABILITY_GAP_SECTIONS.concrete_specifics).toMatch(/never a dollar amount/);
+    expect(CITABILITY_GAP_SECTIONS.named_sources).toMatch(/never invent an agency/);
+  });
+
+  test('refresh agent CITABILITY MODE is keyed on gsc_signal.citability_gaps and names every gap id', () => {
+    const system = REFRESH_AGENT_CONFIG.system;
+    expect(system).toMatch(/CITABILITY MODE — active when the brief's gsc_signal\.citability_gaps/);
+    for (const id of ids) expect(system).toMatch(new RegExp(`^- ${id}:`, 'm'));
+    expect(system).toMatch(/NO\s+padding/);
+    expect(system).toMatch(/NOT a quota and NEVER a\s+dollar amount/);
+    expect(system).toMatch(/NEVER invent\s+an agency, publication, program, or business/);
+    expect(system).toMatch(/NEVER a raw markdown pipe\s+table/);
+    expect(system).toMatch(/Never on a \.md target/);
+    expect(system).toMatch(/INFORMATIONAL\s+TOPIC/);
+  });
+
+  test('every gap id has a completion evaluator in the quality gate', () => {
+    for (const id of ids) {
+      const r = gateInternals.checkCitabilityBackfillGapsCleared(
+        { title: 'Bait or spray?', body: '## Bait or spray?\nExperts say to water deeply.' },
+        { target_page_type: 'blog', gsc_signal: { bucket: 'citability_backfill', citability_gaps: [id] } },
+        {},
+      );
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(new RegExp(`^planned_gaps_unresolved:${id}\\(`));
+    }
+  });
+
+  test('GSC evidence is waived only for a backfill brief that still carries its gap list; SERP is page-only', () => {
+    const { checkGscSignalAttached, checkSerpBriefAttached } = gateInternals;
+    expect(checkGscSignalAttached({}, { gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['named_sources'] } }))
+      .toEqual({ ok: true, reason: 'citability_backfill_scan_evidence' });
+    expect(checkGscSignalAttached({}, { gsc_signal: { bucket: 'citability_backfill', citability_gaps: [] } }))
+      .toEqual({ ok: false, reason: 'no_gsc_signal' });
+    expect(checkGscSignalAttached({}, { gsc_signal: { bucket: 'decay_refresh', citability_gaps: ['named_sources'] } }))
+      .toEqual({ ok: false, reason: 'no_gsc_signal' });
+    expect(checkSerpBriefAttached({}, { target_url: '/termite/x/', target_keyword: null, gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['comparison'] } }))
+      .toEqual({ ok: true, reason: 'serp_skip_page_only' });
   });
 });
