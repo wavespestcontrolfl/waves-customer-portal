@@ -128,6 +128,7 @@
  *   GATE_VISIT_PREP_PEST_READ=true (PR 5 — automatic pest read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPestReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS live (the tech facts block is the only place a read is shown). Triggered from services/visit-prep.js's createVisitPrepSubmission — the ONE place a submission is created — fire-and-forget AFTER the submission's own transaction commits, never on the request path. A submission whose visit is a pest-only service (pest-production-calibration.js isPestOnlyServiceType — never a WDO inspection or assessment; a grouped stop counts if ANY live member at the same physical stop is), runs the same photo-id-v2 identifyPestV2 the app's Photo ID route calls and stores the result in pest_identifications with source='visit_prep', mode='internal' (already an allowed mode — no migration on that table). Lawn / tree & shrub / anything else resolves straight to read_status='unsupported', no engine call. VISIT_PREP_READ_DAILY_CAP (default 40) is this feature's OWN cap, separate from Photo ID's; a capped or failed read never blocks the submission — the technician still gets the photos, just with read_status='failed'. See docs in services/visit-prep-pest-read.js.)
  *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep pest read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires visitPrepPestReadLive(). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same triggerVisitPrepPestRead for at most 10 of TODAY's (ET) submissions on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), and 'unsupported' where the stop is now a pest stop (an unsupported row checked and still not pest is skipped for an hour). Pending and failed rows are never retried. One retry per row per case (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP like a first read. A batch with failed retries fails the job run (job_health).)
  *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
+ *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3443,6 +3444,9 @@ const gates = {
   // reader is ibCancelAppointmentLive() below, same discountStackingLive()
   // convention, so a flip needs no redeploy.
   ibCancelAppointment: process.env.GATE_IB_CANCEL_APPOINTMENT === 'true',
+  // Admin customer Activity timeline (read-only). For logGateStatus only; the
+  // route reads customerActivityTimelineLive() at call time.
+  customerActivityTimeline: process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true',
   // Retire the dormant legacy balance-reminder cron (dunning unification,
   // owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/
   // urgent pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/
@@ -3773,6 +3777,14 @@ function ibCancelAppointmentLive() {
   return process.env.GATE_IB_CANCEL_APPOINTMENT === 'true';
 }
 
+// GATE_CUSTOMER_ACTIVITY_TIMELINE read at CALL time — strict `=== 'true'`, dark
+// by default. The canonical reader for GET /api/admin/customers/:id/activity
+// (routes/admin-customers.js); the admin panel hides itself on the route's
+// `{ enabled: false }`. Read-only: no customer message, no write.
+function customerActivityTimelineLive() {
+  return process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true';
+}
+
 // GATE_VISIT_PREP_TECH_ALERTS read at CALL time — strict `=== 'true'`, same
 // convention as visitPrepPhotosLive(). The canonical reader for
 // server/services/visit-prep-tech-alert.js. Deliberately independent of
@@ -3912,4 +3924,5 @@ module.exports.smsLinkWrapLive = smsLinkWrapLive;
 // Exported on its own line (not in the shared list above) so concurrent
 // gate PRs appending to that one-line list never conflict with this one.
 module.exports.portalActivityLive = portalActivityLive;
+module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 // gates 1775330914
