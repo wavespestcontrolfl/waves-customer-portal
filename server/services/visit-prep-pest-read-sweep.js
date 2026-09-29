@@ -58,7 +58,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { dispatchVisitPrepRead, _internal: { currentReadKey, storedReadKey } } = require('./visit-prep-read-dispatch');
-const { etDayStart } = require('./visit-prep-read-claim');
+const { etDayStart, withLockedStop } = require('./visit-prep-read-claim');
 const { visitPrepReadSweepLive, visitPrepPestReadLive, visitPrepPlantReadLive } = require('../config/feature-gates');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { etDateString } = require('../utils/datetime-et');
@@ -193,6 +193,26 @@ async function selectCandidates(conn, now) {
   return combined.slice(0, SWEEP_BATCH_LIMIT);
 }
 
+// Releases a stale done read to 'none' so it can be re-read — only after
+// proving, under the stop lock, that the stop still wants a DIFFERENT read
+// than the one stored (a stop that changed back keeps its valid result;
+// Codex #5320 r11 P2), and only while it is still the exact read this sweep
+// judged (every claim bumps read_attempts). Its attempt stays counted.
+async function releaseStaleDone(conn, row, svc) {
+  const live = { pestLive: visitPrepPestReadLive(), plantLive: visitPrepPlantReadLive() };
+  return withLockedStop(conn, svc, {
+    onGone: () => false,
+    onMoved: () => false,
+    body: async (trx) => {
+      if (!(await needsReadNow(trx, row, live))) return false;
+      const released = await trx('visit_prep_submissions')
+        .where({ id: row.submission_id, read_status: 'done', read_attempts: row.read_attempts })
+        .update({ read_status: 'none', read_ref: null, read_result: null });
+      return released > 0;
+    },
+  });
+}
+
 async function retryOne(conn, row) {
   // Recorded BEFORE the retry runs (see file header): even a retry that
   // crashes, or lands right back in the same case, must never be retried
@@ -208,17 +228,6 @@ async function retryOne(conn, row) {
   });
   const photos = await loadPhotos(conn, row.submission_id);
   if (!photos.length) return; // nothing left to read
-  let expectStatus = [row.read_status];
-  if (row.read_status === 'done') {
-    // Release the stale read first, only while it is still the done read
-    // this sweep judged: every claim bumps read_attempts, so a re-read that
-    // landed meanwhile is left alone. Its attempt stays counted.
-    const released = await conn('visit_prep_submissions')
-      .where({ id: row.submission_id, read_status: 'done', read_attempts: row.read_attempts })
-      .update({ read_status: 'none', read_ref: null, read_result: null });
-    if (!released) return;
-    expectStatus = ['none'];
-  }
   const svc = {
     id: row.scheduled_service_id,
     customer_id: row.customer_id,
@@ -226,6 +235,11 @@ async function retryOne(conn, row) {
     visit_id: row.visit_id,
     status: row.status,
   };
+  let expectStatus = [row.read_status];
+  if (row.read_status === 'done') {
+    if (!(await releaseStaleDone(conn, row, svc))) return;
+    expectStatus = ['none'];
+  }
   // dispatchVisitPrepRead never throws (see its own docstring) — every
   // failure inside it already resolves to a terminal read_status. Awaited
   // here (unlike the original fire-and-forget call site) because this sweep

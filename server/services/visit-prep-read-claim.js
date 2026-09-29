@@ -6,11 +6,9 @@
  * one claim transaction, so the engines can never drift apart on budget
  * rules.
  *
- * claimReadSlot proves applicability under the canonical stop lock
- * (visit-groups.js lockStopForRow, retrying VISIT_STOP_MOVED like
- * visit-prep.js withStopLock), share-locks the stop's rows against
- * status/type writers that don't take the stop lock, then takes the cap lock
- * last, only for the count and the claim. Only a submission from TODAY (ET)
+ * claimReadSlot proves applicability under the stop lock (withLockedStop:
+ * the canonical stop lock plus share locks on the stop's rows), then takes
+ * the cap lock last, only for the count and the claim. Only a submission from TODAY (ET)
  * may claim: the cap counts by submission day.
  */
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
@@ -61,45 +59,62 @@ async function readsToday(conn, now = new Date()) {
  * @param {string[]} [opts.expectStatus] statuses the claim may take the row from
  * @returns {Promise<{ claimed: true, value: any } | 'unsupported' | 'refused' | 'taken'>}
  */
-async function claimReadSlot(conn, submissionId, svc, {
-  applicable, pendingPatch, now = new Date(), expectStatus = UNCLAIMED_STATUSES,
-}) {
+// Runs `body(trx)` with the stop locked: the canonical stop lock
+// (visit-groups.js lockStopForRow, retrying VISIT_STOP_MOVED like
+// visit-prep.js withStopLock), then every member row share-locked against
+// status/type writers that don't take the stop lock. `onGone(trx)` answers a
+// stop that no longer exists; `onMoved()` one that would not hold still
+// through the retries. Every locked visit-prep read decision goes through
+// here: the claim, the settle, and the sweep's stale-read release.
+async function withLockedStop(conn, svc, { body, onGone, onMoved }) {
   const { lockStopForRow } = require('./visit-groups');
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await conn.transaction(async (trx) => {
-        if ((await lockStopForRow(trx, svc.id)) === null) return 'unsupported';
+        if ((await lockStopForRow(trx, svc.id)) === null) return onGone(trx);
         const { techStopMemberIds } = require('./visit-prep');
         const members = await techStopMemberIds(svc, trx);
         await trx('scheduled_services').whereIn('id', [...new Set([svc.id, ...members])]).forShare().select('id');
-        const value = await applicable(svc, trx);
-        if (!value) return 'unsupported';
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
-        const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at', 'read_attempts');
-        if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
-        if (await readsToday(trx, now) >= dailyCap()) return 'refused';
-        // Claimed only from a status the caller expected (no engine holds the
-        // row): a row another engine already claimed is never taken twice
-        // (Codex #5320 r1 P2).
-        const updated = await trx('visit_prep_submissions').where({ id: submissionId })
-          .whereIn('read_status', expectStatus)
-          .update({
-            read_status: 'pending',
-            read_attempts: (Number(own.read_attempts) || 0) + 1,
-            // The pending-staleness clock starts at the claim, not the
-            // submission (a sweep may claim hours later; Codex #5320 r10).
-            read_claimed_at: now,
-            ...(typeof pendingPatch === 'function' ? pendingPatch(value) : pendingPatch),
-          });
-        if (!updated) return 'taken';
-        return { claimed: true, value };
+        return body(trx);
       });
     } catch (err) {
       if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
-      if (err && err.code === 'VISIT_STOP_MOVED') return 'refused';
+      if (err && err.code === 'VISIT_STOP_MOVED') return onMoved();
       throw err;
     }
   }
+}
+
+async function claimReadSlot(conn, submissionId, svc, {
+  applicable, pendingPatch, now = new Date(), expectStatus = UNCLAIMED_STATUSES,
+}) {
+  return withLockedStop(conn, svc, {
+    onGone: () => 'unsupported',
+    onMoved: () => 'refused',
+    body: async (trx) => {
+      const value = await applicable(svc, trx);
+      if (!value) return 'unsupported';
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
+      const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at', 'read_attempts');
+      if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
+      if (await readsToday(trx, now) >= dailyCap()) return 'refused';
+      // Claimed only from a status the caller expected (no engine holds the
+      // row): a row another engine already claimed is never taken twice
+      // (Codex #5320 r1 P2).
+      const updated = await trx('visit_prep_submissions').where({ id: submissionId })
+        .whereIn('read_status', expectStatus)
+        .update({
+          read_status: 'pending',
+          read_attempts: (Number(own.read_attempts) || 0) + 1,
+          // The pending-staleness clock starts at the claim, not the
+          // submission (a sweep may claim hours later; Codex #5320 r10).
+          read_claimed_at: now,
+          ...(typeof pendingPatch === 'function' ? pendingPatch(value) : pendingPatch),
+        });
+      if (!updated) return 'taken';
+      return { claimed: true, value };
+    },
+  });
 }
 
 /**
@@ -120,30 +135,22 @@ async function claimReadSlot(conn, submissionId, svc, {
  * @returns {Promise<'stored' | 'changed'>}
  */
 async function settleClaimedRead(conn, submissionId, svc, { applicable, matches, store }) {
-  const { lockStopForRow } = require('./visit-groups');
   const release = (trx) => trx('visit_prep_submissions').where({ id: submissionId, read_status: 'pending' })
     .update({ read_status: 'none', read_ref: null, read_result: null });
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await conn.transaction(async (trx) => {
-        if ((await lockStopForRow(trx, svc.id)) === null) { await release(trx); return 'changed'; }
-        const { techStopMemberIds } = require('./visit-prep');
-        const members = await techStopMemberIds(svc, trx);
-        await trx('scheduled_services').whereIn('id', [...new Set([svc.id, ...members])]).forShare().select('id');
-        if (!matches(await applicable(svc, trx))) { await release(trx); return 'changed'; }
-        await store(trx);
-        return 'stored';
-      });
-    } catch (err) {
-      if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
-      // A stop that would not hold still is a stop that changed: release
-      // the claim (a guarded single-row write, no stop lock needed) and let
-      // the caller re-dispatch, never terminalize a paid read as failed
-      // (Codex #5320 r10 P2).
-      if (err && err.code === 'VISIT_STOP_MOVED') { await release(conn); return 'changed'; }
-      throw err;
-    }
-  }
+  const changed = async (trx) => { await release(trx); return 'changed'; };
+  return withLockedStop(conn, svc, {
+    onGone: changed,
+    // A stop that would not hold still is a stop that changed: release the
+    // claim (a guarded single-row write, no stop lock needed) and let the
+    // caller re-dispatch, never terminalize a paid read as failed
+    // (Codex #5320 r10 P2).
+    onMoved: () => changed(conn),
+    body: async (trx) => {
+      if (!matches(await applicable(svc, trx))) return changed(trx);
+      await store(trx);
+      return 'stored';
+    },
+  });
 }
 
 // Every write an engine makes BEFORE holding a claim ('unsupported' = this
@@ -182,4 +189,4 @@ function redispatch(args, logger) {
   });
 }
 
-module.exports = { redispatch, settleClaimedRead, CLAIMED_STATUSES, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };
+module.exports = { redispatch, settleClaimedRead, withLockedStop, CLAIMED_STATUSES, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };

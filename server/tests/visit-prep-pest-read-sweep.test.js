@@ -26,6 +26,14 @@ jest.mock('../services/visit-prep-read-dispatch', () => ({
   },
 }));
 
+// The stop lock itself is covered by the claim's own suites; here the
+// locked body runs directly on the fake conn.
+const mockLockedStop = jest.fn((conn, svc, { body }) => body(conn));
+jest.mock('../services/visit-prep-read-claim', () => ({
+  ...jest.requireActual('../services/visit-prep-read-claim'),
+  withLockedStop: (...args) => mockLockedStop(...args),
+}));
+
 let mockGateOn = true;
 jest.mock('../config/feature-gates', () => ({
   visitPrepReadSweepLive: () => mockGateOn,
@@ -466,6 +474,21 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
       services: [svc({ scheduled_date: TODAY_ET })],
     });
     expect(await selectCandidates(conn, NOW)).toEqual([]);
+  });
+
+  test('a stop that changed BACK before the release keeps its valid read: re-proved under the stop lock (Codex #5320 r11)', async () => {
+    mockIsPestStop.mockResolvedValueOnce(true); // at selection: the stop wants a pest read
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, read_attempts: 1, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    const [row] = await selectCandidates(conn, NOW);
+    mockIsPestStop.mockResolvedValue('plant:lawn'); // back to lawn before the retry runs
+    await _retryOneForTest(conn, row);
+    expect(mockLockedStop).toHaveBeenCalledWith(conn, expect.objectContaining({ id: 'svc-1' }), expect.any(Object));
+    expect(conn._store.submissions[0]).toMatchObject({ read_status: 'done', read_result: LAWN_READ });
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('a re-read that landed after selection (attempts moved on) is never released', async () => {

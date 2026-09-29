@@ -361,7 +361,9 @@ function useRefreshWhileReadPending(customerFlagged, onRefresh) {
     || (entry.read?.status === 'none' && now - new Date(entry.sentAt).getTime() < READ_START_GRACE_MS);
   const entries = customerFlagged || [];
   const waited = entries.filter((entry) => soon(entry) || (entry.read?.status === 'none' && entry.read?.awaiting));
-  const pendingKey = waited.map((entry) => entry.id).join(',');
+  // Keyed by status too: an awaited read the sweep claims (none → pending)
+  // starts a fresh budget at the faster pace (Codex #5320 r11 P2).
+  const pendingKey = waited.map((entry) => `${entry.id}:${entry.read?.status}`).join(',');
   const pollMs = waited.some(soon) ? READ_PENDING_POLL_MS : READ_AWAITING_POLL_MS;
   const polls = useRef({ key: '', count: 0 });
   if (polls.current.key !== pendingKey) polls.current = { key: pendingKey, count: 0 };
