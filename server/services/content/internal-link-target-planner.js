@@ -19,12 +19,14 @@
  * pages Google barely shows, so no impression count ever qualifies them, and
  * that thin visibility is the thing extra internal links are meant to fix.
  * They are stamped ahead of every impressions-ranked target, so the sweep
- * ships their links first; the set is small and bounded (a page already
- * linked from a source is skipped by the planner), so it drains in a few
- * sweeps and the impressions ranking resumes. A benchmark path Search Console
- * already chose keeps its impressions ranking; a path with no corpus page
- * (tool and resource pages rendered by Astro, not from a content file) has no
- * body to anchor from or link-check, so it is not planned.
+ * ships their links first. A week plans one link each for at most
+ * AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGET_LIMIT (default 5) benchmark
+ * pages, rotating through them week by week, so the source takes a small,
+ * fixed share of the sweep and the impressions-ranked targets keep the rest.
+ * A benchmark path Search Console already chose keeps its impressions
+ * ranking; a path with no corpus page (tool and resource pages rendered by
+ * Astro, not from a content file) has no body to anchor from or link-check,
+ * so it is not planned.
  *
  * Kill switches: AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false and
  * AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGETS=false, one per source.
@@ -52,6 +54,13 @@ function enabled(name) {
 // every impressions-stamped one in the sweep's target_priority DESC order.
 const BENCHMARK_TARGET_PRIORITY = 1_000_000;
 const BENCHMARK_PATHS = [...new Set(benchmark.questions.map((q) => q.target_path))];
+// Outranking everything, the benchmark source must stay small or it starves
+// the impressions-ranked targets: the daily sweep ships at most one link PR
+// (three links), and the weekly run would otherwise queue up to five links
+// for every benchmark page. So a week plans one link (the planner's best) for
+// each of a few benchmark pages, and the starting page rotates by week so
+// every page gets its turn.
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Hub pages averaging position 8–20 (impression-weighted) over 28 days.
 // Grouped by the canonical route (query string dropped — the same
@@ -109,6 +118,8 @@ async function loadCorpus() {
 async function planGscTargets({
   limit = envInt('AUTONOMOUS_INTERNAL_LINK_GSC_TARGET_LIMIT', 10),
   minImpressions = envInt('AUTONOMOUS_INTERNAL_LINK_GSC_MIN_IMPRESSIONS', 100),
+  benchmarkLimit = envInt('AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGET_LIMIT', 5),
+  now = Date.now(),
 } = {}) {
   const gscOn = enabled('AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS');
   const benchmarkOn = enabled('AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGETS');
@@ -133,9 +144,11 @@ async function planGscTargets({
   }
   if (benchmarkOn) {
     const chosen = new Set(pages.map((p) => new URL(p.url).pathname.replace(/\/?$/, '/')));
-    for (const path of BENCHMARK_PATHS) {
-      const url = new URL(path, HUB_ORIGIN).href;
-      if (!chosen.has(path) && targetFacts(url, corpus)) pages.push({ url, impressions: null, position: null, priority: BENCHMARK_TARGET_PRIORITY });
+    const eligible = BENCHMARK_PATHS.filter((path) => !chosen.has(path) && targetFacts(new URL(path, HUB_ORIGIN).href, corpus));
+    const start = eligible.length ? Math.floor(now / WEEK_MS) % eligible.length : 0;
+    const rotated = [...eligible.slice(start), ...eligible.slice(0, start)].slice(0, benchmarkLimit);
+    for (const path of rotated) {
+      pages.push({ url: new URL(path, HUB_ORIGIN).href, impressions: null, position: null, priority: BENCHMARK_TARGET_PRIORITY, cap: 1 });
     }
   }
   if (!pages.length) return { status: 'no_targets', targets: 0, queued: 0, candidates: 0 };
@@ -146,7 +159,7 @@ async function planGscTargets({
   const summary = [];
   for (const page of pages) {
     const target = targetFacts(page.url, corpus);
-    const tasks = planner.planForTarget(target, { corpus, excludeSource });
+    const tasks = planner.planForTarget(target, { corpus, excludeSource, ...(page.cap ? { cap: page.cap } : {}) });
     const ids = [];
     for (const task of tasks) {
       const queued = await queueInternalLinkTaskForDryRun({ ...task, target_priority: page.priority }, null);
