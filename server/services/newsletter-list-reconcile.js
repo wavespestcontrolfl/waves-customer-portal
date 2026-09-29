@@ -477,25 +477,36 @@ async function fetchZoneFillCandidates(conn) {
 // Fills ONE subscriber's zone from its linked customer's CURRENT city —
 // never a city read earlier. Must run inside a transaction. Resolve → lock
 // → re-read: the linked customer's comms lock (taken before its customers
-// row, per customer-comms-lock.js's order contract), then the subscriber
-// row FOR UPDATE and the customer row FOR SHARE in the SAME statement that
-// re-checks the whole predicate (still active, still blank, still linked to
-// that customer, customer still live) and reads the city the zone is
-// computed from. A city edit (customer-email-write.js-style FOR UPDATE, or
-// any UPDATE of the row) therefore either commits before this read — and
-// the new city is used — or waits for this commit; it can never land
-// between the read and the write. Returns true only when a zone was written.
+// row, per customer-comms-lock.js's order contract), THEN the customer row
+// FOR SHARE in its OWN statement, THEN the subscriber row FOR UPDATE in a
+// SEPARATE statement that re-checks the whole predicate (still active,
+// still blank, still linked to that customer, customer still live) and
+// reads the city the zone is computed from — the customer lock is already
+// held, so this second statement needs no lock directive of its own.
+// Customer BEFORE subscriber, in that fixed order, matching every other
+// writer of these two tables (customer-email-fanout.js takes `customers
+// FOR UPDATE` before its own later subscriber `FOR UPDATE`, with no comms
+// lock in between to serialize against this). A single combined `FOR
+// UPDATE OF ns FOR SHARE OF c` statement leaves the ACTUAL acquisition
+// order to the query planner — measured here as subscriber-then-customer
+// (an index scan on ns.id feeding a nested-loop join to c) — the reverse
+// of that writer's order, a genuine cross-module deadlock (codex P1). A
+// city edit (customer-email-write.js-style FOR UPDATE, or any UPDATE of
+// the row) therefore either commits before this read — and the new city
+// is used — or waits for this commit; it can never land between the read
+// and the write. Returns true only when a zone was written.
 async function fillZoneForSubscriber(trx, subscriberId) {
   const link = await trx.raw('SELECT customer_id FROM newsletter_subscribers WHERE id = ?', [subscriberId]);
   const customerId = link.rows?.[0]?.customer_id;
   if (!customerId) return false;
   await lockCustomerComms(trx, customerId);
+  await trx.raw('SELECT id FROM customers WHERE id = ? FOR SHARE', [customerId]);
   const locked = await trx.raw(
     `SELECT ns.id AS subscriber_id, c.city
        ${zoneFillFrom()}
         AND ns.id = ?
         AND ns.customer_id = ?
-      FOR UPDATE OF ns FOR SHARE OF c`,
+      FOR UPDATE OF ns`,
     [CUSTOMER_STAGES, subscriberId, customerId],
   );
   const row = locked.rows?.[0];

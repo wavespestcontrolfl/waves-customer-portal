@@ -185,12 +185,16 @@ function makeConn(state) {
     // decideAddress's FOR SHARE on every sharing profile's customers row —
     // a real row lock (proved in the Postgres suite); a no-op here.
     if (sql.includes('FROM customers WHERE id = ANY')) return { rows: [] };
-    // fillZoneForSubscriber: peek the link, then the locked re-read, then
-    // the write — checked BEFORE the generic zone-candidate branch below.
+    // fillZoneForSubscriber: peek the link, lock the customer row FIRST (its
+    // own statement — codex P1: customer-before-subscriber lock order, never
+    // combined with the subscriber lock below in one statement), then the
+    // locked subscriber re-read, then the write — checked BEFORE the generic
+    // zone-candidate branch below.
     if (sql.includes('SELECT customer_id FROM newsletter_subscribers WHERE id = ?')) {
       const row = state.subscribers.find((s) => s.id === bindings[0]);
       return { rows: row ? [{ customer_id: row.customer_id ?? null }] : [] };
     }
+    if (sql.includes('FROM customers WHERE id = ? FOR SHARE')) return { rows: [] };
     if (sql.includes('FOR UPDATE OF ns')) {
       const [, subscriberId, customerId] = bindings;
       const row = state.subscribers.find((s) => s.id === subscriberId);

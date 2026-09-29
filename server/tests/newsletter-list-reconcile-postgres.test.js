@@ -69,6 +69,34 @@ function pauseNthTableRead(base, table, n) {
   return { conn: wrapConn(base), reached, release: releaseResolve };
 }
 
+// Same rendezvous technique as pauseNthTableRead, for a statement reached
+// via `.raw()` (matched by a SQL substring) rather than a table-builder
+// call — fillZoneForSubscriber's customer-row lock and its subscriber-row
+// lock are both plain `.raw()` calls, so pauseNthTableRead's table-name
+// match can't target either one.
+function pauseNthRawCall(base, sqlSubstring, n) {
+  let count = 0;
+  let reachedResolve;
+  let releaseResolve;
+  const reached = new Promise((resolve) => { reachedResolve = resolve; });
+  const released = new Promise((resolve) => { releaseResolve = resolve; });
+  function wrapConn(conn) {
+    const wrapped = (...args) => conn(...args);
+    wrapped.transaction = (cb, ...args) => conn.transaction((trx) => cb(wrapConn(trx)), ...args);
+    wrapped.raw = async (sql, ...rest) => {
+      const result = await conn.raw(sql, ...rest);
+      if (String(sql).includes(sqlSubstring) && ++count === n) {
+        reachedResolve();
+        await released;
+      }
+      return result;
+    };
+    wrapped.fn = conn.fn;
+    return wrapped;
+  }
+  return { conn: wrapConn(base), reached, release: releaseResolve };
+}
+
 const POOL = { min: 0, max: 8 };
 
 postgres('newsletter-list-reconcile — real Postgres', () => {
@@ -636,6 +664,53 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     } finally {
       if (editTrx && !editTrx.isCompleted()) await editTrx.rollback();
       await editor.destroy();
+      await connA.destroy();
+      await cleanupCommitted([cust.id], [email]);
+    }
+  });
+
+  // Codex P1 (this round) — fillZoneForSubscriber locked the subscriber row
+  // and the customer row in ONE combined `FOR UPDATE OF ns FOR SHARE OF c`
+  // statement, leaving the actual acquisition order to the query planner;
+  // customer-email-fanout.js locks `customers FOR UPDATE` BEFORE its own
+  // later subscriber `FOR UPDATE`, with no comms lock in between — a
+  // genuine cross-module deadlock risk if the planner locked ns first here.
+  // Proven directly: while this decision holds ONLY the customer-row lock
+  // (paused right after it, before the subscriber statement runs), a
+  // separate connection can freely take FOR UPDATE on the subscriber row —
+  // the subscriber is genuinely untouched at that point, so the two locks
+  // are sequential (customer, then subscriber), never combined/reordered.
+  test('fillZoneForSubscriber locks the customer row strictly BEFORE the subscriber row — never combined, matching every other writer\'s order (real Postgres)', async () => {
+    const cust = synthCustomer({ city: 'Venice' });
+    await seedCommitted([cust]);
+    const email = cust.email.toLowerCase();
+    const [subRow] = await db('newsletter_subscribers')
+      .insert({ email, status: 'active', source: 'test_zone_order', customer_id: cust.id })
+      .returning(['id']);
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    const other = knexFactory({ client: 'pg', connection, pool: POOL });
+    try {
+      // Pause right after the customer-row FOR SHARE (the statement added
+      // by this round's fix), before the subscriber-row statement runs.
+      const { conn: pausedA, reached, release } = pauseNthRawCall(connA, 'customers WHERE id = ? FOR SHARE', 1);
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: pausedA });
+      await reached;
+
+      // The subscriber row is NOT yet locked — a separate connection can
+      // take FOR UPDATE on it immediately, no wait.
+      const otherTrx = await other.transaction();
+      const before = Date.now();
+      await otherTrx('newsletter_subscribers').where({ id: subRow.id }).forUpdate().first('id');
+      expect(Date.now() - before).toBeLessThan(200); // uncontended — proves ns wasn't locked yet
+      await otherTrx.commit();
+
+      release();
+      const result = await resultPromise;
+      expect(result.errors).toEqual([]);
+      const row = await db('newsletter_subscribers').where({ id: subRow.id }).first();
+      expect(row.region_zone).toBe('south_sarasota'); // the fill still landed once released
+    } finally {
+      await other.destroy();
       await connA.destroy();
       await cleanupCommitted([cust.id], [email]);
     }
