@@ -2070,6 +2070,33 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(merged.flags.disagreementPair.map((p) => p.slug)).toEqual(['fixture-large-patch', 'fixture-herbicide-injury']);
     });
 
+    test('pre-push audit on r1: after a corrected-host rerun, siding with the rerun\'s top settles the split', () => {
+      const conditionIndex = engine.conditionIndexFor('lawn', null);
+      const cond = (slug, confidence) => engine.resolveConditionCandidate({
+        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, conditionIndex);
+      // Gemini's first pass read large patch; the corrected-host rerun read
+      // drought; OpenAI read herbicide injury — a split the referee is shown
+      // as drought (first) vs herbicide injury (second).
+      const conditions = { possibilities: [cond('fixture-large-patch', 0.6)], index: conditionIndex };
+      const escalation = {
+        conditionFlags: {
+          triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        },
+        possibilities: [cond('fixture-drought', 0.55), cond('fixture-herbicide-injury', 0.5)],
+        conditionIndex,
+        rerun: { top: cond('fixture-drought', 0.55) },
+        json: { conditions: [{ slug: 'fixture-herbicide-injury', confidence: 0.5, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+      };
+      const reads = engine._test.earlierReadsFor({ slots: { turf: [], weeds: [], host: [] } }, conditions, escalation, ['conditions']);
+      expect(reads[0].first.slug).toBe('fixture-drought');
+      const refereeJson = { conditions: [{ slug: 'fixture-drought', confidence: 0.8, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
+      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
+      expect(merged.outcome).toBe('settled');
+      expect(merged.possibilities[0].slug).toBe('fixture-drought');
+      expect(merged.flags.disagreed).toBe(false);
+    });
+
     test('finding 2: earlierReadsFor\'s conditions "second" read is OpenAI\'s own ranked top, never the merged list\'s top', () => {
       const conditionIndex = engine.conditionIndexFor('lawn', null);
       const geminiTop = engine.resolveConditionCandidate({

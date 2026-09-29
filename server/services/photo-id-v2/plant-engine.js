@@ -1841,6 +1841,15 @@ function describePossibilityRead(possibility) {
   return { slug: possibility.slug, confidence: possibility.confidence ?? 0 };
 }
 
+/** The condition scope's first (Gemini) read: a corrected-host rerun's own
+ * top when one ran (against the expanded index), else Gemini's original
+ * ranked top. The referee prompt (`earlierReadsFor`) and the 2-of-3 merge
+ * (`mergeConditionsScope`) read this ONE value, so the referee is judged
+ * against the vote it was actually shown (pre-push audit on Codex #5307 r1). */
+function firstConditionRead(conditions, escalation) {
+  return escalation.rerun?.top || [...conditions.possibilities].sort(byConfidenceDesc)[0] || null;
+}
+
 /** Per still-unsure scope: the first (Gemini) read and the second opinion
  * (OpenAI), when it answered this scope at all — the "Earlier reads" block
  * `buildRefereePrompt` renders into the referee's prompt. */
@@ -1852,7 +1861,7 @@ function earlierReadsFor(identity, conditions, escalation, unsureScopes) {
       // A corrected-host rerun's own top (against the EXPANDED index) IS the
       // "first" read from here on — the narrower pre-rerun Gemini top it
       // replaced is stale (Codex #5307 r1 finding 3).
-      const first = escalation.rerun?.top || [...conditions.possibilities].sort(byConfidenceDesc)[0] || null;
+      const first = firstConditionRead(conditions, escalation);
       // OpenAI's own ranked top, resolved against the SAME index the merge
       // uses — never the merged (Gemini+OpenAI) list's top, which can read
       // as Gemini's own pick when OpenAI's answer lost the tie-break
@@ -1962,7 +1971,7 @@ function mergeConditionsScope(conditions, escalation, refereeJson) {
   if (!topReferee) return { outcome: 'unavailable' };
   const top = escalation.possibilities[0] || null;
   if (flags.disagreed) {
-    const geminiTop = [...conditions.possibilities].sort(byConfidenceDesc)[0] || null;
+    const geminiTop = firstConditionRead(conditions, escalation);
     const openaiTop = resolvePossibilities(escalation.json?.conditions, index)[0] || null;
     const matched = geminiTop && topReferee.slug === geminiTop.slug ? geminiTop
       : (openaiTop && topReferee.slug === openaiTop.slug ? openaiTop : null);
