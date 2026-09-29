@@ -27,6 +27,40 @@ function hhmm(t) {
   return t ? String(t).slice(0, 5) : null;
 }
 
+// True when this row's own scheduled_date/window_start/window_end is
+// already behind `now` — the ONE "has this visit's time passed" rule every
+// caller must share (codex + independent-reviewer finding on PR #5308:
+// appointment-public.js's pageState used to compute this on its own,
+// window_start+2h only, and could disagree with THIS function for a long
+// job — calling a visit "past" and offering a "Pick a new time" link while
+// this verdict still said "not missed, just inside the move-notice
+// window", which reschedule-public.js then refuses: a dead end). A past
+// CALENDAR DATE is always elapsed; today's own date is elapsed only once
+// BOTH the internal job block (window_end) AND the quoted arrival promise
+// (window_start + 2h) have passed — window_end alone is often just the
+// job-duration block: a 9:00 visit with window_end 10:00 is still
+// legitimately "on the way" at 10:05, inside the quoted 9–11 arrival
+// window, and must not read as elapsed.
+function visitTimeElapsed(svc, now = new Date()) {
+  const dateStr = apptDateStr(svc.scheduled_date);
+  if (!dateStr) return false;
+  const todayEt = etDateString(now);
+  if (dateStr < todayEt) return true;
+  if (dateStr !== todayEt) return false;
+  const toMin = (t) => {
+    const [h, m] = String(t).split(':').map(Number);
+    return h * 60 + (m || 0);
+  };
+  const candidates = [];
+  const start = hhmm(svc.window_start);
+  const end = hhmm(svc.window_end);
+  if (end) candidates.push(toMin(end));
+  if (start) candidates.push(toMin(start) + ARRIVAL_PROMISE_MINUTES);
+  if (!candidates.length) return false;
+  const nowEt = etParts(now);
+  return Math.max(...candidates) <= nowEt.hour * 60 + nowEt.minute;
+}
+
 // Customer-facing eligibility for the appointment behind the token.
 // Returns { ok: true } or { ok: false, reason } with a customer-safe reason:
 //   completed | cancelled | in_progress | past | not_available
@@ -56,35 +90,10 @@ function eligibility(svc, now = new Date()) {
   // pending-rebook PLACEHOLDER other code treats as non-live — reviving it
   // to confirmed would resurrect a phantom visit.
   const missable = status === 'pending' || status === 'confirmed';
-  const dateStr = apptDateStr(svc.scheduled_date);
-  const todayEt = etDateString(now);
-  if (dateStr && dateStr < todayEt) {
+  if (visitTimeElapsed(svc, now)) {
     return missable ? { ok: true, missed: true } : { ok: false, reason: 'past' };
-  }
-  if (dateStr === todayEt) {
-    // Same-day: the visit is only MISSED once BOTH the internal job block
-    // (window_end) AND the customer-quoted arrival promise (window_start +
-    // 2h — owner rule, same constant the page displays) have elapsed.
-    // window_end alone is often just the job-duration block: a 9:00 visit
-    // with window_end 10:00 is still legitimately "on the way" at 10:05
-    // inside the quoted 9–11 arrival window, and must not read as missed.
-    const toMin = (t) => {
-      const [h, m] = String(t).split(':').map(Number);
-      return h * 60 + (m || 0);
-    };
-    const candidates = [];
-    const start = hhmm(svc.window_start);
-    const end = hhmm(svc.window_end);
-    if (end) candidates.push(toMin(end));
-    if (start) candidates.push(toMin(start) + ARRIVAL_PROMISE_MINUTES);
-    if (candidates.length) {
-      const nowEt = etParts(now);
-      if (Math.max(...candidates) <= nowEt.hour * 60 + nowEt.minute) {
-        return missable ? { ok: true, missed: true } : { ok: false, reason: 'past' };
-      }
-    }
   }
   return { ok: true };
 }
 
-module.exports = { eligibility, apptDateStr, hhmm, RESCHEDULABLE_STATUSES, ARRIVAL_PROMISE_MINUTES };
+module.exports = { eligibility, visitTimeElapsed, apptDateStr, hhmm, RESCHEDULABLE_STATUSES, ARRIVAL_PROMISE_MINUTES };

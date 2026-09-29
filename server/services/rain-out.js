@@ -1414,18 +1414,22 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   // Moved-first means the new slot is already booked — no confirmation
   // reply to ask for. Adjustments self-serve through the same tokenized
   // /reschedule link the 72h/24h reminders send. A capped move reuses what
-  // commit() built for its pre-move segment check. Custom: the exact
-  // { url, body } — templates are admin-editable and the shortener can
-  // fall back to the LONG url, so rebuilding either here could exceed the
-  // cap the check passed (codex pre-push P1). Preset with a note: the
-  // MEASURED url is re-validated here (pinnedUrl — the builder's grouped /
-  // frozen checks run on the POST-move state and hand back that same url
-  // or none; never a lookup or a mint), so a visit grouped in between gets
-  // no link the page refuses (r2 P2) and the body can only shrink against
-  // the measurement (pre-push P1). A measured "no link" stays no link.
+  // commit() built for its pre-move segment check. Custom AND preset-with-
+  // note both re-validate the MEASURED url here (pinnedUrl — the builder's
+  // full eligibility, including the C3/C6 dead-link move-window guard, runs
+  // on the POST-move (landed) state and hands back that same url or none;
+  // never a lookup or a mint), so a visit grouped/frozen/landed-too-soon in
+  // between gets no link the page would refuse (r2 P2; independent-
+  // reviewer finding on PR #5308 for the Custom rung specifically — its
+  // pre-move build uses assumeConfirmed, which the builder deliberately
+  // exempts from that guard, so THIS re-check is the only place it runs for
+  // a Custom move) and the body can only shrink against the measurement
+  // (pre-push P1). A measured "no link" stays no link.
   let rescheduleUrl;
   if (prebuiltSms?.body) {
-    rescheduleUrl = prebuiltSms.url;
+    rescheduleUrl = prebuiltSms.url
+      ? (await buildRescheduleLink(serviceId, { customerId: customer.id, pinnedUrl: prebuiltSms.url })).url
+      : null;
   } else if (prebuiltSms && 'url' in prebuiltSms) {
     rescheduleUrl = prebuiltSms.url
       ? (await buildRescheduleLink(serviceId, { customerId: customer.id, pinnedUrl: prebuiltSms.url })).url
@@ -1521,12 +1525,19 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   if (isCustom) {
     // Custom rung: the dispatcher's message IS the lead, the move line +
     // link close it out. The normal path uses the exact body commit()'s
-    // pre-move segment check validated. The render-here path only serves a
-    // caller that didn't prevalidate; it re-runs the cap itself, and a
-    // missing/disabled row (its own kill switch — there is no honest
-    // fallback rung, the older bodies all render a reason the dispatcher
-    // didn't pick) reports the customer was NOT texted.
-    if (prebuiltSms?.body) {
+    // pre-move segment check validated — UNLESS the landed-state re-check
+    // above (rescheduleUrl, via pinnedUrl) just revoked the pre-move-
+    // measured link: the visit's own slot now falls inside the move-notice
+    // window, or it went grouped/frozen, since the pre-move build
+    // (independent-reviewer finding on PR #5308 — the Custom rung's
+    // pre-move build runs with assumeConfirmed, which the link builder
+    // deliberately exempts from the move-window guard, so this send-time
+    // re-check is the only place it can catch a visit that landed too soon
+    // to move online again). When that happens, re-render with the SAME
+    // landed inputs and no link — dropping the link only SHRINKS the body
+    // (customLinkClause(null) is 46 chars vs >=67 for any link clause), so
+    // the cap this body already passed cannot be exceeded by the swap.
+    if (prebuiltSms?.body && rescheduleUrl === prebuiltSms.url) {
       body = prebuiltSms.body;
     } else {
       body = await renderCustomMovedBody({

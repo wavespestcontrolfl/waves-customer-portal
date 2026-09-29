@@ -3302,11 +3302,16 @@ describe('rain-out service', () => {
       // No weather claims and no NWS fetches on a custom move.
       expect(getDailyRainOutlook).not.toHaveBeenCalled();
       expect(getHourlyRainOutlook).not.toHaveBeenCalled();
-      // Checked body == sent body: the link is built once and the template
-      // rendered once (pre-move segment check); the send reuses both — an
-      // admin template edit or a shortener long-URL fallback between check
-      // and send could otherwise exceed the cap the check passed.
-      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      // Checked body == sent body: the template renders once (pre-move
+      // segment check) and the send reuses it — an admin template edit or
+      // a shortener long-URL fallback between check and send could
+      // otherwise exceed the cap the check passed. The link itself is
+      // built TWICE: once pre-move (mint/reuse) and once more at send time
+      // as a pinnedUrl re-check against the LANDED row (independent-
+      // reviewer finding on PR #5308) — here the landed state still agrees,
+      // so the pre-move body sends verbatim.
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', pinnedUrl: 'https://waves.test/r/tok123' });
       const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
       expect(customCalls).toHaveLength(1);
     });
@@ -3386,9 +3391,50 @@ describe('rain-out service', () => {
       const result = await RainOut.commit(COMMIT_ARGS);
 
       expect(result.ok).toBe(true);
-      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
+      // Pre-move mint/reuse, then the send-time pinnedUrl re-check against
+      // the landed row (independent-reviewer finding on PR #5308) — here it
+      // still agrees, so the pre-move body sends verbatim.
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(1, 'svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', pinnedUrl: 'https://waves.test/r/tok123' });
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
+    });
+
+    // Independent-reviewer finding on PR #5308: the Custom rung's pre-move
+    // build runs with assumeConfirmed, which the link builder deliberately
+    // exempts from the C3/C6 dead-link move-window guard (it reads the OLD,
+    // about-to-be-superseded row) — so a visit that landed too soon to move
+    // online again (or went grouped/frozen) must be caught HERE, at send
+    // time, or the customer gets a link the reschedule page then refuses.
+    test('gate on: the send drops a link revoked by the landed-state re-check (too soon to move online again, or grouped/frozen) — re-renders with the no-link clause, never a stale link', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      // Pre-move: eligible, existing code reused. Send: the builder
+      // re-validates the pinned url against the LANDED row and now refuses.
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
+        .mockResolvedValueOnce({ url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true });
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).not.toContain('New time & other options:');
+      expect(body).toContain(' Need a different time? Reply to this message.');
+      expect(body).not.toContain('waves.test');
+      expect(body).toContain(MESSAGE); // the dispatcher's own message is untouched
+      // The no-link clause is shorter, so the 2-segment cap the pre-move
+      // body already passed still holds — re-rendering never turns a
+      // fitting move into a rejected one.
+      const { countSegments } = require('../services/messaging/segment-counter');
+      const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+      const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+      expect(countSegments(normalizeGsmPunctuation(stripSmsUrlScheme(body))).segmentCount).toBeLessThanOrEqual(2);
+      // The template renders TWICE: once pre-move (with the link) and once
+      // more at send time (without it) — never the same body reused.
+      const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
+      expect(customCalls).toHaveLength(2);
     });
 
     test('custom renders pin the base row and demand the load-bearing placeholders (renderer opts contract)', async () => {

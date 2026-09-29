@@ -64,11 +64,16 @@
  * (reschedule-link-promises.js's visitNotSelfServiceReason) already parks
  * for the office instead of sending. Rather than mint a link that dead-
  * ends, such a visit gets { url: null, line: 'Need a change? Reply here or
- * call.\n\n' } — never the bare empty line, so the confirmation/reminder
- * still tells the customer how to reach someone. A MISSED visit (picking a
- * new time after the window passed) is exempt: it is not "too soon to
- * move", it is being rebooked. Skipped when previewOnly or assumeConfirmed
- * (see both above).
+ * call.\n\n', tooSoonToMove: true } — never the bare empty line, so the
+ * confirmation/reminder still tells the customer how to reach someone, and
+ * `tooSoonToMove` lets a caller that must explain the refusal (the admin
+ * composer's reschedule-link lookup) tell this apart from every other
+ * null-url reason. A MISSED visit (picking a new time after the window
+ * passed) is exempt: it is not "too soon to move", it is being rebooked.
+ * Skipped when previewOnly (a staff-driven surface, not self-serve) or
+ * assumeConfirmed (see both above) — an assumeConfirmed caller reads the
+ * OLD row and must run its OWN landed-state re-check once its move
+ * commits, the way rain-out.js's sendMovedSms does via pinnedUrl.
  */
 
 // What a fresh mint looks like, length-wise (short-url createShortCode:
@@ -131,15 +136,18 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
       && !svc.customer_confirmed) {
       return { url: null, line: '' };
     }
-    // Dead-link guard (C3/C6, see header) — same chokepoint every other
-    // refusal above runs through, so every caller (reminders, rain-out,
-    // the legacy Twilio reminder, admin quick-send) inherits it alike.
-    // Skipped for previewOnly (see its own doc comment above) AND for
-    // assumeConfirmed (pre-push audit round 2, claude fallback P1): that
-    // flag's only callers are rain-out's pre-move measurement/reuse, which
-    // read this row BEFORE the rebooker moves it — checking the move window
-    // against the OLD, about-to-be-superseded slot would refuse a link for
-    // a visit whose NEW slot is perfectly fine to reschedule again later.
+    // Dead-link guard (C3/C6, see header) — the same chokepoint every OTHER
+    // refusal above runs through, so a plain (non-preview, non-
+    // assumeConfirmed) caller — reminders, admin quick-send, the legacy
+    // Twilio reminder — inherits it automatically. That is NOT every
+    // caller, though: previewOnly skips it outright (its own doc comment
+    // above), and assumeConfirmed skips it HERE but is not exempt from the
+    // underlying rule — rain-out's pre-move measurement/reuse reads the
+    // OLD, about-to-be-superseded row (checking the move window against it
+    // would refuse a link for a visit whose NEW slot may be fine), so it
+    // must re-run this same check itself against the LANDED row once the
+    // move commits (its own pinnedUrl re-validation at send time — see
+    // rain-out.js's sendMovedSms) rather than inherit it from here.
     // assumeConfirmed already means "trust the caller, this row's real-
     // world state is about to differ from what's stored" for the dispatch-
     // pending refusal above; the same reasoning applies here.
@@ -147,7 +155,13 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
       const now = new Date();
       const verdict = eligibility(svc, now);
       if (require('./reschedule-link-promises').tooSoonToSelfServeMove(svc, verdict, now)) {
-        return { url: null, line: NO_LINK_LINE };
+        // tooSoonToMove: true lets a caller that must explain WHY there is
+        // no link (e.g. the admin composer's reschedule-link lookup) tell
+        // this apart from every other null-url reason (no token, grouped/
+        // frozen, dispatch-owned-pending, shortener failure) — those are
+        // dead ends; this one just means "too soon, ask them to reply or
+        // call" (independent-reviewer finding on PR #5308).
+        return { url: null, line: NO_LINK_LINE, tooSoonToMove: true };
       }
     }
 

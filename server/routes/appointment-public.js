@@ -55,6 +55,7 @@ const {
 } = require('../utils/sms-time-format');
 const { calendarIcsAvailable, groupedStopEndsAt, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
 const { visitInsideMoveNoticeWindow } = require('../services/scheduling/self-serve-notice');
+const { visitTimeElapsed } = require('../services/reschedule-eligibility');
 const visitPrep = require('../services/visit-prep');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 
@@ -178,14 +179,23 @@ function pageState(svc, now = new Date()) {
   // Past the quoted arrival window with no terminal status = the visit came
   // and went; don't show a "your visit is tomorrow" card for it.
   const date = apptDateStr(svc.scheduled_date);
-  const start = hhmm(svc.window_start);
-  if (date) {
-    const endsAt = start
-      ? new Date(parseETDateTime(`${date}T${start}`).getTime() + ARRIVAL_PROMISE_MINUTES * 60000)
-      : parseETDateTime(`${date}T23:59`);
-    if (endsAt && endsAt < now) return { state: 'past' };
+  if (!date) return { state: 'upcoming' };
+  if (!hhmm(svc.window_start)) {
+    // Windowless: stays live through the end of its own calendar day — no
+    // arrival-promise instant to compare against.
+    const endsAt = parseETDateTime(`${date}T23:59`);
+    return { state: endsAt && endsAt < now ? 'past' : 'upcoming' };
   }
-  return { state: 'upcoming' };
+  // A window_start is present: defer to the SAME "has this visit's time
+  // passed" rule reschedule-eligibility.js applies (visitTimeElapsed —
+  // codex + independent-reviewer finding on PR #5308). This used to
+  // compute window_start+2h only, which could disagree with that rule for
+  // a long job (e.g. 06:00-10:00 viewed at 09:00): this page would call the
+  // visit "past" and offer a "Pick a new time" link, while
+  // reschedule-eligibility.js still called it upcoming-and-not-missed —
+  // reschedule-public.js then refuses the move (too soon, inside the
+  // notice window) and the link dead-ends.
+  return { state: visitTimeElapsed(svc, now) ? 'past' : 'upcoming' };
 }
 
 

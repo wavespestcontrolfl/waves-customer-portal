@@ -84,7 +84,7 @@ describe('buildRescheduleLink dead-link guard (C3/C6)', () => {
     // the default 24h move window.
     mockSvc(svcRow({ scheduled_date: '2026-05-06', window_start: '10:00:00' }));
     await expect(buildRescheduleLink('svc-1')).resolves.toEqual({
-      url: null, line: 'Need a change? Reply here or call.\n\n',
+      url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true,
     });
     expect(mockShortenOrPassthrough).not.toHaveBeenCalled();
   });
@@ -115,7 +115,7 @@ describe('buildRescheduleLink dead-link guard (C3/C6)', () => {
     // URL — reschedule-public.js's own full-row read would refuse the move.
     mockSvc(svcRow({ scheduled_date: '2026-05-06', window_start: '06:00:00', window_end: '10:00:00' }));
     await expect(buildRescheduleLink('svc-1')).resolves.toEqual({
-      url: null, line: 'Need a change? Reply here or call.\n\n',
+      url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true,
     });
     expect(mockShortenOrPassthrough).not.toHaveBeenCalled();
   });
@@ -139,7 +139,7 @@ describe('buildRescheduleLink dead-link guard (C3/C6)', () => {
       // Still 1 hour out — the (unset, default-24h) MOVE window still refuses.
       mockSvc(svcRow({ scheduled_date: '2026-05-06', window_start: '10:00:00' }));
       await expect(buildRescheduleLink('svc-1')).resolves.toEqual({
-        url: null, line: 'Need a change? Reply here or call.\n\n',
+        url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true,
       });
     } finally {
       if (prev === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
@@ -172,7 +172,7 @@ describe('buildRescheduleLink dead-link guard (C3/C6)', () => {
     mockSvc(svcRow({ scheduled_date: '2026-05-06', window_start: '10:00:00' }));
     mockExistingShortUrlFor.mockResolvedValueOnce('https://portal.test/l/existing');
     await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({
-      url: null, line: 'Need a change? Reply here or call.\n\n',
+      url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true,
     });
     expect(mockExistingShortUrlFor).not.toHaveBeenCalled();
   });
