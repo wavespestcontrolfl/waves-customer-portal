@@ -347,12 +347,16 @@ function useRefreshWhileReadPending(customerFlagged, onRefresh) {
   const [refreshTick, setRefreshTick] = useState(0);
   useEffect(() => {
     if (!pendingKey || polls.current.count >= READ_PENDING_MAX_POLLS) return undefined;
+    let cancelled = false;
     const timer = setTimeout(() => {
       polls.current.count += 1;
-      if (typeof refreshRef.current === 'function') refreshRef.current();
-      setRefreshTick((n) => n + 1);
+      // Re-arm only after this refresh settles, so a slow connection never
+      // stacks refreshes (Codex #5305 r18 P2).
+      Promise.resolve(typeof refreshRef.current === 'function' ? refreshRef.current() : null)
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setRefreshTick((n) => n + 1); });
     }, READ_PENDING_POLL_MS);
-    return () => clearTimeout(timer);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [pendingKey, refreshTick]);
 }
 

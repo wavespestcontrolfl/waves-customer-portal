@@ -215,6 +215,25 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     }
   });
 
+  it('a slow refresh is awaited before the next poll is armed', async () => {
+    vi.useFakeTimers();
+    try {
+      let settle;
+      const onRetry = vi.fn(() => new Promise((resolve) => { settle = resolve; }));
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }], onRetry });
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      // Still in flight: no second poll however long it takes.
+      await act(async () => { vi.advanceTimersByTime(90 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      await act(async () => { settle(); await Promise.resolve(); });
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a parent re-render with a new retry callback does not restart the 30 s timer', async () => {
     vi.useFakeTimers();
     try {

@@ -21,6 +21,12 @@ jest.mock('../services/visit-prep', () => ({
   techStopMemberIds: (...args) => mockTechStopMemberIds(...args),
 }));
 
+// The canonical stop lock (visit-groups.js); stubbed per test.
+const mockLockStopForRow = jest.fn(async (trx, id) => id);
+jest.mock('../services/visit-groups', () => ({
+  lockStopForRow: (...args) => mockLockStopForRow(...args),
+}));
+
 const mockGetPhotoBase64 = jest.fn();
 jest.mock('../services/photos', () => ({
   getPhotoBase64: (...args) => mockGetPhotoBase64(...args),
@@ -151,6 +157,8 @@ beforeEach(() => {
   // Applicability is checked twice (pre-check and inside the claim).
   mockTechStopMemberIds.mockReset();
   mockTechStopMemberIds.mockImplementation(async (svc) => [svc.id]);
+  mockLockStopForRow.mockReset();
+  mockLockStopForRow.mockImplementation(async (trx, id) => id);
   mockGateOn = true;
   delete process.env.VISIT_PREP_READ_DAILY_CAP;
 });
@@ -216,6 +224,17 @@ describe('trigger rule', () => {
       conn,
     });
     expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
+  });
+
+  test('the claim takes the canonical stop lock first, and a stop that keeps moving is refused (none), never read', async () => {
+    const moved = Object.assign(new Error('visit stop moved concurrently — retry'), { code: 'VISIT_STOP_MOVED' });
+    mockLockStopForRow.mockRejectedValue(moved);
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
+    expect(mockLockStopForRow).toHaveBeenCalledTimes(3);
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_ref: null }]);
   });
 
   test('the claim share-locks every row of the stop, siblings included', async () => {

@@ -84,27 +84,39 @@ const CAP_LOCK_KEY = 'visit-prep-pest-read-cap';
 // Returns 'claimed', 'unsupported' (no longer a pest stop) or 'refused'
 // (cap reached, or not a today submission).
 async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
-  return conn.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
-    // Applicability re-proved INSIDE the claim, with the stop's rows share-
-    // locked so a reclassification or cancellation either lands before this
-    // check or waits for the claim (Codex #5305 r14 P2).
-    // Every row of the stop is share-locked, not only the anchor: a grouped
-    // stop can be "pest" only through a sibling (Codex #5305 r15 P2).
-    const { techStopMemberIds } = require('./visit-prep');
-    const members = await techStopMemberIds(svc, trx);
-    await trx('scheduled_services').whereIn('id', [...new Set([svc.id, ...members])]).forShare().select('id');
-    if (!(await isPestStop(svc, trx))) return 'unsupported';
-    // The count is by submission day, so only a TODAY (ET) submission may
-    // claim: one committed just before midnight whose trigger runs after it
-    // is not read, rather than spending the new day's cap uncounted
-    // (Codex #5305 r4 P2). Its photos still reach the technician.
-    const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
-    if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
-    if (await readsToday(trx, now) >= dailyCap()) return 'refused';
-    await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', read_ref: null });
-    return 'claimed';
-  });
+  // The canonical stop lock (visit-groups.js lockStopForRow) serializes this
+  // proof against every grouping writer (join, move, detach), so the member
+  // set can't change under it; the members' rows are then share-locked
+  // against status/type writers that don't take the stop lock. A stop that
+  // moved under the peek retries, like visit-prep.js withStopLock
+  // (Codex #5305 r18 P1).
+  const { lockStopForRow } = require('./visit-groups');
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await conn.transaction(async (trx) => {
+        if ((await lockStopForRow(trx, svc.id)) === null) return 'unsupported';
+        const { techStopMemberIds } = require('./visit-prep');
+        const members = await techStopMemberIds(svc, trx);
+        await trx('scheduled_services').whereIn('id', [...new Set([svc.id, ...members])]).forShare().select('id');
+        if (!(await isPestStop(svc, trx))) return 'unsupported';
+        // The cap lock last, held only for the count and the claim.
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
+        // The count is by submission day, so only a TODAY (ET) submission
+        // may claim: one committed just before midnight whose trigger runs
+        // after it is not read, rather than spending the new day's cap
+        // uncounted (Codex #5305 r4 P2). Its photos still reach the tech.
+        const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
+        if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
+        if (await readsToday(trx, now) >= dailyCap()) return 'refused';
+        await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', read_ref: null });
+        return 'claimed';
+      });
+    } catch (err) {
+      if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
+      if (err && err.code === 'VISIT_STOP_MOVED') return 'refused';
+      throw err;
+    }
+  }
 }
 
 async function setReadStatus(conn, submissionId, status, readRef = null) {
