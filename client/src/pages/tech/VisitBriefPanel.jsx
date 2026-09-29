@@ -248,6 +248,7 @@ function formatVisitPrepPlantReadLine(read) {
   const parts = [];
   parts.push(`${read.headline || "We couldn't tell from these photos"}.`);
   if (read.plantCommonName && read.plantCommonName !== read.conditionName) parts.push(`Plant: ${read.plantCommonName}.`);
+  if (read.weedNames?.length) parts.push(`Weeds: ${read.weedNames.join(', ')}.`);
   if (read.fits?.length) parts.push(`Fits: ${read.fits.join('; ')}.`);
   if (read.notYet?.length) parts.push(`Not yet seen: ${read.notYet.join('; ')}.`);
   for (const line of read.safetyLines || []) parts.push(line);

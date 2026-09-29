@@ -643,6 +643,7 @@ describe('plantReadFactsFromResult', () => {
       wordingTier: 'likely',
       headline: 'Likely: Brown Patch',
       plantCommonName: 'St. Augustinegrass',
+      weedNames: [],
       conditionName: 'Brown Patch',
       fits: ['Roughly circular brown patch'],
       notYet: ['A smoke-ring edge'],
@@ -651,6 +652,18 @@ describe('plantReadFactsFromResult', () => {
       safetyLines: [],
       hazards: null,
     });
+  });
+
+  test('a weed-focused read names the approved weeds the engine found (Codex #5320 r13)', () => {
+    const facts = plantReadFactsFromResult('done', {
+      subject_type: 'lawn',
+      v2: {
+        answer: { level: 'symptom', wording: null, headline: 'Weeds in the lawn' },
+        subject: { plant: null, weeds: [{ common_name: 'Spotted Spurge', wording: 'likely' }, { common_name: 'Dollarweed', wording: 'possibly' }] },
+        possibilities: [],
+      },
+    });
+    expect(facts.weedNames).toEqual(['Spotted Spurge', 'Dollarweed']);
   });
 
   test('a symptom-level (unnamed) answer carries no conditionName', () => {

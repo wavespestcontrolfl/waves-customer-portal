@@ -129,7 +129,7 @@ function fakeConn(seed = {}) {
       .filter((r) => !q._since || !r.created_at || new Date(r.created_at) >= q._since)
       .filter((r) => !q._caseValue || metaOf(r).case === q._caseValue)
       .filter((r) => !q._idsFilter || q._idsFilter.includes(String(metaOf(r).submissionId)))
-      .map((r) => ({ submission_id: String(metaOf(r).submissionId) }));
+      .map((r) => ({ submission_id: String(metaOf(r).submissionId), attempts: metaOf(r).attempts == null ? null : String(metaOf(r).attempts) }));
     q.insert = async (row) => { store.activityLog.push({ created_at: new Date(), ...row }); return [{ id: `gen-${store.activityLog.length}` }]; };
     return q;
   }
@@ -283,12 +283,17 @@ describe('base eligibility filters', () => {
     expect(await selectCandidates(conn, NOW)).toHaveLength(0);
   });
 
-  test('a submission from before today\'s ET midnight is excluded (the claim would refuse it)', async () => {
-    const conn = fakeConn({
+  test('a submission from an earlier day on a still-upcoming visit is a candidate; one older than the recovery window is not (Codex #5320 r12)', async () => {
+    const recent = fakeConn({
       submissions: [submission({ read_status: 'none', created_at: new Date(NOW.getTime() - 26 * 3600 * 1000) })],
       services: [svc({ scheduled_date: TODAY_ET })],
     });
-    expect(await selectCandidates(conn, NOW)).toHaveLength(0);
+    expect(await selectCandidates(recent, NOW)).toHaveLength(1);
+    const old = fakeConn({
+      submissions: [submission({ read_status: 'none', created_at: new Date(NOW.getTime() - 16 * 24 * 3600 * 1000) })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect(await selectCandidates(old, NOW)).toHaveLength(0);
   });
 });
 
@@ -441,7 +446,7 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
       photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
     });
     const candidates = await selectCandidates(conn, NOW);
-    expect(candidates.map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_DONE]);
+    expect(candidates.map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
     await sweepVisitPrepPestReads(conn, NOW);
     const row = conn._store.submissions[0];
     expect(row).toMatchObject({ read_status: 'none', read_result: null, read_ref: null, read_attempts: 1 });
@@ -454,7 +459,7 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
       submissions: [submission({ read_status: 'done', read_result: LAWN_READ, created_at: NOW })],
       services: [svc({ scheduled_date: TODAY_ET })],
     });
-    expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_DONE]);
+    expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
   });
 
   test('a done read that still matches the stop is never a candidate (and is checked, then cooled down)', async () => {
@@ -514,5 +519,63 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
     await _retryOneForTest(conn, row);
     expect(conn._store.submissions[0].read_status).toBe('done');
     expect(mockTrigger).not.toHaveBeenCalled();
+  });
+});
+
+describe('case (d) covers failed reads and is one retry per settled attempt (Codex #5320 r13)', () => {
+  const LAWN_FAIL = JSON.stringify({ engine: 'plant', subject_type: 'lawn' });
+  const marker = (attempts) => ({
+    action: 'visit_prep_read_sweep_attempt', created_at: NOW, metadata: { submissionId: 'sub-1', case: SWEEP_CASE.STALE_READ, attempts },
+  });
+
+  test('a failed lawn read on a stop that is pest now is released and re-read', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'failed', read_result: LAWN_FAIL, read_attempts: 1, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
+    await sweepVisitPrepPestReads(conn, NOW);
+    expect(conn._store.submissions[0]).toMatchObject({ read_status: 'none', read_attempts: 1 });
+    expect(mockTrigger).toHaveBeenCalledWith(expect.objectContaining({ expectStatus: ['none'] }));
+  });
+
+  test('a failed read on the line it failed on is never retried', async () => {
+    mockIsPestStop.mockResolvedValue('plant:lawn');
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'failed', read_result: LAWN_FAIL, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect(await selectCandidates(conn, NOW)).toEqual([]);
+  });
+
+  test('a stop reclassified AGAIN after a recovered read gets its own retry; the same attempt never twice', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const LAWN_DONE = JSON.stringify({ engine: 'plant', subject_type: 'lawn', v2: {} });
+    const again = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_DONE, read_attempts: 2, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      activityLog: [marker(1)],
+    });
+    expect((await selectCandidates(again, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
+    const same = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_DONE, read_attempts: 2, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      activityLog: [marker(2)],
+    });
+    expect(await selectCandidates(same, NOW)).toEqual([]);
+  });
+
+  test('the retry marker records the attempt it replaced', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'failed', read_result: LAWN_FAIL, read_attempts: 3, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    await sweepVisitPrepPestReads(conn, NOW);
+    const retry = conn._store.activityLog.find((r) => r.action === 'visit_prep_read_sweep_attempt');
+    expect(metaOf(retry)).toMatchObject({ case: SWEEP_CASE.STALE_READ, attempts: 3 });
   });
 });

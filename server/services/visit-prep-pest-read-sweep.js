@@ -12,12 +12,13 @@
  *       while it was read (the dispatcher's MAX_DISPATCHES bound);
  *   (c) read_status 'unsupported' where a live read engine now reads the
  *       stop (office reclassified it after the photos arrived);
- *   (d) read_status 'done' whose engine / subject no longer matches the
- *       read the stop wants now (pest -> lawn, lawn -> tree & shrub after
- *       the read finished). The tech display already hides such a read;
- *       the sweep releases it to 'none' and re-reads the stop once
- *       (Codex #5320 r10 P2). Its first attempt stays counted in
- *       read_attempts, so the re-read is charged against the daily cap.
+ *   (d) read_status 'done' or 'failed' whose engine / subject no longer
+ *       matches the read the stop wants now (pest -> lawn, lawn -> tree &
+ *       shrub after the read settled, on the same day or a later one). The
+ *       tech display already hides such a read; the sweep releases it to
+ *       'none' and re-reads the stop once per settled attempt (Codex #5320
+ *       r10, r12, r13). Its first attempt stays counted in read_attempts,
+ *       and the re-read is charged to the day it runs.
  *
  * A 'pending' row is NEVER retried (Codex #5319 r2): a pending row may belong
  * to a read that is still running, and there is no claim timestamp to tell
@@ -32,19 +33,21 @@
  * original submission calls (services/visit-prep-read-dispatch.js), so every
  * engine-choice/claim/cap rule stays in exactly one place; this module never
  * touches pest_identifications, the stop lock, or the daily-cap count
- * directly. 'failed' rows are NEVER retried — an engine error already cost
- * a paid vision call, and retrying it is how a retry storm starts.
+ * directly. A 'failed' row is NEVER retried on the line it failed on — an
+ * engine error already cost a paid vision call, and retrying it is how a
+ * retry storm starts; only a changed line (case d) re-reads it.
  *
- * Candidates: submissions created TODAY (America/New_York) whose
+ * Candidates: submissions from the last RECOVERY_WINDOW_DAYS (ET days) whose
  * visit is still upcoming (scheduled_date >= today ET) and not
  * join-ineligible (visit-context/statuses.js JOIN_INELIGIBLE_STATUSES —
- * terminal statuses plus 'rescheduled'). Case (c) additionally requires a
- * live engine to read the stop RIGHT NOW (the dispatcher's own
- * chooseEngine) — the engine re-checks this itself under the stop lock, so
+ * terminal statuses plus 'rescheduled'). Cases (c) and (d) additionally
+ * require the stop's read RIGHT NOW (the dispatcher's own currentReadKey)
+ * to differ from what the row holds — the engine re-checks this itself under the stop lock, so
  * this is only a pre-filter for which rows are worth attempting at all.
  *
- * At most ONE sweep retry per row per case: a `visit_prep_read_sweep_attempt`
- * activity_log row is written (metadata.submissionId + metadata.case)
+ * At most ONE sweep retry per row per case (per settled attempt for case d):
+ * a `visit_prep_read_sweep_attempt` activity_log row is written
+ * (metadata.submissionId + metadata.case + metadata.attempts)
  * BEFORE the retry runs, the same idempotency-marker pattern
  * call-reschedule-apply.js uses on the same table — so a row whose retry
  * lands right back in the SAME case (the cap still refuses it, the stop is
@@ -64,9 +67,11 @@ const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { etDateString } = require('../utils/datetime-et');
 
 const SWEEP_ACTION = 'visit_prep_read_sweep_attempt';
-// Only today's (ET) submissions: the trigger's claim refuses any submission
-// from an earlier ET day (its cap is counted by submission day), so an older
-// retry could only end 'none' without a read.
+// How far back a submission is still worth reading: its visit must also be
+// upcoming (candidateRows), and the daily cap counts a read on the ET day
+// it runs (visit-prep-read-claim.js readsToday), so a re-read of an older
+// submission is charged to today (Codex #5320 r12).
+const RECOVERY_WINDOW_DAYS = 14;
 // The buffer applied to case (b) 'none' rows so the sweep never races the
 // original submission's own in-flight, fire-and-forget trigger.
 const NONE_MIN_AGE_MS = 15 * 60 * 1000;
@@ -75,7 +80,9 @@ const SWEEP_BATCH_LIMIT = 10;
 const SWEEP_CASE = {
   NONE_RETRY: 'none_retry',
   RECLASSIFIED: 'reclassified',
-  STALE_DONE: 'stale_done',
+  // A done or failed read made by the wrong engine / subject for the stop
+  // as it is now (Codex #5320 r10, r13).
+  STALE_READ: 'stale_read',
 };
 
 async function loadPhotos(conn, submissionId) {
@@ -90,8 +97,8 @@ async function loadPhotos(conn, submissionId) {
 async function candidateRows(conn, now) {
   return conn('visit_prep_submissions as vps')
     .join('scheduled_services as ss', 'ss.id', 'vps.scheduled_service_id')
-    .whereIn('vps.read_status', ['none', 'unsupported', 'done'])
-    .where('vps.created_at', '>=', etDayStart(now))
+    .whereIn('vps.read_status', ['none', 'unsupported', 'done', 'failed'])
+    .where('vps.created_at', '>=', etDayStart(new Date(now.getTime() - RECOVERY_WINDOW_DAYS * 24 * 60 * 60 * 1000)))
     .where('ss.scheduled_date', '>=', etDateString(now))
     .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
     .select(
@@ -101,7 +108,10 @@ async function candidateRows(conn, now) {
 }
 
 // Drops any row this sweep has already retried once for this exact case
-// (see file header — the one-retry-per-row-per-case bound).
+// (see file header — the one-retry-per-row-per-case bound). A stale-read
+// retry is keyed to the read attempt it replaced as well, so a stop
+// reclassified AGAIN after a successful recovery gets its own retry
+// (Codex #5320 r13).
 async function dropAlreadyAttempted(conn, rows, caseLabel) {
   if (!rows.length) return rows;
   const ids = rows.map((r) => String(r.submission_id));
@@ -111,9 +121,10 @@ async function dropAlreadyAttempted(conn, rows, caseLabel) {
     .where({ action: SWEEP_ACTION })
     .whereRaw("metadata->>'case' = ?", [caseLabel])
     .whereIn(conn.raw("metadata->>'submissionId'"), ids)
-    .select(conn.raw("metadata->>'submissionId' as submission_id"));
-  const seen = new Set(attempted.map((r) => String(r.submission_id)));
-  return rows.filter((r) => !seen.has(String(r.submission_id)));
+    .select(conn.raw("metadata->>'submissionId' as submission_id"), conn.raw("metadata->>'attempts' as attempts"));
+  const perAttempt = caseLabel === SWEEP_CASE.STALE_READ;
+  const seen = new Set(attempted.map((r) => (perAttempt ? `${r.submission_id}@${r.attempts}` : String(r.submission_id))));
+  return rows.filter((r) => !seen.has(perAttempt ? `${r.submission_id}@${Number(r.read_attempts) || 0}` : String(r.submission_id)));
 }
 
 const CHECK_ACTION = 'visit_prep_read_sweep_check';
@@ -139,13 +150,16 @@ async function recordCheck(conn, row) {
   });
 }
 
+const SETTLED = ['done', 'failed'];
+
 // Does this row need a read the stop's current engine would make? (c): an
-// unsupported row a live engine reads now; (d): a finished read made by the
-// wrong engine / subject for the stop as it is now.
+// unsupported row a live engine reads now; (d): a done or failed read made
+// by the wrong engine / subject for the stop as it is now. A failed read on
+// an unchanged line is never retried.
 async function needsReadNow(conn, row, live) {
   const want = await currentReadKey({ id: row.scheduled_service_id, visit_id: row.visit_id }, conn, live);
   if (!want) return false;
-  return row.read_status === 'done' ? storedReadKey(row.read_result) !== want : true;
+  return SETTLED.includes(row.read_status) ? storedReadKey(row.read_result) !== want : true;
 }
 
 async function selectCandidates(conn, now) {
@@ -155,12 +169,12 @@ async function selectCandidates(conn, now) {
   const none = rows.filter((r) => r.read_status === 'none'
     && now.getTime() - new Date(r.created_at).getTime() > NONE_MIN_AGE_MS);
   const unsupported = rows.filter((r) => r.read_status === 'unsupported');
-  const done = rows.filter((r) => r.read_status === 'done');
+  const settled = rows.filter((r) => SETTLED.includes(r.read_status));
 
-  const [noneOk, unsupportedOk, doneOk] = await Promise.all([
+  const [noneOk, unsupportedOk, settledOk] = await Promise.all([
     dropAlreadyAttempted(conn, none, SWEEP_CASE.NONE_RETRY),
     dropAlreadyAttempted(conn, unsupported, SWEEP_CASE.RECLASSIFIED),
-    dropAlreadyAttempted(conn, done, SWEEP_CASE.STALE_DONE),
+    dropAlreadyAttempted(conn, settled, SWEEP_CASE.STALE_READ),
   ]);
 
   // Cases (c) and (d) only when the stop's read RIGHT NOW differs from what
@@ -171,7 +185,7 @@ async function selectCandidates(conn, now) {
   // advances through the cohort instead of re-checking the same oldest rows
   // (Codex #5319 r2 P2).
   const room = Math.max(0, SWEEP_BATCH_LIMIT - noneOk.length);
-  const unchecked = await dropRecentlyChecked(conn, [...unsupportedOk, ...doneOk], now);
+  const unchecked = await dropRecentlyChecked(conn, [...unsupportedOk, ...settledOk], now);
   const changed = [];
   const oldestFirst = [...unchecked].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   for (const row of oldestFirst.slice(0, room * 2)) {
@@ -185,7 +199,7 @@ async function selectCandidates(conn, now) {
 
   const combined = [
     ...noneOk.map((r) => ({ ...r, caseLabel: SWEEP_CASE.NONE_RETRY })),
-    ...changed.map((r) => ({ ...r, caseLabel: r.read_status === 'done' ? SWEEP_CASE.STALE_DONE : SWEEP_CASE.RECLASSIFIED })),
+    ...changed.map((r) => ({ ...r, caseLabel: SETTLED.includes(r.read_status) ? SWEEP_CASE.STALE_READ : SWEEP_CASE.RECLASSIFIED })),
   ];
   // Oldest first, then bound the whole run (e.g. 10 rows) so a backlog can
   // never burn the day's cap in one tick.
@@ -193,12 +207,12 @@ async function selectCandidates(conn, now) {
   return combined.slice(0, SWEEP_BATCH_LIMIT);
 }
 
-// Releases a stale done read to 'none' so it can be re-read — only after
+// Releases a stale done or failed read to 'none' so it can be re-read — only after
 // proving, under the stop lock, that the stop still wants a DIFFERENT read
 // than the one stored (a stop that changed back keeps its valid result;
 // Codex #5320 r11 P2), and only while it is still the exact read this sweep
 // judged (every claim bumps read_attempts). Its attempt stays counted.
-async function releaseStaleDone(conn, row, svc) {
+async function releaseStaleRead(conn, row, svc) {
   const live = { pestLive: visitPrepPestReadLive(), plantLive: visitPrepPlantReadLive() };
   return withLockedStop(conn, svc, {
     onGone: () => false,
@@ -206,9 +220,9 @@ async function releaseStaleDone(conn, row, svc) {
     body: async (trx) => {
       if (!(await needsReadNow(trx, row, live))) return false;
       const released = await trx('visit_prep_submissions')
-        .where({ id: row.submission_id, read_status: 'done', read_attempts: row.read_attempts })
-        // A read finished before read_attempts existed holds 0 and counted
-        // only through 'done'; released, it keeps one attempt counted.
+        .where({ id: row.submission_id, read_status: row.read_status, read_attempts: row.read_attempts })
+        // A read settled before read_attempts existed holds 0 and counted
+        // only through its status; released, it keeps one attempt counted.
         .update({
           read_status: 'none', read_ref: null, read_result: null, read_attempts: Math.max(Number(row.read_attempts) || 0, 1),
         });
@@ -227,6 +241,8 @@ async function retryOne(conn, row) {
     metadata: {
       submissionId: String(row.submission_id),
       case: row.caseLabel,
+      // The attempt this retry replaces (stale-read retries are one per attempt).
+      attempts: Number(row.read_attempts) || 0,
       scheduledServiceId: String(row.scheduled_service_id),
     },
   });
@@ -240,8 +256,8 @@ async function retryOne(conn, row) {
     status: row.status,
   };
   let expectStatus = [row.read_status];
-  if (row.read_status === 'done') {
-    if (!(await releaseStaleDone(conn, row, svc))) return;
+  if (SETTLED.includes(row.read_status)) {
+    if (!(await releaseStaleRead(conn, row, svc))) return;
     expectStatus = ['none'];
   }
   // dispatchVisitPrepRead never throws (see its own docstring) — every
