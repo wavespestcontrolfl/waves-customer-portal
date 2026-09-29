@@ -168,6 +168,31 @@ describe('agent-gap-reports', () => {
     });
   });
 
+  describe('recordGap', () => {
+    test('writes one row for a source with no per-request collector', async () => {
+      const { recordGap } = load();
+      const saved = await recordGap({ source: 'texting-ai', summary: 'Customer asked about a service we do not offer',
+        attempted: 'Customer text: does Waves do pool cleaning?' });
+      expect(saved).toEqual([{ id: 7, occurrences: 1, status: 'new' }]);
+      expect(insertedRows[0]).toMatchObject({ source: 'texting-ai', kind: 'missing_capability',
+        summary: 'Customer asked about a service we do not offer' });
+    });
+
+    test('never throws when the write rejects', async () => {
+      dbMock.transaction.mockImplementation(async () => { throw new Error('down'); });
+      const { recordGap } = load();
+      await expect(recordGap({ source: 'phone-agent', summary: 'wants pool service', attempted: 'Handed to the office' }))
+        .resolves.toEqual([]);
+    });
+
+    test('the AGENT_GAP_REPORTS=off kill switch writes nothing', async () => {
+      process.env.AGENT_GAP_REPORTS = 'off';
+      const { recordGap } = load();
+      await expect(recordGap({ source: 'phone-agent', summary: 'x' })).resolves.toEqual([]);
+      expect(dbMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createGapCollector', () => {
     const MISS = { status: 'capability_unimplemented', capabilities: [] };
     const found = (...ids) => ({ status: 'capabilities_found', capabilities: ids.map((id) => ({ id, domain: 'customers' })) });
@@ -252,6 +277,38 @@ describe('agent-gap-reports', () => {
       await collector.flush({ reply: DECLINE });
       expect(insertedRows[0]).toMatchObject({ closest_tool: 'save_customer_estimate', attempted: 'The tool exists but does not support this case',
         summary: 'save_customer_estimate: Commercial estimates are not supported by this tool' });
+    });
+
+    test('declined with no signals gathered records the ask itself (the tech-bar fallback, no discovery loop)', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'tech-bar' });
+      await collector.flush({ reply: DECLINE, ask: '  Can you add a note to my next stop?  ' });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ source: 'tech-bar', kind: 'missing_capability',
+        summary: 'Can you add a note to my next stop?', attempted: 'The bar declined; no capability search ran' });
+    });
+
+    test('declined with no signals and no ask records nothing', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'tech-bar' });
+      await collector.flush({ reply: DECLINE, ask: '   ' });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('declined WITH signals gathered ignores ask — existing collected signals are unchanged', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      collector.discovery({ query: 'add a second service address', domain: 'customers' }, MISS);
+      await collector.flush({ reply: DECLINE, ask: 'a completely different ask' });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ summary: 'add a second service address' });
+    });
+
+    test('not declined records nothing, ask or no ask', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'tech-bar' });
+      await collector.flush({ reply: "Here's your route for today.", ask: 'what is my route today?' });
+      expect(insertedRows).toHaveLength(0);
     });
 
     test('flush never rejects, even when the database throws', async () => {

@@ -157,6 +157,16 @@ async function upsertGapRow(row) {
 }
 
 /**
+ * One-shot record for a source with no per-request collector to sample (the
+ * texting AI and phone-agent hooks each observe exactly one signal per
+ * event, not a discovery loop). Same table, same dedupe-by-fingerprint;
+ * never throws.
+ */
+async function recordGap({ source, summary, attempted, closestTool } = {}) {
+  return writeGapRows([{ source, kind: 'missing_capability', summary, attempted, closestTool }]);
+}
+
+/**
  * Records each distinct signal once (deduped by fingerprint, so a search the
  * model retried in several rounds counts one occurrence for the request).
  * Returns the saved { id, occurrences, status } per written row. Never
@@ -285,11 +295,21 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
     return signals;
   }
 
-  async function flush({ reply } = {}) {
+  // `ask` (the caller's own request text) is the tech-bar's fallback signal:
+  // that context has no discover_capabilities search, so a decline with
+  // nothing collected would otherwise vanish. Admin platform requests keep
+  // their existing behaviour — they always searched first, so an empty
+  // `signals` there already means nothing worth recording.
+  async function flush({ reply, ask } = {}) {
     try {
       if (!gapReportsEnabled() || !DECLINE_RE.test(String(reply || ''))) return;
       const signals = pendingSignals();
-      if (!signals.length) return;
+      if (!signals.length) {
+        const asked = cleanText(ask);
+        if (asked) await writeGapRows([{ source, kind: 'missing_capability', summary: asked,
+          attempted: 'The bar declined; no capability search ran' }]);
+        return;
+      }
       await writeGapRows(signals);
     } catch (err) {
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
@@ -305,6 +325,7 @@ module.exports = {
   gapReportsEnabled,
   gapReportPromptLine,
   writeGapRows,
+  recordGap,
   listRecentGaps,
   setGapStatus,
   createGapCollector,

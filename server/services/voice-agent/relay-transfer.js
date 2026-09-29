@@ -32,6 +32,7 @@
  */
 
 const logger = require('../logger');
+const { recordGap } = require('../agent-gap-reports');
 
 const TRANSFER_TOOL_NAME = 'transfer_to_office';
 const WHISPER_MAX_WORDS = 20;
@@ -306,6 +307,11 @@ async function transferToOfficeText(input = {}, ctx = {}) {
       + 'and say a Waves team member will call them back.';
   }
   if (noContext) ringNoContextBell(ctx, facts);
+  // Gap reports (server/services/agent-gap-reports.js): a live human handoff
+  // is Sandy's own admission she couldn't finish it. Fire-and-forget — never
+  // on the hot path that just spoke and ended the relay leg.
+  recordGap({ source: 'phone-agent', summary: packet.summary || packet.intent || 'Caller requested a transfer',
+    attempted: 'Handed to the office' }).catch(() => {});
   return 'Transferring the caller to the office now. Your part of the call is over — do not say anything else and do not call any more tools.';
 }
 

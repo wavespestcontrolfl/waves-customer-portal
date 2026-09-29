@@ -64,17 +64,51 @@ domain or tool the first sighting lacked. It also writes one
 `agent_gap_report_sightings` row in the same transaction; windowed counts
 read those rows.
 
+Four sources write today, each server-owned (no model-facing write tool
+anywhere in this list):
+
+- `intelligence-bar` — the admin platform collector above (full
+  `discover_capabilities` signal collection).
+- `tech-bar` — the tech portal's own collector, created independent of
+  `platformEnabled` (the tech context never runs platform mode). It has no
+  discovery loop to sample, so `flush()` takes an extra `ask` (the
+  operator's own request text): a decline with no signals collected records
+  `ask` itself, trimmed, with `attempted: 'The bar declined; no capability
+  search ran'`. A decline that did collect signals is unaffected — `ask` is
+  ignored whenever there is anything to record already.
+- `texting-ai` — `recordGap()` called from `escalate()` in
+  `services/ai-assistant/assistant.js` and `managed-assistant.js`, but only
+  when `classifyEscalation()` returns `ai_uncertain` (every other reason —
+  cancellation, schedule change, complaint, billing dispute, manager
+  request — is staff-handled by design, not a capability gap).
+- `phone-agent` — `recordGap()` called from Sandy's human handoff
+  (`voice-agent/relay-transfer.js`, right after a confirmed
+  `transfer_to_office`). Tool timeouts and model-provider failures are not
+  recorded: slow or broken tools are Tool Health's job, not a missing
+  feature. The call fires and forgets (`recordGap(...).catch(() => {})`) so
+  a write, slow or failed, never touches the live call.
+
+`recordGap({ source, summary, attempted, closestTool })` is the one-shot
+path for a source with no per-request collector to sample (texting AI and
+the phone agent each observe exactly one signal per event) — same table,
+same dedupe, same never-throws contract as `writeGapRows()`, which it
+wraps.
+
 `list_gap_reports` (`gap-report-tools.js`) is the read side, for "show gap
 reports" and "what should we build next". It groups by domain and ranks by
 sightings in the window, showing `times_seen_in_window` beside
-`times_seen_total`. It returns up to 50 rows with the real `total_matching`
-and `has_more`. The list tool and the digest share one reader,
-`listRecentGaps()`. The owner's triage (`building`, `fixed`, `by_design`,
-`dismissed`) is set by a session through `ops/agents/gap-status.js`, which
-dry-runs by default.
+`times_seen_total`, and each gap carries its `source`. It returns up to 50
+rows with the real `total_matching` and `has_more`. The list tool and the
+digest share one reader, `listRecentGaps()`. The owner's triage (`building`,
+`fixed`, `by_design`, `dismissed`) is set by a session through
+`ops/agents/gap-status.js`, which dry-runs by default.
 `server/services/agent-gap-digest.js` sends a short weekly reminder (Monday
 8:15am ET, `scheduler.js`) when the last 7 days recorded anything still open
-(not fixed, by_design or dismissed); a quiet week sends nothing. The bell carries a fixed two-line instruction, and the
+(not fixed, by_design or dismissed); a quiet week sends nothing. Each line
+names its source through a short label map (`SOURCE_LABELS`: `intelligence-bar`
+→ "bar", `tech-bar` → "tech bar", `texting-ai` → "texting AI", `phone-agent`
+→ "phone agent"), e.g. `gap #3 (new, ops, texting AI): seen 2x this week, 5x
+total`. The bell carries a fixed two-line instruction, and the
 full list is in the bar and in the email fallback (`AGENT_GAP_DIGEST_EMAIL`,
 internal recipients only, default contact@). Kill switch:
 `AGENT_GAP_REPORTS=off`, read at call time. It drops the prompt line, stops

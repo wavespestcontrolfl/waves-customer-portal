@@ -33,6 +33,7 @@ const { executeToolCall } = require('./tools-expanded');
 const { AGENT_CONFIG } = require('./managed-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
 const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
+const { recordGap } = require('../agent-gap-reports');
 
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MANAGED_AGENT_ID = process.env.MANAGED_AGENT_ID;
@@ -424,16 +425,27 @@ class ManagedAssistant {
     if (lower.includes('cancel') || lower.includes('lawsuit') || lower.includes('bbb')) priority = 'urgent';
     if (lower.includes('complaint') || lower.includes('not happy') || lower.includes('refund')) priority = 'urgent';
 
+    const escalationReason = this.classifyEscalation(customerMessage);
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
-      reason: this.classifyEscalation(customerMessage),
+      reason: escalationReason,
       summary: reason,
       customer_message: customerMessage,
       ai_draft_response: null,
       priority,
       status: 'pending',
     }).returning('*');
+
+    // Gap reports (server/services/agent-gap-reports.js): 'ai_uncertain' is
+    // the one classification with no dedicated escalation path (cancellation,
+    // schedule_change, complaint, billing_dispute and manager_request are
+    // staff-handled by design, not a capability gap). Fire-and-forget — a
+    // failed write must never affect the escalation reply.
+    if (escalationReason === 'ai_uncertain') {
+      const gapSummary = (reason && String(reason).trim()) || customerMessage;
+      recordGap({ source: 'texting-ai', summary: gapSummary, attempted: `Customer text: ${customerMessage}` }).catch(() => {});
+    }
 
     // The ai_escalations row above is the source of truth. Once it exists,
     // the customer must get the escalation reply — session bookkeeping and

@@ -13,6 +13,8 @@ jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction:
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
 jest.mock('../services/twilio-failure-alerts', () => ({ maskSid: (s) => String(s || '').slice(-4) }));
+const mockRecordGap = jest.fn(async () => []);
+jest.mock('../services/agent-gap-reports', () => ({ recordGap: (...args) => mockRecordGap(...args) }));
 
 const { notifyAdmin: triggerNotification } = require('../services/notification-service');
 const transfer = require('../services/voice-agent/relay-transfer');
@@ -110,6 +112,9 @@ describe('executeTool transfer_to_office', () => {
     expect(ctx.say).toHaveBeenCalledWith(expect.stringMatching(/connect you with a Waves team member/));
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
     expect(triggerNotification).not.toHaveBeenCalled();
+    // Gap reports (server/services/agent-gap-reports.js): a confirmed human
+    // handoff records what the caller wanted, fire-and-forget.
+    expect(mockRecordGap).toHaveBeenCalledWith({ source: 'phone-agent', summary: p.summary, attempted: 'Handed to the office' });
   });
 
   test('a long summary is clamped to twenty words', () => {
@@ -127,6 +132,7 @@ describe('executeTool transfer_to_office', () => {
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
     await new Promise((r) => setImmediate(r));
     expect(triggerNotification).not.toHaveBeenCalled();
+    expect(mockRecordGap).not.toHaveBeenCalled(); // never rang the office — no gap
   });
 
   test('full write failed, fallback REJECTED (0 rows — ownership lost meanwhile) ⇒ ABORT', async () => {

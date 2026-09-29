@@ -43,6 +43,7 @@ function toGap(row) {
     // bigint id comes back from pg as a string; coerce for a caller that
     // compares it or renders "gap #<id>".
     gap_id: Number(row.id),
+    source: row.source,
     kind: row.kind,
     wanted: row.summary,
     tried: row.attempted || null,
