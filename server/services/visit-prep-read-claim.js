@@ -110,4 +110,19 @@ async function markUnclaimed(conn, submissionId, status, logger) {
 
 const markUnsupported = (conn, submissionId, logger) => markUnclaimed(conn, submissionId, 'unsupported', logger);
 
-module.exports = { UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };
+// When an engine's LOCKED applicability check finds the stop no longer suits
+// it (reclassified while photos loaded), the other engine's own pre-check may
+// already have passed on it too; hand the submission over once so the final
+// classification is read (Codex #5320 r7). `handedOff` stops any ping-pong.
+function handOff(toModule, triggerName, args, logger) {
+  setImmediate(() => {
+    try {
+      Promise.resolve(require(toModule)[triggerName]({ ...args, handedOff: true }))
+        .catch((err) => logger?.error?.(`[visit-prep-read] hand-off failed submission=${args.submissionId}: ${err.message}`));
+    } catch (err) {
+      logger?.error?.(`[visit-prep-read] hand-off could not start submission=${args.submissionId}: ${err.message}`);
+    }
+  });
+}
+
+module.exports = { handOff, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };

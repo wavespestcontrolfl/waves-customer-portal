@@ -48,7 +48,7 @@ const { plantSubjectForStop } = require('./visit-prep-plant-applicability');
 // The daily cap and the locked claim are the SAME ones the pest read uses
 // (visit-prep-read-claim.js): one cap across both engines.
 const {
-  claimReadSlot: claimSharedReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart,
+  claimReadSlot: claimSharedReadSlot, handOff, markUnclaimed, markUnsupported, dailyCap, etDayStart,
 } = require('./visit-prep-read-claim');
 
 // 'lawn' | 'tree_shrub' | 'unsupported'.
@@ -98,7 +98,7 @@ async function setReadStatus(conn, submissionId, status, readResult = JSON.strin
 // Claims the daily slot and returns the plant subject, or settles every
 // non-claimed outcome (another read holds the row, no longer a plant stop,
 // cap refused, claim error) and returns null.
-async function claimOrSettle(conn, submissionId, svc) {
+async function claimOrSettle(conn, submissionId, svc, settleUnsupported) {
   let claim;
   try {
     claim = await claimReadSlot(conn, submissionId, svc);
@@ -110,7 +110,7 @@ async function claimOrSettle(conn, submissionId, svc) {
   if (claim && claim.claimed) return claim.subject;
   if (claim === 'taken') return null; // another read holds the row
   if (claim === 'unsupported') {
-    await markUnsupported(conn, submissionId, logger);
+    await settleUnsupported();
     return null;
   }
   logger.warn(`[visit-prep-plant-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
@@ -121,11 +121,18 @@ async function claimOrSettle(conn, submissionId, svc) {
 }
 
 async function triggerVisitPrepPlantRead({
-  submissionId, svc, photos, conn = db,
+  submissionId, svc, photos, conn = db, handedOff = false,
 } = {}) {
   if (!submissionId || !svc?.id) return;
   if (!visitPrepPlantReadLive()) return; // gate off — leave read_status at its 'none' default
   if (!Array.isArray(photos) || photos.length === 0) return;
+  // Not this engine's stop: settle 'unsupported' and hand the photos to the
+  // other engine once — a service-line change can make both see "not mine"
+  // (Codex #5320 r7 P2). The target re-checks its own gate and applicability.
+  const settleUnsupported = async () => {
+    await markUnsupported(conn, submissionId, logger);
+    if (!handedOff) handOff('./visit-prep-pest-read', 'triggerVisitPrepPestRead', { submissionId, svc, photos, conn }, logger);
+  };
 
   let applicability;
   try {
@@ -137,7 +144,7 @@ async function triggerVisitPrepPlantRead({
   }
 
   if (applicability === 'unsupported') {
-    await markUnsupported(conn, submissionId, logger);
+    await settleUnsupported();
     return;
   }
 
@@ -154,7 +161,7 @@ async function triggerVisitPrepPlantRead({
     return;
   }
 
-  const subject = await claimOrSettle(conn, submissionId, svc);
+  const subject = await claimOrSettle(conn, submissionId, svc, settleUnsupported);
   if (!subject) return;
 
   let result;

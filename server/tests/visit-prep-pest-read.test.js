@@ -33,6 +33,11 @@ jest.mock('../services/photos', () => ({
 }));
 
 let mockGateOn = true;
+const mockPlantTrigger = jest.fn(async () => 'done');
+jest.mock('../services/visit-prep-plant-read', () => ({
+  triggerVisitPrepPlantRead: (...args) => mockPlantTrigger(...args),
+}));
+
 jest.mock('../config/feature-gates', () => ({
   visitPrepPestReadLive: () => mockGateOn,
 }));
@@ -538,5 +543,40 @@ describe('claim day', () => {
     await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
+  });
+});
+
+describe('engine hand-off when the stop changes lines (Codex #5320 r7)', () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  // Earlier tests' unsupported outcomes schedule hand-offs too; let them
+  // land before counting this test's calls.
+  beforeEach(async () => { await tick(); mockPlantTrigger.mockClear(); });
+
+  test('reclassified to lawn under the lock: the photos go to the plant read once, marked handedOff', async () => {
+    const conn = fakeConn();
+    const realTx = conn.transaction;
+    conn.transaction = async (fn) => {
+      conn._store.scheduled_services.forEach((r) => { if (r.id === 'svc-1') r.service_type = 'Lawn Weed & Feed'; });
+      return realTx(fn);
+    };
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
+    await tick();
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+    expect(mockPlantTrigger).toHaveBeenCalledTimes(1);
+    expect(mockPlantTrigger).toHaveBeenCalledWith(expect.objectContaining({
+      submissionId: 'sub-1', photos: PHOTOS, conn, handedOff: true,
+    }));
+  });
+
+  test('a lawn stop at the pre-check also hands off; a handed-off read never hands back', async () => {
+    const svc = { ...BASE_SVC, service_type: 'Lawn Weed & Feed' };
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc, photos: PHOTOS, conn: fakeConn() });
+    await tick();
+    expect(mockPlantTrigger).toHaveBeenCalledTimes(1);
+    mockPlantTrigger.mockClear();
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc, photos: PHOTOS, conn: fakeConn(), handedOff: true });
+    await tick();
+    expect(mockPlantTrigger).not.toHaveBeenCalled();
   });
 });

@@ -29,6 +29,11 @@ jest.mock('../services/photos', () => ({
   getPhotoBase64: (...args) => mockGetPhotoBase64(...args),
 }));
 
+const mockPestTrigger = jest.fn(async () => 'done');
+jest.mock('../services/visit-prep-pest-read', () => ({
+  triggerVisitPrepPestRead: (...args) => mockPestTrigger(...args),
+}));
+
 let mockGateOn = true;
 jest.mock('../config/feature-gates', () => ({
   visitPrepPlantReadLive: () => mockGateOn,
@@ -411,5 +416,41 @@ describe('service labels (Codex #5320 r2/r5: the canonical classifier)', () => {
     ['Lawn Pest Knockdown Service', 'lawn'],
   ])('%s → %s', (label, kind) => {
     expect(kind === 'tree_shrub' ? isTreeShrubOnlyServiceType(label) : isLawnOnlyServiceType(label)).toBe(true);
+  });
+});
+
+describe('engine hand-off when the stop changes lines (Codex #5320 r7)', () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  // Earlier tests' unsupported outcomes schedule hand-offs too; let them
+  // land before counting this test's calls.
+  beforeEach(async () => { await tick(); mockPestTrigger.mockClear(); });
+
+  test('a stop that is pest now hands the photos to the pest read once, marked handedOff', async () => {
+    const conn = fakeConn();
+    const svc = { ...BASE_SVC, service_type: 'Quarterly Pest Control' };
+    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc, photos: PHOTOS, conn });
+    await tick();
+    expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
+    expect(mockPestTrigger).toHaveBeenCalledTimes(1);
+    expect(mockPestTrigger).toHaveBeenCalledWith(expect.objectContaining({
+      submissionId: 'sub-1', photos: PHOTOS, conn, handedOff: true,
+    }));
+  });
+
+  test('a read that was itself handed off never hands back (no ping-pong)', async () => {
+    const conn = fakeConn();
+    const svc = { ...BASE_SVC, service_type: 'Quarterly Pest Control' };
+    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc, photos: PHOTOS, conn, handedOff: true });
+    await tick();
+    expect(mockPestTrigger).not.toHaveBeenCalled();
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
+  });
+
+  test('a lawn stop that gets read never hands off', async () => {
+    mockGetPhotoBase64.mockResolvedValue('b64');
+    mockIdentifyPlantV2.mockResolvedValue({ ok: false, reason: 'blurry' });
+    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() });
+    await tick();
+    expect(mockPestTrigger).not.toHaveBeenCalled();
   });
 });

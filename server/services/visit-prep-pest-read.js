@@ -45,7 +45,7 @@ const { visitPrepPestReadLive } = require('../config/feature-gates');
 // The daily cap and the locked claim are shared with every visit-prep read
 // engine (visit-prep-read-claim.js).
 const {
-  claimReadSlot: claimSharedReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart,
+  claimReadSlot: claimSharedReadSlot, handOff, markUnclaimed, markUnsupported, dailyCap, etDayStart,
 } = require('./visit-prep-read-claim');
 const { isPestStop, liveStopServiceTypes } = require('./visit-prep-pest-applicability');
 
@@ -127,11 +127,18 @@ async function storeIdentification(conn, { svc, submissionId, result }) {
  *          read_status='failed' so the row never sticks on 'pending'.
  */
 async function triggerVisitPrepPestRead({
-  submissionId, svc, photos, conn = db,
+  submissionId, svc, photos, conn = db, handedOff = false,
 } = {}) {
   if (!submissionId || !svc?.id) return;
   if (!visitPrepPestReadLive()) return; // gate off — leave read_status at its 'none' default
   if (!Array.isArray(photos) || photos.length === 0) return;
+  // Not this engine's stop: settle 'unsupported' and hand the photos to the
+  // other engine once — a service-line change can make both see "not mine"
+  // (Codex #5320 r7 P2). The target re-checks its own gate and applicability.
+  const settleUnsupported = async () => {
+    await markUnsupported(conn, submissionId, logger);
+    if (!handedOff) handOff('./visit-prep-plant-read', 'triggerVisitPrepPlantRead', { submissionId, svc, photos, conn }, logger);
+  };
 
   let applicability;
   try {
@@ -144,7 +151,7 @@ async function triggerVisitPrepPestRead({
   }
 
   if (applicability === 'unsupported') {
-    await markUnsupported(conn, submissionId, logger);
+    await settleUnsupported();
     return;
   }
 
@@ -171,7 +178,7 @@ async function triggerVisitPrepPestRead({
   }
   if (claimed === 'taken') return; // another read holds the row
   if (claimed === 'unsupported') {
-    await markUnsupported(conn, submissionId, logger);
+    await settleUnsupported();
     return;
   }
   if (claimed !== 'claimed') {
