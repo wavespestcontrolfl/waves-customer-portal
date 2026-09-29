@@ -9,6 +9,8 @@
  * isV2Extraction() detects the schema version via meta.schema_version.
  */
 
+const { collapseGmailDotEquivalent } = require('./email-equivalence');
+
 function isV2Extraction(extraction) {
   return !!(extraction && extraction.meta && extraction.meta.schema_version);
 }
@@ -569,9 +571,20 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   if (has(merged.email) && has(caller.email) && norm(merged.email) !== norm(caller.email)) {
     const v1Email = merged.email;
     const v2Email = caller.email;
-    merged.email = null;
-    merged.email_candidates = [v1Email, v2Email];
-    adoptedFields.push('email_disagreement');
+    // Gmail ignores local-part dots, so two Gmail readings that differ ONLY
+    // by dots are one address — not a disagreement (owner ruling,
+    // 2026-09-29, call 00437121).
+    // Save the undotted form; anything else (googlemail vs gmail, +tag,
+    // letters, non-Gmail dots) stays held for read-back.
+    const dotEquivalent = collapseGmailDotEquivalent([v1Email, v2Email]);
+    if (dotEquivalent) {
+      merged.email = dotEquivalent;
+      adoptedFields.push('email_gmail_dot_equivalent');
+    } else {
+      merged.email = null;
+      merged.email_candidates = [v1Email, v2Email];
+      adoptedFields.push('email_disagreement');
+    }
   } else {
     filler('email', caller.email);
   }
