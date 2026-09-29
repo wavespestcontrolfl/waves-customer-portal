@@ -2491,7 +2491,34 @@ async function createSelfBooking(payload = {}) {
             .first()
             .catch(() => null);
           if (!estCustomer) return { valid: false };
+          // Committed-booking retry exception: the first wizard booking
+          // promotes its own lead to 'won' in the booking transaction, so an
+          // identical retry after a lost response would otherwise trip the
+          // established-customer refusal before reaching the consumed-draft
+          // replay below. A retry is recognized only when a live (non-
+          // cancelled) booking already consumed THIS draft for the SAME slot
+          // tuple under THIS customer AND the submitted contact is that
+          // customer's — the same binding the replay recovery applies. It
+          // creates no booking (the replay returns the committed one); a
+          // fresh booking for an established customer still refuses.
+          let committedRetry = false;
           if (contactLinked && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(estCustomer.pipeline_stage || ''))) {
+            const consumed = await db('scheduled_services as ss')
+              .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
+              .where('ss.source_estimate_id', estimateId)
+              .where('ss.customer_id', estCustomer.id)
+              .where('sba.date', slot_date)
+              .where('sba.start_time', slot_start)
+              .whereNot('sba.status', 'cancelled')
+              .first('ss.id')
+              .catch(() => null);
+            const typed10 = last10(new_customer?.phone);
+            const typedEmail = String(new_customer?.email || '').trim().toLowerCase();
+            committedRetry = !!consumed && (typed10
+              ? typed10 === last10(estCustomer.phone)
+              : (!!typedEmail && typedEmail === String(estCustomer.email || '').trim().toLowerCase()));
+          }
+          if (contactLinked && !committedRetry && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(estCustomer.pipeline_stage || ''))) {
             return {
               valid: true,
               error: {

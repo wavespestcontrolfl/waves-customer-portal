@@ -237,11 +237,40 @@ describe('createSelfBooking — customers-only gate', () => {
         status: 409,
         error: expect.stringMatching(/sign in to your customer portal/i),
       });
-      // Refused at the gate: no booking table was ever touched, and the
-      // transaction (which would create appointment rows) was never opened.
-      const touched = db.mock.calls.map((c) => c[0]);
-      expect(touched.filter((t) => /scheduled_services|self_booked_appointments/.test(t))).toEqual([]);
-      expect(touched).not.toContain('appointment_slots');
+      // Refused at the gate, before any write: only read-side lookups ran
+      // (the mock has no insert/transaction — reaching one would throw), so
+      // no appointment or customer rows were created.
+      const touched = new Set(db.mock.calls.map((c) => c[0]));
+      expect([...touched].filter((t) => !['booking_config', 'estimates', 'customers', 'scheduled_services as ss'].includes(t))).toEqual([]);
+    });
+
+    test('an identical retry of an already-committed booking (lead promoted to won) still reaches the replay path', async () => {
+      // The first wizard booking promotes its lead to won; a lost-response
+      // retry must not eat the established-customer refusal (pre-push P1).
+      firstResults.estimates = linkedDraft();
+      firstResults.customers = { ...BEARER_ROW(), phone: '941-555-0101', pipeline_stage: 'won' };
+      firstResults['scheduled_services as ss'] = { id: 'ss-committed' };
+      try {
+        const result = await createSelfBooking({
+          ...strangerBody(),
+          customersOnly: true,
+          pricing_estimate_id: 'pe-victim',
+          estimate_token: mintEstimateHandoffToken('pe-victim'),
+        });
+        expect(result).toEqual(BEYOND_WINDOW);
+        // Bound to the customer's own contact: a different typed phone on the
+        // same consumed draft is refused.
+        const other = strangerBody();
+        other.new_customer.phone = '941-555-0199';
+        expect(await createSelfBooking({
+          ...other,
+          customersOnly: true,
+          pricing_estimate_id: 'pe-victim',
+          estimate_token: mintEstimateHandoffToken('pe-victim'),
+        })).toEqual(expect.objectContaining({ ok: false, status: 409 }));
+      } finally {
+        delete firstResults['scheduled_services as ss'];
+      }
     });
 
     test('a legacy null-stage customer row is treated as established (fail closed on identity)', async () => {
