@@ -457,8 +457,13 @@ describe('service facts — treated areas from the service report', () => {
     // At most ONE treated area, from one label (Codex r1 on #5317).
     expect(v('We treated the kitchen and garage.')).toBe('more_than_one_area');
     expect(v('We treated the pool garage.')).toBe('more_than_one_area');
-    // A draft with no work claim is not checked.
-    expect(v('Hope the kitchen ants are backing off. Thanks for having us!')).toBeNull();
+    // Every draft is checked, so a verb nobody listed cannot claim work
+    // (pre-push review on #5317 r2: removed, sealed, cleared...).
+    for (const t of ['We removed the nest from the attic.', 'We sealed the garage.', 'We cleared out the attic, Aaron.', 'All gone now!']) {
+      expect([t, v(t)]).toEqual([t, 'claim_word_outside_facts']);
+    }
+    expect(v('Hope the ants are backing off. Thanks for having us!')).toBeNull();
+    expect(v("Hi Aaron, hope the ants are backing off since we treated the kitchen. If we earned it, a quick Google review would mean the world: {review_url} Reply if anything's off.")).toBeNull();
     expect(v('Hope things are better since the treatment.', { treated: false, areasTreated: [] })).toBe('treatment_not_on_record');
   });
 

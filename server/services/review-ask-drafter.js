@@ -238,16 +238,16 @@ function treatedAreaLabels(serviceFacts) {
 const SERVICE_FACTS_RULE = `
 - Name a place as treated (or worked on in any way) ONLY if it is on the AREAS TREATED line, and mention at most ONE of those areas. With no AREAS TREATED line, never name a place as treated. If the history says no treatment is on record, never say any work was done.`;
 
-// Any wording that claims work at the visit. Deliberately broad: a false
-// match only holds the draft to the closed vocabulary below, and a miss
-// there falls back to the template.
+// Wording that claims work at the visit: allowed only on a visit where work
+// was done. Any other verb (removed, sealed, cleared...) is simply outside
+// the closed vocabulary below, so it never needs to be listed here.
 const WORK_CLAIM_RE = /\b(?:treat\w*|spray\w*|appl(?:y|ied|ies|ying|ication)\w*|bait\w*|dust\w*|fog\w*|servic\w*|inspect\w*|handl\w*|cover(?:ed|ing)?|work(?:ed|ing)?|took care|take care|taking care|knock\w*|hit|did|done|put down|laid down)\b/gi;
 
-// With a work claim anywhere in a draft, every word of the draft must be one
-// of these, a treated area's own word, a pest or condition word
-// (isPestWord), or the customer's or technician's name: a closed vocabulary,
-// so a draft can never name a place the tech did not treat, whatever the
-// place is called or whichever sentence it sits in.
+// With the gate on, every word of a draft must be one of these, a work word
+// on a visit where work was done, a treated area's own word, a pest or
+// condition word (isPestWord), or the customer's or technician's name: a
+// closed vocabulary, so a draft can never claim work, or name a place the
+// tech did not treat, whatever the verb or place and whichever sentence.
 const CLAIM_SENTENCE_WORDS = new Set([
   "a", "an", "the", "and", "or", "in", "on", "at", "of", "to", "for", "with", "by", "from", "around", "along",
   "under", "near", "we", "our", "us", "you", "your", "it", "its", "them", "they", "their", "this", "that",
@@ -257,21 +257,22 @@ const CLAIM_SENTENCE_WORDS = new Set([
   "looking", "doing", "going", "holding", "up", "backing", "off", "settling", "down", "better", "now", "things",
   "everything", "what", "about", "just", "out", "thanks", "thank", "having", "if", "anything", "reply", "let",
   "know", "me", "so", "all", "again", "some", "hi", "hey", "google", "review", "quick", "earned", "would",
-  "mean", "means", "lot",
+  "mean", "means", "lot", "world", "great", "happy", "help", "helps", "small", "team", "crew", "family",
+  "business", "feedback", "time", "moment", "chance", "leave", "share", "wrong", "right", "okay",
+  "ok", "good", "well", "love", "appreciate", "appreciated", "really", "much", "very", "too", "can",
+  "could", "will", "should", "hear", "back",
 ]);
 
 /**
- * Deterministic check of a draft's work claims against the service report
- * (only with serviceFacts, i.e. the gate on). A draft that claims work
- * anywhere needs a visit on which work was done, and then every word of it
- * must be in the closed vocabulary above. Null when clean, else the reject
- * reason.
+ * Deterministic check of a draft against the service report (only with
+ * serviceFacts, i.e. the gate on). Every word of the draft must be in the
+ * closed vocabulary above; a work word needs a visit on which work was done;
+ * at most one treated area. Null when clean, else the reject reason.
  */
 function verifyTreatmentClaims(text, serviceFacts, { names = [] } = {}) {
   if (!serviceFacts) return null;
   const body = String(text || "").replace(/\{review_url\}/g, " ");
-  if (!body.match(WORK_CLAIM_RE)) return null;
-  if (!serviceFacts.treated) return "treatment_not_on_record";
+  if (!serviceFacts.treated && body.match(WORK_CLAIM_RE)) return "treatment_not_on_record";
   const allowed = new Set([
     ...treatedAreaLabels(serviceFacts).flatMap((a) => (a.toLowerCase().match(/[a-z]+/g) || []).map(singularForm)),
     ...names.flatMap((n) => String(n || "").toLowerCase().match(/[a-z]+/g) || []),
