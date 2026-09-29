@@ -11099,6 +11099,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       };
       let customerId = estimate.customer_id;
+      // True only when THIS accept minted the profile below (no linked,
+      // sibling, or phone-matched customer). Handed to the converter so the
+      // insert's own defaults (pipeline_stage 'active_customer' + the quoted
+      // monthly_rate) are never read as a pre-existing monthly membership.
+      let customerCreatedThisAccept = false;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -11251,6 +11256,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             referral_code: code,
           })).returning('*');
           customerId = newCust.id;
+          customerCreatedThisAccept = true;
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
@@ -12041,6 +12047,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          customerCreatedAtAccept: customerCreatedThisAccept,
           skipAutoSchedule: true,
           skipMembershipEmail: true,
           // Labeled manual-discount itemization on the prepay invoice (owner
@@ -12218,6 +12225,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          customerCreatedAtAccept: customerCreatedThisAccept,
           firstApplicationRowAmounts: firstApplicationRowAmounts.length ? firstApplicationRowAmounts : null,
           // The converter's own STANDARD draft-invoice branch runs on the
           // GLOBAL pool (its internal db.transaction + ledger reads), which
