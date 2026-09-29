@@ -20,18 +20,20 @@ const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
 ]);
 
 // The ACCOUNT a contact-linked draft resolves to: the draft-linked customer
-// row plus every live, active sibling property row on its account — the same
-// account resolution routes/booking.js findAccountPropertyByAddress uses to
-// bind a submitted address to a property row. Confirmation, capture-intent
-// and the recovery worker all classify through THIS list so they can never
-// diverge — and the sibling read is deliberately UNCAPPED (a limit could drop
-// the account's only established row): a handoff is blocked when ANY of these rows is an established
-// customer, even if the draft-linked row itself is still a lead (the address
-// bind can land the booking on an established sibling). opts.forShare
-// share-locks the rows (confirmation, inside its transaction). Returns
-// { root, rows } — root null when the customer row is gone.
-async function loadContactLinkedAccountRows(conn, customerId, { forShare = false, columns = ['id', 'account_id', 'pipeline_stage', 'phone', 'email'] } = {}) {
-  const rootQ = conn('customers').where({ id: customerId }).whereNull('deleted_at');
+// row plus every sibling property row on its account (account_id match, or the
+// account's own id) — the same account membership routes/booking.js
+// findAccountPropertyByAddress uses to bind a submitted address to a property
+// row, but read WITHOUT its deleted/inactive filters. Confirmation,
+// capture-intent and the recovery worker all classify through THIS list so
+// they can never diverge — and the sibling read is deliberately UNCAPPED (a
+// limit could drop the account's only blocking row): a handoff is blocked when
+// ANY linked row is an established customer, ARCHIVED (deleted_at set — an
+// archived customer is not a lead, and archiving must never re-open the
+// handoff), or MISSING (the draft names a customer row that is gone). Fail
+// closed throughout. opts.forShare share-locks the rows (confirmation, inside
+// its transaction). Returns { root, rows } — root null when the row is gone.
+async function loadContactLinkedAccountRows(conn, customerId, { forShare = false, columns = ['id', 'account_id', 'pipeline_stage', 'phone', 'email', 'deleted_at'] } = {}) {
+  const rootQ = conn('customers').where({ id: customerId });
   if (forShare) rootQ.forShare();
   const root = await rootQ.first(...columns);
   if (!root) return { root: null, rows: [] };
@@ -41,10 +43,6 @@ async function loadContactLinkedAccountRows(conn, customerId, { forShare = false
       this.where('account_id', accountId).orWhere('id', accountId);
     })
     .whereNot('id', root.id)
-    .whereNull('deleted_at')
-    .andWhere(function () {
-      this.whereNull('active').orWhere('active', true);
-    })
     .orderBy('id');
   if (forShare) siblingQ.forShare();
   const siblings = await siblingQ.select(...columns);
@@ -52,18 +50,22 @@ async function loadContactLinkedAccountRows(conn, customerId, { forShare = false
 }
 
 const isEstablishedCustomerRow = (r) => !PRE_CUSTOMER_PIPELINE_STAGES.has(String(r?.pipeline_stage || ''));
+// Established OR archived: either one means the row is not the quoter's own
+// fresh lead, so the handoff must not act as (or message) that customer.
+const isBlockingLinkedRow = (r) => !!r?.deleted_at || isEstablishedCustomerRow(r);
 
-// True when the draft named by pricingEstimateId is contact-linked to a live
-// customer whose ACCOUNT holds any established row. Throws on a lookup error
-// — callers fail closed.
+// True when the draft named by pricingEstimateId is contact-linked to a
+// customer whose account is blocking (see above) or whose row is missing.
+// Throws on a lookup error — callers fail closed.
 async function establishedContactLinkedDraft(conn, pricingEstimateId) {
   if (!pricingEstimateId) return false;
   const draft = await conn('estimates').where({ id: pricingEstimateId }).first('customer_id');
   if (!draft?.customer_id) return false;
-  const { rows } = await loadContactLinkedAccountRows(conn, draft.customer_id);
-  return rows.some(isEstablishedCustomerRow);
+  const { root, rows } = await loadContactLinkedAccountRows(conn, draft.customer_id);
+  if (!root) return true;
+  return rows.some(isBlockingLinkedRow);
 }
 
 module.exports = {
-  PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft, loadContactLinkedAccountRows, isEstablishedCustomerRow,
+  PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft, loadContactLinkedAccountRows, isEstablishedCustomerRow, isBlockingLinkedRow,
 };

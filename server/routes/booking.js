@@ -1165,7 +1165,7 @@ function bookingSlotWindow(config = {}) {
 // PRE_CUSTOMER_PIPELINE_STAGES lives in services/booking-contact-linked-handoff.js
 // (shared with capture-intent and the abandoned-booking recovery worker).
 const {
-  PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft, loadContactLinkedAccountRows, isEstablishedCustomerRow,
+  PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft, loadContactLinkedAccountRows, isBlockingLinkedRow,
 } = require('../services/booking-contact-linked-handoff');
 
 // Contact-linked quote-wizard handoff → established customer (B11).
@@ -1198,12 +1198,13 @@ async function assertContactLinkedHandoffProvisional(trx, {
   // sibling property row on its account (including the row the address bound)
   // is established. The bound row is always in the account, but a vanished
   // root falls back to reading it directly.
-  let { rows } = await loadContactLinkedAccountRows(trx, handoff.rootId, { forShare: true });
+  let { root, rows } = await loadContactLinkedAccountRows(trx, handoff.rootId, { forShare: true });
   if (!rows.some((r) => String(r.id) === String(handoff.boundId))) {
-    const boundRow = await trx('customers').where({ id: handoff.boundId }).forShare().first('id', 'pipeline_stage', 'phone', 'email');
+    const boundRow = await trx('customers').where({ id: handoff.boundId }).forShare().first('id', 'pipeline_stage', 'phone', 'email', 'deleted_at');
     if (boundRow) rows = [...rows, boundRow];
   }
-  if (!rows.some(isEstablishedCustomerRow)) return;
+  // A missing root, or any archived / established linked row, blocks.
+  if (root && !rows.some(isBlockingLinkedRow)) return;
   const last10 = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; };
   const lcEmail = (v) => String(v || '').trim().toLowerCase();
   // The linking contact belongs to the draft-linked ROOT row (A) — the row
@@ -6414,9 +6415,19 @@ const RECOVERY_SKIP_SOURCES = new Set(['admin-manual-booking-resend']);
 // intent per phone (refreshed, not duplicated); booked phones are skipped.
 // Fire-and-forget: never returns a funnel-blocking error.
 router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter, async (req, res) => {
+  // ONE constant response for every accepted request (Codex r5 P0): the
+  // client is fire-and-forget and reads no body, and any variation — skipped
+  // reason, created vs updated, intent_id, suppressed vs ordinary row, lookup
+  // error — would be an oracle for whether a contact belongs to a customer
+  // (or has a recent booking). The reason is logged server-side only. Only the
+  // request-shape 400 below differs; it depends on nothing but the request.
+  const accepted = (reason) => {
+    logger.debug(`[booking:capture-intent] ${reason}`);
+    return res.json({ ok: true });
+  };
   try {
     const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('selfBooking')) return res.json({ ok: false, skipped: 'gate' });
+    if (!isEnabled('selfBooking')) return accepted('gate');
 
     const b = req.body || {};
 
@@ -6426,7 +6437,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // send-eligible endpoint could be used to seed recovery SMS/email to arbitrary
     // recipients. Fail closed — no/invalid token, no send-eligible row.
     if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
-      return res.json({ ok: true, skipped: 'unverified' });
+      return accepted('unverified');
     }
 
     // One-time / estimate-originated booking links are recovered by the estimate
@@ -6438,7 +6449,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // isn't in that helper (this is a recovery-lane guard only — it does not
     // change createSelfBooking's recurring decision for those sources).
     if (isOneTimeBookingSource(b.source) || RECOVERY_SKIP_SOURCES.has(String(b.source || '').trim())) {
-      return res.json({ ok: true, skipped: 'estimate_source' });
+      return accepted('estimate_source');
     }
 
     const nc = b.new_customer || b;
@@ -6536,14 +6547,14 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // yet" nudge for a booking that already succeeded.
     const booked = await tenMatch(db('booking_intents').whereNotNull('converted_at')
       .where('converted_at', '>', new Date(Date.now() - 24 * 3600000))).first('id');
-    if (booked) return res.json({ ok: true, skipped: 'already_booked' });
+    if (booked) return accepted('already_booked');
     const recentBooking = await db('self_booked_appointments as sba')
       .leftJoin('customers as c', 'sba.customer_id', 'c.id')
       .whereRaw("RIGHT(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
       .where('sba.created_at', '>', new Date(Date.now() - 6 * 3600000))
       .whereNot('sba.status', 'cancelled')
       .first('sba.id');
-    if (recentBooking) return res.json({ ok: true, skipped: 'already_booked' });
+    if (recentBooking) return accepted('already_booked');
 
     // Revalidate the SUBMITTED booking context server-side. The IP-bound token
     // proves the caller fetched availability, but not for THIS slot — so confirm
@@ -6554,7 +6565,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     try {
       const { lat, lng } = await resolveBookingCoords({ lat: row.lat, lng: row.lng, address: row.address_line1, city: row.city });
       if (!lat || !lng || !row.slot_date || !row.slot_start) {
-        return res.json({ ok: true, skipped: 'unverified_slot' });
+        return accepted('unverified_slot');
       }
       const cfg = (await db('booking_config').first()) || {};
       // Codex r5 P2 #5 — thread the same funnel identity /availability
@@ -6587,12 +6598,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
       const offered = !!day && Array.isArray(day.slots)
         && day.slots.some((s) => String(s.start_time).slice(0, 5) === String(row.slot_start).slice(0, 5));
-      if (!offered) return res.json({ ok: true, skipped: 'slot_unavailable' });
+      if (!offered) return accepted('slot_unavailable');
       row.lat = lat;
       row.lng = lng;
     } catch (e) {
       logger.warn(`[booking:capture-intent] slot revalidation failed: ${e.message}`);
-      return res.json({ ok: false, skipped: 'unverified' });
+      return accepted('unverified');
     }
 
     // Resolve an existing customer by phone so a recovery send to a known customer
@@ -6687,12 +6698,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       // null would treat an existing OPTED-OUT customer as a lead and bypass their
       // opt-out on the recovery send. A transient blip → skip this capture.
       logger.warn(`[booking:capture-intent] customer lookup failed — skipping capture: ${e.message}`);
-      return res.json({ ok: false, skipped: 'lookup_failed' });
+      return accepted('lookup_failed');
     }
-    return res.json(result);
+    return accepted(result.stale ? 'stale' : (result.created ? 'created' : 'updated'));
   } catch (err) {
     logger.error(`[booking:capture-intent] failed: ${err.message}`);
-    return res.json({ ok: false }); // fire-and-forget — never block the funnel
+    return accepted('error'); // fire-and-forget — never block the funnel
   }
 });
 

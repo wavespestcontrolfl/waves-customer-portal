@@ -143,6 +143,32 @@ describe('assertContactLinkedHandoffProvisional (runs under the customer lock, i
     expect(loader).not.toMatch(/\.limit\(/);
   });
 
+  test('archived customer rows block — archiving can never re-open the handoff (r5 P1)', async () => {
+    const ARCHIVED = '2026-09-01T00:00:00Z';
+    // archived root, still stage new_lead
+    await expect(run(fakeTrx({ customers: [customer({ id: ROOT, pipeline_stage: 'new_lead', deleted_at: ARCHIVED })] }), {})).rejects.toEqual(REFUSED);
+    // archived SIBLING with a lead stage
+    await expect(run(fakeTrx({ customers: [
+      customer({ id: ROOT, pipeline_stage: 'new_lead', account_id: 'acct-1' }),
+      customer({ id: 'cust-sibling', pipeline_stage: 'new_lead', account_id: 'acct-1', deleted_at: ARCHIVED }),
+    ] }), {})).rejects.toEqual(REFUSED);
+    // archived established sibling
+    await expect(run(fakeTrx({ customers: [
+      customer({ id: ROOT, pipeline_stage: 'new_lead', account_id: 'acct-1' }),
+      customer({ id: 'cust-sibling', pipeline_stage: 'active_customer', account_id: 'acct-1', deleted_at: ARCHIVED }),
+    ] }), {})).rejects.toEqual(REFUSED);
+  });
+
+  test('a draft whose customer row is missing is blocked (fail closed)', async () => {
+    await expect(run(fakeTrx({ customers: [] }), {})).rejects.toEqual(REFUSED);
+  });
+
+  test('the shared loader reads the root and siblings WITHOUT deleted/inactive filters', () => {
+    const loader = fs.readFileSync(path.join(__dirname, '../services/booking-contact-linked-handoff.js'), 'utf8');
+    const body = loader.slice(loader.indexOf('async function loadContactLinkedAccountRows'), loader.indexOf('const isEstablishedCustomerRow'));
+    expect(body).not.toMatch(/deleted_at'\)|whereNull|'active'/);
+  });
+
   test('account with only lead rows → allowed', async () => {
     const trx = fakeTrx({ customers: [
       customer({ id: ROOT, pipeline_stage: 'new_lead', account_id: 'acct-1' }),
@@ -300,21 +326,35 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
 
     const suppressedForDraft = () => ops.filter((o) => o.table === 'booking_intents' && o.op === 'update' && o.args[0]?.suppressed === true);
 
-    test('established link: intents already staged for the draft are retired AND the response is indistinguishable from an ordinary capture (r3 P2)', async () => {
-      // Ordinary capture: draft linked to the quoter's own pre-customer lead.
-      firstResults.estimates = { customer_id: 'cust-lead', customer_phone: '941-555-0101' };
+    test('every accepted capture returns ONE constant response — lead-linked, established-linked, pre-seeded row, lookup error (r5 P0)', async () => {
+      const responses = {};
+      // 1. ordinary: draft linked to the quoter's own pre-customer lead
+      firstResults.estimates = { customer_id: 'cust-lead' };
       firstResults.customers = { id: 'cust-lead', pipeline_stage: 'new_lead' };
-      const ordinary = await call(base());
+      responses.lead = await call(base());
       expect(suppressedForDraft()).toEqual([]);
       ops.length = 0;
-
-      // Established link: same request, same mocks otherwise.
+      // 2. established-linked
       firstResults.customers = { id: 'cust-lead', pipeline_stage: 'active_customer' };
-      const established = await call(base());
-      expect(established).toEqual(ordinary); // status, body shape and values identical
-      expect(JSON.stringify(established)).not.toContain('contact_linked_established');
+      responses.established = await call(base());
       expect(suppressedForDraft().length).toBe(1);
       expect(ops.find((o) => o.table === 'booking_intents' && o.op === 'where' && o.args[0] === 'pricing_estimate_id').args).toEqual(['pricing_estimate_id', 'pe-victim']);
+      ops.length = 0;
+      // 3. pre-seeded un-suppressed open intent for the same session/phone
+      firstResults.customers = { id: 'cust-lead', pipeline_stage: 'new_lead' };
+      firstResults.booking_intents = { id: 'bi-existing' };
+      responses.preSeeded = await call(base());
+      delete firstResults.booking_intents;
+      ops.length = 0;
+      // 4. lookup error
+      db.mockImplementationOnce(() => { throw new Error('boom'); });
+      responses.lookupError = await call(base());
+      expect(suppressedForDraft().length).toBe(1);
+
+      const wire = (r) => JSON.stringify(r);
+      const expected = wire({ ok: true, __status: 200 });
+      for (const [name, r] of Object.entries(responses)) expect([name, wire(r)]).toEqual([name, expected]);
+      expect(expected).not.toMatch(/skipped|intent_id|created|updated|contact_linked/);
     });
 
     test('account-wide: a lead root row whose account holds an established sibling property is treated as established', async () => {
@@ -333,6 +373,16 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
       expect(src).not.toContain("skipped: 'contact_linked_established'");
     });
 
+    test('the handler has exactly one success response (`accepted`) plus the request-shape 400 (source guard)', () => {
+      const src = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
+      const start = src.indexOf("router.post('/capture-intent'");
+      const handler = src.slice(start, src.indexOf('// GET /api/booking/embed-snippet'));
+      expect(handler.match(/res\.json\(/g)).toHaveLength(1);
+      expect(handler).toContain("res.json({ ok: true })");
+      expect(handler.match(/res\.status\(\d+\)/g)).toEqual(['res.status(400)']);
+      expect(handler).not.toMatch(/res\.json\([^)]*(intent_id|created|updated)/);
+    });
+
     test('gate off (flow still books): no skip, no suppression — recovery keeps working', async () => {
       const { isEnabled } = require('../config/feature-gates');
       isEnabled.mockImplementation((name) => name !== 'bookingCustomersOnly');
@@ -346,17 +396,6 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
       } finally {
         isEnabled.mockImplementation(() => true);
       }
-    });
-
-    test('a lookup error fails closed (suppressed) with the ordinary response — no distinct error shape', async () => {
-      firstResults.estimates = { customer_id: 'cust-lead' };
-      firstResults.customers = { id: 'cust-lead', pipeline_stage: 'new_lead' };
-      const ordinary = await call(base());
-      ops.length = 0;
-      db.mockImplementationOnce(() => { throw new Error('boom'); });
-      const result = await call(base());
-      expect(result).toEqual(ordinary);
-      expect(suppressedForDraft().length).toBe(1);
     });
 
     test('a draft linked to the quoter\'s own pre-customer lead is NOT skipped by this check', async () => {

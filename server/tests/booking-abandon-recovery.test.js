@@ -575,6 +575,44 @@ describe('B11 backstop — contact-linked wizard draft linked to an ESTABLISHED 
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('r5: an ARCHIVED linked customer row blocks (archiving must not unblock the backstop)', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { id: 'cust-1', pipeline_stage: 'new_lead', deleted_at: '2026-09-01T00:00:00Z' } });
+    enqueue('customers', { rows: [] });
+    enqueue('booking_intents', { update: 1 });
+
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('r5: an ARCHIVED sibling on the account blocks', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { id: 'cust-1', account_id: 'acct-1', pipeline_stage: 'new_lead' } });
+    enqueue('customers', { rows: [{ id: 'sib', account_id: 'acct-1', pipeline_stage: 'new_lead', deleted_at: '2026-09-01T00:00:00Z' }] });
+    enqueue('booking_intents', { update: 1 });
+
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('r5: a draft whose customer row is MISSING blocks (fail closed)', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    enqueue('estimates', { first: { customer_id: 'cust-gone' } });
+    enqueue('customers', { first: undefined }); // no such row
+    enqueue('booking_intents', { update: 1 });
+
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('draft linked to a still-pre-customer lead (the quoter\'s own row) sends as before', async () => {
     gate(true);
     enqueue('booking_intents', { rows: [linked()] });

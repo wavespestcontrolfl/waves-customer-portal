@@ -846,12 +846,16 @@ email that linked the draft — is the customer's) still reaches the idempotent
 replay. No message is sent on the refusal: the refusal retires the open
 abandoned-booking recovery intents carrying that HMAC-verified draft id (only the id — neither the typed nor the stored contact ever widens it), and
 `/api/booking/capture-intent` writes such a handoff's row already suppressed
-(and retires any staged for the draft) while returning exactly the response an
-ordinary capture returns, so it is no probe for whether a contact is a
-customer. "Established" is judged account-wide by one shared classifier used by
-confirmation, capture-intent and the recovery worker: the draft-linked customer
-row or any live, active sibling property row on its account (the rows the
-address bind can land on) being an established customer blocks it. The
+(and retires any staged for the draft). Every accepted capture-intent request
+answers one constant `200 {"ok": true}` — no `skipped`, `created`/`updated` or
+`intent_id` fields — whatever was staged, skipped, suppressed or errored (the
+clients are fire-and-forget and read no body), so it is no probe for whether a
+contact is a customer or has a recent booking; only the request-shape 400
+(`valid phone required`) differs. "Blocked" is judged account-wide by one
+shared classifier used by confirmation, capture-intent and the recovery worker:
+the draft-linked customer row or any sibling property row on its account being
+an established customer, ARCHIVED (archiving never re-opens the handoff), or the
+draft's customer row being missing (fail closed) blocks it. The
 suppression writes are best effort: the abandoned-booking recovery worker
 re-checks at send time (SMS and email) and skips, marking suppressed, any intent
 whose draft is so linked — a lookup error skips that tick — so a failed
