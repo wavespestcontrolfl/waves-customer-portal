@@ -473,9 +473,13 @@ async function createVisitPrepSubmission({
   // customer's request. Only for a submission that stored something new
   // (never a duplicate-only resubmit).
   if (result.created) {
-    void require('./visit-prep-tech-alert').notifyTechVisitPrepPhotos({
-      scheduledServiceId: result.current.id,
-    });
+    try {
+      require('./visit-prep-tech-alert').notifyTechVisitPrepPhotos({
+        scheduledServiceId: result.current.id,
+      }).catch((err) => logger.error(`[visit-prep] tech alert failed for ${result.current.id}: ${err.message}`));
+    } catch (err) {
+      logger.error(`[visit-prep] tech alert could not start for ${result.current.id}: ${err.message}`);
+    }
   }
 
   return { created: result.created, stored: result.stored, summary: result.summary, svc: result.current };
