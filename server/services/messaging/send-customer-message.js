@@ -330,6 +330,9 @@ async function sendCustomerMessage(input) {
 async function sendCustomerMessageCore(input) {
   let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
   let providerHandoffReservation = null;
+  // Short codes the SMS link wrap put in THIS attempt's body (stamped to the
+  // sms_log row in the finally below once the send is accepted).
+  let wrappedLinkCodes = [];
   try {
   // 1. Contract validation
   const contractCheck = validateContract(input);
@@ -660,6 +663,32 @@ async function sendCustomerMessageCore(input) {
 
   // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
   //    with (input, policy, contactState).
+  // GATE_SMS_LINK_WRAP: every portal link in a customer/lead SMS becomes a
+  // tracked /l/<code> short link (sms-link-wrap.js). Here — after the
+  // withheld-link rewrite, the app/billing routing and every earlier body
+  // transform, immediately before countSegments — so the audit row, segment
+  // count and the text that goes out all describe the SAME wrapped body. Never
+  // blocks: any failure inside keeps the original link.
+  if (sendInput.channel === 'sms') {
+    try {
+      const linkWrap = await require('./sms-link-wrap').wrapPortalLinks({
+        body: sendInput.body,
+        channel: sendInput.channel,
+        audience: sendInput.audience,
+        purpose: sendInput.purpose,
+        hasMedia: sendHasMedia,
+        customerId: sendInput.customerId,
+        leadId: sendInput.leadId,
+      });
+      if (linkWrap.codes.length) {
+        sendInput.body = linkWrap.body;
+        wrappedLinkCodes = linkWrap.codes;
+      }
+    } catch (err) {
+      logger.warn(`[send_customer_message] SMS link wrap failed, body unchanged: ${err?.name || 'error'}`);
+    }
+  }
+
   const segmentMeta = countSegments(sendInput.body || '');
   const pipeline = [
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
@@ -1287,6 +1316,12 @@ async function sendCustomerMessageCore(input) {
         .attachReservationContext(providerHandoffReservation, err.providerOutcome);
     }
     throw err;
+  } finally {
+    // Fire-and-forget: stamping never adds latency to the send path and
+    // settleWrappedLinks never throws.
+    if (wrappedLinkCodes.length) {
+      require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome);
+    }
   }
 }
 

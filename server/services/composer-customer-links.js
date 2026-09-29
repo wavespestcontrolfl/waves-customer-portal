@@ -602,14 +602,18 @@ async function strayConsultationCredentialPresent(runs, hosts, conn = db) {
   return false;
 }
 
+// One run's link core: wrapping punctuation and a glued "Label:" prefix shed.
+function shedLinkRun(run) {
+  const core = run.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, '')
+    // A bare label glued to the link ("Link:", "now,") is shed — but only a
+    // slash-free prefix, so an outer URL's own path/query is never cut away.
+    .replace(/^[^/]*?(?=https?:\/\/)/i, '');
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(core) ? core : core.replace(/^[^/:,;]*[:,;]/, '');
+}
 function linkRuns(runs, fragmentRe) {
   return runs
     .filter((run) => fragmentRe.test(run))
-    .map((run) => run.replace(/^[(\[<'"]+/, '').replace(/[.,;:!?)\]}>'"]+$/, ''))
-    // A bare label glued to the link ("Link:", "now,") is shed — but only a
-    // slash-free prefix, so an outer URL's own path/query is never cut away.
-    .map((run) => run.replace(/^[^/]*?(?=https?:\/\/)/i, ''))
-    .map((run) => (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : run.replace(/^[^/:,;]*[:,;]/, '')));
+    .map(shedLinkRun);
 }
 function secureLinkRuns(runs) {
   return linkRuns(runs, /\/secure\//i);
@@ -829,6 +833,55 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
 // paths the same way in reverse (r8 P1). Any other host is not ours.
 function ownedPortalHosts() {
   return [...new Set([require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host.toLowerCase()))];
+}
+// Every owned-portal-host link in an outbound body that is NOT already an
+// /l/<code> short link — the recognition the SMS link-wrap seam
+// (messaging/sms-link-wrap.js) rewrites. Same run judgement as the bearer
+// fences above: each whitespace run is shed to its link core (shedLinkRun)
+// and PARSED as a URL (https:// assumed when schemeless, how SMS links go
+// out), and accepted only when its hostname is exactly an owned host — never
+// a substring match, so "https://evil.example/?next=portal…/prep/<tok>" and
+// userinfo/subdomain look-alikes are left alone. Returns positions into the
+// ORIGINAL body so the caller replaces in place: [{ start, end, url, family }]
+// where `url` is the parsed https:// target and `family` the first path
+// segment ('prep', 'pay', 'estimate', ...). Bare-host links with no path,
+// query or fragment (the portal home) carry nothing to track and are skipped,
+// as are runs with a backslash (parsed differently by browsers) and any
+// non-http(s) scheme.
+function ownedPortalLinkSpans(body) {
+  const text = String(body || '');
+  const hosts = ownedPortalHosts();
+  const spans = [];
+  const runRe = /\S+/g;
+  let m;
+  while ((m = runRe.exec(text))) {
+    const raw = m[0];
+    if (raw.includes('\\')) continue;
+    const core = shedLinkRun(raw);
+    if (!core) continue;
+    let url;
+    try {
+      url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(core) ? core : `https://${core}`);
+    } catch {
+      continue;
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
+    if (url.username || url.password) continue;
+    if (!hosts.includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
+    const path = url.pathname.replace(/\/+$/, '');
+    if (/^\/l(\/|$)/i.test(path)) continue;
+    if (!path && !url.search && !url.hash) continue;
+    const offset = raw.indexOf(core);
+    if (offset < 0) continue;
+    url.protocol = 'https:';
+    spans.push({
+      start: m.index + offset,
+      end: m.index + offset + core.length,
+      url: url.href,
+      family: (path.split('/')[1] || 'other').toLowerCase(),
+    });
+  }
+  return spans;
 }
 async function shortCodeRows(runs, scheme = {}) {
   const shortRuns = linkRuns(runs, /\/l\//i);
@@ -2662,6 +2715,7 @@ async function buildStatementLink(recipientLast10) {
 }
 
 module.exports = {
+  ownedPortalLinkSpans,
   OPEN_ESTIMATE_STATUSES,
   REVIEW_GATE_REASONS,
   buildReviewRequestLink,
