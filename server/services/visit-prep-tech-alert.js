@@ -41,7 +41,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { visitPrepPhotosLive, visitPrepTechAlertsLive } = require('../config/feature-gates');
-const { isAssignable } = require('./technician-eligibility');
+const { isAssignable, applyAssignable } = require('./technician-eligibility');
 const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 
 const TYPE = 'customer_visit_photos';
@@ -159,10 +159,15 @@ async function sendPhotoAlert(scheduledServiceId) {
 function scopePhotoCardsToLiveVisits(q, conn) {
   return q.where(function livePhotoCards() {
     this.whereNot({ type: TYPE }).orWhereExists(function liveVisit() {
-      this.select(conn.raw('1')).from('scheduled_services as s')
+      // …and the technician is still a field tech (an office-only edit
+      // keeps future visits assigned; Codex #5303 r7 P2), via the shared
+      // technician-eligibility predicate.
+      const liveVisit = this.select(conn.raw('1')).from('scheduled_services as s')
+        .join('technicians as t', 't.id', 's.technician_id')
         .whereRaw("s.id = (tech_notifications.payload->>'scheduled_service_id')::uuid")
         .whereRaw('s.technician_id = tech_notifications.technician_id')
         .whereNotIn('s.status', OFF_ROUTE_STATUSES);
+      applyAssignable(liveVisit, 't');
     });
   });
 }
