@@ -368,6 +368,120 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
     const kept = packCapacityEnds(slots, { lat: 27.4, lng: -82.4, durationMinutes: 60 }).map((s) => s.start_time);
     expect(kept).toEqual(['11:00']);
   });
+
+  describe('arrival grace (A7, owner ruling 2026-09-28)', () => {
+    // The outer file-level beforeEach already resets GATE_SLOT_TRAVEL_GAP to
+    // 'true' and clears SLOT_TRAVEL_BUFFER_MINUTES for every test; this only
+    // overrides the buffer to a round number for deterministic coordless math.
+    beforeEach(() => { process.env.SLOT_TRAVEL_BUFFER_MINUTES = '25'; });
+
+    test('G22 — a candidate whose own simulated arrival delay exceeds grace never reaches the group; grace 0 never checks it (byte-identical)', () => {
+      // prev ends 09:00 (540); both candidates start comfortably past the
+      // 25-minute requirement (drive 0, no padding either side) regardless
+      // of grace — the ONLY thing distinguishing them is arrival_delay_minutes.
+      const prevRow = { startMin: 480, endMin: 540, lat: null, lng: null, expectedMinutes: 60 };
+      const cap = (start, endTime, delay) => ({
+        date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+        arrival_delay_minutes: delay, route_arrivals: [],
+        _gap: { prevId: 's1', nextId: null, prevRow },
+      });
+      const slots = [cap('10:00', '11:00', 100), cap('11:00', '12:00', 90)];
+      // Grace 0/omitted: arrival_delay_minutes is never consulted — both
+      // candidates pass the geometric check and the earliest (10:00) wins,
+      // same as every packCapacityEnds call before this lane.
+      expect(packCapacityEnds(slots, { lat: null, lng: null, durationMinutes: 60 }).map((s) => s.start_time))
+        .toEqual(['10:00']);
+      // Grace 90 (a future date — not `today`): the 100-minute-delay
+      // candidate is dropped before grouping even starts, leaving only the
+      // 90-minute one — now the earliest (only) survivor.
+      const graced = packCapacityEnds(slots, {
+        lat: null, lng: null, durationMinutes: 60, graceMinutes: 90, today: '2099-01-01',
+      }).map((s) => s.start_time);
+      expect(graced).toEqual(['11:00']);
+    });
+
+    test('same-day (today) forces grace to 0 for that date\'s own candidates — the arrival_delay_minutes pre-filter is skipped entirely, exactly as it always has been for every date before this lane', () => {
+      const prevRow = { startMin: 480, endMin: 540, lat: null, lng: null, expectedMinutes: 60 };
+      const cap = (start, endTime, delay) => ({
+        date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+        arrival_delay_minutes: delay, route_arrivals: [],
+        _gap: { prevId: 's1', nextId: null, prevRow },
+      });
+      // A 100-minute simulated delay on TODAY's own candidate: grace forced
+      // to 0 for this date means the NEW arrival_delay_minutes pre-filter
+      // never runs at all (decision 2 keeps today's GEOMETRIC check strict;
+      // it does not invent a new same-day cap that didn't exist before this
+      // lane — evaluateArrivalPlacement's own +120 promise is what already
+      // bounds a same-day candidate's real lateness).
+      const kept = packCapacityEnds([cap('10:00', '11:00', 100)], {
+        lat: null, lng: null, durationMinutes: 60, graceMinutes: 90, today: '2026-10-01',
+      }).map((s) => s.start_time);
+      expect(kept).toEqual(['10:00']);
+      // The SAME candidate on a future date (not `today`) DOES get the
+      // pre-filter, since grace is genuinely active there.
+      const gracedAway = packCapacityEnds([cap('10:00', '11:00', 100)], {
+        lat: null, lng: null, durationMinutes: 60, graceMinutes: 90, today: '2099-01-01',
+      });
+      expect(gracedAway).toEqual([]);
+    });
+
+    // A7's "clearsTravelGap checks [prevRow, nextRow] together": a candidate
+    // whose OWN prev-side lateness (only tolerable because of grace) then
+    // pushes it too close to a REAL next stop must be rejected outright —
+    // never kept just because it happens to look fine on the ONE side a
+    // naive single-side check would evaluate for a given role.
+    test('a candidate graced past prevRow is still rejected when its OWN resulting lateness would violate the always-strict nextRow', () => {
+      // prev: 10:00-11:00, 50 expected (10 min padding) -> required(prev,
+      // cand) = 15. next: 11:55-13:00, 60 expected (no padding) ->
+      // required(cand,next) = 25. Candidate 11:00-11:30 clears prevRow only
+      // with grace (5 min late, 5<=90) — but its own real arrival (11:05)
+      // then leaves only 20 free minutes before next's 25-minute
+      // requirement. A 12:00-12:30 candidate clears prevRow trivially but
+      // genuinely overlaps next outright (unconditional, no grace either).
+      const prevRow = { startMin: 600, endMin: 660, lat: null, lng: null, expectedMinutes: 50 };
+      const nextRow = { startMin: 715, endMin: 780, lat: null, lng: null, expectedMinutes: 60 };
+      const cap = (start, endTime) => ({
+        date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+        arrival_delay_minutes: 0, route_arrivals: [],
+        _gap: { prevId: 's1', nextId: 's2', prevRow, nextRow },
+      });
+      const slots = [cap('11:00', '11:30'), cap('12:00', '12:30')];
+      // Grace 0: each role checks only its own side — 11:00 fails prevRow
+      // (0 grace) so the prev-role falls back to 12:00; 12:00 overlaps
+      // next outright so the next-role falls back to 11:00 (which, checked
+      // ALONE against next with no projected lateness, looks fine at the
+      // exact 25-minute boundary). Byte-identical to every packCapacityEnds
+      // call before this lane.
+      expect(packCapacityEnds(slots, { lat: null, lng: null, durationMinutes: 30 }).map((s) => s.start_time).sort())
+        .toEqual(['11:00', '12:00']);
+      // Grace 90: BOTH candidates are now correctly rejected — 11:00's
+      // real (prev-graced) arrival leaves only 20 free minutes before
+      // next's 25-minute requirement (the combined check catches this;
+      // checking next alone, unprojected, would have wrongly kept it),
+      // and 12:00 still overlaps next outright regardless of grace.
+      const graced = packCapacityEnds(slots, {
+        lat: null, lng: null, durationMinutes: 30, graceMinutes: 90, today: '2099-01-01',
+      });
+      expect(graced).toEqual([]);
+    });
+
+    test('grace 0 never annotates a neighbour from route_arrivals — the nominal window is used, exactly as before', () => {
+      const prevRow = { startMin: 600, endMin: 660, lat: null, lng: null, expectedMinutes: 60 };
+      const cap = (start, endTime) => ({
+        date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+        arrival_delay_minutes: 0,
+        // A simulated arrival that, if wrongly applied at grace 0, would
+        // make this neighbour look 30 minutes later than its nominal window.
+        route_arrivals: [{ id: 's1', arrival: '10:30', departure: '11:30' }],
+        _gap: { prevId: 's1', nextId: null, prevRow },
+      });
+      // Nominal: prev ends 11:00 (660), required 25 (buffer, no padding) ->
+      // a candidate at 11:25 (685) clears with exactly 25 free minutes.
+      const kept = packCapacityEnds([cap('11:25', '12:25')], { lat: null, lng: null, durationMinutes: 60 })
+        .map((s) => s.start_time);
+      expect(kept).toEqual(['11:25']);
+    });
+  });
 });
 
 describe('capacityGapNeighbours — unassigned blockers count as time-based anchors (Codex r3 P1)', () => {

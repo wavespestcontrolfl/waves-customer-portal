@@ -432,7 +432,7 @@ const CONFLICT_COLUMNS = [
  *                                          reservation_expires_at) from the
  *                                          result; default true — holds
  *                                          occupy real route time.
- * @param {{lat:number|null,lng:number|null}} [args.travel]
+ * @param {{lat:number|null,lng:number|null,graceMinutes?:number,technicianId?:string}} [args.travel]
  *                                          The NEW stop's pin. When given AND
  *                                          GATE_SLOT_TRAVEL_GAP is on, a row
  *                                          also conflicts when the free time
@@ -443,7 +443,16 @@ const CONFLICT_COLUMNS = [
  *                                          ('overlap' | 'travel_gap'). Nulls
  *                                          are fine (buffer-only). Omitted or
  *                                          gate off → the overlap SQL below,
- *                                          byte for byte.
+ *                                          byte for byte. `graceMinutes` (A1,
+ *                                          owner ruling 2026-09-28) rides
+ *                                          straight onto the travel-gap
+ *                                          candidate — 0/omitted is
+ *                                          byte-identical. `technicianId`
+ *                                          scopes a GRACED check to that
+ *                                          technician's own rows + unassigned
+ *                                          (multi-tech parity, see
+ *                                          findConflictingVisitsWithTravel);
+ *                                          ignored at grace 0 or when omitted.
  * @returns {Promise<Array>} overlapping rows (chronological), [] if none.
  */
 async function findConflictingVisits({
@@ -686,27 +695,32 @@ function stopCreditResolver(rows) {
  * buffer (scheduling/travel-gap.js travelGapConflicts). Same status / hold /
  * exclusion conventions as the SQL path; windowless placeholder rows stay
  * inert (whereNotNull).
+ *
+ * Arrival grace (`travel.graceMinutes`, A1, owner ruling 2026-09-28) is
+ * stamped straight onto the candidate travelGapConflicts reads — omitted or
+ * 0 (every caller before this lane) is byte-identical.
+ *
+ * Multi-tech parity (`travel.technicianId`, owner ruling 2026-09-28): a
+ * GRACED candidate (graceMinutes > 0) with a known assigned technician is
+ * measured only against that technician's OWN rows plus unassigned ones
+ * (which could still become this technician's) — never every technician's
+ * rows chained as one fictitious route. This module is deliberately
+ * tech-blind for plain overlap (see header — one active technician, so any
+ * overlap is a real clash); grace changes that assumption for a second
+ * technician, because the PROJECTION this file's caller (travel-gap.js)
+ * now runs would otherwise chain an unrelated technician's stops into this
+ * candidate's own lateness math — an offer computed per-technician
+ * (find-time.js's findCapacitySlots) and a commit computed across every
+ * technician's combined day would disagree. Grace 0, or no `technicianId`
+ * given, keeps the full tech-blind row set — byte-identical to before.
  */
-async function findConflictingVisitsWithTravel({
-  db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel,
+// The date's occupying rows for the travel-gap probe — same status/hold/
+// exclusion conventions as every other gate. Pulled out of
+// findConflictingVisitsWithTravel to keep its own branching to candidate
+// construction + the travel-gap resolution alone.
+async function queryScheduledServicesForTravel({
+  db, date, excludeIds, excludeCustomerId, excludeStatuses, includeHolds,
 }) {
-  const candStart = timeToMinutes(windowStart);
-  const candEnd = timeToMinutes(windowEnd);
-  if (candStart == null || candEnd == null) return [];
-  // Expected-minutes padding credit (owner ruling 2026-09-23) — the
-  // candidate's own, when the caller resolved it (travel.expectedMinutes);
-  // no match/omitted falls back to the window length (zero padding, legacy
-  // gap). Every existing stop's own credit is resolved below per row.
-  const candidateWindowMinutes = candEnd - candStart;
-  const candidate = {
-    startMin: candStart, endMin: candEnd, lat: travel?.lat ?? null, lng: travel?.lng ?? null,
-    windowMinutes: candidateWindowMinutes,
-    expectedMinutes: Number.isFinite(travel?.expectedMinutes)
-      ? Math.min(travel.expectedMinutes, candidateWindowMinutes)
-      : candidateWindowMinutes,
-  };
-  await ensureCatalogLoaded(db);
-
   const query = db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.scheduled_date', String(date).split('T')[0])
@@ -727,13 +741,17 @@ async function findConflictingVisitsWithTravel({
       q.whereNotNull('scheduled_services.customer_id').orWhereNull('scheduled_services.reservation_expires_at');
     });
   }
-  const rows = await query
+  return query
     .select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db))
     .orderBy('scheduled_services.window_start', 'asc');
-  if (!Array.isArray(rows)) return [];
+}
 
+// Reshapes occupying rows into the {startMin, endMin, lat, lng, hold,
+// windowMinutes, expectedMinutes, row} entities travel-gap.js reads —
+// each row's own expected-minutes credit (owner ruling 2026-09-23) and
+// hold identity (never shadows a committed neighbour — travel-gap.js).
+function buildTravelGapStops(rows) {
   const stopExpectedMinutes = stopCreditResolver(rows);
-
   const stops = [];
   for (const row of occupiedRows(rows)) {
     const startMin = timeToMinutes(row.window_start);
@@ -748,17 +766,49 @@ async function findConflictingVisitsWithTravel({
       endMin,
       lat: row.lat,
       lng: row.lng,
-      // A live hold never shadows a committed neighbour (travel-gap.js).
       hold: row.reservation_expires_at != null && row.customer_id == null,
-      // Expected-minutes padding credit for THIS row (owner ruling
-      // 2026-09-23) — service_key_snapshot first, else services.name =
-      // service_type; no match falls back to the window length.
       windowMinutes: endMin - startMin,
       expectedMinutes: stopExpectedMinutes(row, endMin - startMin),
       row,
     });
   }
-  const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row.id, reason]));
+  return stops;
+}
+
+async function findConflictingVisitsWithTravel({
+  db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel,
+}) {
+  const candStart = timeToMinutes(windowStart);
+  const candEnd = timeToMinutes(windowEnd);
+  if (candStart == null || candEnd == null) return [];
+  // Expected-minutes padding credit (owner ruling 2026-09-23) — the
+  // candidate's own, when the caller resolved it (travel.expectedMinutes);
+  // no match/omitted falls back to the window length (zero padding, legacy
+  // gap). Every existing stop's own credit is resolved below per row.
+  const candidateWindowMinutes = candEnd - candStart;
+  const graceMinutes = Math.max(0, Number(travel?.graceMinutes) || 0);
+  const candidate = {
+    startMin: candStart, endMin: candEnd, lat: travel?.lat ?? null, lng: travel?.lng ?? null,
+    windowMinutes: candidateWindowMinutes,
+    expectedMinutes: Number.isFinite(travel?.expectedMinutes)
+      ? Math.min(travel.expectedMinutes, candidateWindowMinutes)
+      : candidateWindowMinutes,
+    graceMinutes,
+  };
+  await ensureCatalogLoaded(db);
+
+  const rows = await queryScheduledServicesForTravel({
+    db, date, excludeIds, excludeCustomerId, excludeStatuses, includeHolds,
+  });
+  if (!Array.isArray(rows)) return [];
+
+  const stops = buildTravelGapStops(rows);
+  // Multi-tech parity (see header): a graced candidate with a known
+  // technician is measured only against ITS route + unassigned rows.
+  const travelStops = graceMinutes > 0 && travel?.technicianId
+    ? stops.filter((stop) => stop.row.technician_id == null || String(stop.row.technician_id) === String(travel.technicianId))
+    : stops;
+  const reasonByRow = new Map(travelGapConflicts(candidate, travelStops).map(({ stop, reason }) => [stop.row.id, reason]));
   // Query order (window_start asc), not conflict order.
   return rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
 }

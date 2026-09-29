@@ -23,7 +23,10 @@ const { applyAssignable, absentTechDays } = require('../technician-eligibility')
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes } = require('./policy');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
-const { travelGapEnabled, violatesTravelGap } = require('./travel-gap');
+const {
+  travelGapEnabled, violatesTravelGap, travelGapViolation, annotateProjectedArrivals,
+  effectiveEndMinutes, requiredGapMinutes,
+} = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
@@ -262,6 +265,11 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      // A7 (arrival grace): the simulation's own arrival delay for THIS
+      // candidate — includes chain lateness across every traffic leg the
+      // simulation ran, not just the immediate neighbour. Additive; unused
+      // unless a caller opts into grace below.
+      arrival_delay_minutes: fit.arrivalDelayMinutes,
       return_time: minutesToTime(Math.ceil(fit.finishMinute)),
       route_mode: 'arrival_windows', travel_source: fit.travelSource, travel_reasons: fit.travelReasons,
       stops_that_day: fit.arrivals.length - 1, latest_start_min: start,
@@ -271,8 +279,14 @@ async function findCapacitySlots(opts) {
       _gap: capacityGapNeighbours(context, fit, start),
     });
   }
+  // Arrival grace (A7): `opts.arrivalGraceMinutes` is the RAW, multi-date
+  // value a self-serve caller resolved from selfServeArrivalGraceMinutes()
+  // with no `date` (see normalizeFindTimeOptions); `today` lets
+  // packCapacityEnds force it to 0 for THIS date's own candidates
+  // (decision 2). Omitted (every existing caller) -> 0 -> byte-identical.
   const packed = opts.packEnds === true ? packCapacityEnds(slots, {
     lat: opts.lat, lng: opts.lng, durationMinutes, expectedMinutes: opts.expectedMinutes,
+    graceMinutes: opts.arrivalGraceMinutes || 0, today,
   }) : slots;
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
@@ -362,30 +376,68 @@ function capacityNeighbourEntity(row) {
 // latest when it precedes one; a gap bordered by no stop (empty day) keeps
 // every hour, exactly as the non-capacity packEnds rule does.
 //
-// `caller` ({ lat, lng, durationMinutes, expectedMinutes }, Codex r7 P1):
-// the customer-facing travel-gap predicate (violatesTravelGap, the SAME one
-// booking.js's own commit-gate mirror applies) is now run against each
-// group's candidates BEFORE picking the packed endpoint, not after. Arrival-
-// window route feasibility (evaluateArrivalPlacement) models real drive but
-// not this buffer/credit rule, so it could accept a start (say 10:00, right
-// after a 09:00-10:00 stop) the customer-facing gate would reject — picking
-// that as "the" packed end first, with no fallback, made the whole gap look
+// `caller` ({ lat, lng, durationMinutes, expectedMinutes, graceMinutes?,
+// today? }, Codex r7 P1 + A7 owner ruling 2026-09-28): the customer-facing
+// travel-gap predicate (violatesTravelGap, the SAME one booking.js's own
+// commit-gate mirror applies) is now run against each group's candidates
+// BEFORE picking the packed endpoint, not after. Arrival-window route
+// feasibility (evaluateArrivalPlacement) models real drive but not this
+// buffer/credit rule, so it could accept a start (say 10:00, right after a
+// 09:00-10:00 stop) the customer-facing gate would reject — picking that as
+// "the" packed end first, with no fallback, made the whole gap look
 // unavailable even when a later start (11:00+) the OLD grid-scan would have
 // tried was genuinely fine. Filtering first means the packed pick is always
 // one the commit gate would also accept; a group with no survivors on a
 // side offers nothing from that side, same as every other packed-ends rule
 // in this codebase — never a synthesized fallback.
+//
+// Arrival grace (A7): `caller.graceMinutes` (RAW, multi-date — see
+// normalizeFindTimeOptions) is 0 for every date at/before `caller.today`
+// (decision 2, same-day strict) and the configured value for every other
+// date; `slotGrace` below resolves that per SLOT (a capacity sweep spans a
+// date range, so "today" only ever affects its own day's candidates).
+// `graceMinutes` 0 makes every step below identical to before this lane:
+// no candidate is pre-filtered by `arrival_delay_minutes`, and
+// `clearsTravelGap` checks exactly one neighbour (the side this pass is
+// choosing a survivor for) with no `arrivalMin`/`graceMinutes` on the
+// candidate — byte-identical to the original single-row check.
 function packCapacityEnds(slots, caller = {}) {
+  const graceForSlot = (slot) => (Number(caller.graceMinutes) > 0 && slot.date !== caller.today
+    ? Number(caller.graceMinutes) : 0);
+  // A7 "the simulation's own arrival, which includes chain lateness with
+  // traffic legs": a candidate whose OWN simulated arrival already runs past
+  // this day's grace never reaches the packed-ends grouping at all — kept
+  // today (P2's own reproduction) is the identity filter (arrival_delay_minutes
+  // is compared against 0 grace for every date, and every existing candidate
+  // was already feasible per evaluateArrivalPlacement's own +120 check, so
+  // this never drops anything when grace is 0).
+  const gracedSlots = slots.filter((slot) => {
+    const grace = graceForSlot(slot);
+    return grace <= 0 || !(Number.isFinite(slot.arrival_delay_minutes) && slot.arrival_delay_minutes > grace);
+  });
   const groups = new Map();
-  for (const slot of slots) {
+  for (const slot of gracedSlots) {
     const key = `${slot.date}|${slot.technician.id}|${slot._gap?.prevId ?? ''}|${slot._gap?.nextId ?? ''}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(slot);
   }
-  const clearsTravelGap = (slot, row) => {
+  // A neighbour entity for the travel-gap predicate. At grace > 0 it carries
+  // its REAL simulated arrival for THIS slot (route_arrivals — the same
+  // traffic-aware per-candidate simulation evaluateArrivalPlacement already
+  // ran) as `arrivalMin`, so the offer-side check reflects chain lateness
+  // exactly like the commit-time simulation does — never the nominal window.
+  const neighbourEntity = (slot, row, grace) => {
+    const entity = capacityNeighbourEntity(row);
+    if (!entity || grace <= 0) return entity;
+    const simulated = Array.isArray(slot.route_arrivals) ? slot.route_arrivals.find((a) => a.id === row.id) : null;
+    const arrivalMin = simulated ? timeToMinutes(simulated.arrival) : null;
+    return Number.isFinite(arrivalMin) ? { ...entity, arrivalMin } : entity;
+  };
+  const clearsTravelGap = (slot, rows) => {
     if (!travelGapEnabled()) return true;
-    const neighbour = capacityNeighbourEntity(row);
-    if (!neighbour) return true;
+    const grace = graceForSlot(slot);
+    const neighbours = rows.map((row) => neighbourEntity(slot, row, grace)).filter(Boolean);
+    if (!neighbours.length) return true;
     const startMin = timeToMinutes(slot.start_time);
     const endMin = timeToMinutes(slot.end_time);
     if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return true;
@@ -393,8 +445,34 @@ function packCapacityEnds(slots, caller = {}) {
     const candidate = {
       startMin, endMin, lat: caller.lat ?? null, lng: caller.lng ?? null, windowMinutes: ownWindow,
       expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
+      graceMinutes: grace,
     };
-    return !violatesTravelGap(candidate, [neighbour]);
+    if (grace <= 0) return !violatesTravelGap(candidate, neighbours);
+    // A7, grace > 0: neighbours already carry their REAL simulated arrival
+    // (route_arrivals — the traffic-aware per-candidate simulation), which
+    // is more accurate than travel-gap.js's own haversine-based chain
+    // projection — so this does NOT hand both neighbours to
+    // violatesTravelGap/travelGapConflicts as a raw stops array (its own
+    // annotateProjectedArrivals would recompute — and discard — each
+    // neighbour's pre-set arrivalMin from a fresh chain of just these two
+    // rows). Instead it reproduces A4's before/after split directly: every
+    // before-side neighbour is checked against the plain candidate first
+    // (never graced past `grace`), then folded into the candidate's own
+    // real arrival for the always-strict after-side check (decision 5).
+    const before = neighbours.filter((n) => n.endMin <= candidate.startMin);
+    const after = neighbours.filter((n) => n.endMin > candidate.startMin);
+    for (const n of before) {
+      if (travelGapViolation(candidate, n)) return false;
+    }
+    const arrival = before.reduce(
+      (acc, n) => Math.max(acc, effectiveEndMinutes(n) + requiredGapMinutes(n, candidate)),
+      candidate.startMin,
+    );
+    const candidateForAfter = { ...candidate, arrivalMin: arrival };
+    for (const n of after) {
+      if (travelGapViolation(candidateForAfter, n)) return false;
+    }
+    return true;
   };
   const keep = new Set();
   for (const group of groups.values()) {
@@ -402,12 +480,17 @@ function packCapacityEnds(slots, caller = {}) {
     const nextReal = group[0]._gap?.nextId != null;
     if (!prevReal && !nextReal) { for (const s of group) keep.add(s); continue; }
     const byStart = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
+    const { prevRow, nextRow } = group[0]._gap;
+    // Grace checks BOTH real neighbours together (A7) — a start grace moves
+    // earlier against `prev` must still never violate the always-strict
+    // `next` side (decision 5), which a one-side-at-a-time check could miss.
+    // Grace 0 keeps each pass checking only its own side, exactly as before.
     if (prevReal) {
-      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow));
+      const survivors = byStart.filter((s) => clearsTravelGap(s, graceForSlot(s) > 0 ? [prevRow, nextRow].filter(Boolean) : [prevRow]));
       if (survivors.length) keep.add(survivors[0]);
     }
     if (nextReal) {
-      const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow));
+      const survivors = byStart.filter((s) => clearsTravelGap(s, graceForSlot(s) > 0 ? [prevRow, nextRow].filter(Boolean) : [nextRow]));
       if (survivors.length) keep.add(survivors[survivors.length - 1]);
     }
   }
@@ -444,7 +527,7 @@ async function resolveCandidateExpectedMinutes({
 // findAvailableSlots' own branching stays in the loop that drives it, not
 // the row-shaping itself.
 function buildDayStops(services, {
-  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, arrivalGraceMinutes = 0,
 }) {
   const filtered = services.filter((s) => {
     if (excludeSet.has(String(s.id))) return false;
@@ -470,7 +553,7 @@ function buildDayStops(services, {
   // are computed from each member's own raw span, same as the resolver's
   // own commit-side callers.
   const creditResolver = wantsExpectedMinutesCredit ? stopCreditResolver(filtered) : null;
-  return occupiedRows(filtered)
+  const stops = occupiedRows(filtered)
     .map((s) => {
       // s.startMin/s.endMin are occupiedRows' own (allocation-expanded for
       // a version-2 combined member, else identical to the plain
@@ -485,6 +568,11 @@ function buildDayStops(services, {
         customer: `${s.first_name || ''} ${s.last_name || ''}`.trim() || 'Unknown',
         city: s.city,
         service_type: s.service_type,
+        // Arrival grace (A6/isHoldStop): a live estimate hold occupies this
+        // slot but gets no grace at all on its own next-side check. Stamped
+        // regardless of whether grace is active — cheap, and harmless for
+        // every caller that never reads it.
+        hold: s.reservation_expires_at != null && s.customer_id == null,
         // Expected-minutes padding credit (owner ruling 2026-09-23) — only
         // resolved for a customer-facing caller; a plain endMin-startMin
         // window with no catalog match degrades to the legacy endMin/zero
@@ -495,19 +583,32 @@ function buildDayStops(services, {
       };
     })
     .sort((a, b) => a.startMin - b.startMin);
+  // A2: project this tech's real day (committed rows + live holds) forward
+  // only when this date can accept lateness — grace 0 (every date before
+  // this lane, and TODAY under decision 2) never calls
+  // annotateProjectedArrivals, so no stop ever carries `arrivalMin` and
+  // packedBounds/effectiveEndMinutes resolve exactly as before.
+  return arrivalGraceMinutes > 0 ? annotateProjectedArrivals(stops) : stops;
 }
 
-// Adapts a dayStops row ({startMin, endMin, expectedMinutes?}) to the
-// {rawStartMin, rawEndMin, expectedEndMin} shape scheduling/packing-
-// geometry.js's packedBounds reads — the same credited-effective-end math
-// travel-gap.js's effectiveEndMinutes/paddingMinutesOf compute internally.
-// HQ anchors are never passed through this (see evaluateGap): a zero-width
-// "stop" would otherwise read as having zero window padding and wrongly
-// pick up a full buffer credit HQ legs must never carry.
+// Adapts a dayStops row ({startMin, endMin, expectedMinutes?, arrivalMin?,
+// hold?}) to the {rawStartMin, rawEndMin, expectedEndMin, arrivalMin?, hold?}
+// shape scheduling/packing-geometry.js's packedBounds reads — the same
+// credited-effective-end math travel-gap.js's effectiveEndMinutes/
+// paddingMinutesOf compute internally. `arrivalMin` (A2's projected/graced
+// actual arrival, set by buildDayStops only when that date's grace > 0) and
+// `hold` (A6 — a live estimate hold gets no grace) are plain pass-throughs;
+// a stop that never carries them behaves exactly as before. HQ anchors are
+// never passed through this (see evaluateGap): a zero-width "stop" would
+// otherwise read as having zero window padding and wrongly pick up a full
+// buffer credit HQ legs must never carry.
 function toPackingBoundAnchor(stop) {
   const windowMinutes = stop.endMin - stop.startMin;
   const expected = Number.isFinite(stop.expectedMinutes) ? Math.min(stop.expectedMinutes, windowMinutes) : windowMinutes;
-  return { rawStartMin: stop.startMin, rawEndMin: stop.endMin, expectedEndMin: stop.startMin + expected };
+  return {
+    rawStartMin: stop.startMin, rawEndMin: stop.endMin, expectedEndMin: stop.startMin + expected,
+    arrivalMin: stop.arrivalMin, hold: stop.hold === true,
+  };
 }
 
 // The geometry of ONE route gap (between consecutive anchors prev/next):
@@ -518,11 +619,13 @@ function toPackingBoundAnchor(stop) {
 // share a function scope with the day/tech enumeration around it.
 // `geo` carries the invariants resolved once per findAvailableSlots call:
 // { newStop, dateFrom, stopBuffer, candidateExpectedMinutes, durationMinutes,
-//   dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin }.
+//   dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
+//   arrivalGraceMinutes }.
 function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
   const {
     newStop, dateFrom, stopBuffer, candidateExpectedMinutes,
     durationMinutes, dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
+    arrivalGraceMinutes,
   } = geo;
   const baselineDrive = driveMin(prev, next);
   const driveIn = driveMin(prev, newStop);
@@ -532,6 +635,13 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
 
   const prevIsStop = prev.id !== 'HQ_START';
   const nextIsStop = next.id !== 'HQ_END';
+  // Same-day strict (decision 2, A1's own "today" rule): find-time's ONE
+  // switch point for this — the reader already zeroes today for a caller
+  // that passes `date`, but this file's per-date loop resolves the raw
+  // configured value once (normalizeFindTimeOptions) and reuses `todayEt`
+  // (already computed for the lead-time floor) so every gap on today's date
+  // shares the exact same "is this today" test the rest of the file uses.
+  const grace = date === todayEt ? 0 : (arrivalGraceMinutes || 0);
 
   // Neighbour-buffer geometry (owner ruling 2026-09-23), via the shared
   // packing-geometry.js formula every customer-facing picker now shares
@@ -539,23 +649,36 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
   // each carried a slightly different, independently-buggy copy). HQ legs
   // never get a buffer, padding credit, or the raw-overlap clamp — they are
   // not real stops, so packedBounds sees `null` on that side and this file
-  // falls back to the plain drive-only shape, exactly as before.
-  const { earliestStart: earliestFromPrevStop, latestStart: latestFromNextStop } = packedBounds({
+  // falls back to the plain drive-only shape, exactly as before. `grace`
+  // (A5) lets packedBounds emit an earlier packed-after-prev grid point and
+  // sentinel an infeasible packed-before-next gap to -Infinity; 0 is
+  // byte-identical to before this lane.
+  const { earliestStart: earliestFromPrevStop, latestStart: latestFromNextStop, arrivalFloor: prevArrivalFloor } = packedBounds({
     prev: prevIsStop ? toPackingBoundAnchor(prev) : null,
     next: nextIsStop ? toPackingBoundAnchor(next) : null,
     durationMinutes, expectedMinutes: candidateExpectedMinutes,
-    driveIn, driveOut, buffer: stopBuffer,
+    driveIn, driveOut, buffer: stopBuffer, grace,
   });
 
+  // The HQ_START leg's own arrival floor (A5: "HQ_START gets arrivalFloor =
+  // dayOpen + driveIn") — prev.endMin is dayOpen for that anchor. Used both
+  // to grace the earliest floor below and, if this same gap ends at
+  // HQ_END (an empty day), to sentinel the latest bound.
+  const hqStartArrivalFloor = prev.endMin + driveIn;
   // Earliest the new job could start: after the previous anchor's
   // (effective) end + drive from prev → new — floored at "now + lead" when
   // the date is today. Against a REAL prev stop, packedBounds' earliestStart
   // already floors at prev's own RAW end (Codex r5 P1: credit can move the
   // effective end earlier, but the candidate can never start before prev's
-  // PROMISED window truly closes, however much credit prev carries).
+  // PROMISED window truly closes, however much credit prev carries) and, at
+  // grace > 0, may sit up to `grace` minutes before its arrivalFloor (A5).
+  // The HQ_START leg gets the same treatment directly (E3/E4/cascade 8):
+  // commit has no HQ/day-open concept to re-check, so loosening this floor
+  // is safe — a graced HQ_START offer that turns out too early is caught by
+  // the exact predicate downstream exactly like any other graced offer.
   const earliestFloor = Math.max(
     dayOpen,
-    prevIsStop ? earliestFromPrevStop : (prev.endMin + driveIn),
+    prevIsStop ? earliestFromPrevStop : (hqStartArrivalFloor - grace),
     date === todayEt ? todayFloorMin : 0,
     // honor a hard time-window lower bound, all dates or per date (0 = no-op)
     startFloorFor(date, earliestStartMin, startFloorByDate),
@@ -574,9 +697,22 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
   // or not — travel-gap.js's own real-overlap check is unconditional
   // regardless of credit, so an uncapped bound was rejected downstream with
   // no fallback and the whole gap's "before next" side silently vanished.
-  const latestStartFloor = nextIsStop
+  let latestStartFloor = nextIsStop
     ? latestFromNextStop
     : next.startMin - driveOut - durationMinutes;
+  // HQ_END sentinel (A5): a graced candidate's REAL arrival can never be
+  // earlier than this gap's own (un-graced) arrival floor — whichever start
+  // an offer prints, the tech genuinely cannot get there sooner. If even
+  // that floor, run through the candidate's full (uncredited) work and the
+  // drive home, cannot clear day-close, this whole gap has no room for the
+  // candidate regardless of what start is offered — never a fallback to
+  // "the earliest hour that happens to fit anyway" (grace 0 never runs this;
+  // the un-graced path never offered a start past this floor in the first
+  // place, so it never needed the check).
+  if (!nextIsStop && grace > 0) {
+    const arrivalFloorForThisGap = prevIsStop ? prevArrivalFloor : hqStartArrivalFloor;
+    if (arrivalFloorForThisGap + durationMinutes + driveOut > next.startMin) latestStartFloor = -Infinity;
+  }
 
   // A coordless anchor (ungeocoded stop, or a divergent stamped rental
   // whose primary-coord fallback the SELECT suppressed) degrades to zero
@@ -590,6 +726,16 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
 
   const makeCandidate = (candidateStartMin) => {
     const candidateEndMin = candidateStartMin + durationMinutes;
+    // Arrival grace reporting (diagnostics; getSlotDebug/A9): the candidate's
+    // own real arrival can never be earlier than this gap's arrival floor
+    // (prev's real effective end + drive + buffer, or HQ_START's dayOpen +
+    // driveIn) — never earlier than the offered start itself. At grace 0
+    // the floor is never below `candidateStartMin` (the un-graced code path
+    // never offers an earlier-than-floor start), so both fields are 0/
+    // unchanged for every pre-existing caller.
+    const arrivalFloorForThisGap = prevIsStop ? prevArrivalFloor : hqStartArrivalFloor;
+    const arrivalMin = Math.max(candidateStartMin, arrivalFloorForThisGap);
+    const lateMinutes = Math.max(0, arrivalMin - candidateStartMin);
     return {
       date,
       technician: { id: tech.id, name: tech.name },
@@ -617,6 +763,10 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
       // disappeared from the self-serve booking surfaces (2026-08-05
       // field report).
       latest_start_min: latestStartFloor,
+      // Arrival grace diagnostics (A9/getSlotDebug) — 0/`candidateStartMin`
+      // at grace 0, so no existing shape assertion on this object breaks.
+      arrival_min: arrivalMin,
+      late_minutes: lateMinutes,
       insertion: {
         after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
         before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
@@ -667,8 +817,12 @@ function candidatesForDay(date, tech, params) {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
     slotStepMinutes, durationMinutes, dayOpen, dayClose,
   } = params;
+  // Same-day strict (decision 2) — the one place this date's grace is
+  // resolved for buildDayStops' own projection; evaluateGap re-derives the
+  // identical value from `geo`/`date` for its own packedBounds calls.
+  const dateGrace = date === geo.todayEt ? 0 : (geo.arrivalGraceMinutes || 0);
   const dayStops = buildDayStops(services, {
-    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, arrivalGraceMinutes: dateGrace,
   });
   // Build virtual stop list: HQ ... stops ... HQ
   // "Stops" include timing. For gaps we evaluate between consecutive anchors.
@@ -765,6 +919,14 @@ function candidatesForDay(date, tech, params) {
 //   (estimate picker: the sum across every service in the profile) — wins over the
 //   single serviceKey lookup so a combined visit's other members are never credited
 //   toward travel (push-audit P1).
+// @param {number} [opts.arrivalGraceMinutes] Self-serve arrival grace (A1, owner ruling
+//   2026-09-28) — the RAW value the caller resolved from travel-gap.js's
+//   selfServeArrivalGraceMinutes() with NO `date` (this file is a multi-date sweep, so it
+//   zeroes TODAY's own candidates itself via `todayEt`, the same "one switch point" the
+//   reader documents). A voice/staff caller that never resolves grace passes nothing here
+//   and stays byte-identical — this option only ever WIDENS which hours packedBounds/
+//   evaluateGap can emit; the exact predicate downstream still drops anything it refuses.
+//   Default 0 = every date's gap geometry is exactly what this file has always produced.
 function normalizeFindTimeOptions(opts) {
   const {
     lat, lng,
@@ -783,6 +945,7 @@ function normalizeFindTimeOptions(opts) {
     packEnds = false,
     serviceKey = null,
     expectedMinutes = null,
+    arrivalGraceMinutes = 0,
   } = opts;
   const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const wantsPackedEnds = packEnds === true;
@@ -805,6 +968,7 @@ function normalizeFindTimeOptions(opts) {
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
     earliestStartMin, startFloorByDate, packEnds, serviceKey, expectedMinutes,
     stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
+    arrivalGraceMinutes: Math.max(0, Number(arrivalGraceMinutes) || 0),
   };
 }
 
@@ -857,6 +1021,13 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       'scheduled_services.service_type',
       'scheduled_services.service_key_snapshot',
       'scheduled_services.estimated_duration_minutes',
+      // Arrival grace (A2): a live estimate hold (customer_id NULL + a live
+      // reservation_expires_at) is a real stop for the projection chain and
+      // travel-gap.js's own isHoldStop — but must never itself be graced on
+      // its next-side check (A6). Both columns are cheap and were not
+      // otherwise selected here.
+      'scheduled_services.customer_id',
+      'scheduled_services.reservation_expires_at',
       // Version-2 combined allocations (visit-capacity.js's occupiedRows,
       // the same expansion occupancy.js's shared anchor loader runs) need
       // this to know a row is one member of a summed allocation — without
@@ -911,6 +1082,7 @@ async function findAvailableSlots(opts) {
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
     earliestStartMin, startFloorByDate, serviceKey, expectedMinutes,
     stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
+    arrivalGraceMinutes,
   } = normalizeFindTimeOptions(opts);
   // The requesting estimate's OWN uncommitted holds are not route stops for
   // itself (codex r17 P1). The collision filter downstream already excludes
@@ -972,6 +1144,7 @@ async function findAvailableSlots(opts) {
   const geo = {
     newStop, dateFrom, stopBuffer, candidateExpectedMinutes,
     durationMinutes, dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
+    arrivalGraceMinutes,
   };
 
   const dayParams = {
