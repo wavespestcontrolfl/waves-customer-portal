@@ -5,9 +5,11 @@
 // ⅛ only when no ¼ fits) while the range stays under 1 fl oz, fl oz (¼
 // steps) once it reaches 1 fl oz, the low end rounded up and the high end
 // down so the amount never leaves the label range; a single amount rounds
-// down. The conversion is inventory-units.js'. Any other
-// unit reads exactly as the catalog states it. Container sizes ("250 ml")
-// are how a product is sold, not an application amount, and are not rates.
+// down. A label figure no spoon or cup step fits inside has no rate here,
+// and the assistant sends the tech to the label. The conversion is
+// inventory-units.js'. Any other unit reads exactly as the catalog states
+// it. Container sizes ("250 ml") are how a product is sold, not an
+// application amount, and are not rates.
 const { baseQuantityUnit, convertInventoryQuantity, normalizeInventoryUnit } = require('./inventory-units');
 
 const TSP_PER_FL_OZ = 6;
@@ -28,11 +30,10 @@ function stepText(n) {
 
 const roundUp = (n, step) => Math.ceil(n / step - 1e-9) * step;
 const roundDown = (n, step) => Math.floor(n / step + 1e-9) * step;
-const exact = (n) => String(Math.round(n * 100) / 100);
 
-// An amount or range in one measure: the range rounded inward (low end up,
-// high end down), a single amount rounded down, in the first step that fits;
-// exact to 2 decimals when none does.
+// An amount or range in one measure, in the first step that fits: a range
+// rounded inward (low end up, high end down), a single amount rounded down.
+// null when no step fits inside the label's figure.
 function measuredRange(low, high, steps) {
   for (const step of steps) {
     if (low === high) {
@@ -44,24 +45,27 @@ function measuredRange(low, high, steps) {
     const hi = roundDown(high, step);
     if (lo > 0 && lo <= hi) return lo === hi ? stepText(lo) : `${stepText(lo)}–${stepText(hi)}`;
   }
-  return low === high ? exact(low) : `${exact(low)}–${exact(high)}`;
+  return null;
 }
 
 /**
  * { rate, unit } to show a tech for a catalog label rate. A label in mL comes
- * back in tsp or fl oz ("1¼–2", "tsp/gal"); an mL label whose figure cannot be
- * read comes back empty rather than in mL; any other unit is unchanged.
+ * back in tsp or fl oz ("1¼–2", "tsp/gal"); an mL label whose figure cannot
+ * be read, or that no spoon or cup step fits inside, comes back empty rather
+ * than in mL; any other unit is unchanged.
  */
 function techLabelRate(defaultRate, defaultUnit) {
   if (!isMlUnit(defaultUnit)) return { rate: defaultRate, unit: defaultUnit };
   const bounds = String(defaultRate ?? '').split(/\s*(?:-|–|to)\s*/).map(Number);
-  if (!bounds.length || bounds.length > 2 || bounds.some((n) => !(n > 0))) return { rate: null, unit: null };
+  if (bounds.length > 2 || bounds.some((n) => !(n > 0))) return { rate: null, unit: null };
   const [low, high = low] = bounds.map((ml) => convertInventoryQuantity(ml, 'ml', 'fl_oz'));
+  const inSpoons = high < 1;
+  const rate = inSpoons
+    ? measuredRange(low * TSP_PER_FL_OZ, high * TSP_PER_FL_OZ, TSP_STEPS)
+    : measuredRange(low, high, FL_OZ_STEPS);
+  if (!rate) return { rate: null, unit: null };
   const basis = String(defaultUnit).includes('/') ? `/${String(defaultUnit).split('/').slice(1).join('/').trim()}` : '';
-  if (high < 1) {
-    return { rate: measuredRange(low * TSP_PER_FL_OZ, high * TSP_PER_FL_OZ, TSP_STEPS), unit: `tsp${basis}` };
-  }
-  return { rate: measuredRange(low, high, FL_OZ_STEPS), unit: `fl oz${basis}` };
+  return { rate, unit: `${inSpoons ? 'tsp' : 'fl oz'}${basis}` };
 }
 
 /**

@@ -3,7 +3,22 @@
 // label's own mL figure; a tech reads truck measures, rounded inward so the
 // amount never leaves the label range.
 
+const { convertInventoryQuantity } = require('../services/inventory-units');
 const { techLabelRate, techLabelRateText } = require('../services/label-rate-text');
+
+const FRACTIONS = { '': 0, '⅛': 0.125, '¼': 0.25, '⅜': 0.375, '½': 0.5, '⅝': 0.625, '¾': 0.75, '⅞': 0.875 };
+
+// "1¼–2" tsp -> [low, high] in mL, through the same conversion the module uses.
+function readBackMl(rate, unit) {
+  const amounts = rate.split('–').map((text) => {
+    const match = /^(\d*)([⅛¼⅜½⅝¾⅞]?)$/.exec(text);
+    if (!match || text === '') throw new Error(`not a spoon or cup step: "${rate}"`);
+    return Number(match[1] || 0) + FRACTIONS[match[2]];
+  });
+  const flOz = unit.startsWith('tsp') ? amounts.map((tsp) => tsp / 6) : amounts;
+  const [low, high = low] = flOz.map((oz) => convertInventoryQuantity(oz, 'fl_oz', 'ml'));
+  return [low, high];
+}
 
 describe('techLabelRate — an mL label rate reads in tsp or fl oz', () => {
   test.each([
@@ -27,8 +42,32 @@ describe('techLabelRate — an mL label rate reads in tsp or fl oz', () => {
     expect(techLabelRate('1.25-5', 'ml/gal').rate).toBe('½–1');
   });
 
-  test('a range no spoon step fits inside reads to two decimals, still never mL', () => {
-    expect(techLabelRate('1-1.1', 'ml/gal')).toEqual({ rate: '0.2–0.22', unit: 'tsp/gal' });
+  test('every converted rate reads back inside the label figure', () => {
+    // A range stays between its ends; a single amount is never exceeded.
+    const figures = [0.5, 0.6, 1, 1.01, 1.03, 1.25, 2, 2.5, 3, 5, 7.5, 10, 15, 20, 29, 29.6, 30, 30.5, 45, 60, 90, 118];
+    let converted = 0;
+    for (const low of figures) {
+      for (const high of figures.filter((n) => n >= low)) {
+        const figure = low === high ? `${low}` : `${low}-${high}`;
+        const { rate, unit } = techLabelRate(figure, 'ml/gal');
+        if (rate == null) continue;
+        converted += 1;
+        const [readLow, readHigh] = readBackMl(rate, unit);
+        const floor = low === high ? 0 : low - 1e-6;
+        expect({ figure, inside: readLow > 0 && readLow >= floor && readHigh <= high + 1e-6 })
+          .toEqual({ figure, inside: true });
+        expect(`${rate} ${unit}`).not.toMatch(/\bml\b/i);
+      }
+    }
+    expect(converted).toBeGreaterThan(200);
+  });
+
+  test('a figure no spoon or cup step fits inside has no rate — the assistant sends the tech to the label', () => {
+    // 1.01–1.03 mL is 0.205–0.209 tsp: no ⅛ step lies inside it.
+    expect(techLabelRate('1.01-1.03', 'ml/gal')).toEqual({ rate: null, unit: null });
+    expect(techLabelRate('1-1.1', 'ml/gal')).toEqual({ rate: null, unit: null });
+    // Under ⅛ tsp.
+    expect(techLabelRate('0.5', 'ml/gal')).toEqual({ rate: null, unit: null });
   });
 
   test('an mL figure that cannot be read comes back empty, never in mL', () => {
@@ -55,8 +94,9 @@ describe('techLabelRateText — the knowledge base "Default Rate" line', () => {
     expect(techLabelRateText('5', null)).toBe('5 ');
   });
 
-  test('an unreadable mL figure leaves no line rather than an mL one', () => {
+  test('an mL figure with no rate to state leaves no line rather than an mL one', () => {
     expect(techLabelRateText('see label', 'ml/gal')).toBe('');
+    expect(techLabelRateText('1.01-1.03', 'ml/gal')).toBe('');
   });
 
   test('no rate leaves no line, as before', () => {
