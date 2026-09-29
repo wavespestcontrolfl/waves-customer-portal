@@ -1749,13 +1749,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // Visit prep pest read recovery sweep (GATE_VISIT_PREP_READ_SWEEP, dark):
-  // retries a stuck read (stale pending, a never-attempted 'none', or a
-  // stop reclassified to pest since an 'unsupported' verdict) every 15
-  // minutes. The service gates itself at call time; runExclusive so a
-  // deploy overlap can't double-spend the daily read cap on the same
-  // backlog.
+  // every 15 minutes retries a never-attempted 'none' read or a stop
+  // reclassified to pest since an 'unsupported' verdict (never pending or
+  // failed rows). The gate is checked BEFORE the cron lock, so off means no
+  // query and no job_health write; runExclusive so a deploy overlap can't
+  // double-spend the daily read cap on the same backlog.
   cron.schedule('0 */15 * * * *', async () => {
     try {
+      if (!require('../config/feature-gates').visitPrepReadSweepLive()) return;
       const result = await runExclusive('visit-prep-read-sweep', () => require('./visit-prep-pest-read-sweep').sweepVisitPrepPestReads());
       if (result?.skipped && result.reason !== 'lease_held') {
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');

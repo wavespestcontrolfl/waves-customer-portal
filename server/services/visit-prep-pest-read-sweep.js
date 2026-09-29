@@ -216,13 +216,22 @@ async function sweepVisitPrepPestReads(conn = db, now = new Date()) {
 
   const candidates = await selectCandidates(conn, now);
   let retried = 0;
+  const failures = [];
   for (const row of candidates) {
     try {
       await retryOne(conn, row);
       retried += 1;
     } catch (err) {
       logger.error(`[visit-prep-read-sweep] retry failed submission=${row.submission_id} case=${row.caseLabel}: ${err.message}`);
+      failures.push(row.submission_id);
     }
+  }
+  // Every row still gets its chance above; a batch with failures then fails
+  // the run so job_health shows it (Codex #5319 r3 P2).
+  if (failures.length) {
+    const err = new Error(`visit-prep read sweep: ${failures.length} of ${candidates.length} retries failed`);
+    err.result = { enabled: true, candidates: candidates.length, retried, failed: failures.length };
+    throw err;
   }
   return { enabled: true, candidates: candidates.length, retried };
 }

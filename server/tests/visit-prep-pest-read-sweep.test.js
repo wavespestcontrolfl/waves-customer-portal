@@ -359,7 +359,7 @@ describe('sweepVisitPrepPestReads — retry wiring', () => {
     expect(conn._store.activityLog).toHaveLength(1);
   });
 
-  test('a trigger failure for one row is logged and does not stop the rest of the batch', async () => {
+  test('a trigger failure for one row does not stop the rest of the batch, then fails the run (job_health)', async () => {
     mockTrigger
       .mockRejectedValueOnce(new Error('boom'))
       .mockResolvedValueOnce(undefined);
@@ -374,9 +374,9 @@ describe('sweepVisitPrepPestReads — retry wiring', () => {
         { submission_id: 'sub-2', s3_key: 'b.jpg', mime_type: 'image/jpeg' },
       ],
     });
-    const result = await sweepVisitPrepPestReads(conn, NOW);
-    expect(result.candidates).toBe(2);
-    expect(result.retried).toBe(1); // one threw, one succeeded
-    expect(mockTrigger).toHaveBeenCalledTimes(2);
+    const err = await sweepVisitPrepPestReads(conn, NOW).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.result).toEqual({ enabled: true, candidates: 2, retried: 1, failed: 1 });
+    expect(mockTrigger).toHaveBeenCalledTimes(2); // both rows still ran
   });
 });
