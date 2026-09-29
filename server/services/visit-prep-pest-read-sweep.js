@@ -97,12 +97,14 @@ async function candidateRows(conn, now) {
 async function dropAlreadyAttempted(conn, rows, caseLabel) {
   if (!rows.length) return rows;
   const ids = rows.map((r) => String(r.submission_id));
+  // Selected under an alias and mapped: Knex's pluck() needs a plain column
+  // name, never a Raw (Codex #5319 r1 P1).
   const attempted = await conn('activity_log')
     .where({ action: SWEEP_ACTION })
     .whereRaw("metadata->>'case' = ?", [caseLabel])
     .whereIn(conn.raw("metadata->>'submissionId'"), ids)
-    .pluck(conn.raw("metadata->>'submissionId'"));
-  const seen = new Set(attempted);
+    .select(conn.raw("metadata->>'submissionId' as submission_id"));
+  const seen = new Set(attempted.map((r) => String(r.submission_id)));
   return rows.filter((r) => !seen.has(String(r.submission_id)));
 }
 
@@ -126,8 +128,14 @@ async function selectCandidates(conn, now) {
   // itself under the stop lock (visit-prep-pest-read.js resolveApplicability
   // / claimReadSlot), so a race between this pre-filter and the retry just
   // resolves to 'unsupported' again, harmlessly.
+  // The per-row "pest now?" check runs only for the slots the batch still
+  // has, oldest first, so a large non-pest backlog never turns one tick into
+  // hundreds of queries (Codex #5319 r1 P2).
+  const room = Math.max(0, SWEEP_BATCH_LIMIT - pendingOk.length - noneOk.length);
   const reclassified = [];
-  for (const row of unsupportedOk) {
+  const oldestUnsupported = [...unsupportedOk].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  for (const row of oldestUnsupported.slice(0, room * 2)) {
+    if (reclassified.length >= room) break;
     if (await isPestStop({ id: row.scheduled_service_id, visit_id: row.visit_id }, conn)) reclassified.push(row);
   }
 
@@ -168,8 +176,11 @@ async function retryOne(conn, row) {
   // failure inside it already resolves to a terminal read_status. Awaited
   // here (unlike the original fire-and-forget call site) because this sweep
   // IS the background job; there is no request to keep fast.
+  // The trigger claims only while the row is still in the case this sweep
+  // selected (re-checked under a row lock): an original read that finished
+  // meanwhile is left alone, never re-run (Codex #5319 r1 P1).
   await triggerVisitPrepPestRead({
-    submissionId: row.submission_id, svc, photos, conn,
+    submissionId: row.submission_id, svc, photos, conn, expectStatus: [row.read_status],
   });
 }
 

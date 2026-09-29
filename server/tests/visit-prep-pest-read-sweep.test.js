@@ -89,11 +89,14 @@ function fakeConn(seed = {}) {
     q.where = (obj) => { q._action = obj?.action; return q; };
     q.whereRaw = (sql, bindings) => { q._caseValue = bindings[0]; return q; };
     q.whereIn = (_rawCol, vals) => { q._idsFilter = vals.map(String); return q; };
-    q.pluck = async () => store.activityLog
+    // Mirrors the real query: an aliased select, never pluck() on a Raw
+    // (Knex 3's pluck needs a string column; Codex #5319 r1).
+    q.pluck = () => { throw new Error('pluck() must not be used here'); };
+    q.select = async () => store.activityLog
       .filter((r) => r.action === q._action)
       .filter((r) => !q._caseValue || metaOf(r).case === q._caseValue)
       .filter((r) => !q._idsFilter || q._idsFilter.includes(String(metaOf(r).submissionId)))
-      .map((r) => String(metaOf(r).submissionId));
+      .map((r) => ({ submission_id: String(metaOf(r).submissionId) }));
     q.insert = async (row) => { store.activityLog.push(row); return [{ id: `gen-${store.activityLog.length}` }]; };
     return q;
   }
@@ -329,6 +332,8 @@ describe('sweepVisitPrepPestReads — retry wiring', () => {
       },
       photos: [{ s3Key: 'visitprep/a.jpg', mimeType: 'image/jpeg' }],
       conn,
+      // Claimed only while the row is still in the selected case.
+      expectStatus: ['unsupported'],
     });
   });
 

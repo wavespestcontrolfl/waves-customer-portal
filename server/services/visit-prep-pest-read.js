@@ -83,7 +83,11 @@ const CAP_LOCK_KEY = 'visit-prep-pest-read-cap';
 
 // Returns 'claimed', 'unsupported' (no longer a pest stop) or 'refused'
 // (cap reached, or not a today submission).
-async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
+// `expectStatus`: the read_status(es) this caller is entitled to claim
+// from. Re-checked under a row lock inside the claim, so a read that
+// finished (or was claimed) meanwhile is never overwritten or run twice
+// (Codex #5319 r1 P1). Returns 'taken' when the row moved on.
+async function claimReadSlot(conn, submissionId, svc, now = new Date(), expectStatus = FRESH_STATUSES) {
   // The canonical stop lock (visit-groups.js lockStopForRow) serializes this
   // proof against every grouping writer (join, move, detach), so the member
   // set can't change under it; the members' rows are then share-locked
@@ -105,7 +109,9 @@ async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
         // may claim: one committed just before midnight whose trigger runs
         // after it is not read, rather than spending the new day's cap
         // uncounted (Codex #5305 r4 P2). Its photos still reach the tech.
-        const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
+        const own = await trx('visit_prep_submissions').where({ id: submissionId }).forUpdate()
+          .first('created_at', 'read_status');
+        if (own && !expectStatus.includes(own.read_status)) return 'taken';
         if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
         if (await readsToday(trx, now) >= dailyCap()) return 'refused';
         await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', read_ref: null });
@@ -116,6 +122,22 @@ async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
       if (err && err.code === 'VISIT_STOP_MOVED') return 'refused';
       throw err;
     }
+  }
+}
+
+// A fresh submission's read starts from 'none' ('unsupported' when a
+// reclassified stop is re-read).
+const FRESH_STATUSES = ['none', 'unsupported'];
+
+// A write made BEFORE this read holds a claim lands only while the row is
+// still in a status this caller expected, so it can never overwrite a read
+// that finished or was claimed meanwhile.
+async function writeUnclaimed(conn, submissionId, status, expectStatus) {
+  try {
+    await conn('visit_prep_submissions').where({ id: submissionId })
+      .whereIn('read_status', expectStatus).update({ read_status: status, read_ref: null });
+  } catch (err) {
+    logger.error(`[visit-prep-pest-read] failed to write read_status=${status} submission=${submissionId}: ${err.message}`);
   }
 }
 
@@ -177,7 +199,7 @@ async function storeIdentification(conn, { svc, submissionId, result }) {
  *          read_status='failed' so the row never sticks on 'pending'.
  */
 async function triggerVisitPrepPestRead({
-  submissionId, svc, photos, conn = db,
+  submissionId, svc, photos, conn = db, expectStatus = FRESH_STATUSES,
 } = {}) {
   if (!submissionId || !svc?.id) return;
   if (!visitPrepPestReadLive()) return; // gate off — leave read_status at its 'none' default
@@ -189,12 +211,12 @@ async function triggerVisitPrepPestRead({
   } catch (err) {
     logger.error(`[visit-prep-pest-read] applicability check failed submission=${submissionId}: ${err.message}`);
     // Never reached the engine: 'none', so it never counts against the cap.
-    await setReadStatus(conn, submissionId, 'none');
+    await writeUnclaimed(conn, submissionId, 'none', expectStatus);
     return;
   }
 
   if (applicability === 'unsupported') {
-    await setReadStatus(conn, submissionId, 'unsupported');
+    await writeUnclaimed(conn, submissionId, 'unsupported', expectStatus);
     return;
   }
 
@@ -207,20 +229,21 @@ async function triggerVisitPrepPestRead({
     loaded = await Promise.all(photos.map((p) => PhotoService.getPhotoBase64(p.s3Key)));
   } catch (err) {
     logger.error(`[visit-prep-pest-read] photo load failed for submission=${submissionId}: ${err.message}`);
-    await setReadStatus(conn, submissionId, 'none');
+    await writeUnclaimed(conn, submissionId, 'none', expectStatus);
     return;
   }
 
   let claimed;
   try {
-    claimed = await claimReadSlot(conn, submissionId, svc);
+    claimed = await claimReadSlot(conn, submissionId, svc, new Date(), expectStatus);
   } catch (err) {
     logger.error(`[visit-prep-pest-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
-    await setReadStatus(conn, submissionId, 'none');
+    await writeUnclaimed(conn, submissionId, 'none', expectStatus);
     return;
   }
+  if (claimed === 'taken') return; // finished or claimed meanwhile: leave it
   if (claimed === 'unsupported') {
-    await setReadStatus(conn, submissionId, 'unsupported');
+    await writeUnclaimed(conn, submissionId, 'unsupported', expectStatus);
     return;
   }
   if (claimed !== 'claimed') {
@@ -228,7 +251,7 @@ async function triggerVisitPrepPestRead({
     // 'none', not 'failed': a cap rejection never claimed a slot, so it
     // must not hold the count up if the cap is raised the same day
     // (Codex #5305 r1 P2). The tech sees no read line either way.
-    await setReadStatus(conn, submissionId, 'none');
+    await writeUnclaimed(conn, submissionId, 'none', expectStatus);
     return;
   }
 
