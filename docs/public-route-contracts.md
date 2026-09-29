@@ -3047,9 +3047,12 @@ page calls it once per token on its first successful load, never on the 30 s
 poll. A lookup failure on `/view` is logged code-only (`logViewFailure`,
 never `err.message`, which can carry the bound token) and still answers 204;
 it is never forwarded to the global error handler. The privacy headers are
-also stamped by an `app.use('/api/public/track', …)` mount in
-`server/index.js` AHEAD of the global `/api/` limiter, so a limiter 429 on the
-bearer URL carries them too. Neither companion may grow beyond its single
+also stamped by the `trackPublicPreparser` mount
+(`server/middleware/track-public-preparser.js`) in `server/index.js` AHEAD of
+the global `/api/` limiter and the shared body parsers, so a limiter 429 on the
+bearer URL carries them too. The same guard answers `/view`'s malformed-token
+404 before any body parsing and drops the request Content-Type so the ignored
+body is never parsed (a malformed / oversized body cannot become a 400/413). Neither companion may grow beyond its single
 bounded write).
 `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
 + `POST /:token/confirm`; the destination the 24h reminder and booking
