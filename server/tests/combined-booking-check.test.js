@@ -163,6 +163,29 @@ describe('evaluateCombinedBooking', () => {
     expect(run([PEST, LAWN], [...pestRows(), ...lawn]).ok).toBe(true);
   });
 
+  test('a plan whose every visit was cancelled is not judged (customer churned)', () => {
+    const cancelled = [...pestRows(), ...lawnRows()].map((row) => ({ ...row, status: 'cancelled', window_start: null, technician_id: null }));
+    expect(run([PEST, LAWN], cancelled, { invoice: invoice([firstApp(250)], 'void') })).toBeNull();
+  });
+
+  test('a void first invoice is not a problem when its first-day rows were all cancelled', () => {
+    const rows = [...pestRows(), ...lawnRows()].map((row) => (row.recurring_parent_id ? row : { ...row, status: 'cancelled' }));
+    const verdict = run([PEST, LAWN], rows, { invoice: invoice([firstApp(250)], 'void') });
+    expect(verdict.problems.map((p) => p.code)).not.toContain('first_invoice_missing');
+    expect(verdict.ok).toBe(true);
+  });
+
+  test('a void first invoice with live first-day rows is still reported', () => {
+    const rows = [...pestRows(), ...lawnRows()].map((row) => (row.recurring_parent_id || /lawn/.test(row.id) ? row : { ...row, status: 'cancelled' }));
+    const verdict = run([PEST, LAWN], rows, { invoice: invoice([firstApp(250)], 'void') });
+    expect(codes(verdict)).toEqual(['first_invoice_missing']);
+  });
+
+  test('a cancelled-and-parked mix with nothing live still says no visits', () => {
+    const rows = [...pestRows(), ...lawnRows()].map((row, i) => ({ ...row, status: i % 2 ? 'cancelled' : 'rescheduled' }));
+    expect(codes(run([PEST, LAWN], rows))).toEqual(['no_visits']);
+  });
+
   test('no scheduled visits at all is a problem', () => {
     const verdict = run([PEST, LAWN], []);
     expect(codes(verdict)).toEqual(['no_visits']);

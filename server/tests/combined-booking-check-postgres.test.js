@@ -157,6 +157,32 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('a plan the office cancelled posts nothing, and retires a bell it had already rung', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const { estimateId } = await acceptedEstimate(trx, lines);
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
+      const [rung] = await alertsOf(trx, estimateId);
+      expect(rung.read_at).toBeNull();
+      await trx('scheduled_services').whereIn('id', (await rowsOf(trx, estimateId)).map((row) => row.id)).update({ status: 'cancelled' });
+      expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ checked: 0, skipped: 1, problems: 0, failed: 0 });
+      const rows = await alertsOf(trx, estimateId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].read_at).not.toBeNull();
+      expect(rows[0].metadata.resolved).toBe(true);
+
+      const churned = await acceptedEstimate(trx, lines);
+      await trx('scheduled_services').whereIn('id', (await rowsOf(trx, churned.estimateId)).map((row) => row.id)).update({ status: 'cancelled' });
+      await runCombinedBookingCheck({ conn: trx });
+      expect(await alertsOf(trx, churned.estimateId)).toHaveLength(0);
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('OK results: the first rings once, later ones go to the Activity feed quietly', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

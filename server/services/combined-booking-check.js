@@ -68,6 +68,7 @@ const LOOKBACK_HOURS = 72;
 const MAX_PER_RUN = 25;
 
 const PRICE_TOLERANCE = 0.02;
+const CANCELLED = new Set(['cancelled', 'canceled']);
 const NOT_LIVE = new Set(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
 
 const FAMILY_LABELS = {
@@ -334,15 +335,19 @@ function evaluateCombinedBooking(ctx) {
   const programs = new Map([...accepted.programs].filter(([family]) => !excludedFamilies.has(family)));
   if (programs.size < 2) return null;
 
-  const rows = (ctx.rows || []).filter((row) => !NOT_LIVE.has(row.status)
-    && !row.is_callback && !row.followup_included
+  const planRows = (ctx.rows || []).filter((row) => !row.is_callback && !row.followup_included
     && !(row.is_recurring === false && row.recurring_parent_id)
     && rowFamilies(row).some((family) => programs.has(family)));
+  const rows = planRows.filter((row) => !NOT_LIVE.has(row.status));
+  // Rows were created and every one was cancelled: the customer or office
+  // cancelled the plan. Nothing left to verify, so nothing to say.
+  if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) return null;
   const facts = {
     labels: [...programs.keys()].map(familyLabel),
     customerName: ctx.customerName || null,
     firstDate: null, firstTime: null, tech: null, firstVisitTotal: null,
   };
+  // Only reached when no rows were ever created (or every one is parked).
   if (!rows.length) return { ok: false, problems: [{ code: 'no_visits', text: 'no visits scheduled' }], facts };
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
@@ -489,6 +494,23 @@ function ringOnNewProblem(codes) {
   };
 }
 
+// Retires a bell the way resolveOpsDigest retires a cleared finding: read plus
+// a resolved stamp; the row stays in the Activity feed as history.
+function resolvedPatch(conn) {
+  return {
+    read_at: conn.raw('COALESCE(read_at, NOW())'),
+    metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+      resolved: true, resolvedAt: new Date().toISOString(), resolvedBy: OPS_KEY,
+    })]),
+  };
+}
+const retireRow = (conn, id) => conn('notifications').where({ id }).update(resolvedPatch(conn));
+const retireStanding = (conn, estimateId) => conn('notifications')
+  .where({ recipient_type: 'admin', category: CATEGORY })
+  .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKeyFor(estimateId)])
+  .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+  .update(resolvedPatch(conn));
+
 async function postAlert(conn, estimate, verdict, ctx, { notifier } = {}) {
   const notificationService = notifier || require('./notification-service');
   const { digestRowFields } = require('./ops-digest');
@@ -529,14 +551,7 @@ async function postAlert(conn, estimate, verdict, ctx, { notifier } = {}) {
   // A problem that has since been fixed: the standing bell is retired the way
   // resolveOpsDigest retires a cleared finding (read + resolved stamp; the row
   // stays in the Activity feed as history).
-  if (row && verdict.ok && row.refreshed) {
-    await conn('notifications').where({ id: row.id }).update({
-      read_at: conn.raw('COALESCE(read_at, NOW())'),
-      metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
-        resolved: true, resolvedAt: new Date().toISOString(), resolvedBy: OPS_KEY,
-      })]),
-    });
-  }
+  if (row && verdict.ok && row.refreshed) await retireRow(conn, row.id);
   return row;
 }
 
@@ -569,13 +584,20 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier }
     .whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys])
     .select(conn.raw("metadata->>'dedupeKey' as dedupe_key"), conn.raw("metadata->>'checkResult' as check_result"));
   const finished = new Set(standing.filter((row) => row.check_result === 'ok').map((row) => row.dedupe_key));
+  const standingProblems = new Set(standing.filter((row) => row.check_result === 'problem').map((row) => row.dedupe_key));
 
   for (const estimate of candidates) {
     if (result.checked >= MAX_PER_RUN) break;
     if (finished.has(dedupeKeyFor(estimate.id))) continue;
     try {
       const checked = await checkEstimate(conn, estimate);
-      if (!checked) { result.skipped += 1; continue; }
+      if (!checked) {
+        result.skipped += 1;
+        // A standing problem bell for a plan that has since been cancelled has
+        // nothing left to act on: retire it the way a fixed problem is.
+        if (standingProblems.has(dedupeKeyFor(estimate.id))) await retireStanding(conn, estimate.id);
+        continue;
+      }
       result.checked += 1;
       const row = await postAlert(conn, estimate, checked.verdict, checked.ctx, { notifier });
       if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${estimate.id}`); continue; }
