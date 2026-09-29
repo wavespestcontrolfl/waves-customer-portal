@@ -37,10 +37,11 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
   const stamp = (reason, at) => ({ retired: { by: 'alert-relevance', reason, at: at.toISOString() } });
   const get = (id) => db('notifications').where({ id }).first();
 
-  test('puts back what it retired in the window once the subject is relevant again; older retirements are final', async () => {
+  test('puts back what it retired in the window once the subject is relevant again; older retirements, and a person\'s later read, are final', async () => {
     const now = new Date();
-    // Millisecond-exact, as the sweep writes it.
-    const readAt = new Date(now.getTime() - 60 * 60 * 1000);
+    // As the sweep writes it: millisecond-exact, and the stamp's `at` is that same read.
+    const recent = new Date(now.getTime() - DAY);
+    const old = new Date(now.getTime() - 20 * DAY);
     const customer = await insert('customers', { first_name: 'Rearm', phone: '+15555557001' });
     // Stale again: from before today (ET), back in on_site.
     const pastDay = etDateString(new Date(now.getTime() - 3 * DAY));
@@ -49,11 +50,15 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     // A stale-visit bell the sweep retired whose visit is stuck in progress again.
-    const reopened = await bell({ category: 'alert', read_at: readAt,
-      metadata: { dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id, ...stamp('Visit is no longer open', new Date(now.getTime() - DAY)) } });
+    const reopened = await bell({ category: 'alert', read_at: recent,
+      metadata: { dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id, ...stamp('Visit is no longer in progress', recent) } });
     // The same, retired before the window: final.
-    const final = await bell({ category: 'alert', read_at: readAt,
-      metadata: { dedupeKey: `stale-visit:${visit.id}:old`, scheduled_service_id: visit.id, ...stamp('Visit is no longer open', new Date(now.getTime() - 20 * DAY)) } });
+    const final = await bell({ category: 'alert', read_at: old,
+      metadata: { dedupeKey: `stale-visit:${visit.id}:old`, scheduled_service_id: visit.id, ...stamp('Visit is no longer in progress', old) } });
+    // Retired in the window, then read by a person (a later read_at than the stamp's): theirs.
+    const personRead = new Date(now.getTime() - 60 * 60 * 1000);
+    const readByPerson = await bell({ category: 'alert', read_at: personRead,
+      metadata: { dedupeKey: `stale-visit:${visit.id}:read`, scheduled_service_id: visit.id, ...stamp('Visit is no longer in progress', recent) } });
 
     const result = await relevance.runAdminAlertRelevanceSweep({ now });
     expect(result.rearmed).toBeGreaterThanOrEqual(1);
@@ -62,8 +67,9 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect(back.read_at).toBeNull();
     expect(back.metadata).toEqual({ dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id });
     const kept = await get(final.id);
-    expect(kept.read_at).toEqual(readAt);
+    expect(kept.read_at).toEqual(old);
     expect(kept.metadata.retired).toMatchObject({ by: 'alert-relevance' });
+    expect((await get(readByPerson.id)).read_at).toEqual(personRead);
 
     // Moved on again: the next sweep retires the bell once more.
     await db('scheduled_services').where({ id: visit.id }).update({ status: 'completed' });
@@ -73,18 +79,20 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect(again.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'Visit is no longer in progress' });
   });
 
-  test('a new-lead bell is judged only by what happened after it: an earlier estimate or a booking that never ran does not count, a live booking does', async () => {
+  test('a new-lead bell is judged only by what happened after it: an earlier estimate, a conversion or a booking that never ran does not count, a live booking does', async () => {
     const now = new Date();
     const bellAt = new Date(now.getTime() - 2 * 60 * 60 * 1000);
     const customer = await insert('customers', { first_name: 'Lead', phone: '+15555557002' });
     const estimate = await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: new Date(bellAt.getTime() - DAY) });
-    const lead = await insert('leads', { first_name: 'Lead', phone: '+15555557002', status: 'estimate_sent', customer_id: customer.id, estimate_id: estimate.id });
+    // Converted by a booking after the bell — that visit was then a no-show (below).
+    const lead = await insert('leads', { first_name: 'Lead', phone: '+15555557002', status: 'estimate_sent', customer_id: customer.id, estimate_id: estimate.id,
+      converted_at: new Date(bellAt.getTime() + 60 * 60 * 1000) });
     const leadBell = await bell({ category: 'new_lead', link: `/admin/leads?lead=${lead.id}`, created_at: bellAt,
       metadata: { triggerKey: 'new_lead', payload: { leadId: lead.id } } });
     const booked = (status) => insert('scheduled_services', { customer_id: customer.id, scheduled_date: etDateString(new Date(now.getTime() + 7 * DAY)),
       service_type: 'General Pest Control', status, created_at: new Date(bellAt.getTime() + 60 * 60 * 1000) });
 
-    // A status and an estimate from before the bell, and a visit booked after it that was a no-show: still relevant.
+    // A status and an estimate from before the bell, a conversion after it, and the visit booked after it a no-show: still relevant.
     await booked('no_show');
     await relevance.runAdminAlertRelevanceSweep({ now });
     expect((await get(leadBell.id)).read_at).toBeNull();

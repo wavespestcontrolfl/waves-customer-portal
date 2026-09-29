@@ -143,7 +143,7 @@ async function loadSubjects(rows, conn = db) {
   }
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
-      .select('id', 'converted_at', 'deleted_at', 'customer_id', 'estimate_id'));
+      .select('id', 'deleted_at', 'customer_id', 'estimate_id'));
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
@@ -223,10 +223,12 @@ function seriesMoveMovedOn(s) {
 }
 
 // A new-lead bell is about the submission that raised it, so only what
-// happened AFTER the bell counts: the lead deleted or converted, its estimate
-// sent, or a live visit booked for its customer. Timestamped facts only — a
-// status carries no time, and the lead's state can predate the bell (a
-// website submission attached to a lead already quoted or worked).
+// happened AFTER the bell counts: the lead deleted, its estimate sent, or a
+// live visit booked for its customer. Timestamped facts only — a status
+// carries no time, and the lead's state can predate the bell (a website
+// submission attached to a lead already quoted or worked). Not converted_at:
+// booking the lead stamps it and cancelling that visit never clears it, so
+// the booking itself — while it is live — is the evidence.
 function newLeadMovedOn(s) {
   const lead = s.lead;
   // A missing lead row is "unknown", never "gone": the emitter falls back to a
@@ -234,7 +236,6 @@ function newLeadMovedOn(s) {
   if (!lead || !s.bellAt) return null;
   const after = (at) => !!at && new Date(at).getTime() > s.bellAt.getTime();
   if (after(lead.deleted_at)) return 'Lead was deleted';
-  if (after(lead.converted_at)) return 'Lead was converted';
   if (after(s.estimate?.sent_at)) return 'Estimate was sent';
   if (after(s.leadBookedAt)) return 'A visit was booked';
   return null;
@@ -323,11 +324,12 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   if (!current || !sameRow(current, row)) return null;
   const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
   if (!reason) return null;
-  const stamp = { by: RETIRED_BY, reason, at: now.toISOString() };
-  // An explicit millisecond instant, not NOW(): Postgres keeps microseconds,
-  // which a JS Date read back would truncate, and the put-back below must
-  // match the exact read_at this write stored.
-  const readAt = new Date();
+  // The stamp's `at` IS the read_at this write stores — an explicit
+  // millisecond instant, not NOW() (Postgres keeps microseconds, which a JS
+  // Date read back would truncate) — so every put-back, now or on a later
+  // run, can require that this module's read is still the one on the row.
+  const readAt = new Date(now.getTime());
+  const stamp = { by: RETIRED_BY, reason, at: readAt.toISOString() };
   const [retired] = await sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at'), current)
     .update({ read_at: readAt, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]) })
     .returning(['id']);
@@ -358,12 +360,15 @@ function retiredQuery(cursor, since) {
 }
 
 // Puts back one retired row whose subject is relevant again, unread, onto
-// exactly the version read: category, link, metadata, and the read_at this
-// module wrote. Nothing is pushed.
+// exactly the version read (category, link, metadata) and only while the
+// row's read is still the one this module wrote (the stamp's `at`): a person
+// who read the bell since keeps their read, on this run and every later one.
+// Nothing is pushed.
 function putBack(row) {
-  if (!row.read_at) return 0;
+  const ourRead = new Date(parseMeta(row.metadata).retired?.at || NaN);
+  if (Number.isNaN(ourRead.getTime())) return 0;
   return sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row)
-    .where({ read_at: row.read_at })
+    .where({ read_at: ourRead })
     .update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
 }
 
