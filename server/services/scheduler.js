@@ -3064,6 +3064,57 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:15PM ET — Pest Insider proof catch-up (GATE_PEST_INSIDER_PROOF).
+  // The draft survives a failed proof send and the Tuesday autopilot stops
+  // at its already-drafted check, so this is the only retry. No-op unless
+  // the gate is on, it is day 1–10 of the ET month, and this month's issue
+  // is still a draft with no proof on record.
+  // =========================================================================
+  cron.schedule('15 14 * * *', async () => {
+    try {
+      await runExclusive('pest-insider-proof-retry', async () => {
+        const { retryPestInsiderProof } = require('./pest-insider-autopilot');
+        const result = await retryPestInsiderProof();
+        if (!result.skipped) {
+          logger.info(`[pest-insider-proof-retry] proof ${result.proofSent ? 'sent' : `not sent (${result.reason})`} for send ${result.sendId}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[pest-insider-proof-retry] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 2:15AM ET — Email division fact register sync. Brings the code
+  // register (services/email-division/fact-register-data.js) into
+  // knowledge_base: inserts missing facts, updates rows still carrying what
+  // the register last wrote, retires expired/withdrawn ones, and HOLDS any
+  // row a person edited (never overwritten; audited once). Runs BEFORE the
+  // 2:40 AM knowledge-index sync so an expired fact is out of knowledge_base
+  // (and its index chunks dropped) by the time the index rebuilds (codex
+  // round 9). The Pest Insider draft also syncs on demand.
+  // =========================================================================
+  cron.schedule('15 2 * * *', async () => {
+    try {
+      await runExclusive('email-division-fact-sync', async () => {
+        const { ensureFactRegister } = require('./email-division/fact-register');
+        const r = await ensureFactRegister({ force: true });
+        logger.info(`[fact-register] sync: ${r.inserted.length} inserted, ${r.updated.length} updated, ${r.retired.length} retired, ${r.held.length} held, ${r.errors.length} errors`);
+        if (r.held.length) {
+          logger.warn(`[fact-register] held (edited by a person, not overwritten): ${r.held.map((h) => h.slug).join(', ')}`);
+        }
+        if (r.errors.length) {
+          // Surface as a job failure (not a warning) so runExclusive's health
+          // record and the ops digest see a partial sync as a failed tick.
+          throw new Error(`fact-register sync: ${r.errors.length} row error(s): ${r.errors.map((e) => `${e.slug}: ${e.error}`).join('; ')}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[fact-register] sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MONDAY 7AM ET — Newsletter autopilot
   // Auto-drafts the weekly flagship digest from approved events. Never
   // auto-sends — creates a draft for admin review. Skips if fewer than 3

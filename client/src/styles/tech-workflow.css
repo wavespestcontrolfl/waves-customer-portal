@@ -118,6 +118,14 @@
 .tech-visit-choice-section { margin-bottom: 12px; }
 .tech-visit-choice-section .tech-visit-tile-grid { margin-bottom: 0; }
 .tech-visit-amount-block { margin-bottom: 8px; }
+/* Fast Complete: the visit note leads the sheet, mic beside a multi-line box. */
+.tech-visit-note-row { display: flex; align-items: flex-start; gap: 10px; }
+.tech-visit-note-row .ui-control.tech-visit-control { flex: 1; min-width: 0; }
+/* Fast Complete tip options: label over one line of the customer copy. */
+.tech-visit-tip-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.ui-action.tech-visit-tip { justify-content: flex-start; height: auto; min-height: 56px; padding: 8px 12px; text-align: left; white-space: normal; }
+.tech-visit-tip-copy { display: block; color: var(--tech-muted); font-size: 14px; font-weight: 400; }
+.ui-action.tech-visit-tip[aria-pressed='true'] .tech-visit-tip-copy { color: #e0f2fe; }
 .tech-visit-timeline-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 14px; }
 .tech-visit-choice { display: flex; gap: 12px; color: var(--tech-text); margin-top: 8px; font-size: 14px; }
 .tech-visit-checkbox { flex-shrink: 0; background: var(--tech-card); border-color: var(--tech-muted); }

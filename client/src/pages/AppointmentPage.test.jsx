@@ -276,7 +276,7 @@ describe('AppointmentPage visit prep photos block', () => {
 
     await screen.findByText('Anything you want your technician to look at?');
     const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
-    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
@@ -299,7 +299,7 @@ describe('AppointmentPage visit prep photos block', () => {
 
     await screen.findByText('Anything you want your technician to look at?');
     const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
-    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
@@ -315,7 +315,7 @@ describe('AppointmentPage visit prep photos block', () => {
 
     await screen.findByText('Anything you want your technician to look at?');
     const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
-    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
@@ -332,7 +332,7 @@ describe('AppointmentPage visit prep photos block', () => {
 
     await screen.findByText('Anything you want your technician to look at?');
     const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
-    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    fireEvent.change(screen.getByTestId('visit-prep-library-input'), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 

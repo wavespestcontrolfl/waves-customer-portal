@@ -3303,6 +3303,14 @@ const gates = {
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 
+  // Pest Insider monthly proof-approval (email division fact register lane).
+  // Ships DARK: off unless exactly 'true'. On, pest-insider-autopilot.js
+  // calls sendNewsletterProof after drafting, same as the weekly flagship —
+  // still subject to GATE_NEWSLETTER_PROOF_APPROVAL underneath. This entry
+  // is for logGateStatus only; services/pest-insider-autopilot.js reads
+  // GATE_PEST_INSIDER_PROOF at call time. Kill = unset — today's behavior:
+  // draft + notification only, no proof attempt.
+  pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
   // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
   // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
   // version for what this deliberately leaves out). Ships DARK: off unless
@@ -3340,6 +3348,47 @@ const gates = {
   // services/previsit-balance-reminder.js's leadDays() reads
   // GATE_PREVISIT_BALANCE_5DAY at call time.
   previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
+
+  // Retire the dormant legacy balance-reminder cron (dunning unification,
+  // owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/
+  // urgent pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/
+  // 60/90 late check) sent 0 messages in the last 30 days — the invoice
+  // follow-up ladder, late-payment-checker.js, and the pre-visit balance
+  // reminder own these now. Ships DARK: off unless exactly 'true'. This
+  // entry is for logGateStatus only:
+  // server/services/workflows/balance-reminder.js's dailyCheck()/
+  // latePaymentCheck() read GATE_BALANCE_REMINDER_LEGACY_OFF at call time,
+  // each with its OWN coupling to its own replacement:
+  //   - dailyCheck() retires ONLY once the pre-visit balance reminder is
+  //     actually live (PREVISIT_BALANCE_REMINDER=true AND its seeded SMS
+  //     template active — GATE_PREVISIT_BALANCE_5DAY only widens that
+  //     reminder's lead window and says nothing about whether it runs at
+  //     all). The one duty the pre-visit reminder has no equivalent for —
+  //     the internal owner alert for a balance ≥30 days overdue with
+  //     service today/tomorrow — keeps running on its own
+  //     (imminentOverdueOwnerAlertSweep) even while dailyCheck retires.
+  //   - latePaymentCheck() retires ONLY together with GATE_DUNNING_LADDER_90
+  //     also live (its Day 60/90 steps are what actually replace it);
+  //     legacy-off with the ladder gate unset logs a warn and runs
+  //     latePaymentCheck's legacy body unchanged.
+  // Neither retirement needs GATE_LATE_PAYMENT_CHECKER_OFF or
+  // GATE_DUNNING_ADOPT_ORPHANS: those two gate the SEPARATE late-payment-
+  // checker.js system's own retirement/orphan-adoption and are independent
+  // of whether this file's two methods still run. The at-risk
+  // pipeline_stage stamp both methods carried for 60/90-day debt is shared
+  // (invoice-followups.js's markAtRiskForLongOverdue, warn-and-continue on
+  // failure rather than a bare await) with the ladder's own Day 60/90 steps
+  // (fireTouch, on GATE_DUNNING_LADDER_90 AND this gate) and with
+  // late-payment-checker.js's own tiers — including for an invoice with no
+  // invoice_followup_sequences row, which late-payment-checker.js is the
+  // only sender left for once this gate retires latePaymentCheck()
+  // (adoption, GATE_DUNNING_ADOPT_ORPHANS, is dark by default). That
+  // checker call is gated on THIS gate alone (not unconditional): it reaches
+  // customers latePaymentCheck()'s own active/waveguard_tier filters would
+  // have excluded, so stamping unconditionally there would break
+  // "unset = byte-identical." Also guarded against overwriting a
+  // churned/archived customer's stage. Unset = byte-identical.
+  balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -3348,6 +3397,17 @@ const gates = {
 // truth: '1' / 'true' / 'on', case-insensitive.
 function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
+
+// Pest Insider proof approval — read at CALL time so turning the gate off
+// takes effect without a redeploy at every point that matters: proofing
+// (pest-insider-autopilot.js), approval (newsletter-proof.js
+// maybeHandleProofApproval) and dispatch of an already-approved issue
+// (newsletter-sender.js processScheduledSends). Off = draft-only, which is
+// what "kill switch" has to mean: a proof that went out while the gate was
+// on cannot be approved or dispatched after it is turned off.
+function pestInsiderProofLive() {
+  return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
 
 // GATE_DISCOUNT_STACKING read at CALL time — strict `=== 'true'`, NOT
@@ -3603,5 +3663,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive };
 // gates 1775330914
