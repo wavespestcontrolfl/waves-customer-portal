@@ -124,6 +124,61 @@ const visit = (overrides = {}) => {
 };
 
 describe('planRescheduleFromCall', () => {
+  test('qualified promises and omitted relative dates never reach the apply plan', () => {
+    const planFor = (agentLine) => {
+      const extraction = v2({
+        scheduling: {
+          confirmed_start_at: '2026-09-24T14:00:00-04:00',
+          agreed_slot_words: { day: 'Thursday', hour: 'two', period: null },
+        },
+        evidence: [
+          { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: agentLine },
+          { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: agentLine },
+          { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
+        ],
+      });
+      return planRescheduleFromCall({
+        v2: extraction,
+        call: call({ transcription: `Agent: ${agentLine}\nCaller: ${ACCEPT}` }),
+        customer: customer(),
+        candidates: [visit()],
+        now: NOW,
+      });
+    };
+    for (const said of [
+      'We will see you Thursday next week at two.',
+      'We will see you Thursday of next week at two.',
+      'If the technician is free, I can arrange it and we will see you Thursday at two.',
+      'Pending approval, I can confirm it and we will see you Thursday at two.',
+      'I can tentatively have you down for Thursday at two.',
+      'I will probably have you down for Thursday at two.',
+      'The payment is pending approval before we can see you Thursday at two.',
+    ]) expect([said, planFor(said).reason]).toEqual([said, 'reschedule_not_agreed']);
+    expect(planFor('The balance is probably pending, and we will see you Thursday at two.'))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
+
+    const qualifiedCommit = 'I can tentatively see you Thursday at two';
+    const callerSlot = 'Thursday at two PM, please.';
+    const qualified = v2({
+      scheduling: {
+        confirmed_start_at: '2026-09-24T14:00:00-04:00',
+        agreed_slot_words: { day: 'Thursday', hour: 'two', period: 'PM' },
+      },
+      evidence: [
+        { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: qualifiedCommit },
+        { field_path: '/scheduling/confirmed_start_at', speaker: 'caller', quote: callerSlot },
+        { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: callerSlot },
+      ],
+    });
+    expect(planRescheduleFromCall({
+      v2: qualified,
+      call: call({ transcription: `Agent: ${qualifiedCommit}, and your Thursday payment is due at two PM.\nCaller: ${callerSlot}` }),
+      customer: customer(),
+      candidates: [visit()],
+      now: NOW,
+    })).toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'agent_commitment_ungrounded' });
+  });
+
   test('a different program near the destination cannot replace the requested service outside the span', () => {
     const args = { v2: v2(), call: call(), customer: customer(), now: NOW,
       candidates: [visit({ scheduled_date: '2026-11-01' }), visit({ id: 'mosquito-visit', service_id: 'mosquito-monthly', service_type: 'Monthly Mosquito Control Service' })] };
@@ -228,14 +283,15 @@ describe('planRescheduleFromCall', () => {
       const slot = quoteFor(startAt);
       return planRescheduleFromCall({ customer: customer(), candidates: [visit(), december], now: NOW,
         v2: v2({ scheduling: {
-          confirmed_start_at: startAt, moved_appointment_date: movedDate, moved_appointment_words: movedQuote.replace(/^my | visit$/g, ''),
+          confirmed_start_at: startAt, moved_appointment_date: movedDate,
+          moved_appointment_words: extra.movedWords || movedQuote.replace(/^my | visit$/g, ''),
         }, evidence: [
           { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: slot },
           { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: slot },
           { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
           { field_path: '/scheduling/moved_appointment_date', speaker: 'caller', quote: movedQuote },
         ] }),
-        call: call({ transcription: `Caller: Can you move ${extra.said || movedQuote}?\nAgent: ${slot}\nCaller: ${ACCEPT}` }) });
+        call: call({ transcription: `Caller: ${extra.callerLine || `Can you move ${extra.said || movedQuote}?`}\nAgent: ${slot}\nCaller: ${ACCEPT}` }) });
     };
     // December's visit moved to December 17: the named date picks it.
     expect(plan('2026-12-17T12:00:00-05:00', '2026-12-24', 'my December 24th visit'))
@@ -248,6 +304,13 @@ describe('planRescheduleFromCall', () => {
     // The moved date must be named by a quote actually said.
     expect(plan('2026-12-17T12:00:00-05:00', '2026-12-24', 'my December 24th visit', { said: 'my next visit' }))
       .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'moved_appointment_ungrounded' });
+    // A dropped relative-date qualifier must not select the nearer Thursday.
+    expect(plan('2026-10-01T12:00:00-04:00', '2026-09-24', 'my Thursday a week from now appointment', { movedWords: 'Thursday' }))
+      .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'moved_appointment_ungrounded' });
+    const fullMovedQuote = 'My plan renews Thursday eight days from now, and please move my Thursday appointment.';
+    expect(plan('2026-10-01T12:00:00-04:00', '2026-09-24', fullMovedQuote, {
+      movedWords: 'Thursday', callerLine: fullMovedQuote,
+    })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
     // December 24 is 7 days from December 17, inside the span; one moved to
     // October 1 is 84 days away, outside it.
     expect(plan('2026-10-01T12:00:00-04:00', '2026-12-24', 'my December 24th visit').reason).toBe('no_visit_on_books');

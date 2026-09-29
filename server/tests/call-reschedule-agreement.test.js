@@ -92,6 +92,10 @@ describe('groundRescheduleAgreement', () => {
     const OK_CALLER = 'Thursday at two works for me.';
     expect(said('We will not see you Thursday at two in the afternoon.', OK_CALLER)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
     expect(said('If the tech is free we will see you Thursday at two in the afternoon.', OK_CALLER)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
+    expect(said('If the technician is free, I can arrange it and we will see you Thursday at two in the afternoon.', OK_CALLER))
+      .toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
+    expect(said('Pending approval, I can confirm it and we will see you Thursday at two in the afternoon.', OK_CALLER))
+      .toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
     expect(said('We will see you Thursday at two in the afternoon.', 'Thursday at two works for me, but actually no it does not.'))
       .toMatchObject({ ok: false, reason: 'caller_acceptance_ungrounded' });
     // Codex #5092 r8: a question is not a commitment or an acceptance.
@@ -329,6 +333,14 @@ describe('groundRescheduleAgreement', () => {
     expect(plain(THURSDAY_2PM, 'We will see you the Thursday after next at two.', 'two').ok).toBe(false);
     expect(plain(THURSDAY_2PM, 'We will see you next coming Thursday at two.', 'two').ok).toBe(false);
     expect(plain(THURSDAY_2PM, 'We will see you a week from Thursday at two.', 'two').ok).toBe(false);
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday eight days from now at two.', 'two').ok).toBe(false);
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday after this one at two.', 'two').ok).toBe(false);
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday next week at two.', 'two').ok).toBe(false);
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday of next week at two.', 'two').ok).toBe(false);
+    // Unrelated relative timing in the same sentence does not qualify the
+    // appointment's date.
+    expect(plain(THURSDAY_2PM, 'Your plan renews a week from now, and we will see you Thursday at two.', 'two').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'Your plan renews Thursday eight days from now, and we will see you Thursday at two.', 'two').ok).toBe(true);
     expect(plain(THURSDAY_2PM, 'Following your request, we will see you Thursday at two.', 'two').ok).toBe(true);
     expect(plain(THURSDAY_2PM, 'We will see you Thursday at two, thanks so much.', 'two').ok).toBe(true);
     expect(plain(THURSDAY_2PM, 'We will see you Thursday at two, thank you, have a great day.', 'two').ok).toBe(true);
@@ -360,6 +372,30 @@ describe('groundRescheduleAgreement', () => {
       .toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(callerAccepts('Thursday at two, please.', 'We will see you at either three or Thursday, at two.'))
       .toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    for (const commit of [
+      'We can tentatively see you Thursday at two.',
+      'We will probably see you Thursday at two.',
+      'We can possibly see you Thursday at two.',
+      'Perhaps we can see you Thursday at two.',
+      'We will hopefully see you Thursday at two.',
+      'I can tentatively have you down for Thursday at two.',
+      'I will probably have you down for Thursday at two.',
+    ]) expect([commit, callerAccepts('Thursday at two, please.', commit).ok]).toEqual([commit, false]);
+    expect(callerAccepts('Thursday at two, please.', 'We will definitely see you Thursday at two.').ok).toBe(true);
+    expect(callerAccepts('Thursday at two, please.', 'The balance is probably pending, and we will see you Thursday at two.').ok).toBe(true);
+    expect(callerAccepts('Thursday at two, please.', 'The payment is pending approval before we can see you Thursday at two.'))
+      .toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
+    const qualifiedCommit = 'I can tentatively see you Thursday at two';
+    const callerSlot = 'Thursday at two PM, please.';
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: 'PM' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', qualifiedCommit),
+        quote('/scheduling/confirmed_start_at', 'caller', callerSlot),
+        quote('/scheduling/caller_accepted_slot', 'caller', callerSlot),
+      ],
+    }), `Agent: ${qualifiedCommit}, and your Thursday payment is due at two PM.\nCaller: ${callerSlot}`))
+      .toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
     expect(callerAccepts('Thursday at two, please.', 'Please call or text us, we will see you Thursday at two.').ok).toBe(true);
     expect(callerAccepts('Thursday at two, please.', 'Regarding your question about access, we will see you Thursday at two.').ok).toBe(true);
     // Alternatives before the extracted hour are still unresolved choices.
@@ -368,6 +404,7 @@ describe('groundRescheduleAgreement', () => {
     // A day-of-month numeral equal to the hour is date evidence, not a
     // second inexact occurrence of the hour.
     expect(agreedAt('2026-10-10T10:00:00-04:00', 'We will move it to October 10 at 10.', { day: 'October 10', hour: '10', period: null }).ok).toBe(true);
+    expect(agreedAt('2026-10-10T10:00:00-04:00', 'We will move it to Oct. 10 at 10.', { day: 'Oct. 10', hour: '10', period: null }).ok).toBe(true);
     expect(agreedAt('2026-10-10T10:00:00-04:00', 'We will move it to 10/10 at 10.', { day: '10/10', hour: '10', period: null }).ok).toBe(true);
     expect(agreedAt('2027-05-10T10:00:00-04:00', 'We should arrive around May 10 at ten.', { day: 'May 10', hour: 'ten', period: null }).ok).toBe(false);
     expect(agreedAt('2027-05-10T10:00:00-04:00', 'We will see you May 10 at ten.', { day: 'May 10', hour: 'ten', period: null }).ok).toBe(true);
@@ -440,6 +477,21 @@ describe('groundRescheduleAgreement', () => {
     // Codex #5092 r8: a negated moved-date sentence does not name the visit to move.
     expect(moved('my September 24th visit', 'September 24th', { callerOpening: 'Do not move my September 24th visit.' }))
       .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    // A relative qualifier omitted from the extraction cannot redirect the
+    // move to the nearer appointment with the same weekday.
+    expect(moved('my Thursday a week from now appointment', 'Thursday'))
+      .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    // A model quote cannot shed a relative qualifier from the surrounding
+    // sentence, while the same weekday in a separate clause is independent.
+    expect(moved('move my Thursday', 'Thursday', { callerOpening: 'Please move my Thursday a week from now appointment.' }))
+      .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    expect(moved('move my Thursday appointment', 'Thursday', {
+      callerOpening: 'My plan renews Thursday eight days from now, and please move my Thursday appointment.',
+    }).ok).toBe(true);
+    const fullMovedQuote = 'My plan renews Thursday eight days from now, and please move my Thursday appointment.';
+    expect(moved(fullMovedQuote, 'Thursday', { callerOpening: fullMovedQuote }).ok).toBe(true);
+    expect(moved('my Thursday appointment', 'Thursday', { callerOpening: 'My plan renews a week from now. Can you move my Thursday appointment?' }).ok)
+      .toBe(true);
     // Codex #5092 r16: a same-day commitment must name no other day.
     const SAME_DAY_OTHER = 'We will see you Friday at two in the afternoon.';
     const sameDayCommit = (commit) => ground(v2({
