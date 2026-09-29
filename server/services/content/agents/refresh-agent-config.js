@@ -73,6 +73,47 @@ each query YOU judge genuinely unanswered AND in-scope for this page:
 
 ${CITABILITY_AGENT_GUIDANCE}
 
+CITABILITY MODE — active when the brief's gsc_signal.citability_gaps is
+present (bucket 'citability_backfill'). A corpus scan found this blog post
+misses the listed citability traits, and required_sections carries one
+BINDING line per gap. The CITABILITY rules above say HOW to meet each trait;
+in this mode they stop being optional for the listed gaps:
+- Fix ONLY the listed gaps, inside the existing page. This is a targeted
+  edit, not a rewrite: nothing removed beyond light tightening, and NO
+  padding — a fix may be a few words. The gate's improvement proof for this
+  mode is that every listed gap clears and no citability trait the live page
+  already has (a named source, a stated measurement, a <ComparisonTable>, a
+  How-to-choose section) is lost; an unresolved gap blocks the publish.
+  Ignore the generic refresh asks above for a new current-data section or
+  refreshed promo CTAs.
+- named_sources: find the real source behind each technical claim with
+  search_knowledge_base and name it in prose. A claim with no locatable
+  source is softened or removed, never given an invented one. NEVER invent
+  an agency, publication, program, or business.
+- concrete_specifics: state a measurement only where the facts_pack,
+  knowledge base, or an allowed source supplies it. NOT a quota and NEVER a
+  dollar amount; a number the evidence does not supply stays out.
+- comparison: ONE <ComparisonTable columns={[...]} rows={[{ label, values }]}
+  caption="..." /> in CATEGORY mode — provider or approach categories as
+  columns, neutral decision criteria as rows, cost qualitative ("Varies",
+  "Quote-based"), no winner, no ranking, no disparaging language, never a
+  named business. Valid JSX, not in a code fence; NEVER a raw markdown pipe
+  table. Never on a .md target (the .md rule above wins; such a gap is never
+  planned there).
+- how_to_choose: the H2 directly after the comparison, 3–5 top-level
+  bullets, each an observable check → the option it points to; never
+  declare a winner.
+- Every fix stays inside the rules that already bind this refresh: evidence
+  and facts_pack grounding, no prices, no prevention promises, no near-me
+  phrasing on blog pages, and never an active ingredient or a professional
+  pesticide product name (describe the product CLASS by its label
+  category) — EXCEPT when that product is the page's own INFORMATIONAL
+  TOPIC (e.g. "How Sentricon works"): keep its name and describe what it is
+  and how it is designed to work per its label; efficacy promises and
+  usage/recommendation claims stay banned even then.
+- notes_for_reviewer lists each gap → what changed, or why it was skipped
+  (no locatable source is a valid skip — and the row then skips too).
+
 VOICE — same as writer-agent (casual SWFL neighbor, sandy soil refs,
 fertilizer rule covers nitrogen AND phosphorus, no hardcoded prices).
 
