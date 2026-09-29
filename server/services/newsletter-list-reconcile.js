@@ -660,12 +660,16 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     // 'row_appeared' (an active row already claims the address) and
     // 'no_longer_live' keep their own buckets — never silently dropped.
     if (decision.outcome !== 'importable') { excluded[decision.outcome] += 1; continue; }
-    // Two candidate profiles sharing one address are ONE subscriber: the
+    // Two candidate profiles sharing one MAILBOX are ONE subscriber: the
     // first is projected, the rest counted here — exactly what the write
-    // would do (its second insert would find the first's active row).
+    // would do (its second insert finds the first's active row through
+    // sameMailboxSql). Keyed by the same mailbox identity the write uses,
+    // so equivalent Google spellings (john.doe+work@gmail.com and
+    // johndoe@gmail.com) count once (codex round on 78312cbf27).
     const address = normalizeEmail(decision.fresh.email);
-    if (projectedAddresses.has(address)) { excluded.duplicate_address += 1; continue; }
-    projectedAddresses.add(address);
+    const mailbox = googleMailboxIdentity(address) || address;
+    if (projectedAddresses.has(mailbox)) { excluded.duplicate_address += 1; continue; }
+    projectedAddresses.add(mailbox);
     importableRows.push(decision.fresh);
     // The canonical profile's city — the profile the row links to, whose
     // city the write's zone fill reads.

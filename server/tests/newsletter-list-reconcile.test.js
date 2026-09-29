@@ -703,6 +703,17 @@ test('two candidate profiles sharing one address: projected ONCE (duplicate_addr
   expect(state.subscribers).toHaveLength(1);
 });
 
+test('the dry run keys duplicates by mailbox identity: equivalent Google spellings are projected once', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'john.doe+work@gmail.com' }), cust({ id: 'c2', email: 'johndoe@gmail.com' })],
+    subscribers: [],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.importable).toBe(1);
+  expect(dry.excluded.duplicate_address).toBe(1);
+});
+
 test('a profile that joins the address after its comms locks were chosen forces a fresh attempt, and its opt-out is honoured', async () => {
   const state = { customers: [cust({ id: 'c1', email: 'a@example.com' })], subscribers: [], prefs: [] };
   const conn = makeConn(state);

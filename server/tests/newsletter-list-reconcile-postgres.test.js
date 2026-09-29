@@ -391,6 +391,19 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     }
   });
 
+  test('two live candidates on equivalent Google spellings are ONE mailbox: the dry run projects one import and the write performs exactly one (real Postgres)', () => rollbackTest(async (trx) => {
+    const tag = randomUUID().slice(0, 8).replace(/-/g, '');
+    const a = synthCustomer({ email: `j.o.h.n${tag}+work@gmail.com` });
+    const b = synthCustomer({ email: `john${tag}@gmail.com` });
+    await trx('customers').insert([a, b]);
+    const dry = await reconcileCustomers({ conn: trx });
+    expect(dry.importable).toBe(1);
+    expect(dry.excluded.duplicate_address).toBe(1);
+    const write = await reconcileCustomers({ dryRun: false, conn: trx });
+    expect(write.imported).toBe(1);
+    expect(write.excluded.row_appeared).toBe(0); // the preview matched what the write applied
+  }));
+
   test('a lead-stage profile sharing the address with an explicit opt-out excludes it (real Postgres) — the dry run and the write agree', () => rollbackTest(async (trx) => {
     const primary = synthCustomer();
     const sharer = synthCustomer({ email: ` ${primary.email.toUpperCase()}`, pipeline_stage: 'new_lead' });
