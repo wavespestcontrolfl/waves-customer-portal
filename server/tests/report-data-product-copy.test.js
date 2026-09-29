@@ -53,6 +53,10 @@ const SERVICE = {
   service_date: '2026-07-16',
   first_name: 'Test',
   last_name: 'Customer',
+  // The visit's own city (COALESCE stamped service_address_city,
+  // customers.city, as every real caller's query already aliases it) — the
+  // "Labeled for N+ City pests" ruling's city source (owner 2026-09-29).
+  city: 'Bradenton',
   areas_serviced: JSON.stringify(['Perimeter']),
   structured_notes: '{}',
   service_data: '{}',
@@ -148,15 +152,29 @@ describe('report_copy on applications[].product (GATE_REPORT_PRODUCT_COPY)', () 
     expect(JSON.stringify(data)).not.toContain('report_copy');
   });
 
-  test('gate ON: approved catalog-linked product gets its three lines', async () => {
+  test('gate ON: approved catalog-linked product gets its three lines, also_labeled_for as a rounded count + the visit\'s city', async () => {
     process.env.GATE_REPORT_PRODUCT_COPY = 'true';
     const data = await buildReportV1Data(SERVICE, 'token-product-copy-on', makeKnex(FIXTURES));
     const taurus = data.applications.find((a) => a.product.name === 'Taurus SC');
+    // Taurus SC's raw label count is 35 -> floors to 25+; SERVICE.city is
+    // 'Bradenton' (owner ruling 2026-09-29).
     expect(taurus.product.report_copy).toEqual({
       how_it_works: expect.stringContaining('treated band'),
-      also_labeled_for: expect.stringContaining('Big-headed'),
+      also_labeled_for: 'Labeled for 25+ Bradenton pests',
       pets_kids: expect.stringContaining('Keep people and pets off treated areas'),
     });
+  });
+
+  test('gate ON: no usable city on the visit falls back to the no-city wording', async () => {
+    process.env.GATE_REPORT_PRODUCT_COPY = 'true';
+    const noCityService = { ...SERVICE, id: 'svc-product-copy-no-city', city: null };
+    const noCityFixtures = {
+      ...FIXTURES,
+      service_products: FIXTURES.service_products.map((row) => ({ ...row, service_record_id: noCityService.id })),
+    };
+    const data = await buildReportV1Data(noCityService, 'token-product-copy-no-city', makeKnex(noCityFixtures));
+    const taurus = data.applications.find((a) => a.product.name === 'Taurus SC');
+    expect(taurus.product.report_copy.also_labeled_for).toBe('Labeled for 25+ pests');
   });
 
   test('gate ON: LESCO gets how_it_works + pets_kids but NO also_labeled_for key at all', async () => {
@@ -168,12 +186,13 @@ describe('report_copy on applications[].product (GATE_REPORT_PRODUCT_COPY)', () 
     expect(lesco.product.report_copy.pets_kids).toMatch(/Follows the spray/);
   });
 
-  test('gate ON: a hand-entered row with no product_id still resolves by its snapshotted product_name', async () => {
+  test('gate ON: a hand-entered row with no product_id still resolves by its snapshotted product_name — Gentrol is a narrow IGR, so it gets how_it_works/pets_kids but NO also_labeled_for line (owner ruling 2026-09-29)', async () => {
     process.env.GATE_REPORT_PRODUCT_COPY = 'true';
     const data = await buildReportV1Data(SERVICE, 'token-product-copy-noid', makeKnex(FIXTURES));
     const gentrol = data.applications.find((a) => a.product.name === 'Gentrol IGR');
     expect(gentrol.product.report_copy).not.toBeNull();
-    expect(gentrol.product.report_copy.also_labeled_for).toMatch(/German and American cockroaches/);
+    expect(gentrol.product.report_copy).not.toHaveProperty('also_labeled_for');
+    expect(gentrol.product.report_copy.how_it_works).toMatch(/insect growth regulator/i);
   });
 
   test('gate ON: an unapproved product (not on the owner-approved list) gets NO report_copy key — fail closed', async () => {

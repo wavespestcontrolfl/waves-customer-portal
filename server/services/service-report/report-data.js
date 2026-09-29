@@ -4175,7 +4175,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // "not termite" only through that same existing default.
         ...(reportProductCopyGateOn() && serviceLine !== 'termite'
           ? (() => {
-            const copy = reportProductCopyForApplicationProduct(product);
+            // service.city is the visit's own city (COALESCE stamped
+            // service_address_city, customers.city — the exact precedence
+            // the "Labeled for N+ City pests" ruling asks for: the property
+            // serviced, falling back to the customer's own city), already
+            // overlaid by applyReportIdentitySnapshot at the top of this
+            // function (owner ruling 2026-09-29).
+            const copy = reportProductCopyForApplicationProduct(product, service.city);
             return copy ? { report_copy: copy } : {};
           })()
           : {}),

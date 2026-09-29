@@ -25,12 +25,18 @@ function passesReportCopyScreen(line) {
 // `product` is report-data.js's enriched service_products row (the one
 // `attachApprovedReportProductFacts` returns) — carries `product_name` /
 // `epa_reg_number` when a catalog join resolved, or a hand-entered
-// `epa_reg` on legacy rows with no product_id. Returns null on no match
-// (unapproved product, or nothing recorded to match on) — fail closed.
-function reportProductCopyForApplicationProduct(product = {}) {
+// `epa_reg` on legacy rows with no product_id. `city` is the visit's own
+// city (report-data.js passes `service.city` — the visit's stamped service
+// address city, falling back to the customer's own city; see that call
+// site), used ONLY to compose the "Labeled for N+ City pests" sentence
+// (owner ruling 2026-09-29) — a missing/unusable city falls back to the
+// no-city wording, never blocks the rest of the copy. Returns null on no
+// match (unapproved product, or nothing recorded to match on) — fail closed.
+function reportProductCopyForApplicationProduct(product = {}, city) {
   const copy = reportProductCopyFor({
     epaReg: product?.epa_reg_number || product?.epa_reg || '',
     name: product?.product_name || product?.name || '',
+    city,
   });
   if (!copy) return null;
   // Belt-and-suspenders on reviewed static text, so a config edit that skips
