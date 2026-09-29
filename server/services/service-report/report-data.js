@@ -652,6 +652,20 @@ function snapshotAreaValues(service = {}) {
     .filter(Boolean)));
 }
 
+// Every persisted spelling a per-product application area can arrive under —
+// camelCase JS objects (`applicationArea`), snake_case DB rows
+// (`application_area`), and the shorter `area` alias a couple of older
+// readers use. Exported so any other reader of `service_products` (e.g. the
+// email-division visit reader) merges the same values instead of growing its
+// own copy (codex round 8 P2 on #5164).
+function applicationAreaValues(applications = []) {
+  const values = [];
+  for (const app of applications || []) {
+    values.push(app.applicationArea, app.application_area, app.area);
+  }
+  return values;
+}
+
 function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const values = [
@@ -659,14 +673,10 @@ function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
     ...parseJsonArray(structured.areasServiced),
     ...parseJsonArray(structured.areasTreated),
     ...snapshotAreaValues(service),
+    ...applicationAreaValues(applications),
   ];
 
   for (const app of applications || []) {
-    values.push(
-      app.applicationArea,
-      app.application_area,
-      app.area,
-    );
     values.push(...parseJsonArray(app.targets));
   }
 
@@ -6599,6 +6609,7 @@ module.exports = {
   parseJsonObject,
   parseJsonArray,
   uniqueStrings,
+  applicationAreaValues,
   locationAreaLabels,
   taggedNoteLines,
   minutesFromElapsed,
