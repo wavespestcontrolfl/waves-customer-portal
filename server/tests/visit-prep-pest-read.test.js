@@ -76,6 +76,9 @@ function fakeConn(tables = {}) {
       });
     });
     q.select = async () => rowsMatching();
+    // Recorded so a test can see which rows the claim share-locked.
+    const baseForShare = q.forShare;
+    q.forShare = () => { (store._shareLocked = store._shareLocked || []).push(q._whereIn ? q._whereIn.vals : q._where.id); return baseForShare ? baseForShare() : q; };
     q.count = () => ({
       first: async () => ({ count: rowsMatching().length }),
     });
@@ -213,6 +216,25 @@ describe('trigger rule', () => {
       conn,
     });
     expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
+  });
+
+  test('the claim share-locks every row of the stop, siblings included', async () => {
+    mockTechStopMemberIds.mockResolvedValue(['svc-1', 'svc-2']);
+    const conn = fakeConn({
+      scheduled_services: [
+        { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
+        { id: 'svc-2', service_type: 'Quarterly Pest Control', status: 'confirmed', visit_id: 'visit-9' },
+      ],
+    });
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    mockIdentifyPestV2.mockResolvedValue(okEngineResult());
+    await triggerVisitPrepPestRead({
+      submissionId: 'sub-1',
+      svc: { id: 'svc-1', customer_id: 'cust-1', service_type: 'Lawn Weed & Feed', visit_id: 'visit-9' },
+      photos: PHOTOS,
+      conn,
+    });
+    expect(conn._store._shareLocked).toContainEqual(['svc-1', 'svc-2']);
   });
 
   test('grouped stop: a TERMINAL (cancelled) pest sibling does not count — unsupported', async () => {
