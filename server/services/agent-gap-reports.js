@@ -61,6 +61,18 @@ const DECLINE_RE = new RegExp([
   String.raw`\b(?:isn['’]t|not) (?:available|possible) (?:from here|(?:from|in|through) (?:the|this) bar)\b`,
 ].join('|'), 'i');
 
+// The tech-bar `ask` fallback has no search behind it, so it needs a refusal
+// that names the bar itself: a field answer can say "not supported by the
+// label" or "no way to treat that indoors" and still be a real answer.
+const BAR_DECLINE_RE = new RegExp([
+  String.raw`\bno tools?\b`,
+  String.raw`\bdon['’]t have (?:a|an|any)\b[^.!?\n]{0,40}?\b(?:tools?|capability)\b`,
+  String.raw`\b(?:not|isn['’]t) something i can\b`,
+  String.raw`\boutside (?:of )?what i can\b`,
+  String.raw`\b(?:can(?:not|['’]t)|could(?: not|n['’]t)|unable to|not able to)\b[^.!?\n]{0,80}?\b(?:from here|(?:from|in|through|with) (?:the|this) bar)\b`,
+  String.raw`\b(?:isn['’]t|not) (?:available|possible) (?:from here|(?:from|in|through) (?:the|this) bar)\b`,
+].join('|'), 'i');
+
 // Kill switch (CLAUDE.md rule 14): AGENT_GAP_REPORTS=off stops the prompt
 // line, the collector's writes and the Monday digest. Read at call time, so
 // a flip needs no redeploy. Default on.
@@ -310,7 +322,7 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
       if (!signals.length) {
         // A decline after a tool broke is an outage talking, not a missing
         // feature — the failure is already in tool_health_events.
-        if (toolBroke) return;
+        if (toolBroke || !BAR_DECLINE_RE.test(String(reply || ''))) return;
         const asked = cleanText(ask);
         if (asked) await writeGapRows([{ source, kind: 'missing_capability', summary: asked,
           attempted: 'The bar declined; no capability search ran' }]);
@@ -335,5 +347,5 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
-  _private: { prepareGapRow, gapWindowCutoff, DECLINE_RE },
+  _private: { prepareGapRow, gapWindowCutoff, DECLINE_RE, BAR_DECLINE_RE },
 };

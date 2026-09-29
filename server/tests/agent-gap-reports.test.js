@@ -296,6 +296,13 @@ describe('agent-gap-reports', () => {
       expect(insertedRows).toHaveLength(0);
     });
 
+    test('a field answer that merely says "not supported" is not a bar refusal — no ask recorded', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'tech-bar' });
+      await collector.flush({ reply: 'That tank mix is not supported by the label, so use the separate rinse.', ask: 'can I tank mix these two' });
+      expect(insertedRows).toHaveLength(0);
+    });
+
     test('declined with no signals and no ask records nothing', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'tech-bar' });

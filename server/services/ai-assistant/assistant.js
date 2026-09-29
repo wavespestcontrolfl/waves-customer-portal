@@ -244,7 +244,8 @@ class WavesAssistant {
         for (const toolUse of toolUses) {
           // Check if it's an escalation
           if (toolUse.name === 'escalate') {
-            const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation');
+            const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
+              { gap: toolUse.input.not_supported === true });
             return escResult;
           }
 

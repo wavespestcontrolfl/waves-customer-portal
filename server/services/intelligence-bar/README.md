@@ -74,15 +74,17 @@ anywhere in this list):
   discovery loop to sample, so `flush()` takes an extra `ask` (the
   operator's own request text): a decline with no signals collected records
   `ask` itself, trimmed, with `attempted: 'The bar declined; no capability
-  search ran'` — unless a tool genuinely failed on that request (an outage,
+  search ran'` — only for a refusal that names the bar itself
+  (`BAR_DECLINE_RE`; "not supported by the label" is an answer), and not
+  when a tool genuinely failed on that request (an outage,
   already in Tool Health). A decline that did collect signals is unaffected — `ask` is
   ignored whenever there is anything to record already.
 - `texting-ai` — `recordGap()` called from `escalate()` in
-  `services/ai-assistant/assistant.js` and `managed-assistant.js`, only when
-  the caller passes `{ gap: true }`. Today that is only the managed agent's
-  `unsupported_or_uncertain` category; the older assistant's escalate tool
-  has no category to tell a missing feature from a staff workflow, so it
-  never records. The keyword classifier plays no part.
+  `services/ai-assistant/assistant.js` (the live texting and portal-chat
+  assistant) and `managed-assistant.js`, only when the caller passes
+  `{ gap: true }`: the escalate tool's optional `not_supported: true` in
+  `assistant.js`, and the managed agent's `unsupported_or_uncertain`
+  category. The keyword classifier plays no part.
 - `phone-agent` — `recordGap()` called from Sandy's human handoff
   (`voice-agent/relay-transfer.js`, right after a confirmed
   `transfer_to_office`) that Sandy marks `not_supported: true` (an optional

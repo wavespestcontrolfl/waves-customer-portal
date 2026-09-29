@@ -83,3 +83,12 @@ describe.each([
     await expect(target.escalate(conversation, 'something unclear here', 'x', { gap: true })).resolves.toMatchObject({ escalated: true });
   });
 });
+
+describe('assistant.js escalate tool', () => {
+  test('offers an optional not_supported flag (the live texting gap signal)', () => {
+    const { TOOLS } = jest.requireActual('../services/ai-assistant/tools');
+    const escalate = TOOLS.find((tool) => tool.name === 'escalate');
+    expect(escalate.input_schema.properties.not_supported).toMatchObject({ type: 'boolean' });
+    expect(escalate.input_schema.required).toEqual(['reason']);
+  });
+});
