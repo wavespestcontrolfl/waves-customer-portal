@@ -457,29 +457,55 @@ function validateReserviceOffer({ reply, factsBlock }) {
   return { ok: true, violations: [] };
 }
 
-// LIVE ETA minutes-away claim (independent review finding, PR #5334):
-// scoped narrowly to arrival/away/ETA phrasing so an unrelated duration
-// ("the treatment takes about 30 minutes to dry", "allow 30 minutes before
-// letting pets out") never false-positives. "away"/"out" must sit RIGHT
-// after the number+unit (no words in between — "30 minutes before letting
-// pets out" has four words between "minutes" and "out" and never matches);
-// "eta"/"arriv*"/"on the way"/"en route"/"get there"/"show up"/"be there"
-// may instead sit shortly BEFORE it ("ETA is about 12 minutes", "he's
-// arriving in 12 minutes").
+// LIVE ETA minutes-away claim (independent review finding, PR #5334;
+// broadened — pre-push audit P1, PR #5334 round 2): scoped to arrival/away/
+// ETA phrasing found ANYWHERE in the SAME SENTENCE as the minutes figure, in
+// EITHER order — the original version only looked in a narrow window
+// immediately before/after the number, which missed ordinary phrasing like
+// "The tech is on the way, about 12 minutes." (the number sits after the
+// trigger, separated by a comma + "about"). Sentence-scoped trigger words:
+// "on the/his/her/their way", "en route", "heading over"/"heading your way",
+// "arriv*", "eta", "away", "out", "get(ting) there", "be(ing) there",
+// "show(ing) up", "pull(ing) up". An unrelated duration ("the treatment
+// takes about 30 minutes to dry", "allow 30 minutes before letting pets
+// out", "takes about 45 minutes") must still never false-positive even
+// though "out"/generic words can legitimately co-occur in the same sentence
+// ("...letting pets out") — a duration/wait phrase checked in a narrow
+// window right around the matched number (never sentence-wide) wins over
+// the sentence-level trigger.
+const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their)\s+way|en\s*route|heading\s+(?:over|your\s+way)|arriv\w*|eta|away|out|get(?:ting)?\s+there|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up)\b/i;
 const ETA_MINUTES_TOKEN_RE = /\b(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
-const ETA_MINUTES_AFTER_RE = /^\s*(?:away|out)\b/i;
-const ETA_MINUTES_BEFORE_RE = /\b(?:eta|arriv\w*|on (?:his|her|their) way|en route|get(?:ting)? there|show(?:ing)? up|be there)\b[^.?!\n]{0,15}$/i;
+const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
+const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it)\b[^.?!\n]{0,20}$/i;
+// Sentence spans over raw sentence-boundary punctuation only (. ? ! or a
+// newline) — an em dash, comma, or "—" never splits a sentence, so "heading
+// your way — 12 minutes" is one sentence and the trigger/number share it.
+function sentenceSpans(str) {
+  const spans = [];
+  let start = 0;
+  const re = /[.?!\n]+/g;
+  let m;
+  while ((m = re.exec(str))) {
+    spans.push([start, m.index]);
+    start = re.lastIndex;
+  }
+  spans.push([start, str.length]);
+  return spans;
+}
 function findEtaMinutesClaims(text) {
   const claims = [];
   const str = String(text || '');
+  const spans = sentenceSpans(str);
   const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
   let m;
   while ((m = re.exec(str))) {
-    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 8);
-    const before = str.slice(Math.max(0, m.index - 25), m.index);
-    if (ETA_MINUTES_AFTER_RE.test(after) || ETA_MINUTES_BEFORE_RE.test(before)) {
-      claims.push({ minutes: parseInt(m[1], 10), index: m.index });
-    }
+    const span = spans.find(([s, e]) => m.index >= s && m.index < e) || spans[spans.length - 1];
+    const sentence = str.slice(span[0], span[1]);
+    if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
+    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
+    const before = str.slice(Math.max(0, m.index - 30), m.index);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) continue;
+    claims.push({ minutes: parseInt(m[1], 10), index: m.index });
   }
   return claims;
 }
@@ -492,19 +518,29 @@ function replyClaimsEtaMinutes(reply) {
 }
 
 // The send-time freshness snapshot for a drafted reply (independent review
-// finding, PR #5334): context.liveEtaScheduledServiceIds is the plain list
-// context-aggregator built (never rendered into any prompt — see the
-// comment there), persisted alongside facts_generated_at exactly like
-// open_times_snapshot so sms-eta-freshness.js can recheck — with no
-// GPS/Distance Matrix call of its own — that the SAME visit is still
-// customer-facing en_route before an outgoing minutes claim may go out.
-// null when this draft's facts carried no LIVE ETA at all; a missing
-// snapshot plus a minutes claim in the outgoing body fails closed there.
+// finding, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2):
+// context.liveEtaGroups is the [{ minutes, scheduledServiceIds }] list
+// context-aggregator built, one entry per distinct resolved LIVE ETA
+// (grouped-stop siblings sharing one physical stop collapse to one entry —
+// see liveEtaDedupeKey there), never rendered into any prompt. Persisted as
+// { entries: [...] } alongside facts_generated_at exactly like
+// open_times_snapshot so sms-eta-freshness.js can bind each claimed minutes
+// figure in the outgoing body to the ONE entry it came from and recheck —
+// with no GPS/Distance Matrix call of its own — that THAT entry's visit(s),
+// not some other stop's, are still customer-facing en_route before the
+// claim may go out. A flat scheduledServiceIds list (the pre-round-2 shape)
+// could let a reply quoting one completed stop pass on another stop's
+// en_route status. null when this draft's facts carried no LIVE ETA at all;
+// a missing snapshot plus a minutes claim in the outgoing body fails closed
+// there — and the old flat shape (no `entries`) fails closed too, since
+// nothing merged yet ever persisted it.
 function buildLiveEtaSnapshot(context) {
-  const ids = Array.isArray(context?.liveEtaScheduledServiceIds)
-    ? context.liveEtaScheduledServiceIds.filter((id) => id != null)
-    : [];
-  return ids.length ? { scheduledServiceIds: ids } : null;
+  const groups = Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups : [];
+  const entries = groups
+    .filter((g) => g && Number.isFinite(g.minutes) && Array.isArray(g.scheduledServiceIds))
+    .map((g) => ({ minutes: g.minutes, scheduledServiceIds: g.scheduledServiceIds.filter((id) => id != null) }))
+    .filter((g) => g.scheduledServiceIds.length);
+  return entries.length ? { entries } : null;
 }
 
 // Deterministic backstop (independent review finding, PR #5334): today only

@@ -657,7 +657,7 @@ class ContextAggregator {
   // only reads context.billing — sms-amount-recheck's send-time revalidation
   // is the one today — never needs the LIVE ETA fact, which is the one leg
   // here that makes an external GPS + Distance Matrix call. Skipping it
-  // drops upcomingServices[].liveEta and liveEtaScheduledServiceIds to their
+  // drops upcomingServices[].liveEta and liveEtaGroups to their
   // empty/null defaults; every other field is unaffected.
   async getContextForCustomer(customer, { skipLiveEta = false } = {}) {
     // Parallel data fetch
@@ -924,20 +924,29 @@ class ContextAggregator {
     const liveEtaResultByKey = new Map(uniqueLiveEtaKeys.map((key, i) => [key, uniqueLiveEtaResults[i]]));
     const liveEtas = liveEtaKeys.map((key) => (key != null ? liveEtaResultByKey.get(key) || null : null));
     // LIVE ETA send-time freshness (independent review + Codex round-1
-    // finding, PR #5334): every scheduled_service id whose row actually
-    // backed a rendered LIVE ETA fact, so sms-eta-freshness.js can recheck
-    // — with no GPS/Distance Matrix call of its own — that the SAME visit
-    // is still customer-facing en_route before an outgoing minutes claim
-    // may go out. Threaded through generateGroundedDraft's context param,
-    // never persisted here.
-    const liveEtaScheduledServiceIds = upcomingServices.filter((s, i) => liveEtas[i]).map((s) => s.id);
+    // finding, PR #5334; grouped by distinct ETA — pre-push audit P1, round
+    // 2): one entry per unique (technician, destination) key that actually
+    // resolved a LIVE ETA, each carrying that group's own minutes figure and
+    // the scheduled_service ids it covers (grouped-stop siblings sharing one
+    // physical stop share one entry — they were resolved once, above). A
+    // FLAT list of every id that ever backed ANY live ETA would let a reply
+    // that quotes one stop's number pass sms-eta-freshness.js's recheck on a
+    // DIFFERENT stop's still-en_route status — grouping preserves which
+    // ids each distinct minutes figure actually came from. Threaded through
+    // generateGroundedDraft's context param, never persisted here.
+    const liveEtaGroups = uniqueLiveEtaKeys
+      .filter((key) => liveEtaResultByKey.get(key))
+      .map((key) => ({
+        minutes: liveEtaResultByKey.get(key).minutes,
+        scheduledServiceIds: upcomingServices.filter((s, i) => liveEtaKeys[i] === key).map((s) => s.id),
+      }));
 
     return {
       known: true,
       // LIVE ETA send-time freshness snapshot input (see the comment above
-      // where this is built) — a plain array of scheduled_service ids, never
+      // where this is built) — [{ minutes, scheduledServiceIds }], never
       // rendered into any prompt.
-      liveEtaScheduledServiceIds,
+      liveEtaGroups,
       customer: {
         id: customer.id, name: `${customer.first_name} ${customer.last_name}`,
         firstName: customer.first_name, phone: customer.phone, email: customer.email,

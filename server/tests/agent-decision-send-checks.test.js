@@ -119,12 +119,12 @@ describe('LIVE ETA send-time recheck', () => {
   test('the recheck receives the decision\'s own live_eta_snapshot and facts_generated_at', async () => {
     await agentDecisionSendBlockReason({
       decision: decision({
-        input_snapshot: JSON.stringify({ ...SNAP, live_eta_snapshot: { scheduledServiceIds: ['svc-1'] }, facts_generated_at: '2026-09-29T14:00:00.000Z' }),
+        input_snapshot: JSON.stringify({ ...SNAP, live_eta_snapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] }, facts_generated_at: '2026-09-29T14:00:00.000Z' }),
       }),
       outgoingBody: 'The tech is 12 minutes away.',
     });
     expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({
-      liveEtaSnapshot: { scheduledServiceIds: ['svc-1'] },
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] },
       factsGeneratedAt: '2026-09-29T14:00:00.000Z',
       outgoingBody: 'The tech is 12 minutes away.',
     }));

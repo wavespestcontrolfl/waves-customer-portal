@@ -309,7 +309,7 @@ describe('liveEtaEligible — track_state gate (Codex round-1 finding, PR #5334)
   });
 });
 
-describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes — deterministic minutes guard (independent review finding #3, PR #5334)', () => {
+describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes — deterministic minutes guard (independent review finding #3, PR #5334; broadened — pre-push audit P1, round 2)', () => {
   afterEach(() => { delete process.env[GATE]; });
 
   test('arrival-scoped phrasing is detected: "X minutes away", "ETA is about X minutes", "arriving in X minutes"', () => {
@@ -319,11 +319,44 @@ describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes 
     expect(replyClaimsEtaMinutes('The tech is 12 minutes away.')).toBe(true);
   });
 
-  test('unrelated durations never false-positive: "takes about 30 minutes to dry", "allow 30 minutes before letting pets out"', () => {
+  // Broadened detection (pre-push audit P1): the number may now come AFTER
+  // the trigger, separated by a comma/"about", not just immediately before
+  // it — "The tech is on the way, about 12 minutes." was missed by the
+  // original narrow proximity window.
+  test('the number after the trigger, separated by a comma/"about", is detected: "on the way, about 12 minutes"', () => {
+    expect(findEtaMinutesClaims('The tech is on the way, about 12 minutes.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('"out" right after the number, sentence-scoped: "12 minutes out"', () => {
+    expect(findEtaMinutesClaims('He\'s 12 minutes out.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('"should arrive in about 12 min" (abbreviated "min")', () => {
+    expect(findEtaMinutesClaims('He should arrive in about 12 min.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('"ETA 12 minutes" (bare ETA, no "is about")', () => {
+    expect(findEtaMinutesClaims('ETA 12 minutes.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('"heading your way — 12 minutes" (em dash, number after the trigger)', () => {
+    expect(findEtaMinutesClaims('Heading your way — 12 minutes.').map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test('unrelated durations never false-positive: "takes about 30 minutes to dry", "allow 30 minutes before letting pets out", "takes about 45 minutes"', () => {
     expect(findEtaMinutesClaims('The treatment takes about 30 minutes to dry.')).toHaveLength(0);
     expect(findEtaMinutesClaims('Please allow 30 minutes before letting pets out.')).toHaveLength(0);
+    expect(findEtaMinutesClaims('It takes about 45 minutes.')).toHaveLength(0);
     expect(replyClaimsEtaMinutes('The treatment takes about 30 minutes to dry.')).toBe(false);
     expect(replyClaimsEtaMinutes('Please allow 30 minutes before letting pets out.')).toBe(false);
+    expect(replyClaimsEtaMinutes('It takes about 45 minutes.')).toBe(false);
+  });
+
+  // The exclusion must win even when a duration phrase shares a sentence
+  // with a generic trigger word like "out" ("...letting pets out" carries
+  // "out") or "away"/"eta" elsewhere nearby.
+  test('a duration exclusion inside an arrival-triggered sentence still excludes just that number', () => {
+    expect(findEtaMinutesClaims('He\'s on the way — allow 30 minutes before letting pets out.').map((c) => c.minutes)).toEqual([]);
   });
 
   test('gate off: never runs (byte-identical to v11 — no LIVE ETA fact can exist anyway)', () => {
@@ -367,15 +400,34 @@ describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes 
   });
 });
 
-describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (independent review finding #2, PR #5334)', () => {
+describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (independent review finding #2, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2)', () => {
   test('no scheduled_service ever backed a LIVE ETA fact: null', () => {
-    expect(buildLiveEtaSnapshot({ liveEtaScheduledServiceIds: [] })).toBeNull();
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [] })).toBeNull();
     expect(buildLiveEtaSnapshot({})).toBeNull();
     expect(buildLiveEtaSnapshot(null)).toBeNull();
   });
 
-  test('carries the exact ids context-aggregator collected, filtering out nullish entries', () => {
-    expect(buildLiveEtaSnapshot({ liveEtaScheduledServiceIds: ['svc-1', 'svc-2'] }))
-      .toEqual({ scheduledServiceIds: ['svc-1', 'svc-2'] });
+  test('carries the exact groups context-aggregator collected, filtering out nullish ids', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1', null, 'svc-2'] }] }))
+      .toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'] }] });
+  });
+
+  test('two distinct stops (different technicians/destinations) persist as two separate entries', () => {
+    expect(buildLiveEtaSnapshot({
+      liveEtaGroups: [
+        { minutes: 9, scheduledServiceIds: ['svc-1'] },
+        { minutes: 20, scheduledServiceIds: ['svc-2'] },
+      ],
+    })).toEqual({
+      entries: [
+        { minutes: 9, scheduledServiceIds: ['svc-1'] },
+        { minutes: 20, scheduledServiceIds: ['svc-2'] },
+      ],
+    });
+  });
+
+  test('a group with no minutes or no ids is dropped rather than persisted as a bogus entry', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: null, scheduledServiceIds: ['svc-1'] }, { minutes: 12, scheduledServiceIds: [] }] }))
+      .toBeNull();
   });
 });
