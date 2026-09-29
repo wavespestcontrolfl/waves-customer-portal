@@ -13,8 +13,9 @@ const mockConvertHeicToJpeg = jest.fn();
 const mockDeletePhoto = jest.fn().mockResolvedValue(undefined);
 const mockLockStopForRow = jest.fn(async (trx, id) => id);
 const mockTriggerPestRead = jest.fn(async () => {});
-jest.mock('../services/visit-prep-pest-read', () => ({
-  triggerVisitPrepPestRead: (...args) => mockTriggerPestRead(...args),
+// The upload hook calls the ONE read dispatcher, which picks the engine.
+jest.mock('../services/visit-prep-read-dispatch', () => ({
+  dispatchVisitPrepRead: (...args) => mockTriggerPestRead(...args),
 }));
 
 jest.mock('../utils/funnel-photos', () => ({
@@ -450,12 +451,13 @@ describe('pest read hook (PR 5)', () => {
   });
   afterEach(() => {
     delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_PREP_PLANT_READ;
     delete process.env.GATE_VISIT_FACTS;
     delete process.env.GATE_VISIT_PREP_PHOTOS;
   });
   const flushImmediate = () => new Promise((resolve) => setImmediate(resolve));
 
-  test('gate off: the read is never started (the engine module is not even loaded)', async () => {
+  test('gates off: the read is never dispatched', async () => {
     mockTriggerPestRead.mockClear();
     const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
     await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
@@ -474,5 +476,26 @@ describe('pest read hook (PR 5)', () => {
     await flushImmediate();
     expect(mockTriggerPestRead).toHaveBeenCalledTimes(1);
     expect(mockTriggerPestRead.mock.calls[0][0]).toMatchObject({ svc: expect.objectContaining({ id: 'svc-1' }) });
+  });
+
+  test('both read gates on: ONE dispatch per upload, never one per engine (Codex #5320 r9)', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_PREP_PLANT_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
+    await flushImmediate();
+    expect(mockTriggerPestRead).toHaveBeenCalledTimes(1);
+  });
+
+  test('only the plant read gate on: the upload still dispatches', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PLANT_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
+    await flushImmediate();
+    expect(mockTriggerPestRead).toHaveBeenCalledTimes(1);
   });
 });

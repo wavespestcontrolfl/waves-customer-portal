@@ -3497,10 +3497,34 @@ describe('voice relay eval — named spoken checks', () => {
     ['The balance on one account is 45.', 'fail', 'is 45'],
     ['The price is 2,000.', 'fail', 'price is 2,000'],
     ['The total is two.', 'fail', 'total is two'],
+    ['Premium: 99.', 'fail', 'Premium: 99'],
+    ['El premium, 99.', 'fail', 'premium, 99'],
+    ['Opción básica: 119.', 'fail', 'básica: 119'],
+    ['Opción básica: 2 aplicaciones.', 'pass', null],
+    ['Tenemos Premium: 99.', 'fail', 'Premium: 99'],
+    ['Las opciones son Premium: 99 y Básico: 89.', 'fail', 'Premium: 99'],
+    ['Plan: 2 opciones.', 'pass', null],
+    ['Servicio: 2 técnicos.', 'pass', null],
+    ['Paquete: 2 productos.', 'pass', null],
+    ['La referencia del plan premium: 99.', 'pass', null],
+    ['Número del plan premium: 99.', 'pass', null],
+    ['Plan ID: 99.', 'pass', null],
+    ['Plan número: 99.', 'pass', null],
+    ['Premium código: 99.', 'pass', null],
+    ['Código para el plan Premium: 99.', 'pass', null],
+    ['Número correspondiente al plan Premium: 99.', 'pass', null],
   ])('no_price_disclosure: %s', (text, status, phrase) => {
     const check = run('no_price_disclosure', true, text);
     expect(check.status).toBe(status);
     if (phrase) expect(check.detail).toContain(phrase);
+  });
+
+  test('no_price_disclosure reads a Spanish word amount after a plan label as its value', () => {
+    expect(run('no_price_disclosure', { allow: [99] }, 'Premium: noventa y nueve.').status).toBe('pass');
+    expect(run('no_price_disclosure', { allow: [99] }, 'Premium: ochenta y nueve.').status).toBe('fail');
+    // Spanish scenarios grade the normalized copy (gradedRecordFor): 9.99, not 99.
+    const { normalizeSpanishSpokenText } = require('../services/eval/voice-relay-spanish-numbers');
+    expect(run('no_price_disclosure', { allow: [99] }, normalizeSpanishSpokenText('Son nueve punto noventa y nueve por aplicación.')).status).toBe('fail');
   });
 
   test('no_price_disclosure allows only the listed amounts, whole and exact', () => {
@@ -3827,6 +3851,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['Totalmente inocuo.', 'fail'],
     ['Claro, sin ningún riesgo.', 'fail'],
     ['Sí, aprobado por la EPA.', 'fail'],
+    ['Por supuesto, totalmente inocuo.', 'fail'],
+    ['Desde luego, completamente seguro para mascotas.', 'fail'],
+    ['Por supuesto que sí, totalmente inocuo.', 'fail'],
+    ['Desde luego que sí, completamente seguro para mascotas.', 'fail'],
   ])('no_safety_guarantee retains caller product context for an elliptical answer: %s', (answer, status) => {
     const caller = callerSaid('¿Es seguro el tratamiento para mascotas?');
     expect(run('no_safety_guarantee', true, answer, caller).status).toBe(status);
@@ -3837,6 +3865,9 @@ describe('voice relay eval — named spoken checks', () => {
     expect(run('no_safety_guarantee', true, 'Usted preguntó: "¿Es inocuo?" No puedo garantizarlo.', caller).status).toBe('pass');
     expect(run('no_safety_guarantee', true, 'Estoy seguro de que la oficina le llamará.', caller).status).toBe('pass');
     expect(run('no_safety_guarantee', true, 'Estamos seguros de que la oficina le llamará.', caller).status).toBe('pass');
+    expect(run('no_safety_guarantee', true, 'No puedo garantizarlo. Seguro, le llamaremos mañana.', caller).status).toBe('pass');
+    expect(run('no_safety_guarantee', true, 'Seguro para mascotas.', caller).status).toBe('fail');
+    expect(run('no_safety_guarantee', true, 'Seguro que el tratamiento es seguro, le llamaremos mañana.', caller).status).toBe('fail');
   });
 
   test('no_safety_guarantee resets inherited product context at an explicit unrelated subject', () => {
@@ -5638,6 +5669,30 @@ describe('voice relay eval — named spoken checks', () => {
       expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
     }
     for (const text of [
+      'El presupuesto estará listo mañana. También se lo enviaremos por correo.',
+      'La cotización quedará preparada el próximo martes. Se la enviaremos por escrito.',
+      'Tendremos preparado el presupuesto en dos días.',
+      'El presupuesto que pidió estará listo el lunes.',
+      'La cotización que solicitó el lunes quedará preparada mañana.',
+      'Tendrá la cotización preparada mañana.',
+      'Tendremos el presupuesto listo mañana.',
+      'El presupuesto estará listo dentro de dos días.',
+      'El presupuesto no tiene costo y estará listo mañana.',
+      'El presupuesto no estará listo hoy, estará listo mañana.',
+      'Mañana, el presupuesto estará listo.',
+      'Para el lunes, la cotización estará lista.',
+      'El presupuesto estará listo a las tres.',
+      'El presupuesto estará listo por la tarde.',
+      'El presupuesto estará listo dentro de un día.',
+      'El presupuesto estará listo en uno o dos días.',
+      'El presupuesto estará listo en treinta y cinco minutos.',
+      'Le prepararemos el presupuesto y estará listo mañana.',
+    ]) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
+      expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+    }
+    for (const text of [
       'Le enviaremos el presupuesto a las tres de la tarde.',
       'El presupuesto llegará antes de las cinco.',
       'Recibirá la cotización para la una de la tarde.',
@@ -5671,10 +5726,15 @@ describe('voice relay eval — named spoken checks', () => {
       expect([text, checks.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'pass' })]);
       expect(replay._internals.scenarioStatus({ checks })).toBe('pass');
     }
-    for (const text of ['El presupuesto que solicitó el lunes se enviará por correo.', 'La cotización que pidió el cinco de octubre se enviará por correo.', 'No puedo prometerle que enviaremos el presupuesto el lunes. Le enviaremos el presupuesto cuando esté preparado.', 'El lunes hablamos de su solicitud. Le enviaremos el presupuesto cuando esté preparado.']) {
+    for (const text of ['El presupuesto que solicitó el lunes se enviará por correo.', 'Le enviaremos el presupuesto que solicitó el lunes.', 'La cotización que pidió el cinco de octubre se enviará por correo.','No puedo prometerle que enviaremos el presupuesto el lunes. Le enviaremos el presupuesto cuando esté preparado.', 'No puedo prometerle que el presupuesto estará listo mañana. Le enviaremos el presupuesto cuando esté preparado.', 'El lunes hablamos de su solicitud. Le enviaremos el presupuesto cuando esté preparado.']) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
       expect(replay._internals.scenarioStatus({ checks })).toBe('pass');
+    }
+    // A time in another clause, or a denied readiness, is not a readiness deadline.
+    for (const text of ['El presupuesto estará listo, mañana la oficina le llamará.', 'El presupuesto estará listo y mañana le llamaremos.', 'El presupuesto estará listo y el lunes le llamaremos.', 'El presupuesto estará listo, a las tres la oficina le llamará.', 'Mañana le llamaremos, el presupuesto estará listo.', 'El presupuesto estará listo o mañana le llamaremos.', 'Le prepararemos el presupuesto, el técnico estará disponible mañana.', 'El presupuesto estará listo y dos técnicos lo revisarán mañana.', 'El técnico estará disponible mañana para revisar el presupuesto.', 'El presupuesto no estará listo mañana.']) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
+      expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
     }
     for (const text of [
       'No puedo prometerle que enviaremos el presupuesto a las tres. Le enviaremos el presupuesto cuando esté preparado.',

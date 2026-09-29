@@ -1,35 +1,50 @@
 /**
  * services/visit-prep-pest-read-sweep.js — GATE_VISIT_PREP_READ_SWEEP.
  * Pure/unit coverage against a small purpose-built chainable fake conn (same
- * convention as visit-prep-pest-read.test.js), with triggerVisitPrepPestRead
- * and isPestStop fully mocked — this suite is about CANDIDATE SELECTION and
- * the one-retry-per-row-per-case bound, not the engine/claim/cap machinery
- * itself (covered by visit-prep-pest-read.test.js).
+ * convention as visit-prep-pest-read.test.js), with dispatchVisitPrepRead
+ * and its engine choice fully mocked — this suite is about CANDIDATE
+ * SELECTION and the one-retry-per-row-per-case bound, not the dispatch/
+ * engine/claim/cap machinery itself (covered by visit-prep-read-dispatch,
+ * visit-prep-pest-read and visit-prep-plant-read tests).
  */
 
 const mockTrigger = jest.fn(async () => undefined);
-jest.mock('../services/visit-prep-pest-read', () => {
-  const { etDateString, parseETDateTime } = jest.requireActual('../utils/datetime-et');
-  return {
-    triggerVisitPrepPestRead: (...args) => mockTrigger(...args),
-    _internal: { etDayStart: (now = new Date()) => parseETDateTime(`${etDateString(now)}T00:00`) },
-  };
-});
-
+// "Does a live engine read this stop now" — the dispatcher's own chooseEngine.
 const mockIsPestStop = jest.fn(async () => false);
-jest.mock('../services/visit-prep-pest-applicability', () => ({
-  isPestStop: (...args) => mockIsPestStop(...args),
+jest.mock('../services/visit-prep-read-dispatch', () => ({
+  dispatchVisitPrepRead: (...args) => mockTrigger(...args),
+  _internal: {
+    // true → the stop wants a pest read; a string is taken as the key itself.
+    currentReadKey: async (svc, conn) => {
+      const v = await mockIsPestStop(svc, conn);
+      return v === true ? 'pest' : (v || null);
+    },
+    storedReadKey: (r) => {
+      const parsed = typeof r === 'string' ? JSON.parse(r) : r;
+      return parsed?.engine === 'plant' ? `plant:${parsed.subject_type}` : 'pest';
+    },
+  },
+}));
+
+// The stop lock itself is covered by the claim's own suites; here the
+// locked body runs directly on the fake conn.
+const mockLockedStop = jest.fn((conn, svc, { body }) => body(conn));
+jest.mock('../services/visit-prep-read-claim', () => ({
+  ...jest.requireActual('../services/visit-prep-read-claim'),
+  withLockedStop: (...args) => mockLockedStop(...args),
 }));
 
 let mockGateOn = true;
 jest.mock('../config/feature-gates', () => ({
   visitPrepReadSweepLive: () => mockGateOn,
+  visitPrepPestReadLive: () => true,
+  visitPrepPlantReadLive: () => true,
 }));
 
 const {
   sweepVisitPrepPestReads,
   SWEEP_BATCH_LIMIT,
-  _internal: { selectCandidates, SWEEP_CASE, SWEEP_ACTION },
+  _internal: { selectCandidates, SWEEP_CASE, SWEEP_ACTION, retryOne: _retryOneForTest },
 } = require('../services/visit-prep-pest-read-sweep');
 
 const NOW = new Date('2026-09-29T18:00:00Z'); // 2:00 PM ET — well inside 2026-09-29 either offset
@@ -58,6 +73,8 @@ function fakeConn(seed = {}) {
       submission_id: vps.id,
       read_status: vps.read_status,
       created_at: vps.created_at,
+      read_result: vps.read_result ?? null,
+      read_attempts: vps.read_attempts ?? 0,
       scheduled_service_id: ss.id,
       customer_id: ss.customer_id,
       service_type: ss.service_type,
@@ -72,7 +89,18 @@ function fakeConn(seed = {}) {
     q.join = () => q;
     q.whereIn = (col, vals) => { q._whereIn = { col: colKey(col), vals }; return q; };
     q.whereNotIn = (col, vals) => { q._whereNotIn = { col: colKey(col), vals }; return q; };
-    q.where = (col, op, val) => { q._wheres.push({ col: colKey(col), val }); return q; };
+    q.where = (col, op, val) => {
+      if (typeof col === 'object') { q._match = { ...(q._match || {}), ...col }; return q; }
+      q._wheres.push({ col: colKey(col), val });
+      return q;
+    };
+    // The stale-done release: a guarded single-row update.
+    q.update = async (patch) => {
+      const hits = store.submissions.filter((r) => Object.entries(q._match || {})
+        .every(([k, v]) => (k === 'read_attempts' ? (r.read_attempts ?? 0) === v : r[k] === v)));
+      hits.forEach((r) => Object.assign(r, patch));
+      return hits.length;
+    };
     q.select = async () => store.submissions
       .map(joinedRow)
       .filter(Boolean)
@@ -191,7 +219,7 @@ describe('candidate selection — case (c) unsupported reclassified to pest', ()
     });
     const candidates = await selectCandidates(conn, NOW);
     expect(candidates).toHaveLength(1);
-    expect(candidates[0].caseLabel).toBe(SWEEP_CASE.RECLASSIFIED_PEST);
+    expect(candidates[0].caseLabel).toBe(SWEEP_CASE.RECLASSIFIED);
     expect(mockIsPestStop).toHaveBeenCalledWith({ id: 'svc-1', visit_id: null }, conn);
   });
 
@@ -399,5 +427,92 @@ describe('sweepVisitPrepPestReads — retry wiring', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.result).toEqual({ enabled: true, candidates: 2, retried: 1, failed: 1 });
     expect(mockTrigger).toHaveBeenCalledTimes(2); // both rows still ran
+  });
+});
+
+describe('case (d): a finished read made for the wrong line or subject (Codex #5320 r10)', () => {
+  const LAWN_READ = JSON.stringify({ engine: 'plant', subject_type: 'lawn', v2: {} });
+
+  test('a done lawn read on a stop that is pest now is released and re-dispatched from none', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, read_attempts: 1, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    const candidates = await selectCandidates(conn, NOW);
+    expect(candidates.map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_DONE]);
+    await sweepVisitPrepPestReads(conn, NOW);
+    const row = conn._store.submissions[0];
+    expect(row).toMatchObject({ read_status: 'none', read_result: null, read_ref: null, read_attempts: 1 });
+    expect(mockTrigger).toHaveBeenCalledWith(expect.objectContaining({ submissionId: 'sub-1', expectStatus: ['none'] }));
+  });
+
+  test('a done lawn read on a stop now tree & shrub is stale too (subject changed)', async () => {
+    mockIsPestStop.mockResolvedValue('plant:tree_shrub');
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_DONE]);
+  });
+
+  test('a done read that still matches the stop is never a candidate (and is checked, then cooled down)', async () => {
+    mockIsPestStop.mockResolvedValue('plant:lawn');
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect(await selectCandidates(conn, NOW)).toEqual([]);
+    expect(conn._store.activityLog.map((r) => r.action)).toEqual(['visit_prep_read_sweep_check']);
+  });
+
+  test('a done read on a stop no live engine reads is left alone', async () => {
+    mockIsPestStop.mockResolvedValue(null);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect(await selectCandidates(conn, NOW)).toEqual([]);
+  });
+
+  test('a stop that changed BACK before the release keeps its valid read: re-proved under the stop lock (Codex #5320 r11)', async () => {
+    mockIsPestStop.mockResolvedValueOnce(true); // at selection: the stop wants a pest read
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, read_attempts: 1, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    const [row] = await selectCandidates(conn, NOW);
+    mockIsPestStop.mockResolvedValue('plant:lawn'); // back to lawn before the retry runs
+    await _retryOneForTest(conn, row);
+    expect(mockLockedStop).toHaveBeenCalledWith(conn, expect.objectContaining({ id: 'svc-1' }), expect.any(Object));
+    expect(conn._store.submissions[0]).toMatchObject({ read_status: 'done', read_result: LAWN_READ });
+    expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  test('a legacy done read (attempts 0, pre-column) released keeps one attempt counted (pre-push audit P1)', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, read_attempts: 0, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    await sweepVisitPrepPestReads(conn, NOW);
+    expect(conn._store.submissions[0]).toMatchObject({ read_status: 'none', read_attempts: 1 });
+  });
+
+  test('a re-read that landed after selection (attempts moved on) is never released', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, read_attempts: 1, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    const [row] = await selectCandidates(conn, NOW);
+    conn._store.submissions[0].read_attempts = 2; // another read claimed and finished meanwhile
+    await _retryOneForTest(conn, row);
+    expect(conn._store.submissions[0].read_status).toBe('done');
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 });
