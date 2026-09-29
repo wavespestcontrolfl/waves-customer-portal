@@ -340,3 +340,95 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     expect(await held(legacy)).toEqual([]);
   });
 });
+
+/**
+ * The churned-customer live-work finder (class 4), the real query: a customer
+ * whose live pipeline_stage is 'churned' (and not soft-deleted) with a live
+ * upcoming visit or a never-sent invoice is found; the same customer with only
+ * past / cancelled / completed visits and sent / paid / void invoices, an
+ * active customer with drafts, a reactivated customer carrying a stale
+ * churned_at, and a soft-deleted churned customer are not.
+ */
+maybeDescribe('churned customer with live work: the finder (live Postgres)', () => {
+  let db;
+  let watchdog;
+  const made = { invoices: [], scheduled_services: [], customers: [] };
+  const RUN = `w${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const TODAY = '2026-09-29';
+  let n = 0;
+  let mine = [];
+
+  beforeAll(() => {
+    db = require('../models/db');
+    watchdog = require('../services/schedule-integrity-watchdog');
+  });
+  beforeEach(() => { mine = []; });
+  afterAll(async () => {
+    for (const table of ['invoices', 'scheduled_services', 'customers']) {
+      if (made[table].length) await db(table).whereIn('id', made[table]).del();
+    }
+  });
+
+  const insert = async (table, row) => {
+    const [r] = await db(table).insert(row).returning('*');
+    made[table].push(r.id);
+    return r;
+  };
+  const customer = async (over = {}) => {
+    n += 1;
+    const row = await insert('customers', { first_name: 'Finder', phone: `+1555556${String(1000 + n)}`, pipeline_stage: 'churned', ...over });
+    mine.push(row.id);
+    return row;
+  };
+  const visit = (c, over = {}) => insert('scheduled_services', {
+    customer_id: c.id, scheduled_date: '2026-10-05', service_type: 'General Pest Control', status: 'pending', ...over,
+  });
+  const invoice = (c, status, over = {}) => {
+    n += 1;
+    return insert('invoices', { customer_id: c.id, token: `${RUN}-${n}`, invoice_number: `${RUN}-${n}`, status, ...over });
+  };
+  // Only this test's customers, so a shared dev database's own rows never matter.
+  const found = async () => Object.fromEntries((await watchdog._findChurnedLiveWork(TODAY))
+    .filter((r) => mine.includes(r.id)).map((r) => [r.id, [r.live_visits, r.unsent_invoices]]));
+
+  test('churned with a future pending visit and/or an unsent invoice is found, with counts', async () => {
+    const visitOnly = await customer();
+    await visit(visitOnly); await visit(visitOnly, { status: null, scheduled_date: TODAY });
+    const invoiceOnly = await customer();
+    await invoice(invoiceOnly, 'draft'); await invoice(invoiceOnly, 'scheduled');
+    const both = await customer();
+    await visit(both, { status: 'confirmed' }); await invoice(both, 'draft');
+    expect(await found()).toEqual({
+      [visitOnly.id]: [2, 0], [invoiceOnly.id]: [0, 2], [both.id]: [1, 1],
+    });
+  });
+
+  test('churned with only past, cancelled or completed visits and only sent, paid, void or archived invoices is not found', async () => {
+    const c = await customer();
+    await visit(c, { scheduled_date: '2026-09-28' }); // yesterday, still pending: not upcoming
+    for (const status of ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show']) await visit(c, { status });
+    for (const status of ['sent', 'viewed', 'overdue', 'paid', 'void', 'refunded', 'sending']) await invoice(c, status);
+    await invoice(c, 'draft', { archived_at: new Date('2026-09-01T12:00:00Z') });
+    expect(await found()).toEqual({});
+  });
+
+  test('an active or reactivated customer (stale churned_at) with drafts and future visits is not found; nor is a soft-deleted churned one', async () => {
+    const active = await customer({ pipeline_stage: 'active_customer' });
+    await visit(active); await invoice(active, 'draft');
+    const reactivated = await customer({ pipeline_stage: 'active_customer', churned_at: '2026-05-01' });
+    await visit(reactivated); await invoice(reactivated, 'scheduled');
+    const merged = await customer({ deleted_at: new Date('2026-09-01T12:00:00Z') });
+    await visit(merged); await invoice(merged, 'draft');
+    expect(await found()).toEqual({});
+  });
+
+  test('it clears when the work is cleaned up', async () => {
+    const c = await customer();
+    const v = await visit(c);
+    const inv = await invoice(c, 'draft');
+    expect(await found()).toEqual({ [c.id]: [1, 1] });
+    await db('scheduled_services').where({ id: v.id }).update({ status: 'cancelled' });
+    await db('invoices').where({ id: inv.id }).update({ status: 'void' });
+    expect(await found()).toEqual({});
+  });
+});

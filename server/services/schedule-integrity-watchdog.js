@@ -29,6 +29,12 @@
  *  3. PREPAY COVERAGE GAPS — annual stamps the completion validator cannot
  *     verify, missing or conflicting stamps on linked paid terms, or a missing
  *     or replaced manual series allocation. Includes overdue live visits.
+ *  4. CHURNED CUSTOMER WITH LIVE WORK — a customer whose live pipeline_stage is
+ *     'churned' (not soft-deleted) who still has a live upcoming visit or an
+ *     invoice that never reached the customer (draft / scheduled). Catches a
+ *     churn done outside the app's cancel path (a direct database edit skips
+ *     its steps, leaving open visits on the books and a draft unvoided). One
+ *     bell per customer; it clears once the work is cancelled or voided.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
@@ -84,12 +90,16 @@ const UPCOMING_WINDOW_DAYS = 14;
 // the bells per run so it drains over ticks instead of flooding.
 const MAX_ALERTS_PER_RUN = 10;
 
-// The four bell classes, by dedupeKey prefix. Only the watchdog raises under
+// The bell classes, by dedupeKey prefix. Only the watchdog raises under
 // these prefixes, so an open row under one is this module's to close.
 const UNPRICED_PREFIX = 'unpriced-series:';
 const LAWN_GAP_PREFIX = 'lawn-email-gap:';
 const PREPAY_PREFIX = 'prepay-coverage:';
 const ACCEPTED_PREFIX = 'accepted-schedule:';
+const CHURNED_PREFIX = 'churned-live-work:';
+// Invoice statuses that have not reached the customer (the status column has no
+// CHECK; 'send_failed' is an estimate status, never an invoice one).
+const UNSENT_INVOICE_STATUSES = ['draft', 'scheduled'];
 // A prepay-coverage visit in these statuses stays open for a person even with
 // the gap gone from the scan: a completed visit is where the billing mistake
 // happens, and a rescheduled one moved its coverage question elsewhere.
@@ -348,6 +358,65 @@ async function judgePrepayGaps(row, paidTermById) {
   return { annualCovered, issues };
 }
 
+// Class 4 finder: churned customers who still have live work on the books.
+// Set-based (one query, EXISTS legs, counts as correlated subselects) — no
+// per-customer reads. `pipeline_stage = 'churned'` is the live churn marker
+// (churned_at can outlive a reactivation, as call-commitments'
+// customerLeftProof also holds); a merge soft-deletes, so deleted_at must be
+// null. Live upcoming visit = the file's null-or-not-excluded status rule on or
+// after today ET; unsent invoice = never reached the customer, not archived.
+// Internal test customers are not filtered here: the alert carries
+// customer_id in its metadata, so notification-service's own central
+// suppression (isInternalTestCustomerId) keeps them off the bell.
+async function findChurnedLiveWork(todayET) {
+  const statusPlaceholders = LIVE_STATUS_EXCLUSIONS.map(() => '?').join(', ');
+  const unsentPlaceholders = UNSENT_INVOICE_STATUSES.map(() => '?').join(', ');
+  const visitsSql = `FROM scheduled_services ss WHERE ss.customer_id = c.id AND ss.scheduled_date >= ?
+    AND (ss.status IS NULL OR ss.status NOT IN (${statusPlaceholders}))`;
+  const invoicesSql = `FROM invoices inv WHERE inv.customer_id = c.id AND inv.archived_at IS NULL
+    AND inv.status IN (${unsentPlaceholders})`;
+  const visitBindings = [todayET, ...LIVE_STATUS_EXCLUSIONS];
+  return db('customers as c')
+    .where('c.pipeline_stage', 'churned')
+    .whereNull('c.deleted_at')
+    .whereRaw(`(EXISTS (SELECT 1 ${visitsSql}) OR EXISTS (SELECT 1 ${invoicesSql}))`,
+      [...visitBindings, ...UNSENT_INVOICE_STATUSES])
+    .select(
+      'c.id',
+      db.raw(`(SELECT count(*)::int ${visitsSql}) as live_visits`, visitBindings),
+      db.raw(`(SELECT count(*)::int ${invoicesSql}) as unsent_invoices`, UNSENT_INVOICE_STATUSES),
+    )
+    .orderBy('c.id');
+}
+
+// The class's alerts, or a failed flag when the check threw (an unknown live
+// set: the close pass then leaves the class's standing bells alone).
+async function churnedLiveWorkAlerts(todayET) {
+  try {
+    const rows = await findChurnedLiveWork(todayET);
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const alerts = rows.map((r) => {
+      const visits = Number(r.live_visits) || 0;
+      const invoices = Number(r.unsent_invoices) || 0;
+      const parts = [];
+      if (visits) parts.push(plural(visits, 'upcoming visit'));
+      if (invoices) parts.push(plural(invoices, 'unsent invoice'));
+      return [
+        `${CHURNED_PREFIX}${r.id}`,
+        'Churned customer still has live work',
+        `${parts.join(' and ')} ${visits + invoices === 1 ? 'is' : 'are'} still on the books for a churned customer — ` +
+        'cancel or void them through the app.',
+        { customer_id: r.id, live_visits: visits, unsent_invoices: invoices },
+        { link: `/admin/customers?customerId=${encodeURIComponent(r.id)}` },
+      ];
+    });
+    return { alerts, failed: false };
+  } catch (err) {
+    logger.error(`[schedule-integrity] churned-customer live-work check failed: ${err.message}`);
+    return { alerts: [], failed: true };
+  }
+}
+
 async function runInner({ now = new Date() } = {}) {
   const todayET = etDateString(now);
 
@@ -520,8 +589,14 @@ async function runInner({ now = new Date() } = {}) {
       { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}`, refreshOnDedupe: true, dedupeVersion: gap.evidenceKey },
   ]));
 
+  // Last: a churned customer's leftover work never starves the money pages
+  // above under the per-run cap.
+  const churned = await churnedLiveWorkAlerts(todayET);
+  alerts.push(...churned.alerts);
+
   const delivered = await deliverAlerts({
     alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed, acceptedScheduleCheckFailed,
+    churnedWorkCheckFailed: churned.failed,
   });
 
   return {
@@ -534,6 +609,8 @@ async function runInner({ now = new Date() } = {}) {
 
     acceptedScheduleGaps: acceptedGaps.length,
     acceptedScheduleCheckFailed,
+    churnedLiveWork: churned.alerts.length,
+    churnedWorkCheckFailed: churned.failed,
     // alerted, plus closed / closePassFailed under episodes.
     ...delivered,
   };
@@ -542,7 +619,7 @@ async function runInner({ now = new Date() } = {}) {
 // Delivers one run's findings: rings them in order, capped at
 // MAX_ALERTS_PER_RUN real rings, and — under episodes — closes every
 // standing bell the findings no longer name (closeResolvedAlerts).
-async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed }) {
+async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed }) {
   let alerted = 0;
   const capped = () => {
     if (alerted < MAX_ALERTS_PER_RUN) return false;
@@ -606,6 +683,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
   const skipPrefixes = [];
   if (lawnGapCheckFailed) skipPrefixes.push(LAWN_GAP_PREFIX);
   if (acceptedScheduleCheckFailed) skipPrefixes.push(ACCEPTED_PREFIX);
+  if (churnedWorkCheckFailed) skipPrefixes.push(CHURNED_PREFIX);
   try {
     return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }), closePassFailed: false };
   } catch (err) {
@@ -839,6 +917,8 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, s
   closed += await closeLawnAlerts({ absentOf, close, liveKeys, deliveredKeys });
   closed += await close(await absentOf(ACCEPTED_PREFIX), 'gap resolved');
   closed += await closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, horizonDay });
+  // Cleaned up, or the customer came back (reactivated / merged away).
+  closed += await close(await absentOf(CHURNED_PREFIX), 'no live work left');
   return closed;
 }
 
@@ -855,6 +935,7 @@ module.exports = {
   _completedUnpricedSince: completedUnpricedSince,
   _unpricedSeriesAlerts: unpricedSeriesAlerts,
   _closeResolvedAlerts: closeResolvedAlerts,
+  _findChurnedLiveWork: findChurnedLiveWork,
   UPCOMING_WINDOW_DAYS,
   MAX_ALERTS_PER_RUN,
 };
