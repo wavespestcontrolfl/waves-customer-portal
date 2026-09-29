@@ -8,6 +8,8 @@
  * these tests insert is deleted afterwards. The watchdog's own rules are
  * covered by schedule-integrity-watchdog.test.js.
  */
+const { randomUUID } = require('crypto');
+
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
@@ -338,5 +340,237 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     expect(await held(raced)).toEqual([raced.root.id]);
     const legacy = await series({ completedAt: '2026-09-28T15:00:00Z', bellCreatedAt: '2026-09-28T16:00:00Z' });
     expect(await held(legacy)).toEqual([]);
+  });
+});
+
+/**
+ * The churned-customer live-work finder (class 4), the real query: a customer
+ * whose live pipeline_stage is 'churned' (and not soft-deleted) with a live
+ * upcoming visit or a never-sent invoice is found; the same customer with only
+ * past / cancelled / completed visits and sent / paid / void invoices, an
+ * active customer with drafts, a reactivated customer carrying a stale
+ * churned_at, and a soft-deleted churned customer are not.
+ */
+maybeDescribe('churned customer with live work: the finder (live Postgres)', () => {
+  let db;
+  let watchdog;
+  const made = { invoices: [], scheduled_services: [], customers: [], annual_prepay_terms: [], payer_statements: [], payers: [], service_records: [] };
+  const RUN = `w${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const TODAY = '2026-09-29';
+  let n = 0;
+  let mine = [];
+
+  beforeAll(() => {
+    db = require('../models/db');
+    watchdog = require('../services/schedule-integrity-watchdog');
+  });
+  beforeEach(() => { mine = []; });
+  afterAll(async () => {
+    for (const table of ['annual_prepay_terms', 'invoices', 'payer_statements', 'payers', 'service_records', 'scheduled_services', 'customers']) {
+      if (made[table].length) await db(table).whereIn('id', made[table]).del();
+    }
+  });
+
+  const insert = async (table, row) => {
+    const [r] = await db(table).insert(row).returning('*');
+    made[table].push(r.id);
+    return r;
+  };
+  const customer = async (over = {}) => {
+    n += 1;
+    const row = await insert('customers', { first_name: 'Finder', phone: `+1555556${String(1000 + n)}`, pipeline_stage: 'churned', ...over });
+    mine.push(row.id);
+    return row;
+  };
+  const visit = (c, over = {}) => insert('scheduled_services', {
+    customer_id: c.id, scheduled_date: '2026-10-05', service_type: 'General Pest Control', status: 'pending', ...over,
+  });
+  const invoice = (c, status, over = {}) => {
+    n += 1;
+    return insert('invoices', { customer_id: c.id, token: `${RUN}-${n}`, invoice_number: `${RUN}-${n}`, status, ...over });
+  };
+  // Only this test's customers, so a shared dev database's own rows never matter.
+  const found = async () => Object.fromEntries((await watchdog._findChurnedLiveWork(TODAY))
+    .filter((r) => mine.includes(r.id)).map((r) => [r.id, [r.live_visits, r.unsent_invoices]]));
+  const legsOf = async (c) => (await watchdog._findChurnedLiveWork(TODAY)).find((r) => r.id === c.id) || null;
+
+  test('churned outside the cancel steps with a live visit and/or an unsent invoice the cancel would void is found, with counts', async () => {
+    const visitOnly = await customer();
+    await visit(visitOnly); await visit(visitOnly, { status: 'confirmed', scheduled_date: TODAY });
+    // A visit cancelled outside the app whose invoice was never voided: linked
+    // directly, or through the visit's service record (invoice.js's link).
+    const invoiceOnly = await customer();
+    const gone = await visit(invoiceOnly, { status: 'cancelled' });
+    const record = await insert('service_records', { customer_id: invoiceOnly.id, scheduled_service_id: gone.id, service_date: '2026-10-05', service_type: 'General Pest Control' });
+    await invoice(invoiceOnly, 'draft', { scheduled_service_id: gone.id });
+    await invoice(invoiceOnly, 'scheduled', { service_record_id: record.id });
+    const both = await customer();
+    const live = await visit(both, { status: 'confirmed' });
+    await invoice(both, 'draft', { scheduled_service_id: live.id });
+    expect(await found()).toEqual({
+      [visitOnly.id]: [2, 0], [invoiceOnly.id]: [0, 2], [both.id]: [1, 1],
+    });
+  });
+
+  test('a churn done by the cancel steps (churn_episode_id stamped) never pages: what they leave is deliberate', async () => {
+    const processed = await customer({ churn_episode_id: randomUUID() });
+    const v = await visit(processed);
+    await invoice(processed, 'draft', { scheduled_service_id: v.id });
+    await insert('annual_prepay_terms', { customer_id: processed.id, term_start: '2026-01-01', term_end: '2026-12-31', status: 'active' });
+    expect(await legsOf(processed)).toBeNull();
+  });
+
+  test('an invoice for finished work is an earned receivable, and one with no visit link is not attributable: neither pages', async () => {
+    const c = await customer();
+    const done = await visit(c, { status: 'completed', scheduled_date: '2026-09-15' });
+    const missed = await visit(c, { status: 'no_show', scheduled_date: '2026-09-16' });
+    const record = await insert('service_records', { customer_id: c.id, scheduled_service_id: done.id, service_date: '2026-09-15', service_type: 'General Pest Control' });
+    await invoice(c, 'draft', { scheduled_service_id: done.id });
+    await invoice(c, 'scheduled', { service_record_id: record.id });
+    await invoice(c, 'draft', { scheduled_service_id: missed.id });
+    await invoice(c, 'draft');
+    expect(await legsOf(c)).toBeNull();
+  });
+
+  test('churned with only past, finished or unknown-status visits and only sent, paid, void or archived invoices is not found', async () => {
+    const c = await customer();
+    await visit(c, { scheduled_date: '2026-09-28' }); // yesterday, still pending: not upcoming
+    for (const status of ['cancelled', 'completed', 'skipped', 'no_show']) await visit(c, { status });
+    await visit(c, { status: null }); // no status: not live by the guard's rule
+    const gone = await visit(c, { status: 'cancelled', scheduled_date: '2026-10-12' });
+    for (const status of ['sent', 'viewed', 'overdue', 'paid', 'void', 'refunded', 'sending']) await invoice(c, status, { scheduled_service_id: gone.id });
+    await invoice(c, 'draft', { scheduled_service_id: gone.id, archived_at: new Date('2026-09-01T12:00:00Z') });
+    expect(await found()).toEqual({});
+  });
+
+  test('the churn guard\'s own live work counts: a rescheduled row (whatever its old date), a tracker-live row, an ongoing series anchor', async () => {
+    const rescheduled = await customer();
+    await visit(rescheduled, { status: 'rescheduled', scheduled_date: '2026-08-01' });
+    const tracked = await customer();
+    await visit(tracked, { status: 'confirmed', scheduled_date: '2026-09-20', track_state: 'on_property' });
+    const series = await customer();
+    await visit(series, { status: 'completed', scheduled_date: '2026-09-01', recurring_ongoing: true, is_recurring: true });
+    expect((await legsOf(rescheduled)).live_visits).toBe(1);
+    expect((await legsOf(tracked)).live_visits).toBe(1);
+    expect(await legsOf(series)).toMatchObject({ live_visits: 0, ongoing_series: 1 });
+  });
+
+  test('a paid prepay term still covering, or an unpaid prepay invoice, counts; a void one does not', async () => {
+    const term = await customer();
+    await insert('annual_prepay_terms', { customer_id: term.id, term_start: '2026-01-01', term_end: '2026-12-31', status: 'active' });
+    const pending = await customer();
+    const pendingInvoice = await invoice(pending, 'sent', { sent_at: new Date('2026-09-20T12:00:00Z') });
+    await insert('annual_prepay_terms', { customer_id: pending.id, term_start: '2026-10-01', term_end: '2027-09-30', status: 'payment_pending', prepay_invoice_id: pendingInvoice.id });
+    const voided = await customer();
+    const voidInvoice = await invoice(voided, 'void');
+    await insert('annual_prepay_terms', { customer_id: voided.id, term_start: '2026-10-01', term_end: '2027-09-30', status: 'payment_pending', prepay_invoice_id: voidInvoice.id });
+    expect(await legsOf(term)).toMatchObject({ prepay_terms: 1 });
+    expect(await legsOf(pending)).toMatchObject({ pending_prepay_invoices: 1 });
+    expect(await legsOf(voided)).toBeNull();
+  });
+
+  // A term the cancel machinery decided ('cancelled' + renewal_decision
+  // 'cancel'), sold as two General Pest Control visits.
+  const lapse = (c, disposition, inv, over = {}) => insert('annual_prepay_terms', { customer_id: c.id, term_start: '2026-01-01', term_end: '2026-12-31',
+    status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: disposition, prepay_invoice_id: inv.id,
+    coverage_service_type: 'General Pest Control', coverage_visit_count: 2, ...over });
+  const paidInvoice = (c) => invoice(c, 'paid', { paid_at: new Date('2026-01-02T12:00:00Z'), sent_at: new Date('2026-01-01T12:00:00Z') });
+
+  test('a decided lapse is the renewal machinery\'s own outcome: an end-at-term lapse with its sold visits, or an end-now lapse awaiting its refund, never pages', async () => {
+    const endAtTerm = await customer();
+    const kept = await lapse(endAtTerm, 'end_at_term', await paidInvoice(endAtTerm));
+    await visit(endAtTerm, { annual_prepay_term_id: kept.id });
+    await visit(endAtTerm, { annual_prepay_term_id: kept.id, status: 'confirmed', scheduled_date: '2026-12-05' });
+    const endNow = await customer();
+    await lapse(endNow, 'end_now_refund', await paidInvoice(endNow));
+    expect(await legsOf(endAtTerm)).toBeNull();
+    expect(await legsOf(endNow)).toBeNull();
+  });
+
+  test('only the lapse\'s sold coverage rides out (coverageRowsForTerm, the cancel\'s keep set): another family, a visit past the sold count, one outside the window, a rescheduled rebook, a visit on an end-now lapse, revoked coverage or a live term still page', async () => {
+    const extra = await customer();
+    const kept = await lapse(extra, 'end_at_term', await paidInvoice(extra));
+    await visit(extra, { annual_prepay_term_id: kept.id }); // sold visit 1 (kept)
+    await visit(extra, { annual_prepay_term_id: kept.id, scheduled_date: '2026-11-05' }); // sold visit 2 (kept)
+    await visit(extra, { annual_prepay_term_id: kept.id, scheduled_date: '2026-12-05' }); // a third on a two-visit term
+    await visit(extra, { annual_prepay_term_id: kept.id, service_type: 'Lawn Care' }); // linked, but not the covered family
+    await visit(extra, { annual_prepay_term_id: kept.id, status: 'rescheduled', scheduled_date: '2026-08-01' });
+    await visit(extra, { annual_prepay_term_id: kept.id, status: 'confirmed', scheduled_date: '2027-01-15' }); // moved past term_end
+    const early = await customer(); // a lapse whose window has not started: a visit before term_start is not covered
+    const future = await lapse(early, 'end_at_term', await paidInvoice(early), { term_start: '2026-11-01', term_end: '2027-10-31' });
+    await visit(early, { annual_prepay_term_id: future.id, scheduled_date: '2026-10-15' });
+    await visit(early, { annual_prepay_term_id: future.id, scheduled_date: '2026-11-05' });
+    const endNow = await customer();
+    const refunding = await lapse(endNow, 'end_now_refund', await paidInvoice(endNow));
+    await visit(endNow, { annual_prepay_term_id: refunding.id });
+    const revoked = await customer(); // a lost dispute reopens the invoice: no longer paid coverage
+    const disputed = await lapse(revoked, 'end_at_term', await invoice(revoked, 'overdue', { sent_at: new Date('2026-01-01T12:00:00Z') }));
+    await visit(revoked, { annual_prepay_term_id: disputed.id });
+    const live = await customer(); // churned outside Cancel plan: the term was never decided
+    const active = await insert('annual_prepay_terms', { customer_id: live.id, term_start: '2026-01-01', term_end: '2026-12-31', status: 'active' });
+    await visit(live, { annual_prepay_term_id: active.id });
+    expect(await legsOf(extra)).toMatchObject({ live_visits: 4, prepay_terms: 0 });
+    expect(await legsOf(early)).toMatchObject({ live_visits: 1, prepay_terms: 0 });
+    expect(await legsOf(endNow)).toMatchObject({ live_visits: 1, prepay_terms: 0 });
+    expect(await legsOf(revoked)).toMatchObject({ live_visits: 1, prepay_terms: 0 });
+    expect(await legsOf(live)).toMatchObject({ live_visits: 1, prepay_terms: 1 });
+  });
+
+  test('a payer\'s receivable is not the churned customer\'s unsent work: a third-party payer, a NET statement accrual, a draft withdrawn to the payer', async () => {
+    const c = await customer();
+    const gone = await visit(c, { status: 'cancelled' });
+    const payer = await insert('payers', { display_name: `Payer ${RUN}` });
+    const statement = await insert('payer_statements', { payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30',
+      terms_snapshot: JSON.stringify({ net_days: 30 }), token: `${RUN}-stmt` });
+    await invoice(c, 'draft', { scheduled_service_id: gone.id, payer_id: payer.id });
+    await invoice(c, 'draft', { scheduled_service_id: gone.id, payer_statement_id: statement.id });
+    await invoice(c, 'scheduled', { scheduled_service_id: gone.id, scheduled_send_error: 'payer_billed: withdrawn to the payer' });
+    expect(await legsOf(c)).toBeNull();
+  });
+
+  test('a collected prepay invoice whose term has not advanced yet is paid coverage, never an unpaid invoice; a status-less unpaid one is still unpaid', async () => {
+    const pendingTerm = (c, inv) => insert('annual_prepay_terms', { customer_id: c.id, term_start: '2026-10-01', term_end: '2027-09-30', status: 'payment_pending', prepay_invoice_id: inv.id });
+    const paid = await customer();
+    await pendingTerm(paid, await invoice(paid, 'paid', { paid_at: new Date('2026-09-25T12:00:00Z'), sent_at: new Date('2026-09-20T12:00:00Z') }));
+    const credit = await customer();
+    await pendingTerm(credit, await invoice(credit, 'prepaid', { sent_at: new Date('2026-09-20T12:00:00Z') }));
+    const paidAtOnly = await customer();
+    await pendingTerm(paidAtOnly, await invoice(paidAtOnly, 'sent', { paid_at: new Date('2026-09-25T12:00:00Z'), sent_at: new Date('2026-09-20T12:00:00Z') }));
+    const statusless = await customer();
+    await pendingTerm(statusless, await invoice(statusless, null, { sent_at: new Date('2026-09-20T12:00:00Z') }));
+    for (const c of [paid, credit, paidAtOnly]) expect(await legsOf(c)).toMatchObject({ prepay_terms: 1, pending_prepay_invoices: 0 });
+    expect(await legsOf(statusless)).toMatchObject({ prepay_terms: 0, pending_prepay_invoices: 1 });
+  });
+
+  test('an invoice that already reached the customer is not unsent: any delivery stamp, or Text/App accepted with only the email retrying', async () => {
+    const c = await customer();
+    const gone = await visit(c, { status: 'cancelled' });
+    await invoice(c, 'scheduled', { scheduled_service_id: gone.id, sms_sent_at: new Date('2026-09-20T12:00:00Z') });
+    await invoice(c, 'scheduled', { scheduled_service_id: gone.id, scheduled_send_error: 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED' });
+    await invoice(c, 'draft', { scheduled_service_id: gone.id, viewed_at: new Date('2026-09-21T12:00:00Z') });
+    expect(await legsOf(c)).toBeNull();
+    await invoice(c, 'scheduled', { scheduled_service_id: gone.id });
+    expect(await legsOf(c)).toMatchObject({ unsent_invoices: 1 });
+  });
+
+  test('an active or reactivated customer (stale churned_at) with drafts and future visits is not found; nor is a soft-deleted churned one', async () => {
+    const active = await customer({ pipeline_stage: 'active_customer' });
+    await visit(active); await invoice(active, 'draft');
+    const reactivated = await customer({ pipeline_stage: 'active_customer', churned_at: '2026-05-01' });
+    await visit(reactivated); await invoice(reactivated, 'scheduled');
+    const merged = await customer({ deleted_at: new Date('2026-09-01T12:00:00Z') });
+    await visit(merged); await invoice(merged, 'draft');
+    expect(await found()).toEqual({});
+  });
+
+  test('it clears when the work is cleaned up: cancelling the visit leaves its draft to void, voiding it clears', async () => {
+    const c = await customer();
+    const v = await visit(c);
+    const inv = await invoice(c, 'draft', { scheduled_service_id: v.id });
+    expect(await found()).toEqual({ [c.id]: [1, 1] });
+    await db('scheduled_services').where({ id: v.id }).update({ status: 'cancelled' });
+    expect(await found()).toEqual({ [c.id]: [0, 1] });
+    await db('invoices').where({ id: inv.id }).update({ status: 'void' });
+    expect(await found()).toEqual({});
   });
 });
