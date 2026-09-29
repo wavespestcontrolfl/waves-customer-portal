@@ -705,6 +705,32 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       expect(result).toBe(true);
     });
 
+    // Pre-1.19 earlier calls carry no sms_declined, so an explicit "no" on
+    // them is unrecoverable. They count as a possible decline (fail closed);
+    // the call under judgment itself is exempt.
+    test('an earlier pre-1.19 call (no sms_declined recorded) blocks; the origin call itself does not', async () => {
+      const phone = '+15555550321';
+      await insertLead(mockPg, { phone });
+      const legacyConsent = { sms_consent_given: false, do_not_contact_request: false };
+      const originId = await insertCall(mockPg, {
+        from_phone: phone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: legacyConsent },
+        created_at: new Date('2027-01-10T12:00:00.000Z'), updated_at: new Date('2027-01-10T12:00:00.000Z'),
+      });
+      await expect(callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, phone, { originCallId: originId, asOf: NOW },
+      )).resolves.toBe(false);
+
+      await insertCall(mockPg, {
+        from_phone: phone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: legacyConsent },
+        created_at: new Date('2027-01-05T12:00:00.000Z'), updated_at: new Date('2027-01-05T12:00:00.000Z'),
+      });
+      await expect(callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, phone, { originCallId: originId, asOf: NOW },
+      )).resolves.toBe(true);
+    });
+
     test('a later explicit opt-in does NOT clear an earlier decline (owner ruling 2026-09-29)', async () => {
       const phone = '+15555550302';
       await insertLead(mockPg, { phone });
@@ -728,8 +754,10 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     test('no earlier decisive call at all does not block', async () => {
       const phone = '+15555550303';
       await insertLead(mockPg, { phone });
+      // A 1.19+ call where texting never came up (sms_declined: false). A
+      // pre-1.19 call would count as a possible decline (test above).
       await insertCall(mockPg, {
-        from_phone: phone, ai_extraction_enriched: { ...eligibleExtraction(), consent: {} },
+        from_phone: phone, ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: false } },
         created_at: new Date('2027-01-10T12:00:00.000Z'), updated_at: new Date('2027-01-10T12:00:00.000Z'),
       });
 

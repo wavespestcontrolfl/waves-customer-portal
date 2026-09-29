@@ -1406,7 +1406,7 @@ describe('smsDeclinedOnEarlierCall', () => {
   function declineConn(row) {
     const raws = [];
     const chain = {};
-    ['where', 'orWhere'].forEach((m) => {
+    ['where', 'orWhere', 'whereNot'].forEach((m) => {
       chain[m] = jest.fn((...args) => {
         if (typeof args[0] === 'function') args[0](chain);
         return chain;

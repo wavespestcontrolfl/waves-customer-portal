@@ -1106,9 +1106,20 @@ async function smsDeclinedOnEarlierCall(conn, phone, { originCallId, asOf } = {}
       .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
     .where('v2_extraction_status', 'valid')
     .where('created_at', '<=', asOf)
-    .whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
+    // An earlier call extracted before schema 1.19.0 has no sms_declined at
+    // all: an explicit "no" on it was recorded only as sms_consent_given
+    // false, indistinguishable from never asked. Fail closed — such a call
+    // counts as a possible decline (owner ruling 2026-09-29: any past "no"
+    // blocks; this lane sends ~1–3 texts a month). The call under judgment
+    // itself is exempt; its own missing field is sms_refusal_unrecorded at
+    // staging.
+    .where((q) => q.whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
+      .orWhere((legacy) => legacy.whereRaw("(ai_extraction_enriched->'consent'->'sms_declined') IS NULL")
+        .modify((l) => { if (originCallId) l.whereNot('id', originCallId); })))
     .first('ai_extraction_enriched');
-  return extractionOf(row)?.consent?.sms_declined === true;
+  if (!row) return false;
+  const declined = extractionOf(row)?.consent?.sms_declined;
+  return declined === true || typeof declined !== 'boolean';
 }
 
 // A short_codes row only proves a consultation link was MINTED — not sent.
