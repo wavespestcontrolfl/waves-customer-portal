@@ -211,7 +211,9 @@ describe('customerFlaggedFacts', () => {
           topic: 'pest', location_on_property: null, note: null, read_status: 'done', read_ref: 'pi-1',
         },
         {
-          id: 'sub-2', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T11:00:00Z'),
+          // Sent just now: a pending read is shown as pending only inside
+          // its 15-minute window, so a fixed date would go stale.
+          id: 'sub-2', scheduled_service_id: 'svc-1', created_at: new Date(),
           topic: null, location_on_property: null, note: null, read_status: 'pending', read_ref: null,
         },
       ],
