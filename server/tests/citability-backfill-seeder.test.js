@@ -20,8 +20,6 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), ga
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const seeder = require('../services/content/citability-backfill-seeder');
-const gate = require('../services/content/content-quality-gate');
-const gateInternals = gate._internals;
 
 const { serviceForPost, specialtyTopicForPost, rowForPost, dedupeKeyFor, availableAtFor, BASE_SCORE } = seeder._internals;
 
