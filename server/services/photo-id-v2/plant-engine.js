@@ -1797,6 +1797,10 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
 // for a model that needs it, so this is a generous starting cap, not the
 // final wire size.
 const REFEREE_MAX_TOKENS = 8192;
+// A tie-break never holds the customer's request for the whole ladder budget:
+// the referee gets at most this long (or what is left, if less), and a
+// timeout leaves the lane exactly as the escalation left it.
+const REFEREE_MAX_MS = 60 * 1000;
 
 function describeIdentityRead(candidate) {
   if (!candidate) return null;
@@ -1915,7 +1919,7 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
     jsonMode: true,
     jsonSchema: ESCALATION_SCHEMA,
     maxTokens: REFEREE_MAX_TOKENS,
-    timeoutMs: remainingMs,
+    timeoutMs: Math.min(remainingMs, REFEREE_MAX_MS),
     laneId: 'photo_id_v2_plant_referee',
     promptVersion: PROMPT_VERSION,
   });
@@ -2218,6 +2222,7 @@ module.exports = {
     callWithProvider,
     SCHEMA_INVALID_REASON,
     runReferee,
+    REFEREE_MAX_MS,
     mergeIdentityScope,
     refereeCandidateScopes,
     earlierReadsFor,
