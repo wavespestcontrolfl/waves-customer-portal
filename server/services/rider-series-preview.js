@@ -206,7 +206,17 @@ function planRiderDates({
 async function resolveSeriesPropertyScope(conn, parent) {
   const { topUpScopeInput } = require('../routes/admin-schedule');
   const { normalizedEstimatePropertyKey } = require('./estimate-property-linkage');
-  const scope = await topUpScopeInput(conn, parent);
+  // Savepoint: topUpScopeInput swallows a failed source-estimate read as a
+  // best-effort fallback, but that failed statement aborts the transaction
+  // (25P02) for its own customer-address read after it. Isolate the lookup
+  // so the caller's transaction stays usable, and treat a failed lookup as
+  // unresolved (reported property_unresolved, never guessed).
+  let scope;
+  try {
+    scope = await conn.transaction((sp) => topUpScopeInput(sp, parent));
+  } catch {
+    return { propertyId: null, key: null, resolved: false };
+  }
   const propertyId = scope.property_id ? String(scope.property_id) : null;
   const key = scope.address ? normalizedEstimatePropertyKey(scope.address) : null;
   return { propertyId, key, resolved: !!(propertyId || key) };
@@ -581,10 +591,15 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
   for (const r of riderRows) {
     const c = classifyRiderRow(r, reasonMap, nearTermCutoff);
     classifications.set(r.id, c);
+    // Derived from the tracker-aware classification, never raw status: a
+    // lagging status can say 'rescheduled' after the tracker cancelled the
+    // visit, or 'confirmed' after the tracker completed it.
     const isPlanRow = isPlanSeriesRow(r);
-    const isReschedulePending = isPlanRow && r.status === 'rescheduled';
+    const isReschedulePending = isPlanRow && c.why === 'rescheduled_pending';
     if (isReschedulePending) reschedulePending = true;
-    if (isPlanRow && !isReschedulePending && (r.status === 'completed' || c.pinned === true)) {
+    const performed = r.track_state === 'complete'
+      || (r.status === 'completed' && !TERMINAL_TRACK_STATES.includes(r.track_state));
+    if (isPlanRow && !isReschedulePending && (performed || c.pinned === true)) {
       const d = dateOnly(r.scheduled_date);
       if (d && (!lastRiderDate || d > lastRiderDate)) lastRiderDate = d;
     }
@@ -603,7 +618,8 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
   // series whose first visit is still live. A skipped, no-show, cancelled or
   // rescheduled parent never happened on that date, so it never anchors
   // (completed already anchored above).
-  const parentAnchorable = !JOIN_INELIGIBLE_STATUSES.includes(riderParent.status);
+  const parentAnchorable = !JOIN_INELIGIBLE_STATUSES.includes(riderParent.status)
+    && !TERMINAL_TRACK_STATES.includes(riderParent.track_state);
   if (!lastRiderDate && parentAnchorable) lastRiderDate = dateOnly(riderParent.scheduled_date);
   return {
     riderRows, classifications, lastRiderDate, reschedulePending,

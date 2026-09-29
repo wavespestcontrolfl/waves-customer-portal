@@ -873,4 +873,43 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     const after = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
     expect(after.plan[0]).not.toBe(hostDate);
   });
+
+  test('derived rider state is tracker-aware: a tracker-cancelled "rescheduled" row is no pending reschedule, a tracker-completed "confirmed" row anchors', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const [first, second] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc');
+    await trx('scheduled_services').where({ id: first.id }).update({ status: 'rescheduled', track_state: 'cancelled' });
+    await trx('scheduled_services').where({ id: second.id }).update({ status: 'confirmed', track_state: 'complete' });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.reasons).not.toContain('rider_reschedule_pending');
+    expect(preview.anchor).toBe(dateOnlyStr(second.scheduled_date));
+  });
+
+  test('a tracker-cancelled rider parent with a lagging live status never becomes the fallback anchor', async () => {
+    const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ status: 'pending', track_state: 'cancelled' });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.reasons).toContain('no_anchor');
+    expect(preview.plan).toEqual([]);
+  });
+
+  test('a swallowed read error inside the property-scope lookup leaves the caller transaction usable', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const adminSchedule = require('../routes/admin-schedule');
+    const real = adminSchedule.topUpScopeInput;
+    const spy = jest.spyOn(adminSchedule, 'topUpScopeInput').mockImplementation(async (sp, parent) => {
+      await sp.raw('SELECT 1/0').catch(() => {});
+      return real(sp, parent);
+    });
+    try {
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.error).toBeUndefined();
+      expect(preview.reasons).not.toContain('error');
+      // A failed lookup is unresolved, never guessed.
+      expect(preview.reasons).toContain('property_unresolved');
+      const [{ ok }] = (await trx.raw('SELECT 1 AS ok')).rows;
+      expect(ok).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
