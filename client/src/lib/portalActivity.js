@@ -82,7 +82,9 @@ export function reportPortalPageView(route, now = Date.now()) {
   const previous = lastSent.get(key);
   if (previous !== undefined && now - previous < RESEND_SAME_ROUTE_MS) return;
   lastSent.set(key, now);
-  lastSent.set(`${currentIdentityKey()}|heartbeat`, now); // the page-view stamps last_seen_at too
+  // Deliberately does NOT advance the heartbeat memo: the server's own SQL
+  // throttle may have refused this page-view's last_seen_at stamp, and the
+  // periodic heartbeat must keep probing on its own 5-minute floor (#5335).
   void post(PAGE_VIEW_PATH, { route, platform: platformHint() });
 }
 

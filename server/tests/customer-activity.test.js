@@ -348,7 +348,13 @@ describe('sanitisers', () => {
   test('sanitizeRouteName keeps only a short lowercase first segment', () => {
     expect(activity.sanitizeRouteName('visits')).toBe('visits');
     expect(activity.sanitizeRouteName('/plan/svc-1')).toBe('plan');
-    expect(activity.sanitizeRouteName('my-property')).toBe('my-property');
+    expect(activity.sanitizeRouteName('property')).toBe('property');
+    // Only the portal's real tabs: an invented category is refused (#5335).
+    expect(activity.sanitizeRouteName('my-property')).toBeNull();
+    expect(activity.sanitizeRouteName('zzz-made-up')).toBeNull();
+    for (const tab of ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn']) {
+      expect(activity.sanitizeRouteName(tab)).toBe(tab);
+    }
     expect(activity.sanitizeRouteName('visits2')).toBeNull();
     expect(activity.sanitizeRouteName('x'.repeat(200))).toBeNull();
     expect(activity.sanitizeRouteName(undefined)).toBeNull();

@@ -47,6 +47,10 @@ const { recordPageView, shouldRecord } = require('./customer-page-views');
 const LAST_SEEN_THROTTLE_MINUTES = 5;
 const PLATFORMS = ['web', 'ios', 'android'];
 const ROUTE_RE = /^[a-z][a-z-]{0,29}$/;
+// The customer portal's real tabs (client/src/pages/PortalPage.jsx
+// PRIMARY_TABS + MORE_TABS). Anything else is refused so a client cannot
+// invent page categories and defeat the page-based dedupe (Codex #5335).
+const PORTAL_TABS = new Set(['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn']);
 const TYPE_RE = /^[a-z][a-z0-9_-]{0,47}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ROUTED_TAG_PREFIX = 'push-routed:';
@@ -74,13 +78,13 @@ function stampLastSeen(req, customerId) {
  * The portal tab name from whatever the client sent: only the first path
  * segment survives ('visits/:id' -> 'visits'; query, hash and id-looking
  * later segments are dropped), and it must be 1-30 lowercase letters or
- * hyphens. A segment with digits, underscores, colons or anything long
+ * hyphens AND one of the real portal tabs. A segment with digits, underscores, colons or anything long
  * (ids, tokens, uuids) is refused, not truncated. Returns null when unusable.
  */
 function sanitizeRouteName(raw) {
   if (typeof raw !== 'string') return null;
   const first = raw.split(/[?#]/)[0].trim().toLowerCase().replace(/^\/+/, '').split('/')[0];
-  return ROUTE_RE.test(first) ? first : null;
+  return ROUTE_RE.test(first) && PORTAL_TABS.has(first) ? first : null;
 }
 
 function sanitizePlatform(raw) {

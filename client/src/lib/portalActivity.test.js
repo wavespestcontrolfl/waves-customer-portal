@@ -171,12 +171,14 @@ describe('foreground heartbeat', () => {
     expect(beacon.mock.calls.map((c) => c[0])).toEqual(['/customer/activity/heartbeat', '/customer/activity/heartbeat']);
   });
 
-  it('a page-view send counts as a heartbeat, and a heartbeat never posts a page view', () => {
+  it('a page view never defers the heartbeat, and a heartbeat never posts a page view', () => {
+    // The server may have throttled the page view's last_seen_at stamp, so
+    // the heartbeat keeps its own 5-minute floor regardless (#5335).
     reportPortalPageView('visits', 1_000);
-    reportPortalHeartbeat(1_000 + 60_000); // page-view just stamped last_seen
-    expect(beacon).toHaveBeenCalledTimes(1);
-    reportPortalHeartbeat(1_000 + 6 * 60_000);
+    reportPortalHeartbeat(1_000 + 60_000);
     expect(beacon.mock.calls.map((c) => c[0])).toEqual(['/customer/activity/page-view', '/customer/activity/heartbeat']);
+    reportPortalHeartbeat(1_000 + 2 * 60_000); // inside the heartbeat's own floor
+    expect(beacon).toHaveBeenCalledTimes(2);
   });
 
   it('stops for the session when the gate is dark', async () => {
