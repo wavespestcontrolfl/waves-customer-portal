@@ -8,6 +8,8 @@
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
+const { etDateString } = require('../utils/datetime-et');
+
 const DAY = 24 * 60 * 60 * 1000;
 
 maybeDescribe('alert relevance re-arm (live Postgres)', () => {
@@ -40,12 +42,14 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     // Millisecond-exact, as the sweep writes it.
     const readAt = new Date(now.getTime() - 60 * 60 * 1000);
     const customer = await insert('customers', { first_name: 'Rearm', phone: '+15555557001' });
+    // Stale again: from before today (ET), back in on_site.
+    const pastDay = etDateString(new Date(now.getTime() - 3 * DAY));
     const visit = await insert('scheduled_services', {
-      customer_id: customer.id, scheduled_date: '2026-12-01', service_type: 'General Pest Control', status: 'pending',
+      customer_id: customer.id, scheduled_date: pastDay, service_type: 'General Pest Control', status: 'on_site',
     });
     const lead = await insert('leads', { first_name: 'Rearm', phone: '+15555557001', status: 'new' });
 
-    // A stale-visit bell the sweep retired whose visit is open again.
+    // A stale-visit bell the sweep retired whose visit is stuck in progress again.
     const reopened = await bell({ category: 'alert', read_at: readAt,
       metadata: { dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id, ...stamp('Visit is no longer open', new Date(now.getTime() - DAY)) } });
     // The same, retired before the window: final.
@@ -57,7 +61,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
 
     const result = await relevance.runAdminAlertRelevanceSweep({ now });
     expect(result.rearmed).toBeGreaterThanOrEqual(2);
-    // Unread again, and the retire pass right after left it: the visit is open.
+    // Unread again, and the retire pass right after left it: the visit is still stale.
     const back = await get(reopened.id);
     expect(back.read_at).toBeNull();
     expect(back.metadata).toEqual({ dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id });
@@ -71,6 +75,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
     const again = await get(reopened.id);
     expect(again.read_at).toBeInstanceOf(Date);
-    expect(again.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'Visit is no longer open' });
+    expect(again.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'Visit is no longer in progress' });
   });
 });

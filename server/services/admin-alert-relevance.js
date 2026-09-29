@@ -69,6 +69,9 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // asks someone to complete, price or review it. 'rescheduled' stays open (a
 // pending reschedule request parks the same row).
 const CLOSED_VISIT_STATUSES = new Set([...VISIT_NEVER_RAN_STATUSES, 'completed']);
+// The statuses the stale in-progress bell was raised for (the removed
+// schedule-integrity-watchdog class's STALE_STATUSES).
+const STALE_IN_PROGRESS_STATUSES = new Set(['on_site', 'en_route']);
 const CANCELLED_VISIT_STATUSES = new Set(['cancelled', 'canceled']);
 // leads.status values that mean staff worked the lead (admin-leads.js
 // LEAD_STATUSES + the non-engaged set in lead-statuses.js). 'new' and
@@ -136,7 +139,10 @@ async function loadSubjects(rows, conn = db) {
   const visitIds = ids((r) => r.visitIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
   if (visitIds.length) {
-    data.visits = byId(await conn('scheduled_services as ss').whereIn('ss.id', visitIds).select('ss.id', 'ss.customer_id', 'ss.status'));
+    // The service date as text: a DATE parsed to a JS Date lands at the
+    // host's midnight, the previous ET day on a UTC host.
+    data.visits = byId(await conn('scheduled_services as ss').whereIn('ss.id', visitIds)
+      .select('ss.id', 'ss.customer_id', 'ss.status', conn.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date")));
   }
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
@@ -172,9 +178,19 @@ function subjectFor(row, data, todayET) {
   };
 }
 
-// The referenced visit is finished, never-ran, or gone.
-const visitClosed = (s) => (s.refs.visitId && (!s.visit || CLOSED_VISIT_STATUSES.has(String(s.visit.status)))
-  ? 'Visit is no longer open' : null);
+// The stale in-progress bell's own predicate, judged again: a visit from
+// before today (ET) still on_site or en_route (the removed watchdog class's
+// isStaleInProgress). Settled once that no longer holds — the visit is gone,
+// has left those statuses (closed, or corrected back to pending, confirmed or
+// rescheduled), or was moved to today or later. A bell naming no visit is
+// never judged.
+function staleVisitSettled(s) {
+  if (!s.refs.visitId) return null;
+  if (!s.visit) return 'Visit is gone';
+  if (!STALE_IN_PROGRESS_STATUSES.has(String(s.visit.status))) return 'Visit is no longer in progress';
+  const day = String(s.visit.service_date || '');
+  return DATE_RE.test(day) && day < s.todayET ? null : 'Visit is no longer past its date';
+}
 
 function seriesMoveMovedOn(s) {
   const dates = [...arr(s.meta.overlapDates), ...arr(s.meta.conflicts).map((c) => c?.date),
@@ -213,7 +229,7 @@ function newLeadMovedOn(s) {
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
   { // emitter removed in #5223; unread rows remain. Only the visit itself settles it.
-    key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: visitClosed,
+    key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: staleVisitSettled,
   },
   { // admin-dispatch.js applySeriesMoveEffects — one card per move
     key: 'series_move', categories: ['schedule_conflict'], match: (meta) => !!meta.seriesMoveId, rule: seriesMoveMovedOn,

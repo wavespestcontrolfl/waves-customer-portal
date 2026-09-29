@@ -146,7 +146,8 @@ const note = (over = {}) => ({
   id: uid(100 + (seq += 1)), recipient_type: 'admin', read_at: null, created_at: new Date('2026-09-27T12:00:00Z'),
   link: null, ...over, metadata: JSON.stringify(over.metadata || {}),
 });
-const visit = (over = {}) => ({ id: VISIT, customer_id: CUST, status: 'pending', ...over });
+// service_date: the loader's to_char of scheduled_date — before TODAY by default.
+const visit = (over = {}) => ({ id: VISIT, customer_id: CUST, status: 'pending', service_date: '2026-09-20', ...over });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -235,20 +236,26 @@ describe('class rules', () => {
     expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 
-  test('stale visit: retires only when its visit is closed, never-ran or gone — nothing about the customer', async () => {
+  test('stale visit: judged by the bell\'s own predicate — a visit from before today still on_site or en_route — never by the customer', async () => {
     const row = staleNote(uid(400));
-    mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
-    expect(await reasonFor(row)).toEqual({ cls: 'stale_visit', reason: null });
-    for (const status of ['completed', 'cancelled', 'skipped']) {
+    for (const status of ['on_site', 'en_route']) {
       mockTables['scheduled_services as ss'] = [visit({ status })];
-      expect((await reasonFor(row)).reason).toEqual(expect.stringContaining('no longer open'));
+      expect(await reasonFor(row)).toEqual({ cls: 'stale_visit', reason: null });
+    }
+    // Closed, or corrected back out of in-progress: the stale condition ended.
+    for (const status of ['completed', 'cancelled', 'skipped', 'pending', 'confirmed', 'rescheduled']) {
+      mockTables['scheduled_services as ss'] = [visit({ status })];
+      expect((await reasonFor(row)).reason).toBe('Visit is no longer in progress');
+    }
+    // Moved to today or later (Eastern dates): no longer past its date.
+    for (const service_date of [TODAY, '2026-10-02']) {
+      mockTables['scheduled_services as ss'] = [visit({ status: 'on_site', service_date })];
+      expect((await reasonFor(row)).reason).toBe('Visit is no longer past its date');
     }
     // The visit row is gone.
     mockTables['scheduled_services as ss'] = [];
-    expect((await reasonFor(row)).reason).toEqual(expect.stringContaining('no longer open'));
-    // A rescheduled visit is still open; a bell that names no visit is never judged closed.
-    mockTables['scheduled_services as ss'] = [visit({ status: 'rescheduled' })];
-    expect((await reasonFor(row)).reason).toBeNull();
+    expect((await reasonFor(row)).reason).toBe('Visit is gone');
+    // A bell that names no visit is never judged.
     expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'stale-visit:z' } }))).reason).toBeNull();
   });
 
@@ -420,7 +427,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(stale.read_at).toBeInstanceOf(Date);
     // Pure read + retired marker: every emitter-owned key survives as it was,
     // dedupe key included.
-    expect(JSON.parse(stale.metadata)).toEqual({ ...staleMeta, retired: { by: 'alert-relevance', reason: 'Visit is no longer open', at: NOW.toISOString() } });
+    expect(JSON.parse(stale.metadata)).toEqual({ ...staleMeta, retired: { by: 'alert-relevance', reason: 'Visit is no longer in progress', at: NOW.toISOString() } });
     expect(leadRow.read_at).toBeInstanceOf(Date);
     expect(JSON.parse(leadRow.metadata)).toEqual({ ...leadBefore, retired: { by: 'alert-relevance', reason: 'Lead is won', at: NOW.toISOString() } });
     expect(alreadyRead.read_at).toEqual(new Date('2026-09-27T13:00:00Z'));
@@ -626,8 +633,8 @@ describe('re-arm: a retirement holds only while its rule does', () => {
   test('a retired bell whose subject is relevant again is unread again with the stamp gone; one still moved on stays retired', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' }), visit({ id: OPEN_VISIT, status: 'completed' })];
     mockTables.leads = [lead({ status: 'new' })];
-    const reopened = swept(staleNote(uid(700)), 'Visit is no longer open');
-    const stillClosed = swept(staleNote(uid(701), { scheduled_service_id: OPEN_VISIT }), 'Visit is no longer open');
+    const reopened = swept(staleNote(uid(700)), 'Visit is no longer in progress');
+    const stillClosed = swept(staleNote(uid(701), { scheduled_service_id: OPEN_VISIT }), 'Visit is no longer in progress');
     // A lead whose booking was cancelled: nothing raises a new-lead event again.
     const bookingCancelled = swept(leadNote(), 'A visit was booked');
     mockTables.notifications = [reopened, stillClosed, bookingCancelled];
@@ -653,7 +660,7 @@ describe('re-arm: a retirement holds only while its rule does', () => {
 
   test('a retirement older than the window is final; a human dismissal or another module\'s stamp is never re-armed', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
-    const final = swept(staleNote(uid(710)), 'Visit is no longer open', '2026-09-13T15:59:59.000Z');
+    const final = swept(staleNote(uid(710)), 'Visit is no longer in progress', '2026-09-13T15:59:59.000Z');
     const human = { ...staleNote(uid(711)), read_at: READ_AT };
     const other = { ...staleNote(uid(712), { retired: { by: 'someone-else', at: AT } }), read_at: READ_AT };
     mockTables.notifications = [final, human, other];
@@ -663,8 +670,8 @@ describe('re-arm: a retirement holds only while its rule does', () => {
 
   test('the put-back lands only on the version read: a row rewritten or read again meanwhile is left alone', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
-    const rewritten = swept(staleNote(uid(720)), 'Visit is no longer open');
-    const reread = swept(staleNote(uid(721)), 'Visit is no longer open');
+    const rewritten = swept(staleNote(uid(720)), 'Visit is no longer in progress');
+    const reread = swept(staleNote(uid(721)), 'Visit is no longer in progress');
     mockTables.notifications = [rewritten, reread];
     // New row versions land between the page read and the write (the page
     // holds the versions it read, as Postgres would).
@@ -683,7 +690,7 @@ describe('re-arm: a retirement holds only while its rule does', () => {
 
   test('a retire whose put-back failed is judged again by the next run: kept while still moved on, put back once relevant', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
-    const row = swept(staleNote(uid(730)), 'Visit is no longer open');
+    const row = swept(staleNote(uid(730)), 'Visit is no longer in progress');
     mockTables.notifications = [row];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
     expect(row.read_at).toBe(READ_AT);
