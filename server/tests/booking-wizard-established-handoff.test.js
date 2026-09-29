@@ -181,24 +181,24 @@ describe('wiring in createSelfBooking (source guard)', () => {
     const branch = src.slice(catchStart, catchStart + 3500);
     expect(branch).toContain("txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN'");
     expect(branch).toContain('suppressRecoveryIntents(db,');
-    // scoped to the verified draft's own stored contact, never typed values
-    expect(branch).toContain('draftContact?.customer_phone');
-    expect(branch).not.toMatch(/suppressRecoveryIntents\(db, \{[^}]*new_customer/);
+    // scoped to the verified draft id only — no contact of any kind
+    expect(branch).toContain('suppressRecoveryIntents(db, { pricingEstimateId: pricing_estimate_id })');
   });
 });
 
 describe('recovery intents after a refused / established handoff (P1)', () => {
-  test('suppressRecoveryIntents kills every open intent for the draft, phone and email — converted ones untouched', async () => {
+  test('suppressRecoveryIntents retires open intents for the verified draft id ONLY — no phone/email widening, converted rows untouched', async () => {
     await suppressRecoveryIntents(db, { pricingEstimateId: 'pe-1', phone: '(941) 555-0101', email: 'Owner@Example.com' });
     const forIntents = ops.filter((o) => o.table === 'booking_intents');
     expect(forIntents.find((o) => o.op === 'whereNull').args).toEqual(['converted_at']);
-    const groupedWhere = forIntents.filter((o) => ['orWhere', 'orWhereRaw'].includes(o.op)).map((o) => o.args);
-    expect(groupedWhere).toEqual(expect.arrayContaining([
-      ['pricing_estimate_id', 'pe-1'],
-      [expect.stringMatching(/RIGHT\(regexp_replace/), ['9415550101']],
-      ['LOWER(email) = ?', ['owner@example.com']],
-    ]));
+    expect(forIntents.filter((o) => o.op === 'where').map((o) => o.args)).toEqual([['pricing_estimate_id', 'pe-1']]);
+    // Draft contact and typed contact are both anonymous input: neither may
+    // widen suppression to another person's intents (pre-push audit P1 x2).
+    expect(forIntents.filter((o) => ['orWhere', 'orWhereRaw', 'whereRaw'].includes(o.op))).toEqual([]);
     expect(forIntents.find((o) => o.op === 'update').args[0]).toEqual(expect.objectContaining({ suppressed: true }));
+    ops.length = 0;
+    await suppressRecoveryIntents(db, { pricingEstimateId: null });
+    expect(ops).toEqual([]); // no verified draft id → nothing suppressed
   });
 
   test('the recovery cron only selects suppressed = false rows (both touches)', () => {
@@ -246,15 +246,8 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
       expect(ops.filter((o) => o.table === 'booking_intents' && o.op === 'insert')).toEqual([]);
       const upd = ops.find((o) => o.table === 'booking_intents' && o.op === 'update');
       expect(upd.args[0]).toEqual(expect.objectContaining({ suppressed: true }));
-      // Scoped to the verified draft: its id and ITS stored contact — never
-      // the phone/email the caller typed in the body.
-      const scope = ops.filter((o) => o.table === 'booking_intents' && ['orWhere', 'orWhereRaw'].includes(o.op)).map((o) => o.args);
-      expect(scope).toEqual(expect.arrayContaining([
-        ['pricing_estimate_id', 'pe-victim'],
-        [expect.stringMatching(/RIGHT\(regexp_replace/), ['9415550101']],
-        ['LOWER(email) = ?', ['owner@example.com']],
-      ]));
-      expect(JSON.stringify(scope)).not.toContain('pat@example.com');
+      expect(ops.filter((o) => o.table === 'booking_intents' && o.op === 'where').map((o) => o.args)).toEqual([['pricing_estimate_id', 'pe-victim']]);
+      expect(ops.filter((o) => o.table === 'booking_intents' && ['orWhere', 'orWhereRaw', 'whereRaw'].includes(o.op))).toEqual([]);
     });
 
     test('a lookup error fails closed — no row is staged', async () => {

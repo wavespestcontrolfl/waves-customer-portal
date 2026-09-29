@@ -1233,19 +1233,16 @@ async function assertContactLinkedHandoffProvisional(trx, {
 // A refused (or never-eligible) contact-linked handoff must leave NO open
 // abandoned-booking recovery intent behind: the recovery cron texts/emails
 // the intent's phone/email (the real customer's, when an attacker quoted with
-// their contact). Callers pass only the VERIFIED draft's id and the contact
-// that draft stored — never caller-typed values. booking_intents.suppressed is the cron's kill flag — every
-// recovery selection filters `suppressed = false`.
-async function suppressRecoveryIntents(conn, { pricingEstimateId, phone, email }) {
-  const ten = String(phone || '').replace(/\D/g, '').slice(-10);
-  const lc = String(email || '').trim().toLowerCase();
+// their contact). Scoped to the HMAC-verified draft id ONLY: a draft's stored
+// contact and the caller's typed contact are both anonymous input, so neither
+// may widen the suppression to other people's intents. Every capture staged
+// through this handoff carries the verified id. booking_intents.suppressed is
+// the cron's kill flag — every recovery selection filters `suppressed = false`.
+async function suppressRecoveryIntents(conn, { pricingEstimateId }) {
+  if (!pricingEstimateId) return;
   await conn('booking_intents')
     .whereNull('converted_at')
-    .where((q) => {
-      if (pricingEstimateId) q.orWhere('pricing_estimate_id', String(pricingEstimateId));
-      if (ten.length === 10) q.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
-      if (lc) q.orWhereRaw('LOWER(email) = ?', [lc]);
-    })
+    .where('pricing_estimate_id', String(pricingEstimateId))
     .update({ suppressed: true, updated_at: conn.fn.now() });
 }
 
@@ -4320,18 +4317,7 @@ async function createSelfBooking(payload = {}) {
         if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
           // No message may follow this refusal: retire the recovery intent the
           // wizard's capture-intent staged for this contact.
-          // Scoped to the VERIFIED draft: its id plus the contact the draft
-          // itself stored — never the caller's typed phone/email, which an
-          // anonymous caller could point at a third party's intents.
-          await (async () => {
-            const draftContact = await db('estimates').where({ id: pricing_estimate_id })
-              .first('customer_phone', 'customer_email');
-            await suppressRecoveryIntents(db, {
-              pricingEstimateId: pricing_estimate_id,
-              phone: draftContact?.customer_phone,
-              email: draftContact?.customer_email,
-            });
-          })().catch((supErr) => {
+          await suppressRecoveryIntents(db, { pricingEstimateId: pricing_estimate_id }).catch((supErr) => {
             logger.warn(`[booking:confirm] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
           });
         }
@@ -6479,14 +6465,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // staged for this draft and skip. Lookup errors fail closed (no row).
     if (handoffVerified) {
       try {
-        const linkedDraft = await db('estimates').where({ id: handoffId }).first('customer_id', 'customer_phone', 'customer_email');
+        const linkedDraft = await db('estimates').where({ id: handoffId }).first('customer_id');
         if (linkedDraft?.customer_id) {
           const linkedCustomer = await db('customers').where({ id: linkedDraft.customer_id })
             .whereNull('deleted_at').first('pipeline_stage');
           if (linkedCustomer && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(linkedCustomer.pipeline_stage || ''))) {
-            await suppressRecoveryIntents(db, {
-              pricingEstimateId: handoffId, phone: linkedDraft.customer_phone, email: linkedDraft.customer_email,
-            });
+            await suppressRecoveryIntents(db, { pricingEstimateId: handoffId });
             return res.json({ ok: true, skipped: 'contact_linked_established' });
           }
         }
