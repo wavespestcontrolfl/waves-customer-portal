@@ -3543,6 +3543,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN — Admin alert relevance sweep (owner ruling 2026-09-28,
+  // "we don't want garbage"). Marks read, with a metadata.retired audit
+  // stamp, every unread admin bell whose customer / visit / invoice /
+  // estimate / lead has since moved on (admin-alert-relevance.js class
+  // table — never customer-contact or money-owed bells). Live by default;
+  // kill switch ADMIN_ALERT_RELEVANCE=off (read at call time inside the
+  // sweep). Read-only apart from notification rows. runExclusive: a deploy
+  // overlap must not run two sweeps over the same page of rows.
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await runExclusive('admin-alert-relevance-sweep', () => require('./admin-alert-relevance').runAdminAlertRelevanceSweep());
+    } catch (err) {
+      logger.error(`[alert-relevance] sweep tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
   // the post to build_failed if it blows up. runExclusive: this tick

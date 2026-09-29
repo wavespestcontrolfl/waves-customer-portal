@@ -51,21 +51,13 @@ function unitDefinition(unit) {
 // Rate-unit vocabulary accepted on application records — the single
 // allowlist shared by the /complete route and the pest recap (codex P1
 // r11): both closeout paths must reject unknown units before they reach
-// service_products and the FDACS ledger.
-const VALID_RATE_UNITS = new Set([
-  'oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'each',
-  'oz/gal', 'fl_oz/gal', 'g/gal', 'ml/gal', 'lb/gal', 'gal/gal',
-  'oz/1000sf', 'lb/1000sf', 'g/1000sf',
-  // Label-native per-basis units carried in products_catalog default_unit
-  // (rate-render backfill): gel spot placements, 100-gal dilutions,
-  // trunk-injection doses, per-acre broadcast, ornamental-bed rates, and
-  // station/placement densities.
-  'g/spot', 'fl_oz/100gal', 'oz/100gal',
-  'ml/inch dbh', 'g/inch dbh', 'ml/palm',
-  'oz/acre', 'fl_oz/acre', 'lb/acre', 'gal/acre',
-  'lb/100sf', 'each/100sf', 'each/acre', 'fl_oz/50ft',
-  'each/20ft', 'each/station', 'each/placement',
-]);
+// service_products and the FDACS ledger. It lives in shared/rate-units.json
+// so the tech Fast Complete sheet sends rates from the same list. Besides
+// the base, per-gallon and per-1,000 sq ft units, it holds the label-native
+// per-basis units carried in products_catalog default_unit (rate-render
+// backfill): gel spot placements, 100-gal dilutions, trunk-injection doses,
+// per-acre broadcast, ornamental-bed rates, and station/placement densities.
+const VALID_RATE_UNITS = new Set(require('../../shared/rate-units.json'));
 
 function isValidRateUnit(unit) {
   return VALID_RATE_UNITS.has(String(unit || '').trim().toLowerCase());

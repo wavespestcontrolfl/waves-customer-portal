@@ -2714,9 +2714,14 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
-    // not do this request, for the owner's weekly review. Platform mode only.
+    // not do this request, for the owner's weekly review. Platform mode gets
+    // the full collector (its own discover_capabilities searches). The tech
+    // portal has no discovery loop to sample, so its collector only ever
+    // gathers a flush()-time `ask` fallback (see below) — source 'tech-bar',
+    // independent of platformEnabled (tech requests never set it).
     const gapCollector = platformEnabled
-      ? createGapCollector({ source: 'intelligence-bar', isRegisteredTool: name => ActionRegistry.actions.has(name) }) : null;
+      ? createGapCollector({ source: 'intelligence-bar', isRegisteredTool: name => ActionRegistry.actions.has(name) })
+      : context === 'tech' ? createGapCollector({ source: 'tech-bar' }) : null;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
     // lines — label + outcome + duration per tool call, never inputs or
     // results. Returned only when the gate is on; off = today's payload.
@@ -2972,8 +2977,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     }
     // Gap reports: records only when this reply says the bar could not do
     // something. Awaited — flush() never rejects and writes nothing on an
-    // ordinary request.
-    await gapCollector?.flush({ reply: finalResponse });
+    // ordinary request. `ask` is the tech-bar's fallback signal (no
+    // discover_capabilities loop there to gather signals from); the admin
+    // platform collector already searches first, so passing it there too is
+    // inert on every request that already gathered a signal.
+    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool

@@ -1529,5 +1529,6 @@ module.exports = {
   // third copy of the coverage-holding status list is a drift bug waiting
   // to happen. The LOCKING assert still lives in admin-customers._private.
   annualPrepayOverlapStatusClause: overlapStatusClause,
+  normalizedPattern,
   _test: { normalizedPattern, PLAN_CLASS_BY_SERVICE_KEY, overlapStatusClause },
 };

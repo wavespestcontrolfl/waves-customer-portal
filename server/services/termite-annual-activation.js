@@ -112,6 +112,7 @@ function parkedAtForEstimate(estimate) {
 const REPLAYED_ACCEPT_OPTS = [
   'prepayInvoiceAmount', 'firstApplicationAmount', 'manualDiscountItemization', 'adoptedExistingAppointmentId',
   'annualPrepayTermStart', 'coverageServiceType', 'coverageVisitCount', 'coverageCadence',
+  'createdCustomerId',
 ];
 function replayedAcceptOpts(acceptContext) {
   return Object.fromEntries(REPLAYED_ACCEPT_OPTS

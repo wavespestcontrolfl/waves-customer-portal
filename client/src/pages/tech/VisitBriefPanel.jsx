@@ -175,8 +175,9 @@ function AccessSection({ alerts, access }) {
 // facts carry the SAME list — the caller (the main render below) passes
 // whichever member's brief answered it, and its service.id doubles as the
 // id for the thumbnails fetch (the server resolves the same stop from any
-// of its member ids). No AI read line here (PR 5 adds it once the pest
-// engine adapter lands).
+// of its member ids). PR 5 (GATE_VISIT_PREP_PEST_READ) adds `entry.read` —
+// built server-side from ONLY fixed pest-engine fields (never free model
+// text) — rendered by formatVisitPrepReadLine/renderVisitPrepRead below.
 const VISIT_PREP_TOPIC_LABELS = {
   pest: 'Pest',
   lawn: 'Lawn',
@@ -196,6 +197,60 @@ const VISIT_PREP_LOCATION_LABELS = {
   garden_beds: 'Garden beds',
   other: 'Other',
 };
+
+// PR 5 (GATE_VISIT_PREP_PEST_READ) — the automatic pest read on a customer
+// visit-prep submission. `entry.read` carries ONLY fixed server-computed
+// fields (see visit-prep.js's readFactsFromContract): a wording tier (a
+// fixed enum), an APPROVED catalog common name, the catalog's own
+// matched/still-needed trait strings, a referral kind, and boolean hazard
+// flags. This module authors every LABEL below itself — no free text from
+// the model ever reaches this line, and no product or rate guidance rides
+// here.
+const VISIT_PREP_READ_WORDING_LABELS = {
+  pretty_sure: "We're pretty sure",
+  likely: 'Likely',
+  group_only: 'Looks like',
+  unknown: "Couldn't tell",
+};
+
+const VISIT_PREP_READ_HAZARD_LABELS = {
+  stinging: 'stinging',
+  venomous: 'venomous',
+  structural_threat: 'structural threat',
+  disease_vector: 'disease vector',
+};
+
+function formatVisitPrepReadLine(read) {
+  if (!read || read.status !== 'done') return null;
+  const parts = [];
+  const wordingLabel = VISIT_PREP_READ_WORDING_LABELS[read.wordingTier] || 'AI read';
+  if (read.commonName) parts.push(`${wordingLabel}: ${read.commonName}.`);
+  else if (read.groupLabel) parts.push(`Looks like: ${read.groupLabel}.`);
+  else if (read.groupHeadline) parts.push(`${read.groupHeadline}.`);
+  else parts.push('No species named from these photos.');
+  if (read.matches?.length) parts.push(`Matches: ${read.matches.join('; ')}.`);
+  if (read.stillNeed?.length) parts.push(`Still need: ${read.stillNeed.join('; ')}.`);
+  const hazards = Object.keys(VISIT_PREP_READ_HAZARD_LABELS).filter((k) => read.hazards?.[k]).map((k) => VISIT_PREP_READ_HAZARD_LABELS[k]);
+  if (hazards.length) parts.push(`Hazard: ${hazards.join(', ')}.`);
+  if (read.referralKind) parts.push(`Refer: ${String(read.referralKind).replace(/_/g, ' ')}.`);
+  return parts.join(' ');
+}
+
+function VisitPrepReadLine({ read }) {
+  if (!read) return null;
+  if (read.status === 'done') {
+    const line = formatVisitPrepReadLine(read);
+    if (!line) return null;
+    return <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read (AI suggestion, not confirmed): {line}</p>;
+  }
+  if (read.status === 'pending') return <p style={factMutedStyle}>Photo read pending</p>;
+  // none / unsupported / failed: stay quiet — no line at all (scope doc
+  // §5.4: the mock's "pending for lawn" wording only covers a topic with
+  // no engine adapter, and the owner's "keep it simple and truthful"
+  // steer landed on omitting the line entirely rather than a hedge for
+  // every non-done state).
+  return null;
+}
 
 function formatFlaggedSentAt(iso) {
   if (!iso) return '';
@@ -262,9 +317,53 @@ function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
   return fresh ? links.byId : {};
 }
 
-function CustomerFlaggedSection({ serviceId, customerFlagged, request }) {
+// While a photo read is running the brief says "Photo read pending"; nothing
+// pushes the finished read, so re-read the brief every 30 s (the parent's
+// retry keeps the loaded data on screen) for at most the 15 minutes after
+// which the server stops calling a read pending (Codex #5305 r1 P2).
+const READ_PENDING_POLL_MS = 30 * 1000;
+const READ_PENDING_MAX_POLLS = 30;
+const READ_START_GRACE_MS = 2 * 60 * 1000;
+
+function useRefreshWhileReadPending(customerFlagged, onRefresh) {
+  // The budget belongs to the set of reads being waited on: a new pending
+  // read (another submission, another visit) starts a fresh 30 polls.
+  // A submission sent in the last two minutes whose read has not started
+  // yet ('none' — the deferred trigger hasn't claimed a slot) is waited on
+  // too, so a brief fetched in that gap still picks up the result
+  // (Codex #5305 r11). Nothing extra is shown for it.
+  const now = Date.now();
+  const pendingKey = (customerFlagged || []).filter((entry) => entry.read?.status === 'pending'
+    || (entry.read?.status === 'none' && now - new Date(entry.sentAt).getTime() < READ_START_GRACE_MS))
+    .map((entry) => entry.id).join(',');
+  const polls = useRef({ key: '', count: 0 });
+  if (polls.current.key !== pendingKey) polls.current = { key: pendingKey, count: 0 };
+  // The latest callback in a ref: parent re-renders (inline retry callbacks,
+  // socket-driven refreshes) must not restart the 30 s timer, or a busy
+  // screen would never poll (Codex #5305 r10 P2).
+  const refreshRef = useRef(onRefresh);
+  refreshRef.current = onRefresh;
+  // `refreshTick` re-arms the timer after each fired poll for the same set.
+  const [refreshTick, setRefreshTick] = useState(0);
+  useEffect(() => {
+    if (!pendingKey || polls.current.count >= READ_PENDING_MAX_POLLS) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      polls.current.count += 1;
+      // Re-arm only after this refresh settles, so a slow connection never
+      // stacks refreshes (Codex #5305 r18 P2).
+      Promise.resolve(typeof refreshRef.current === 'function' ? refreshRef.current() : null)
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setRefreshTick((n) => n + 1); });
+    }, READ_PENDING_POLL_MS);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [pendingKey, refreshTick]);
+}
+
+function CustomerFlaggedSection({ serviceId, customerFlagged, request, onRefresh }) {
   const photoSignature = (customerFlagged || []).flatMap((entry) => entry.photoIds || []).join(',');
   const photoUrls = useVisitPrepPhotoUrls(serviceId, !!customerFlagged?.length, request, photoSignature);
+  useRefreshWhileReadPending(customerFlagged, onRefresh);
   if (!customerFlagged?.length) return null;
   return (
     <>
@@ -277,6 +376,7 @@ function CustomerFlaggedSection({ serviceId, customerFlagged, request }) {
             <p style={factMutedStyle}>sent {formatFlaggedSentAt(entry.sentAt)}</p>
             {entry.note && <p style={{ ...factRowStyle, fontStyle: 'italic' }}>&ldquo;{entry.note}&rdquo;</p>}
             {meta && <p style={factMutedStyle}>{meta}</p>}
+            <VisitPrepReadLine read={entry.read} />
             {entry.photoIds?.length > 0 && (
               <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
                 {entry.photoIds.map((photoId) => {
@@ -872,6 +972,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         serviceId={customerFlaggedMember?.service?.id}
         customerFlagged={customerFlagged}
         request={request}
+        onRefresh={onRetry}
       />
 
       {memberBits.map((m) => (m.wdo ? (

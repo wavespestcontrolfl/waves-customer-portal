@@ -511,12 +511,24 @@ function narrowBySubject(candidates, subject) {
 // office instead. Same predicate reschedule-public.js layers over
 // eligibilityAsync (withSelfServeNotice), kept out of the shared eligibility
 // module the voice-agent surfaces also read.
+//
+// Shared with reschedule-link.js (buildRescheduleLink, codex/plan C3/C6):
+// true when an otherwise self-serviceable visit (eligibility().ok, and not a
+// missed-visit rebook — that customer is picking a NEW time, not moving a
+// visit off its own too-soon start) currently starts inside the self-serve
+// MOVE notice window, so a "reschedule online" link/CTA for it would land on
+// a page that refuses the move. `verdict` is the caller's own
+// `eligibility(visit, now)` result, so this never recomputes it.
+function tooSoonToSelfServeMove(visit, verdict, now) {
+  if (!verdict.ok || verdict.missed) return false;
+  return require('./scheduling/self-serve-notice').visitInsideMoveNoticeWindow(visit, now);
+}
+
 function visitNotSelfServiceReason(visit, now) {
   if (!visit.reschedule_token || (visit.visit_id && visit.follow_through_group_eligible !== true)) return 'visit_not_self_service';
   const verdict = require('./reschedule-eligibility').eligibility(visit, now);
   if (verdict.ok) {
-    const { visitInsideMoveNoticeWindow } = require('./scheduling/self-serve-notice');
-    if (!verdict.missed && visitInsideMoveNoticeWindow(visit, now)) return 'visit_not_self_service';
+    if (tooSoonToSelfServeMove(visit, verdict, now)) return 'visit_not_self_service';
     return null;
   }
   return verdict.reason === 'past' ? 'visit_elapsed' : 'visit_not_self_service';
@@ -2148,4 +2160,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isPromisedFloor, promisedFloorAt };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isPromisedFloor, promisedFloorAt, tooSoonToSelfServeMove };

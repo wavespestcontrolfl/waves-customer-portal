@@ -16,12 +16,13 @@ const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const {
   runAgentGapDigest,
-  _private: { composeAgentGapDigest, dedupeKeyFor, BELL_BODY },
+  _private: { composeAgentGapDigest, dedupeKeyFor, BELL_BODY, gapLine, SOURCE_LABELS },
 } = require('../services/agent-gap-digest');
 
 function gapRow(overrides = {}) {
   return {
     id: 1,
+    source: 'intelligence-bar',
     kind: 'missing_capability',
     domain: 'ops',
     summary: 'Add a second service address to a customer',
@@ -52,7 +53,7 @@ describe('composeAgentGapDigest', () => {
   test('an ACT subject counts the gaps and the body lists each one', () => {
     const rows = [gapRow({ id: 1, seen_in_window: 3, occurrences: 40 }), gapRow({ id: 2, summary: 'Second gap', closest_tool: 'send_sms', attempted: 'tried the sms tool' })];
     const composed = composeAgentGapDigest(rows);
-    expect(composed.text).toContain('gap #1 (new, ops): seen 3x this week, 40x total');
+    expect(composed.text).toContain('gap #1 (new, ops, bar): seen 3x this week, 40x total');
     // The description is model-written and stays in the bar, never the email.
     expect(composed.text).not.toContain('Add a second service address');
     expect(composed.subject).toBe("ACT: 2 things the bar couldn't do this week");
@@ -66,6 +67,20 @@ describe('composeAgentGapDigest', () => {
   test('singular subject for exactly one gap', () => {
     const composed = composeAgentGapDigest([gapRow()]);
     expect(composed.subject).toBe("ACT: 1 thing the bar couldn't do this week");
+  });
+});
+
+describe('gapLine source labels', () => {
+  test('each known source gets its short label', () => {
+    expect(gapLine(gapRow({ source: 'intelligence-bar' }))).toContain('(new, ops, bar)');
+    expect(gapLine(gapRow({ source: 'tech-bar' }))).toContain('(new, ops, tech bar)');
+    expect(gapLine(gapRow({ source: 'texting-ai' }))).toContain('(new, ops, texting AI)');
+    expect(gapLine(gapRow({ source: 'phone-agent' }))).toContain('(new, ops, phone agent)');
+  });
+
+  test('an unrecognized source falls back to its raw value, never dropped', () => {
+    expect(gapLine(gapRow({ source: 'some-future-source' }))).toContain('(new, ops, some-future-source)');
+    expect(Object.keys(SOURCE_LABELS)).toEqual(['intelligence-bar', 'tech-bar', 'texting-ai', 'phone-agent']);
   });
 });
 

@@ -163,6 +163,12 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // Citability backfill only (isCitabilityBackfillBrief): every planned
+    // gap must clear and no trait the live page already had may be lost
+    // before the refresh may publish and complete its row. Weight-0 hard,
+    // so an unresolved row gets its one feedback redraft, then skips —
+    // never 'done' with open gaps. Every other refresh answers ok.
+    { name: 'citability_backfill_gaps_cleared', weight: 0, isHard: true, evaluate: checkCitabilityBackfillGapsCleared },
     // Blog refreshes use this bundle too. These remain weight-zero signals;
     // nonBlogTarget() makes them no-ops for ordinary service/city pages.
     { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
@@ -480,6 +486,18 @@ function isAeoQuestionGapBrief(brief) {
     && Array.isArray(s.aeo_engines_missing) && s.aeo_engines_missing.length > 0;
 }
 
+// citability_backfill briefs (citability-backfill-seeder) are page-anchored
+// refreshes mined from a corpus SCAN, not from GSC: the scan result — a
+// non-empty gsc_signal.citability_gaps list — IS the provenance. Same
+// anti-spoofing key (persisted gsc_signal.bucket) and presence rule as
+// isCompetitorGapBrief: a backfill brief that lost its gap list still
+// hard-fails no_gsc_signal.
+function isCitabilityBackfillBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'citability_backfill'
+    && Array.isArray(s.citability_gaps) && s.citability_gaps.length > 0;
+}
+
 function checkGscSignalAttached(_draft, brief) {
   if (isOperatorAuthoredBrief(brief)) {
     return { ok: true, reason: 'operator_authored_brief' };
@@ -489,6 +507,9 @@ function checkGscSignalAttached(_draft, brief) {
   }
   if (isAeoQuestionGapBrief(brief)) {
     return { ok: true, reason: 'aeo_question_gap_evidence' };
+  }
+  if (isCitabilityBackfillBrief(brief)) {
+    return { ok: true, reason: 'citability_backfill_scan_evidence' };
   }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
@@ -1135,12 +1156,16 @@ function checkRedactionPassed(draft) {
 
 // ── refresh checks ──────────────────────────────────────────────────
 
-function checkImprovementOverPrior(draft, _brief, context) {
+function checkImprovementOverPrior(draft, brief, context) {
   const prev = context.previousVersion;
   if (!prev) return { ok: false, reason: 'no_previous_version_to_compare' };
   const prevLen = (prev.body || '').length;
   const newLen = String(draft.body || '').length;
   if (newLen < prevLen * 0.8) return { ok: false, reason: 'refresh_lost_>20%_of_prior_content' };
+  // A citability backfill is a targeted edit (an attribution or a number can
+  // be a few words), so body growth is not its improvement proof —
+  // citability_backfill_gaps_cleared is. The 20% loss floor above still holds.
+  if (isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'citability_backfill_targeted_edit' };
   if (newLen < prevLen + 200) return { ok: false, reason: 'refresh_adds_less_than_200_chars' };
   return { ok: true };
 }
@@ -1996,6 +2021,79 @@ function checkCitabilityHowToChoose(draft, brief, context) {
   return { ok: true };
 }
 
+// ── citability backfill completion (refresh, weight-0 hard) ──────────
+//
+// Composes the four signals above — no heuristic of its own. Two traits
+// bind as STRUCTURE on a backfill: once a comparison / how_to_choose gap is
+// planned (or the live page already carried the structure), only the
+// <ComparisonTable> or the 3–5-criteria How-to-choose H2 itself satisfies
+// it. The signal checks answer "not applicable" once the choice framing is
+// gone, so without this a refresh could rename a heading and skip the work.
+const CITABILITY_GAP_CHECKS = {
+  named_sources: checkCitabilityNamedSources,
+  concrete_specifics: checkCitabilityConcreteSpecifics,
+  comparison: checkCitabilityComparison,
+  how_to_choose: checkCitabilityHowToChoose,
+};
+
+const CITABILITY_STRUCTURES = {
+  comparison: (body) => COMPARISON_TABLE_RE.test(body),
+  how_to_choose: (body) => {
+    const n = howToChooseSectionCriteria(body);
+    return n >= HOW_TO_CHOOSE_MIN_CRITERIA && n <= HOW_TO_CHOOSE_MAX_CRITERIA;
+  },
+};
+
+function citabilityStructurePresent(gap, body) {
+  return CITABILITY_STRUCTURES[gap](renderedCitabilityBody(body));
+}
+
+function checkCitabilityBackfillGapsCleared(draft, brief, context) {
+  if (!isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'not_citability_backfill' };
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const ctx = context || {};
+  const planned = brief.gsc_signal.citability_gaps;
+  const unresolved = [];
+  for (const gap of planned) {
+    const check = CITABILITY_GAP_CHECKS[gap];
+    if (!check) continue;
+    // A legacy .md target cannot carry the MDX table; the signal already
+    // answers not-applicable there, so the structure is never demanded.
+    if (CITABILITY_STRUCTURES[gap] && !(gap === 'comparison' && markdownOnlyTarget(brief))) {
+      if (!citabilityStructurePresent(gap, draft.body)) unresolved.push(`${gap}(structure_missing)`);
+      continue;
+    }
+    const r = check(draft, brief, ctx);
+    if (!r.ok) unresolved.push(`${gap}(${r.reason})`);
+  }
+  if (unresolved.length) return { ok: false, reason: `planned_gaps_unresolved:${unresolved.join(',')}` };
+  // A targeted edit must not trade one trait for another: a trait the live
+  // page already satisfied may not be lost.
+  const prev = ctx.previousVersion;
+  if (prev && typeof prev.body === 'string') {
+    const prevDraft = {
+      ...draft,
+      body: prev.body,
+      title: prev.frontmatter?.title || draft.title,
+      frontmatter: prev.frontmatter || draft.frontmatter,
+    };
+    // The prior page is judged on its own (no body to compare against); the
+    // frozen frontmatter still classifies its post_type.
+    const prevCtx = prev.frontmatter ? { previousVersion: { frontmatter: prev.frontmatter } } : {};
+    const regressed = [];
+    for (const [gap, check] of Object.entries(CITABILITY_GAP_CHECKS)) {
+      if (planned.includes(gap)) continue;
+      if (CITABILITY_STRUCTURES[gap]) {
+        if (citabilityStructurePresent(gap, prev.body) && !citabilityStructurePresent(gap, draft.body)) regressed.push(gap);
+        continue;
+      }
+      if (check(prevDraft, brief, prevCtx).ok && !check(draft, brief, ctx).ok) regressed.push(gap);
+    }
+    if (regressed.length) return { ok: false, reason: `citability_traits_regressed:${regressed.join(',')}` };
+  }
+  return { ok: true };
+}
+
 // The four optional signals as retry advisories ({ code, message }), for
 // the writer's in-session emit_draft redraft, which runs before any
 // run-level evaluate() (5013 Codex r2 P2). Same checks, same codes as the
@@ -2185,7 +2283,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkMetaDescriptionComplete, checkSerpBriefAttached, checkGscSignalAttached,
-  isOperatorAuthoredBrief, isCompetitorGapBrief, isAeoQuestionGapBrief,
+  isOperatorAuthoredBrief, isCompetitorGapBrief, isAeoQuestionGapBrief, isCitabilityBackfillBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
@@ -2194,6 +2292,7 @@ module.exports._internals = {
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
+  checkCitabilityBackfillGapsCleared,
   countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,

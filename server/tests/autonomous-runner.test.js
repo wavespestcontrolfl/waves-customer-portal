@@ -5083,3 +5083,93 @@ describe('W1 in-loop self-lint arms for refreshes with gate 3c options', () => {
     }
   });
 });
+
+describe('citability backfill retry feedback — every gate\'s one redraft hears the completion contract', () => {
+  const BRIEF = {
+    id: 'brief_cb', action_type: 'refresh_existing_page', page_type: 'refresh', target_url: '/termite/ants/',
+    gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['named_sources'] },
+  };
+  function load(publisher) {
+    jest.dontMock('../services/content/content-quality-gate');
+    return loadRunnerWith({ queue: {}, briefBuilder: {}, dispatcher: {}, publisher });
+  }
+  function livePublisher() {
+    return {
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Experts say ants trail after rain. Wait 14 days.', frontmatter: {}, source_file: 'src/content/blog/termite/ants.mdx' }),
+      resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/termite/ants.mdx' }),
+    };
+  }
+  async function retryData(runner, run, blocking, extra = {}) {
+    const bounded = jest.spyOn(runner, '_boundedRetryOrSkip').mockResolvedValue({ outcome: 'deferred_gate_retry' });
+    await runner._gateFailRetryOrSkip({}, { id: 'opp_cb' }, run, 0, jest.fn(), {
+      claimToken: 't', skipReason: 'content_guardrails_failed', notes: 'n', blocking, ...extra,
+    });
+    return bounded.mock.calls[0][5].retryData;
+  }
+
+  test('an early-gate retry judges the draft against the live page: hard gap finding + signals', async () => {
+    const publisher = livePublisher();
+    const runner = load(publisher);
+    const data = await retryData(runner, {
+      citability_backfill_brief: BRIEF,
+      draft_payload: { title: 'Ants', body: 'Experts say ants trail after rain.' },
+    }, [{ severity: 'P1', code: 'HARDCODED_PRICE', message: 'price' }]);
+    expect(publisher.loadExistingPageBody).toHaveBeenCalledWith('/termite/ants/');
+    expect(data.findings.map((f) => f.code)).toEqual(['HARDCODED_PRICE', 'CITABILITY_BACKFILL_GAPS_CLEARED']);
+    expect(data.findings[1].message).toMatch(/^planned_gaps_unresolved:named_sources\(/);
+    // The dropped "14 days" is only visible against the live page.
+    expect(data.advisory_messages.map((m) => m.code)).toEqual(expect.arrayContaining(['CITABILITY_NAMED_SOURCES', 'CITABILITY_CONCRETE_SPECIFICS']));
+    expect(data.advisory_messages.find((m) => m.code === 'CITABILITY_CONCRETE_SPECIFICS').message).toBe('refresh_dropped_measurements_1_to_0');
+  });
+
+  test('after the quality gate ran, its own verdict is reused (no second page load)', async () => {
+    const publisher = livePublisher();
+    const runner = load(publisher);
+    const qualityResult = {
+      ok: false,
+      hard_failures: [{ name: 'citability_backfill_gaps_cleared', reason: 'citability_traits_regressed:comparison' }],
+      soft_failures: [{ name: 'citability_how_to_choose', reason: 'no_how_to_choose_section' }],
+    };
+    const advisoryMessages = citabilityAdvisoryMessages(qualityResult);
+    const data = await retryData(runner, {
+      citability_backfill_brief: BRIEF, quality_gate_result: qualityResult, draft_payload: { body: 'x' },
+    }, [{ severity: 'P1', code: 'QUALITY_GATE', message: 'failed' }], { advisoryMessages });
+    expect(publisher.loadExistingPageBody).not.toHaveBeenCalled();
+    expect(data.findings).toEqual([
+      { severity: 'P1', code: 'QUALITY_GATE', message: 'failed' },
+      { severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: 'citability_traits_regressed:comparison' },
+    ]);
+    expect(data.advisory_messages).toEqual([{ code: 'CITABILITY_HOW_TO_CHOOSE', message: 'no_how_to_choose_section' }]);
+  });
+
+  test('a cleared draft adds nothing; other runs are untouched', async () => {
+    const publisher = livePublisher();
+    const runner = load(publisher);
+    const cleared = await retryData(runner, {
+      citability_backfill_brief: BRIEF,
+      draft_payload: { body: 'Per UF/IFAS, ants trail after rain. Wait 14 days.' },
+    }, [{ severity: 'P1', code: 'HARDCODED_PRICE', message: 'price' }]);
+    expect(cleared.findings.map((f) => f.code)).toEqual(['HARDCODED_PRICE']);
+    runner._boundedRetryOrSkip.mockRestore();
+    publisher.loadExistingPageBody.mockClear();
+    const other = await retryData(runner, { draft_payload: { body: 'Experts say.' } }, [{ severity: 'P1', code: 'HARDCODED_PRICE', message: 'price' }]);
+    expect(publisher.loadExistingPageBody).not.toHaveBeenCalled();
+    expect(other).toEqual({ findings: [{ severity: 'P1', code: 'HARDCODED_PRICE', message: 'price' }], advisory_messages: [] });
+  });
+
+  test('an unreadable live page still carries the planned-gap finding (never throws)', async () => {
+    const publisher = { loadExistingPageBody: jest.fn().mockRejectedValue(new Error('github down')) };
+    const runner = load(publisher);
+    const data = await retryData(runner, {
+      citability_backfill_brief: BRIEF, draft_payload: { body: 'Experts say ants trail.' },
+    }, []);
+    expect(data.findings.map((f) => f.code)).toEqual(['CITABILITY_BACKFILL_GAPS_CLEARED']);
+  });
+
+  test('the completion finding renders as a binding redraft directive', () => {
+    const { GATE_RETRY_INSTRUCTIONS, buildRetryDirectives } = require('../services/content/gate-retry-directives');
+    expect(GATE_RETRY_INSTRUCTIONS.CITABILITY_BACKFILL_GAPS_CLEARED).toMatch(/never invent a source or a number/);
+    const lines = buildRetryDirectives({ findings: [{ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: 'planned_gaps_unresolved:comparison(structure_missing)' }] });
+    expect(lines[1]).toContain('[Gate reported: planned_gaps_unresolved:comparison(structure_missing)]');
+  });
+});
