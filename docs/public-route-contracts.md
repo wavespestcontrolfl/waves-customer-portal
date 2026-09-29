@@ -3125,11 +3125,14 @@ the earliest after the previous one — never a mid-gap hour; an empty day still
 lists every grid hour); only the separate recommendations are curated. Moving an existing self-booked visit
 excludes that booking from its own day-cap count (the per-day cap runs only
 while `GATE_SELF_BOOK_DAY_CAP` is set — retired 2026-09-23). Self-serve notice
-window (owner ruling 2026-09-23, `scheduling/self-serve-notice.js`,
-`SELF_SERVE_NOTICE_HOURS` default 24): GET answers `not_reschedulable` with
-reason `self_serve_notice` for a visit that itself starts within the window
-(a MISSED visit is being rebooked and is exempt), no offered target starts
-within the window, and POST refuses such a visit with 409 code
+windows (owner ruling 2026-09-23, `scheduling/self-serve-notice.js`; split
+into a book window and a move window 2026-09-28, `SELF_SERVE_MOVE_NOTICE_HOURS`,
+default 24, independent of `SELF_SERVE_NOTICE_HOURS` — no fallback to it):
+GET answers `not_reschedulable` with reason `self_serve_notice` for a visit
+that itself currently starts within the MOVE window (a MISSED visit is being
+rebooked and is exempt); no offered target/destination starts within the
+BOOK window (`SELF_SERVE_NOTICE_HOURS`, default 24); and POST refuses such a
+visit with 409 code
 `SELF_SERVE_NOTICE`. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
