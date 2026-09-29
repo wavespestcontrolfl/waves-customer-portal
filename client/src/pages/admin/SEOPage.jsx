@@ -1562,6 +1562,10 @@ function BacklinksTab() {
   const [llmError, setLlmError] = useState(false);
   const [llmScanning, setLlmScanning] = useState(false);
   const canRunSeoActions = isAdminUser();
+  // One citation row is edited at a time: { id, listing_url, location_id }.
+  const [citEdit, setCitEdit] = useState(null);
+  const [citSaving, setCitSaving] = useState(false);
+  const [citError, setCitError] = useState("");
   useEffect(() => {
     adminFetch("/admin/seo/backlinks")
       .then((d) => {
@@ -1603,6 +1607,19 @@ function BacklinksTab() {
       setData(d);
     } finally {
       setScanning(false);
+    }
+  };
+  const saveCitation = async (id, body) => {
+    setCitSaving(true);
+    setCitError("");
+    try {
+      await adminFetch(`/admin/seo/citations/${id}`, { method: "PUT", body });
+      setData(await adminFetch("/admin/seo/backlinks"));
+      setCitEdit(null);
+    } catch (e) {
+      setCitError(e.message || "Save failed");
+    } finally {
+      setCitSaving(false);
     }
   };
   if (loading)
@@ -1916,9 +1933,10 @@ function BacklinksTab() {
           </div>
           {(data.citations || []).map((c, i) => (
             <div
-              key={i}
-              className="flex items-center [gap:10px] [padding:8px_0] border-b border-hairline border-zinc-200"
+              key={c.id || i}
+              className="border-b border-hairline border-zinc-200"
             >
+            <div className="flex items-center [gap:10px] [padding:8px_0]">
               {" "}
               <div
                 style={{
@@ -1954,6 +1972,89 @@ function BacklinksTab() {
                 {(CITATION_STATES.find(([key]) => key === c.status) || [])[1] ||
                   c.status}
               </span>{" "}
+              {canRunSeoActions && (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setCitError("");
+                    setCitEdit(
+                      citEdit?.id === c.id
+                        ? null
+                        : {
+                            id: c.id,
+                            listing_url: c.listing_url || "",
+                            location_id: c.location_id || "",
+                          }
+                    );
+                  }}
+                >
+                  {citEdit?.id === c.id ? "Close" : "Edit"}
+                </Button>
+              )}
+            </div>
+            {citEdit?.id === c.id && (
+              <div className="flex flex-col [gap:10px] [padding:0_0_12px]">
+                <div className="flex [gap:10px] items-center flex-wrap">
+                  <Input
+                    value={citEdit.listing_url}
+                    onChange={(e) =>
+                      setCitEdit({ ...citEdit, listing_url: e.target.value })
+                    }
+                    placeholder="Public listing URL (https://…) — blank clears it"
+                    className="[flex:1] [min-width:280px]"
+                  />
+                  <Select
+                    className="!w-auto"
+                    value={citEdit.location_id}
+                    onChange={(e) =>
+                      setCitEdit({ ...citEdit, location_id: e.target.value })
+                    }
+                    title="Which office this listing should show"
+                  >
+                    <option value="">Any office</option>
+                    {(data.citationLocations || []).map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button
+                    disabled={citSaving}
+                    onClick={() =>
+                      saveCitation(c.id, {
+                        listing_url: citEdit.listing_url,
+                        location_id: citEdit.location_id,
+                      })
+                    }
+                  >
+                    {citSaving ? "Saving…" : "Save"}
+                  </Button>
+                </div>
+                <div className="flex [gap:10px] items-center flex-wrap">
+                  <Button
+                    variant="secondary"
+                    disabled={citSaving || c.status === "missing"}
+                    onClick={() => saveCitation(c.id, { status: "missing" })}
+                  >
+                    Mark missing
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={citSaving || c.status === "unverified"}
+                    onClick={() => saveCitation(c.id, { status: "unverified" })}
+                  >
+                    Back to unverified
+                  </Button>
+                  <span className="text-ui-body text-ink-secondary">
+                    Saving a new URL or office re-queues the row for the next
+                    audit. Missing means no listing exists.
+                  </span>
+                </div>
+                {citError && (
+                  <div className="text-ui-body text-zinc-900">{citError}</div>
+                )}
+              </div>
+            )}
             </div>
           ))}
         </UiCard>

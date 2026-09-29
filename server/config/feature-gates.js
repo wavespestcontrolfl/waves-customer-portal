@@ -1072,7 +1072,6 @@ const gates = {
   // (services/seo/citation-auditor.js: SSRF-pinned, sequential, one request per
   // row, nothing submitted or claimed) compared against config/locations.js NAP.
   // No sends, no customer data. DEFAULT ON; kill switch GATE_CITATION_AUDIT=false.
-  // The admin "run audit" route calls the same audit() and is not gated here.
   citationAudit: process.env.GATE_CITATION_AUDIT !== 'false',
 
   // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of

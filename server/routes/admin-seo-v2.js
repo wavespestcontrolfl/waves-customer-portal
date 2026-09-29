@@ -831,13 +831,6 @@ router.put('/citations/:id', requireAdmin, async (req, res, next) => {
   }
 });
 
-// Read-only audit of every recorded listing URL (same call the weekly cron makes).
-router.post('/citations/audit', requireAdmin, async (req, res, next) => {
-  try {
-    res.json(await CitationAuditor.audit());
-  } catch (err) { next(err); }
-});
-
 // Conversion Funnel
 router.get('/funnel', async (req, res, next) => {
   try {

@@ -12,7 +12,7 @@ const db = require('../models/db');
 const auditor = require('../services/seo/citation-auditor');
 const { WAVES_LOCATIONS } = require('../config/locations');
 
-const { classifyListing, expectedNapFor, STATES } = auditor._internals;
+const { classifyListing, candidatesFor, STATES } = auditor._internals;
 const BRAND = WAVES_LOCATIONS[0];
 const PARRISH = WAVES_LOCATIONS.find((l) => l.id === 'parrish');
 
@@ -24,12 +24,12 @@ const page = (body, over = {}) => ({
 const ld = (obj) => `<script type="application/ld+json">${JSON.stringify(obj)}</script>`;
 
 describe('classifyListing', () => {
-  const expected = expectedNapFor({});
+  const expected = candidatesFor({});
 
   test('verified: name and phone match, address matched when shown', () => {
     const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>Call (941) 318-7612 - 13649 Luxe Ave #110, Bradenton, FL 34211</p>`), expected);
     expect(r.status).toBe('verified');
-    expect(r.detail.address_checked).toBe(true);
+    expect(r.detail).toMatchObject({ address_checked: true, office: BRAND.id });
     expect(r.nap).toMatchObject({ nap_name: 'Waves Pest Control', nap_phone: BRAND.phone });
   });
 
@@ -42,7 +42,7 @@ describe('classifyListing', () => {
   test('mismatched phone names the field and the value seen', () => {
     const r = classifyListing(page('<h1>Waves Pest Control</h1><p>(941) 555-0142</p>'), expected);
     expect(r.status).toBe('mismatched');
-    expect(r.detail.mismatches).toEqual([{ field: 'phone', expected: BRAND.phone, seen: ['(941) 555-0142'] }]);
+    expect(r.detail.mismatches).toEqual([{ field: 'phone', expected: WAVES_LOCATIONS.map((l) => l.phone).join(' or '), seen: ['(941) 555-0142'] }]);
     expect(r.nap.nap_phone).toBe('(941) 555-0142');
   });
 
@@ -59,12 +59,28 @@ describe('classifyListing', () => {
     expect(r.detail.mismatches[0].seen).toBe('Acme Bug Co');
   });
 
-  test('a row tied to a location is judged against that office, not the brand', () => {
+  test('an unassigned brand listing may show ANY office and records which one matched', () => {
+    for (const loc of WAVES_LOCATIONS) {
+      const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${loc.phone} ${loc.address}</p>`), candidatesFor({}));
+      expect(r.status).toBe('verified');
+      expect(r.detail.office).toBe(loc.id);
+      expect(r.nap.nap_address).toBe(loc.address);
+    }
+  });
+
+  test('a brand listing pairs the phone with THAT office: another office\'s address is a mismatch', () => {
+    const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${PARRISH.phone}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: PARRISH.phone, address: { streetAddress: '13649 Luxe Ave' } })}`), candidatesFor({}));
+    expect(r.status).toBe('mismatched');
+    expect(r.detail.office).toBe('parrish');
+    expect(r.detail.mismatches).toEqual([{ field: 'address', expected: PARRISH.address, seen: '13649 Luxe Ave' }]);
+  });
+
+  test('a row assigned to an office is judged against that office only', () => {
     const body = `<h1>Waves Pest Control</h1><p>${PARRISH.phone}</p>`;
-    expect(classifyListing(page(body), expectedNapFor({ location_id: 'parrish' })).status).toBe('verified');
-    const brand = classifyListing(page(body), expectedNapFor({}));
-    expect(brand.status).toBe('mismatched');
-    expect(brand.detail.mismatches[0]).toMatchObject({ field: 'phone', expected: BRAND.phone });
+    expect(classifyListing(page(body), candidatesFor({ location_id: 'parrish' })).status).toBe('verified');
+    const other = classifyListing(page(body), candidatesFor({ location_id: 'venice' }));
+    expect(other.status).toBe('mismatched');
+    expect(other.detail.mismatches[0]).toMatchObject({ field: 'phone', expected: WAVES_LOCATIONS.find((l) => l.id === 'venice').phone });
   });
 
   test('a cut-off body cannot prove a mismatch', () => {
@@ -149,7 +165,7 @@ describe('audit()', () => {
 
     expect(byId.ok).toMatchObject({ status: 'verified', nap_consistent: true });
     expect(byId.bad).toMatchObject({ status: 'mismatched', nap_consistent: false, nap_phone: '(941) 555-0142' });
-    expect(JSON.parse(byId.bad.status_detail).mismatches[0]).toMatchObject({ field: 'phone', expected: BRAND.phone });
+    expect(JSON.parse(byId.bad.status_detail).mismatches[0]).toMatchObject({ field: 'phone', seen: ['(941) 555-0142'] });
     expect(byId.yelp).toMatchObject({ status: 'fetch-blocked', nap_consistent: null });
     expect(JSON.parse(byId.yelp.status_detail)).toMatchObject({ reason: 'http_403', http_status: 403 });
     // a redirect to a loopback address is refused, and a refusal is a blocked fetch
@@ -204,6 +220,15 @@ describe('getDashboard() and updateCitation()', () => {
     test('changing the URL or office resets the row to unverified for the next audit', async () => {
       await auditor.updateCitation('1', { listing_url: 'https://dir.example/waves', location_id: 'parrish' });
       expect(patches[0]).toMatchObject({ listing_url: 'https://dir.example/waves', location_id: 'parrish', status: 'unverified', nap_consistent: null });
+    });
+
+    test('the fields the editor sends: URL is trimmed, blank clears it, priority is validated', async () => {
+      await auditor.updateCitation('1', { listing_url: '  https://dir.example/waves  ' });
+      expect(patches[0].listing_url).toBe('https://dir.example/waves');
+      await auditor.updateCitation('1', { listing_url: '', location_id: '' });
+      expect(patches[1]).toMatchObject({ listing_url: null, location_id: null, status: 'unverified' });
+      await expect(auditor.updateCitation('1', { listing_url: 'https://a b' })).rejects.toMatchObject({ code: 'INVALID_CITATION_UPDATE' });
+      await expect(auditor.updateCitation('1', { priority: 'urgent' })).rejects.toMatchObject({ code: 'INVALID_CITATION_UPDATE' });
     });
 
     test('rejects an unknown office and a non-http URL; ignores unknown fields', async () => {

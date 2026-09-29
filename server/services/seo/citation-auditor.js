@@ -4,8 +4,9 @@
  * For every seo_citations row with a `listing_url`, fetch that page (read-only
  * GET, nothing is submitted, no login, no claim, no edit) and compare the
  * name / phone / address it shows against the right NAP from
- * config/locations.js: the row's `location_id` office, or the default office
- * (WAVES_LOCATIONS[0], the brand NAP) when the row is unassigned.
+ * config/locations.js: the row's `location_id` office; an unassigned (brand)
+ * listing may show ANY of the four offices — Waves has four — and
+ * status_detail.office records which one matched.
  *
  * States (seo_citations.status, CHECK-constrained by migration
  * 20260929200000_seo_citations_audit_states):
@@ -30,8 +31,8 @@
  *
  * Scheduling: weekly cron in services/scheduler.js (Mon 4:20 AM ET), run
  * exclusively. Kill switch: GATE_CITATION_AUDIT=false (default on; the audit is
- * read-only GETs of public pages, sequential, one per row). The admin
- * "run audit" route calls the same audit() directly.
+ * read-only GETs of public pages, sequential, one per row). Staff record each
+ * listing's URL and office in the SEO admin Citations editor (updateCitation).
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -51,10 +52,15 @@ const invalid = (message) => Object.assign(new Error(message), { code: 'INVALID_
 const phoneKey = (s) => { const d = String(s || '').replace(/\D/g, ''); return d.length === 11 && d[0] === '1' ? d.slice(1) : d; };
 const alnum = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
-// The NAP a listing is judged against: the row's office, else the brand (default office).
+const napOf = (loc) => ({ locationId: loc.id, name: BRAND_NAME, phone: loc.phone, phoneKey: phoneKey(loc.phone), address: loc.address });
+// The office a row is assigned to, else the default office (WAVES_LOCATIONS[0]) — the dashboard's reference NAP.
 function expectedNapFor(row) {
-  const loc = WAVES_LOCATIONS.find((l) => l.id === row.location_id) || WAVES_LOCATIONS[0];
-  return { locationId: loc.id, name: BRAND_NAME, phone: loc.phone, phoneKey: phoneKey(loc.phone), address: loc.address };
+  return napOf(WAVES_LOCATIONS.find((l) => l.id === row.location_id) || WAVES_LOCATIONS[0]);
+}
+// What a listing may legitimately show: its assigned office, or any office when unassigned.
+function candidatesFor(row) {
+  const assigned = WAVES_LOCATIONS.find((l) => l.id === row.location_id);
+  return (assigned ? [assigned] : WAVES_LOCATIONS).map(napOf);
 }
 
 // "13649 Luxe Ave #110, Bradenton" -> matches "13649 Luxe Ave", "13649 Luxe Avenue Ste 5",
@@ -117,9 +123,10 @@ function judgeAddress(nap, expected) {
 
 /**
  * Pure classifier: a fetched page -> { status, nap_*, detail }. `page` is
- * contact-finder's fetchPage result. Nothing here reaches the network.
+ * contact-finder's fetchPage result; `candidates` are the NAPs it may match
+ * (candidatesFor). Nothing here reaches the network.
  */
-function classifyListing(page, expected) {
+function classifyListing(page, candidates) {
   const blocked = (reason, extra = {}) => ({ status: 'fetch-blocked', nap: null, detail: { reason, http_status: page.status || null, ...extra } });
   if (page.blocked) return blocked('blocked_host');
   if (page.error) return blocked(page.error);
@@ -131,13 +138,16 @@ function classifyListing(page, expected) {
   const nap = extractNap(html);
   if (nap.text.length < MIN_VISIBLE_CHARS) return blocked('empty_or_js_only');
 
+  // With several candidate offices, judge against the one whose phone the page shows
+  // (else the first, the default office).
+  const expected = candidates.find((c) => nap.phones.includes(c.phoneKey)) || candidates[0];
   const namePresent = alnum(`${nap.text} ${nap.title} ${nap.ldName || ''}`).includes(alnum(expected.name));
   if (!namePresent && !nap.phones.length) return blocked('no_nap_found');
 
   const mismatches = [];
   if (!namePresent) mismatches.push({ field: 'name', expected: expected.name, seen: nap.ldName || nap.title || null });
   const phoneOk = nap.phones.includes(expected.phoneKey);
-  if (nap.phones.length && !phoneOk) mismatches.push({ field: 'phone', expected: expected.phone, seen: nap.phones.slice(0, 3).map(fmtPhone) });
+  if (nap.phones.length && !phoneOk) mismatches.push({ field: 'phone', expected: candidates.map((c) => c.phone).join(' or '), seen: nap.phones.slice(0, 3).map(fmtPhone) });
 
   const address = judgeAddress(nap, expected);
   if (address.mismatch) mismatches.push(address.mismatch);
@@ -147,7 +157,7 @@ function classifyListing(page, expected) {
     nap_phone: phoneOk ? expected.phone : (nap.phones[0] ? fmtPhone(nap.phones[0]) : null),
     nap_address: address.inText ? expected.address : nap.ldAddress,
   };
-  const base = { http_status: page.status, final_url: page.finalUrl, address_checked: address.checked };
+  const base = { http_status: page.status, final_url: page.finalUrl, office: expected.locationId, address_checked: address.checked };
 
   if (mismatches.length) {
     // A cut-off body cannot prove a field differs — same rule as the backlink verifier.
@@ -161,7 +171,7 @@ function classifyListing(page, expected) {
 async function checkRow(row, seams = {}) {
   if (!row.listing_url) return { status: 'unverified', nap: null, detail: { reason: 'no_listing_url' } };
   const page = await contactFinder.fetchPage(row.listing_url, { ...seams, timeoutMs: FETCH_TIMEOUT_MS, maxRedirects: MAX_REDIRECTS });
-  return classifyListing(page, expectedNapFor(row));
+  return classifyListing(page, candidatesFor(row));
 }
 
 function statusCounts(rows) {
@@ -218,9 +228,10 @@ class CitationAuditor {
   // Changing the listing URL or office resets the row so the next audit re-checks it.
   async updateCitation(citationId, updates = {}) {
     const patch = {};
-    for (const k of ['listing_url', 'location_id', 'priority']) if (k in updates) patch[k] = updates[k] || null;
+    for (const k of ['listing_url', 'location_id', 'priority']) if (k in updates) patch[k] = String(updates[k] ?? '').trim() || null;
     if (patch.location_id && !WAVES_LOCATIONS.some((l) => l.id === patch.location_id)) throw invalid(`Unknown location_id: ${patch.location_id}`);
-    if (patch.listing_url && !/^https?:\/\//i.test(patch.listing_url)) throw invalid('listing_url must be an http(s) URL');
+    if (patch.listing_url && !/^https?:\/\/\S+$/i.test(patch.listing_url)) throw invalid('listing_url must be an http(s) URL');
+    if ('priority' in patch && !['high', 'medium', 'low'].includes(patch.priority)) throw invalid('priority must be high, medium or low');
     if (updates.status !== undefined) {
       if (!['missing', 'unverified'].includes(updates.status)) throw invalid("status can only be set to 'missing' or 'unverified'; the audit sets the rest");
       patch.status = updates.status;
@@ -234,4 +245,4 @@ class CitationAuditor {
 
 module.exports = new CitationAuditor();
 module.exports.statusCounts = statusCounts; // shared with backlink-monitor's dashboard
-module.exports._internals = { classifyListing, expectedNapFor, extractNap, STATES };
+module.exports._internals = { classifyListing, candidatesFor, expectedNapFor, extractNap, STATES };

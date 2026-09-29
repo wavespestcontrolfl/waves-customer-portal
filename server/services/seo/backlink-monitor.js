@@ -933,6 +933,7 @@ class BacklinkMonitor {
       newGapsSince7d,
       newHighValueGapsSince7d,
       llmStats: llmDashboard.summary,
+      citationLocations: require('../../config/locations').WAVES_LOCATIONS.map(({ id, name }) => ({ id, name })),
       citationStats: { total: citations.length, ...require('./citation-auditor').statusCounts(citations) },
     };
   }
