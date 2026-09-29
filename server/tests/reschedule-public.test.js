@@ -135,6 +135,24 @@ describe('reschedule-public eligibility', () => {
     expect(eligibility(svc, new Date('2026-11-01T08:35:00.000Z'))).toEqual({ ok: true, missed: true });
   });
 
+  // codex round-7 P2: the 2-hour arrival cutoff is the displayed WALL CLOCK
+  // (window_start + 2h), not start + 120 elapsed minutes.
+  test('the arrival cutoff across spring-forward is the displayed wall clock', () => {
+    // 2026-03-08 01:00 EST start, displayed 01:00-03:00 -> 03:00 EDT = 07:00Z
+    // (elapsed +120 would have said 04:00 EDT = 08:00Z).
+    const svc = { status: 'confirmed', scheduled_date: '2026-03-08', window_start: '01:00:00', window_end: '01:30:00' };
+    expect(eligibility(svc, new Date('2026-03-08T06:50:00.000Z'))).toEqual({ ok: true });
+    expect(eligibility(svc, new Date('2026-03-08T07:30:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
+  test('the arrival cutoff across fall-back is the displayed wall clock', () => {
+    // 2026-11-01 00:00 EDT start, displayed 00:00-02:00 -> 02:00 EST = 07:00Z
+    // (elapsed +120 would have said 01:00 EST = 06:00Z, an hour early).
+    const svc = { status: 'confirmed', scheduled_date: '2026-11-01', window_start: '00:00:00', window_end: '00:30:00' };
+    expect(eligibility(svc, new Date('2026-11-01T06:30:00.000Z'))).toEqual({ ok: true });
+    expect(eligibility(svc, new Date('2026-11-01T07:05:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
   test('same-day appointment with a window still ahead stays reschedulable', () => {
     expect(eligibility({
       status: 'confirmed',

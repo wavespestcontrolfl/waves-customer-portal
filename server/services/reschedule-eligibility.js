@@ -41,6 +41,25 @@ function hhmm(t) {
 // job-duration block: a 9:00 visit with window_end 10:00 is still
 // legitimately "on the way" at 10:05, inside the quoted 9–11 arrival
 // window, and must not read as elapsed.
+// The ET calendar date after `dateStr` ('YYYY-MM-DD').
+function nextEtDate(dateStr) {
+  return etDateString(addETDays(parseETDateTime(`${dateStr}T12:00`), 1));
+}
+
+// The instant of wall clock `hhmmStr` + `addMinutes` on ET date `dateStr`,
+// rolling onto following ET dates in wall-clock terms (DST-safe).
+function etWallClockInstant(dateStr, hhmmStr, addMinutes) {
+  const [h, m] = hhmmStr.split(':').map(Number);
+  let total = h * 60 + m + addMinutes;
+  let day = dateStr;
+  while (total >= 1440) {
+    total -= 1440;
+    day = nextEtDate(day);
+  }
+  const wall = `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  return parseETDateTime(`${day}T${wall}`);
+}
+
 function visitTimeElapsed(svc, now = new Date()) {
   const dateStr = apptDateStr(svc.scheduled_date);
   if (!dateStr) return false;
@@ -61,15 +80,18 @@ function visitTimeElapsed(svc, now = new Date()) {
   // (codex round-5 P2 on PR #5308).
   const startInstant = parseETDateTime(`${dateStr}T${start}`);
   if (Number.isNaN(startInstant.getTime())) return false;
-  const candidates = [new Date(startInstant.getTime() + ARRIVAL_PROMISE_MINUTES * 60000)];
+  // Every cutoff is an ET WALL CLOCK on its own ET calendar date, parsed
+  // with parseETDateTime — never elapsed milliseconds, which drift an hour
+  // across a DST change and disagree with the displayed window (codex
+  // round-6/7 P2 on PR #5308).
+  const candidates = [etWallClockInstant(dateStr, start, ARRIVAL_PROMISE_MINUTES)];
   const end = hhmm(svc.window_end);
   if (end) {
     // window_end's clock time before window_start's means the job block
     // crosses midnight: parse it as a wall clock on the NEXT ET calendar
     // date (never +24h of elapsed time, which drifts an hour across a DST
     // change — codex round-6 P2 on PR #5308).
-    const endDateStr = end < start ? etDateString(addETDays(startInstant, 1)) : dateStr;
-    const endInstant = parseETDateTime(`${endDateStr}T${end}`);
+    const endInstant = etWallClockInstant(end < start ? nextEtDate(dateStr) : dateStr, end, 0);
     if (!Number.isNaN(endInstant.getTime())) candidates.push(endInstant);
   }
   const worstInstant = candidates.reduce((a, b) => (b.getTime() > a.getTime() ? b : a));
