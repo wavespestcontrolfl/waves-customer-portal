@@ -50,7 +50,8 @@ const {
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
-const { expectedServiceMinutes, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
+const { expectedServiceMinutes, expectedMinutesForServices, ensureCatalogLoaded } = require('./scheduling/expected-service-minutes');
+const { violatesTravelGap } = require('./scheduling/travel-gap');
 
 // The candidate's own expected-minutes padding credit (owner ruling
 // 2026-09-23) for the travel-gap probes below (occupancy.js decides
@@ -696,6 +697,63 @@ function slotDateRefusal(date, todayEt, offerArrivalGrace) {
   return null;
 }
 
+// Codex r4 P1 on #5314: another estimate's live hold on this same tech/date
+// can be minted DURING a signed offer's 45-minute life. reserveSlot's grace
+// check (verifyArrivalCapacity's arrivalGraceMinutes) only compares the
+// candidate's OWN simulated arrival delay against the signed grace — it
+// never re-applies the strict travel-gap BUFFER to a hold that didn't exist
+// yet when packCapacityEnds screened this offer, so two holds could graduate
+// without the buffer the contract promises a live hold always keeps ("a live
+// hold never gets the waiver" — travel-gap.js, graceWaivesBufferOnly).
+// Runs ONLY for a graced offer (grace 0 is byte-identical — a whole-route
+// FEASIBILITY conflict with a new hold is still caught by
+// verifyArrivalCapacity itself regardless of grace; this closes the
+// STRICT-BUFFER gap grace specifically reopens). Reuses find-time.js's own
+// row-expansion + entity-shaping (expandRowsWithCredit/capacityNeighbourEntity)
+// so the entity shape here can never drift from the offer side's. Owns its
+// own guard + candidate construction (rather than the reserveSlot call site)
+// so reserveSlot's transaction callback keeps origin/main's complexity.
+async function refuseGracedOfferOnRivalHoldConflict(trx, {
+  useCapacity, offerArrivalGrace, estimateId, date, techId,
+  slotStartMinutes, effectiveDurationMinutes, holdPin, candidateExpectedMinutes,
+}) {
+  if (!useCapacity || !(offerArrivalGrace > 0)) return;
+  const rivalHolds = await trx('scheduled_services')
+    .where({ scheduled_date: date })
+    .whereNot({ source_estimate_id: estimateId })
+    .whereNull('customer_id')
+    .whereNotNull('reservation_expires_at')
+    .whereRaw('reservation_expires_at > NOW()')
+    // This candidate's OWN technician, or an unassigned hold — an unassigned
+    // hold could still be assigned to this tech, same convention
+    // graceWaivesBufferOnly's own hold filter uses (find-time.js
+    // sameAssignedTech, Codex r3 P2).
+    .where((q) => {
+      q.whereNull('technician_id');
+      if (techId) q.orWhere('technician_id', techId);
+    })
+    .select('*');
+  if (!rivalHolds.length) return;
+  await ensureCatalogLoaded(trx);
+  // Lazy require (matches this file's convention for same-directory
+  // scheduling modules, e.g. combined-visit-capacity below): find-time.js is
+  // mocked WITHOUT `_internals` by several unrelated test suites, and this
+  // whole function is already a no-op above for every grace-0 caller (every
+  // test that never exercises a graced offer), so nothing should pay for the
+  // require at module-load time.
+  const { expandRowsWithCredit, capacityNeighbourEntity } = require('./scheduling/find-time')._internals;
+  const candidate = {
+    startMin: slotStartMinutes, endMin: slotStartMinutes + effectiveDurationMinutes,
+    lat: holdPin?.lat ?? null, lng: holdPin?.lng ?? null, windowMinutes: effectiveDurationMinutes,
+    expectedMinutes: Number.isFinite(candidateExpectedMinutes)
+      ? Math.min(candidateExpectedMinutes, effectiveDurationMinutes) : effectiveDurationMinutes,
+  };
+  for (const row of expandRowsWithCredit(rivalHolds)) {
+    const neighbour = capacityNeighbourEntity(row);
+    if (neighbour && violatesTravelGap(candidate, [neighbour])) throw capacityError('rival_hold_travel_gap');
+  }
+}
+
 async function reserveSlot({
   estimateId,
   slotId,
@@ -1112,6 +1170,14 @@ async function reserveSlot({
         // ONCE, here, at reserve; commitReservation below never re-applies it.
         arrivalGraceMinutes: offerArrivalGrace,
       }) : null;
+      // Rival-hold strict buffer (Codex r4 P1 on #5314) — the helper itself
+      // no-ops unless this offer is graced (grace 0 is byte-identical). Runs
+      // under the SAME row lock verifyArrivalCapacity just took, so this
+      // reads a consistent, already-locked snapshot of the date/tech.
+      await refuseGracedOfferOnRivalHoldConflict(trx, {
+        useCapacity, offerArrivalGrace, estimateId, date, techId,
+        slotStartMinutes, effectiveDurationMinutes, holdPin, candidateExpectedMinutes,
+      });
       // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
       // graduated visit carries it even if the profile can't be re-resolved
       // at commit; commitReservation backfills it when this returns null.
@@ -2633,5 +2699,6 @@ module.exports = {
     notesWithServiceMix,
     catalogLinkForProfile,
     candidateExpectedMinutesFromRow,
+    refuseGracedOfferOnRivalHoldConflict,
   },
 };

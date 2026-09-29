@@ -313,11 +313,25 @@ async function findCapacitySlots(opts) {
 // end and dropped the real 11:00 one, then buildBookingAvailability's own
 // (already-expanded) commit-side mirror rejected the kept 10:00 as still
 // occupied — no offer at all, though 11:00 was genuinely valid.
-function capacityGapNeighbours(context, fit, startMin) {
-  const creditResolver = stopCreditResolver(context.rows);
-  const expanded = occupiedRows(context.rows).map((row) => ({
+// Version-2 combined-allocation expansion (occupiedRows) + the SAME
+// expected-minutes credit resolver (stopCreditResolver) every other reader
+// of a day's rows shares — the one place raw scheduled_services rows become
+// the {startMin, endMin, expectedMinutes} shape capacityNeighbourEntity and
+// every travel-gap probe in this module read. Pulled out of
+// capacityGapNeighbours (Codex r4 on #5314) so a caller outside this
+// module's own per-candidate loop — slot-reservation.js's reserve-time rival-
+// hold check — can build the exact same neighbour shape instead of
+// hand-rolling the expansion. Requires the sync expected-minutes catalog to
+// already be warm (ensureCatalogLoaded) exactly like every other caller.
+function expandRowsWithCredit(rows) {
+  const creditResolver = stopCreditResolver(rows);
+  return occupiedRows(rows).map((row) => ({
     ...row, expectedMinutes: creditResolver(row, row.endMin - row.startMin),
   }));
+}
+
+function capacityGapNeighbours(context, fit, startMin) {
+  const expanded = expandRowsWithCredit(context.rows);
   const expandedById = new Map(expanded.map((row) => [row.id, row]));
   const anchors = [
     ...fit.routeOrder
@@ -1107,5 +1121,10 @@ module.exports = {
     packCapacityEnds,
     capacityGapNeighbours,
     buildDayStops,
+    // Shared travel-gap neighbour shape (Codex r4 on #5314) — reused by
+    // slot-reservation.js's reserve-time rival-hold check so it builds the
+    // EXACT same entity shape the offer side does, never a hand-rolled one.
+    expandRowsWithCredit,
+    capacityNeighbourEntity,
   },
 };
