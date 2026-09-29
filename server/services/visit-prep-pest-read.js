@@ -46,6 +46,7 @@ const { identifyPestV2 } = require('./photo-id-v2/pest-engine');
 const { classifyServiceLine } = require('./service-line');
 const { visitPrepPestReadLive } = require('../config/feature-gates');
 const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 const DEFAULT_DAILY_CAP = 40;
 
@@ -95,10 +96,16 @@ async function resolveApplicability(topic, svc, conn) {
 // engine call that failed still cost a vision call. pending/done/failed are
 // the statuses a pest-applicable submission can reach (unsupported never
 // calls the engine and never counts).
-async function readsToday(conn) {
+// The cap's day is the America/New_York calendar day (AGENTS.md), not
+// the DB session's UTC day: midnight ET as an instant, bound as a param.
+function etDayStart(now = new Date()) {
+  return parseETDateTime(`${etDateString(now)}T00:00`);
+}
+
+async function readsToday(conn, now = new Date()) {
   const row = await conn('visit_prep_submissions')
     .whereIn('read_status', ['pending', 'done', 'failed'])
-    .where('created_at', '>=', conn.raw("date_trunc('day', now())"))
+    .where('created_at', '>=', etDayStart(now))
     .count('id as count')
     .first();
   return Number(row?.count || 0);
@@ -233,5 +240,5 @@ async function triggerVisitPrepPestRead({
 module.exports = {
   triggerVisitPrepPestRead,
   dailyCap,
-  _internal: { isPestStop, resolveApplicability, liveStopServiceTypes },
+  _internal: { isPestStop, resolveApplicability, liveStopServiceTypes, etDayStart },
 };

@@ -358,3 +358,15 @@ describe('_internal.isPestStop', () => {
     expect(await _internal.isPestStop({ ...BASE_SVC, service_type: 'Lawn Weed & Feed' }, conn)).toBe(false);
   });
 });
+
+describe('_internal.etDayStart (cap day = America/New_York calendar day)', () => {
+  test('8:30 PM ET on Sep 28 (00:30 UTC Sep 29) still counts from Sep 28 midnight ET', () => {
+    const start = _internal.etDayStart(new Date('2026-09-29T00:30:00Z'));
+    expect(start.toISOString()).toBe('2026-09-28T04:00:00.000Z');
+  });
+
+  test('winter (EST) offset', () => {
+    const start = _internal.etDayStart(new Date('2026-12-15T15:00:00Z'));
+    expect(start.toISOString()).toBe('2026-12-15T05:00:00.000Z');
+  });
+});

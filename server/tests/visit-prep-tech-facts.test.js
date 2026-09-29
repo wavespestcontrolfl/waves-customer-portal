@@ -205,6 +205,22 @@ describe('customerFlaggedFacts', () => {
   });
 });
 
+describe('effectiveReadStatus (a read interrupted by a redeploy never sticks on pending)', () => {
+  const { effectiveReadStatus } = visitPrep._internal;
+  const created = new Date('2026-10-01T12:00:00Z');
+  test('pending within 15 minutes stays pending', () => {
+    expect(effectiveReadStatus('pending', created, created.getTime() + 14 * 60 * 1000)).toBe('pending');
+  });
+  test('pending older than 15 minutes reads as failed', () => {
+    expect(effectiveReadStatus('pending', created, created.getTime() + 16 * 60 * 1000)).toBe('failed');
+  });
+  test('other statuses pass through', () => {
+    for (const s of ['none', 'done', 'failed', 'unsupported']) {
+      expect(effectiveReadStatus(s, created, created.getTime() + 60 * 60 * 1000)).toBe(s);
+    }
+  });
+});
+
 describe('techStopMemberIds (Codex #5239 r1 P1)', () => {
   const { techStopMemberIds } = visitPrep;
   // A frozen visit keeps visit_id on a member dispatch reassigned or moved;

@@ -625,6 +625,18 @@ function parseJsonMaybe(value) {
 // entirely (protocols.json, the tree & shrub field guide). `contract` is
 // the stored pest_identifications.report_contract (v1 shape + embedded
 // `v2`), the SAME JSON shape the customer Photo ID route stores.
+// A read runs in-process after the submission commits; a redeploy or
+// crash mid-read would otherwise leave 'pending' on the row forever. A
+// read still pending this long after the photos arrived is shown as
+// failed (quiet) instead of "Photo read pending".
+const READ_PENDING_STALE_MS = 15 * 60 * 1000;
+
+function effectiveReadStatus(status, createdAt, now = Date.now()) {
+  if (status !== 'pending') return status;
+  const at = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
+  return Number.isFinite(at) && now - at > READ_PENDING_STALE_MS ? 'failed' : status;
+}
+
 function readFactsFromContract(status, contract) {
   if (status !== 'done' || !contract) return { status };
   const v2 = contract.v2 || {};
@@ -691,7 +703,7 @@ async function customerFlaggedFacts(svc, conn = db) {
     locationOnProperty: s.location_on_property || null,
     note: s.note || null,
     photoIds: photoIdsBySubmission.get(s.id) || [],
-    read: readFactsFromContract(s.read_status || 'none', s.read_ref ? contractsByRef.get(s.read_ref) : null),
+    read: readFactsFromContract(effectiveReadStatus(s.read_status || 'none', s.created_at), s.read_ref ? contractsByRef.get(s.read_ref) : null),
   }));
 }
 
@@ -709,6 +721,6 @@ module.exports = {
   customerFlaggedFacts,
   techStopMemberIds,
   _internal: {
-    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg, readFactsFromContract,
+    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg, readFactsFromContract, effectiveReadStatus,
   },
 };
