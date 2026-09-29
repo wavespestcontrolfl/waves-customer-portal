@@ -16,8 +16,11 @@
  * entry points share ONE rule table:
  *   - runAdminAlertRelevanceSweep: periodic (scheduler.js, every 10 minutes)
  *     retirement of unread rows whose subject has moved on. Unread rows never
- *     age out of it (a refreshed bell keeps its first created_at), and every
- *     retirement is judged again under locks right before it is written.
+ *     age out of it (a refreshed bell keeps its first created_at). Each
+ *     retirement is judged on a fresh read right before it is written and
+ *     once more after it; a change that landed in between puts the bell back.
+ *     No row locks, ever: this sweep is advisory and must never block or fail
+ *     a money path (invoice settlement takes the visit FOR UPDATE NOWAIT).
  *   - ringTimeCheck: the ringGate notifyAdmin's existing seam already runs
  *     inside the insert's transaction — a fresh row that has ALREADY moved on
  *     is written activity-only instead of ringing (notification-service.js
@@ -127,34 +130,10 @@ const emptyData = () => ({
 });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
-// Every row a visit verdict reads, locked FOR SHARE before it is read (the
-// retirement recheck): the visits, the parent whose price a child inherits,
-// the combined first-application invoice that covers a sibling, and the
-// annual-prepay funding that validates a stamp — the term, any renewal of
-// it, and the term's prepay invoice (coverage is judged from those rows:
-// coveredTermsAsOf reads the invoice's status / paid_at). The joined read
-// that follows then sees a state no concurrent write can change until the
-// recheck commits.
-async function lockVisitFamily(conn, visitIds) {
-  const own = await conn('scheduled_services').whereIn('id', visitIds).forShare()
-    .select('id', 'recurring_parent_id', 'first_application_invoice_id', 'annual_prepay_term_id');
-  const idsOf = (rows, col) => [...new Set(rows.map((r) => r[col]).filter(Boolean).map(String))];
-  const termIds = idsOf(own, 'annual_prepay_term_id');
-  const terms = termIds.length ? await conn('annual_prepay_terms')
-    .where((q) => q.whereIn('id', termIds).orWhereIn('renewed_from_term_id', termIds)).forShare().select('id', 'prepay_invoice_id') : [];
-  const family = [['scheduled_services', idsOf(own, 'recurring_parent_id')],
-    ['invoices', [...idsOf(own, 'first_application_invoice_id'), ...idsOf(terms, 'prepay_invoice_id')]]];
-  for (const [table, ids] of family) {
-    if (ids.length) await conn(table).whereIn('id', ids).forShare().select('id');
-  }
-}
-
 // The live records for a batch of notification rows: one query per table per
 // batch (the estimate and customer ids are only known once visits, invoices
-// and leads are loaded, so those two run second). `lock` takes FOR SHARE on
-// every row a verdict reads (the retirement recheck, inside its transaction).
-async function loadSubjects(rows, conn = db, { lock = false } = {}) {
-  const shared = (q) => { if (lock) q.forShare(); };
+// and leads are loaded, so those two run second). Plain reads — never a lock.
+async function loadSubjects(rows, conn = db) {
   const data = emptyData();
   const all = rows.map(refsFromRow);
   const ids = (pick) => [...new Set(all.flatMap(pick))];
@@ -162,7 +141,6 @@ async function loadSubjects(rows, conn = db, { lock = false } = {}) {
   const invoiceIds = ids((r) => r.invoiceIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
   if (visitIds.length) {
-    if (lock) await lockVisitFamily(conn, visitIds);
     data.visits = byId(await conn('scheduled_services as ss')
       .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
       .leftJoin('invoices as fa_invoice', 'fa_invoice.id', 'ss.first_application_invoice_id')
@@ -183,10 +161,10 @@ async function loadSubjects(rows, conn = db, { lock = false } = {}) {
     }
   }
   if (invoiceIds.length) {
-    data.invoices = byId(await conn('invoices').whereIn('id', invoiceIds).modify(shared).select('id', 'status', 'customer_id'));
+    data.invoices = byId(await conn('invoices').whereIn('id', invoiceIds).select('id', 'status', 'customer_id'));
   }
   if (leadIds.length) {
-    data.leads = byId(await conn('leads').whereIn('id', leadIds).modify(shared)
+    data.leads = byId(await conn('leads').whereIn('id', leadIds)
       .select('id', 'status', 'converted_at', 'deleted_at', 'created_at', 'customer_id', 'estimate_id'));
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
@@ -194,22 +172,19 @@ async function loadSubjects(rows, conn = db, { lock = false } = {}) {
   const customerIds = [...new Set(resolved.map((r) => r.customerId).filter(Boolean))];
   const leadCustomerIds = [...new Set([...data.leads.values()].map((l) => l.customer_id && String(l.customer_id)).filter(Boolean))];
   if (estimateIds.length) {
-    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).modify(shared)
+    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds)
       .select('id', 'status', 'archived_at', 'sent_at', 'customer_id'));
   }
   if (customerIds.length) {
-    data.customers = byId(await conn('customers').whereIn('id', customerIds).modify(shared).select('id', 'churned_at', 'deleted_at'));
+    data.customers = byId(await conn('customers').whereIn('id', customerIds).select('id', 'churned_at', 'deleted_at'));
   }
   if (leadCustomerIds.length) {
     // A booking someone made: never a child the system generated on its own
     // (the nightly series top-up, a booking's seeded follow-ups) — those land
     // on an existing customer's plan whether or not anyone worked the lead.
-    const bookings = (q) => q.whereIn('customer_id', leadCustomerIds)
-      .where((w) => w.whereNull('status').orWhereNotIn('status', [...CANCELLED_VISIT_STATUSES]))
-      .whereNull('recurring_parent_id').whereNull('parent_service_id');
-    // The recheck locks those bookings first (an aggregate cannot be locked).
-    if (lock) await conn('scheduled_services').modify(bookings).forShare().select('id');
-    const booked = await conn('scheduled_services').modify(bookings)
+    const booked = await conn('scheduled_services').whereIn('customer_id', leadCustomerIds)
+      .where((q) => q.whereNull('status').orWhereNotIn('status', [...CANCELLED_VISIT_STATUSES]))
+      .whereNull('recurring_parent_id').whereNull('parent_service_id')
       .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
     data.leadVisits = new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
   }
@@ -343,36 +318,33 @@ function candidateQuery(cursor) {
     .select('id', 'category', 'link', 'metadata');
 }
 
-// Only while the row is still unread: never races a staff action.
-async function retireRow(conn, id, reason, now) {
-  return conn('notifications')
-    .where({ id, recipient_type: 'admin' })
-    .whereNull('read_at')
-    .update({
-      read_at: conn.fn.now(),
-      metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-        [JSON.stringify({ retired: { by: RETIRED_BY, reason, at: now.toISOString() } })]),
-    });
-}
+// The row as the batch read it, still: a refresh that rewrote it since is
+// left for the next sweep to judge.
+const sameRow = (a, b) => a.category === b.category && (a.link || null) === (b.link || null)
+  && JSON.stringify(parseMeta(a.metadata)) === JSON.stringify(parseMeta(b.metadata));
 
-// Judges one row AGAIN, under locks, and retires it only if it is still moved
-// on: a payment, a reopen or a refresh that landed after the batch read can
-// never be silently dismissed. Locks go in the order the emitters take theirs
-// — the subject rows FOR SHARE, then the notification FOR UPDATE
-// (first-application-sibling-split locks its invoice, then its alert) — so
-// the recheck cannot deadlock a concurrent raise. A row read, or rewritten by
-// a refresh, since the batch read is left for the next sweep to judge.
+// Judges one row on a fresh read and retires it only if it is still moved on,
+// then judges it once more AFTER the write: a change that landed between the
+// read and the write (a payment starting on a churned customer's draft, a
+// lead reopened) puts the bell back exactly as it was — unless a person has
+// read it since (their read_at wins). No row locks: see the module header.
+// A change after the final judgement is a new event its emitter raises.
 async function retireIfStillMovedOn(row, cls, todayET, now) {
-  return db.transaction(async (trx) => {
-    const fresh = await loadSubjects([row], trx, { lock: true });
-    const current = await trx('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
-      .forUpdate().first('id', 'category', 'link', 'metadata');
-    if (!current || current.category !== row.category || (current.link || null) !== (row.link || null)
-      || JSON.stringify(parseMeta(current.metadata)) !== JSON.stringify(parseMeta(row.metadata))) return null;
-    const reason = cls.rule(subjectFor(current, fresh, todayET));
-    if (reason) await retireRow(trx, current.id, reason, now);
-    return reason || null;
-  });
+  const current = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
+    .first('id', 'category', 'link', 'metadata');
+  if (!current || !sameRow(current, row)) return null;
+  const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
+  if (!reason) return null;
+  const stamp = { by: RETIRED_BY, reason, at: now.toISOString() };
+  const [retired] = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
+    .update({ read_at: db.fn.now(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]) })
+    .returning(['id', 'read_at']);
+  if (!retired) return null;
+  if (cls.rule(subjectFor(current, await loadSubjects([current]), todayET))) return reason;
+  await db('notifications').where({ id: row.id, read_at: retired.read_at })
+    .whereRaw("metadata->'retired'->>'at' = ?", [stamp.at])
+    .update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
+  return null;
 }
 
 // A backlog bigger than one run (MAX_PAGES pages) is walked across runs: a
@@ -399,7 +371,7 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
       try {
         const cls = classify(row);
         // The batch read is a first pass: only a row that looks moved on pays
-        // for the locked recheck that actually retires it.
+        // for the fresh recheck that actually retires it.
         if (!cls || !cls.rule(subjectFor(row, data, todayET))) continue;
         if (await retireIfStillMovedOn(row, cls, todayET, now)) byClass[cls.key] = (byClass[cls.key] || 0) + 1;
       } catch (err) {

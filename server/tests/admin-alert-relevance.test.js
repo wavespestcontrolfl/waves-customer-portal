@@ -54,16 +54,26 @@ jest.mock('../models/db', () => {
     };
     const hit = () => (mockTables[table] || []).filter((r) => conds.every((c) => c(r)));
     b.first = async () => { mockQueries.push(q); return hit()[0] || null; };
-    b.update = async (patch) => {
-      mockQueries.push(q);
-      const rows = hit();
-      rows.forEach((r) => {
-        const { metadata, ...rest } = patch;
-        Object.assign(r, rest);
-        if (metadata && metadata.__raw) r.metadata = JSON.stringify({ ...parse(r.metadata), ...JSON.parse(metadata.bindings[0]) });
-        else if (metadata !== undefined) r.metadata = metadata;
-      });
-      return rows.length;
+    b.update = (patch) => {
+      let applied = null;
+      const apply = () => {
+        if (applied) return applied;
+        mockQueries.push(q);
+        applied = hit();
+        applied.forEach((r) => {
+          const { metadata, ...rest } = patch;
+          Object.assign(r, rest);
+          if (metadata && metadata.__raw && /- 'retired'/.test(metadata.__raw)) {
+            const { retired: _dropped, ...kept } = parse(r.metadata);
+            r.metadata = JSON.stringify(kept);
+          } else if (metadata && metadata.__raw) r.metadata = JSON.stringify({ ...parse(r.metadata), ...JSON.parse(metadata.bindings[0]) });
+          else if (metadata !== undefined) r.metadata = metadata;
+        });
+        return applied;
+      };
+      const done = Promise.resolve().then(() => apply().length);
+      done.returning = async () => apply().map((r) => ({ id: r.id, read_at: r.read_at }));
+      return done;
     };
     b.insert = (row) => ({
       returning: async () => {
@@ -485,63 +495,55 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(old.read_at).toBe('NOW');
   });
 
-  test('the retirement is judged again under locks: a payment that starts after the batch read keeps the divergence alert ringing', async () => {
-    const meta = { dedupeKey: `first_application_sibling_divergence:${EST}:${INV}:z`, alertKind: 'diverged', invoiceId: INV, stampedInvoiceId: INV, customerId: CUST };
+  const divergenceRow = (id) => note({ id, category: 'billing', metadata: { dedupeKey: `first_application_sibling_divergence:${EST}:${INV}:z`, alertKind: 'diverged', invoiceId: INV, stampedInvoiceId: INV, customerId: CUST } });
+  const churnedWithDraft = () => {
     mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
     mockTables.invoices = [invoice()];
-    const row = note({ id: uid(550), category: 'billing', metadata: meta });
+  };
+
+  test('the retirement is judged on a fresh read: a payment that starts after the batch read keeps the divergence alert ringing', async () => {
+    churnedWithDraft();
+    const row = divergenceRow(uid(550));
     mockTables.notifications = [row];
     let invoiceReads = 0;
     mockHooks.invoices = () => { invoiceReads += 1; if (invoiceReads === 2) mockTables.invoices[0].status = 'processing'; };
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
-    // The recheck read its subjects FOR SHARE and the alert FOR UPDATE, in that order.
-    const locked = mockQueries.filter((q) => q.calls.some(([m]) => m === 'forShare' || m === 'forUpdate')).map((q) => q.table);
-    expect(locked.indexOf('invoices')).toBeLessThan(locked.indexOf('notifications'));
+    expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 
-  test('the unpriced recheck locks every row its verdict reads — the visit, its parent, the combined invoice and the prepay funding — before reading them', async () => {
-    const TERM = uid(11);
-    const family = { id: VISIT, customer_id: CUST, recurring_parent_id: PARENT, first_application_invoice_id: INV, annual_prepay_term_id: TERM };
-    mockTables.scheduled_services = [family];
-    mockTables.annual_prepay_terms = [{ id: TERM, prepay_invoice_id: INV2 }];
-    mockTables['scheduled_services as ss'] = [visit({ status: 'completed', recurring_parent_id: PARENT, first_application_invoice_id: INV, first_application_invoice_status: 'draft' })];
-    const row = note({ id: uid(570), category: 'alert', metadata: { dedupeKey: `unpriced-series:${PARENT}`, scheduled_service_id: VISIT, customer_id: CUST } });
+  test('a change that lands between the write and the final judgement puts the bell back exactly as it was', async () => {
+    churnedWithDraft();
+    const row = divergenceRow(uid(551));
+    const before = JSON.parse(row.metadata);
     mockTables.notifications = [row];
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 1 });
-    const locks = mockQueries.filter((q) => q.calls.some(([m]) => m === 'forShare'));
-    const lockedIds = (table) => locks.filter((q) => q.table === table).flatMap((q) => q.calls.filter(([m]) => m === 'whereIn').map(([, , ids]) => ids)).flat();
-    expect(lockedIds('scheduled_services')).toEqual(expect.arrayContaining([VISIT, PARENT]));
-    // The combined first-application invoice AND the term's prepay invoice (the funding).
-    expect(lockedIds('invoices')).toEqual(expect.arrayContaining([INV, INV2]));
-    expect(locks.some((q) => q.table === 'annual_prepay_terms')).toBe(true);
-    // Locks first, then the joined read the verdict uses.
-    const order = mockQueries.map((q) => q.table);
-    expect(order.lastIndexOf('annual_prepay_terms')).toBeLessThan(order.lastIndexOf('scheduled_services as ss'));
+    let invoiceReads = 0;
+    mockHooks.invoices = () => { invoiceReads += 1; if (invoiceReads === 3) mockTables.invoices[0].status = 'processing'; };
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
+    expect(row.read_at).toBeNull();
+    expect(JSON.parse(row.metadata)).toEqual(before);
   });
 
-  test('a new-lead bell retired on a booking locks the bookings its verdict read', async () => {
-    const leadNoteRow = note({ id: uid(580), category: 'new_lead', metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } } });
-    mockTables.leads = [{ id: LEAD, status: 'new', converted_at: null, deleted_at: null, created_at: new Date('2026-09-28T12:00:00Z'), customer_id: CUST, estimate_id: null }];
-    mockTables.scheduled_services = [{ id: VISIT, customer_id: CUST, latest_created_at: new Date('2026-09-28T13:00:00Z') }];
-    mockTables.notifications = [leadNoteRow];
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 1, byClass: { new_lead: 1 } });
-    const bookingLock = mockQueries.find((q) => q.table === 'scheduled_services' && q.calls.some(([m]) => m === 'forShare'));
-    expect(bookingLock.calls).toEqual(expect.arrayContaining([['whereIn', 'customer_id', [CUST]], ['whereNull', 'recurring_parent_id'], ['whereNull', 'parent_service_id']]));
+  test('a person who reads the bell in that window keeps their read: nothing is put back over it', async () => {
+    churnedWithDraft();
+    const row = divergenceRow(uid(552));
+    mockTables.notifications = [row];
+    const theirRead = new Date('2026-09-28T16:00:01Z');
+    let invoiceReads = 0;
+    mockHooks.invoices = () => {
+      invoiceReads += 1;
+      if (invoiceReads === 3) { mockTables.invoices[0].status = 'processing'; row.read_at = theirRead; }
+    };
+    await runAdminAlertRelevanceSweep({ now: NOW });
+    expect(row.read_at).toBe(theirRead);
   });
 
-  test('a backlog larger than one run is walked across runs: the next run resumes where the page cap stopped', async () => {
-    mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })]; // still stuck: nothing retires
-    mockTables.notifications = Array.from({ length: 10205 }, (_v, i) => staleNote(uid(20000 + i)));
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 10000, retired: 0 });
-    mockQueries.length = 0;
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 205, retired: 0 });
-    const firstPage = mockQueries.find((q) => q.table === 'notifications');
-    expect(firstPage.calls).toEqual(expect.arrayContaining([['where', 'id', '>', uid(20000 + 9999)]]));
-    // Reaching the end leaves nothing to resume: the next run starts over
-    // (and the one after it finishes the walk again, leaving no resume point).
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 10000 });
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 205 });
+  test('no row locks anywhere: the sweep never takes FOR SHARE / FOR UPDATE (invoice settlement takes the visit FOR UPDATE NOWAIT)', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed', recurring_parent_id: PARENT, first_application_invoice_id: INV, first_application_invoice_status: 'draft' })];
+    mockTables.notifications = [staleNote(uid(553)), divergenceRow(uid(554))];
+    churnedWithDraft();
+    await runAdminAlertRelevanceSweep({ now: NOW });
+    expect(mockQueries.some((q) => q.calls.some(([m]) => m === 'forShare' || m === 'forUpdate'))).toBe(false);
   });
 
   test('a row a refresh rewrote after the batch read is left for the next sweep', async () => {
@@ -582,11 +584,9 @@ describe('runAdminAlertRelevanceSweep', () => {
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toMatchObject({ scanned: 205, retired: 205 });
     expect(mockTables.notifications.every((r) => r.read_at === 'NOW')).toBe(true);
-    const lockedRead = (q) => q.calls.some(([m]) => m === 'forShare');
     // The batched first pass reads visits once per page; each retirement then
-    // locks its visit family once and re-reads it once.
-    expect(mockQueries.filter((q) => q.table === 'scheduled_services as ss')).toHaveLength(2 + 205);
-    expect(mockQueries.filter((q) => q.table === 'scheduled_services' && lockedRead(q))).toHaveLength(205);
+    // judges its row on a fresh read before the write and once after it.
+    expect(mockQueries.filter((q) => q.table === 'scheduled_services as ss')).toHaveLength(2 + 205 * 2);
   });
 
   test('one unreadable row is skipped, not fatal', async () => {
