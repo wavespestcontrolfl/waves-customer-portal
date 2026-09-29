@@ -221,6 +221,7 @@ describe('intelligence bar Cloudflare write tools (preview only)', () => {
       result: [{
         name: 'spoke-venice',
         latest_deployment: {
+          id: 'dep-111',
           latest_stage: { name: 'build', status: 'failure' },
           deployment_trigger: { metadata: { branch: 'main' } },
           created_on: '2026-07-11T09:00:00Z',
@@ -233,7 +234,46 @@ describe('intelligence bar Cloudflare write tools (preview only)', () => {
     expect(result.preview).toBe(true);
     expect(result.project).toBe('spoke-venice');
     expect(result.deployment.latest_status).toBe('failure');
+    // The pinned exact deployment id — codex r3 P1 on #5275: deployed_at is
+    // stripped from the fingerprint as a volatile `_at` field, so this id is
+    // the only thing that binds the approval to WHICH deployment.
+    expect(result.deployment.id).toBe('dep-111');
     expect(result.note).toContain('spoke-venice');
+  });
+
+  // Codex r3 P1 on #5275: deployed_at is volatile (stripped by the
+  // fingerprint's `_at`-suffix rule), so a NEW deployment landing between
+  // preview and confirm — with the SAME stage/status/branch text — must
+  // still be caught as drift. Only the deployment id makes that possible.
+  test('retry_cloudflare_pages_build: the preview fingerprint changes when the deployment id changes, even with identical stage/status/branch text', async () => {
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    const project = (depId, createdOn) => ({
+      success: true,
+      result: [{
+        name: 'spoke-venice',
+        latest_deployment: {
+          id: depId,
+          latest_stage: { name: 'build', status: 'failure' },
+          deployment_trigger: { metadata: { branch: 'main' } },
+          created_on: createdOn,
+        },
+      }],
+    });
+    global.fetch.mockResolvedValueOnce(jsonResponse(project('dep-111', '2026-07-11T09:00:00Z')));
+    const before = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    // A brand-new failed deployment on the same branch — identical stage,
+    // status and branch text, only the id (and the volatile timestamp) differ.
+    global.fetch.mockResolvedValueOnce(jsonResponse(project('dep-222', '2026-07-12T09:00:00Z')));
+    const after = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    expect(previewFingerprint(after)).not.toBe(previewFingerprint(before));
+
+    // But a re-fetch of the SAME deployment (only its volatile field would
+    // differ, and it doesn't even here) still fingerprints identically.
+    global.fetch.mockResolvedValueOnce(jsonResponse(project('dep-111', '2026-07-11T09:00:00Z')));
+    const again = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    expect(previewFingerprint(again)).toBe(previewFingerprint(before));
   });
 
   test('retry_cloudflare_pages_build: unknown project returns an error result, no confirm', async () => {

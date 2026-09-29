@@ -1529,17 +1529,33 @@ async function submitGscSitemap(input) {
       // the bare domain rather than refuse a site the registry confirms.
       site = matches[0] || { domain: canonicalDomain, name: canonicalDomain, area: null };
     }
-    // The pinned canonical domain (the registry's own value, lowercased) —
-    // never the operator's raw casing — is what a future commit path must
-    // submit.
-    const siteUrl = `https://${canonicalDomain}`;
-    const sitemapUrl = `${siteUrl}${sitemapPath.startsWith('/') ? '' : '/'}${sitemapPath}`;
+    // A domain the fleet registry confirms is still not necessarily a
+    // property THIS service account can submit to — a URL-prefix property
+    // ("https://domain/") and a domain property ("sc-domain:domain") are
+    // different Search Console properties, and only one may actually be
+    // verified for this account. Resolve the real, exact property live
+    // (reusing search-console-v2.js's own URL-prefix/sc-domain: resolution)
+    // rather than synthesizing a URL that merely looks right (codex r3 P1 on
+    // #5275) — a synthesized property that isn't accessible would commit to
+    // nothing once the write path ships.
+    const SearchConsoleV2 = require('../seo/search-console-v2');
+    const resolved = await SearchConsoleV2.resolveAccessibleProperty(canonicalDomain);
+    if (resolved.error === 'not_accessible') {
+      throw new Error(`Neither Search Console property for "${canonicalDomain}" (${resolved.checked.join(' or ')}) is accessible to this service account.`);
+    }
+    if (resolved.error) throw new Error(resolved.error);
+    // The pinned canonical property identifier — Search Console's own
+    // verified form, never a synthesized guess — is what a future commit
+    // path must submit against.
+    const siteUrl = resolved.siteUrl;
+    const sitemapUrl = `https://${canonicalDomain}${sitemapPath.startsWith('/') ? '' : '/'}${sitemapPath}`;
     return {
       preview: true,
       tool: 'submit_gsc_sitemap',
       site: { domain: site.domain, name: site.name, area: site.area },
+      property: siteUrl,
       sitemap_url: sitemapUrl,
-      note: `Submit "${sitemapUrl}" to Google Search Console for ${site.name} (${site.domain}).`,
+      note: `Submit "${sitemapUrl}" to Google Search Console property "${siteUrl}" for ${site.name} (${site.domain}).`,
     };
   }
   return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };

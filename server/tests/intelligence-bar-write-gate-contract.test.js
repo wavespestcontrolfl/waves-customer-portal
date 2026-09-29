@@ -31,6 +31,12 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// submit_gsc_sitemap now resolves the real Search Console property live
+// (codex r3 P1 on #5275) — keep that off the network here too, like the
+// route-optimizer mock below.
+jest.mock('../services/seo/search-console-v2', () => ({
+  resolveAccessibleProperty: jest.fn(async (domain) => ({ siteUrl: `https://${domain}/`, permissionLevel: 'siteOwner' })),
+}));
 // Behavioral tests drive optimize_* far enough to invoke the optimizer —
 // keep it off the network.
 jest.mock('../services/route-optimizer', () => ({
@@ -650,6 +656,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         result: [{
           name: 'bradenton-pest-control',
           latest_deployment: {
+            id: 'cf-dep-1',
             latest_stage: { name: 'deploy', status: 'failure' },
             deployment_trigger: { metadata: { branch: 'main' } },
             created_on: '2026-01-01T00:00:00Z',
@@ -681,7 +688,14 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     },
     rerun_failed_github_checks: {
       env: { GITHUB_TOKEN: 'test-github-token' },
-      responses: [GITHUB_PR_FIXTURE, { check_runs: [{ name: 'tests', status: 'completed', conclusion: 'failure', id: 111 }] }],
+      // Third response is the /actions/runs?head_sha=… list the executor now
+      // resolves the failed check into a rerunnable WORKFLOW-RUN id from
+      // (codex r3 P1 on #5275 — a check-run id is not a workflow-run id).
+      responses: [
+        GITHUB_PR_FIXTURE,
+        { check_runs: [{ name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } }] },
+        { workflow_runs: [{ id: 999888, name: 'CI', status: 'completed', conclusion: 'failure' }] },
+      ],
     },
     add_github_pr_label: { env: { GITHUB_TOKEN: 'test-github-token' }, responses: [GITHUB_PR_FIXTURE, [{ name: 'needs-review' }]] },
     request_codex_review: { env: { GITHUB_TOKEN: 'test-github-token' }, responses: [GITHUB_PR_FIXTURE] },

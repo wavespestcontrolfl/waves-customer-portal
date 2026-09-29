@@ -289,10 +289,45 @@ describe('intelligence bar Railway write tools (preview only)', () => {
     const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
     expect(result.error).toBeUndefined();
     expect(result.preview).toBe(true);
-    // The pinned canonical identity (id + exact name), not just the name.
-    expect(result.service).toEqual({ id: 's1', service: 'portal', latest_deployment_status: 'SUCCESS', deployed_at: '2026-07-11T10:00:00Z' });
+    // The pinned canonical identity (id + exact name), not just the name —
+    // latest_deployment_id (codex r3 P1 on #5275) is what actually binds the
+    // fingerprint to WHICH deployment, since deployed_at is volatile.
+    expect(result.service).toEqual({
+      id: 's1', service: 'portal', latest_deployment_id: 'd1',
+      latest_deployment_status: 'SUCCESS', deployed_at: '2026-07-11T10:00:00Z',
+    });
     expect(result.note).toContain('portal');
     expect(result.note).toMatch(/Redeploy/);
+  });
+
+  // Codex r3 P1 on #5275: deployed_at is volatile (stripped by the
+  // fingerprint's `_at`-suffix rule), so a NEW deploy landing between preview
+  // and confirm — with the SAME status text (e.g. another SUCCESS) — must
+  // still be caught as drift. Only latest_deployment_id makes that possible.
+  test('redeploy_railway_service: the preview fingerprint changes when the deployment id changes, even with identical status text', async () => {
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    const env = (depId, createdAt) => gqlResponse({
+      environment: {
+        id: 'env-1',
+        name: 'production',
+        serviceInstances: { edges: [{ node: { serviceId: 's1', serviceName: 'portal', latestDeployment: { id: depId, status: 'SUCCESS', createdAt } } }] },
+      },
+    });
+    global.fetch.mockResolvedValueOnce(env('d1', '2026-07-11T10:00:00Z'));
+    const before = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    // A brand-new successful deploy — identical status text, only the id
+    // (and the volatile timestamp) differ.
+    global.fetch.mockResolvedValueOnce(env('d2', '2026-07-12T10:00:00Z'));
+    const after = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    expect(previewFingerprint(after)).not.toBe(previewFingerprint(before));
+
+    // A re-fetch of the SAME deployment still fingerprints identically.
+    global.fetch.mockResolvedValueOnce(env('d1', '2026-07-11T10:00:00Z'));
+    const again = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    expect(previewFingerprint(again)).toBe(previewFingerprint(before));
   });
 
   test('redeploy_railway_service: a substring is never enough — it never picks a service that merely contains the input', async () => {

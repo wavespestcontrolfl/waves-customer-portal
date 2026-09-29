@@ -65,7 +65,7 @@ Use for: "what is commit abae45b?", "what's live right now?" (after getting the 
   },
   {
     name: 'rerun_failed_github_checks',
-    description: `Rerun the failed jobs of the most recent CI run for a pull request's current head commit (only the failed jobs, not the whole run). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to GitHub.
+    description: `Rerun the failed jobs (only the failed jobs, not the whole run) of every failed GitHub Actions workflow run on a pull request's current head commit — a head commit can have more than one workflow run, and this reruns each that failed. A failed check from a non-Actions app (e.g. a third-party status check) cannot be rerun from here. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to GitHub.
 Use for: "rerun the failed checks on PR 5230", "that CI run flaked, retry it"`,
     input_schema: {
       type: 'object',
@@ -219,30 +219,67 @@ async function resolvePr(prNumber) {
 // card names the PR and lists exactly which jobs are currently failing.
 // Confirmed: the commit path (a GitHub rerun-failed-jobs POST) is not built
 // in this PR. Full access is enforced by the route (ib-access.js).
+const GITHUB_ACTIONS_APP_SLUG = 'github-actions';
+const FAILED_CONCLUSIONS = ['failure', 'timed_out', 'cancelled'];
+
+// The Checks API (commits/{sha}/check-runs) returns one row per CHECK — for
+// a GitHub Actions job that is one row per job, but third-party apps
+// (Codecov, a status-check bot, …) post their own check runs the same way,
+// and the rerun-failed-jobs endpoint that a future commit path calls takes a
+// WORKFLOW-RUN id, not a check-run id (codex r3 P1 on #5275 — check-run ids
+// were being pinned as `run_id` and would 404 against that endpoint even
+// when they did happen to be Actions-backed). Actions-backed check runs
+// carry `app.slug === 'github-actions'`; everything else cannot be rerun
+// from here at all.
 async function rerunFailedGithubChecks(input) {
   if (input.confirmed !== true) {
     const pr = await resolvePr(input.pr_number);
     const sha = pr.head?.sha;
     if (!sha) throw new Error(`PR #${pr.number} has no head commit to check.`);
     const checkRuns = await githubGet(`/repos/${repoPath()}/commits/${sha}/check-runs`, { per_page: 100 });
-    const failed = (checkRuns?.check_runs || [])
-      .filter(r => r.status === 'completed' && ['failure', 'timed_out', 'cancelled'].includes(r.conclusion))
-      .map(r => ({ name: r.name, conclusion: r.conclusion, run_id: r.id }));
-    if (!failed.length) {
-      // No failed checks on the head commit — a rerun would have nothing to
-      // do. A refusal (isToolFailure) so no confirmation card is offered for
-      // an action that could only be a no-op (codex r2 P2 on #5275).
-      return {
-        error: `No failed checks found on PR #${pr.number} "${pr.title}"'s current head commit — nothing to rerun.`,
-        code: 'no_failed_checks',
-      };
+    const failedChecks = (checkRuns?.check_runs || [])
+      .filter(r => r.status === 'completed' && FAILED_CONCLUSIONS.includes(r.conclusion));
+    const nonActionsFailed = failedChecks
+      .filter(r => r.app?.slug !== GITHUB_ACTIONS_APP_SLUG)
+      .map(r => ({ name: r.name, conclusion: r.conclusion }));
+
+    // Only resolve workflow runs when at least one failed check is
+    // Actions-backed — several failed checks can share one workflow run, and
+    // rerun-failed-jobs reruns every failed job in the run it names, so the
+    // run id (never a per-check id) is what a future commit path needs.
+    let failedRuns = [];
+    if (failedChecks.length > nonActionsFailed.length) {
+      const runsResp = await githubGet(`/repos/${repoPath()}/actions/runs`, { head_sha: sha, per_page: 100 });
+      const runs = Array.isArray(runsResp?.workflow_runs) ? runsResp.workflow_runs : [];
+      failedRuns = runs
+        .filter(r => r.status === 'completed' && FAILED_CONCLUSIONS.includes(r.conclusion))
+        .map(r => ({ id: r.id, name: r.name, conclusion: r.conclusion }));
+    }
+
+    if (!failedRuns.length) {
+      // Nothing rerunnable: either no failed check at all, or every failed
+      // check belongs to a non-Actions app this endpoint can't touch. Either
+      // way a refusal (isToolFailure), not a card that could only fail on
+      // Confirm (codex r2 P2 on #5275).
+      return nonActionsFailed.length
+        ? {
+          error: `PR #${pr.number} "${pr.title}"'s failed check(s) (${nonActionsFailed.map(f => f.name).join(', ')}) are not GitHub Actions runs and can't be rerun from here.`,
+          code: 'no_rerunnable_checks',
+        }
+        : {
+          error: `No failed checks found on PR #${pr.number} "${pr.title}"'s current head commit — nothing to rerun.`,
+          code: 'no_failed_checks',
+        };
     }
     return {
       preview: true,
       tool: 'rerun_failed_github_checks',
       pr: { number: pr.number, title: pr.title, head_sha: sha.slice(0, 10) },
-      failed_checks: failed,
-      note: `Rerun ${failed.length} failed job(s) on PR #${pr.number} "${pr.title}" (${failed.map(f => f.name).join(', ')}) — only the failed jobs, not the whole run.`,
+      // The pinned canonical workflow-run identity a future commit path must
+      // call rerun-failed-jobs against — never a check-run id.
+      workflow_runs: failedRuns,
+      ...(nonActionsFailed.length ? { non_actions_failed_checks: nonActionsFailed } : {}),
+      note: `Rerun the failed jobs in ${failedRuns.length} workflow run(s) on PR #${pr.number} "${pr.title}" (${failedRuns.map(r => r.name).join(', ')})${nonActionsFailed.length ? ` — ${nonActionsFailed.map(f => f.name).join(', ')} cannot be rerun from here` : ''}.`,
     };
   }
   return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };

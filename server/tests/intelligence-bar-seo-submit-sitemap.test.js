@@ -7,7 +7,9 @@
  * missing-token refusal, a human-readable preview naming the real
  * fleet_sites row (not just the typed domain string), EXACT matching only
  * (pre-push audit #5275 — no substring, no SQL wildcard widening, refuse on
- * ambiguity), and the commit path's refusal.
+ * ambiguity), the live Search Console property resolution (codex r3 P1 on
+ * #5275 — a synthesized siteUrl is never trusted), and the commit path's
+ * refusal.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -22,6 +24,8 @@ function makeDbMock(rows) {
   const builder = { select: () => Promise.resolve(rows) };
   return jest.fn(() => builder);
 }
+
+const mockResolveAccessibleProperty = jest.fn();
 
 let executeSeoTool;
 
@@ -39,11 +43,18 @@ afterAll(() => {
 beforeEach(() => {
   jest.resetModules();
   for (const key of ENV_KEYS) delete process.env[key];
+  // Default: the property is accessible in its plain URL-prefix form — most
+  // tests below are about fleet-domain resolution, not GSC property
+  // resolution, so this keeps them focused on what they assert.
+  mockResolveAccessibleProperty.mockReset().mockImplementation(async (domain) => ({ siteUrl: `https://${domain}/`, permissionLevel: 'siteOwner' }));
 });
 
 function load(rows) {
   const dbMock = makeDbMock(rows);
   jest.doMock('../models/db', () => dbMock);
+  jest.doMock('../services/seo/search-console-v2', () => ({
+    resolveAccessibleProperty: (...args) => mockResolveAccessibleProperty(...args),
+  }));
   ({ executeSeoTool } = require('../services/intelligence-bar/seo-tools'));
   return dbMock;
 }
@@ -72,6 +83,9 @@ describe('submit_gsc_sitemap (preview only)', () => {
     // a substring (both rows above contain "bradenton").
     expect(result.site).toEqual({ domain: 'bradentonflpestcontrol.com', name: 'Bradenton Pest Control', area: 'Bradenton' });
     expect(result.sitemap_url).toBe('https://bradentonflpestcontrol.com/sitemap-index.xml');
+    // The pinned live Search Console property, resolved (not synthesized).
+    expect(result.property).toBe('https://bradentonflpestcontrol.com/');
+    expect(mockResolveAccessibleProperty).toHaveBeenCalledWith('bradentonflpestcontrol.com');
     expect(result.note).toContain('Bradenton Pest Control');
   });
 
@@ -176,6 +190,51 @@ describe('submit_gsc_sitemap (preview only)', () => {
     const result = await executeSeoTool('submit_gsc_sitemap', {});
     expect(result.error).toMatch(/domain/);
     expect(dbMock).not.toHaveBeenCalled();
+  });
+
+  test('the property is resolved in its sc-domain: form when that is what is actually verified', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    load([{ domain: 'bradentonflpestcontrol.com', name: 'Bradenton Pest Control', area: 'Bradenton' }]);
+    mockResolveAccessibleProperty.mockResolvedValue({ siteUrl: 'sc-domain:bradentonflpestcontrol.com', permissionLevel: 'siteOwner' });
+
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'bradentonflpestcontrol.com' });
+    expect(result.error).toBeUndefined();
+    expect(result.property).toBe('sc-domain:bradentonflpestcontrol.com');
+    // The feedpath (sitemap_url) is still a real crawlable URL, independent
+    // of which property form Search Console verified.
+    expect(result.sitemap_url).toBe('https://bradentonflpestcontrol.com/sitemap-index.xml');
+    expect(result.note).toContain('sc-domain:bradentonflpestcontrol.com');
+  });
+
+  test('a domain the fleet registry tracks but this service account cannot reach in EITHER property form is refused, never a synthesized URL', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    load([{ domain: 'bradentonflpestcontrol.com', name: 'Bradenton Pest Control', area: 'Bradenton' }]);
+    mockResolveAccessibleProperty.mockResolvedValue({ error: 'not_accessible', checked: ['https://bradentonflpestcontrol.com/', 'sc-domain:bradentonflpestcontrol.com'] });
+
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'bradentonflpestcontrol.com' });
+    expect(result.error).toMatch(/is accessible to this service account/);
+    expect(result.error).toContain('https://bradentonflpestcontrol.com/');
+    expect(result.error).toContain('sc-domain:bradentonflpestcontrol.com');
+    expect(result.preview).toBeUndefined();
+    expect(result.property).toBeUndefined();
+  });
+
+  test('a GSC init/list failure surfaces as a refusal, never a synthesized property', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    load([]);
+    mockResolveAccessibleProperty.mockResolvedValue({ error: 'Google Search Console is not configured or failed to initialize.' });
+
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com' });
+    expect(result.error).toMatch(/failed to initialize/);
+    expect(result.preview).toBeUndefined();
+  });
+
+  test('missing GOOGLE_SERVICE_ACCOUNT_JSON stays the existing configured:false refusal and never reaches property resolution', async () => {
+    const dbMock = load([]);
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com' });
+    expect(result.configured).toBe(false);
+    expect(dbMock).not.toHaveBeenCalled();
+    expect(mockResolveAccessibleProperty).not.toHaveBeenCalled();
   });
 
   test('confirmed:true refuses — the commit path is not built in this PR', async () => {

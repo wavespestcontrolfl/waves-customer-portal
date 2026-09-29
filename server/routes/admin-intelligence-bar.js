@@ -448,6 +448,14 @@ function ibWritesDisabled() {
 }
 const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work; make the change on the normal admin screen.';
 
+// tool_health_events.error_message is a separate telemetry sink from
+// intelligence_bar_queries (the redacted prompt/response above) — a PII or
+// outside-write tool's refusal text (a GitHub PR title, a Sentry issue
+// title, a customer name) must not land there verbatim either (Codex r3 P1
+// on #5275). The operator-visible result.error in the tool_result content is
+// never touched by this — only this health-event copy.
+const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
+
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
 }
@@ -2604,7 +2612,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // Outside-service writes too (Codex r1 on #5275, P1): assign_sentry_issue
         // takes an account email, and their scope is 'none' so they are never
         // in PII_TOOL_NAMES.
-        const loggableInput = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)
+        const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name);
+        const loggableInput = toolTelemetrySensitive
           ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, loggableInput);
@@ -2737,6 +2746,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // Only a card that exists blocks further writes; a proposal refused at
         // preflight left nothing to reconcile, so a corrected call may follow.
         if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) writeFrontierBlocked = true;
+        // Codex r3 P1 on #5275: a github-ops refusal (no failed checks / label
+        // already present) embeds the PR title in `error`, and this sink is
+        // NOT the redacted intelligence_bar_queries telemetry (finding above)
+        // — it is a separate table this route writes unconditionally, so the
+        // same sensitivity test applies here too, on the health-event copy
+        // only. The operator-visible result.error (in the tool_result content
+        // below) is untouched.
         recordToolEvent({
           source: context === 'tech' ? 'tech-intelligence-bar' : 'intelligence-bar',
           context: context || null,
@@ -2744,7 +2760,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           success: !failed,
           durationMs: Date.now() - toolStartedAt,
           circuitOpen,
-          errorMessage,
+          errorMessage: toolTelemetrySensitive && errorMessage ? REDACTED_TOOL_HEALTH_ERROR : errorMessage,
         });
         gapCollector?.toolResult(toolUse.name, result, failed);
 

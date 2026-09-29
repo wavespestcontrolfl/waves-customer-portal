@@ -301,6 +301,18 @@ async function resolveSentryAssignee(rawAssignee) {
   };
 }
 
+// The issue's current assignee, id + display name only — never their email
+// (same discipline as resolveSentryAssignee's own preview fields). null when
+// unassigned or assigned to a team rather than a person.
+function currentAssigneeSummary(issue) {
+  const assignedTo = issue.assignedTo;
+  if (!assignedTo || assignedTo.type !== 'user') return null;
+  return {
+    id: assignedTo.id != null ? String(assignedTo.id) : null,
+    name: assignedTo.name || 'Sentry member',
+  };
+}
+
 // Shared preview/refuse-commit executor for resolve/ignore/assign — the
 // structural two-step gate (write-gates.js OUTSIDE_WRITE_TOOL_NAMES). Full
 // access is enforced by the route, not here (ib-access.js ibFullAccess).
@@ -315,29 +327,61 @@ async function writeSentryIssue(toolName, input) {
   // just the short id, and never mutates Sentry.
   if (input.confirmed !== true) {
     const issue = await resolveIssueByShortId(shortId);
+
+    // Refuse a no-op transition (resolve on an already-resolved issue, ignore
+    // on an already-ignored one) rather than propose a card that could only
+    // report success without changing anything (codex r3 P2 on #5275; same
+    // isToolFailure convention as the github-ops no-op refusals). action.past
+    // is exactly the Sentry issue-status value the write would set.
+    if (toolName !== 'assign_sentry_issue' && issue.status === action.past) {
+      return {
+        error: `Issue "${issue.title}" (${issue.shortId}) is already ${action.past} in Sentry.`,
+        code: `already_${action.past}`,
+      };
+    }
+
+    let assigneeMember = null;
+    if (toolName === 'assign_sentry_issue') {
+      assigneeMember = await resolveSentryAssignee(input.assignee);
+      const current = currentAssigneeSummary(issue);
+      if (current?.id && current.id === String(assigneeMember.id)) {
+        return {
+          error: `Issue "${issue.title}" (${issue.shortId}) is already assigned to ${assigneeMember.display_name} in Sentry.`,
+          code: 'already_assigned',
+        };
+      }
+    }
+
     const preview = {
       preview: true,
       tool: toolName,
       action: action.verb,
       // The pinned canonical identity (internal id + the exact short id) —
       // never a re-resolve of the operator's raw string — is what a future
-      // commit path must act on.
+      // commit path must act on. `status` is a STABLE field (changes only on
+      // an explicit transition, never drifts the way event/user counters
+      // do) bound into the preview/fingerprint so a status change between
+      // preview and confirm (someone else resolved it meanwhile) is caught
+      // as drift, not silently overwritten (codex r3 P2 on #5275).
       // Stable identity only. /confirm-action re-runs this preview and
       // compares its fingerprint, so live counters (events, users, last
       // seen) on an active issue would refuse every confirm as drifted.
       issue: {
         id: issue.id, short_id: issue.shortId, title: truncate(issue.title),
         culprit: truncate(issue.culprit), level: issue.level, link: issue.permalink,
+        status: issue.status || null,
       },
       note: `${action.verb} "${issue.title}" (${issue.shortId}) in Sentry.`,
     };
     if (toolName === 'assign_sentry_issue') {
-      const member = await resolveSentryAssignee(input.assignee);
       // The pinned canonical member (id + display name) — never the
       // operator's raw string, and never their email — is what a future
-      // commit path must assign to.
-      preview.assignee = { id: member.id, name: member.display_name };
-      preview.note = `Assign "${issue.title}" (${issue.shortId}) to ${member.display_name} in Sentry.`;
+      // commit path must assign to. current_assignee (also id + display name
+      // only, no email) is the FROM half of the transition — null when
+      // currently unassigned or assigned to a team.
+      preview.assignee = { id: assigneeMember.id, name: assigneeMember.display_name };
+      preview.current_assignee = currentAssigneeSummary(issue);
+      preview.note = `Assign "${issue.title}" (${issue.shortId}) to ${assigneeMember.display_name} in Sentry.`;
     }
     return preview;
   }

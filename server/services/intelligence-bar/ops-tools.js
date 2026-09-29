@@ -397,6 +397,12 @@ async function writeRailwayService(toolName, input) {
       service: {
         id: service.serviceId,
         service: service.serviceName,
+        // The pinned exact deployment id — deployed_at (below) is stripped
+        // from the fingerprint as a volatile `_at` field, so without this
+        // the fingerprint bound to nothing distinguishing WHICH deployment
+        // is "latest": a new deploy landing between preview and confirm
+        // would go undetected as drift (codex r3 P1 on #5275).
+        latest_deployment_id: service.latestDeployment?.id || null,
         latest_deployment_status: service.latestDeployment?.status || 'NONE',
         deployed_at: service.latestDeployment?.createdAt || null,
       },

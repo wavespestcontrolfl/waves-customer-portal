@@ -155,15 +155,21 @@ describe('intelligence bar GitHub write tools (preview only)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('rerun_failed_github_checks: unconfirmed names the PR and lists only the failed checks', async () => {
+  test('rerun_failed_github_checks: unconfirmed names the PR and pins the failed WORKFLOW RUN id (never a check-run id)', async () => {
     process.env.GITHUB_TOKEN = 'ghp_x';
     global.fetch
       .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
       .mockResolvedValueOnce(jsonResponse({
         check_runs: [
-          { name: 'tests', status: 'completed', conclusion: 'failure', id: 111 },
-          { name: 'lint', status: 'completed', conclusion: 'success', id: 112 },
-          { name: 'build', status: 'in_progress', conclusion: null, id: 113 },
+          { name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } },
+          { name: 'lint', status: 'completed', conclusion: 'success', id: 112, app: { slug: 'github-actions' } },
+          { name: 'build', status: 'in_progress', conclusion: null, id: 113, app: { slug: 'github-actions' } },
+        ],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow_runs: [
+          { id: 999888, name: 'CI', status: 'completed', conclusion: 'failure' },
+          { id: 999889, name: 'Lint', status: 'completed', conclusion: 'success' },
         ],
       }));
 
@@ -171,8 +177,82 @@ describe('intelligence bar GitHub write tools (preview only)', () => {
     expect(result.error).toBeUndefined();
     expect(result.preview).toBe(true);
     expect(result.pr).toEqual({ number: 5230, title: PR_FIXTURE.title, head_sha: 'abc123def4' });
-    expect(result.failed_checks).toEqual([{ name: 'tests', conclusion: 'failure', run_id: 111 }]);
+    // The WORKFLOW-RUN id (999888), never the check-run id (111) — that's
+    // what /actions/runs/{run_id}/rerun-failed-jobs actually takes.
+    expect(result.workflow_runs).toEqual([{ id: 999888, name: 'CI', conclusion: 'failure' }]);
+    expect(result.non_actions_failed_checks).toBeUndefined();
     expect(result.note).toContain(PR_FIXTURE.title);
+    expect(result.note).toContain('CI');
+    // The actions/runs call is scoped to this exact head sha.
+    const runsCallUrl = new URL(global.fetch.mock.calls[2][0]);
+    expect(runsCallUrl.pathname).toBe('/repos/wavespestcontrolfl/waves-customer-portal/actions/runs');
+    expect(runsCallUrl.searchParams.get('head_sha')).toBe('abc123def456');
+  });
+
+  test('rerun_failed_github_checks: a failed check can span several workflow runs — every failed run is pinned', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({
+        check_runs: [
+          { name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } },
+          { name: 'deploy-preview', status: 'completed', conclusion: 'failure', id: 222, app: { slug: 'github-actions' } },
+        ],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow_runs: [
+          { id: 1, name: 'CI', status: 'completed', conclusion: 'failure' },
+          { id: 2, name: 'Preview Deploy', status: 'completed', conclusion: 'failure' },
+        ],
+      }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.error).toBeUndefined();
+    expect(result.workflow_runs).toEqual([
+      { id: 1, name: 'CI', conclusion: 'failure' },
+      { id: 2, name: 'Preview Deploy', conclusion: 'failure' },
+    ]);
+  });
+
+  test('rerun_failed_github_checks: a failed check from a non-Actions app cannot be rerun from here', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({
+        check_runs: [
+          { name: 'codecov/patch', status: 'completed', conclusion: 'failure', id: 333, app: { slug: 'codecov' } },
+        ],
+      }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('no_rerunnable_checks');
+    expect(result.error).toContain('codecov/patch');
+    expect(result.error).toContain("can't be rerun from here");
+    // No /actions/runs call at all — nothing Actions-backed to resolve.
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('rerun_failed_github_checks: a mix of an Actions failure and a non-Actions failure pins the rerunnable run and lists the rest separately', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({
+        check_runs: [
+          { name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } },
+          { name: 'codecov/patch', status: 'completed', conclusion: 'failure', id: 333, app: { slug: 'codecov' } },
+        ],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow_runs: [{ id: 999888, name: 'CI', status: 'completed', conclusion: 'failure' }],
+      }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.error).toBeUndefined();
+    expect(result.workflow_runs).toEqual([{ id: 999888, name: 'CI', conclusion: 'failure' }]);
+    expect(result.non_actions_failed_checks).toEqual([{ name: 'codecov/patch', conclusion: 'failure' }]);
+    expect(result.note).toContain('codecov/patch');
+    expect(result.note).toContain('cannot be rerun from here');
   });
 
   test('rerun_failed_github_checks: no failed checks refuses as a no-op, never a preview/card', async () => {

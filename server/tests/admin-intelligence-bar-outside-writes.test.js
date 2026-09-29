@@ -16,6 +16,7 @@ process.env.ANTHROPIC_API_KEY = 'test-key';
 
 const mockMessagesCreate = jest.fn();
 const mockCreatePendingAction = jest.fn();
+const mockRecordToolEvent = jest.fn();
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -31,7 +32,7 @@ jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
     recordSuccess: jest.fn(),
   })),
 }));
-jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: jest.fn() }));
+jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: (...args) => mockRecordToolEvent(...args) }));
 jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 jest.mock('../services/intelligence-bar/pending-actions', () => ({
   createPendingAction: (...args) => mockCreatePendingAction(...args),
@@ -205,6 +206,58 @@ describe('outside-service write tools are full-access-only in the /query dispatc
       expect(call[1]).toEqual({ fields: ['issue_short_id', 'assignee'], confirmed: false });
       expect(JSON.stringify(logger.info.mock.calls)).not.toContain('someone@example.com');
     });
+  });
+
+  // Codex r3 P1 on #5275: a github-ops no-op refusal embeds the PR title in
+  // `error`, and that string used to reach tool_health_events.error_message
+  // verbatim via recordToolEvent. github-ops-tools loads for REAL here (not
+  // stubbed above), so this exercises the actual no-op refusal path.
+  test('an outside-write no-op refusal (no failed checks to rerun) redacts the tool_health_events copy but keeps the operator-visible message', async () => {
+    const savedToken = process.env.GITHUB_TOKEN;
+    const savedFetch = global.fetch;
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    let githubCall = 0;
+    const githubResponses = [
+      { ok: true, status: 200, json: async () => ({ number: 5230, title: 'Secret PR title that must not reach tool_health_events', head: { sha: 'abc123def456' } }) },
+      { ok: true, status: 200, json: async () => ({ check_runs: [{ name: 'tests', status: 'completed', conclusion: 'success', id: 111 }] }) },
+    ];
+    // Only the GitHub API calls are faked; the outer request below to this
+    // test's own local server must still reach the real fetch.
+    global.fetch = jest.fn((url, opts) => (
+      String(url).includes('api.github.com') ? Promise.resolve(githubResponses[githubCall++]) : savedFetch(url, opts)
+    ));
+    try {
+      await withServer(async (baseUrl) => {
+        mockMessagesCreate
+          .mockResolvedValueOnce(toolUseTurn('rerun_failed_github_checks', { pr_number: 5230 }))
+          .mockResolvedValueOnce(finalTextTurn());
+
+        const res = await fetch(`${baseUrl}/admin/intelligence-bar/query`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ context: 'customers', prompt: 'rerun the failed checks on PR 5230' }),
+        });
+        expect(res.status).toBe(200);
+
+        // The operator (and the model) still see the full, useful message.
+        const secondCall = mockMessagesCreate.mock.calls[1][0];
+        const toolResults = secondCall.messages[secondCall.messages.length - 1].content;
+        expect(toolResults[0].content).toContain('Secret PR title that must not reach tool_health_events');
+
+        // The health-event sink is redacted instead.
+        expect(mockRecordToolEvent).toHaveBeenCalledWith(expect.objectContaining({
+          toolName: 'rerun_failed_github_checks',
+          success: false,
+          errorMessage: expect.stringMatching(/redacted/),
+        }));
+        const healthCall = mockRecordToolEvent.mock.calls.find(([c]) => c.toolName === 'rerun_failed_github_checks');
+        expect(healthCall[0].errorMessage).not.toContain('Secret PR title');
+      });
+    } finally {
+      global.fetch = savedFetch;
+      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedToken;
+    }
   });
 
   test('the owner-only refusal also covers every other outside-write tool name', async () => {

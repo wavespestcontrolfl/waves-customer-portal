@@ -286,6 +286,12 @@ async function retryCloudflarePagesBuild(input) {
       tool: 'retry_cloudflare_pages_build',
       project: project.name,
       deployment: {
+        // The pinned exact deployment id — deployed_at (below) is stripped
+        // from the fingerprint as a volatile `_at` field, so without this
+        // the fingerprint bound to nothing distinguishing WHICH deployment
+        // is "latest": a new push landing between preview and confirm would
+        // go undetected as drift (codex r3 P1 on #5275).
+        id: dep.id || null,
         latest_stage: dep.latest_stage?.name || null,
         latest_status: dep.latest_stage?.status || 'NONE',
         branch: dep.deployment_trigger?.metadata?.branch || null,
