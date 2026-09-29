@@ -3,6 +3,31 @@ const { reserviceReportCopyGateOn } = require('./reservice-report');
 const { detectServiceLine } = require('./service-line-configs');
 const { dateOnlyToNoonUtc, formatVisitLabel, normalizeDate } = require('./time-format');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { scoreSourceFromComponents } = require('../pest-pressure/calculate');
+
+// Scale change (#4741, merged 2026-09-24): a technician's 0-5 tap became the
+// Pest Pressure score exactly (tap 3 -> 3.0); before, the tap was blended with
+// zeros (tap 3 -> 0.9). No past score was recalculated, so stored
+// pressure_index values sit on two different scales and must never be
+// compared with each other - a June 0.9 next to a September 3.0 is the same
+// tech rating, not "pressure increased".
+//
+// The per-record marker is pest_pressure_scores.component_scores carrying the
+// technicianActivityRating component (scoreSource 'technician_rating').
+// TECH_RATING_CUTOVER_AT is the fallback for a visit with no score row (or
+// when the score lookup fails): 2026-09-24 00:00 America/New_York (EDT, UTC-4).
+const SCALE_TECHNICIAN_RATING = 'technician_rating';
+const SCALE_BLENDED = 'blended';
+const TECH_RATING_CUTOVER_AT = Date.parse('2026-09-24T04:00:00Z');
+
+function pressureScaleOf(row) {
+  if (row?.pressure_scale === SCALE_TECHNICIAN_RATING || row?.pressure_scale === SCALE_BLENDED) {
+    return row.pressure_scale;
+  }
+  return serviceStartedAt(row).getTime() >= TECH_RATING_CUTOVER_AT
+    ? SCALE_TECHNICIAN_RATING
+    : SCALE_BLENDED;
+}
 
 const SEVERITY_RANK = {
   critical: 5,
@@ -50,6 +75,7 @@ function pointFromRow(row, findings = []) {
     findingsCount: findings.length,
     criticalFindingsCount: findings.filter((finding) => String(finding.severity || '').toLowerCase() === 'critical').length,
     mainDriver: highest?.title || undefined,
+    scale: pressureScaleOf(row),
   };
 }
 
@@ -111,11 +137,20 @@ function buildPressureTrendContextFromRows({
     ...(currentPressureIndex != null ? [{ ...record, pressure_index: currentPressureIndex }] : []),
   ];
 
-  const points = rows
+  const dated = rows
     .map((row) => pointFromRow(row, findingsByRecordId[String(row.id)] || []))
     .filter((point) => point.pressureIndex != null)
-    .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))
-    .slice(-limit);
+    .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+
+  // Only readings on the newest reading's scale are comparable (and chartable):
+  // when the newest is a technician tap and every earlier one is a pre-#4741
+  // blended score, the series is just the newest point -> first_visit copy,
+  // never a fake up/down and never a fake jump on the report chart.
+  const newest = dated[dated.length - 1];
+  const points = dated
+    .filter((point) => point.scale === newest?.scale)
+    .slice(-limit)
+    .map(({ scale, ...point }) => point);
 
   if (!points.length) return undefined;
 
@@ -142,6 +177,25 @@ function buildPressureTrendContextFromRows({
     customerSummary: buildCustomerSummary({ direction, percentChange, baseline, current }),
     tooltipSummary: current.mainDriver ? `Current driver: ${current.mainDriver}` : undefined,
   };
+}
+
+// Which scale each stored pressure_index was recorded on, read from the score
+// row's provenance. Best-effort: a failed lookup leaves rows unmarked and
+// pressureScaleOf falls back to the cutover date.
+async function loadPressureScales(ids, knex) {
+  const scales = new Map();
+  if (!ids.length) return scales;
+  const scoreRows = await knex('pest_pressure_scores')
+    .whereIn('service_record_id', ids)
+    .select('service_record_id', 'component_scores')
+    .catch(() => []);
+  for (const row of Array.isArray(scoreRows) ? scoreRows : []) {
+    scales.set(
+      String(row.service_record_id),
+      scoreSourceFromComponents(row.component_scores) === 'technician_rating' ? SCALE_TECHNICIAN_RATING : SCALE_BLENDED,
+    );
+  }
+  return scales;
 }
 
 async function buildPressureTrendContext({
@@ -197,6 +251,8 @@ async function buildPressureTrendContext({
     .catch(() => []);
 
   const ids = [...priorRows.map((row) => row.id), record.id].filter(Boolean);
+  const scales = await loadPressureScales(ids, knex);
+  const withScale = (row) => (scales.has(String(row.id)) ? { ...row, pressure_scale: scales.get(String(row.id)) } : row);
   const findings = ids.length
     ? await knex('service_findings')
       .whereIn('service_record_id', ids)
@@ -205,8 +261,8 @@ async function buildPressureTrendContext({
     : [];
 
   return buildPressureTrendContextFromRows({
-    record,
-    priorRows,
+    record: withScale(record),
+    priorRows: priorRows.map(withScale),
     findings,
     currentPressureIndexOverride,
     limit,
@@ -217,5 +273,6 @@ module.exports = {
   buildPressureTrendContext,
   buildPressureTrendContextFromRows,
   buildCustomerSummary,
+  TECH_RATING_CUTOVER_AT,
   SEVERITY_RANK,
 };
