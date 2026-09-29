@@ -53,7 +53,10 @@ const PORTAL_TABS = new Set(['dashboard', 'plan', 'visits', 'billing', 'refer', 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Stamp customers.last_seen_at for a foreground activity beacon.
+ * Stamp customers.last_seen_at for a foreground activity beacon. Skips a
+ * soft-deleted (merged-away) customer in the same UPDATE: executeMerge holds
+ * the loser row FOR UPDATE, so a racing stamp waits, re-reads deleted_at and
+ * matches nothing.
  * Never throws, never awaited by the caller. No-op while the gate is off or
  * for staff browsers / bots.
  */
@@ -63,6 +66,7 @@ function stampLastSeen(req, customerId) {
     Promise.resolve(db.raw(
       `UPDATE customers SET last_seen_at = now()
         WHERE id = ?::uuid
+          AND deleted_at IS NULL
           AND (last_seen_at IS NULL OR last_seen_at < now() - (?::int * interval '1 minute'))`,
       [customerId, LAST_SEEN_THROTTLE_MINUTES],
     )).catch((err) => logger.warn(`[activity] last_seen stamp failed: ${err.message}`));

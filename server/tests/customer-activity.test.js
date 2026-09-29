@@ -119,6 +119,8 @@ describe('last_seen_at stamp (foreground beacons only)', () => {
     expect(updates()).toHaveLength(1);
     const [sql, params] = updates()[0];
     expect(sql).toMatch(/last_seen_at IS NULL OR last_seen_at < now\(\)/);
+    // a merged-away (soft-deleted) customer is never stamped, in the same UPDATE
+    expect(sql).toMatch(/AND deleted_at IS NULL/);
     expect(params).toEqual([CUSTOMER_ID, activity.LAST_SEEN_THROTTLE_MINUTES]);
   });
 

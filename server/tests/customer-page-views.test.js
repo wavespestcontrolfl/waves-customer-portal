@@ -47,7 +47,16 @@ describe('recordPageView', () => {
     expect(params.slice(0, 6)).toEqual(['cust-1', 'appointment', 'scheduled_service', '42', expectedHash, longUa.slice(0, 500)]);
     // the dedupe probe repeats page/subject/ip/customer and carries the window
     expect(sql).toMatch(/customer_id IS NOT DISTINCT FROM/);
-    expect(params.slice(6)).toEqual(['appointment', '42', 'cust-1', false, 'scheduled_service', expectedHash, DEDUPE_MINUTES]);
+    expect(params.slice(6)).toEqual(['appointment', '42', 'cust-1', false, 'scheduled_service', expectedHash, DEDUPE_MINUTES, 'cust-1', 'cust-1']);
+  });
+
+  test('a customer-attributed insert is conditional on the customer being live, in the same statement (FOR SHARE)', async () => {
+    await recordPageView({ req: mkReq(), page: 'portal:plan', customerId: 'cust-1', subjectType: 'web' });
+    const sql = mockRaw.mock.calls[0][0].replace(/\s+/g, ' ');
+    expect(sql).toContain('EXISTS ( SELECT 1 FROM customers WHERE id = ?::uuid AND deleted_at IS NULL FOR SHARE )');
+    // a lead view (null customer) short-circuits the guard: nothing to look up
+    await recordPageView({ req: mkReq(), page: 'track', subjectType: 'scheduled_service', subjectId: 'a' });
+    expect(mockRaw.mock.calls[1][1].slice(-2)).toEqual([null, null]);
   });
 
   test('dedupeForever (with a subject id) turns on the ip/time bypass; without a subject id it is ignored', async () => {
@@ -71,8 +80,8 @@ describe('recordPageView', () => {
   test('a caller-supplied dedupe window replaces the default; a bad one falls back', async () => {
     await recordPageView({ req: mkReq(), page: 'track', subjectType: 'scheduled_service', subjectId: 'a', dedupeMinutes: 60 });
     await recordPageView({ req: mkReq(), page: 'track', subjectType: 'scheduled_service', subjectId: 'a', dedupeMinutes: -5 });
-    expect(mockRaw.mock.calls[0][1].slice(-1)).toEqual([60]);
-    expect(mockRaw.mock.calls[1][1].slice(-1)).toEqual([DEDUPE_MINUTES]);
+    expect(mockRaw.mock.calls[0][1][12]).toEqual(60);
+    expect(mockRaw.mock.calls[1][1][12]).toEqual(DEDUPE_MINUTES);
   });
 
   test('a deduped view (0 rows inserted) resolves false', async () => {

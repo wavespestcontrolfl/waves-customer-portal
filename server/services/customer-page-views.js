@@ -23,6 +23,13 @@
  *     The check lives in SQL (INSERT ... WHERE NOT EXISTS) so it holds across
  *     pods and deploys; two simultaneous first loads can both pass it (no
  *     unique constraint) — an accepted, rare double count.
+ *   - A customer-attributed view is written only while that customer is live
+ *     (deleted_at IS NULL), checked in the SAME statement with FOR SHARE. A
+ *     customer merge (executeMerge) holds the loser row FOR UPDATE until it
+ *     commits and soft-deletes it in the same transaction, so a beacon racing
+ *     the merge blocks on that lock, re-reads the row as deleted and writes
+ *     nothing; a plain EXISTS would have passed on the pre-commit snapshot and
+ *     left a row on the retired record after the merge's FK sweep.
  *   - `dedupeForever: true` (with a subjectId) drops the ip, time and
  *     subject_type conditions: page + subject + customer is unique for good. For subjects
  *     that are a stable id for one event (a push notification id).
@@ -146,8 +153,11 @@ function recordPageView({
              AND viewed_at > now() - (?::int * interval '1 minute')
            ))
        )
+       AND (?::uuid IS NULL OR EXISTS (
+         SELECT 1 FROM customers WHERE id = ?::uuid AND deleted_at IS NULL FOR SHARE
+       ))
        ${conflictClause}`,
-      [custId, page, subjType, subjId, ipHash, ua, page, subjId, custId, forever, subjType, ipHash, windowMinutes],
+      [custId, page, subjType, subjId, ipHash, ua, page, subjId, custId, forever, subjType, ipHash, windowMinutes, custId, custId],
     )).then((res) => !!(res && (res.rowCount === undefined || res.rowCount > 0)))
       .catch((err) => {
         logViewFailure('insert', page, subjType, err);

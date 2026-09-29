@@ -13,7 +13,9 @@ vi.mock('../utils/api', async () => {
 });
 vi.mock('../native/platform', () => ({ nativePlatform: () => platform.value }));
 
-import { reportPortalHeartbeat, reportPortalPageView, reportPushOpen, resetPortalActivityForTests } from './portalActivity';
+import {
+  reportPortalHeartbeat, reportPortalPageView, reportPushOpen, resetPortalActivityForTests, RESEND_SAME_ROUTE_MS,
+} from './portalActivity';
 
 beforeEach(() => {
   beacon.mockReset();
@@ -40,18 +42,25 @@ describe('portal page-view beacon', () => {
     expect(beacon.mock.calls[0][1].platform).toBe('web');
   });
 
-  it('does not resend the same tab inside five minutes, but sends other tabs', () => {
+  it('does not resend the same tab inside the server dedupe window (10 minutes), but sends other tabs', () => {
+    // Pinned to the server's DEDUPE_MINUTES (customer-page-views.js): a shorter memo
+    // sends beacons the server discards; a longer one loses a revisit.
+    expect(RESEND_SAME_ROUTE_MS).toBe(10 * 60 * 1000);
     reportPortalPageView('visits', 1_000);
     reportPortalPageView('visits', 1_000 + 4 * 60_000);
     reportPortalPageView('billing', 1_000 + 4 * 60_000);
     reportPortalPageView('visits', 1_000 + 6 * 60_000);
+    reportPortalPageView('visits', 1_000 + 10 * 60_000 - 1);
+    expect(beacon.mock.calls.map((c) => c[1].route)).toEqual(['visits', 'billing']);
+    // the first moment the server would record it again, the client sends it
+    reportPortalPageView('visits', 1_000 + 10 * 60_000);
     expect(beacon.mock.calls.map((c) => c[1].route)).toEqual(['visits', 'billing', 'visits']);
   });
 
   it('does not carry the same-tab memo across a logout / sign-in as another customer', () => {
     reportPortalPageView('visits', 1_000);
     localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-b', sessionId: 'fam-b' }));
-    reportPortalPageView('visits', 1_000 + 60_000); // B inside A's 5-minute window
+    reportPortalPageView('visits', 1_000 + 60_000); // B inside A's window
     reportPortalPageView('visits', 1_000 + 2 * 60_000); // B again: still deduped for B
     expect(beacon).toHaveBeenCalledTimes(2);
     // Same customer, new session family (logout + login) also starts fresh.

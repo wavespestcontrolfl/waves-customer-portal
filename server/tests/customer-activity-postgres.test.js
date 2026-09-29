@@ -31,6 +31,7 @@ const settle = () => new Promise((r) => setTimeout(r, 200));
     await mockPg.schema.createTable('customers', (t) => {
       t.uuid('id').primary();
       t.string('first_name');
+      t.timestamp('deleted_at');
     });
     await mockPg.schema.createTable('notifications', (t) => {
       t.uuid('id').primary();
@@ -191,5 +192,54 @@ const settle = () => new Promise((r) => setTimeout(r, 200));
     expect(rows.filter((r) => r.subject_id === null)).toHaveLength(2);
     const idx = await mockPg.raw("SELECT 1 FROM pg_indexes WHERE schemaname = ? AND indexname = 'customer_page_views_push_open_uniq'", [schema]);
     expect(idx.rows).toHaveLength(1);
+  });
+
+  test('a soft-deleted (merged-away) customer gets no page view, push open or last_seen stamp', async () => {
+    const dead = randomUUID();
+    const notif = randomUUID();
+    await mockPg('customers').insert({ id: dead, first_name: 'M', deleted_at: mockPg.fn.now() });
+    await mockPg('notifications').insert({ id: notif, recipient_type: 'customer', recipient_id: dead });
+    expect(await recordPageView({ req: HUMAN_REQ, page: 'portal:plan', customerId: dead, subjectType: 'web' })).toBe(false);
+    expect(await recordPushOpen(HUMAN_REQ, { customerId: dead, platform: 'ios', notificationId: notif })).toBe(false);
+    stampLastSeen(HUMAN_REQ, dead);
+    await settle();
+    expect(await mockPg('customer_page_views').where({ customer_id: dead })).toHaveLength(0);
+    expect((await mockPg('customers').where({ id: dead }).first()).last_seen_at).toBeNull();
+    // a live customer still records
+    const live = randomUUID();
+    await mockPg('customers').insert({ id: live, first_name: 'L' });
+    expect(await recordPageView({ req: HUMAN_REQ, page: 'portal:plan', customerId: live, subjectType: 'web' })).toBe(true);
+    // a lead view (null customer) is unaffected by the guard
+    expect(await recordPageView({ req: HUMAN_REQ, page: 'track', subjectType: 'scheduled_service', subjectId: 'lead-1' })).toBe(true);
+  });
+
+  test('a beacon racing executeMerge (loser locked FOR UPDATE, then soft-deleted and committed) writes nothing', async () => {
+    const loser = randomUUID();
+    const notif = randomUUID();
+    await mockPg('customers').insert({ id: loser, first_name: 'R' });
+    await mockPg('notifications').insert({ id: notif, recipient_type: 'customer', recipient_id: loser });
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let locked;
+    const lockedP = new Promise((r) => { locked = r; });
+    // What executeMerge does: lock the row FOR UPDATE, do its sweep, soft-delete, commit.
+    const merge = mockPg.transaction(async (trx) => {
+      await trx('customers').where({ id: loser }).forUpdate().first();
+      locked();
+      await gate;
+      await trx('customers').where({ id: loser }).update({ deleted_at: trx.fn.now() });
+    });
+    await lockedP;
+    // Beacons start while the merge holds the lock (snapshot still shows the loser live).
+    const view = recordPageView({ req: HUMAN_REQ, page: 'portal:plan', customerId: loser, subjectType: 'web' });
+    stampLastSeen(HUMAN_REQ, loser);
+    await sleep(300);
+    release();
+    await merge;
+    expect(await view).toBe(false);
+    await settle();
+    expect(await mockPg('customer_page_views').where({ customer_id: loser })).toHaveLength(0);
+    expect((await mockPg('customers').where({ id: loser }).first()).last_seen_at).toBeNull();
   });
 });

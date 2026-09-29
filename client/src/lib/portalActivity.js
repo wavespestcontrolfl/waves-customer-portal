@@ -15,9 +15,13 @@ import { nativePlatform } from '../native/platform';
 const PAGE_VIEW_PATH = '/customer/activity/page-view';
 const PUSH_OPEN_PATH = '/customer/activity/push-open';
 const HEARTBEAT_PATH = '/customer/activity/heartbeat';
-// The server dedupes a tab view for 10 minutes; do not even send a repeat of
-// the same tab sooner than this from the same page session.
-const RESEND_SAME_ROUTE_MS = 5 * 60 * 1000;
+// MUST equal the server's page-view dedupe window (DEDUPE_MINUTES = 10 in
+// server/services/customer-page-views.js): the server drops a repeat of the
+// same tab inside that window, so a shorter memo here would spend a beacon on a
+// revisit the server discards, and a longer one would leave a revisit
+// unrecorded. Do not even send a repeat of the same tab sooner than this from
+// the same page session.
+export const RESEND_SAME_ROUTE_MS = 10 * 60 * 1000;
 
 // Foreground heartbeat: stamps last_seen_at only (no page-view row), at most
 // this often per signed-in identity. The page-view beacon also stamps
