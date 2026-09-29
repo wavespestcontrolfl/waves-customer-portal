@@ -468,7 +468,7 @@ describe('runAdminAlertRelevanceSweep', () => {
 
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toEqual({ skipped: false, scanned: 4, retired: 2, byClass: { stale_visit: 1, first_application_divergence: 1 } });
-    expect(stale.read_at).toBe('NOW');
+    expect(stale.read_at).toBeInstanceOf(Date);
     expect(JSON.parse(stale.metadata).retired).toEqual({ by: 'alert-relevance', reason: 'Visit is no longer open', at: NOW.toISOString() });
     // Pure read + retired marker: every emitter-owned key survives as it was.
     expect(JSON.parse(divergence.metadata)).toEqual({ ...divergenceMeta, retired: { by: 'alert-relevance', reason: expect.stringContaining('Customer left'), at: NOW.toISOString() } });
@@ -492,7 +492,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     const old = { ...staleNote(uid(540)), created_at: new Date('2026-06-01T12:00:00Z') };
     mockTables.notifications = [old];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 1 });
-    expect(old.read_at).toBe('NOW');
+    expect(old.read_at).toBeInstanceOf(Date);
   });
 
   const divergenceRow = (id) => note({ id, category: 'billing', metadata: { dedupeKey: `first_application_sibling_divergence:${EST}:${INV}:z`, alertKind: 'diverged', invoiceId: INV, stampedInvoiceId: INV, customerId: CUST } });
@@ -555,6 +555,22 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(JSON.parse(row.metadata)).toEqual({ dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST });
   });
 
+  test('the retire writes an explicit millisecond read_at (never NOW(), whose microseconds a read-back would lose) and the put-back matches it exactly', async () => {
+    churnedWithDraft();
+    const row = divergenceRow(uid(557));
+    mockTables.notifications = [row];
+    const retireWrites = [];
+    let invoiceReads = 0;
+    mockHooks.invoices = () => {
+      invoiceReads += 1;
+      if (invoiceReads === 3) { retireWrites.push(row.read_at); mockTables.invoices[0].status = 'processing'; }
+    };
+    await runAdminAlertRelevanceSweep({ now: NOW });
+    expect(retireWrites[0]).toBeInstanceOf(Date);
+    expect(retireWrites[0]).not.toBe('NOW');
+    expect(row.read_at).toBeNull(); // put back by an exact read_at match
+  });
+
   test('a person who reads the bell in that window keeps their read: nothing is put back over it', async () => {
     churnedWithDraft();
     const row = divergenceRow(uid(552));
@@ -614,7 +630,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = Array.from({ length: 205 }, (_v, i) => staleNote(uid(1000 + i)));
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toMatchObject({ scanned: 205, retired: 205 });
-    expect(mockTables.notifications.every((r) => r.read_at === 'NOW')).toBe(true);
+    expect(mockTables.notifications.every((r) => r.read_at instanceof Date)).toBe(true);
     // The batched first pass reads visits once per page; each retirement then
     // judges its row on a fresh read before the write and once after it.
     expect(mockQueries.filter((q) => q.table === 'scheduled_services as ss')).toHaveLength(2 + 205 * 2);
@@ -627,7 +643,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = [odd, good];
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result.retired).toBe(1);
-    expect(good.read_at).toBe('NOW');
+    expect(good.read_at).toBeInstanceOf(Date);
   });
 });
 
@@ -720,7 +736,7 @@ describe('ring time, through the existing ringGate seam', () => {
     mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
     const sweep = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(sweep.byClass).toEqual({ first_application_divergence: 1 });
-    expect(original.read_at).toBe('NOW');
+    expect(original.read_at).toBeInstanceOf(Date);
     const after = JSON.parse(original.metadata);
     const { retired, ...rest } = after;
     expect(retired.by).toBe('alert-relevance');
@@ -732,7 +748,7 @@ describe('ring time, through the existing ringGate seam', () => {
     expect(again.deduped).toBe(true);
     expect(again.refreshed).toBeUndefined();
     expect(mockTables.notifications).toHaveLength(1);
-    expect(original.read_at).toBe('NOW');
+    expect(original.read_at).toBeInstanceOf(Date);
 
     // The diverging set changed (new dedupeKey): a fresh row, quiet because the customer left and the invoice is a draft.
     const changed = await raise({}, { divergingSiblingIds: [VISIT, PARENT] }, `first_application_sibling_divergence:${EST}:${INV}:${VISIT},${PARENT}`);

@@ -342,12 +342,16 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   const { dedupeKey } = parseMeta(current.metadata);
   const rearm = cls.rearm && dedupeKey ? { dedupeKey: null } : {};
   const stamp = { by: RETIRED_BY, reason, at: now.toISOString(), ...(rearm.dedupeKey === null ? { dedupeKey } : {}) };
+  // An explicit millisecond instant, not NOW(): Postgres keeps microseconds,
+  // which a JS Date read back would truncate, and the put-back below must
+  // match the exact read_at this write stored.
+  const readAt = new Date();
   const [retired] = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
-    .update({ read_at: db.fn.now(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp, ...rearm })]) })
-    .returning(['id', 'read_at']);
+    .update({ read_at: readAt, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp, ...rearm })]) })
+    .returning(['id']);
   if (!retired) return null;
   if (cls.rule(subjectFor(current, await loadSubjects([current]), todayET))) return reason;
-  await db('notifications').where({ id: row.id, read_at: retired.read_at })
+  await db('notifications').where({ id: row.id, read_at: readAt })
     .whereRaw("metadata->'retired'->>'at' = ?", [stamp.at])
     .update({ read_at: null, metadata: db.raw("(metadata - 'retired') || ?::jsonb", [JSON.stringify(rearm.dedupeKey === null ? { dedupeKey } : {})]) });
   return null;
