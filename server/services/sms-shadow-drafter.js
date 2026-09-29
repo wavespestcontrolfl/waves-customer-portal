@@ -1472,7 +1472,7 @@ function buildFactsBlock(context, extras = {}) {
   if (context.billing?.payerBilledInvoice) {
     billingLines.push('- A separate invoice is BILLED TO A THIRD-PARTY PAYER — never ask the customer to pay that one');
   }
-  // v13: PAYMENT OPTIONS — how Waves actually accepts payment, read from the
+  // PAYMENT OPTIONS — how Waves actually accepts payment, read from the
   // SAME canonical source the public /pay page's own "other ways to pay"
   // block uses (routes/pay-v2-helpers.js#manualPayOptionsFromEnv, driven by
   // ZELLE_RECIPIENT). Never hardcoded — Zelle-only unset ⇒ card/ACH only.
