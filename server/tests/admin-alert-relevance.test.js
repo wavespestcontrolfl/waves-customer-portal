@@ -500,10 +500,11 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(locked.indexOf('invoices')).toBeLessThan(locked.indexOf('notifications'));
   });
 
-  test('the unpriced recheck locks every row its verdict reads — the visit, its parent, the combined invoice and the prepay term — before reading them', async () => {
+  test('the unpriced recheck locks every row its verdict reads — the visit, its parent, the combined invoice and the prepay funding — before reading them', async () => {
     const TERM = uid(11);
     const family = { id: VISIT, customer_id: CUST, recurring_parent_id: PARENT, first_application_invoice_id: INV, annual_prepay_term_id: TERM };
     mockTables.scheduled_services = [family];
+    mockTables.annual_prepay_terms = [{ id: TERM, prepay_invoice_id: INV2 }];
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed', recurring_parent_id: PARENT, first_application_invoice_id: INV, first_application_invoice_status: 'draft' })];
     const row = note({ id: uid(570), category: 'alert', metadata: { dedupeKey: `unpriced-series:${PARENT}`, scheduled_service_id: VISIT, customer_id: CUST } });
     mockTables.notifications = [row];
@@ -511,11 +512,36 @@ describe('runAdminAlertRelevanceSweep', () => {
     const locks = mockQueries.filter((q) => q.calls.some(([m]) => m === 'forShare'));
     const lockedIds = (table) => locks.filter((q) => q.table === table).flatMap((q) => q.calls.filter(([m]) => m === 'whereIn').map(([, , ids]) => ids)).flat();
     expect(lockedIds('scheduled_services')).toEqual(expect.arrayContaining([VISIT, PARENT]));
-    expect(lockedIds('invoices')).toContain(INV);
-    expect(lockedIds('annual_prepay_terms')).toContain(TERM);
+    // The combined first-application invoice AND the term's prepay invoice (the funding).
+    expect(lockedIds('invoices')).toEqual(expect.arrayContaining([INV, INV2]));
+    expect(locks.some((q) => q.table === 'annual_prepay_terms')).toBe(true);
     // Locks first, then the joined read the verdict uses.
     const order = mockQueries.map((q) => q.table);
     expect(order.lastIndexOf('annual_prepay_terms')).toBeLessThan(order.lastIndexOf('scheduled_services as ss'));
+  });
+
+  test('a new-lead bell retired on a booking locks the bookings its verdict read', async () => {
+    const leadNoteRow = note({ id: uid(580), category: 'new_lead', metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } } });
+    mockTables.leads = [{ id: LEAD, status: 'new', converted_at: null, deleted_at: null, created_at: new Date('2026-09-28T12:00:00Z'), customer_id: CUST, estimate_id: null }];
+    mockTables.scheduled_services = [{ id: VISIT, customer_id: CUST, latest_created_at: new Date('2026-09-28T13:00:00Z') }];
+    mockTables.notifications = [leadNoteRow];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 1, byClass: { new_lead: 1 } });
+    const bookingLock = mockQueries.find((q) => q.table === 'scheduled_services' && q.calls.some(([m]) => m === 'forShare'));
+    expect(bookingLock.calls).toEqual(expect.arrayContaining([['whereIn', 'customer_id', [CUST]], ['whereNull', 'recurring_parent_id'], ['whereNull', 'parent_service_id']]));
+  });
+
+  test('a backlog larger than one run is walked across runs: the next run resumes where the page cap stopped', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })]; // still stuck: nothing retires
+    mockTables.notifications = Array.from({ length: 10205 }, (_v, i) => staleNote(uid(20000 + i)));
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 10000, retired: 0 });
+    mockQueries.length = 0;
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 205, retired: 0 });
+    const firstPage = mockQueries.find((q) => q.table === 'notifications');
+    expect(firstPage.calls).toEqual(expect.arrayContaining([['where', 'id', '>', uid(20000 + 9999)]]));
+    // Reaching the end leaves nothing to resume: the next run starts over
+    // (and the one after it finishes the walk again, leaving no resume point).
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 10000 });
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 205 });
   });
 
   test('a row a refresh rewrote after the batch read is left for the next sweep', async () => {

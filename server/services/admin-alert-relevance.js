@@ -130,15 +130,21 @@ const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 // Every row a visit verdict reads, locked FOR SHARE before it is read (the
 // retirement recheck): the visits, the parent whose price a child inherits,
 // the combined first-application invoice that covers a sibling, and the
-// annual-prepay term that validates a stamp. The joined read that follows
-// then sees a state no concurrent write can change until the recheck commits.
+// annual-prepay funding that validates a stamp — the term, any renewal of
+// it, and the term's prepay invoice (coverage is judged from those rows:
+// coveredTermsAsOf reads the invoice's status / paid_at). The joined read
+// that follows then sees a state no concurrent write can change until the
+// recheck commits.
 async function lockVisitFamily(conn, visitIds) {
   const own = await conn('scheduled_services').whereIn('id', visitIds).forShare()
     .select('id', 'recurring_parent_id', 'first_application_invoice_id', 'annual_prepay_term_id');
-  const idsOf = (col) => [...new Set(own.map((r) => r[col]).filter(Boolean).map(String))];
-  const family = [['scheduled_services', 'recurring_parent_id'], ['invoices', 'first_application_invoice_id'], ['annual_prepay_terms', 'annual_prepay_term_id']];
-  for (const [table, col] of family) {
-    const ids = idsOf(col);
+  const idsOf = (rows, col) => [...new Set(rows.map((r) => r[col]).filter(Boolean).map(String))];
+  const termIds = idsOf(own, 'annual_prepay_term_id');
+  const terms = termIds.length ? await conn('annual_prepay_terms')
+    .where((q) => q.whereIn('id', termIds).orWhereIn('renewed_from_term_id', termIds)).forShare().select('id', 'prepay_invoice_id') : [];
+  const family = [['scheduled_services', idsOf(own, 'recurring_parent_id')],
+    ['invoices', [...idsOf(own, 'first_application_invoice_id'), ...idsOf(terms, 'prepay_invoice_id')]]];
+  for (const [table, ids] of family) {
     if (ids.length) await conn(table).whereIn('id', ids).forShare().select('id');
   }
 }
@@ -198,9 +204,12 @@ async function loadSubjects(rows, conn = db, { lock = false } = {}) {
     // A booking someone made: never a child the system generated on its own
     // (the nightly series top-up, a booking's seeded follow-ups) — those land
     // on an existing customer's plan whether or not anyone worked the lead.
-    const booked = await conn('scheduled_services').whereIn('customer_id', leadCustomerIds)
-      .where((q) => q.whereNull('status').orWhereNotIn('status', [...CANCELLED_VISIT_STATUSES]))
-      .whereNull('recurring_parent_id').whereNull('parent_service_id')
+    const bookings = (q) => q.whereIn('customer_id', leadCustomerIds)
+      .where((w) => w.whereNull('status').orWhereNotIn('status', [...CANCELLED_VISIT_STATUSES]))
+      .whereNull('recurring_parent_id').whereNull('parent_service_id');
+    // The recheck locks those bookings first (an aggregate cannot be locked).
+    if (lock) await conn('scheduled_services').modify(bookings).forShare().select('id');
+    const booked = await conn('scheduled_services').modify(bookings)
       .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
     data.leadVisits = new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
   }
@@ -366,17 +375,25 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   });
 }
 
+// A backlog bigger than one run (MAX_PAGES pages) is walked across runs: a
+// run that stops at the cap leaves where it stopped, and the next run
+// resumes after it; a run that reaches the end leaves nothing, so the next
+// one starts over. In-process: a restart simply starts over.
+let resumeAfter = null;
+
 async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (!adminAlertRelevanceLive()) return { skipped: true, reason: 'switch_off' };
   const todayET = etDateString(now);
   const byClass = {};
   let scanned = 0;
-  let cursor = null;
+  let cursor = resumeAfter;
+  resumeAfter = null;
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const rows = await candidateQuery(cursor);
     if (!rows.length) break;
     cursor = rows[rows.length - 1].id;
     scanned += rows.length;
+    if (rows.length === PAGE_SIZE && page === MAX_PAGES - 1) resumeAfter = cursor;
     const data = await loadSubjects(rows);
     for (const row of rows) {
       try {
