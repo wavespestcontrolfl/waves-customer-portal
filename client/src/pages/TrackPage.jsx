@@ -822,6 +822,10 @@ export default function TrackPage() {
   // refetch would otherwise revert a completed visit to "arrives in N min"
   // until the next tick (F-037).
   const fetchSeqRef = useRef(0);
+  // The token whose page view has already been reported. The view POST goes
+  // out once per token, on the first successful load — never on the 30s poll
+  // or a socket-triggered refetch (the GET itself is read-only by contract).
+  const viewSentRef = useRef(null);
 
   // Refetch the public track endpoint. Used both for the initial mount
   // and as the wake-up handler when a customer:job_update broadcast
@@ -849,6 +853,13 @@ export default function TrackPage() {
       if (stale()) return;
       if (body?.state) {
         setData(body);
+        if (viewSentRef.current !== token) {
+          viewSentRef.current = token;
+          // Fire-and-forget: a failed view report must never touch the page.
+          try {
+            fetch(`${API_BASE}/public/track/${token}/view`, { method: 'POST', keepalive: true }).catch(() => {});
+          } catch { /* ignore */ }
+        }
         // The GET is read-only by contract: stopsAheadPending means the
         // clamp floor isn't durable yet. Ack through the explicit POST
         // write path and render from ITS response — a number never shows

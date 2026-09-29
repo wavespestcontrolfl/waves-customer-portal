@@ -75,6 +75,8 @@ const LANE_RUNTIME = {
   response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
   'sms-commitment-fulfillment': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'sms-commitment-fulfillment', ...LONG_BATCH },
+  // PROMISE_CONTACT_CHECK: a 15-minute tick reads open Waves "other" call promises and, on a grounded model verdict, closes one in the ledger (internal_write; no customer message). Cadence stays 'event': a tick with no candidate makes no call.
+  'call-commitment-contact-check': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'call-commitment-contact-check', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // GATE_REVIEW_DAY0_CONTEXT: classifies a Day-0 review-ask topic from a
