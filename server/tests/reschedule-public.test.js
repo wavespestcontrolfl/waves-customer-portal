@@ -570,11 +570,15 @@ describe('codex #3429 r2 P1 — dispatch-owned unreviewed bookings', () => {
     });
 
     // Eligible visit: the existing code is returned, nothing is minted.
+    // scheduled_date is deliberately far out (real wall clock, not the
+    // fixture NOW above — buildRescheduleLink's own dead-link check reads
+    // the actual clock) so it never lands inside the move-notice window.
     mockDb.mockImplementation(() => ({
       where: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue({
         id: 'svc-1', customer_id: 'cust-1', reschedule_token: 'a'.repeat(64),
         source_action: null, status: 'confirmed', customer_confirmed: true, visit_id: null,
+        scheduled_date: '2099-01-01', window_start: '09:00:00',
       }),
     }));
     await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({

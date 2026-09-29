@@ -833,6 +833,64 @@ describe('GET /api/public/appointment/:token — additive prepPhotos', () => {
   });
 });
 
+// Dead-link guard (C3/C6, 2026-09-28): canMoveOnline on the GET payload —
+// AppointmentPage hides its "See open times" card when this is false. Dates
+// are computed off the REAL wall clock (this file runs no fake timers, and
+// the default svcRow's far-future '2099-01-01' already relies on that same
+// convention) rather than hardcoded, so the suite never rots into the past.
+describe('GET /api/public/appointment/:token — canMoveOnline (C3/C6)', () => {
+  const { etDateString, etParts } = require('../utils/datetime-et');
+  const prevAppt = process.env.GATE_APPOINTMENT_PAGE;
+
+  function hoursFromNow(hours) {
+    const at = new Date(Date.now() + hours * 3600000);
+    const p = etParts(at);
+    return { scheduled_date: etDateString(at), window_start: `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}:00` };
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    resetDbState();
+    router = require('../routes/appointment-public');
+  });
+  afterAll(() => {
+    if (prevAppt === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prevAppt;
+  });
+
+  test('a visit far outside the move-notice window (the default far-future svcRow): canMoveOnline true', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await getAppointment(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.canMoveOnline).toBe(true);
+      expect(body.rescheduleToken).toBe('a'.repeat(64));
+    });
+  });
+
+  test('a visit starting 1 hour from now: canMoveOnline false, but the token itself is untouched (the client gates the CTA)', async () => {
+    resetDbState({ svcRow: { ...dbStateSvc(), ...hoursFromNow(1) } });
+    await withServer(async (baseUrl) => {
+      const res = await getAppointment(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.canMoveOnline).toBe(false);
+      expect(body.rescheduleToken).toBe('a'.repeat(64));
+    });
+  });
+
+  test('a visit 30 hours out clears the default 24h window: canMoveOnline true', async () => {
+    resetDbState({ svcRow: { ...dbStateSvc(), ...hoursFromNow(30) } });
+    await withServer(async (baseUrl) => {
+      const res = await getAppointment(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.canMoveOnline).toBe(true);
+    });
+  });
+});
+
 describe('visitPrepPreParserGuard — mounted by index.js AHEAD of the shared body parsers', () => {
   const prevPrep = process.env.GATE_VISIT_PREP_PHOTOS;
   afterAll(() => { if (prevPrep === undefined) delete process.env.GATE_VISIT_PREP_PHOTOS; else process.env.GATE_VISIT_PREP_PHOTOS = prevPrep; });

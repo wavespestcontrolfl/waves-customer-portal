@@ -54,6 +54,7 @@ const {
   ARRIVAL_WINDOW_MINUTES,
 } = require('../utils/sms-time-format');
 const { calendarIcsAvailable, groupedStopEndsAt, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
+const { visitInsideMoveNoticeWindow } = require('../services/scheduling/self-serve-notice');
 const visitPrep = require('../services/visit-prep');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 
@@ -794,6 +795,14 @@ router.get('/:token', async (req, res, next) => {
         || (svc.visit_id && !visitInfo.visitUnknown
           && (await require('../services/visit-groups').frozenVisitVerdict(db, svc.visit_id)).frozen))
         ? null : svc.reschedule_token,
+      // Dead-link guard (C3/C6): the "See open times" CTA's own destination
+      // (/reschedule/:token) refuses to MOVE a visit that already starts
+      // inside the self-serve move-notice window — the same verdict
+      // buildRescheduleLink now applies before texting the link. We are
+      // already inside `state === 'upcoming'` here (a missed/past visit
+      // returned above with its own `state: 'past'`), so this is never the
+      // missed-visit recovery case — only "too soon to move, not missed".
+      canMoveOnline: !visitInsideMoveNoticeWindow(svc, new Date()),
     });
   } catch (err) {
     next(err);

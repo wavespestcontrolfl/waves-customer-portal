@@ -33,7 +33,10 @@
  * opts.previewOnly: read-only — the same eligibility checks and existing-
  * code reuse, but where a mint would happen returns a placeholder of a
  * fresh code's length instead (the sheet's advisory counter must never
- * mint). Implies reuseExisting.
+ * mint). Implies reuseExisting. Deliberately skips the dead-link check
+ * below: its only caller (rain-out.js's day-options measurement) is a
+ * staff-driven surface, not a customer self-serve one, so the visit's own
+ * move-notice window does not apply to it.
  * opts.assumeConfirmed: judge eligibility on the row's LANDED state — the
  * caller is about to move it through the rebooker, which confirms it, so
  * the dispatch-owned-pending refusal does not apply (the link would be
@@ -49,6 +52,18 @@
  * so a caller that must fail closed on a read failure can tell it apart
  * from a plain "not eligible" (Quick Move's segment cap); every other
  * caller keeps treating the null url as "send without the link".
+ *
+ * Dead-link guard (owner-verified 2026-09-28, plan C3/C6): a visit that is
+ * otherwise self-serviceable but currently starts inside the self-serve
+ * MOVE notice window (SELF_SERVE_MOVE_NOTICE_HOURS) would 409/refuse on
+ * /reschedule/:token — the exact same verdict the promised-link worker
+ * (reschedule-link-promises.js's visitNotSelfServiceReason) already parks
+ * for the office instead of sending. Rather than mint a link that dead-
+ * ends, such a visit gets { url: null, line: 'Need a change? Reply here or
+ * call.\n\n' } — never the bare empty line, so the confirmation/reminder
+ * still tells the customer how to reach someone. A MISSED visit (picking a
+ * new time after the window passed) is exempt: it is not "too soon to
+ * move", it is being rebooked. Skipped when previewOnly (see above).
  */
 
 // What a fresh mint looks like, length-wise (short-url createShortCode:
@@ -60,10 +75,16 @@ const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
 const { shortenOrPassthrough, existingShortUrlFor, shortLinkBaseUrl } = require('./short-url');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+const { eligibility } = require('./reschedule-eligibility');
 
 function smsLineFor(url) {
   return url ? `Reschedule here: ${url}\n\n` : '';
 }
+
+// The clause for a visit this builder refuses to link (C3/C6): never the
+// bare empty line the OTHER refusals return, so a customer still hears how
+// to reach someone instead of a template line that just vanishes.
+const NO_LINK_LINE = 'Need a change? Reply here or call.\n\n';
 
 async function hasUnblockedVisitGroup(conn, visitId) {
   if (!visitId) return true;
@@ -78,7 +99,8 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
     if (!scheduledServiceId) return { url: null, line: '' };
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'reschedule_token', 'source_action', 'status', 'customer_confirmed', 'visit_id');
+      .first('id', 'customer_id', 'reschedule_token', 'source_action', 'status', 'customer_confirmed',
+        'visit_id', 'scheduled_date', 'window_start');
     if (!svc?.reschedule_token) return { url: null, line: '' };
     // GROUPED / FROZEN visits self-serve-reschedule as a whole (or not at
     // all) — /reschedule/:token deterministically refuses their rows, so
@@ -103,6 +125,17 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
       && String(svc.status || '').toLowerCase() === 'pending'
       && !svc.customer_confirmed) {
       return { url: null, line: '' };
+    }
+    // Dead-link guard (C3/C6, see header) — same chokepoint every other
+    // refusal above runs through, so every caller (reminders, rain-out,
+    // the legacy Twilio reminder, admin quick-send) inherits it alike.
+    // Skipped for previewOnly (see its own doc comment above).
+    if (!previewOnly) {
+      const now = new Date();
+      const verdict = eligibility(svc, now);
+      if (require('./reschedule-link-promises').tooSoonToSelfServeMove(svc, verdict, now)) {
+        return { url: null, line: NO_LINK_LINE };
+      }
     }
 
     if (pinnedUrl !== undefined) return { url: pinnedUrl, line: smsLineFor(pinnedUrl) };
