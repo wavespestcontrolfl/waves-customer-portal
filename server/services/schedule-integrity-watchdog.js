@@ -333,49 +333,6 @@ async function runInner({ now = new Date() } = {}) {
 
   // Lazy require, like isEnabled above; read at call time so the env is a live kill switch.
   const episodes = require('../config/feature-gates').alertEpisodesLive();
-  let alerted = 0;
-  const capped = () => {
-    if (alerted < MAX_ALERTS_PER_RUN) return false;
-    logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
-    return true;
-  };
-  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', refreshOnDedupe, dedupeVersion } = {}) => {
-    // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
-    // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
-    // site-level tag these money-loss pages would return a suppressed
-    // sentinel instead of ringing.
-    // Forever-dedupe (or refreshed-on-change with dedupeVersion) now runs
-    // through notifyAdmin's own advisory-locked dedupe — passing dedupeKey
-    // here instead of a local read-then-insert (the old alreadyAlerted())
-    // that raced across overlapping ticks and could double-ring.
-    const alertOpts = {
-      link,
-      bell: true,
-      dedupeKey,
-      ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
-      ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
-      metadata: { dedupeKey, ...metadata },
-    };
-    // Episodes: the reopen wrapper (an auto-cleared row rings again; a
-    // standing one is a silent dedupe). Killed: exactly the pre-episode call.
-    const created = episodes
-      ? await NotificationService.raiseAdminAlertWithReopen('alert', title, body, alertOpts)
-      : await NotificationService.notifyAdmin('alert', title, body, alertOpts);
-    // NotificationService.create swallows insert errors into a null result;
-    // this job's ONLY output is the bell, so a lost bell must fail the run
-    // loudly instead of logging success. Internal-test suppression
-    // ({ suppressed: true }) is a deliberate success-without-a-row.
-    if (!created || (created.id == null && !created.suppressed)) {
-      throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
-    }
-    // A deduped result (the standing row already exists and either matched
-    // or was just refreshed) is not a NEW alert for this run's count. Under
-    // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
-    // or a refresh that rang) — never a silent dedupe onto a standing row.
-    if (episodes ? !created.rang : created.deduped) return false;
-    alerted += 1;
-    return true;
-  };
 
   // Unpriced series ring FIRST: they are same-day money loss (a visit can
   // complete and invoice at $0 today).
@@ -497,34 +454,9 @@ async function runInner({ now = new Date() } = {}) {
       { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}`, refreshOnDedupe: true, dedupeVersion: gap.evidenceKey },
   ]));
 
-  // Live keys per class, from the COMPLETE findings above — computed before
-  // the loop so the per-run cap (which only limits new rings) never changes
-  // what a close pass judges.
-  const liveKeys = new Set(alerts.map((alert) => alert[0]));
-
-  for (const alert of alerts) {
-    if (capped()) break;
-    await ring(...alert);
-  }
-
-  let closed = 0;
-  let closePassFailed = false;
-  if (episodes) {
-    try {
-      closed = await closeResolvedAlerts({
-        now, liveKeys, overdueUnpricedRoots,
-        // A class whose check failed has an unknown live set: closing on it
-        // would clear every standing bell of the class.
-        skipPrefixes: [
-          ...(lawnGapCheckFailed ? [LAWN_GAP_PREFIX] : []),
-          ...(acceptedScheduleCheckFailed ? [ACCEPTED_PREFIX] : []),
-        ],
-      });
-    } catch (err) {
-      closePassFailed = true;
-      logger.error(`[schedule-integrity] alert close pass failed: ${err.message}`);
-    }
-  }
+  const delivered = await deliverAlerts({
+    alerts, episodes, now, overdueUnpricedRoots, horizonDay: etDateString(horizon), lawnGapCheckFailed, acceptedScheduleCheckFailed,
+  });
 
   return {
     skipped: false,
@@ -536,9 +468,79 @@ async function runInner({ now = new Date() } = {}) {
 
     acceptedScheduleGaps: acceptedGaps.length,
     acceptedScheduleCheckFailed,
-    alerted,
-    ...(episodes ? { closed, closePassFailed } : {}),
+    // alerted, plus closed / closePassFailed under episodes.
+    ...delivered,
   };
+}
+
+// Delivers one run's findings: rings them in order, capped at
+// MAX_ALERTS_PER_RUN real rings, and — under episodes — closes every
+// standing bell the findings no longer name (closeResolvedAlerts).
+async function deliverAlerts({ alerts, episodes, now, overdueUnpricedRoots, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed }) {
+  let alerted = 0;
+  const capped = () => {
+    if (alerted < MAX_ALERTS_PER_RUN) return false;
+    logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
+    return true;
+  };
+  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', refreshOnDedupe, dedupeVersion } = {}) => {
+    // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
+    // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
+    // site-level tag these money-loss pages would return a suppressed
+    // sentinel instead of ringing.
+    // Forever-dedupe (or refreshed-on-change with dedupeVersion) now runs
+    // through notifyAdmin's own advisory-locked dedupe — passing dedupeKey
+    // here instead of a local read-then-insert (the old alreadyAlerted())
+    // that raced across overlapping ticks and could double-ring.
+    const alertOpts = {
+      link,
+      bell: true,
+      dedupeKey,
+      ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
+      ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
+      metadata: { dedupeKey, ...metadata },
+    };
+    // Episodes: the reopen wrapper (an auto-cleared row rings again; a
+    // standing one is a silent dedupe). Killed: exactly the pre-episode call.
+    const created = episodes
+      ? await NotificationService.raiseAdminAlertWithReopen('alert', title, body, alertOpts)
+      : await NotificationService.notifyAdmin('alert', title, body, alertOpts);
+    // NotificationService.create swallows insert errors into a null result;
+    // this job's ONLY output is the bell, so a lost bell must fail the run
+    // loudly instead of logging success. Internal-test suppression
+    // ({ suppressed: true }) is a deliberate success-without-a-row.
+    if (!created || (created.id == null && !created.suppressed)) {
+      throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
+    }
+    // A deduped result (the standing row already exists and either matched
+    // or was just refreshed) is not a NEW alert for this run's count. Under
+    // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
+    // or a refresh that rang) — never a silent dedupe onto a standing row.
+    if (episodes ? !created.rang : created.deduped) return false;
+    alerted += 1;
+    return true;
+  };
+
+  // Live keys per class, from the COMPLETE findings — computed before the
+  // loop so the per-run cap (which only limits new rings) never changes
+  // what the close pass judges.
+  const liveKeys = new Set(alerts.map((alert) => alert[0]));
+  for (const alert of alerts) {
+    if (capped()) break;
+    await ring(...alert);
+  }
+  if (!episodes) return { alerted };
+  // A class whose check failed has an unknown live set: closing on it would
+  // clear every standing bell of the class.
+  const skipPrefixes = [];
+  if (lawnGapCheckFailed) skipPrefixes.push(LAWN_GAP_PREFIX);
+  if (acceptedScheduleCheckFailed) skipPrefixes.push(ACCEPTED_PREFIX);
+  try {
+    return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, horizonDay, skipPrefixes }), closePassFailed: false };
+  } catch (err) {
+    logger.error(`[schedule-integrity] alert close pass failed: ${err.message}`);
+    return { alerted, closed: 0, closePassFailed: true };
+  }
 }
 
 // Episodes close pass: per class, open bells (by prefix) minus the live keys
@@ -546,7 +548,7 @@ async function runInner({ now = new Date() } = {}) {
 // moot). Read-only against scheduled_services: it reads a visit's status and
 // writes nothing but admin notifications. A problem that returns after this
 // scan is re-raised, and re-rung, by the next run.
-async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, skipPrefixes }) {
+async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, horizonDay, skipPrefixes }) {
   const absentOf = async (prefix) => {
     if (skipPrefixes.includes(prefix)) return [];
     return (await NotificationService.openAdminAlertKeys(db, prefix)).filter((key) => !liveKeys.has(key));
@@ -558,7 +560,9 @@ async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, skipPr
 
   const unpriced = (await absentOf(UNPRICED_PREFIX))
     .filter((key) => !overdueUnpricedRoots.has(key.slice(UNPRICED_PREFIX.length)));
-  closed += await close(unpriced, 'no longer unpriced');
+  // Priced, done, cancelled, or moved past the look-ahead window: a visit
+  // that comes back into the window unpriced re-rings.
+  closed += await close(unpriced, 'no longer unpriced in the look-ahead window');
   closed += await close([...await absentOf(LAWN_GAP_PREFIX), ...await absentOf(ACCEPTED_PREFIX)], 'gap resolved');
 
   // Prepay: key = prepay-coverage:<visit>:<issue>:<evidence hash>.
@@ -567,12 +571,14 @@ async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, skipPr
     const visitOf = (key) => key.split(':')[1];
     const visitIds = [...new Set(prepayAbsent.map(visitOf).filter((id) => UUID_RE.test(id || '')))];
     const statusRows = visitIds.length
-      ? await db('scheduled_services').whereIn('id', visitIds).select('id', 'status') : [];
+      ? await db('scheduled_services').whereIn('id', visitIds)
+        .select('id', 'status', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as service_date")) : [];
     const statusById = new Map(statusRows.map((r) => [String(r.id), r.status]));
+    const dayById = new Map(statusRows.map((r) => [String(r.id), r.service_date]));
     // A visit that still has a live prepay key was superseded by a new
     // evidence key rather than resolved.
     const supersededVisits = new Set([...liveKeys].filter((k) => k.startsWith(PREPAY_PREFIX)).map(visitOf));
-    const byReason = { 'visit did not run': [], superseded: [], 'gap resolved': [] };
+    const byReason = { 'visit did not run': [], superseded: [], 'moved past the look-ahead window': [], 'gap resolved': [] };
     for (const key of prepayAbsent) {
       const id = visitOf(key);
       const known = statusById.has(id);
@@ -580,6 +586,8 @@ async function closeResolvedAlerts({ now, liveKeys, overdueUnpricedRoots, skipPr
       if (known && PREPAY_HOLD_OPEN_STATUSES.includes(status)) continue;
       if (!known || NEVER_RAN_STATUSES.includes(status)) byReason['visit did not run'].push(key);
       else if (supersededVisits.has(id)) byReason.superseded.push(key);
+      // Out of the scan by date, not fixed: it re-rings once back in the window.
+      else if (horizonDay && dayById.get(id) > horizonDay) byReason['moved past the look-ahead window'].push(key);
       else byReason['gap resolved'].push(key);
     }
     for (const [reason, keys] of Object.entries(byReason)) closed += await close(keys, reason);

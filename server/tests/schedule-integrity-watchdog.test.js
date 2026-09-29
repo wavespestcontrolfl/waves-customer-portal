@@ -601,7 +601,7 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     });
     const result = await runInner({ now: NOW });
     expect(closedBy()).toEqual({
-      'no longer unpriced': ['unpriced-series:ss-gone'],
+      'no longer unpriced in the look-ahead window': ['unpriced-series:ss-gone'],
       'gap resolved': ['lawn-email-gap:cust-fixed:no_email', 'accepted-schedule:e-9:pest_control'],
     });
     expect(result).toMatchObject({ closed: 3, closePassFailed: false });
@@ -629,7 +629,7 @@ describe('alert episodes (ALERT_EPISODES)', () => {
       'unpriced-series:': ['unpriced-series:ss-gone'],
     });
     await runInner({ now: NOW });
-    expect(closedBy()).toEqual({ 'no longer unpriced': ['unpriced-series:ss-gone'] });
+    expect(closedBy()).toEqual({ 'no longer unpriced in the look-ahead window': ['unpriced-series:ss-gone'] });
   });
 
   test('an unpriced series with an OVERDUE unpriced visit stays open even though it no longer pages', async () => {
@@ -657,6 +657,13 @@ describe('alert episodes (ALERT_EPISODES)', () => {
         'visit did not run': [key(V(3)), key(V(4)), key(V(5)), key(V(6)), key(V(9))],
         'gap resolved': [key(V(7)), key(V(8))],
       });
+    });
+
+    test('a live visit moved past the look-ahead window closes as moved, not resolved (it re-rings once back in the window)', async () => {
+      makeDbMock({ staleRows: [{ id: V(1), status: 'scheduled', service_date: '2099-01-01' }] });
+      openKeysByPrefix({ 'prepay-coverage:': [key(V(1))] });
+      await runInner({ now: NOW });
+      expect(closedBy()).toEqual({ 'moved past the look-ahead window': [key(V(1))] });
     });
 
     test('a key superseded by a new evidence key for the same visit closes as superseded; the new key stays', async () => {
