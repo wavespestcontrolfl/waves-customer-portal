@@ -10096,6 +10096,13 @@ module.exports = {
   // (it used to live only under _private, which left the route's destructure
   // undefined and 500'd the booking).
   serviceMatchesCoverage,
+  // Public for the same reason: admin-cancellation.js destructures the
+  // canonical covered-visit identity from the module root (the end-of-coverage
+  // keep set, the prepay refund's completed-visit count, the scoped-cancel
+  // coverage conflict). Under _private only, all three failed closed: "End
+  // of paid coverage" always refused, every refund went to manual
+  // calculation, and a scoped cancel on a prepay account refused.
+  coverageRowsForTerm,
   syncTermForInvoicePayment,
   syncTermForRefundedPayment,
   activatePaidPendingTerms,
