@@ -52,9 +52,11 @@ const { _internals: gate } = require('./content-quality-gate');
 const CITABILITY_BACKFILL_BUCKET = 'citability_backfill';
 const DEDUPE_PREFIX = 'citability:v1:';
 const EXPIRES_DAYS_AFTER_AVAILABLE = 45;
-// Refresh rows must clear the 75 non-blog floor (opportunity-queue ELSE
-// arm); +1 per gap keeps the worst posts first without outranking mined work.
-const BASE_SCORE = 76;
+// Refresh rows sit exactly on the 75 non-blog floor (opportunity-queue ELSE
+// arm, score >= floor). Claims order by score, so a backfill never outranks
+// mined work (Codex r2 P2: 76 + gaps took every daily slot ahead of mined
+// rows at 75–77). Worst-first order comes from the ET-day batching instead.
+const BASE_SCORE = 75;
 const DEFAULT_PER_DAY = 5;
 const DEFAULT_MIN_GAPS = 2;
 
@@ -236,7 +238,7 @@ function availableAtFor(now, dayOffset) {
 function rowForPost(post, scan, { now = new Date(), dayOffset = 0, scannedRef = null } = {}) {
   // Other page-edit producers compare domain + path, so persist a full hub URL.
   const pageUrl = new URL(post.url, 'https://www.wavespestcontrol.com').href;
-  const score = BASE_SCORE + scan.gaps.length;
+  const score = BASE_SCORE;
   const availableAt = availableAtFor(now, dayOffset);
   const expiresBase = availableAt || now;
   return {
@@ -369,7 +371,10 @@ async function seedAll({ dryRun = false, perDay = DEFAULT_PER_DAY, minGaps = DEF
        -- An ordinary producer can take this page while the lane is off.
        -- That ownership transfer is durable: do not revive the retired row
        -- or erase the marker if an operator runs the seeder after re-enable.
+       -- A done row was refreshed already: leave it untouched so a re-run
+       -- neither reopens nor counts it (Codex r2 P2).
        WHERE NOT jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'page_edit_superseded')
+         AND opportunity_queue.status <> 'done'
       `,
       [
         row.bucket, row.action_type, row.query, row.page_url, row.service, row.city,

@@ -122,7 +122,7 @@ Per UF/IFAS, subterranean termites swarm after rain when soil stays above 70 deg
 
 describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day', () => {
   const now = new Date('2026-09-25T15:00:00Z');
-  test('row shape: refresh_existing_page, query NULL, city NULL, score above the 75 refresh floor, scan in signal_metadata', () => {
+  test('row shape: refresh_existing_page, query NULL, city NULL, score on the 75 refresh floor, scan in signal_metadata', () => {
     const scan = seeder.scanPost({ url: '/termite/bait-vs-liquid/', body: POOR });
     const row = rowForPost({ url: '/termite/bait-vs-liquid/', file: 'src/content/blog/termite/bait-vs-liquid.mdx' }, scan, { now });
     expect(row.bucket).toBe('citability_backfill');
@@ -131,8 +131,10 @@ describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day
     expect(row.city).toBeNull();
     expect(row.service).toBe('termite');
     expect(row.page_url).toBe('https://www.wavespestcontrol.com/termite/bait-vs-liquid/');
-    expect(row.score).toBe(BASE_SCORE + 4);
-    expect(row.score).toBeGreaterThan(75);
+    // Exactly the floor: claimable, but never ahead of mined work (Codex r2 P2).
+    expect(row.score).toBe(BASE_SCORE);
+    expect(row.score).toBe(require('../services/content/scoring-config').THRESHOLDS.minScoreToAct);
+    expect(row.score_breakdown).toEqual({ base: BASE_SCORE, citability_gaps: 4 });
     expect(row.signal_metadata.citability_gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose']);
     expect(row.signal_metadata.source).toBe('citability-backfill-seeder');
     expect(row.dedupe_key).toBe('citability:v1:/termite/bait-vs-liquid/');
@@ -241,6 +243,8 @@ describe('seedAll — gated, idempotent upsert', () => {
     expect(sql).toMatch(/ON CONFLICT \(dedupe_key\) DO UPDATE/);
     expect(sql).toMatch(/status IN \('claimed', 'done', 'pending_review'\)/);
     expect(sql).toContain("WHERE NOT jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'page_edit_superseded')");
+    // A done row is left untouched and uncounted on a re-run (Codex r2 P2).
+    expect(sql).toMatch(/AND opportunity_queue\.status <> 'done'/);
     expect(bindings[0]).toBe('citability_backfill');
     expect(bindings[1]).toBe('refresh_existing_page');
     expect(bindings[13]).toBe('citability:v1:/termite/bait-vs-liquid/');
