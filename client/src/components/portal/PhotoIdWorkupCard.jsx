@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
-import { FONTS } from '../../theme-brand';
+import { COLORS as B, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE as SHELL } from '../../theme-customer';
 import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
@@ -12,6 +12,7 @@ import {
   OUTCOME_CHIP_LABEL,
   WEED_WORDING_PHRASE,
   evidenceChipPhrase,
+  subjectPlantChipText,
 } from './photoIdCopy';
 
 // =========================================================================
@@ -26,6 +27,16 @@ import {
 // settle it -> next step.
 // =========================================================================
 
+// The catalog's own warning for anything the card names (a possibility, a
+// weed chip) — the same bold red line the identity card shows for a named
+// entry, so a poison / sap / sting warning is never dropped just because the
+// answer came back as a workup (Codex #5250 r3 P2: fairy ring's poisonous
+// mushrooms).
+function SafetyLine({ text }) {
+  if (!text) return null;
+  return <div style={{ fontSize: 16, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{text}</div>;
+}
+
 function SectionHeading({ children }) {
   return (
     <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 8 }}>
@@ -34,19 +45,38 @@ function SectionHeading({ children }) {
   );
 }
 
+// The plant the workup is about — the account's grass on file, or the plant
+// the photo named — with its catalog warning (Codex #5250 r4: a sago palm
+// workup must not drop the pet-poisoning line).
+function SubjectPlant({ plant, subjectType }) {
+  if (!plant?.common_name) return null;
+  return (
+    <>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <Chip>{subjectPlantChipText(plant, subjectType)}</Chip>
+      </div>
+      <SafetyLine text={plant.safety_line} />
+    </>
+  );
+}
+
 function WeedChips({ weeds }) {
   if (!Array.isArray(weeds) || weeds.length === 0) return null;
+  const warnings = [...new Set(weeds.map((w) => w.safety_line).filter(Boolean))];
   return (
-    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-      {weeds.map((w, i) => {
-        const phrase = WEED_WORDING_PHRASE[w.wording];
-        return (
-          <Chip key={w.slug || i}>
-            {`Also spotted: ${w.common_name}${phrase ? ` — ${phrase}` : ''}`}
-          </Chip>
-        );
-      })}
-    </div>
+    <>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {weeds.map((w, i) => {
+          const phrase = WEED_WORDING_PHRASE[w.wording];
+          return (
+            <Chip key={w.slug || i}>
+              {`Also spotted: ${w.common_name}${phrase ? ` — ${phrase}` : ''}`}
+            </Chip>
+          );
+        })}
+      </div>
+      {warnings.map((text) => <SafetyLine key={text} text={text} />)}
+    </>
   );
 }
 
@@ -111,6 +141,7 @@ function PossibilitySheet({ possibility, onClose }) {
             <Icon name="x" size={18} strokeWidth={2} />
           </button>
         </div>
+        <SafetyLine text={possibility.safety_line} />
         {possibility.what_it_means && (
           <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.55 }}>{possibility.what_it_means}</div>
         )}
@@ -138,6 +169,7 @@ function PossibilityRow({ possibility, isLast, onOpen }) {
         {outcomeLabel && <Chip tone="alert">{outcomeLabel}</Chip>}
         {localTags.map((tag) => (LOCAL_FIT_LABELS[tag] ? <Chip key={tag}>{LOCAL_FIT_LABELS[tag]}</Chip> : null))}
       </div>
+      <SafetyLine text={possibility.safety_line} />
       {Array.isArray(possibility.fits) && possibility.fits.length > 0 && (
         <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.4 }}>
           <span style={{ fontWeight: 700 }}>What fits: </span>{possibility.fits.join('; ')}
@@ -253,7 +285,10 @@ function NextStepHintBlock({ nextStepHint, referral, onOpenRequestCta, onDone })
   return (
     <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
       {nextStepHint?.text && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{nextStepHint.text}</div>}
-      {referral && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{referral}</div>}
+      {/* `referral` is `{ kind, text }`; its text usually repeats the hint's own (Codex #5250 r4 P1). */}
+      {referral?.text && referral.text !== nextStepHint?.text && (
+        <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{referral.text}</div>
+      )}
       {requestable ? (
         <button type="button" data-glass-accent="" data-glass-size="primary" onClick={onOpenRequestCta} style={{
           minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body, alignSelf: 'flex-start',
@@ -285,6 +320,7 @@ export default function PhotoIdWorkupCard({ v2, photos, unavailablePhotoIds, onP
           {answer.headline && <div style={{ fontSize: 20, fontWeight: 700, color: SHELL.text, lineHeight: 1.25 }}>{answer.headline}</div>}
           {answer.subhead && <div style={{ fontSize: 16, fontStyle: 'italic', color: SHELL.muted, marginTop: 2 }}>{answer.subhead}</div>}
         </div>
+        <SubjectPlant plant={subject.plant} subjectType={v2.subject_type} />
         <WeedChips weeds={subject.weeds} />
         {tierLabel && (
           <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{tierLabel}</div>

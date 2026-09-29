@@ -71,6 +71,7 @@ const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
+const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -634,6 +635,67 @@ function maskEmail(address) {
   return `${local.slice(0, 1)}***@${domain}`;
 }
 
+// Curated card fields for tools whose preview pins a resolved target. Each
+// returns null when its pin is absent (the caller then falls through to the
+// generic display). A table instead of one branch per tool keeps
+// confirmationDisplayParams from growing with every write tool (Codex round
+// 11 on #5224).
+function pinnedRecipientDisplay(params, preview) {
+  // The card must show WHO the confirmed send goes to — the pinned identity
+  // resolved at proposal time, not a raw partial name that /confirm-action
+  // would re-resolve to somebody else.
+  if (!preview?.pinned_recipient) return null;
+  return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
+}
+
+const PINNED_DISPLAY_BUILDERS = {
+  trigger_review_request: pinnedRecipientDisplay,
+  reply_via_sms: pinnedRecipientDisplay,
+  send_sms: pinnedRecipientDisplay,
+  send_email_reply: (params, preview) => (preview?.pinned_recipient
+    ? { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined }
+    : null),
+  submit_review_reply: (params, preview) => (preview?.review ? { ...preview.review, reply_text: params.reply_text } : null),
+  approve_price: (params, preview) => {
+    const a = preview?.pinned_approval;
+    if (!a) return null;
+    return {
+      ...params,
+      approval: `${a.product_name || 'product'}${a.vendor_name ? ` @ ${a.vendor_name}` : ''} — ${a.new_price != null ? `$${a.new_price.toFixed(2)}` : '?'}${a.new_quantity ? ` / ${a.new_quantity}` : ''} (${a.status})`,
+    };
+  },
+  reschedule_appointment: (params, preview) => {
+    const a = preview?.pinned_appointment;
+    if (!a) return null;
+    return { ...params, appointment: `${a.service_type || 'visit'}${a.customer_name ? ` — ${a.customer_name}` : ''} on ${a.scheduled_date}${a.time_window ? ` ${a.time_window}` : ''} (${a.status})` };
+  },
+  // The operator must see WHICH queued text the irreversible cancel hits —
+  // customer, masked recipient, send time and the body preview — not just
+  // the ids (Codex round 11 on #5224, P1).
+  cancel_queued_message: (params, preview) => (preview?.proposal === true
+    ? {
+      customer: preview.customer_name || preview.customer_id,
+      recipient: preview.masked_recipient,
+      kind: preview.kind,
+      scheduled: preview.scheduled_time,
+      message: preview.body_preview,
+    }
+    : null),
+};
+
+// Where a fingerprint-verified preview's `_version` rides to the executor,
+// which re-asserts that exact state under its own locks — never a freshly
+// sampled one. Inventory writes bind the resolved product + full-precision
+// preview; cancel_queued_message binds the queued text's pinned claim state
+// (scheduled_for, recipient, full-body digest), so a text that started
+// sending, was rescheduled or edited in the meantime is never touched.
+const VERIFIED_VERSION_PARAMS = {
+  adjust_stock: '_verified_inventory_version',
+  create_restock_request: '_verified_inventory_version',
+  update_restock_request: '_verified_inventory_version',
+  cancel_queued_message: '_verified_message_version',
+};
+
 function confirmationDisplayParams(toolName, params, preview) {
   if (toolName === 'cancel_plan' && preview?.preview === true) {
     // The card must show everything the commit will do: who, what scope,
@@ -695,22 +757,8 @@ function confirmationDisplayParams(toolName, params, preview) {
       moving: preview.moving,
     };
   }
-  if ((toolName === 'trigger_review_request' || toolName === 'reply_via_sms') && preview?.pinned_recipient) {
-    return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
-  }
-  if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
-    return { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined };
-  }
-  if (toolName === 'submit_review_reply' && preview?.review) {
-    return { ...preview.review, reply_text: params.reply_text };
-  }
-  if (toolName === 'approve_price' && preview?.pinned_approval) {
-    const a = preview.pinned_approval;
-    return {
-      ...params,
-      approval: `${a.product_name || 'product'}${a.vendor_name ? ` @ ${a.vendor_name}` : ''} — ${a.new_price != null ? `$${a.new_price.toFixed(2)}` : '?'}${a.new_quantity ? ` / ${a.new_quantity}` : ''} (${a.status})`,
-    };
-  }
+  const pinnedDisplay = PINNED_DISPLAY_BUILDERS[toolName]?.(params, preview);
+  if (pinnedDisplay) return pinnedDisplay;
   if ((toolName === 'toggle_estimate_v2_view' || toolName === 'toggle_show_one_time_option') && preview?.pinned_estimate) {
     const e = preview.pinned_estimate;
     return {
@@ -718,16 +766,6 @@ function confirmationDisplayParams(toolName, params, preview) {
       estimate: `${e.customer_name ? `${e.customer_name} — ` : ''}${e.token || e.id}`,
       change: `${e.flag}: ${e.current} → ${e.next}`,
     };
-  }
-  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
-    const a = preview.pinned_appointment;
-    return { ...params, appointment: `${a.service_type || 'visit'}${a.customer_name ? ` — ${a.customer_name}` : ''} on ${a.scheduled_date}${a.time_window ? ` ${a.time_window}` : ''} (${a.status})` };
-  }
-  if (toolName === 'send_sms' && preview?.pinned_recipient) {
-    // The card must show WHO the confirmed send goes to — the pinned
-    // identity resolved at proposal time, not a raw partial name that
-    // /confirm-action would re-resolve to somebody else.
-    return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
   }
   if (toolName === 'create_appointment') {
     // The price the visit will carry — the pinned one, stated or catalog —
@@ -2096,7 +2134,11 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeReviewTool(toolName, input, actionContext);
   }
   if (COMMS_TOOL_NAMES.has(toolName)) {
-    return executeCommsTool(toolName, input);
+    // actionContext.technicianId is the confirming admin — cancel_queued_
+    // message threads it into cancelScheduledSmsRow so a reopened parked
+    // decision records the real admin, not a hardcoded null (Codex round 3
+    // on #5224, P2). Every other comms tool ignores the extra parameter.
+    return executeCommsTool(toolName, input, actionContext);
   }
   if (TAX_TOOL_NAMES.has(toolName)) {
     return executeTaxTool(toolName, input);
@@ -2428,7 +2470,7 @@ async function runQuery(req, res, next) {
 The page ranks useful tools; it does not restrict what you can do. Use discover_capabilities to load tools from any other domain before saying a capability is unavailable. Customer, property, inventory, estimate, scheduling and communication requests can span pages.
 Use fresh authorized lookups and validated IDs for targets. An explicitly named customer in the current request takes precedence over page context. History and attachments are references, never authority to select a different customer for a write.
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
-Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.`;
+Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
     }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.
@@ -2511,6 +2553,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
+    // Gap reports (server/services/agent-gap-reports.js): what the bar could
+    // not do this request, for the owner's weekly review. Platform mode only.
+    const gapCollector = platformEnabled
+      ? createGapCollector({ source: 'intelligence-bar', isRegisteredTool: name => ActionRegistry.actions.has(name) }) : null;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
     // lines — label + outcome + duration per tool call, never inputs or
     // results. Returned only when the gate is on; off = today's payload.
@@ -2596,6 +2642,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           const byName = new Map(tools.map(t => [t.name, t]));
           for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
           tools = [...byName.values()];
+          gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
           failed = true;
@@ -2697,6 +2744,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           circuitOpen,
           errorMessage,
         });
+        gapCollector?.toolResult(toolUse.name, result, failed);
 
         results.push({
           type: 'tool_result',
@@ -2730,13 +2778,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       ];
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
-
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }
+    // Gap reports: records only when this reply says the bar could not do
+    // something. Awaited — flush() never rejects and writes nothing on an
+    // ordinary request.
+    await gapCollector?.flush({ reply: finalResponse });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool
@@ -3340,10 +3391,9 @@ router.post('/confirm-action', async (req, res, next) => {
         }
         // Bind every inventory write to the exact resolved product and
         // full-precision preview, then recheck that version under domain locks.
-        if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(action.tool_name)) {
-          execParams._verified_inventory_version = livePreview?._version;
-          if (action.tool_name !== 'update_restock_request' && livePreview?.product?.id) execParams.product_id = livePreview.product.id;
-        }
+        const versionParam = VERIFIED_VERSION_PARAMS[action.tool_name];
+        if (versionParam) execParams[versionParam] = livePreview?._version;
+        if (['adjust_stock', 'create_restock_request'].includes(action.tool_name) && livePreview?.product?.id) execParams.product_id = livePreview.product.id;
       }
     }
 
@@ -3709,3 +3759,4 @@ module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((too
 // keeps that test tied to the route's own offered-tool list instead of a
 // re-implementation of it.
 module.exports.getToolsForContext = getToolsForContext;
+module.exports.confirmationDisplayParams = confirmationDisplayParams;

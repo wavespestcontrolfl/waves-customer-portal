@@ -9017,6 +9017,119 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
   return isCommercialAccept === true || siteConfirmationHold === true;
 }
 
+// Geo visibility for future route scoring: the accept path creates the
+// visit series with no coordinates, and find-time's detour math silently
+// treats coordless stops as zero drive time — so these visits are
+// invisible as route anchors to every later offer. Geocode the ESTIMATE
+// property once (the offer generator already geocoded the same string,
+// so this is usually an in-process memo hit) and stamp lat/lng onto the
+// accepted rows, keyed by source_estimate_id so the reserved parent,
+// standalone units, and seeded follow-ups are all covered.
+//
+// Same-property proof (Codex 2026-07-20 ×3): the rows' displayed
+// destination is the customer's primary address (service_address_* is
+// not stamped on this path), so coordinates may only be written when
+// the estimate property IS that address — proven by comparing GEOCODE
+// RESULTS (estimate address vs the customer's own address, ≤0.15 mi),
+// which string heuristics can't do safely ('1 Main St' vs '21 Main
+// St', same street in two cities). A phone-matched accept reusing an
+// existing customer for a different property skips the stamp entirely
+// rather than making coords contradict the displayed address. When the
+// properties match and the customer had no coords, backfill
+// customers.latitude/longitude from the same result — coherent by
+// construction. Called post-commit, fire-and-forget, fail-soft — extracted
+// to a named function (byte-identical logic) so it can be unit tested
+// without driving the whole accept transaction.
+// Every field the pre-lock/fenced-reread comparison below uses to decide
+// whether the customer's address moved out from under custCoords (Codex
+// P1): omitting address_line2 here made two customers.js reads disagree
+// with the review snapshot whenever a unit was on file (see
+// ADDRESS_SNAPSHOT_FIELDS' use below and customer-geocode-review.js's own
+// ADDRESS_FIELDS, which this must always mirror).
+const ADDRESS_SNAPSHOT_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+
+async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
+  const { geocodeAddress, buildAddress } = require('../services/geocoder');
+  const { haversine } = require('../services/route-optimizer');
+  const estCoords = await geocodeAddress(estimate.address);
+  if (!estCoords) return;
+  const cust = await db('customers')
+    .where({ id: customerId })
+    .first('address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+  if (!cust) return;
+  const review = require('../services/customer-geocode-review');
+  const reviewedCust = await review.reviewedCustomerLocation({ ...cust, id: customerId }, db);
+  if (reviewedCust.geocode_review_blocked) return;
+  const custCoords = (reviewedCust.latitude != null && reviewedCust.longitude != null)
+    ? { lat: Number(reviewedCust.latitude), lng: Number(reviewedCust.longitude) }
+    : await geocodeAddress(buildAddress(reviewedCust));
+  if (!custCoords) return;
+  const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
+  if (!(samePlaceMiles <= 0.15)) return;
+  // The exact address custCoords was computed against, pre-lock (Codex
+  // P1): if the customer's address is edited before the fenced reread
+  // below sees it, custCoords describes a property that is no longer this
+  // customer's — the fenced reread must abort rather than carry it across
+  // the edit, never re-validate under the lock (a network geocode call is
+  // never made while holding this fence).
+  const addressSnapshot = ADDRESS_SNAPSHOT_FIELDS.map((field) => cust[field] ?? null);
+  await review.withCustomerReviewWriteFence(customerId, db, async (conn) => {
+    // No excludeCustomerAutomaticGeocodeForId fence on the visit write
+    // (Codex P1 round 1): that fence exists to stop an automatic geocode
+    // from overwriting a staff-reviewed customer/property pin, but this
+    // write stamps the AUTHORITATIVE reviewed pin itself onto a coordless
+    // visit, already proven same-place as the estimate address.
+    //
+    // custCoords above was read BEFORE any lock (Codex P1 round 2, fallback
+    // auditor 2026-09-28: a TOCTOU race, unlike the customers-table write
+    // below whose excludeCustomerAutomaticGeocodeForId filter is evaluated
+    // live at write time) — a staff outside_area/needs_pin decision landing
+    // between that read and this fenced callback, including while blocked
+    // waiting on the fence's own customer-row lock, must not have its
+    // rejection overwritten by the now-stale pin. Re-derive under the SAME
+    // locked connection so it sees the fence's FOR-UPDATE-consistent state
+    // (the same lock-then-reread idiom reuseMatchedProfile's fenced re-read
+    // uses), and skip the write if the customer is blocked as of THIS read.
+    const freshCust = await conn('customers')
+      .where({ id: customerId })
+      .first('address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+    if (!freshCust) return;
+    // The address may have been edited after the pre-lock read while this
+    // fire-and-forget task waited for the fence (Codex P1): custCoords was
+    // geocoded for THAT snapshot, so a fresh row with a different address
+    // must never fall back to it below — abort instead of stamping the
+    // accepted visits (and possibly backfilling the customer) with a pin
+    // for a property this customer no longer has on file. A same-property
+    // edit (unchanged snapshot) proceeds exactly as before.
+    const freshSnapshot = ADDRESS_SNAPSHOT_FIELDS.map((field) => freshCust[field] ?? null);
+    if (JSON.stringify(freshSnapshot) !== JSON.stringify(addressSnapshot)) return;
+    const freshReviewed = await review.reviewedCustomerLocation({ ...freshCust, id: customerId }, conn);
+    if (freshReviewed.geocode_review_blocked) return;
+    // A network geocode call is never made under this lock (this file's own
+    // established rule elsewhere) — when the fresh read has no live pin to
+    // offer (not blocked, just nothing stored yet), the pre-lock provider
+    // result stands, same as before this round's fix.
+    const freshCoords = (freshReviewed.latitude != null && freshReviewed.longitude != null)
+      ? { lat: Number(freshReviewed.latitude), lng: Number(freshReviewed.longitude) }
+      : custCoords;
+    await conn('scheduled_services')
+      .where({ source_estimate_id: estimate.id })
+      .whereNull('lat')
+      .update({ lat: freshCoords.lat, lng: freshCoords.lng });
+    if (review.needsCoordinatePairRepair(freshCust)) {
+      let customerUpdate = conn('customers').where({ id: customerId }).where(function () {
+        this.whereNull('latitude').orWhereNull('longitude');
+      });
+      customerUpdate = review.excludeCustomerAutomaticGeocodeForId(customerUpdate, customerId);
+      await customerUpdate.update({
+        latitude: freshCoords.lat,
+        longitude: freshCoords.lng,
+        updated_at: new Date(),
+      });
+    }
+  });
+}
+
 // PUT /api/estimates/:token/accept — customer accepts
 // Body (backward compatible — both optional):
 //   { slotId?: string, paymentMethodPreference?: 'card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual' }
@@ -10573,6 +10686,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // waiting on the customer row. Reentrant no-op downstream.
           const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
           await acquireScheduledInvoiceMintLock(trx, acceptHoldRow.id);
+        }
+        // EVERY adopted existing appointment, not only a reservation-held
+        // one, takes the mint lock here, before any row lock (Codex r5 P1 on
+        // #5253): update-details' re-price takes mint lock → customer row,
+        // while this txn updates the customer (service_preferences) before
+        // the adopt block's own mint acquisition — ABBA. Re-acquiring it
+        // there is a reentrant no-op. Same mint → catalog order the held
+        // path already uses; nothing later in this txn takes occupancy or
+        // tech-day locks for a non-held row.
+        if (existingAppointmentRow?.id && existingAppointmentRow.id !== acceptHoldRow?.id) {
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, existingAppointmentRow.id);
         }
       }
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r21/r22): an
@@ -12905,55 +13030,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       void AppointmentTagger.onServiceScheduled(appointment.id, { suppressWelcome: true })
         .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
-    // Geo visibility for future route scoring: the accept path creates the
-    // visit series with no coordinates, and find-time's detour math silently
-    // treats coordless stops as zero drive time — so these visits are
-    // invisible as route anchors to every later offer. Geocode the ESTIMATE
-    // property once (the offer generator already geocoded the same string,
-    // so this is usually an in-process memo hit) and stamp lat/lng onto the
-    // accepted rows, keyed by source_estimate_id so the reserved parent,
-    // standalone units, and seeded follow-ups are all covered.
-    //
-    // Same-property proof (Codex 2026-07-20 ×3): the rows' displayed
-    // destination is the customer's primary address (service_address_* is
-    // not stamped on this path), so coordinates may only be written when
-    // the estimate property IS that address — proven by comparing GEOCODE
-    // RESULTS (estimate address vs the customer's own address, ≤0.15 mi),
-    // which string heuristics can't do safely ('1 Main St' vs '21 Main
-    // St', same street in two cities). A phone-matched accept reusing an
-    // existing customer for a different property skips the stamp entirely
-    // rather than making coords contradict the displayed address. When the
-    // properties match and the customer had no coords, backfill
-    // customers.latitude/longitude from the same result — coherent by
-    // construction. Post-commit, fail-soft.
+    // Geo visibility for future route scoring — see stampAcceptedVisitCoordinates
+    // above for the full rationale. Post-commit, fire-and-forget, fail-soft.
     if (estimate.address && customerId) {
-      void (async () => {
-        const { geocodeAddress, buildAddress } = require('../services/geocoder');
-        const { haversine } = require('../services/route-optimizer');
-        const estCoords = await geocodeAddress(estimate.address);
-        if (!estCoords) return;
-        const cust = await db('customers')
-          .where({ id: customerId })
-          .first('address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
-        if (!cust) return;
-        const custCoords = (cust.latitude != null && cust.longitude != null)
-          ? { lat: Number(cust.latitude), lng: Number(cust.longitude) }
-          : await geocodeAddress(buildAddress(cust));
-        if (!custCoords) return;
-        const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
-        if (!(samePlaceMiles <= 0.15)) return;
-        await db('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNull('lat')
-          .update({ lat: estCoords.lat, lng: estCoords.lng });
-        if (cust.latitude == null || cust.longitude == null) {
-          await db('customers').where({ id: customerId }).update({
-            latitude: custCoords.lat,
-            longitude: custCoords.lng,
-            updated_at: new Date(),
-          });
-        }
-      })().catch((e) => logger.warn(`[estimate-accept] visit geocode stamp failed (non-blocking) for estimate ${estimate.id}: ${e.message}`));
+      void stampAcceptedVisitCoordinates({ estimate, customerId, db })
+        .catch((e) => logger.warn(`[estimate-accept] visit geocode stamp failed (non-blocking) for estimate ${estimate.id}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
       ? acceptConversion.deferredFollowUpReminderRows
@@ -28372,6 +28453,10 @@ module.exports.planCreditFirstVisitSlice = planCreditFirstVisitSlice;
 // keeps an already-sent Tree & Shrub quote at its sent price after an admin
 // flips the v4.7 pricing_config knobs.
 module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-shrub-knob-replay').treeShrubKnobSignalForReplay;
+// Test hook (geocode review fence P1, PR #5064): the post-accept visit
+// coordinate stamp, extracted so it can be unit tested without driving the
+// whole accept transaction.
+module.exports.stampAcceptedVisitCoordinates = stampAcceptedVisitCoordinates;
 module.exports.estimateTermiteKnobSignal = require('../services/estimate-tree-shrub-knob-replay').termiteKnobSignalForReplay;
 // Test hooks (measured-basis lane 2026-08-12): the treatable-area line the
 // lawn PriceCard renders beside its per-application price.

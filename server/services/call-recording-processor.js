@@ -111,7 +111,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -9624,6 +9624,15 @@ const CallRecordingProcessor = {
     // union of read-back reminders the office clears, never edited across
     // calls (no per-reason provenance). Schema-valid V2 only.
     const wdoArrangerAuthorizedThisPass = v2Result?.status === 'valid' && isAuthorizedWdoArrangerBooking(v2Result.extraction);
+    // Same idea, owner ruling 2026-09-28: a family_member caller (schema
+    // 1.18.0) with a confirmed time on the call is authorized for ANY
+    // service type (isAuthorizedFamilyMemberBooking). Live miss (call
+    // f5a54dbd, 2026-09-28): a paper-wasp knockdown at "my grandfather's
+    // house" blocked on caller_not_authorized because pre-1.18.0 schema
+    // forced the caller onto "other". A force-reprocess of that call under
+    // the new schema/relationship value must retire the stale card the same
+    // way the WDO-arranger reprocess does below.
+    const familyMemberAuthorizedThisPass = v2Result?.status === 'valid' && isAuthorizedFamilyMemberBooking(v2Result.extraction);
     let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
@@ -19630,12 +19639,19 @@ const CallRecordingProcessor = {
         }
       }
       // Owner ruling 2026-09-26 (codex #4890 r1 P1): a lender/realtor/home
-      // buyer ordering a confirmed WDO inspection is an authorized caller. A
-      // force-reprocess of a call an earlier pass carded caller_not_authorized
-      // must retire that card here — the finalizer only ever OPENS review
-      // state — or the visit books while the office still sees a "confirm the
-      // account holder" task. Same transaction and fence as the repairs above.
-      if (written > 0 && finalStatus === 'processed' && wdoArrangerAuthorizedThisPass) {
+      // buyer ordering a confirmed WDO inspection is an authorized caller.
+      // Owner ruling 2026-09-28: a family member of the homeowner/resident
+      // (grandchild, child, parent, sibling, in-law, etc.) booking at THAT
+      // RELATIVE'S home with a confirmed time is authorized too, for any
+      // service type. Either way, a force-reprocess of a call an earlier
+      // pass carded caller_not_authorized must retire that card here — the
+      // finalizer only ever OPENS review state — or the visit books while
+      // the office still sees a "confirm the account holder" task. Same
+      // transaction and fence as the repairs above.
+      if (written > 0 && finalStatus === 'processed' && (wdoArrangerAuthorizedThisPass || familyMemberAuthorizedThisPass)) {
+        const retirementNote = familyMemberAuthorizedThisPass
+          ? 'Superseded — a family member booking service at their relative’s home with a confirmed time is an authorized caller (owner ruling 2026-09-28).'
+          : 'Superseded — a lender, realtor or home buyer ordering a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).';
         const retired = await trx('triage_items')
           .where({ call_log_id: call.id, reason_code: 'caller_not_authorized' })
           .whereIn('status', ['open', 'in_progress'])
@@ -19643,7 +19659,7 @@ const CallRecordingProcessor = {
             status: 'resolved',
             resolved_at: new Date(),
             resolution_source: 'system',
-            resolution_note: 'Superseded — a lender, realtor or home buyer ordering a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).',
+            resolution_note: retirementNote,
           });
         if (retired > 0) {
           await trx('call_log')

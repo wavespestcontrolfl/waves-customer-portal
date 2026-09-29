@@ -1596,6 +1596,42 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY AGENT GAP DIGEST — Monday 8:15am ET — owner ACT email ONLY when the
+  // Intelligence Bar recorded a gap report (missing capability, tool failure,
+  // or blocked action) in the last 7 days; a clean week sends nothing.
+  // =========================================================================
+  cron.schedule('15 8 * * 1', async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('agent-gap-digest', async () => {
+        const { runAgentGapDigest } = require('./agent-gap-digest');
+        const result = await runAgentGapDigest();
+        logger.info(`[agent-gap-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count ?? null })}`);
+        // A delivery-blocking skip (mailer unconfigured / non-internal
+        // recipient) or a failed send must still read as a FAILED run in
+        // job_health, mirroring the turf-variance digest block above.
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`agent gap digest did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      // A tick that got no DB connection returns { skipped } without running
+      // the job, and on the connection-acquire path without any job_health
+      // write: record the missed weekly run. recordMissedTick only writes when
+      // no start or success for this occurrence is already recorded within its
+      // 60 s tick window, so the slot-timeout path (which already recorded
+      // it) is not counted twice. lease_held means another instance ran this
+      // tick, which is not a miss.
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('agent-gap-digest', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`agent gap digest tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly agent gap digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
   // Each is exception-based (a quiet day sends nothing), carries its own
   // env kill switch, and dedupes via ops_email_send_state. Cron minutes are
@@ -3028,6 +3064,57 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:15PM ET — Pest Insider proof catch-up (GATE_PEST_INSIDER_PROOF).
+  // The draft survives a failed proof send and the Tuesday autopilot stops
+  // at its already-drafted check, so this is the only retry. No-op unless
+  // the gate is on, it is day 1–10 of the ET month, and this month's issue
+  // is still a draft with no proof on record.
+  // =========================================================================
+  cron.schedule('15 14 * * *', async () => {
+    try {
+      await runExclusive('pest-insider-proof-retry', async () => {
+        const { retryPestInsiderProof } = require('./pest-insider-autopilot');
+        const result = await retryPestInsiderProof();
+        if (!result.skipped) {
+          logger.info(`[pest-insider-proof-retry] proof ${result.proofSent ? 'sent' : `not sent (${result.reason})`} for send ${result.sendId}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[pest-insider-proof-retry] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 2:15AM ET — Email division fact register sync. Brings the code
+  // register (services/email-division/fact-register-data.js) into
+  // knowledge_base: inserts missing facts, updates rows still carrying what
+  // the register last wrote, retires expired/withdrawn ones, and HOLDS any
+  // row a person edited (never overwritten; audited once). Runs BEFORE the
+  // 2:40 AM knowledge-index sync so an expired fact is out of knowledge_base
+  // (and its index chunks dropped) by the time the index rebuilds (codex
+  // round 9). The Pest Insider draft also syncs on demand.
+  // =========================================================================
+  cron.schedule('15 2 * * *', async () => {
+    try {
+      await runExclusive('email-division-fact-sync', async () => {
+        const { ensureFactRegister } = require('./email-division/fact-register');
+        const r = await ensureFactRegister({ force: true });
+        logger.info(`[fact-register] sync: ${r.inserted.length} inserted, ${r.updated.length} updated, ${r.retired.length} retired, ${r.held.length} held, ${r.errors.length} errors`);
+        if (r.held.length) {
+          logger.warn(`[fact-register] held (edited by a person, not overwritten): ${r.held.map((h) => h.slug).join(', ')}`);
+        }
+        if (r.errors.length) {
+          // Surface as a job failure (not a warning) so runExclusive's health
+          // record and the ops digest see a partial sync as a failed tick.
+          throw new Error(`fact-register sync: ${r.errors.length} row error(s): ${r.errors.map((e) => `${e.slug}: ${e.error}`).join('; ')}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[fact-register] sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MONDAY 7AM ET — Newsletter autopilot
   // Auto-drafts the weekly flagship digest from approved events. Never
   // auto-sends — creates a draft for admin review. Skips if fewer than 3
@@ -4198,14 +4285,16 @@ function initScheduledJobs() {
               try {
                 // Scoped to drafts that recorded an escalation (Codex r5):
                 // wording alone never blocks a scheduled reply.
-                const { followupPromiseBlockReason } = require('./sms-followup-sla');
+                const { followupPromiseBlockReason, slaDraftedAt } = require('./sms-followup-sla');
                 const slaDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
                   .first('input_snapshot', 'prompt_version', 'suggested_message', 'created_at');
                 if (followupPromiseBlockReason({
                   inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version,
                   originalBody: slaDecision?.suggested_message ?? null, body: msg.message_body,
-                  draftedAt: slaDecision?.created_at ?? null,
+                  // Codex #5194 P2: the drafter's own facts-generated instant
+                  // when the decision carries one, else created_at.
+                  draftedAt: slaDraftedAt(slaDecision),
                 })) slaStale = true;
               } catch (err) {
                 logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);

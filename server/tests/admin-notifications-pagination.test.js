@@ -18,6 +18,13 @@ jest.mock('../models/db', () => () => {
   let offset = 0;
   const q = {
     where(filters) { rows = rows.filter(r => Object.entries(filters).every(([k, v]) => r[k] === v)); return q; },
+    // The one raw predicate the bell list adds: Activity-only rows
+    // (metadata.feed = 'activity') never reach the bell.
+    whereRaw(sql) {
+      if (!/metadata->>'feed'/.test(sql)) throw new Error(`unexpected whereRaw: ${sql}`);
+      rows = rows.filter(r => r.metadata?.feed !== 'activity');
+      return q;
+    },
     orderBy(key, direction) { sorts.push([key, direction]); return q; },
     limit(n) { limit = n; return q; },
     offset(n) { offset = n; return q; },
@@ -86,4 +93,12 @@ test('pagination clamps negative inputs before querying', async () => {
   const result = await list({ limit: '-1', page: '-5' });
   expect(result).toMatchObject({ page: 1, limit: 1, hasMore: true });
   expect(result.notifications).toHaveLength(1);
+});
+
+test('an Activity-only row never reaches the bell list', async () => {
+  mockRows.push({ id: 'activity-only', recipient_type: 'admin', created_at: '2026-09-13T12:00:00Z', read_at: null, metadata: { feed: 'activity', kind: 'FIX' } });
+  mockRows.push({ id: 'owner-row', recipient_type: 'admin', created_at: '2026-09-13T11:00:00Z', read_at: null, metadata: { feed: null, kind: 'ACT' } });
+  const ids = (await list({ limit: '100' })).notifications.map(n => n.id);
+  expect(ids).not.toContain('activity-only');
+  expect(ids).toContain('owner-row');
 });

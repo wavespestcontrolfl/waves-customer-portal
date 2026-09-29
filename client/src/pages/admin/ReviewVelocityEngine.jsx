@@ -265,7 +265,7 @@ const TEMPLATES = [
     id: "qr_followup",
     name: "QR Code Follow-Up",
     sentiment: "happy",
-    body: "Hey {first}! Waves here - great seeing you today. Here is that review link one more time:\n\n{review_url}",
+    body: "Hey {first}, it's Waves - great seeing you today. Here is that review link one more time:\n\n{review_url}",
   },
   // first_treatment_ask is deliberately NOT offered here (codex #3235 r12
   // P1, superseding the r3 mirror-parity note): it is a cadence-internal,
@@ -444,7 +444,7 @@ function hydrate(body, c) {
       )
       // {sender} is deliberately NOT hydrated here (codex #4139 r1): the
       // candidates feed carries no technician, so the server renders it from
-      // the record ("<tech> with Waves", else "Waves Pest Control") — the same
+      // the record ("<tech> with Waves", else "It's Waves") — the same
       // way it swaps {review_url} for the tokenized link.
       .replace(/\{service_type\}/g, c.lastSvc || "pest control")
       .replace(/\{review_url\}/g, c.reviewUrl)

@@ -17,7 +17,7 @@ const {
   CITY_SERVICE_SLUG,
   cityServiceRoute,
 } = require('./blog-seo-contract');
-const { isFaqBlockedService, findHardcodedPrice } = require('./content-guardrails');
+const { isFaqBlockedService, findHardcodedPrice, priceEvidenceUrls } = require('./content-guardrails');
 
 const P0_CODES = new Set([
   'P0_MISSING_TITLE',
@@ -89,7 +89,7 @@ function evaluate(input = {}) {
   if (detectPii(body)) {
     findings.push(finding('P0', 'P0_PII_DETECTED', 'Draft appears to contain customer PII.', 'Remove customer phone numbers, emails, and verbatim customer details before publishing.'));
   }
-  if (detectHardcodedPrice(body, brief)) {
+  if (detectHardcodedPrice(body, brief, draft)) {
     findings.push(finding('P0', 'P0_HARDCODED_PRICE_NOT_APPROVED', 'Draft appears to hardcode unapproved pricing.', 'Use estimate/calculator language and link to the calculator instead of publishing fixed prices.'));
   }
   if (uniquenessResult?.ok === false && hasDuplicateIntentFailure(uniquenessResult)) {
@@ -1314,31 +1314,26 @@ function briefForbidsPrices(...sources) {
   return forbids;
 }
 
-function detectHardcodedPrice(body = '', brief = null) {
+function detectHardcodedPrice(body = '', brief = null, draft = null) {
   // Competitor-price provenance = the persisted TRUE-intercept marker, not
   // the bucket alone: category/spoke seeds share the operator_intercept
   // bucket and must keep the full price guard (Codex P0). Mined drafts and
   // legacy briefs without the marker fail closed.
   const isOperatorIntercept = brief?.gsc_signal?.bucket === 'operator_intercept';
   const thirdPartyCitations = isOperatorIntercept && brief?.gsc_signal?.intercept === true;
-  // The source-and-date requirement means the price check also needs the
-  // CITATION context, or a properly sourced intercept parks here even though
-  // the run-context guardrail passed it — the same drift that put a private
-  // copy of this check out of step before (Codex). Sources come off the
-  // persisted brief so this stays usable from remediation.
+  // A competitor price needs no link or as-of date (owner ruling
+  // 2026-09-28), but it does need a source in the draft's unpublished
+  // evidence or the brief's bound sources — the same test the guardrails
+  // run (Codex r9 on #5191).
   const operatorBrief = brief?.voice_constraints?.operator_brief || null;
-  const requiredSourceUrls = [
+  // A brief-level ban outranks every exemption here too (Codex).
+  const forbidAllPrices = briefForbidsPrices(operatorBrief, brief?.gsc_signal);
+  const boundSourceUrls = [
     ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
     ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
   ];
-  // A brief-level ban outranks every exemption here too (Codex).
-  const forbidAllPrices = briefForbidsPrices(operatorBrief, brief?.gsc_signal);
-  return findHardcodedPrice(body, {
-    thirdPartyCitations,
-    operatorCitations: isOperatorIntercept,
-    requiredSourceUrls,
-    forbidAllPrices,
-  }) !== null;
+  const evidenceUrls = thirdPartyCitations ? priceEvidenceUrls(draft) : [];
+  return findHardcodedPrice(body, { thirdPartyCitations, forbidAllPrices, evidenceUrls, boundSourceUrls }) !== null;
 }
 
 function hasDuplicateIntentFailure(result = {}) {

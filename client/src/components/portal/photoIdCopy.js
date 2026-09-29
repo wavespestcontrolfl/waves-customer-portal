@@ -204,6 +204,15 @@ export const WEED_WORDING_PHRASE = { pretty_sure: "we're pretty sure", likely: '
 
 export const FIELD_TEST_TECHNICIAN_LINE = 'or a technician checks it on your next visit.';
 
+// The workup's named subject plant (Codex #5250 r4): the grass on file for
+// the account, or the plant the photo named, with the photo's wording.
+export function subjectPlantChipText(plant, subjectType) {
+  const noun = subjectType === 'lawn' ? 'Grass' : 'Plant';
+  if (plant.source === 'account') return `${noun} on file: ${plant.common_name}`;
+  const phrase = WEED_WORDING_PHRASE[plant.wording];
+  return `${noun}: ${plant.common_name}${phrase ? ` — ${phrase}` : ''}`;
+}
+
 // evidence.chips readable phrases (assignment: "Evidence we have (photo
 // count + chips as readable phrases)"). Only chip keys/values this table
 // defines are ever rendered — an unrecognized key or value is skipped

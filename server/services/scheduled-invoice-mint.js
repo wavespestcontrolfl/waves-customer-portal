@@ -78,6 +78,25 @@ async function acquireScheduledInvoiceMintLock(trx, scheduledServiceId) {
   );
 }
 
+// Non-blocking sibling of the above, same key — for a caller that already
+// holds ONE visit's mint lock (or row lock) and needs another visit's mint
+// lock too, where waiting could deadlock against a second transaction
+// acquiring the same two locks in the opposite order (pre-push audit P1,
+// "the re-price block": the 'following' sibling propagation holds the
+// edited visit's mint lock while it takes each sibling's). pg_try_advisory_
+// xact_lock never blocks — it returns immediately, true if the lock was
+// free (now held, transaction-scoped like the blocking form) or already
+// held by THIS same transaction (re-entrant), false if another transaction
+// holds it. A caller that gets false must not proceed as if it held the
+// lock; it should refuse the whole operation and let the operator retry.
+async function tryAcquireScheduledInvoiceMintLock(trx, scheduledServiceId) {
+  const result = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired',
+    [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String(scheduledServiceId)],
+  );
+  return result?.rows?.[0]?.acquired === true;
+}
+
 // Call under the existing mint lock. Packet creation takes those same locks
 // before freezing its members, so a legacy writer cannot slip past a packet
 // that has committed while the writer waited. Do not adopt the shared invoice
@@ -351,6 +370,7 @@ module.exports = {
   SCHEDULED_SERVICE_INVOICE_MINT_LOCK,
   TERMINAL_INVOICE_STATUSES,
   acquireScheduledInvoiceMintLock,
+  tryAcquireScheduledInvoiceMintLock,
   assertScheduledInvoiceNotPacketOwned,
   acquireScheduledMintLockChain,
   findAdoptableScheduledInvoice,

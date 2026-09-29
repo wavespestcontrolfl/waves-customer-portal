@@ -238,7 +238,7 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
 
   let count = 0;
   for (const row of rows) {
-    const result = await db.raw(
+    const insert = (runner) => runner.raw(
       `INSERT INTO opportunity_queue
          (bucket, action_type, query, page_url, service, city,
           score, score_breakdown, signal_metadata, status,
@@ -283,6 +283,7 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
                                   ELSE opportunity_queue.attempt_count
                              END,
              updated_at = now()
+       RETURNING status
       `,
       [
         row.bucket, row.action_type, row.query, row.page_url, row.service, row.city,
@@ -291,7 +292,30 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
         maxClaimAttempts(),
       ]
     );
-    count += result.rowCount || 1;
+    let result;
+    if (row.page_url && row.action_type === 'refresh_existing_page') {
+      result = await db.transaction(async (trx) => {
+        const refreshAudit = require('../seo/refresh-audit');
+        const queue = require('./opportunity-queue')._internals;
+        await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+        const inflight = await refreshAudit.findInflightPageEdit(trx, {
+          path: refreshAudit._identity.urlToPath(row.page_url),
+          targetDomain: refreshAudit._identity.registrableDomain(row.page_url) || 'wavespestcontrol.com',
+        });
+        if (inflight && inflight.dedupe_key !== row.dedupe_key) return { rowCount: 0, rows: [] };
+        const inserted = await insert(trx);
+        if (['pending', 'claimed', 'pending_review'].includes(inserted.rows?.[0]?.status)) {
+          await queue.supersedeCitabilityBackfillsForPage(trx, {
+            pageUrl: row.page_url,
+            ordinaryDedupeKey: row.dedupe_key,
+          });
+        }
+        return inserted;
+      });
+    } else {
+      result = await insert(db);
+    }
+    count += result.rowCount ?? 1;
   }
   logger.info(`[intercept-brief-seeder] seeded ${count}/${rows.length} intercept brief(s) from ${path.basename(file)}`);
   return { dryRun: false, count, rows };
@@ -414,7 +438,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     payload.thesis ? `THESIS (the post must argue exactly this): ${payload.thesis}` : null,
     'OUTLINE: cover every outline item in the brief\'s required_sections, in order — they are the content plan, not suggestions.',
     requiredSources.length
-      ? `REQUIRED SOURCES (cite IN-POST): every source below must be linked in the body with explicit attribution (name the source where you cite it). Quote exactly where the brief calls for verbatim quotes. Sources: ${requiredSources.join(' | ')}`
+      ? `REQUIRED SOURCES (cite IN-POST): every source below must be cited in the body with explicit attribution (name the source where you cite it) and linked — EXCEPT a competitor's own website, which is named in plain text and never linked (list its URL under "Evidence sources" in notes_for_reviewer, which is never published). Quote exactly where the brief calls for verbatim quotes. Sources: ${requiredSources.join(' | ')}`
       : null,
     // Non-URL sourcing directives (manifest `source_notes`) are instructions
     // for sources the writer must locate ("Orkin published terms/plan pages",
@@ -422,7 +446,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     // must-link URL list above so the snapshot step never tries to archive a
     // sentence.
     sourceNotes.length
-      ? `SOURCING DIRECTIVES (binding): ${sourceNotes.join(' | ')}. Locate the live pages these directives describe, cite them in-post as real linked URLs with explicit attribution, and OMIT any claim those pages do not support.`
+      ? `SOURCING DIRECTIVES (binding): ${sourceNotes.join(' | ')}. Locate the live pages these directives describe, cite them in-post with explicit attribution (a real linked URL — EXCEPT a competitor's own website, which is named in plain text and never linked; list its URL under "Evidence sources" in notes_for_reviewer, which is never published), and OMIT any claim those pages do not support.`
       : null,
     ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified against the cited source, OMIT the claim entirely.`) : []),
     payload.internal_links?.length
@@ -442,15 +466,20 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
       ? `SCHEMA: emit ${payload.schema_types.join(' + ')} structured data with matching VISIBLE content (FAQPage requires the visible FAQ section; HowTo requires visible steps). The operator manifest explicitly REQUIRES the FAQ section for this post (owner directive 2026-06-11) — this operator mandate overrides the default no-FAQ rule for blocked topics for THIS brief only; include the FAQ section as outlined.`
       : null,
     globalRules ? `GLOBAL RULES (apply to every intercept post): ${globalRules}` : null,
-    'COMPARISON DISCLAIMER: end the post with a short footer noting competitor pricing/terms are as of the publish date and readers should verify current terms directly.',
+    // Owner rulings 2026-09-28: "I do not want to link to a competitor's
+    // website, whatsoever" and "list them, we don't have to link to their
+    // site, or say verified or not verified." This line outranks the
+    // manifest's older global rules (in-post competitor links, dated
+    // attribution, a verify-current-terms footer), which predate them.
+    'COMPETITOR FACTS (owner ruling 2026-09-28 — overrides any rule above): NEVER link a competitor\'s own website, anywhere (body, CTA, caption, frontmatter). State competitor facts and prices plainly, naming the company — no link to their site, no "verified"/"not verified" label, no "as of" date or "verify current terms" footer required. A competitor page you relied on is named in the text and its URL listed under "Evidence sources" in notes_for_reviewer (never published): that is where the reviewer checks the claim. Public-record sources about a competitor may still be linked: BBB and ConsumerAffairs pages, or a court/AG/regulator release listed in this brief\'s sources.',
     'Never hardcode Waves pricing — link to /pest-control-calculator/ instead.',
-    // The publish-time price guards (content-guardrails + seo-completion-gate)
-    // P0 any bare dollar figure unless one of their allowance words sits
-    // within ~80 characters. The manifest REQUIRES sourced competitor dollar
-    // figures, so the framing rule below is what makes those two requirements
-    // compatible — without it a compliant draft gets routed out as
-    // HARDCODED_PRICE.
-    'COMPETITOR PRICING FRAMING (mandatory for every dollar figure): each competitor dollar amount must appear in the same sentence as at least one of these exact words: "quote", "range", "pricing varies", "depends", or "estimate" — AND carry a dated source attribution. Example: "Aptive\'s early-cancellation fee is $199 as of June 2026 per ConsumerAffairs, though quoted pricing varies by contract." A bare dollar figure with none of those words nearby will block the post at the publish-time price guard.',
+    // Mirrors the publish-time price guard (content-guardrails
+    // findHardcodedPrice): on an intercept brief a dollar figure passes only
+    // when its OWN sentence names whose price it is, in plain prose outside
+    // any table, AND that company's source is in notes_for_reviewer or this
+    // brief's sources (competitorPriceEvidenced); framing words ("pricing
+    // varies") do not exempt an amount.
+    'COMPETITOR PRICING (mandatory for every dollar figure): each competitor dollar amount must sit in a plain-prose sentence that names whose price it is — e.g. "Aptive\'s early-cancellation fee is $199." — never in a table, never next to a Waves price, never with first-person wording ("we", "our") in the same sentence. List the page each figure came from under "Evidence sources" in notes_for_reviewer (the company\'s own page, or a BBB/ConsumerAffairs page about it) unless it is one of this brief\'s sources. An unattributed or unsourced dollar figure blocks the post at the publish-time price guard.',
   ];
   return lines.filter(Boolean);
 }

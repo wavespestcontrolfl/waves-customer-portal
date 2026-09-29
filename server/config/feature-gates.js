@@ -78,11 +78,13 @@
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_REPORT_PLAN_SUMMARY=true ("Your plan" section on the LIVE report: an active plan member's visit/re-service COUNTS for this year — never prices, owner ruling 2026-09-28; live view only, stripped from PDF/static like nextAppointment; dark = report payload carries no planSummary)
  *   GATE_REPORT_NEAR_YOU=true  ("Near you" line on the LIVE LAWN report only: the lawn pest most often found among other lawn customers in the same city over the last 30 ET days, shown only at/above the NEAR_YOU_MIN_CUSTOMERS distinct-customer floor — owner ruling 2026-09-28, "lawn only"; live view only, stripped from PDF/static like planSummary; dark = report payload carries no nearYou)
+ *   GATE_STAMPED_ZERO_FREE=true (a scheduled_services.estimated_price stamped exactly 0 — not NULL, not '' — bills nothing in EVERY billing lane: per-application, per-visit, monthly_membership, legacy-null, annual prepay; owner ruling 2026-09-28, waves-billing skill invariant #8, "$0 means charge nothing", superseding invariant #6's monthly-fallback note while the gate is on. NULL/blank is unchanged — still falls through to per_application_fee / monthly_rate as today. Off = byte-identical to today on every path; canonical CALL-TIME reader stampedZeroFreeLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
+ *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer-display only — never fed into the AI report writer's grounding. Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
@@ -513,6 +515,26 @@ const gates = {
   // static/sms_preview never carry it at any setting. Kill switch: unset or
   // any non-'true' value.
   reportNearYou: process.env.GATE_REPORT_NEAR_YOU === 'true',
+
+  // A stamped estimated_price of exactly 0 bills nothing in every billing
+  // lane (owner ruling 2026-09-28). This map entry is for logGateStatus
+  // only, same discountStackingLive() convention — the canonical CALL-TIME
+  // reader is stampedZeroFreeLive() below (strict 'true'), which
+  // billing-lane.js's hasAuthoritativeZeroPrice and the handful of sites
+  // that bypass the resolver read directly, so a flip needs no redeploy.
+  // Off = byte-identical to today on every path.
+  stampedZeroFree: process.env.GATE_STAMPED_ZERO_FREE === 'true',
+  // Product-copy lines on the service report (owner-approved 2026-09-28) —
+  // "How it works" / "Also labeled for" / "Pets & kids" per applied product,
+  // matched against the static reviewed config in
+  // server/config/report-product-copy.js. Live view only, like
+  // planSummary/nearYou above — PDF/static/sms_preview never carry it at any
+  // setting (stripLiveOnlyReportProductCopy), and termite-line reports never
+  // get it. This map entry is for logGateStatus only — the
+  // canonical CALL-TIME reader is reportProductCopyGateOn() in
+  // server/services/service-report/report-product-copy.js, same posture as
+  // pestReportExpectationsGateOn().
+  reportProductCopy: process.env.GATE_REPORT_PRODUCT_COPY === 'true',
 
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
@@ -1990,6 +2012,18 @@ const gates = {
   // returns [].
   answerGapMining: isProd ? process.env.GATE_ANSWER_GAP_MINING === 'true' : true,
 
+  // citability_backfill seeding — operator-triggered scan of the live blog
+  // corpus (server/scripts/seed-citability-backfill.js) that queues
+  // refresh_existing_page rows for posts missing the citability traits the
+  // quality gate nudges on (named sources / concrete specifics / comparison
+  // / how-to-choose). Default OFF in prod: the seeder's --dry-run scan
+  // always works, but writes need GATE_CITABILITY_BACKFILL=true so the
+  // first batch is eyeballed before the refresh lane starts consuming it.
+  // The same gate fences CONSUMPTION (opportunity-queue
+  // citabilityBackfillLaneOpen: claimNext/peek skip the bucket while off),
+  // so flipping it back off is a real kill switch for rows already queued.
+  citabilityBackfill: isProd ? process.env.GATE_CITABILITY_BACKFILL === 'true' : true,
+
   // Listicle brief overlay — when a supporting-blog brief's query is
   // list-shaped ("signs of…", "10 natural…"), the brief-builder layers the
   // citable-listicle architecture (count-in-title, numbered H2 per item,
@@ -3273,6 +3307,23 @@ const gates = {
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 
+  // Pest Insider monthly proof-approval (email division fact register lane).
+  // Ships DARK: off unless exactly 'true'. On, pest-insider-autopilot.js
+  // calls sendNewsletterProof after drafting, same as the weekly flagship —
+  // still subject to GATE_NEWSLETTER_PROOF_APPROVAL underneath. This entry
+  // is for logGateStatus only; services/pest-insider-autopilot.js reads
+  // GATE_PEST_INSIDER_PROOF at call time. Kill = unset — today's behavior:
+  // draft + notification only, no proof attempt.
+  pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
+  // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
+  // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
+  // version for what this deliberately leaves out). Ships DARK: off unless
+  // exactly 'true'. This entry is for logGateStatus only:
+  // services/collections/contact-policy.js reads GATE_DUNNING_SPACING_SHADOW
+  // at call time and only LOGS what the rule would have held — it never
+  // holds, denies, or changes a send.
+  dunningSpacingShadow: process.env.GATE_DUNNING_SPACING_SHADOW === 'true',
+
   // Retire the legacy account-level late-payment checker (dunning
   // unification, PR 3a): with the Day 90 ladder owning every overdue
   // invoice through its final notice, the Mon–Fri 10:10 checker is
@@ -3309,6 +3360,17 @@ const gates = {
 // truth: '1' / 'true' / 'on', case-insensitive.
 function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
+
+// Pest Insider proof approval — read at CALL time so turning the gate off
+// takes effect without a redeploy at every point that matters: proofing
+// (pest-insider-autopilot.js), approval (newsletter-proof.js
+// maybeHandleProofApproval) and dispatch of an already-approved issue
+// (newsletter-sender.js processScheduledSends). Off = draft-only, which is
+// what "kill switch" has to mean: a proof that went out while the gate was
+// on cannot be approved or dispatched after it is turned off.
+function pestInsiderProofLive() {
+  return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
 
 // GATE_DISCOUNT_STACKING read at CALL time — strict `=== 'true'`, NOT
@@ -3544,6 +3606,16 @@ function visitPrepPhotosLive() {
   return process.env.GATE_VISIT_PREP_PHOTOS === 'true';
 }
 
+// GATE_STAMPED_ZERO_FREE read at CALL time — strict `=== 'true'`, same
+// convention as discountStackingLive(). The canonical reader for
+// billing-lane.js's hasAuthoritativeZeroPrice (widens it to ANY stamped 0,
+// not just the discount-engine provenance shape) and for the handful of
+// charge-fallback sites that compute a visit's amount without going
+// through that resolver. Off = byte-identical to today everywhere.
+function stampedZeroFreeLive() {
+  return process.env.GATE_STAMPED_ZERO_FREE === 'true';
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -3560,5 +3632,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, emailAreaIntelLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailAreaIntelLive };
 // gates 1775330914

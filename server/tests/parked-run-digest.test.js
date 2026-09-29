@@ -134,6 +134,30 @@ describe('composeParkedRunDigest', () => {
   test('empty set composes nothing', () => {
     expect(composeParkedRunDigest({ active: [], stale: [], newCount: 0 })).toBeNull();
   });
+
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`.
+  test('headline/summary lead with active drafts when any are awaiting a decision', () => {
+    const composed = composeParkedRunDigest({
+      active: [item(), item()],
+      stale: [item({ opp_status: 'done' })],
+      newCount: 1,
+    });
+    expect(composed.headline).toBe('Content — 2 drafts awaiting review');
+    expect(composed.summary).toBe('1 new since last check; 1 probably dismissible.');
+  });
+
+  // Zero-guard: active can be empty while only stale rows exist — the
+  // headline must never read "Content — 0 drafts awaiting review".
+  test('headline/summary lead with stale drafts when nothing is actively awaiting review', () => {
+    const composed = composeParkedRunDigest({
+      active: [],
+      stale: [item({ opp_status: 'done' }), item({ opp_status: 'skipped' })],
+      newCount: 2,
+    });
+    expect(composed.headline).toBe('Content — 2 stale drafts to dismiss');
+    expect(composed.summary).toBe('2 new since last check.');
+  });
 });
 
 describe('note excerpts (no PII)', () => {

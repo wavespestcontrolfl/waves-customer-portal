@@ -13,6 +13,9 @@ const {
   isVariableOrCustomDiscountPreset,
 } = require("./discount-stack");
 const { discountStackingLive } = require("../config/feature-gates");
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require("./billing-lane").stampedZeroFreeLive();
 const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
@@ -450,6 +453,64 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) additions — both
+  // independent of the scheduled_service_id early-return below, so they
+  // also cover a combined-visit packet invoice and one linked only by
+  // service_record_id, and both gated so the function stays byte-identical
+  // while off. Fail CLOSED on a read error, same posture as every other
+  // guard in this function. No customer billing_mode lookup needed — the
+  // rule is lane-free.
+  if (stampedZeroFreeLive()) {
+    // A combined-visit packet invoice bills EVERY member stamped with its
+    // id, not only the owner visit resolved below — a member re-priced to
+    // $0 after the void would ride back in on the restored combined
+    // charge.
+    if (invoiceRow.visit_completion_packet_id) {
+      let freeMember = null;
+      try {
+        let q = conn("visit_completion_packet_items as p")
+          .join("scheduled_services as s", "s.id", "p.scheduled_service_id")
+          .where("p.packet_id", invoiceRow.visit_completion_packet_id)
+          .where("p.invoice_id", invoiceRow.id)
+          .where("s.estimated_price", 0);
+        if (lock) q = q.forShare("s");
+        freeMember = await q.first("s.id");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the combined invoice's visits — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (freeMember) {
+        throw new Error(
+          "Cannot unvoid — a visit on this combined invoice is now priced at $0; re-price that visit before restoring a charge",
+        );
+      }
+    }
+    // Most post-completion invoices carry only service_record_id — when
+    // there is no scheduled_service_id for the block below to check,
+    // resolve the visit through the service record so the $0 rule still
+    // covers it. Every OTHER linked-visit guard below still only runs when
+    // scheduled_service_id is present — unchanged by this gate.
+    if (!invoiceRow.scheduled_service_id && invoiceRow.service_record_id) {
+      let svcViaRecord = null;
+      try {
+        let q = conn("service_records as sr")
+          .join("scheduled_services as s", "s.id", "sr.scheduled_service_id")
+          .where("sr.id", invoiceRow.service_record_id);
+        if (lock) q = q.forUpdate("s");
+        svcViaRecord = await q.first("s.estimated_price", "s.primary_line_price");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the linked service record's visit — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (svcViaRecord && hasAuthoritativeZeroPrice(svcViaRecord.estimated_price, svcViaRecord.primary_line_price)) {
+        throw new Error(
+          "Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge",
+        );
+      }
+    }
+  }
   if (!invoiceRow.scheduled_service_id) return;
   let svc = null;
   try {
@@ -485,6 +546,15 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   if (svc.is_callback && !(Number(svc.estimated_price) > 0)) {
     throw new Error(
       "Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge",
+    );
+  }
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): ANY visit now stamped
+  // $0 — not only a callback conversion — refuses the restore the same
+  // way; the check above stays narrow (callback-only) for gate-off
+  // byte-identical behavior.
+  if (stampedZeroFreeLive() && hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)) {
+    throw new Error(
+      "Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge",
     );
   }
   // Annual-prepay stamping: prepaid_method + amount + term link mean the
@@ -1798,8 +1868,12 @@ async function buildScheduledServiceInvoiceLines(
   // Delegate to the shared predicate so this can never drift from
   // completionInvoiceAmount / predictCompletionBilling's own reading of
   // the same provenance signal.
-  const authoritativeZero = primaryBaseKnown
-    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
+  // primaryBaseKnown is implied with the gate off (the predicate needs a
+  // positive primary_line_price there); under GATE_STAMPED_ZERO_FREE a bare
+  // stamped $0 with no primary is authoritative too, so stored add-ons
+  // reconcile down to it (Codex r1 P1 on #5256). Checkout extras are
+  // appended after this reconciliation, untouched.
+  const authoritativeZero = hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
   // Whether storedNetAmount below actually came from a stamped price on this
   // row (a real positive estimated_price, or the provenance-backed genuine
   // $0) versus the fee/rate fallback another caller resolved because this
@@ -5248,6 +5322,11 @@ const InvoiceService = {
       // caller's transaction, and the invoice commits atomically with the
       // caller's own writes.
       database = null,
+      // The caller's check under the visit row lock, run on every linked
+      // mint (see buildParams): same contract as
+      // mintScheduledServiceInvoiceWithDeposit's recheckInTrx. Completion
+      // passes refuseCoveredMemberMintInTrx (Codex r4 P1 on #5237).
+      recheckInTrx = null,
     },
   ) {
     const sr = await db("service_records")
@@ -5304,6 +5383,22 @@ const InvoiceService = {
             throw scheduledPriceMovedError(lockedRow);
           }
         }
+      }
+      // The caller's in-lock check runs on EVERY linked mint, not only the
+      // replay lane (pre-push P1 on 645ccccaee — completion's backfill mint
+      // is explicit-amount). The non-replay lanes hold only the advisory mint
+      // lock here, so they take the same shared chain first (the advisory
+      // re-acquire is a same-transaction no-op): the check then reads under
+      // the visit row lock, the one the stamp writer also takes.
+      if (recheckInTrx && conn && sr.scheduled_service_id) {
+        if (!replayFromScheduled) {
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(conn, {
+            scheduledServiceId: sr.scheduled_service_id,
+            customerId: sr.customer_id,
+          });
+        }
+        await recheckInTrx(conn);
       }
       const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
@@ -11542,3 +11637,8 @@ module.exports.claimInvoiceForSend = claimInvoiceForSend;
 // be asserted against real schema without driving the whole send twice.
 module.exports.restoreSendClaim = restoreSendClaim;
 module.exports.withPayLinkSendClaim = withPayLinkSendClaim;
+// Test-only seam (GATE_STAMPED_ZERO_FREE): exercises the unvoid linked-visit
+// guard directly, without driving the whole unvoidInvoice call chain, so the
+// gate's on/off behavior (incl. the combined-packet member check and the
+// service_record_id-only fallback) can be pinned with a minimal conn mock.
+module.exports._assertUnvoidableLinkedVisit = assertUnvoidableLinkedVisit;

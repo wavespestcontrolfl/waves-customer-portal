@@ -88,8 +88,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "84639f6292fd4c6249d2f6fa50cbd26f8c1c1450a1add1f918e97f918bc010c1"
     },
     "condition": {
       "hosts": [
@@ -125,7 +126,7 @@
         {
           "slug": "turf-rust",
           "difference": "Nitrogen deficiency has no pustules; rust shows orange, powdery pustules on the blade that rub off on a finger.",
-          "next_observation": "Rub a blade between your fingers checking for orange residue.",
+          "next_observation": "A close-up of your fingertip after rubbing a blade: orange powder that rubs off points to rust.",
           "photo_can_confirm": true
         }
       ],
@@ -217,8 +218,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b748f8a0ce418c1f22c42035a611e541b1e1235136eecbb527b63214df0b7649"
     },
     "condition": {
       "hosts": [
@@ -254,7 +256,7 @@
         {
           "slug": "herbicide-injury",
           "difference": "Iron deficiency stripes new blades lawn-wide; herbicide injury matches where and when something was applied, whether a small area or the whole lawn.",
-          "next_observation": "A wider photo checking whether the discoloration follows a treated area or a mowing/edging path.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or a mowing/edging path.",
           "photo_can_confirm": false
         }
       ],
@@ -355,8 +357,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "fa17834264065c3f8bbf5d5c9203a11ea30c9b129524aa54bb62bfe7870f0d4a"
     },
     "condition": {
       "hosts": [
@@ -392,7 +395,7 @@
         {
           "slug": "herbicide-injury",
           "difference": "Magnesium deficiency shows blotchy, interveinal yellowing lawn-wide; herbicide injury matches where and when something was applied, spot or lawn-wide.",
-          "next_observation": "A wider photo checking whether the discoloration follows a treated area or spreads evenly.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or spreads evenly.",
           "photo_can_confirm": false
         }
       ],
@@ -493,8 +496,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c6b6b95487f644f007336487dbb0075fdd937534f2ec61dd0bed4009c2e4b6fe"
     },
     "condition": {
       "hosts": [
@@ -530,7 +534,7 @@
         {
           "slug": "cold-damage",
           "difference": "Potassium deficiency develops gradually and stays on the oldest fronds; cold damage appears within days of a cold snap and can affect many fronds at once.",
-          "next_observation": "A wider photo checking how many fronds are affected and whether a recent cold snap occurred.",
+          "next_observation": "A technician checks how many fronds are affected and whether the damage lines up with a recent cold snap.",
           "photo_can_confirm": false
         }
       ],
@@ -631,8 +635,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bc1739f1c426bc7b137a8921bf7837fe43661052b6caaba660cc95381ca82e9f"
     },
     "condition": {
       "hosts": [
@@ -766,8 +771,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2b186680bfe4d28c2926e50d29a07bde57123ca7949ddef7b4ad2cba06b842ca"
     },
     "condition": {
       "hosts": [
@@ -897,8 +903,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "833286f8dc8bc9fc59fc43a7a53c9157ed71b55759561e4ad4ba3fe44c10d9f9"
     },
     "condition": {
       "hosts": [
@@ -927,7 +934,7 @@
         {
           "slug": "palm-bud-rot",
           "difference": "Boron deficiency keeps the spear leaf attached even if it will not open; bud rot leaves discolor, wilt and pull free easily from the crown.",
-          "next_observation": "Gently check whether the spear leaf pulls free, or have a technician check it.",
+          "next_observation": "A technician checks whether the spear leaf pulls free; don't climb a ladder to reach it yourself.",
           "photo_can_confirm": false
         },
         {
@@ -1035,8 +1042,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "58cd6ba4ecd354b42ac3e387bed6f4329e1e8e9c6f277598b5452f81059b7f7a"
     },
     "condition": {
       "hosts": [

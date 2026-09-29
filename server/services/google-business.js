@@ -5,7 +5,10 @@ function getGoogle() {
   return _googleapis;
 }
 const logger = require('./logger');
-const { deliverOpsDigest, readCleanWatermark } = require('./ops-digest');
+const {
+  deliverOpsDigest, readCleanWatermark, digestRowFields, alertClassFor, ringOnRefreshFrom,
+  normalizeItemKeys, itemSetHashFor, itemKeysMetaFor,
+} = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
@@ -138,6 +141,81 @@ async function readJsonOrThrow(res, label) {
   }
   try { return JSON.parse(text); }
   catch (e) { throw new Error(`${label} returned malformed JSON (status ${res.status}): ${e.message}`); }
+}
+
+// The same-signature repeat path's digest rewrite: same row shape
+// deliverOpsDigest writes (short title/body, full report in `detail`,
+// kind/audience/feed), normalized exactly as create() persists it — a
+// rewrite in the old subject/body form would leave a superseded finding's
+// report in `detail` and a stale `feed` after a FIX <-> ACT flip (codex r2
+// P1 on #5236). Only the NEWEST unresolved digest is the standing row:
+// older unresolved duplicates (the pre-fix production state) must not all
+// flip back to unread on every detail change (codex r1 P2).
+//
+// Ring-only-on-change (owner audience only, admin-alerts-ring scope
+// 2026-09-28): this bypasses notifyAdmin entirely, so it applies the SAME
+// test ringOnRefreshFrom encodes by hand — a quiet standing row (no growth
+// in findings.length, no prior row to compare) keeps read_at and its own
+// feed/quiet; only a ringing rewrite may flip them. Engineering/fyi (anyFix)
+// never gates — notifyAdmin's own default behavior applies, byte-identical
+// to before this scope.
+//
+// Item identity (admin-alerts-ring follow-up, codex r8 P1): a same-count
+// finding swap (stats_stale on one location replaced by feed_degraded on
+// another, same total) must still ring — `itemKeys` is each finding's own
+// `<location id>:<class>` (the same pair the dedupe signature above sorts
+// and joins), normalized/hashed exactly like an ops-crons or in-process
+// sender's own itemKeys.
+//
+// An audience flip (owner<->engineering) changes which surface the row
+// belongs to, not merely whether it rings — the same rule
+// notification-service.js's mergeRefreshMetadata applies to notifyAdmin's
+// own refresh path. Without it, a FIX->ACT flip whose count hasn't grown
+// (shouldRing false) would leave the now-owner row hidden behind a stale
+// feed:'activity' (codex round-1). Guarded on the STANDING row actually
+// carrying an `audience` already — a legacy/pre-scope row with no such key
+// is a new field appearing, not a flip, and must not force a routing write
+// on every quiet repeat.
+async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary, observedAt, findings, itemKeys: rawItemKeys }) {
+  const fields = digestRowFields({ subject, text: body, headline, summary });
+  const next = NotificationService.normalizeAdminText({
+    category: 'ops_digest', title: fields.title, body: fields.body, detail: fields.detail,
+  });
+  const standingRow = await trx('notifications').select('id', 'title', 'body', 'detail', 'metadata')
+    .where({ recipient_type: 'admin', category: 'ops_digest' })
+    .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
+    .whereRaw("metadata->>'source' IS NULL")
+    .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+    .orderBy('created_at', 'desc').limit(1).first();
+  if (!standingRow) return;
+  const standingMeta = parseJsonObject(standingRow.metadata);
+  const contentChanged = standingRow.title !== next.title || next.body !== (standingRow.body ?? null)
+    || next.detail !== (standingRow.detail ?? null) || standingMeta.kind !== fields.kind;
+  if (!contentChanged) return;
+  const audienceFlipped = Object.prototype.hasOwnProperty.call(standingMeta, 'audience')
+    && standingMeta.audience !== fields.audience;
+  const itemKeys = normalizeItemKeys(rawItemKeys);
+  const itemSetHash = itemSetHashFor(rawItemKeys);
+  // FIX -> ACT is news to the owner even at an equal count (the FIX row may
+  // have been read in Activity), so entering the owner audience rings.
+  const shouldRing = fields.audience !== 'owner' || audienceFlipped
+    || ringOnRefreshFrom({ count: findings.length, itemKeys, itemSetHash, ringOnFirstIdentity: true })(standingRow, standingMeta);
+  const applyRouting = shouldRing || audienceFlipped;
+  await trx('notifications').where({ id: standingRow.id }).update({
+    title: next.title,
+    body: next.body,
+    detail: next.detail,
+    ...(shouldRing ? { read_at: null } : {}),
+    metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+      subject, observedAt, kind: fields.kind, audience: fields.audience,
+      alertClass: alertClassFor('gbp-sync-health', null), count: findings.length,
+      ...itemKeysMetaFor(rawItemKeys, itemKeys, itemSetHash),
+      ...(applyRouting ? { feed: fields.feed, quiet: false } : {}),
+      // Age baseline (admin-alerts-ring-v2 follow-up): findPriorRungRow
+      // reads the last RING, not created_at — only a genuine ring advances it.
+      ...(shouldRing ? { rungAt: new Date().toISOString() } : {}),
+    })]),
+  });
 }
 
 class GoogleBusinessService {
@@ -1821,7 +1899,12 @@ class GoogleBusinessService {
     // location's stats_stale suppress a DIFFERENT location going feed_down an
     // hour later. Same finding set → deduped 24h; any new/changed finding →
     // new title → sends immediately.
-    const signature = findings.map((f) => `${f.loc.id}:${f.cls}`).sort().join('|');
+    // Item identity (admin-alerts-ring follow-up, codex r8 P1): each
+    // finding's own `<location id>:<class>` — the same stable pair the
+    // dedupe signature sorts and joins, never a customer-facing value — so
+    // a same-count finding swap still rings (see rewriteStandingGbpDigest).
+    const itemKeys = findings.map((f) => `${f.loc.id}:${f.cls}`);
+    const signature = [...itemKeys].sort().join('|');
     const title = `Review sync health escalation [${signature}]`;
     const lines = findings.map((f) => `${f.severity} ${f.loc.name} [${f.cls}]: ${f.detail}`);
     const body = [
@@ -1831,6 +1914,12 @@ class GoogleBusinessService {
       'Remediation: reconnect the GBP account for credential failures (/admin/reviews sync status); for silent_empty confirm the profile state in Google Business Profile (removed/suspended listings need the support case); stats_stale usually means the Places API call is failing — check GOOGLE_MAPS_API_KEY quota/validity.',
     ].join('\n');
     const subject = `${anyFix ? 'FIX' : 'ACT'}: Google review sync — ${findings.length} location${findings.length === 1 ? '' : 's'} degraded or stale`;
+    // Admin-alerts-brevity scope (owner ruling 2026-09-28): the ACT variant
+    // is the owner's decision (reconnect/verify), so it gets short bell copy.
+    // The FIX variant (a Places API/credential problem an engineer chases)
+    // relies on ops-digest.js's default: FIX -> engineering, Activity-only.
+    const headline = anyFix ? null : `Reviews — ${findings.length} GBP location${findings.length === 1 ? '' : 's'} degraded`;
+    const summary = anyFix ? null : 'Review sync is stale or down. Reconnect or check the profile.';
     const lockKey = 'ops-digest:gbp-sync-health';
     let result;
     try {
@@ -1874,24 +1963,7 @@ class GoogleBusinessService {
           // is still unresolved (so no re-bell), but the standing digest
           // describes B. Rewrite the digest to the CURRENT findings when its
           // text differs, surfacing it unread again (pre-push audit P1).
-          // Only the NEWEST unresolved digest is the standing row: older
-          // unresolved duplicates (the pre-fix production state) must not all
-          // flip back to unread on every detail change (codex r1 P2).
-          const digestTitle = subject.slice(0, 200);
-          const standingDigest = trx('notifications').select('id')
-            .where({ recipient_type: 'admin', category: 'ops_digest' })
-            .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
-            .whereRaw("metadata->>'source' IS NULL")
-            .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-            .orderBy('created_at', 'desc').limit(1);
-          await trx('notifications').whereIn('id', standingDigest)
-            .where((q) => q.whereNot('title', digestTitle).orWhereNot('body', body).orWhereNull('body'))
-            .update({
-              title: digestTitle,
-              body,
-              read_at: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ subject, observedAt })]),
-            });
+          await rewriteStandingGbpDigest(trx, { subject, body, headline, summary, observedAt, findings, itemKeys });
           return { deduped: true };
         }
 
@@ -1922,6 +1994,13 @@ class GoogleBusinessService {
               key: 'gbp-sync-health',
               subject,
               text: body,
+              headline,
+              summary,
+              count: findings.length,
+              itemKeys,
+              // A standing digest from before item identity rings on its
+              // first identified refresh (see ringOnRefreshFrom).
+              ringOnFirstIdentity: true,
               link: '/admin/reviews',
               metadata: { observedAt },
               trx: savepoint,
