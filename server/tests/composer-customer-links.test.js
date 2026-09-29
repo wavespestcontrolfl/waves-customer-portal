@@ -3209,13 +3209,21 @@ describe('wrapped /l/ codes are judged by their target (SMS link wrap)', () => {
     const { ownedPortalLinkSpans } = require('../services/composer-customer-links');
     const A = `portal.wavespestcontrol.com/prep/${'a'.repeat(32)}`;
     const B = `portal.wavespestcontrol.com/pay/statement/${'b'.repeat(64)}`;
-    test.each([[','], [';'], ['),'], ['),(']])('"%s" between two URLs gives two spans, not one', (glue) => {
+    test.each([[','], [';'], ['),'], ['),('], ['!'], ['|'], ['*'], ['^'], ['"'], ["'"], ['>'], ['\\']])('"%s" between two URLs gives two spans, not one', (glue) => {
       const body = `x ${A}${glue}${B} y`;
       const spans = ownedPortalLinkSpans(body);
       expect(spans).toHaveLength(2);
       expect(body.slice(spans[0].start, spans[0].end)).toBe(A);
       expect(body.slice(spans[1].start, spans[1].end)).toBe(B);
       expect(spans.map((s) => s.family)).toEqual(['prep', 'pay']);
+    });
+    test('characters that continue a URL never split it (query/path stay inside the link)', () => {
+      for (const glue of ['?next=', '&to=', '/', '=', ':', '@', '+']) {
+        const body = `${A}${glue}${B}`;
+        const spans = ownedPortalLinkSpans(body);
+        expect(spans).toHaveLength(1);
+        expect(spans[0].start).toBe(0);
+      }
     });
     test('a single URL, and a foreign URL carrying an owned one, are unchanged', () => {
       expect(ownedPortalLinkSpans(`see ${A}.`)).toHaveLength(1);

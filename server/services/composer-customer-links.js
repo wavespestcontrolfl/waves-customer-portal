@@ -509,7 +509,7 @@ const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 // expandedView.)
 // Whitespace runs of a body, further split where an owned-host URL directly
 // follows punctuation glued to an owned-host URL ("portal…/a,portal…/b",
-// "(portal…/a);portal…/b", ...): two links the customer's phone shows as two
+// "(portal…/a);portal…/b", "portal…/a|portal…/b", ...): two links the customer's phone shows as two
 // (GH Codex #5332 r4 P2). A boundary is accepted ONLY when the text before it
 // is itself a link on an owned host, so a foreign URL that merely carries an
 // owned URL in its query ("https://evil.example/?next=,portal…/secure/<tok>")
@@ -517,7 +517,11 @@ const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 // [{ raw, start, end }] into the ORIGINAL text.
 function ownedHostStartRe(hosts) {
   const alt = hosts.map((h) => String(h).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  return new RegExp(`(?<=[,;)\\]}>'"][(\\[<]*)(?:https?:\\/\\/)?(?:${alt})\\.?(?=[/?#])`, 'gi');
+  // Separator = any printable character that cannot continue a URL path or
+  // query (",", ";", "!", "|", ")", "]", quotes, ...). Characters that DO
+  // continue one ("/", "?", "=", "&", ":", "@", "+", "%", word chars) never
+  // split, so "?next=portal…" stays inside its link (GH Codex #5332 r5 P2).
+  return new RegExp(`(?<=[^\\sA-Za-z0-9\\-._~%/?#=&+:@][(\\[<]*)(?:https?:\\/\\/)?(?:${alt})\\.?(?=[/?#])`, 'gi');
 }
 function isOwnedLinkCore(core, hosts) {
   try {
@@ -543,10 +547,13 @@ function splitOwnedRuns(body, hosts) {
         // Openers glued in front of the next link ("),(portal…") belong to it.
         let cut = s.index;
         while (cut > from && /[(\[<]/.test(raw[cut - 1])) cut -= 1;
-        if (cut <= from) continue;
-        const segment = raw.slice(from, cut);
+        // The separator itself (raw[cut - 1]) belongs to neither link: the
+        // first piece ends before it, so "…/a|…/b" never mints "…/a|".
+        const sepEnd = cut - 1;
+        if (sepEnd <= from) continue;
+        const segment = raw.slice(from, sepEnd);
         if (!isOwnedLinkCore(shedLinkRun(decodeLinkText(segment)), hosts)) continue;
-        pieces.push({ raw: segment, start: m.index + from, end: m.index + cut });
+        pieces.push({ raw: segment, start: m.index + from, end: m.index + sepEnd });
         from = cut;
       }
     }
