@@ -15,7 +15,9 @@
  * (their classes are untouched); it only adds the classes below, and the two
  * entry points share ONE rule table:
  *   - runAdminAlertRelevanceSweep: periodic (scheduler.js, every 10 minutes)
- *     retirement of unread rows whose subject has moved on.
+ *     retirement of unread rows whose subject has moved on. Unread rows never
+ *     age out of it (a refreshed bell keeps its first created_at), and every
+ *     retirement is judged again under locks right before it is written.
  *   - ringTimeCheck: the ringGate notifyAdmin's existing seam already runs
  *     inside the insert's transaction — a fresh row that has ALREADY moved on
  *     is written activity-only instead of ringing (notification-service.js
@@ -42,7 +44,6 @@ const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
 
 const RETIRED_BY = 'alert-relevance';
-const LOOKBACK_DAYS = 30;
 const PAGE_SIZE = 200;
 const MAX_PAGES = 50;
 
@@ -84,8 +85,12 @@ function refsFromRow(row) {
   const meta = parseMeta(row.metadata);
   const payload = parseMeta(meta.payload);
   const params = linkParams(row.link);
+  // The alert's own visit first, then every other visit it names: the
+  // divergence set, and a series move's windowless conflicts and preserved
+  // occurrences (each { id, date }).
   const visitIds = [first(meta.scheduledServiceId, meta.scheduled_service_id, meta.anchorId, params.get('appointment')),
-    ...arr(meta.divergingSiblingIds)].map(uuidOrNull).filter(Boolean);
+    ...arr(meta.divergingSiblingIds), ...arr(meta.conflicts).map((c) => c?.id),
+    ...arr(meta.preservedOccurrences).map((c) => c?.id)].map(uuidOrNull).filter(Boolean);
   const invoiceIds = [first(meta.invoiceId, meta.invoice_id, params.get('invoice')), meta.stampedInvoiceId]
     .map(uuidOrNull).filter(Boolean);
   return {
@@ -113,7 +118,8 @@ function resolveRefs(row, data) {
   // soft-deletes the old one, which must not read as "customer left".
   const customerId = first(visit?.customer_id, invoices.find(Boolean)?.customer_id,
     estimate?.customer_id, lead?.customer_id, refs.customerId) || null;
-  return { refs, visit, invoices, lead, estimate, customerId: customerId ? String(customerId) : null };
+  const affectedVisits = refs.visitIds.map((id) => data.visits.get(id));
+  return { refs, visit, affectedVisits, invoices, lead, estimate, customerId: customerId ? String(customerId) : null };
 }
 
 const emptyData = () => ({
@@ -123,8 +129,10 @@ const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
 // batch (the estimate and customer ids are only known once visits, invoices
-// and leads are loaded, so those two run second).
-async function loadSubjects(rows, conn = db) {
+// and leads are loaded, so those two run second). `lock` takes FOR SHARE on
+// every subject row read (the retirement recheck, inside its transaction).
+async function loadSubjects(rows, conn = db, { lock = false } = {}) {
+  const shared = (q) => { if (lock) q.forShare(); };
   const data = emptyData();
   const all = rows.map(refsFromRow);
   const ids = (pick) => [...new Set(all.flatMap(pick))];
@@ -136,6 +144,7 @@ async function loadSubjects(rows, conn = db) {
       .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
       .leftJoin('invoices as fa_invoice', 'fa_invoice.id', 'ss.first_application_invoice_id')
       .whereIn('ss.id', visitIds)
+      .modify((q) => { if (lock) q.forShare('ss'); })
       .select('ss.id', 'ss.customer_id', 'ss.status', 'ss.is_recurring', 'ss.recurring_parent_id',
         'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount', 'ss.prepaid_method',
         'ss.annual_prepay_term_id', 'ss.prepaid_at', 'ss.service_type', 'ss.scheduled_date', 'ss.completed_at',
@@ -152,10 +161,10 @@ async function loadSubjects(rows, conn = db) {
     }
   }
   if (invoiceIds.length) {
-    data.invoices = byId(await conn('invoices').whereIn('id', invoiceIds).select('id', 'status', 'customer_id'));
+    data.invoices = byId(await conn('invoices').whereIn('id', invoiceIds).modify(shared).select('id', 'status', 'customer_id'));
   }
   if (leadIds.length) {
-    data.leads = byId(await conn('leads').whereIn('id', leadIds)
+    data.leads = byId(await conn('leads').whereIn('id', leadIds).modify(shared)
       .select('id', 'status', 'converted_at', 'deleted_at', 'created_at', 'customer_id', 'estimate_id'));
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
@@ -163,11 +172,11 @@ async function loadSubjects(rows, conn = db) {
   const customerIds = [...new Set(resolved.map((r) => r.customerId).filter(Boolean))];
   const leadCustomerIds = [...new Set([...data.leads.values()].map((l) => l.customer_id && String(l.customer_id)).filter(Boolean))];
   if (estimateIds.length) {
-    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds)
+    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).modify(shared)
       .select('id', 'status', 'archived_at', 'sent_at', 'customer_id'));
   }
   if (customerIds.length) {
-    data.customers = byId(await conn('customers').whereIn('id', customerIds).select('id', 'churned_at', 'deleted_at'));
+    data.customers = byId(await conn('customers').whereIn('id', customerIds).modify(shared).select('id', 'churned_at', 'deleted_at'));
   }
   if (leadCustomerIds.length) {
     // A booking someone made: never a child the system generated on its own
@@ -218,7 +227,12 @@ function seriesMoveMovedOn(s) {
     ...arr(s.meta.preservedOccurrences).map((c) => c?.date)]
     .map((d) => String(d || '').slice(0, 10)).filter((d) => DATE_RE.test(d));
   if (dates.length && dates.every((d) => d < s.todayET)) return 'Every flagged date has passed';
-  if (s.visit && CANCELLED_VISIT_STATUSES.has(String(s.visit.status))) return 'The moved visit was cancelled';
+  // Every visit the move named — the moved one, its windowless conflicts, its
+  // preserved occurrences — must be settled: cancelling only the moved visit
+  // leaves the others' dispatch work standing.
+  if (s.affectedVisits.length && s.affectedVisits.every((v) => !v || CLOSED_VISIT_STATUSES.has(String(v.status)))) {
+    return 'Every visit it named is closed';
+  }
   return customerLeft(s);
 }
 
@@ -282,14 +296,14 @@ function classify(row) {
     && (!c.match || c.match(meta, row))) || null;
 }
 
-// Unread admin rows this sweep could judge: recent, bell-visible, of a class
-// in the table. Keyset-paged on id: retiring a row removes it from the set,
-// so an offset would skip rows.
-function candidateQuery(since, cursor) {
+// Unread admin rows this sweep could judge: bell-visible, of a class in the
+// table, of any age (a refreshed bell keeps its first created_at, so an age
+// cut-off would hide a re-rung one for good). Keyset-paged on id: retiring a
+// row removes it from the set, so an offset would skip rows.
+function candidateQuery(cursor) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
     .whereNull('read_at')
-    .where('created_at', '>', since)
     .where((q) => {
       for (const c of CLASSES) {
         q.orWhere((cq) => {
@@ -305,26 +319,45 @@ function candidateQuery(since, cursor) {
 }
 
 // Only while the row is still unread: never races a staff action.
-async function retireRow(id, reason, now) {
-  return db('notifications')
+async function retireRow(conn, id, reason, now) {
+  return conn('notifications')
     .where({ id, recipient_type: 'admin' })
     .whereNull('read_at')
     .update({
-      read_at: db.fn.now(),
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+      read_at: conn.fn.now(),
+      metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
         [JSON.stringify({ retired: { by: RETIRED_BY, reason, at: now.toISOString() } })]),
     });
+}
+
+// Judges one row AGAIN, under locks, and retires it only if it is still moved
+// on: a payment, a reopen or a refresh that landed after the batch read can
+// never be silently dismissed. Locks go in the order the emitters take theirs
+// — the subject rows FOR SHARE, then the notification FOR UPDATE
+// (first-application-sibling-split locks its invoice, then its alert) — so
+// the recheck cannot deadlock a concurrent raise. A row read, or rewritten by
+// a refresh, since the batch read is left for the next sweep to judge.
+async function retireIfStillMovedOn(row, cls, todayET, now) {
+  return db.transaction(async (trx) => {
+    const fresh = await loadSubjects([row], trx, { lock: true });
+    const current = await trx('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
+      .forUpdate().first('id', 'category', 'link', 'metadata');
+    if (!current || current.category !== row.category || (current.link || null) !== (row.link || null)
+      || JSON.stringify(parseMeta(current.metadata)) !== JSON.stringify(parseMeta(row.metadata))) return null;
+    const reason = cls.rule(subjectFor(current, fresh, todayET));
+    if (reason) await retireRow(trx, current.id, reason, now);
+    return reason || null;
+  });
 }
 
 async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (!adminAlertRelevanceLive()) return { skipped: true, reason: 'switch_off' };
   const todayET = etDateString(now);
-  const since = new Date(now.getTime() - LOOKBACK_DAYS * 24 * 3600 * 1000);
   const byClass = {};
   let scanned = 0;
   let cursor = null;
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const rows = await candidateQuery(since, cursor);
+    const rows = await candidateQuery(cursor);
     if (!rows.length) break;
     cursor = rows[rows.length - 1].id;
     scanned += rows.length;
@@ -332,8 +365,10 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
     for (const row of rows) {
       try {
         const cls = classify(row);
-        const reason = cls && cls.rule(subjectFor(row, data, todayET));
-        if (reason && await retireRow(row.id, reason, now)) byClass[cls.key] = (byClass[cls.key] || 0) + 1;
+        // The batch read is a first pass: only a row that looks moved on pays
+        // for the locked recheck that actually retires it.
+        if (!cls || !cls.rule(subjectFor(row, data, todayET))) continue;
+        if (await retireIfStillMovedOn(row, cls, todayET, now)) byClass[cls.key] = (byClass[cls.key] || 0) + 1;
       } catch (err) {
         logger.warn(`[alert-relevance] notification ${row.id} skipped: ${err.message}`);
       }
@@ -380,8 +415,18 @@ function ringTimeCheck({ category, link, metadata }) {
   }
 }
 
+// A row the ring-time check wrote activity-only (its subject had already
+// moved on): nothing rang, so the trigger dispatcher sends no push for it.
+// A sweep retirement never sets feed 'activity', and a later ringing refresh
+// replaces the row's feed, so neither reads as quieted here.
+function quietedAtRingTime(row) {
+  const meta = parseMeta(row?.metadata);
+  return meta.feed === 'activity' && meta.retired?.by === RETIRED_BY;
+}
+
 module.exports = {
   runAdminAlertRelevanceSweep,
+  quietedAtRingTime,
   ringTimeCheck,
   classify,
   loadSubjects,

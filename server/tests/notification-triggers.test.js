@@ -326,6 +326,20 @@ describe('triggerNotification bell outcome', () => {
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 
+  // admin-alert-relevance.js: a new-lead bell whose lead was already worked is
+  // written to the Activity feed only — nothing rang, so no phone buzzes.
+  test('a bell the relevance check wrote activity-only never pushes; an ordinary quiet row still does', async () => {
+    const PushService = require('../services/push-notifications');
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'quiet-bell',
+      metadata: { feed: 'activity', quiet: true, retired: { by: 'alert-relevance', reason: 'Lead is won', at: '2026-09-28T16:00:00.000Z' } } });
+    expect(await triggerNotification('new_lead', { leadId: 'fixture-lead-1', name: 'Fixture Lead', service: 'Pest Control' }))
+      .toMatchObject({ bellWritten: true, quiet: true, push: null });
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    // A sweep retirement (read + stamp, no activity feed) is not this: the push path is untouched.
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'rung-bell', metadata: { retired: { by: 'alert-relevance' } } });
+    expect(await triggerNotification('new_lead', { leadId: 'fixture-lead-2', name: 'Fixture Lead', service: 'Pest Control' })).not.toHaveProperty('quiet');
+  });
+
   test('push-only SMS recovery retains its message tag and avoids renotification', async () => {
     db.mockImplementation(table => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
       : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));

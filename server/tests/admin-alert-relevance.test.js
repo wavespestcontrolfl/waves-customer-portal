@@ -34,7 +34,7 @@ jest.mock('../models/db', () => {
     const q = { table, calls: [] };
     let cap = null;
     const b = {};
-    for (const m of ['select', 'leftJoin', 'orderBy', 'groupBy', 'max', 'whereNotIn']) {
+    for (const m of ['select', 'leftJoin', 'orderBy', 'groupBy', 'max', 'whereNotIn', 'forShare', 'forUpdate']) {
       b[m] = (...args) => { q.calls.push([m, ...args]); return b; };
     }
     b.limit = (n) => { cap = n; q.calls.push(['limit', n]); return b; };
@@ -53,7 +53,7 @@ jest.mock('../models/db', () => {
       return b;
     };
     const hit = () => (mockTables[table] || []).filter((r) => conds.every((c) => c(r)));
-    b.first = async () => hit()[0] || null;
+    b.first = async () => { mockQueries.push(q); return hit()[0] || null; };
     b.update = async (patch) => {
       mockQueries.push(q);
       const rows = hit();
@@ -88,7 +88,7 @@ jest.mock('../models/db', () => {
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
   const makeTrx = () => {
     const trx = jest.fn((table) => builder(table));
-    trx.raw = jest.fn(async () => {});
+    trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
     trx.fn = fn.fn;
     trx.transaction = jest.fn(async (cb) => cb(trx));
     mockTrxs.push(trx);
@@ -312,15 +312,23 @@ describe('class rules', () => {
     expect((await reasonFor(move({ overlapDates: ['2026-09-20'], conflicts: [{ id: VISIT, date: '2026-09-28' }] }))).reason).toBeNull();
   });
 
-  test('series move: every overlap / conflict / preserved date in the past (Eastern), the moved visit cancelled, or the customer left', async () => {
+  test('series move: every overlap / conflict / preserved date in the past (Eastern), every visit it named closed, or the customer left', async () => {
     mockTables['scheduled_services as ss'] = [visit()];
     expect((await reasonFor(move({ overlapDates: ['2026-09-20', '2026-09-27'], conflicts: [{ id: VISIT, date: '2026-09-01' }], preservedOccurrences: [{ date: '2026-08-01' }] }))).reason)
       .toEqual(expect.stringContaining('passed'));
     mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' })];
-    expect((await reasonFor(move())).reason).toEqual(expect.stringContaining('cancelled'));
+    expect((await reasonFor(move())).reason).toEqual(expect.stringContaining('closed'));
     mockTables['scheduled_services as ss'] = [visit()];
     mockTables.customers = [customer({ churned_at: new Date() })];
     expect((await reasonFor(move())).reason).toBe('Customer left');
+  });
+
+  test('series move: cancelling only the moved visit keeps the alert while a conflict or preserved occurrence it named is still open', async () => {
+    const named = move({ conflicts: [{ id: PARENT, date: '2026-10-12' }], preservedOccurrences: [{ id: uid(9), date: '2026-11-09' }] });
+    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'pending' }), visit({ id: uid(9), status: 'completed' })];
+    expect((await reasonFor(named)).reason).toBeNull();
+    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'cancelled' }), visit({ id: uid(9), status: 'completed' })];
+    expect((await reasonFor(named)).reason).toEqual(expect.stringContaining('closed'));
   });
 
   test('a schedule_conflict row that is not a series move is not in the table', () => {
@@ -425,16 +433,48 @@ describe('runAdminAlertRelevanceSweep', () => {
     for (const untouched of [paid, contact]) { expect(untouched.read_at).toBeNull(); expect(JSON.parse(untouched.metadata).retired).toBeUndefined(); }
   });
 
-  test('the candidate query is unread, admin, bell-visible, and inside the 30-day window', async () => {
+  test('the candidate query is unread, admin and bell-visible, with no age cut-off (a refreshed bell keeps its first created_at)', async () => {
     mockTables.notifications = [];
     await runAdminAlertRelevanceSweep({ now: NOW });
     const q = mockQueries.find((x) => x.table === 'notifications');
     const flat = JSON.stringify(q.calls);
-    expect(q.calls).toEqual(expect.arrayContaining([
-      ['where', { recipient_type: 'admin' }], ['whereNull', 'read_at'],
-      ['where', 'created_at', '>', new Date(NOW.getTime() - 30 * 24 * 3600 * 1000)],
-    ]));
+    expect(q.calls).toEqual(expect.arrayContaining([['where', { recipient_type: 'admin' }], ['whereNull', 'read_at']]));
     expect(flat).toContain("metadata->>'feed'");
+    expect(flat).not.toContain('created_at');
+  });
+
+  test('an unread bell first raised months ago (then re-rung by a refresh) is still judged and retired', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const old = { ...staleNote(uid(540)), created_at: new Date('2026-06-01T12:00:00Z') };
+    mockTables.notifications = [old];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 1 });
+    expect(old.read_at).toBe('NOW');
+  });
+
+  test('the retirement is judged again under locks: a payment that starts after the batch read keeps the divergence alert ringing', async () => {
+    const meta = { dedupeKey: `first_application_sibling_divergence:${EST}:${INV}:z`, alertKind: 'diverged', invoiceId: INV, stampedInvoiceId: INV, customerId: CUST };
+    mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
+    mockTables.invoices = [invoice()];
+    const row = note({ id: uid(550), category: 'billing', metadata: meta });
+    mockTables.notifications = [row];
+    let invoiceReads = 0;
+    mockHooks.invoices = () => { invoiceReads += 1; if (invoiceReads === 2) mockTables.invoices[0].status = 'processing'; };
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
+    expect(row.read_at).toBeNull();
+    // The recheck read its subjects FOR SHARE and the alert FOR UPDATE, in that order.
+    const locked = mockQueries.filter((q) => q.calls.some(([m]) => m === 'forShare' || m === 'forUpdate')).map((q) => q.table);
+    expect(locked.indexOf('invoices')).toBeLessThan(locked.indexOf('notifications'));
+  });
+
+  test('a row a refresh rewrote after the batch read is left for the next sweep', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(560));
+    mockTables.notifications = [row];
+    mockHooks.customers = () => {
+      mockTables.notifications[0] = { ...row, metadata: JSON.stringify({ ...JSON.parse(row.metadata), dedupeVersion: 'refreshed' }) };
+    };
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
+    expect(mockTables.notifications[0].read_at).toBeNull();
   });
 
   test('switch off: no reads, no writes, nothing retired', async () => {
@@ -464,7 +504,10 @@ describe('runAdminAlertRelevanceSweep', () => {
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toMatchObject({ scanned: 205, retired: 205 });
     expect(mockTables.notifications.every((r) => r.read_at === 'NOW')).toBe(true);
-    expect(mockQueries.filter((q) => q.table === 'scheduled_services as ss')).toHaveLength(2);
+    const visitReads = mockQueries.filter((q) => q.table === 'scheduled_services as ss');
+    const lockedRead = (q) => q.calls.some(([m]) => m === 'forShare');
+    expect(visitReads.filter((q) => !lockedRead(q))).toHaveLength(2); // the batched first pass, one per page
+    expect(visitReads.filter(lockedRead)).toHaveLength(205); // one locked recheck per retirement
   });
 
   test('one unreadable row is skipped, not fatal', async () => {
