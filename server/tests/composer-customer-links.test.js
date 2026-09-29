@@ -3167,6 +3167,69 @@ describe('wrapped /l/ codes are judged by their target (SMS link wrap)', () => {
     expect(resolvePrepSource).not.toHaveBeenCalled();
   });
 
+  describe('in-place expansion: the wrapper is replaced by its target in the wrapper\'s own form (GH Codex #5332 r4)', () => {
+    const WRAP = 'wavespest.co/l/wrapabc123';
+    const line = (name, link) => `Your prep checklist for the upcoming ${name} is here: ${link}`;
+
+    test('a wrapped prep line whose guide name no longer matches the page is refused; the matching name is allowed', async () => {
+      const target = `${PORTAL}/prep/${PREP}`;
+      wire({ target });
+      const long = await bearerLinkSendCheck(line('Rodent Service', `portal.wavespestcontrol.com/prep/${PREP}`), SAME, { trustedCustomerId: 'c1' });
+      expect(long.error).toMatch(/names Rodent Service but the page now shows the Flea Treatment guide/);
+      wire({ target });
+      expect(await bearerLinkSendCheck(line('Rodent Service', WRAP), SAME, { trustedCustomerId: 'c1' })).toEqual(long);
+      wire({ target });
+      expect((await bearerLinkSendCheck(line('Flea Treatment', WRAP), SAME, { trustedCustomerId: 'c1' })).ok).toBe(true);
+      // The in-lock re-check reads the same expanded body.
+      wire({ target });
+      expect((await recheckPrepLinks(line('Rodent Service', WRAP), SAME, { trustedCustomerId: 'c1' })).error).toMatch(/names Rodent Service/);
+    });
+
+    test('an http:// wrapper aimed at a bearer is refused like a raw http:// link; https and scheme-less wrappers behave like their long forms', async () => {
+      const target = `${PORTAL}/prep/${PREP}`;
+      const cases = [
+        [`http://${WRAP}`, `http://portal.wavespestcontrol.com/prep/${PREP}`],
+        [`https://${WRAP}`, `https://portal.wavespestcontrol.com/prep/${PREP}`],
+        [WRAP, `portal.wavespestcontrol.com/prep/${PREP}`],
+      ];
+      for (const [wrapped, long] of cases) {
+        wire({ target });
+        const longResult = await bearerLinkSendCheck(`See ${long}`, SAME, { trustedCustomerId: 'c1' });
+        wire({ target });
+        expect(await bearerLinkSendCheck(`See ${wrapped}`, SAME, { trustedCustomerId: 'c1' })).toEqual(longResult);
+        expect(longResult.ok).toBe(!long.startsWith('http://'));
+      }
+      // Contract bearer through an http:// wrapper: refused as well.
+      wire({ target: `${PORTAL}/contract/${CONTRACT}`, contract: live });
+      expect((await bearerLinkSendCheck('Sign: http://wavespest.co/l/wrapabc123', SAME, { trustedCustomerId: 'c1' })).ok).toBe(false);
+    });
+  });
+
+  describe('adjacent portal URLs are separate links (GH Codex #5332 r4 P2)', () => {
+    const { ownedPortalLinkSpans } = require('../services/composer-customer-links');
+    const A = `portal.wavespestcontrol.com/prep/${'a'.repeat(32)}`;
+    const B = `portal.wavespestcontrol.com/pay/statement/${'b'.repeat(64)}`;
+    test.each([[','], [';'], ['),'], ['),(']])('"%s" between two URLs gives two spans, not one', (glue) => {
+      const body = `x ${A}${glue}${B} y`;
+      const spans = ownedPortalLinkSpans(body);
+      expect(spans).toHaveLength(2);
+      expect(body.slice(spans[0].start, spans[0].end)).toBe(A);
+      expect(body.slice(spans[1].start, spans[1].end)).toBe(B);
+      expect(spans.map((s) => s.family)).toEqual(['prep', 'pay']);
+    });
+    test('a single URL, and a foreign URL carrying an owned one, are unchanged', () => {
+      expect(ownedPortalLinkSpans(`see ${A}.`)).toHaveLength(1);
+      expect(ownedPortalLinkSpans(`https://evil.example/?next=,${A}`)).toEqual([]);
+      expect(ownedPortalLinkSpans(`evil.example/x,${A}`)).toEqual([]);
+    });
+    test('the send-check runs see adjacent wrapped links as separate runs (each judged)', async () => {
+      wire({ target: `${PORTAL}/prep/${'b'.repeat(32)}` });
+      expect(await immediateOnlyLinkSendCheck('a wavespest.co/l/wrapabc123;wavespest.co/l/wrapabc123')).toEqual({ present: true, label: 'Prep guide' });
+      wire({ target: `${PORTAL}/prep/${'b'.repeat(32)}` });
+      expect(await immediateOnlyLinkSendCheck('(wavespest.co/l/wrapabc123),wavespest.co/l/wrapabc123')).toEqual({ present: true, label: 'Prep guide' });
+    });
+  });
+
   test('the kind column never hides a bearer target: a code labelled with a protected kind but aiming at a prep page is judged as a prep page too', async () => {
     wire({ target: `${PORTAL}/prep/${PREP}`, kind: 'receipt' });
     expect(await immediateOnlyLinkSendCheck('See wavespest.co/l/wrapabc123')).toMatchObject({ present: true });

@@ -505,8 +505,54 @@ const TOKEN_RUN_RE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,64}(?![A-Za-z0-9_-])/g;
 // the browser keeps the escape and follows evil.example; r8 P1). Decoded
 // whitespace inside a run stays inside it, and the URL parser then judges
 // the whole run against the real origin.
-function decodedRuns(body) {
-  return String(body || '').split(/\s+/).filter(Boolean).map(decodeLinkText);
+// (Runs are produced by splitOwnedRuns below and decoded one by one in
+// expandedView.)
+// Whitespace runs of a body, further split where an owned-host URL directly
+// follows punctuation glued to an owned-host URL ("portal…/a,portal…/b",
+// "(portal…/a);portal…/b", ...): two links the customer's phone shows as two
+// (GH Codex #5332 r4 P2). A boundary is accepted ONLY when the text before it
+// is itself a link on an owned host, so a foreign URL that merely carries an
+// owned URL in its query ("https://evil.example/?next=,portal…/secure/<tok>")
+// stays one run, judged whole against the real host. Returns
+// [{ raw, start, end }] into the ORIGINAL text.
+function ownedHostStartRe(hosts) {
+  const alt = hosts.map((h) => String(h).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return new RegExp(`(?<=[,;)\\]}>'"][(\\[<]*)(?:https?:\\/\\/)?(?:${alt})\\.?(?=[/?#])`, 'gi');
+}
+function isOwnedLinkCore(core, hosts) {
+  try {
+    const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(core) ? core : `https://${core}`);
+    return !url.username && !url.password && hosts.includes(url.host.toLowerCase().replace(/\.$/, ''));
+  } catch {
+    return false;
+  }
+}
+function splitOwnedRuns(body, hosts) {
+  const text = String(body || '');
+  const pieces = [];
+  const runRe = /\S+/g;
+  const startRe = hosts.length ? ownedHostStartRe(hosts) : null;
+  let m;
+  while ((m = runRe.exec(text))) {
+    const raw = m[0];
+    let from = 0;
+    if (startRe) {
+      startRe.lastIndex = 0;
+      let s;
+      while ((s = startRe.exec(raw))) {
+        // Openers glued in front of the next link ("),(portal…") belong to it.
+        let cut = s.index;
+        while (cut > from && /[(\[<]/.test(raw[cut - 1])) cut -= 1;
+        if (cut <= from) continue;
+        const segment = raw.slice(from, cut);
+        if (!isOwnedLinkCore(shedLinkRun(decodeLinkText(segment)), hosts)) continue;
+        pieces.push({ raw: segment, start: m.index + from, end: m.index + cut });
+        from = cut;
+      }
+    }
+    pieces.push({ raw: raw.slice(from), start: m.index + from, end: m.index + raw.length });
+  }
+  return pieces;
 }
 // A URL fragment percent-decoded until stable (bounded) — a wrapper may
 // encode the inner link more than once.
@@ -849,13 +895,10 @@ function ownedPortalHosts() {
 // as are runs with a backslash (parsed differently by browsers) and any
 // non-http(s) scheme.
 function ownedPortalLinkSpans(body) {
-  const text = String(body || '');
   const hosts = ownedPortalHosts();
   const spans = [];
-  const runRe = /\S+/g;
-  let m;
-  while ((m = runRe.exec(text))) {
-    const raw = m[0];
+  for (const piece of splitOwnedRuns(body, hosts)) {
+    const raw = piece.raw;
     if (raw.includes('\\')) continue;
     const core = shedLinkRun(raw);
     if (!core) continue;
@@ -875,8 +918,8 @@ function ownedPortalLinkSpans(body) {
     if (offset < 0) continue;
     url.protocol = 'https:';
     spans.push({
-      start: m.index + offset,
-      end: m.index + offset + core.length,
+      start: piece.start + offset,
+      end: piece.start + offset + core.length,
       url: url.href,
       family: (path.split('/')[1] || 'other').toLowerCase(),
     });
@@ -888,7 +931,8 @@ function ownedPortalLinkSpans(body) {
 // bearer page as their target, e.g. /prep/, /secure/, /contract/,
 // /report/project/, /pay/statement/). What /l/:code opens is its target_url,
 // so each code's target is judged as if that long link had been pasted: the
-// target is appended to the body's runs and every long-form check below
+// target REPLACES the wrapper in the body and its runs (expandedView, in the
+// wrapper's own scheme form) and every long-form check below
 // (ownership / recipient binding, expiry, immediate-only, eligibility) runs
 // on it unchanged. Called by every seam that derives its runs from a body
 // (Auto Pay, immediate-only, bearer, prep re-check, consultation rows).
@@ -911,25 +955,73 @@ function targetJudgedAsShortRow(target, hosts) {
   return [APPOINTMENT_TOKEN_RE, REPORT_TOKEN_RE, RECEIPT_TOKEN_PATH_RE, RECEIPT_PAY_TARGET_RE]
     .some((re) => canonicalPortalToken(target, hosts, re, ANY_SCHEME));
 }
-async function expandedRuns(body, conn = db) {
-  const runs = decodedRuns(body);
-  const shortRuns = linkRuns(runs, /\/l\//i);
-  if (!shortRuns.length) return runs;
+// The wrapper's own form, kept: its scheme (or none) prefixes the target's
+// host + path, so an http:// wrapper judges as the http:// long link and a
+// scheme-less one as the scheme-less long link (GH Codex #5332 r4 P1).
+function targetInWrapperForm(core, target) {
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(core);
+  return `${scheme ? `${scheme[0]}` : ''}${String(target).replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, '')}`;
+}
+// The body EXPANDED IN PLACE: every owned /l/<code> whose target is a
+// protected page is replaced by that target, in the wrapper's scheme form,
+// exactly where the wrapper stood — so the body and its runs read as if the
+// long link had been pasted, and every check on either (link recognition,
+// label wording such as the prep line's guide name, the plaintext-scheme
+// refusal) sees the same thing. { body, runs }; both are the input's own
+// when nothing expands. Each run is decoded once, the
+// target once.
+async function expandedView(body, conn = db) {
+  const text = String(body || '');
   const hosts = ownedPortalHosts();
-  const codes = [...new Set(shortRuns
-    .map((run) => canonicalPortalToken(run, hosts, SHORT_CODE_PATH_RE, ANY_SCHEME))
-    .filter(Boolean)
-    .map((code) => code.toLowerCase()))];
-  const extra = [];
-  for (const code of codes) {
+  const pieces = splitOwnedRuns(text, hosts);
+  const decoded = pieces.map((piece) => decodeLinkText(piece.raw));
+  const wrappers = new Map(); // piece index -> { core, code }
+  decoded.forEach((run, i) => {
+    if (!/\/l\//i.test(run)) return;
+    const core = shedLinkRun(run);
+    const code = core && canonicalPortalToken(core, hosts, SHORT_CODE_PATH_RE, ANY_SCHEME);
+    if (code) wrappers.set(i, { core, code: code.toLowerCase() });
+  });
+  if (!wrappers.size) return { body: text, runs: decoded };
+  const targets = new Map(); // code -> { rawTarget, keepWrapper } | null
+  for (const code of new Set([...wrappers.values()].map((w) => w.code))) {
     const row = await conn('short_codes').where({ code }).first('code', 'kind', 'target_url');
-    const target = decodeLinkText(String(row?.target_url || '').trim());
+    const rawTarget = String(row?.target_url || '').trim();
+    const target = decodeLinkText(rawTarget);
     // A target on a host we do not own is no portal bearer (and never one of
     // our redirects): left to shortRowDestination's kind-based judgement.
-    if (!target || row.kind === 'consultation' || !targetOnOwnedHost(target, hosts) || targetJudgedAsShortRow(target, hosts)) continue;
-    extra.push(...target.split(/\s+/).filter(Boolean));
+    const expand = target && row.kind !== 'consultation' && targetOnOwnedHost(target, hosts) && !targetJudgedAsShortRow(target, hosts);
+    // A code whose kind CLAIMS a protected page keeps its own /l/ run as well:
+    // shortRowDestination fails a claim its target does not confirm closed.
+    targets.set(code, expand ? { rawTarget, keepWrapper: ['appointment', 'service_report', 'receipt'].includes(row.kind) } : null);
   }
-  return extra.length ? [...runs, ...extra] : runs;
+  const perPiece = decoded.map((run) => [run]);
+  let out = '';
+  let cursor = 0;
+  let changed = false;
+  pieces.forEach((piece, i) => {
+    const wrapper = wrappers.get(i);
+    const resolved = wrapper && targets.get(wrapper.code);
+    if (!resolved) return;
+    const { rawTarget, keepWrapper } = resolved;
+    const offset = decoded[i].indexOf(wrapper.core);
+    if (offset < 0) return;
+    const head = decoded[i].slice(0, offset);
+    const tail = decoded[i].slice(offset + wrapper.core.length);
+    const expandedCore = targetInWrapperForm(wrapper.core, rawTarget);
+    out += text.slice(cursor, piece.start) + head + expandedCore + tail;
+    cursor = piece.end;
+    // The runs: the decoded head/tail around the target decoded once (a
+    // target with whitespace in it is several runs, as when pasted).
+    perPiece[i] = (head + decodeLinkText(expandedCore) + tail).split(/\s+/).filter(Boolean);
+    if (keepWrapper) perPiece[i].unshift(decoded[i]);
+    changed = true;
+  });
+  if (!changed) return { body: text, runs: decoded };
+  return { body: out + text.slice(cursor), runs: perPiece.flat() };
+}
+async function expandedRuns(body, conn = db) {
+  return (await expandedView(body, conn)).runs;
 }
 async function shortCodeRows(runs, scheme = {}) {
   const shortRuns = linkRuns(runs, /\/l\//i);
@@ -1794,9 +1886,12 @@ async function checkCardLinks(ctx, cards) {
 async function bearerLinkSendCheck(body, toLast10, {
   trustedCustomerId, usDestination = true, contractId = null, expectedLeadId = null,
 } = {}) {
+  // In-place expansion: ctx.body and ctx.runs are the SAME expanded view, so
+  // a wrapped link is judged, labelled and scheme-checked as its long form.
+  const view = await expandedView(body);
   const ctx = {
-    runs: await expandedRuns(body),
-    body,
+    runs: view.runs,
+    body: view.body,
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,
@@ -1820,7 +1915,7 @@ async function bearerLinkSendCheck(body, toLast10, {
     // checked by destination phone alone (ctx.toLast10), independent of
     // ctx.trustedCustomerId, so this same check works unmodified from the
     // lead-only /admin/leads/:id/send-sms route too (see that route).
-    () => checkConsultationLinkSend(ctx.body, ctx.toLast10, ctx, ctx.expectedLeadId),
+    () => checkConsultationLinkSend(body, ctx.toLast10, ctx, ctx.expectedLeadId),
   ];
   for (const check of checks) {
     const refusal = await check();
@@ -1873,9 +1968,10 @@ async function bearerLinkSendCheck(body, toLast10, {
  * check (checkPrepLinks); the caller reports a refusal as a not-sent result.
  */
 async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
+  const view = await expandedView(body);
   const ctx = {
-    runs: await expandedRuns(body),
-    body,
+    runs: view.runs,
+    body: view.body,
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,

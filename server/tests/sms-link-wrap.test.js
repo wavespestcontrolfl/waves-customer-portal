@@ -97,6 +97,23 @@ describe('wrapPortalLinks', () => {
     expect(createShortCode).toHaveBeenCalledWith(`https://${HOST}/prep/${TOKEN}`, expect.anything());
   });
 
+  test.each([[','], [';'], ['),'], [', ']])('two portal URLs joined by "%s" wrap to two correct short links (GH Codex #5332 r4 P2)', async (glue) => {
+    const PAY = 'abc123def456ghi789jk';
+    const out = await wrapPortalLinks({ ...base, body: `Links: (${HOST}/prep/${TOKEN}${glue}${HOST}/pay/${PAY}) ok` });
+    expect(createShortCode.mock.calls.map((c) => c[0])).toEqual([
+      `https://${HOST}/prep/${TOKEN}`,
+      `https://${HOST}/pay/${PAY}`,
+    ]);
+    expect(out.body).toBe(`Links: (${HOST}/l/code1${glue}${HOST}/l/code2) ok`);
+    expect(out.codes).toEqual(['code1', 'code2']);
+  });
+
+  test('a single URL keeps one code (unchanged)', async () => {
+    const out = await wrapPortalLinks({ ...base, body: `Prep: ${HOST}/prep/${TOKEN}.` });
+    expect(out.body).toBe(`Prep: ${HOST}/l/code1.`);
+    expect(out.codes).toEqual(['code1']);
+  });
+
   test('a lead audience carries the lead id; a non-uuid id is never passed (FK-safe)', async () => {
     await wrapPortalLinks({ body: `${HOST}/estimate/tok123tok123tok123`, channel: 'sms', audience: 'lead', customerId: 'cust-1', leadId: LEAD_ID });
     expect(createShortCode.mock.calls[0][1]).toEqual(expect.objectContaining({ leadId: LEAD_ID, customerId: null }));
