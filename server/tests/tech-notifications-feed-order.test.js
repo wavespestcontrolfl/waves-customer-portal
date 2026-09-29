@@ -89,3 +89,34 @@ test('tracking notices are served only while GATE_NOSHOW_DETECTOR is on', async 
   expect(await run()).not.toContainEqual({ type: 'follow_through_tracking' });
   delete process.env.GATE_NOSHOW_DETECTOR;
 });
+
+describe('customer_visit_photos cards follow the visit-prep gates at request time', () => {
+  function run() {
+    const chain = {};
+    for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orderByRaw', 'orderBy', 'limit']) {
+      chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
+    }
+    chain.then = (res, rej) => Promise.resolve([]).then(res, rej);
+    db.mockImplementation(() => chain);
+    const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+    // Wrapped: the chain is itself thenable, so returning it would resolve it.
+    return getHandler()({ technicianId: 't-1', query: {} }, res, jest.fn()).then(() => ({ chain }));
+  }
+  const hidesPhotos = ({ chain }) => chain.whereNot.mock.calls.some(([arg]) => arg?.type === 'customer_visit_photos');
+
+  afterEach(() => {
+    delete process.env.GATE_VISIT_PREP_TECH_ALERTS;
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+  });
+
+  test('either gate off → photo cards are filtered out', async () => {
+    process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
+    expect(hidesPhotos(await run())).toBe(true);
+  });
+
+  test('both gates on → photo cards are served', async () => {
+    process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    expect(hidesPhotos(await run())).toBe(false);
+  });
+});

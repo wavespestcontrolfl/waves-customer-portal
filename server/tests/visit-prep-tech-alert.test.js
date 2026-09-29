@@ -32,14 +32,14 @@ let mockLastSvcChain = null;
 // from any value the caller passed in (there is none to pass: the function
 // takes only scheduledServiceId/visitId).
 function prime({
-  svcTechnicianId = 'tech-1', techs = { 'tech-1': TECH }, visitId = 'visit-9', scheduledDate = '2026-10-02',
+  svcTechnicianId = 'tech-1', techs = { 'tech-1': TECH }, visitId = 'visit-9', scheduledDate = '2026-10-02', status = 'confirmed',
 } = {}) {
   // The card is written inside db.transaction; the trx is the same stub.
   db.transaction = jest.fn(async (fn) => fn(db));
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
       mockLastSvcChain = chain(async () => ({
-        id: 'svc-1', technician_id: svcTechnicianId, visit_id: visitId, scheduled_date: scheduledDate,
+        id: 'svc-1', technician_id: svcTechnicianId, visit_id: visitId, scheduled_date: scheduledDate, status,
       }));
       return mockLastSvcChain;
     }
@@ -147,6 +147,13 @@ describe('notifyTechVisitPrepPhotos', () => {
       expect(mockInsertCard).toHaveBeenCalledWith('tech-1', expect.objectContaining({
         payload: { scheduled_service_id: 'svc-1', visit_id: null, scheduled_date: '2026-10-05' },
       }));
+    });
+
+    test.each(['cancelled', 'completed', 'skipped', 'no_show'])('a %s visit (still carrying its technician) → no card, no push', async (status) => {
+      prime({ status });
+      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
+      expect(mockInsertCard).not.toHaveBeenCalled();
+      expect(mockSendToAdminUser).not.toHaveBeenCalled();
     });
 
     test('no technician assigned → no card, no push', async () => {

@@ -42,6 +42,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { visitPrepPhotosLive, visitPrepTechAlertsLive } = require('../config/feature-gates');
 const { isAssignable } = require('./technician-eligibility');
+const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 
 const TYPE = 'customer_visit_photos';
 
@@ -63,7 +64,7 @@ async function loadVisitLocked(scheduledServiceId, trx) {
   return trx('scheduled_services')
     .where({ id: scheduledServiceId })
     .forShare()
-    .first('id', 'technician_id', 'visit_id', 'scheduled_date');
+    .first('id', 'technician_id', 'visit_id', 'scheduled_date', 'status');
 }
 
 function isoDate(value) {
@@ -78,6 +79,9 @@ async function writeCard(scheduledServiceId) {
   return db.transaction(async (trx) => {
     const row = await loadVisitLocked(scheduledServiceId, trx);
     if (!row?.technician_id) return null;
+    // Cancelled or completed since the photos landed (a transition keeps
+    // technician_id): no longer a visit on anyone's route (Codex #5303 r2).
+    if (TERMINAL_ROW_STATUSES.includes(row.status)) return null;
     const technicianId = String(row.technician_id);
     const tech = await trx('technicians').where({ id: technicianId })
       .first('id', 'employment_status', 'field_dispatchable');

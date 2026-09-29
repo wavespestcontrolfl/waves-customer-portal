@@ -39,6 +39,12 @@ router.get('/', async (req, res, next) => {
     if (!require('../config/feature-gates').gateEnvValue('GATE_NOSHOW_DETECTOR')) {
       q = q.whereNot({ type: 'follow_through_tracking' });
     }
+    // Photo cards point at the Visit Brief's customer photos, which 404
+    // while either visit-prep gate is off: hide them at request time the
+    // same way (Codex #5303 r2). Re-enabling brings undismissed ones back.
+    if (!require('../services/visit-prep-tech-alert').isEnabled()) {
+      q = q.whereNot({ type: 'customer_visit_photos' });
+    }
     if (unreadOnly) q = q.where({ read: false });
     // FRESH non-storm rows outrank everything inside the 20-row window: a
     // storm burst must never crowd an actionable geofence/timer prompt out
