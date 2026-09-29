@@ -95,7 +95,14 @@ function fakeConn(tables = {}) {
     q.count = () => ({
       first: async () => ({ count: rowsMatching().length }),
     });
-    q.first = async () => rowsMatching()[0] || null;
+    // readsToday's Postgres attempt sum, computed the same way here.
+    q.first = async (...cols) => {
+      if (typeof cols[0] === 'string' && cols[0].includes('SUM(GREATEST')) {
+        const claimed = ['pending', 'done', 'failed'];
+        return { count: rowsMatching().reduce((n, r) => n + Math.max(Number(r.read_attempts) || 0, claimed.includes(r.read_status) ? 1 : 0), 0) };
+      }
+      return rowsMatching()[0] || null;
+    };
     q.insert = (row) => ({
       returning: async () => {
         const id = `gen-${nextId}`; nextId += 1;
@@ -500,7 +507,7 @@ describe('a successful read', () => {
     expect(stored.mode).toBe('internal');
     expect(stored.customer_id).toBe('cust-1');
     const writes = readStatusWrites(conn, 'sub-1');
-    expect(writes[0]).toEqual({ read_status: 'pending', read_attempts: 1, read_ref: null, read_result: null });
+    expect(writes[0]).toEqual({ read_status: 'pending', read_attempts: 1, read_claimed_at: expect.any(Date), read_ref: null, read_result: null });
     expect(writes[1].read_status).toBe('done');
     expect(writes[1].read_ref).toBe(stored.id);
   });
@@ -623,5 +630,28 @@ describe('trigger outcome', () => {
     await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() })).resolves.toBe('failed');
     mockGateOn = false;
     await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() })).resolves.toBe('skipped');
+  });
+});
+
+describe('a stop that will not hold still while the read settles (Codex #5320 r10)', () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  beforeEach(async () => { await tick(); mockDispatch.mockClear(); });
+
+  test('VISIT_STOP_MOVED on every settle attempt releases the paid read and re-dispatches, never failed', async () => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    mockIdentifyPestV2.mockResolvedValue(okEngineResult());
+    // The claim's lock succeeds; every settle attempt finds the stop moved.
+    let calls = 0;
+    mockLockStopForRow.mockImplementation(async (trx, id) => {
+      calls += 1;
+      if (calls > 1) throw Object.assign(new Error('moved'), { code: 'VISIT_STOP_MOVED' });
+      return id;
+    });
+    await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn })).resolves.toBe('changed');
+    await tick();
+    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('none');
+    expect(conn._store.pest_identifications).toHaveLength(0);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 });

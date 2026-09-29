@@ -11,7 +11,13 @@
  *       a VISIT_STOP_MOVED refusal, or a stop that kept changing line
  *       while it was read (the dispatcher's MAX_DISPATCHES bound);
  *   (c) read_status 'unsupported' where a live read engine now reads the
- *       stop (office reclassified it after the photos arrived).
+ *       stop (office reclassified it after the photos arrived);
+ *   (d) read_status 'done' whose engine / subject no longer matches the
+ *       read the stop wants now (pest -> lawn, lawn -> tree & shrub after
+ *       the read finished). The tech display already hides such a read;
+ *       the sweep releases it to 'none' and re-reads the stop once
+ *       (Codex #5320 r10 P2). Its first attempt stays counted in
+ *       read_attempts, so the re-read is charged against the daily cap.
  *
  * A 'pending' row is NEVER retried (Codex #5319 r2): a pending row may belong
  * to a read that is still running, and there is no claim timestamp to tell
@@ -51,7 +57,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { dispatchVisitPrepRead, _internal: { chooseEngine } } = require('./visit-prep-read-dispatch');
+const { dispatchVisitPrepRead, _internal: { currentReadKey, storedReadKey } } = require('./visit-prep-read-dispatch');
 const { etDayStart } = require('./visit-prep-read-claim');
 const { visitPrepReadSweepLive, visitPrepPestReadLive, visitPrepPlantReadLive } = require('../config/feature-gates');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
@@ -69,6 +75,7 @@ const SWEEP_BATCH_LIMIT = 10;
 const SWEEP_CASE = {
   NONE_RETRY: 'none_retry',
   RECLASSIFIED: 'reclassified',
+  STALE_DONE: 'stale_done',
 };
 
 async function loadPhotos(conn, submissionId) {
@@ -83,12 +90,12 @@ async function loadPhotos(conn, submissionId) {
 async function candidateRows(conn, now) {
   return conn('visit_prep_submissions as vps')
     .join('scheduled_services as ss', 'ss.id', 'vps.scheduled_service_id')
-    .whereIn('vps.read_status', ['none', 'unsupported'])
+    .whereIn('vps.read_status', ['none', 'unsupported', 'done'])
     .where('vps.created_at', '>=', etDayStart(now))
     .where('ss.scheduled_date', '>=', etDateString(now))
     .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
     .select(
-      'vps.id as submission_id', 'vps.read_status', 'vps.created_at',
+      'vps.id as submission_id', 'vps.read_status', 'vps.created_at', 'vps.read_result', 'vps.read_attempts',
       'ss.id as scheduled_service_id', 'ss.customer_id', 'ss.service_type', 'ss.visit_id', 'ss.status',
     );
 }
@@ -127,9 +134,18 @@ async function dropRecentlyChecked(conn, rows, now) {
 async function recordCheck(conn, row) {
   await conn('activity_log').insert({
     action: CHECK_ACTION,
-    description: 'visit-prep read sweep: no live engine reads the stop yet',
+    description: 'visit-prep read sweep: the stop needs no new read',
     metadata: { submissionId: String(row.submission_id) },
   });
+}
+
+// Does this row need a read the stop's current engine would make? (c): an
+// unsupported row a live engine reads now; (d): a finished read made by the
+// wrong engine / subject for the stop as it is now.
+async function needsReadNow(conn, row, live) {
+  const want = await currentReadKey({ id: row.scheduled_service_id, visit_id: row.visit_id }, conn, live);
+  if (!want) return false;
+  return row.read_status === 'done' ? storedReadKey(row.read_result) !== want : true;
 }
 
 async function selectCandidates(conn, now) {
@@ -139,26 +155,29 @@ async function selectCandidates(conn, now) {
   const none = rows.filter((r) => r.read_status === 'none'
     && now.getTime() - new Date(r.created_at).getTime() > NONE_MIN_AGE_MS);
   const unsupported = rows.filter((r) => r.read_status === 'unsupported');
+  const done = rows.filter((r) => r.read_status === 'done');
 
-  const [noneOk, unsupportedOk] = await Promise.all([
+  const [noneOk, unsupportedOk, doneOk] = await Promise.all([
     dropAlreadyAttempted(conn, none, SWEEP_CASE.NONE_RETRY),
     dropAlreadyAttempted(conn, unsupported, SWEEP_CASE.RECLASSIFIED),
+    dropAlreadyAttempted(conn, done, SWEEP_CASE.STALE_DONE),
   ]);
 
-  // Case (c) only when a live engine reads the stop RIGHT NOW — never
-  // re-derived from the submission's stale snapshot; the engine re-checks
-  // it under the stop lock. The per-row check runs only for the batch's remaining room
-  // (Codex #5319 r1 P2), and a row checked and found still unreadable is
-  // skipped for CHECK_COOLDOWN_MS, so each tick advances through the cohort
-  // instead of re-checking the same oldest rows (Codex #5319 r2 P2).
+  // Cases (c) and (d) only when the stop's read RIGHT NOW differs from what
+  // the row holds — never re-derived from the submission's stale snapshot;
+  // the engine re-checks it under the stop lock. The per-row check runs only
+  // for the batch's remaining room (Codex #5319 r1 P2), and a row checked
+  // and found still fine is skipped for CHECK_COOLDOWN_MS, so each tick
+  // advances through the cohort instead of re-checking the same oldest rows
+  // (Codex #5319 r2 P2).
   const room = Math.max(0, SWEEP_BATCH_LIMIT - noneOk.length);
-  const unchecked = await dropRecentlyChecked(conn, unsupportedOk, now);
-  const reclassified = [];
-  const oldestUnsupported = [...unchecked].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  for (const row of oldestUnsupported.slice(0, room * 2)) {
-    if (reclassified.length >= room) break;
-    if (await chooseEngine({ id: row.scheduled_service_id, visit_id: row.visit_id }, conn, live)) {
-      reclassified.push(row);
+  const unchecked = await dropRecentlyChecked(conn, [...unsupportedOk, ...doneOk], now);
+  const changed = [];
+  const oldestFirst = [...unchecked].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  for (const row of oldestFirst.slice(0, room * 2)) {
+    if (changed.length >= room) break;
+    if (await needsReadNow(conn, row, live)) {
+      changed.push(row);
     } else {
       await recordCheck(conn, row);
     }
@@ -166,7 +185,7 @@ async function selectCandidates(conn, now) {
 
   const combined = [
     ...noneOk.map((r) => ({ ...r, caseLabel: SWEEP_CASE.NONE_RETRY })),
-    ...reclassified.map((r) => ({ ...r, caseLabel: SWEEP_CASE.RECLASSIFIED })),
+    ...changed.map((r) => ({ ...r, caseLabel: r.read_status === 'done' ? SWEEP_CASE.STALE_DONE : SWEEP_CASE.RECLASSIFIED })),
   ];
   // Oldest first, then bound the whole run (e.g. 10 rows) so a backlog can
   // never burn the day's cap in one tick.
@@ -189,6 +208,17 @@ async function retryOne(conn, row) {
   });
   const photos = await loadPhotos(conn, row.submission_id);
   if (!photos.length) return; // nothing left to read
+  let expectStatus = [row.read_status];
+  if (row.read_status === 'done') {
+    // Release the stale read first, only while it is still the done read
+    // this sweep judged: every claim bumps read_attempts, so a re-read that
+    // landed meanwhile is left alone. Its attempt stays counted.
+    const released = await conn('visit_prep_submissions')
+      .where({ id: row.submission_id, read_status: 'done', read_attempts: row.read_attempts })
+      .update({ read_status: 'none', read_ref: null, read_result: null });
+    if (!released) return;
+    expectStatus = ['none'];
+  }
   const svc = {
     id: row.scheduled_service_id,
     customer_id: row.customer_id,
@@ -204,7 +234,7 @@ async function retryOne(conn, row) {
   // selected (re-checked under a row lock): an original read that finished
   // meanwhile is left alone, never re-run (Codex #5319 r1 P1).
   const outcome = await dispatchVisitPrepRead({
-    submissionId: row.submission_id, svc, photos, conn, expectStatus: [row.read_status],
+    submissionId: row.submission_id, svc, photos, conn, expectStatus,
   });
   // The dispatch never throws (it must never break a customer's upload), so
   // its outcome is how a failed recovery reaches job health (Codex #5319 r4).
@@ -249,6 +279,6 @@ module.exports = {
   sweepVisitPrepPestReads,
   SWEEP_BATCH_LIMIT,
   _internal: {
-    SWEEP_ACTION, SWEEP_CASE, selectCandidates, candidateRows, NONE_MIN_AGE_MS,
+    SWEEP_ACTION, SWEEP_CASE, selectCandidates, candidateRows, NONE_MIN_AGE_MS, retryOne,
   },
 };

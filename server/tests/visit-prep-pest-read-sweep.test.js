@@ -13,7 +13,17 @@ const mockTrigger = jest.fn(async () => undefined);
 const mockIsPestStop = jest.fn(async () => false);
 jest.mock('../services/visit-prep-read-dispatch', () => ({
   dispatchVisitPrepRead: (...args) => mockTrigger(...args),
-  _internal: { chooseEngine: (svc, conn) => mockIsPestStop(svc, conn) },
+  _internal: {
+    // true → the stop wants a pest read; a string is taken as the key itself.
+    currentReadKey: async (svc, conn) => {
+      const v = await mockIsPestStop(svc, conn);
+      return v === true ? 'pest' : (v || null);
+    },
+    storedReadKey: (r) => {
+      const parsed = typeof r === 'string' ? JSON.parse(r) : r;
+      return parsed?.engine === 'plant' ? `plant:${parsed.subject_type}` : 'pest';
+    },
+  },
 }));
 
 let mockGateOn = true;
@@ -26,7 +36,7 @@ jest.mock('../config/feature-gates', () => ({
 const {
   sweepVisitPrepPestReads,
   SWEEP_BATCH_LIMIT,
-  _internal: { selectCandidates, SWEEP_CASE, SWEEP_ACTION },
+  _internal: { selectCandidates, SWEEP_CASE, SWEEP_ACTION, retryOne: _retryOneForTest },
 } = require('../services/visit-prep-pest-read-sweep');
 
 const NOW = new Date('2026-09-29T18:00:00Z'); // 2:00 PM ET — well inside 2026-09-29 either offset
@@ -55,6 +65,8 @@ function fakeConn(seed = {}) {
       submission_id: vps.id,
       read_status: vps.read_status,
       created_at: vps.created_at,
+      read_result: vps.read_result ?? null,
+      read_attempts: vps.read_attempts ?? 0,
       scheduled_service_id: ss.id,
       customer_id: ss.customer_id,
       service_type: ss.service_type,
@@ -69,7 +81,18 @@ function fakeConn(seed = {}) {
     q.join = () => q;
     q.whereIn = (col, vals) => { q._whereIn = { col: colKey(col), vals }; return q; };
     q.whereNotIn = (col, vals) => { q._whereNotIn = { col: colKey(col), vals }; return q; };
-    q.where = (col, op, val) => { q._wheres.push({ col: colKey(col), val }); return q; };
+    q.where = (col, op, val) => {
+      if (typeof col === 'object') { q._match = { ...(q._match || {}), ...col }; return q; }
+      q._wheres.push({ col: colKey(col), val });
+      return q;
+    };
+    // The stale-done release: a guarded single-row update.
+    q.update = async (patch) => {
+      const hits = store.submissions.filter((r) => Object.entries(q._match || {})
+        .every(([k, v]) => (k === 'read_attempts' ? (r.read_attempts ?? 0) === v : r[k] === v)));
+      hits.forEach((r) => Object.assign(r, patch));
+      return hits.length;
+    };
     q.select = async () => store.submissions
       .map(joinedRow)
       .filter(Boolean)
@@ -396,5 +419,66 @@ describe('sweepVisitPrepPestReads — retry wiring', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.result).toEqual({ enabled: true, candidates: 2, retried: 1, failed: 1 });
     expect(mockTrigger).toHaveBeenCalledTimes(2); // both rows still ran
+  });
+});
+
+describe('case (d): a finished read made for the wrong line or subject (Codex #5320 r10)', () => {
+  const LAWN_READ = JSON.stringify({ engine: 'plant', subject_type: 'lawn', v2: {} });
+
+  test('a done lawn read on a stop that is pest now is released and re-dispatched from none', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, read_attempts: 1, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    const candidates = await selectCandidates(conn, NOW);
+    expect(candidates.map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_DONE]);
+    await sweepVisitPrepPestReads(conn, NOW);
+    const row = conn._store.submissions[0];
+    expect(row).toMatchObject({ read_status: 'none', read_result: null, read_ref: null, read_attempts: 1 });
+    expect(mockTrigger).toHaveBeenCalledWith(expect.objectContaining({ submissionId: 'sub-1', expectStatus: ['none'] }));
+  });
+
+  test('a done lawn read on a stop now tree & shrub is stale too (subject changed)', async () => {
+    mockIsPestStop.mockResolvedValue('plant:tree_shrub');
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_DONE]);
+  });
+
+  test('a done read that still matches the stop is never a candidate (and is checked, then cooled down)', async () => {
+    mockIsPestStop.mockResolvedValue('plant:lawn');
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect(await selectCandidates(conn, NOW)).toEqual([]);
+    expect(conn._store.activityLog.map((r) => r.action)).toEqual(['visit_prep_read_sweep_check']);
+  });
+
+  test('a done read on a stop no live engine reads is left alone', async () => {
+    mockIsPestStop.mockResolvedValue(null);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect(await selectCandidates(conn, NOW)).toEqual([]);
+  });
+
+  test('a re-read that landed after selection (attempts moved on) is never released', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, read_attempts: 1, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    const [row] = await selectCandidates(conn, NOW);
+    conn._store.submissions[0].read_attempts = 2; // another read claimed and finished meanwhile
+    await _retryOneForTest(conn, row);
+    expect(conn._store.submissions[0].read_status).toBe('done');
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 });

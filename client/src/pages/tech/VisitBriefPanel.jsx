@@ -344,6 +344,10 @@ function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
 const READ_PENDING_POLL_MS = 30 * 1000;
 const READ_PENDING_MAX_POLLS = 30;
 const READ_START_GRACE_MS = 2 * 60 * 1000;
+// A read the server says the recovery sweep may still start (`awaiting`)
+// is waited on at a slower pace: the sweep runs every 15 minutes, so 30
+// polls a minute apart cover its next two passes (Codex #5320 r10 P2).
+const READ_AWAITING_POLL_MS = 60 * 1000;
 
 function useRefreshWhileReadPending(customerFlagged, onRefresh) {
   // The budget belongs to the set of reads being waited on: a new pending
@@ -353,9 +357,12 @@ function useRefreshWhileReadPending(customerFlagged, onRefresh) {
   // too, so a brief fetched in that gap still picks up the result
   // (Codex #5305 r11). Nothing extra is shown for it.
   const now = Date.now();
-  const pendingKey = (customerFlagged || []).filter((entry) => entry.read?.status === 'pending'
-    || (entry.read?.status === 'none' && now - new Date(entry.sentAt).getTime() < READ_START_GRACE_MS))
-    .map((entry) => entry.id).join(',');
+  const soon = (entry) => entry.read?.status === 'pending'
+    || (entry.read?.status === 'none' && now - new Date(entry.sentAt).getTime() < READ_START_GRACE_MS);
+  const entries = customerFlagged || [];
+  const waited = entries.filter((entry) => soon(entry) || (entry.read?.status === 'none' && entry.read?.awaiting));
+  const pendingKey = waited.map((entry) => entry.id).join(',');
+  const pollMs = waited.some(soon) ? READ_PENDING_POLL_MS : READ_AWAITING_POLL_MS;
   const polls = useRef({ key: '', count: 0 });
   if (polls.current.key !== pendingKey) polls.current = { key: pendingKey, count: 0 };
   // The latest callback in a ref: parent re-renders (inline retry callbacks,
@@ -375,9 +382,9 @@ function useRefreshWhileReadPending(customerFlagged, onRefresh) {
       Promise.resolve(typeof refreshRef.current === 'function' ? refreshRef.current() : null)
         .catch(() => {})
         .finally(() => { if (!cancelled) setRefreshTick((n) => n + 1); });
-    }, READ_PENDING_POLL_MS);
+    }, pollMs);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [pendingKey, refreshTick]);
+  }, [pendingKey, refreshTick, pollMs]);
 }
 
 function CustomerFlaggedSection({ serviceId, customerFlagged, request, onRefresh }) {

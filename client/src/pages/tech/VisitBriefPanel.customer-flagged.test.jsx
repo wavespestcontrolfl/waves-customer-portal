@@ -230,6 +230,24 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     }
   });
 
+  it('an older unread submission the recovery sweep may still read (awaiting) is polled once a minute, silently', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      renderPanel({
+        customerFlagged: [{ ...CUSTOMER_FLAGGED[0], sentAt: new Date(Date.now() - 40 * 60 * 1000).toISOString(), read: { status: 'none', awaiting: true } }],
+        onRetry,
+      });
+      expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetry).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(30 * 1000); await Promise.resolve(); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a slow refresh is awaited before the next poll is armed', async () => {
     vi.useFakeTimers();
     try {

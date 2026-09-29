@@ -35,17 +35,16 @@ function etDayStart(now = new Date()) {
 // engine call that failed, or whose result was released because the stop
 // changed mid-read, still cost a vision call. Each claim bumps
 // read_attempts; rows claimed before that column existed count once while
-// they sit in a claimed status (pending/done/failed). Today's rows are few
-// (the cap bounds the claimed ones), so they are summed here.
+// they sit in a claimed status (pending/done/failed). Summed in Postgres
+// over the created_at index (Codex #5320 r10 P2).
 const CLAIMED_STATUSES = ['pending', 'done', 'failed'];
-function attemptsOf(row) {
-  return Math.max(Number(row.read_attempts) || 0, CLAIMED_STATUSES.includes(row.read_status) ? 1 : 0);
-}
+const ATTEMPTS_SUM_SQL = 'COALESCE(SUM(GREATEST(read_attempts, CASE WHEN read_status IN '
+  + "('pending', 'done', 'failed') THEN 1 ELSE 0 END)), 0)::int AS count";
 async function readsToday(conn, now = new Date()) {
-  const rows = await conn('visit_prep_submissions')
+  const row = await conn('visit_prep_submissions')
     .where('created_at', '>=', etDayStart(now))
-    .select('read_status', 'read_attempts');
-  return rows.reduce((sum, row) => sum + attemptsOf(row), 0);
+    .first(conn.raw(ATTEMPTS_SUM_SQL));
+  return Number(row?.count || 0);
 }
 
 /**
@@ -87,6 +86,9 @@ async function claimReadSlot(conn, submissionId, svc, {
           .update({
             read_status: 'pending',
             read_attempts: (Number(own.read_attempts) || 0) + 1,
+            // The pending-staleness clock starts at the claim, not the
+            // submission (a sweep may claim hours later; Codex #5320 r10).
+            read_claimed_at: now,
             ...(typeof pendingPatch === 'function' ? pendingPatch(value) : pendingPatch),
           });
         if (!updated) return 'taken';
@@ -134,6 +136,11 @@ async function settleClaimedRead(conn, submissionId, svc, { applicable, matches,
       });
     } catch (err) {
       if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
+      // A stop that would not hold still is a stop that changed: release
+      // the claim (a guarded single-row write, no stop lock needed) and let
+      // the caller re-dispatch, never terminalize a paid read as failed
+      // (Codex #5320 r10 P2).
+      if (err && err.code === 'VISIT_STOP_MOVED') { await release(conn); return 'changed'; }
       throw err;
     }
   }
@@ -175,4 +182,4 @@ function redispatch(args, logger) {
   });
 }
 
-module.exports = { redispatch, settleClaimedRead, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };
+module.exports = { redispatch, settleClaimedRead, CLAIMED_STATUSES, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };

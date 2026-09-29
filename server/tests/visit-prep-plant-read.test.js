@@ -83,7 +83,14 @@ function fakeConn(tables = {}) {
     const baseForShare = q.forShare;
     q.forShare = () => { (store._shareLocked = store._shareLocked || []).push(q._whereIn ? q._whereIn.vals : q._where.id); return baseForShare ? baseForShare() : q; };
     q.count = () => ({ first: async () => ({ count: rowsMatching().length }) });
-    q.first = async () => rowsMatching()[0] || null;
+    // readsToday's Postgres attempt sum, computed the same way here.
+    q.first = async (...cols) => {
+      if (typeof cols[0] === 'string' && cols[0].includes('SUM(GREATEST')) {
+        const claimed = ['pending', 'done', 'failed'];
+        return { count: rowsMatching().reduce((n, r) => n + Math.max(Number(r.read_attempts) || 0, claimed.includes(r.read_status) ? 1 : 0), 0) };
+      }
+      return rowsMatching()[0] || null;
+    };
     q.insert = (row) => ({
       returning: async () => {
         const id = `gen-${nextId}`; nextId += 1;
@@ -352,7 +359,9 @@ describe('a successful read', () => {
     expect(mockGetPhotoBase64).toHaveBeenCalledWith('visitprep/a.jpg');
     const writes = readStatusWrites(conn, 'sub-1');
     // The claim stamps the engine marker so the display knows who owns it.
-    expect(writes[0]).toEqual({ read_status: 'pending', read_attempts: 1, read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn' }) });
+    expect(writes[0]).toEqual({
+      read_status: 'pending', read_attempts: 1, read_claimed_at: expect.any(Date), read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn' }),
+    });
     expect(writes[1].read_status).toBe('done');
     const stored = JSON.parse(writes[1].read_result);
     expect(stored.subject_type).toBe('lawn');

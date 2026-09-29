@@ -660,13 +660,17 @@ function parseJsonMaybe(value) {
 // `v2`), the SAME JSON shape the customer Photo ID route stores.
 // A read runs in-process after the submission commits; a redeploy or
 // crash mid-read would otherwise leave 'pending' on the row forever. A
-// read still pending this long after the photos arrived is shown as
-// failed (quiet) instead of "Photo read pending".
+// read still pending this long after it was CLAIMED (read_claimed_at; the
+// submission time for rows claimed before that column) is shown as failed
+// (quiet) instead of "Photo read pending" — timed from the claim so a read
+// the recovery sweep starts long after the photos arrived stays pending
+// while it runs (Codex #5320 r10 P2).
 const READ_PENDING_STALE_MS = 15 * 60 * 1000;
 
-function effectiveReadStatus(status, createdAt, now = Date.now()) {
+function effectiveReadStatus(status, createdAt, now = Date.now(), claimedAt = null) {
   if (status !== 'pending') return status;
-  const at = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
+  const from = claimedAt || createdAt;
+  const at = from instanceof Date ? from.getTime() : new Date(from).getTime();
   return Number.isFinite(at) && now - at > READ_PENDING_STALE_MS ? 'failed' : status;
 }
 
@@ -821,7 +825,18 @@ async function finalStopSnapshot(svc, conn, needPest, needPlant) {
 // 'unsupported' written by the other engine is served as 'none' and the
 // panel keeps polling (Codex #5320 r3 P2). Otherwise 'unsupported'.
 function servedRead(s, ctx) {
-  const status = effectiveReadStatus(s.read_status || 'none', s.created_at);
+  const read = servedReadLine(s, ctx);
+  // An unread row the recovery sweep may still pick up today: the panel
+  // keeps re-reading the brief for it, so a recovered read reaches a brief
+  // that is already open (Codex #5320 r10 P2). Nothing extra is shown.
+  if (read?.status === 'none' && ctx.recoveryLive && new Date(s.created_at) >= ctx.todayStart) {
+    return { ...read, awaiting: true };
+  }
+  return read;
+}
+
+function servedReadLine(s, ctx) {
+  const status = effectiveReadStatus(s.read_status || 'none', s.created_at, Date.now(), s.read_claimed_at);
   const plantResult = s.read_result ? parseJsonMaybe(s.read_result) : null;
   const origin = readOrigin(s.read_status, plantResult);
   const shownStatus = !origin && status === 'unsupported' ? 'none' : status;
@@ -841,7 +856,7 @@ async function customerFlaggedFacts(svc, conn = db) {
   const submissions = await conn('visit_prep_submissions')
     .whereIn('scheduled_service_id', ids)
     .orderBy('created_at', 'asc')
-    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note', 'read_status', 'read_ref', 'read_result');
+    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note', 'read_status', 'read_ref', 'read_result', 'read_claimed_at');
   if (submissions.length === 0) return null;
   const photos = await conn('visit_prep_photos')
     .whereIn('submission_id', submissions.map((s) => s.id))
@@ -907,6 +922,8 @@ async function customerFlaggedFacts(svc, conn = db) {
   const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
   if (kept.length === 0) return null;
 
+  const recoveryLive = require('../config/feature-gates').visitPrepReadSweepLive();
+  const todayStart = require('./visit-prep-read-claim').etDayStart();
   return kept.map((s) => {
     const entry = {
       id: s.id,
@@ -917,7 +934,7 @@ async function customerFlaggedFacts(svc, conn = db) {
       photoIds: photoIdsBySubmission.get(s.id) || [],
     };
     const read = servedRead(s, {
-      readsLive, plantReadsLive, stillPest, plantSubject, contractsByRef,
+      readsLive, plantReadsLive, stillPest, plantSubject, contractsByRef, recoveryLive, todayStart,
     });
     if (read) entry.read = read;
     return entry;

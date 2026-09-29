@@ -34,13 +34,30 @@ const { markUnclaimed, UNCLAIMED_STATUSES } = require('./visit-prep-read-claim')
 
 const MAX_DISPATCHES = 3;
 
-// 'pest' | 'plant' | null for the stop as it is now, among live engines.
-async function chooseEngine(svc, conn, { pestLive, plantLive }) {
+// The read the stop wants as it is now, among live engines: 'pest',
+// 'plant:lawn', 'plant:tree_shrub', or null. plantSubjectForStop is null for
+// any pest stop ("pest wins"), so a pest stop with only the plant gate live
+// is never read by the plant engine.
+async function currentReadKey(svc, conn, { pestLive, plantLive }) {
   if (pestLive && await isPestStop(svc, conn)) return 'pest';
-  // plantSubjectForStop is null for any pest stop ("pest wins"), so a pest
-  // stop with only the plant gate live is never read by the plant engine.
-  if (plantLive && await plantSubjectForStop(svc, conn)) return 'plant';
-  return null;
+  const subject = plantLive ? await plantSubjectForStop(svc, conn) : null;
+  return subject ? `plant:${subject}` : null;
+}
+
+// The read a finished row holds, in the same terms: a plant read carries
+// its engine marker and subject in read_result; anything else is pest.
+function storedReadKey(readResult) {
+  let parsed = readResult;
+  if (typeof readResult === 'string') {
+    try { parsed = JSON.parse(readResult); } catch { parsed = null; }
+  }
+  return parsed?.engine === 'plant' ? `plant:${parsed.subject_type}` : 'pest';
+}
+
+// 'pest' | 'plant' | null for the stop as it is now, among live engines.
+async function chooseEngine(svc, conn, live) {
+  const key = await currentReadKey(svc, conn, live);
+  return key ? key.split(':')[0] : null;
 }
 
 /**
@@ -83,4 +100,4 @@ async function dispatchVisitPrepRead({
   return 'unsupported';
 }
 
-module.exports = { dispatchVisitPrepRead, MAX_DISPATCHES, _internal: { chooseEngine } };
+module.exports = { dispatchVisitPrepRead, MAX_DISPATCHES, _internal: { chooseEngine, currentReadKey, storedReadKey } };

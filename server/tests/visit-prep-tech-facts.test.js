@@ -116,6 +116,23 @@ describe('customerFlaggedFacts', () => {
     expect(JSON.stringify(facts)).not.toMatch(/visitprep|s3_key|signed:\/\//);
   });
 
+  test('an unread submission from today is marked awaiting only while the recovery sweep is live (Codex #5320 r10)', async () => {
+    const seed = () => fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
+      visit_prep_submissions: [{
+        id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(Date.now() - 40 * 60 * 1000), read_status: 'none',
+      }],
+      visit_prep_photos: [],
+    });
+    expect((await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, seed()))[0].read).toEqual({ status: 'none' });
+    process.env.GATE_VISIT_PREP_READ_SWEEP = 'true';
+    try {
+      expect((await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, seed()))[0].read).toEqual({ status: 'none', awaiting: true });
+    } finally {
+      delete process.env.GATE_VISIT_PREP_READ_SWEEP;
+    }
+  });
+
   test('grouped stop: resolves CURRENT membership, not the submission\'s own snapshotted visit_id', async () => {
     // svc-A and svc-B currently share visit_id "visit-9". A third
     // submission was recorded against svc-C, which used to be in this
@@ -308,6 +325,11 @@ describe('effectiveReadStatus (a read interrupted by a redeploy never sticks on 
   });
   test('pending older than 15 minutes reads as failed', () => {
     expect(effectiveReadStatus('pending', created, created.getTime() + 16 * 60 * 1000)).toBe('failed');
+  });
+  test('a read claimed long after the photos were sent is timed from its claim (Codex #5320 r10)', () => {
+    const claimed = new Date(created.getTime() + 3 * 60 * 60 * 1000);
+    expect(effectiveReadStatus('pending', created, claimed.getTime() + 5 * 60 * 1000, claimed)).toBe('pending');
+    expect(effectiveReadStatus('pending', created, claimed.getTime() + 16 * 60 * 1000, claimed)).toBe('failed');
   });
   test('other statuses pass through', () => {
     for (const s of ['none', 'done', 'failed', 'unsupported']) {
