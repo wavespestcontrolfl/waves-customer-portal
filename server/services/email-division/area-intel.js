@@ -65,12 +65,18 @@ async function canonicalTargetVocabulary(conn) {
 async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   const monthStart = etMonthStart(month);
   const monthEnd = etMonthEnd(month);
-  // City = the booked visit address (scheduled_services.service_address_city,
-  // the immutable booking-time stamp), falling back to the customer's own
-  // city on an unstamped/unlinked row — the same COALESCE legacy fallback
-  // every other reader of this stamp uses. Never the account's CURRENT city:
-  // a rental or second property must not have its visits credited to the
-  // customer's primary address. Only PERFORMED, customer-visible visits
+  // City = ONLY the booked visit's own frozen stamp
+  // (scheduled_services.service_address_city, written once at booking and
+  // never rewritten by anything later). NEVER customers.city — that mirror
+  // is rewritten in place whenever the account's primary property flips
+  // (property-role-proposals.js's primary-flip transaction), so falling
+  // back to it can move an OLD, already-recomputed visit into a city it
+  // never happened in on some later month's recompute, contaminating both
+  // cities' counts and sentence (codex round 10 P2 on #5164). An unlinked
+  // service record or a legacy row with no city stamp at all has no frozen
+  // city to attribute — it is OMITTED from area intel below (the existing
+  // `if (!city) continue`), never guessed from the mutable mirror. Only
+  // PERFORMED, customer-visible visits
   // count — status = 'completed' is not enough on its own (a completed row
   // can still carry structured_notes.visitOutcome 'customer_declined' or
   // 'inspection_only'); this reuses the exact predicate
@@ -88,6 +94,8 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   // a pest can be merely observed or negated ("saw a few fire ants", "no
   // fire ants found") and would turn into a false "technicians treated X".
   const query = conn('service_records as sr')
+    // Existence filter only (excludes a visit whose customer_id no longer
+    // resolves) — its `city` is never read; see the city stamp note above.
     .join('customers as c', 'c.id', 'sr.customer_id')
     .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .where('sr.status', 'completed')
@@ -99,7 +107,7 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
     NON_PERFORMED_VISIT_OUTCOMES,
   );
   const rows = await query
-    .select('sr.id', 'sr.customer_id', conn.raw('COALESCE(ss.service_address_city, c.city) as city'));
+    .select('sr.id', 'sr.customer_id', 'ss.service_address_city as city');
 
   const productsByVisit = new Map();
   const visitIds = rows.map((row) => row.id);

@@ -2,6 +2,7 @@
 // DB). DB-backed reads are covered in email-division-postgres.test.js.
 const fs = require('fs');
 const path = require('path');
+const { parse } = require('csv-parse/sync');
 const {
   PRODUCT_FAMILIES, PRODUCT_LABELS, PEST_KEYWORDS, classifyProduct, rankVisibleProducts, parsePestsNamed, treatmentTargets, nutrientsListed,
   allCustomerFacingStrings, readVisitProducts,
@@ -145,8 +146,11 @@ describe('classifyProduct', () => {
     expect(classifyProduct({ productName: 'Some IGR Blend', activeIngredient: 'unlisted-chemistry', productCategory: 'Insect Growth Regulator' })).toBe('igr');
     // A specific ingredient/name match still wins over a misleading category.
     expect(classifyProduct({ productName: 'Taurus SC', activeIngredient: 'fipronil', catalogCategory: 'herbicide' })).toBe('non_repellent');
+    // A 'termiticide' category is now caught by the generic pesticide
+    // fallback (codex round 10 P2) — no longer 'other'.
+    expect(classifyProduct({ productName: 'Mystery Blend 42', activeIngredient: 'unobtanium', catalogCategory: 'termiticide' })).toBe('insecticide');
     // No matching category at all -> still 'other'.
-    expect(classifyProduct({ productName: 'Mystery Blend 42', activeIngredient: 'unobtanium', catalogCategory: 'termiticide' })).toBe('other');
+    expect(classifyProduct({ productName: 'Mystery Blend 42', activeIngredient: 'unobtanium', catalogCategory: 'greenhouse supply' })).toBe('other');
   });
 
   test('a catalogued herbicide/fungicide caught only by category carries no label claim or fact slug, and ranks above nutrition', async () => {
@@ -190,6 +194,44 @@ describe('classifyProduct', () => {
     // No specific ingredient/name match -> the Fertilizer category still wins
     // (unchanged from round 7).
     expect(classifyProduct({ productName: 'Brand Weed & Feed', activeIngredient: 'unlisted-chemistry', catalogCategory: 'Fertilizer' })).toBe('nutrition');
+  });
+
+  test('a catalogued insecticide caught only by the generic pesticide category never falls to \'other\' and ranks above a fertilizer (codex round 10 P2) — exact Acelepryn Xtra row', async () => {
+    // pricing.csv:15 — neither name nor active ingredient is in any FAMILIES
+    // list; only the recorded category ("Insecticide") saves it.
+    expect(classifyProduct({
+      productName: 'Acelepryn Xtra', activeIngredient: 'Chlorantraniliprole & Thiamethoxam', productCategory: 'Insecticide',
+    })).toBe('insecticide');
+    const { products, primary, secondary } = await readVisitProducts('sr-1', { conn: stubConn([
+      { product_name: 'LESCO 6-0-0 Liquid', active_ingredient: '6-0-0', catalog_category: 'Fertilizer' },
+      { product_name: 'Acelepryn Xtra', active_ingredient: 'Chlorantraniliprole & Thiamethoxam', product_category: 'Insecticide' },
+    ]) });
+    const acelepryn = products.find((p) => p.productName === 'Acelepryn Xtra');
+    expect(acelepryn).toMatchObject({ family: 'insecticide', verified: false, notes: [], factSlugs: [], dryRule: null, source: null, phrase: 'an insecticide' });
+    expect(primary.productName).toBe('Acelepryn Xtra');
+    expect(secondary.productName).toBe('LESCO 6-0-0 Liquid');
+  });
+
+  test('every distinct pesticide Category in pricing.csv classifies as a real family, never "other" or "nutrition" (codex round 10 P2) — the general rule, not a hardcoded list', () => {
+    // Categories genuinely NOT a pesticide (nutrition/adjuvant, already
+    // handled by their own category regexes) or not a pesticide at all
+    // (plant growth regulators — Primo Maxx/Anuew/Shortstop mow-frequency
+    // products, chemically nothing like an insecticide/herbicide/fungicide)
+    // are excluded from this sweep on purpose.
+    const NON_PESTICIDE_CATEGORIES = new Set([
+      '', 'Adjuvant', 'Fertilizer', 'Micronutrient Fertilizer', 'Soil Amendment / Biostimulant',
+      'Soil Moisture Management Aid', 'Soil Surfactant', 'Soils, Mulch & Amendments',
+      'Growth Regulator', 'Plant Growth Regulator',
+    ]);
+    const rows = parse(fs.readFileSync(path.join(__dirname, '../data/pricing.csv'), 'utf8'), { columns: true, skip_empty_lines: true });
+    const categories = [...new Set(rows.map((r) => r.Category).filter((c) => c != null))];
+    const pesticideCategories = categories.filter((c) => !NON_PESTICIDE_CATEGORIES.has(c));
+    expect(pesticideCategories.length).toBeGreaterThan(3); // the sweep must actually cover something
+    for (const category of pesticideCategories) {
+      const family = classifyProduct({ productName: 'Unlisted Synthetic Product', activeIngredient: 'unlisted-chemistry', productCategory: category });
+      expect({ category, family }).not.toMatchObject({ family: 'other' });
+      expect({ category, family }).not.toMatchObject({ family: 'nutrition' });
+    }
   });
 
   test('a catalogued nutrition category decides nutrition even when name and analysis miss the lists (codex round 7 P2)', () => {
@@ -339,7 +381,7 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
     }
   });
 
-  test.each(['fungicide', 'herbicide', 'nutrition', 'adjuvant', 'other'])('%s has no label, so its products are never verified', async (family) => {
+  test.each(['fungicide', 'herbicide', 'insecticide', 'nutrition', 'adjuvant', 'other'])('%s has no label, so its products are never verified', async (family) => {
     expect(PRODUCT_FAMILIES[family].labels).toEqual([]);
   });
 });

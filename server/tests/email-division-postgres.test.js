@@ -65,17 +65,11 @@ suite('email division against real Postgres', () => {
   async function makeTechRatedVisits(customerId, count, overrides = {}) {
     return makeVisits(customerId, count, { client_pest_rating_source: 'technician', ...overrides });
   }
-  // `count` DISTINCT customers in `city`, each with exactly one matching
-  // visit — the privacy floor is distinct customers, so area-intel tests
-  // must never qualify a city from one customer's repeated visits.
-  async function makeCityVisits(city, count, overrides = {}) {
-    for (let i = 0; i < count; i++) {
-      const customerId = await makeCustomer({ city });
-      await makeVisit(customerId, overrides);
-    }
-  }
   // A visit booked/serviced at a property whose stamped city differs from
-  // the customer's own (current) city — a rental or second property.
+  // the customer's own (current) city — a rental or second property. This
+  // is the ONLY thing area-intel now reads for city attribution (codex
+  // round 10 P2 on #5164) — never customers.city, the mutable primary-
+  // property mirror.
   async function makeVisitAtCity(customerId, serviceAddressCity, overrides = {}) {
     const scheduledServiceId = randomUUID();
     await trx('scheduled_services').insert({
@@ -83,6 +77,16 @@ suite('email division against real Postgres', () => {
       service_type: 'Pest Control', status: 'completed', service_address_city: serviceAddressCity,
     });
     return makeVisit(customerId, { scheduled_service_id: scheduledServiceId, ...overrides });
+  }
+  // `count` DISTINCT customers, each with exactly one visit STAMPED at
+  // `city` via its own scheduled_services row — the privacy floor is
+  // distinct customers, so area-intel tests must never qualify a city from
+  // one customer's repeated visits.
+  async function makeCityVisits(city, count, overrides = {}) {
+    for (let i = 0; i < count; i++) {
+      const customerId = await makeCustomer({ city });
+      await makeVisitAtCity(customerId, city, overrides);
+    }
   }
 
   test('readVisitProducts: classifies, ranks primary/secondary, hides the adjuvant, and lists an unknown product as "other"', async () => {
@@ -262,6 +266,31 @@ suite('email division against real Postgres', () => {
     expect(nextDate).toBe(liveNextDate); // never the earlier, abandoned 'rescheduled' row
   });
 
+  test('readVisitSummary: normalizes re-entry guidance at read time, matching the report (codex round 10 P2) — an interior-only visit suppresses the stored exterior default', async () => {
+    const customerId = await makeCustomer();
+    // Interior-only signal, no exterior evidence anywhere — the report's
+    // own read-time normalizer (normalizeAdvisoryForTreatmentScope) zeroes
+    // exterior_reentry_min here; this reader must reuse it, not return the
+    // stored write-time value verbatim.
+    const interiorOnly = await makeVisit(customerId, {
+      structured_notes: { areasTreated: ['Kitchen'] },
+      advisory: { pet_advisory: 'Keep pets off treated areas until dry.', exterior_reentry_min: 30, interior_reentry_min: 0, irrigation_hold_hr: 24 },
+    });
+    const summary = await readVisitSummary(interiorOnly, { conn: trx });
+    expect(summary.advisory).toEqual({
+      petAdvisory: 'Keep pets off treated areas until dry.', exteriorReentryMin: 0, interiorReentryMin: 0, irrigationHoldHr: 24,
+    });
+
+    // A visit with BOTH interior and exterior evidence keeps the stored
+    // exterior default (the same "exterior" + "garage" mix the existing
+    // structured-fields test above proves the report itself preserves).
+    const both = await makeVisit(customerId, {
+      structured_notes: { areasTreated: ['exterior', 'garage'] },
+      advisory: { exterior_reentry_min: 30, interior_reentry_min: 0 },
+    });
+    expect((await readVisitSummary(both, { conn: trx })).advisory).toMatchObject({ exteriorReentryMin: 30, interiorReentryMin: 0 });
+  });
+
   test('readVisitSummary: areasTreated unions every persisted area field (areas_serviced, areasServiced, areasTreated, typed snapshot)', async () => {
     const customerId = await makeCustomer();
     const legacyOnly = await makeVisit(customerId, { areas_serviced: JSON.stringify(['Perimeter', 'Lanai']) });
@@ -429,9 +458,12 @@ suite('email division against real Postgres', () => {
   test('computeAreaIntel: one customer with 5+ completed visits never alone clears the privacy floor', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
     const customerId = await makeCustomer({ city: 'Wimauma' });
-    // Several service lines/callbacks for the SAME household — a real
-    // scenario, but distinct CUSTOMERS is the privacy floor, not raw visits.
-    await makeVisits(customerId, 6, { service_date: '2026-09-05', targets: ['Fleas'] });
+    // Several service lines/callbacks for the SAME household, each
+    // properly stamped at the SAME city — a real scenario, but distinct
+    // CUSTOMERS is the privacy floor, not raw visits.
+    for (let i = 0; i < 6; i++) {
+      await makeVisitAtCity(customerId, 'Wimauma', { service_date: '2026-09-05', targets: ['Fleas'] });
+    }
     await computeAreaIntel({ month, conn: trx });
     expect(await trx('email_area_intel_monthly').where({ city: 'wimauma' })).toHaveLength(0);
   });
@@ -482,6 +514,35 @@ suite('email division against real Postgres', () => {
     expect(await trx('email_area_intel_monthly').where({ city: 'bradenton' })).toHaveLength(0);
     const veniceRows = await trx('email_area_intel_monthly').where({ city: 'venice' });
     expect(veniceRows).toMatchObject([{ visits: 5, pest_key: 'fleas', visits_with_pest: 5 }]);
+  });
+
+  test('computeAreaIntel: never attributes an unstamped visit to the mutable customers.city mirror — a stamped visit keeps its OWN city even after a later primary-property flip rewrites that mirror (codex round 10 P2)', async () => {
+    const month = new Date('2026-09-15T12:00:00Z');
+    // Five distinct customers, each with a visit stamped Parrish — then
+    // simulate property-role-proposals.js's primary-flip transaction
+    // rewriting every one of their `customers.city` mirrors to Sarasota
+    // AFTER the visit happened. The visit must still count as Parrish.
+    const customerIds = [];
+    for (let i = 0; i < 5; i++) {
+      const customerId = await makeCustomer({ city: 'Parrish' });
+      customerIds.push(customerId);
+      await makeVisitAtCity(customerId, 'Parrish', { service_date: '2026-09-05', targets: ['Fleas'] });
+    }
+    await trx('customers').whereIn('id', customerIds).update({ city: 'Sarasota' });
+
+    // Five MORE distinct customers whose visits were never stamped at all
+    // (no scheduled_services row — a legacy or unlinked service record).
+    // Their current `customers.city` (Wesley Chapel) must never be guessed.
+    for (let i = 0; i < 5; i++) {
+      const customerId = await makeCustomer({ city: 'Wesley Chapel' });
+      await makeVisit(customerId, { service_date: '2026-09-05', targets: ['Fleas'] });
+    }
+
+    await computeAreaIntel({ month, conn: trx });
+    expect(await trx('email_area_intel_monthly').where({ city: 'sarasota' })).toHaveLength(0);
+    expect(await trx('email_area_intel_monthly').where({ city: 'wesley chapel' })).toHaveLength(0);
+    const parrishRows = await trx('email_area_intel_monthly').where({ city: 'parrish' });
+    expect(parrishRows).toMatchObject([{ visits: 5, pest_key: 'fleas', visits_with_pest: 5 }]);
   });
 
   test('getAreaIntelSentence: applies the 10% floor to the unrounded ratio, not the rounded percentage', async () => {

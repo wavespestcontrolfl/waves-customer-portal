@@ -25,7 +25,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
-const { applicationAreaValues, uniqueStrings } = require('../service-report/report-data');
+const { applicationAreaValues, uniqueStrings, normalizeAdvisoryForTreatmentScope, resolveTracedExteriorZone } = require('../service-report/report-data');
 
 // Every label entry cites a fact in the email-division fact register
 // (server/services/email-division/fact-register-data.js, PR #5187) and says
@@ -83,6 +83,16 @@ const FAMILIES = {
   igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', customerVisible: true, labels: ['gentrol_igr'] },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', customerVisible: true, labels: [] },
   herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', customerVisible: true, labels: [] },
+  // A catalogued pesticide whose recorded category names it as some kind of
+  // "-cide"/bait/rodent/termite pesticide (Acelepryn Xtra: category
+  // Insecticide, chlorantraniliprole & thiamethoxam — pricing.csv:15;
+  // termiticide, rodenticide, a bait station, …) but whose ingredient/name
+  // never matches any of the narrower lists above. No label, no fact slug;
+  // ranked with the contact products so a real pesticide never loses to a
+  // fertilizer's feeding-goal phrase (codex round 10 P2 on #5164). Reached
+  // only through GENERIC_PESTICIDE_CATEGORY_RE below, never by ai/name
+  // substring — those lists stay empty on purpose.
+  insecticide: { ai: [], name: [], phrase: 'an insecticide', customerVisible: true, labels: [] },
   // `phrase` is the fallback when the recorded AI lists no recognisable
   // nutrient; otherwise nutritionPhrase() names exactly what it lists.
   nutrition: { ai: ['potassium', 'iron', 'manganese', 'micronutrient', '0-0-'], name: ['k-flow', 'chelated'], phrase: 'a nutrition product', customerVisible: true, labels: [] },
@@ -97,8 +107,11 @@ const FAMILY_ORDER = Object.keys(FAMILIES).filter((f) => f !== 'other');
 // own generic ai/name substrings) without disturbing adjuvant's existing
 // position at the end of FAMILY_ORDER (codex round 9 P2 on #5164).
 const PESTICIDE_FAMILY_ORDER = FAMILY_ORDER.filter((f) => f !== 'nutrition' && f !== 'adjuvant');
-// Customer-primacy ranking (adjuvant is never customer-visible, so never eligible).
-const PRIMARY_FAMILY_RANK = ['non_repellent', 'contact_residual', 'igr', 'fungicide', 'herbicide', 'nutrition', 'other'];
+// Customer-primacy ranking (adjuvant is never customer-visible, so never
+// eligible). 'insecticide' (the generic category-only pesticide bucket)
+// ranks with the contact products, right after the two specific insecticide
+// families (codex round 10 P2 on #5164).
+const PRIMARY_FAMILY_RANK = ['non_repellent', 'contact_residual', 'insecticide', 'igr', 'fungicide', 'herbicide', 'nutrition', 'other'];
 
 // A catalogued/recorded category or product type that marks a non-pesticide
 // additive (products_catalog.category 'adjuvant' / 'soil_surfactant',
@@ -129,6 +142,18 @@ const NUTRITION_CATEGORY_RE = /fertili[sz]er|nutrition|nutrient|biostimulant|soi
 const HERBICIDE_CATEGORY_RE = /herbicide/i;
 const FUNGICIDE_CATEGORY_RE = /fungicide/i;
 const IGR_CATEGORY_RE = /\bigr\b|insect growth regulator/i;
+// Every OTHER recorded pesticide category catches the generic 'insecticide'
+// family (codex round 10 P2) — the general rule, not a hardcoded list of
+// today's exact strings, so a category this repo doesn't catalog yet
+// (miticide, larvicide, molluscicide, nematicide, acaricide, avicide, …)
+// is caught automatically. Any "-cide" suffix (insecticide, termiticide,
+// rodenticide, the pricing.csv compound "Termiticide / Insecticide", and
+// herbicide/fungicide too — harmless, since HERBICIDE_CATEGORY_RE and
+// FUNGICIDE_CATEGORY_RE already returned before this ever runs), or a
+// bait/rodent/termite pesticide category with no "-cide" suffix at all
+// (the dispatch migration's 'bait' / 'termite bait' / 'mole bait',
+// pricing.csv's "Rodent Control" / "Termite Monitoring").
+const GENERIC_PESTICIDE_CATEGORY_RE = /[a-z]*cide\b|\bbait\b|\brodents?\b|\btermites?\b/i;
 
 // Nutrients named only when the recorded active ingredient lists them.
 // [nutrient, word (any case), two-letter element symbol (exact case,
@@ -202,6 +227,11 @@ function classifyProduct({ productName, activeIngredient, productCategory, catal
   if (categories.some((c) => HERBICIDE_CATEGORY_RE.test(c))) return 'herbicide';
   if (categories.some((c) => FUNGICIDE_CATEGORY_RE.test(c))) return 'fungicide';
   if (categories.some((c) => IGR_CATEGORY_RE.test(c))) return 'igr';
+  // Every other recorded pesticide category (insecticide, termiticide,
+  // rodenticide, a bait/monitoring station, …) — codex round 10 P2. Same
+  // precedence reasoning as the three checks above: after every
+  // ingredient/name match, before nutrition's own generic substrings.
+  if (categories.some((c) => GENERIC_PESTICIDE_CATEGORY_RE.test(c))) return 'insecticide';
 
   // Nutrition's own generic ai/name substrings (potassium, iron, an NPK
   // analysis, "k-flow", "chelated") are the weakest signal — checked last so
@@ -403,8 +433,21 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
   if (!service) return null;
 
   const { products } = await readVisitProducts(serviceRecordId, { conn });
-  const advisory = asObject(service.advisory);
   const conditions = asObject(service.conditions);
+  // The stored advisory is a write-time default (buildCompletionAdvisory
+  // deliberately preserves it so a treatment-zone trace saved AFTER
+  // completion can still activate it) — every display/email read path
+  // resolves the trace and re-normalizes at read time
+  // (report-data.js ~4790-4802) rather than returning it verbatim, so an
+  // interior-only visit never exposes a stale exterior re-entry default
+  // (codex round 10 P2 on #5164). Reuse the exact same canonical
+  // normalizer and trace resolver — never a second copy of this logic.
+  const tracedExteriorZone = await resolveTracedExteriorZone(service, conn).catch(() => false);
+  const advisory = normalizeAdvisoryForTreatmentScope(asObject(service.advisory), {
+    service, applications: products,
+    zones: tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+    treatmentEvidence: products.length > 0,
+  });
 
   let nextVisitDate = null;
   if (service.customer_id) {
