@@ -14,34 +14,42 @@
  * pest and plant triggers are two independent fire-and-forget calls with no
  * shared lock between them — see visit-prep-plant-read.js's header).
  *
- * Subject resolution is strict-token, never a catch-all, mirroring
- * pest-production-calibration.js's isPestOnlyServiceType: a service_type
- * must carry the subject's own token AND none of the tokens that would
- * make it something else. A WDO inspection, a termite service or a Waves
- * Assessment carries neither a lawn/turf nor a tree/shrub token, so it is
- * never lawn/tree_shrub-applicable by construction — no explicit exclusion
- * needed for those (unlike isPestOnlyServiceType, which starts from a
- * broader "mentions pest" match and has to exclude the others).
+ * Subject resolution uses the canonical service classifier
+ * (utils/service-normalizer.js detectServiceCategory) plus this lane's
+ * exclusions (a combined service, one naming another line, palm): see
+ * isLawnOnlyServiceType / isTreeShrubOnlyServiceType below. A WDO
+ * inspection, termite service or Waves Assessment never classifies as lawn
+ * or tree_shrub.
  */
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { isPestOnlyServiceType } = require('./pest-production-calibration');
+const { detectServiceCategory } = require('../utils/service-normalizer');
 const { isPestStop, liveStopServiceTypes } = require('./visit-prep-pest-applicability');
 
+// The line comes from the canonical classifier (utils/service-normalizer.js
+// detectServiceCategory — "Weed Control Service" and "Sod Replacement" are
+// lawn, "Ornamental Care Program" is tree & shrub; Codex #5320 r5). This
+// lane only adds its exclusions: a combined service, or one naming another
+// line (pest, mosquito, termite, rodent, WDO), is never read here, and palm
+// services stay out (the read's subject is lawn or tree_shrub only).
+const OTHER_LINE_TOKENS = ['pest', 'mosquito', 'termite', 'rodent', 'wdo', ' + ', ' & pest'];
+
+function normalizedLabel(serviceType) {
+  return String(serviceType || '').toLowerCase().replace(/[_-]+/g, ' ');
+}
+
+function namesAnotherLine(raw) {
+  return OTHER_LINE_TOKENS.some((token) => raw.includes(token));
+}
+
 function isLawnOnlyServiceType(serviceType) {
-  // Separators normalized so stored keys like lawn_care / tree-shrub match
-  // (Codex #5320 r4).
-  const raw = String(serviceType || '').toLowerCase().replace(/[_-]+/g, ' ');
-  if (!/\b(lawns?|turf)\b/.test(raw)) return false;
-  return !['tree', 'shrub', 'palm', 'pest', 'mosquito', 'termite', 'rodent', 'wdo', ' + '].some((token) => raw.includes(token));
+  const raw = normalizedLabel(serviceType);
+  return detectServiceCategory(serviceType) === 'lawn' && !namesAnotherLine(raw);
 }
 
 function isTreeShrubOnlyServiceType(serviceType) {
-  // Separators normalized so stored keys like lawn_care / tree-shrub match
-  // (Codex #5320 r4).
-  const raw = String(serviceType || '').toLowerCase().replace(/[_-]+/g, ' ');
-  // Plurals too: legacy live rows read "Quarterly Trees & Shrubs" (Codex #5320 r2).
-  if (!/\b(trees?|shrubs?)\b/.test(raw)) return false;
-  return !['lawn', 'turf', 'palm', 'pest', 'mosquito', 'termite', 'rodent', 'wdo', ' + '].some((token) => raw.includes(token));
+  const raw = normalizedLabel(serviceType);
+  return detectServiceCategory(serviceType) === 'tree_shrub' && !namesAnotherLine(raw) && !raw.includes('palm');
 }
 
 // 'lawn' | 'tree_shrub' | null — lawn checked first (documented, arbitrary)
