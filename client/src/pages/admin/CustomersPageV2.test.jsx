@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { BrowserRouter, MemoryRouter, useNavigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, MemoryRouter, Route, Routes, useNavigate, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
@@ -861,4 +861,50 @@ describe('CustomersPageV2 workflow state', () => {
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
   });
+
+  // Both customers routes render the same page element, so React keeps the
+  // page and its queue mounted across a move between them: no prompt, and
+  // the draft is still there afterwards.
+  it('does not prompt or lose a queue draft moving between the two customers routes', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}>
+      <NewCustomerLink />
+      <Routes>
+        <Route path="/admin/customers" element={<CustomersPageV2 />} />
+        <Route path="/admin/customers/new" element={<CustomersPageV2 />} />
+      </Routes>
+    </MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
+    fireEvent.click(screen.getByRole('link', { name: 'New customer' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId('route-path')).toHaveTextContent('/admin/customers/new'));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+  });
+
+  // The profile is keyed on location.key while tab=comms, so opening Comms
+  // for the same customer remounts it and would drop its draft.
+  it('prompts before a same-customer Comms navigation remounts an open profile draft', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    window.history.replaceState({}, '', '/admin/customers?customerId=customer-a');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<MemoryRouter initialEntries={['/admin/customers?customerId=customer-a']}>
+      <a href="/admin/customers?customerId=customer-a&tab=comms" onClick={(e) => e.preventDefault()}>Open Comms</a>
+      <CustomersPageV2 />
+    </MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open address draft' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Open Comms' }));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+  });
 });
+
+function NewCustomerLink() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  return <>
+    <output data-testid="route-path">{location.pathname}</output>
+    <a href="/admin/customers/new" onClick={(e) => { e.preventDefault(); navigate('/admin/customers/new'); }}>New customer</a>
+  </>;
+}

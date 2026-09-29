@@ -1711,10 +1711,10 @@ function CustomersOverlayPage({
 
 const CUSTOMER_PAGE_PRESENTATIONS = { true: CustomersWorkspacePage, false: CustomersOverlayPage };
 
-// App.jsx gives /admin/customers and /admin/customers/new separate <Route>
-// elements (both rendering this component) — a pathname change between
-// them, like any other pathname change, unmounts and remounts everything
-// here, so both paths get the same query-param analysis below.
+// App.jsx gives /admin/customers and /admin/customers/new sibling <Route>
+// elements that render the same AdminCustomersPage element, so React keeps
+// this page (and its panels) mounted across a move between them; those two
+// paths get the query-param analysis below instead of counting as an exit.
 const CUSTOMER_ROUTE_PATHS = new Set(["/admin/customers", "/admin/customers/new"]);
 
 // The query params that select which draft-bearing panel is mounted here:
@@ -1735,6 +1735,9 @@ function customerRouteSignature(searchParams, isAdmin) {
     view,
     customerId: searchParams.get("customerId") || null,
     workspaceMode: searchParams.get("customer360") !== "overlay",
+    // The profile is keyed on tabKey, which is location.key while
+    // tab=comms: every navigation to, from, or within Comms remounts it.
+    comms: searchParams.get("tab") === "comms",
   };
 }
 
@@ -1756,10 +1759,10 @@ function customerPanelsMounted(pathname, sig) {
 // presently holds an open draft? `draftActive` is this page's own
 // draftActiveRef.current snapshot ({ profile, queue }).
 //
-// A different pathname always remounts this whole page (verified: distinct
-// <Route> entries even for /admin/customers vs /admin/customers/new, and
-// obviously true for any other admin page) — no query comparison needed,
-// just "is anything open at all". On the same pathname, a customer360 mode
+// Leaving the two customers routes always remounts this whole page, so no
+// query comparison is needed, just "is anything open at all"; a move
+// between those two routes keeps it mounted and is compared like any other
+// same-page change. On the same pathname, a customer360 mode
 // flip swaps CUSTOMER_PAGE_PRESENTATIONS to a different component type
 // (CustomersWorkspacePage <-> CustomersOverlayPage), which unmounts both
 // panels regardless of view/customerId. Otherwise: the queue is lost only
@@ -1770,7 +1773,8 @@ function customerPanelsMounted(pathname, sig) {
 // though "a profile" stays open in the boolean sense.
 function navigationDiscardsDraft(current, target, { draftActive, isAdmin }) {
   const hasAnyDraft = Boolean(draftActive.queue || draftActive.profile);
-  if (target.pathname !== current.pathname) return hasAnyDraft;
+  const bothCustomerRoutes = CUSTOMER_ROUTE_PATHS.has(current.pathname) && CUSTOMER_ROUTE_PATHS.has(target.pathname);
+  if (target.pathname !== current.pathname && !bothCustomerRoutes) return hasAnyDraft;
   const sigNow = customerRouteSignature(current.params, isAdmin);
   const sigNext = customerRouteSignature(target.params, isAdmin);
   if (sigNow.workspaceMode !== sigNext.workspaceMode) return hasAnyDraft;
@@ -1778,7 +1782,7 @@ function navigationDiscardsDraft(current, target, { draftActive, isAdmin }) {
   const mountedNext = customerPanelsMounted(target.pathname, sigNext);
   const queueDiscarded = draftActive.queue && mountedNow.queue && !mountedNext.queue;
   const profileDiscarded = draftActive.profile && mountedNow.profile
-    && (!mountedNext.profile || sigNow.customerId !== sigNext.customerId);
+    && (!mountedNext.profile || sigNow.customerId !== sigNext.customerId || sigNow.comms || sigNext.comms);
   return queueDiscarded || profileDiscarded;
 }
 
@@ -2098,7 +2102,8 @@ export default function CustomersPageV2() {
       // A link to another origin is definitely "a different page" —
       // ELSEWHERE_PATHNAME forces navigationDiscardsDraft's pathname-changed
       // branch without needing to know that origin's actual route shape.
-      const current = { pathname: window.location.pathname, params: new URLSearchParams(window.location.search) };
+      // The router's own settled location, same source as guardHistory.
+      const current = { pathname: lastLocationRef.current.pathname, params: new URLSearchParams(lastLocationRef.current.search) };
       const target = link.origin === window.location.origin
         ? { pathname: link.pathname, params: new URLSearchParams(link.search) }
         : { pathname: ELSEWHERE_PATHNAME, params: new URLSearchParams() };
