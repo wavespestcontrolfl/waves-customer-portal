@@ -148,7 +148,93 @@ async function logLatePaymentEmailAttempt({
 }
 
 class BalanceReminder {
+  // GATE_BALANCE_REMINDER_LEGACY_OFF, read at call time (strict 'true'):
+  // dailyCheck() retires ONLY once its replacement — the pre-visit balance
+  // reminder — is actually live, not merely on the newer 5-day window.
+  // GATE_PREVISIT_BALANCE_5DAY only changes that reminder's lead window and
+  // says nothing about whether it runs at all; the reminder itself needs
+  // BOTH of its own dark levers — PREVISIT_BALANCE_REMINDER=true AND its
+  // seeded previsit_balance_reminder SMS template active — or its 10:05
+  // sweep returns inert too (dunning unification round-2 review, Codex P2).
+  // Legacy-off with either lever still dark logs a warning and keeps
+  // dailyCheck's legacy body running unchanged, so upcoming customers are
+  // never left with no pre-visit balance nudge at all.
+  async dailyCheckRetired() {
+    if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF !== 'true') return false;
+    const PrevisitBalanceReminder = require('../previsit-balance-reminder');
+    if (!PrevisitBalanceReminder.gateEnabled() || !(await PrevisitBalanceReminder.smsTemplateActive())) {
+      logger.warn('[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for dailyCheck: the pre-visit balance reminder replacement (PREVISIT_BALANCE_REMINDER + its SMS template) is not live yet');
+      return false;
+    }
+    return true;
+  }
+
+  // The one dailyCheck() duty the pre-visit reminder carries no equivalent
+  // for (Codex P2, round 2): an internal heads-up to ADAM_PHONE when a
+  // customer with a balance at least 30 days overdue has service today or
+  // tomorrow. Kept running on its own once dailyCheck retires — same
+  // threshold, same copy, independent of whether a customer reminder is
+  // sent by anything (the pre-visit reminder's own send is a separate,
+  // narrower trigger: recurring-lane debt only, up to leadDays() out).
+  async imminentOverdueOwnerAlertSweep() {
+    const today = etDateString();
+    const tomorrow = etDateString(addETDays(new Date(), 1));
+    const upcoming = await db("scheduled_services")
+      .where("scheduled_date", ">=", today)
+      .where("scheduled_date", "<=", tomorrow)
+      .whereIn("scheduled_services.status", ["pending", "confirmed"])
+      .leftJoin("customers", "scheduled_services.customer_id", "customers.id")
+      .where("customers.active", true)
+      .whereNull("customers.deleted_at")
+      .whereNotNull("customers.waveguard_tier")
+      .select(
+        "scheduled_services.*",
+        "customers.id as cust_id",
+        "customers.first_name",
+        "customers.last_name",
+      );
+    // One alert per customer per visit day: several services on the same
+    // day used to produce one alert (the legacy reminder's same-day history
+    // check suppressed the rest), so dedupe here too (Codex #5294 r1 P2).
+    const alerted = new Set();
+    for (const service of upcoming) {
+      try {
+        const alertKey = `${service.cust_id}:${dateOnlyString(service.scheduled_date)}`;
+        if (alerted.has(alertKey)) continue;
+        const balance = await this.getCustomerBalance(service.cust_id);
+        // Same scope the legacy alert had: a real balance (dailyCheck skipped
+        // totalBalance <= 0) on an unpaid invoice (sendReminder needed one
+        // before it alerted).
+        if (!balance || balance.totalBalance <= 0 || balance.daysOverdue < 30 || !balance.oldestInvoiceId) continue;
+        // scheduled_date is a DATE column — comparing it against `new Date()`
+        // as instants (Codex P1) shifts by TZ: on Railway (TZ=UTC) a DATE
+        // parses to UTC midnight, and this cron runs ~10 AM ET (~14:00 UTC),
+        // so today's visit floors to -1 (skipped) and tomorrow's floors to 0
+        // (mislabeled "today"). Compare calendar dates instead —
+        // dateOnlyString reads the stored date with no TZ shift, same as the
+        // legacy query above that selected this row by scheduled_date.
+        const serviceDateEt = dateOnlyString(service.scheduled_date);
+        if (serviceDateEt !== today && serviceDateEt !== tomorrow) continue;
+        if (await customerDunningStopped(balance)) continue;
+        const daysUntil = serviceDateEt === today ? 0 : 1;
+        await TwilioService.sendSMS(
+          process.env.ADAM_PHONE || "+19415993489",
+          `💰 Overdue: ${service.first_name} ${service.last_name} — $${balance.totalBalance.toFixed(2)} (${balance.daysOverdue} days). Service ${daysUntil === 0 ? "today" : "tomorrow"}.`,
+          { messageType: "internal_alert" },
+        );
+        alerted.add(alertKey);
+      } catch (err) {
+        logger.error(`Imminent overdue owner alert failed for ${service.cust_id}: ${err.message}`);
+      }
+    }
+  }
+
   async dailyCheck() {
+    if (await this.dailyCheckRetired()) {
+      logger.info('[balance-reminders] dailyCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the pre-visit balance reminder owns these now');
+      await this.imminentOverdueOwnerAlertSweep();
+      return;
+    }
     const today = etDateString();
     const day7 = etDateString(addETDays(new Date(), 7));
 
@@ -667,6 +753,41 @@ class BalanceReminder {
   }
 
   async latePaymentCheck() {
+    // Retired (dunning unification, owner ruling 2026-09-27) — but ONLY
+    // together with GATE_DUNNING_LADDER_90: the Day 60/90 steps that
+    // replace this account-level 7/14/30/60/90 check exist only under the
+    // ladder gate (Codex P2), so retiring latePaymentCheck while the ladder
+    // gate is unset would drop every 60/90-day reminder with nothing
+    // replacing it. dailyCheck() has its own, separate coupling above.
+    if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
+      // An invoice with no follow-up sequence also needs an owner: the
+      // late-payment checker while it runs, or orphan adoption once it
+      // retires (Codex #5294 r1 P1). Otherwise this stays the fallback.
+      const InvoiceFollowUps = require('../invoice-followups');
+      const sequencelessOwned = !InvoiceFollowUps.latePaymentCheckerRetiredLive()
+        || InvoiceFollowUps.adoptOrphanInvoicesLive();
+      // Legacy `unpaid`-status invoices are covered by neither the checker
+      // nor adoption (both read sent/viewed/overdue), so while any exists
+      // this stays the owner (Codex #5294 r2 P1; prod had none 2026-09-28).
+      // An unreadable count keeps it running.
+      let legacyUnpaidOpen = true;
+      try {
+        legacyUnpaidOpen = !!(await db('invoices').where({ status: 'unpaid' }).first('id'));
+      } catch (err) {
+        logger.warn(`[balance-reminders] legacy unpaid-invoice check failed, latePaymentCheck keeps running: ${err.message}`);
+      }
+      if (legacyUnpaidOpen) {
+        logger.warn('[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: legacy unpaid-status invoices still need it');
+      } else if (process.env.GATE_DUNNING_LADDER_90 === 'true' && sequencelessOwned) {
+        logger.info('[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js (or orphan adoption) own these');
+        return;
+      }
+      if (!legacyUnpaidOpen) {
+        logger.warn(process.env.GATE_DUNNING_LADDER_90 === 'true'
+          ? '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live'
+          : '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
+      }
+    }
     const customers = await db("customers")
       .where({ active: true })
       .whereNull("deleted_at")

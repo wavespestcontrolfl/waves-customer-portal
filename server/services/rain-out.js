@@ -1515,6 +1515,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   //     row is load-bearing as the absent-v2 fallback body; never delete.
   let body = null;
   let renderedKey = null;
+  // The legacy rung keeps the v2 kill-switch key above (see the metadata
+  // comment) but must record the row it really rendered as template_key.
+  let legacyRendered = false;
   if (isCustom) {
     // Custom rung: the dispatcher's message IS the lead, the move line +
     // link close it out. The normal path uses the exact body commit()'s
@@ -1611,7 +1614,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
         ...longFormVars,
         weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
       }, renderContext);
-      if (body) renderedKey = 'rain_out_moved_v2';
+      if (body) { renderedKey = 'rain_out_moved_v2'; legacyRendered = true; }
     }
   }
   if (!body) {
@@ -1661,7 +1664,8 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // (is_active=false), and stamping a retired key suppresses every send
     // as a sentinel "success". The legacy-render fallback stamps the v2 key
     // for the same reason — an absent v2 row (rolled-back migration) counts
-    // as active there, so the fallback still texts.
+    // as active there, so the fallback still texts. templateKey below still
+    // names the legacy row, since that is what rendered the body.
     metadata: {
       original_message_type: renderedKey,
       reason_code: reasonCode,
@@ -1670,6 +1674,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
       // carrying a dispatcher-authored note — reads as system-generated in
       // the durable record (codex r2 P2).
       ...(actorUserId ? { adminUserId: actorUserId } : {}),
+      // The row that rendered the body, for the template audit. Same as
+      // original_message_type except on the legacy rung, which keeps v2's
+      // kill-switch key there but rendered the legacy rain_out_moved row.
+      templateKey: legacyRendered ? 'rain_out_moved' : renderedKey,
     },
   });
   if (result?.blocked || result?.sent === false) {

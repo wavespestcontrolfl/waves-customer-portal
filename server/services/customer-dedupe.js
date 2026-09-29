@@ -3240,7 +3240,7 @@ const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'cus
 // denormalized copy of the customer email. This table MIRRORS the canonical
 // registry in server/services/customer-email-fanout.js (:108-244 — leads,
 // open estimates incl. 'sending', active automation enrollments, queued
-// template runs, referral promoters, billing prefs, open contracts, pending
+// template runs, pending automation intent markers, referral promoters, billing prefs, open contracts, pending
 // booking follow-ups, newsletter subscribers). That module exports functions
 // and a disclosure string, not a machine-readable surface list, so the
 // mirror is BY HAND: extend BOTH in the same commit (same rule as its own
@@ -3293,6 +3293,27 @@ const EMAIL_BOUND_SURFACES = [
     active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled', 'running']),
     label: 'queued template send(s)',
     carriesName: true,
+  },
+  {
+    // Pending email-template-automation INTENT markers (#5154, codex P1
+    // round 7) — the step BEFORE a queued run: a 'pending' marker replays
+    // through the executor later and delivers to the payload's own
+    // customer_email snapshot (the executor looks a live address up only
+    // when the payload has none). customer-email-fanout.js retargets these
+    // (same commit rule as every other surface here), so an undo clearing
+    // the merged-in email must see them exactly like queued runs. Linkage
+    // and address live in the jsonb payload (payload.customer_id /
+    // payload.customer_email, the fan-out's own predicates); the payload
+    // carries no name. Only 'pending' delivers again — processed and
+    // unrecoverable markers are history.
+    table: 'email_template_automation_intents',
+    emailColumn: "payload->>'customer_email'",
+    linkWhere: (q, winnerId) => {
+      q.whereRaw("payload->>'customer_id' = ?", [String(winnerId)]);
+    },
+    active: (q) => q.where('status', 'pending'),
+    label: 'pending automation intent(s)',
+    carriesName: false,
   },
   {
     // first_touch_holds.held_email is a LIVE delivery target (r23 — the
@@ -3430,6 +3451,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   estimates: ['created_at', 'updated_at'],
   automation_enrollments: ['created_at', 'updated_at'],
   email_template_automation_runs: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260928220000.
+  email_template_automation_intents: ['created_at', 'updated_at'],
   notification_prefs: ['created_at', 'updated_at'],
   customer_contracts: ['created_at', 'updated_at'],
   booking_intents: ['created_at', 'updated_at'],

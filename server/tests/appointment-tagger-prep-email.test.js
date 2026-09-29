@@ -20,6 +20,7 @@ jest.mock('../services/sms-template-renderer', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
+  emailTemplateAutomationsMode: jest.fn(() => 'live'),
 }));
 jest.mock('../services/email-template-automation-executor', () => ({
   processTrigger: jest.fn(async () => ({
@@ -37,7 +38,7 @@ jest.mock('../services/automation-runner', () => ({
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const executor = require('../services/email-template-automation-executor');
 const AppointmentTagger = require('../services/appointment-tagger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -333,11 +334,30 @@ describe('appointment tagger prep email automation', () => {
   });
 
   test('skips when the emailTemplateAutomations gate is off', async () => {
-    isEnabled.mockReturnValue(false);
+    emailTemplateAutomationsMode.mockReturnValue('off');
 
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
 
     expect(executor.processTrigger).not.toHaveBeenCalled();
+  });
+
+  // Shadow must never change a LIVE send (#5154 coordinator finding): a
+  // queued:true here reads to the caller as "the guide email is handled,
+  // send the companion SMS" — in shadow the queued run finalizes 'shadow'
+  // (nothing actually sends), so shadow must return exactly what off does.
+  test('triggerPrepEmailGuide in shadow mode returns gate_off and creates no run; in live mode it queues', async () => {
+    emailTemplateAutomationsMode.mockReturnValue('shadow');
+
+    const shadowResult = await AppointmentTagger.triggerPrepEmailGuide(service(), 'cockroach');
+
+    expect(shadowResult).toEqual({ queued: false, reason: 'gate_off' });
+    expect(executor.processTrigger).not.toHaveBeenCalled();
+
+    emailTemplateAutomationsMode.mockReturnValue('live');
+    const liveResult = await AppointmentTagger.triggerPrepEmailGuide(service(), 'cockroach');
+
+    expect(liveResult.queued).toBe(true);
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
   });
 
   test('routes to the service contact when one is set', async () => {
@@ -480,8 +500,13 @@ describe('appointment tagger prep email automation', () => {
     // call is the treatmentAutomationEnroll check — a bare mockReturnValueOnce
     // would land there instead of the email-automations gate.)
     isEnabled.mockReturnValue(false);
+    emailTemplateAutomationsMode.mockReturnValue('off');
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
     isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
+    // Gate back live so the next two calls actually reach (and are skipped
+    // by) the terminal-status/past-date checks this test means to cover —
+    // not the gate short-circuit again.
+    emailTemplateAutomationsMode.mockReturnValue('live');
 
     await AppointmentTagger.triggerPestPrep(service({ status: 'cancelled' }), 'cockroach');
     await AppointmentTagger.triggerPestPrep(service({ scheduled_date: PAST_DATE }), 'cockroach');
