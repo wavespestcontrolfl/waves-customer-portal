@@ -12,17 +12,7 @@ jest.mock('../models/db', () => {
 });
 const { randomUUID, randomBytes } = require('node:crypto');
 const { stampSeriesPrepaid, clearSeriesPrepaid, withoutAnnualCoverage } = require('../services/prepaid-series');
-jest.mock('../services/notification-service', () => {
-  const notifyAdmin = jest.fn(async () => ({ id: 'synthetic-notification' }));
-  return {
-    notifyAdmin,
-    // The watchdog raises through the episode wrapper (ALERT_EPISODES, live by
-    // default); it delegates to notifyAdmin so the assertions read one mock.
-    raiseAdminAlertWithReopen: jest.fn(async (...args) => ({ ...(await notifyAdmin(...args)), rang: true })),
-    openAdminAlertKeys: jest.fn(async () => []),
-    closeAdminAlertKeys: jest.fn(async () => 0),
-  };
-});
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'synthetic-notification' })) }));
 jest.mock('../services/irrigation-weekly-email', () => ({
   findLawnEmailAudienceGaps: jest.fn(async () => []), findUnstampedRecurringLawnMembers: jest.fn(async () => []),
 }));

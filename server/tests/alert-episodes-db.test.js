@@ -9,6 +9,7 @@
  * covered by schedule-integrity-watchdog.test.js.
  */
 const SKIP = !process.env.DATABASE_URL;
+// The episode helpers live in the schedule-integrity watchdog (private to it).
 const maybeDescribe = SKIP ? describe.skip : describe;
 
 // Both suites share the pool; it closes once, after the last of them.
@@ -17,12 +18,14 @@ afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 maybeDescribe('alert episodes (live Postgres)', () => {
   let db;
   let NotificationService;
+  let helpers;
   const RUN = `episodes-test-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const key = (name) => `${RUN}:${name}`;
 
   beforeAll(() => {
     db = require('../models/db');
     NotificationService = require('../services/notification-service');
+    ({ _private: helpers } = require('../services/schedule-integrity-watchdog'));
   });
   afterAll(async () => {
     await db('notifications').whereRaw("starts_with(metadata->>'dedupeKey', ?)", [RUN]).del();
@@ -37,10 +40,10 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     return row;
   };
   const get = (id) => db('notifications').where({ id }).first();
-  const raise = (name, over = {}) => NotificationService.raiseAdminAlertWithReopen('alert', 'Fixture alert', 'Fixture body', {
+  const raise = (name, over = {}) => helpers.raiseAdminAlertWithReopen('alert', 'Fixture alert', 'Fixture body', {
     link: '/admin/dispatch', bell: true, dedupeKey: key(name), metadata: { dedupeKey: key(name) }, ...over,
   });
-  const close = (names, reason = 'gap resolved') => NotificationService.closeAdminAlertKeys(db, names.map(key), reason);
+  const close = (names, reason = 'gap resolved') => helpers.closeAdminAlertKeys(db, names.map(key), reason);
 
   test('close: an unread row is read and auto-cleared; a READ row keeps its read_at but is auto-cleared; empty list is a no-op', async () => {
     const unread = await bell('close-unread');
@@ -66,7 +69,7 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     await bell('open-a');
     await bell('open-b', { read: true });
     await bell('open-c', { meta: { autoCleared: true } });
-    const keys = await NotificationService.openAdminAlertKeys(db, `${RUN}:open-`);
+    const keys = await helpers.openAdminAlertKeys(db, `${RUN}:open-`);
     expect(keys.sort()).toEqual([key('open-a'), key('open-b')]);
   });
 
@@ -127,6 +130,24 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect((await get(row.id)).metadata.dedupeVersion).toBe('ev2::g1');
   });
 
+  test('notifyAdmin\'s own dedupe lookup and the reopen probe both read the NEWEST row of a key', async () => {
+    // Two rows under one key (an aged-out window, or a leftover duplicate): an old auto-cleared one and a newer standing one.
+    const older = await bell('newest', { meta: { autoCleared: true, recurrenceGeneration: 3, dedupeVersion: 'ev0::g3' } });
+    await db('notifications').where({ id: older.id }).update({ created_at: new Date('2026-08-01T12:00:00Z') });
+    const newer = await bell('newest', { read: true, meta: { dedupeVersion: 'ev1' } });
+    // The probe sees the newer, standing row: no reopen, no generation bump, nothing rung.
+    const silent = await raise('newest', { dedupeVersion: 'ev1', refreshOnDedupe: true });
+    expect(silent).toMatchObject({ deduped: true, rang: false });
+    expect((await get(older.id)).metadata.recurrenceGeneration).toBe(3);
+    // A changed version refreshes the NEWER row (notifyAdmin's lookup), never the older one.
+    const changed = await raise('newest', { dedupeVersion: 'ev2', refreshOnDedupe: true });
+    expect(changed).toMatchObject({ refreshed: true, rang: true });
+    expect((await get(newer.id)).metadata.dedupeVersion).toBe('ev2');
+    expect((await get(newer.id)).read_at).toBeNull();
+    expect((await get(older.id)).metadata.dedupeVersion).toBe('ev0::g3');
+    expect((await get(older.id)).read_at).toBeNull(); // untouched
+  });
+
   test('a dismissal racing the watchdog\'s refresh is never overwritten back to unread (the standing-row read takes a row lock)', async () => {
     const row = await bell('race', { meta: { dedupeVersion: 'ev1', autoCleared: true } });
     await db('notifications').where({ id: row.id }).update({ read_at: new Date('2026-09-01T12:00:00Z') });
@@ -182,7 +203,7 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     return r;
   };
   // A series: unpriced root + a completed, unpriced child, and the root's bell.
-  const series = async ({ completedAt = '2026-09-28T15:00:00Z', childOver = {}, bellCreatedAt = '2026-09-25T12:00:00Z', rungAt = null } = {}) => {
+  const series = async ({ completedAt = '2026-09-28T15:00:00Z', childOver = {}, bellCreatedAt = '2026-09-25T12:00:00Z', rungAt = null, episodeStartedAt = null } = {}) => {
     n += 1;
     const customer = await insert('customers', { first_name: 'Hold', phone: `+1555555${String(8000 + n)}` });
     const root = await insert('scheduled_services', { customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'General Pest Control', status: 'pending', is_recurring: true });
@@ -193,7 +214,7 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     const key = `unpriced-series:${root.id}`;
     await insert('notifications', {
       recipient_type: 'admin', category: 'alert', title: RUN, created_at: bellCreatedAt,
-      metadata: JSON.stringify({ dedupeKey: key, ...(rungAt ? { rungAt } : {}) }),
+      metadata: JSON.stringify({ dedupeKey: key, ...(rungAt ? { rungAt } : {}), ...(episodeStartedAt ? { episode_started_at: episodeStartedAt } : {}) }),
     });
     return { customer, root, child, key };
   };
@@ -204,11 +225,14 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     expect(await held(s)).toEqual([s.root.id]);
   });
 
-  test('an invoice through the visit\'s service record, or directly on the visit, releases it; a void one does not', async () => {
+  test('an invoice through the visit\'s service record, or directly on the visit, releases it; void, refunded, canceled and cancelled ones do not', async () => {
     const viaRecord = await series();
     const record = await insert('service_records', { customer_id: viaRecord.customer.id, service_date: '2026-09-28', service_type: 'General Pest Control', scheduled_service_id: viaRecord.child.id });
     const inv = await insert('invoices', { customer_id: viaRecord.customer.id, token: `${RUN}-a`, invoice_number: `${RUN}-a`, service_record_id: record.id, status: 'void' });
-    expect(await held(viaRecord)).toEqual([viaRecord.root.id]);
+    for (const dead of ['void', 'refunded', 'canceled', 'cancelled']) {
+      await db('invoices').where({ id: inv.id }).update({ status: dead });
+      expect(await held(viaRecord)).toEqual([viaRecord.root.id]);
+    }
     await db('invoices').where({ id: inv.id }).update({ status: 'sent' });
     expect(await held(viaRecord)).toEqual([]);
 
@@ -226,13 +250,18 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     expect(await held(await series({ rungAt: '2026-09-29T10:00:00Z' }))).toEqual([]);
   });
 
-  test('a first-application combined invoice covering the visit releases it; a void one does not', async () => {
+  test('a first-application stamp alone releases nothing: billing\'s verdict needs the visit\'s source estimate', async () => {
     const s = await series();
-    const covering = await insert('invoices', { customer_id: s.customer.id, token: `${RUN}-c`, invoice_number: `${RUN}-c`, status: 'sent' });
-    await db('scheduled_services').where({ id: s.child.id }).update({ first_application_invoice_id: covering.id });
-    expect(await held(s)).toEqual([]);
-    await db('invoices').where({ id: covering.id }).update({ status: 'void' });
+    const stamped = await insert('invoices', { customer_id: s.customer.id, token: `${RUN}-c`, invoice_number: `${RUN}-c`, status: 'sent' });
+    await db('scheduled_services').where({ id: s.child.id }).update({ first_application_invoice_id: stamped.id });
     expect(await held(s)).toEqual([s.root.id]);
     await db('scheduled_services').where({ id: s.child.id }).update({ first_application_invoice_id: null });
+  });
+
+  test('episode_started_at (pre-scan time) beats created_at/rungAt: a visit that completed just before the bell landed still holds', async () => {
+    const raced = await series({ completedAt: '2026-09-28T15:00:00Z', bellCreatedAt: '2026-09-28T16:00:00Z', rungAt: '2026-09-28T16:00:05Z', episodeStartedAt: '2026-09-28T14:00:00Z' });
+    expect(await held(raced)).toEqual([raced.root.id]);
+    const legacy = await series({ completedAt: '2026-09-28T15:00:00Z', bellCreatedAt: '2026-09-28T16:00:00Z' });
+    expect(await held(legacy)).toEqual([]);
   });
 });

@@ -448,7 +448,10 @@ const NotificationService = {
         if (Number.isFinite(windowMs) && windowMs > 0) {
           existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
         }
-        const existing = await existingQuery.first();
+        // Newest row first: a key with a rolling window (or a duplicate left by
+        // an old race) can hold several rows, and the LATEST is the standing
+        // one — never an arbitrary older row.
+        const existing = await existingQuery.orderBy('created_at', 'desc').first();
         if (existing) {
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an
@@ -834,99 +837,6 @@ const NotificationService = {
       .whereNull('read_at')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
       .update({ read_at: new Date() });
-  },
-
-  // ── Alert episodes (ALERT_EPISODES, scope 2026-09-29) ─────────────────────
-  // The shared close/reopen mechanism first-application-sibling-split.js
-  // proved on its own alert: a source CLOSES its bell when the problem is
-  // fixed and RINGS AGAIN when it comes back, even if a person had already
-  // read the old one. That module keeps its own copy (billing code, left
-  // untouched); new emitters use these.
-  //
-  // Close: mark every matching admin row read (COALESCE, so a person's own
-  // read_at stands) and stamp autoCleared. Deliberately NOT limited to unread
-  // rows — a row a person dismissed while the problem stood must still carry
-  // the stamp once it is really fixed, or raiseAdminAlertWithReopen would
-  // never see the fix and a comeback would stay silently dismissed. Rows
-  // already stamped are skipped, so a re-run rewrites nothing. Returns the
-  // number of rows closed.
-  async closeAdminAlertKeys(conn, dedupeKeys, reason, { now = new Date() } = {}) {
-    const keys = [...new Set((dedupeKeys || []).filter(Boolean).map(String))];
-    if (!keys.length) return 0;
-    return conn('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [keys])
-      .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
-      .update({
-        read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [now]),
-        metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
-          autoCleared: true, autoClearedReason: reason, autoClearedAt: now.toISOString(),
-        })]),
-      });
-  },
-
-  // The dedupe keys of every admin row under a key prefix that is not yet
-  // auto-cleared (read or unread) — the set a source judges against its live
-  // findings to decide what to close.
-  async openAdminAlertKeys(conn, prefix) {
-    const rows = await conn('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [prefix])
-      .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
-      .select(conn.raw("metadata->>'dedupeKey' as dedupe_key"));
-    return [...new Set(rows.map((r) => r.dedupe_key))];
-  },
-
-  // notifyAdmin with reopen. Inside ONE transaction (the same per-key advisory
-  // lock notifyAdmin takes) it reads the standing row for the key:
-  //  - auto-cleared (a fix came in and the problem is back): bump
-  //    recurrenceGeneration and pass dedupeVersion `${baseVersion}::g<n>` with
-  //    refreshOnDedupe, so notifyAdmin rewrites the row and rings it again;
-  //  - open (or absent): pass a version ONLY when the caller has one, kept
-  //    stable per generation — rows written before this existed carry no
-  //    dedupeVersion, and inventing one here would re-ring every standing
-  //    alert on the first run. No baseVersion = the call is exactly what the
-  //    caller would have made, a silent dedupe onto a standing row.
-  // A person's own dismissal of a still-standing problem stays dismissed;
-  // only a real fix followed by a real comeback rings again.
-  // Returns notifyAdmin's result plus `rang`: true when this call created a
-  // row or re-rang one (a silent dedupe is false), so a caller can cap real
-  // rings only.
-  async raiseAdminAlertWithReopen(category, title, body, opts = {}) {
-    const { dedupeKey, dedupeVersion: baseVersion, trx: callerTrx = null } = opts;
-    if (!dedupeKey) throw new Error('raiseAdminAlertWithReopen requires a dedupeKey');
-    const run = async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-      // .forUpdate(): the advisory lock is cooperative — markReadAdmin (a
-      // person's dismissal) never takes it — so the standing row is
-      // row-locked here, exactly as first-application-sibling-split.js's
-      // raise does. A dismissal then either commits and is visible in this
-      // read, or queues behind this whole transaction and lands on top of
-      // the refresh; the refresh can never overwrite a dismissal back to
-      // unread.
-      // Newest row first: a key with a rolling dedupeWindowMs can hold several
-      // rows (an old one aged out of the window, then a fresh insert), and
-      // the LATEST decides whether the episode is standing or cleared — an
-      // arbitrary older auto-cleared row must not re-version a live one.
-      const existing = await trx('notifications').where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).orderBy('created_at', 'desc').forUpdate().first('metadata');
-      let existingMeta = existing?.metadata;
-      if (typeof existingMeta === 'string') { try { existingMeta = JSON.parse(existingMeta); } catch { existingMeta = null; } }
-      const priorGeneration = Number(existingMeta?.recurrenceGeneration) || 0;
-      let raiseOpts = { ...opts, trx };
-      if (existingMeta?.autoCleared === true) {
-        const generation = priorGeneration + 1;
-        raiseOpts = {
-          ...raiseOpts,
-          dedupeVersion: `${baseVersion ?? ''}::g${generation}`,
-          refreshOnDedupe: true,
-          metadata: { ...opts.metadata, autoCleared: false, recurrenceGeneration: generation },
-        };
-      } else if (baseVersion !== undefined && priorGeneration > 0) {
-        raiseOpts = { ...raiseOpts, dedupeVersion: `${baseVersion}::g${priorGeneration}` };
-      }
-      return this.notifyAdmin(category, title, body, raiseOpts);
-    };
-    const result = callerTrx ? await run(callerTrx) : await db.transaction(run);
-    return { ...result, rang: !result.deduped || (result.refreshed === true && result.rung !== false) };
   },
 
   // Mark all read for customer
