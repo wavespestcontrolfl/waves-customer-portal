@@ -1043,7 +1043,9 @@ router.post(
       // the RECHECKED row.
       if (result.created) {
         const appointmentPublic = require('./appointment-public');
-        void appointmentPublic.notifyOfficeVisitPrepSubmission(result.svc, req.body?.topic);
+        Promise.resolve()
+          .then(() => appointmentPublic.notifyOfficeVisitPrepSubmission(result.svc, req.body?.topic))
+          .catch((err) => logger.error(`[schedule] visit-prep office item failed for ${result.svc?.id}: ${err.message}`));
       }
       return res.status(result.created ? 201 : 200).json({
         ok: true,
