@@ -687,4 +687,16 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 0 });
     expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: other.id, closed_at: firstClose });
   });
+
+  test('a customer who left dismisses a promise of any kind the portal may close — a technician follow-up or a slot-bound visit too, never as a hint', async () => {
+    const followUp = await world({ kind: 'technician_follow_up', customerExtra: churnedStage(1) });
+    await visit(followUp); // a booked visit is only a hint for this kind
+    const photos = await world({ kind: 'send_photos', customerExtra: churnedStage(1) });
+    for (const w of [followUp, photos]) {
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+      expect(await row(w.commitment.id)).toMatchObject({
+        status: 'dismissed', fulfilled_at: null, fulfillment: { kind: 'customer_left', closed_by: 'promise_evidence' },
+      });
+    }
+  });
 });

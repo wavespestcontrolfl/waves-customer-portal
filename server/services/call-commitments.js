@@ -2295,8 +2295,10 @@ const closedAtSql = (cc = "cc") => `(${cc}.fulfillment ->> 'closed_at')::timesta
 
 // An association proof closes a promise the portal may close, of a kind an
 // association closes (associationCloses) — never one bound to a confirmed
-// slot (resolveScheduleVisit).
+// slot (resolveScheduleVisit). A customer who left dismisses any promise the
+// portal may close, whatever its kind: the promise is moot, not kept.
 function closesOnAssociation(commitment, proof) {
+  if (proof.kind === CUSTOMER_LEFT) return evidenceCloseApplies(commitment);
   return proof.strength === "association" && !proof.slot_bound && associationCloses(commitment);
 }
 
