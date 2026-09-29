@@ -509,11 +509,6 @@ function reusableDraft(prior, serviceFacts, names) {
   return !require("./review-ask-drafter").verifyTreatmentClaims(prior.custom_body, serviceFacts, { names });
 }
 
-// Visit outcomes where no work was performed (pest-recap.js,
-// visit-completion-packets.js): the review drafters must not claim a
-// treatment on them (GATE_REVIEW_ASK_SERVICE_FACTS).
-const NON_PERFORMED_VISIT_OUTCOMES = ["inspection_only", "customer_declined", "incomplete"];
-
 // How long after enrollment the detached topic classifier has surely settled
 // (its model budget is 8 s; review-ask-topic.js TOPIC_TIMEOUT_MS).
 const TOPIC_SETTLE_MS = 60 * 1000;
@@ -4695,7 +4690,7 @@ const ReviewService = {
         // (GATE_REVIEW_DAY0_CONTEXT), never the 60-day history the other
         // follow-ups draw from; a miss sends the topic_followup template.
         const drafted = templateId === OUTREACH.TOPIC_FOLLOWUP_TEMPLATE_KEY
-          ? await this._topicFollowupBody({ sequenceId, customer, contact })
+          ? await this._topicFollowupBody({ sequenceId, customer, contact, serviceFacts })
           : await require("./review-ask-drafter").draftAskBody({
             customer,
             recipientFirstName: smsFirstName,
@@ -4963,10 +4958,9 @@ const ReviewService = {
   /**
    * GATE_REVIEW_ASK_SERVICE_FACTS (owner 2026-09-29): the service report's
    * treated areas for the review drafters — { treated, areasTreated }.
-   * treated is false only for the outcomes where no work was performed
-   * (NON_PERFORMED_VISIT_OUTCOMES, the same set pest-recap.js and the packet
-   * closeout use); a missing outcome is a completed visit, as everywhere
-   * else. areasTreated only on a `completed` visit (owner scope). Null when
+   * treated is the shared performed-visit classifier
+   * (pest-pressure/first-visit.js isPerformedVisitOutcome — a missing
+   * outcome is a completed visit, as everywhere else). areasTreated only on a `completed` visit (owner scope). Null when
    * either drafter gate is off, there is no record, or the read fails: the
    * drafters then work exactly as before. Never products, findings,
    * recommendations or billing. Never throws.
@@ -4979,7 +4973,7 @@ const ReviewService = {
       if (!row) return null;
       const notes = parseDecision(row.structured_notes) || {};
       const outcome = notes.visitOutcome || "completed";
-      const treated = !NON_PERFORMED_VISIT_OUTCOMES.includes(outcome);
+      const treated = require("./pest-pressure/first-visit").isPerformedVisitOutcome(outcome);
       const areasTreated = outcome === "completed" && Array.isArray(notes.areasTreated)
         ? notes.areasTreated.filter((a) => typeof a === "string")
         : [];
@@ -4990,9 +4984,11 @@ const ReviewService = {
     }
   },
 
-  async _topicFollowupBody({ sequenceId, customer, contact }) {
+  async _topicFollowupBody({ sequenceId, customer, contact, serviceFacts = null }) {
     try {
-      const seq = await db("review_sequences").where({ id: sequenceId }).first("ask_context", "service_record_id");
+      // serviceFacts is the caller's one read, so the row it stamps
+      // (drafted_with_service_facts) matches the facts this body used.
+      const seq = await db("review_sequences").where({ id: sequenceId }).first("ask_context");
       const askContext = parseDecision(seq?.ask_context);
       if (!askContext?.concern) return null;
       return await require("./review-ask-drafter").draftTopicFollowupBody({
@@ -5000,7 +4996,7 @@ const ReviewService = {
         recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
         concern: askContext.concern,
         topic: askContext.topic,
-        serviceFacts: await this._reviewServiceFacts(seq.service_record_id),
+        serviceFacts,
       });
     } catch (err) {
       logger.warn(`[review] topic follow-up draft skipped (sequenceId=${sequenceId}): ${err.message}`);

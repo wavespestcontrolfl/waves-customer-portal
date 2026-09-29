@@ -680,6 +680,8 @@ describe('review sequences — cadence engine', () => {
       await ReviewService.processReviewSequences();
 
       expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ topic: 'ants in the kitchen', serviceFacts: { treated: true, areasTreated: ['Kitchen'] } }));
+      // The row is stamped from the one facts read the body used (Codex r3 on #5317).
+      expect(lastTouch(mock).drafted_with_service_facts).toBe(true);
     });
 
     test('a refused draft sends the generic follow-up text', async () => {
