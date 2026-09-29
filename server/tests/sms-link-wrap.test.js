@@ -245,6 +245,35 @@ describe('settleWrappedLinks', () => {
     expect(log).toEqual([]);
   });
 
+  test('only codes still present in the body actually sent are stamped (a code stripped at the provider boundary stays unstamped)', async () => {
+    rows.sms_log = { id: 'log-uuid-2', message_body: `Prep: ${HOST}/l/c1 and details ${HOST}/estimate/x` };
+    await settleWrappedLinks(['c1', 'c2'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID, withheldLinksRewritten: ['est-1'] });
+    expect(log).toContainEqual({ table: 'short_codes', whereIn: ['code', ['c1']] });
+    expect(log).toContainEqual({ table: 'short_codes', update: expect.objectContaining({ message_ref: 'sms_log:log-uuid-2' }) });
+  });
+
+  test('a code is not matched by a longer code sharing its prefix', async () => {
+    rows.sms_log = { id: 'log-uuid-3', message_body: `Pay ${HOST}/l/c12` };
+    await settleWrappedLinks(['c1'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID });
+    expect(log.some((e) => e.table === 'short_codes')).toBe(false);
+  });
+
+  test('every wrapped code removed at the boundary: nothing is stamped at all', async () => {
+    rows.sms_log = { id: 'log-uuid-4', message_body: 'Waves: see your account at portal.wavespestcontrol.com' };
+    await settleWrappedLinks(['c1'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID, withheldLinksRewritten: ['est-1'] });
+    expect(log.some((e) => e.table === 'short_codes')).toBe(false);
+  });
+
+  test('a link was rewritten at the boundary and the final body is unreadable: nothing is stamped', async () => {
+    db.mockImplementation((t) => {
+      const b = queryBuilder(t, log, rows);
+      if (t === 'sms_log') b.first = jest.fn(async () => { throw new Error('nope'); });
+      return b;
+    });
+    await settleWrappedLinks(['c1'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID, withheldLinksRewritten: ['est-1'] });
+    expect(log.some((e) => e.table === 'short_codes')).toBe(false);
+  });
+
   test('a database error never throws', async () => {
     db.mockImplementation(() => { throw new Error('pool exhausted'); });
     await expect(settleWrappedLinks(['c1'], { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: SID })).resolves.toBeUndefined();

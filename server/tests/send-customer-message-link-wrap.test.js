@@ -154,6 +154,32 @@ test('an accepted send stamps the minted code with the sms_log row (after the se
   expect(dbLog).toContainEqual({ table: 'short_codes', update: expect.objectContaining({ message_ref: 'sms_log:sms-log-9' }) });
 });
 
+test('a code the provider boundary stripped (withheldLinksRewritten) stays unstamped', async () => {
+  sendViaTwilio.mockResolvedValue({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: SID, withheldLinksRewritten: ['est-1'] });
+  db.mockImplementation((table) => {
+    const b = fakeDb(table);
+    // The provider logged the body it ACTUALLY sent: the link is gone.
+    if (table === 'sms_log') b.first = jest.fn(async () => ({ id: 'sms-log-9', message_body: 'Hi, this is Waves. See your account at portal.wavespestcontrol.com' }));
+    return b;
+  });
+  const result = await sendCustomerMessage(BASE_INPUT);
+  await flush();
+  expect(result).toMatchObject({ sent: true });
+  expect(dbLog.some((e) => e.table === 'short_codes')).toBe(false);
+});
+
+test('a code still in the provider-logged body is stamped even when another link was rewritten', async () => {
+  sendViaTwilio.mockResolvedValue({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: SID, withheldLinksRewritten: ['est-1'] });
+  db.mockImplementation((table) => {
+    const b = fakeDb(table);
+    if (table === 'sms_log') b.first = jest.fn(async () => ({ id: 'sms-log-9', message_body: WRAPPED_BODY }));
+    return b;
+  });
+  await sendCustomerMessage(BASE_INPUT);
+  await flush();
+  expect(dbLog).toContainEqual({ table: 'short_codes', whereIn: ['code', ['wrap1abcde']] });
+});
+
 test('a push-routed accepted send (no Twilio sid) leaves the code unstamped', async () => {
   sendViaTwilio.mockResolvedValue({ sent: true, provider: 'push', deliveryOutcome: 'accepted', providerMessageId: 'push:delivered' });
   await sendCustomerMessage(BASE_INPUT);

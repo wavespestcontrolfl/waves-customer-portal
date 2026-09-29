@@ -97,6 +97,14 @@ const REVIEW_LINK_RE = /^https:\/\/[^/]+(?:\/api)?\/rate\//i;
 // claim. These flows keep the body they stamped.
 const BODY_RECONCILED_PURPOSES = new Set(['review_request', 'missed_call_followup']);
 
+// True when `body` still carries the /l/<code> short link for `code` (codes
+// resolve case-insensitively; the character after it must not extend the code).
+function bodyCarriesCode(body, code) {
+  const escaped = String(code).replace(/[^A-Za-z0-9_-]/g, '');
+  if (!escaped) return false;
+  return new RegExp(`/l/${escaped}(?![A-Za-z0-9_-])`, 'i').test(body);
+}
+
 function familyLabel(family) {
   const clean = String(family || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
   return clean || 'other';
@@ -167,7 +175,8 @@ async function wrapPortalLinks({ body, channel, audience, purpose = null, hasMed
 }
 
 /**
- * After an accepted send: stamp every code with the carrying message. Any
+ * After an accepted send: stamp every code still in the sent body with the
+ * carrying message (a code the provider boundary stripped stays unstamped). Any
  * other outcome leaves the codes unstamped (inert; a retry mints its own).
  * Best-effort and self-contained — never throws; callers run it as
  * `void settleWrappedLinks(...).catch(...)`, not awaited on the send path.
@@ -184,20 +193,36 @@ async function settleWrappedLinks(codes, outcome = {}) {
   try {
     const db = require('../../models/db');
     let ref = `twilio_sid:${outcome.providerMessageId}`;
+    // The body the provider ACTUALLY sent is the sms_log row's message_body.
+    // The provider boundary can still change it after the wrap (twilio.js
+    // strips a withheld estimate link under withheldLinkPolicy 'rewrite'), so a
+    // minted code the final text no longer carries must stay unstamped — stamp
+    // only codes present in that body. null = the final body could not be read.
+    let sentBody = null;
     try {
       const { excludeUnresolvedSendReservations } = require('./review-ask-reservation');
       const row = await excludeUnresolvedSendReservations(db('sms_log'))
         .where({ twilio_sid: outcome.providerMessageId })
-        .first('id');
+        .first('id', 'message_body');
       if (row && row.id) ref = `sms_log:${row.id}`;
+      if (row && typeof row.message_body === 'string') sentBody = row.message_body;
     } catch (err) {
       logger.warn(`[sms-link-wrap] sms_log lookup failed, stamping the provider id: ${errLabel(err)}`);
     }
-    await db('short_codes').whereIn('code', codes).whereNull('message_ref')
+    let stampCodes = codes;
+    if (sentBody !== null) {
+      stampCodes = codes.filter((code) => bodyCarriesCode(sentBody, code));
+    } else if (Array.isArray(outcome.withheldLinksRewritten) && outcome.withheldLinksRewritten.length) {
+      // A link was rewritten at the provider boundary and the final body is
+      // unreadable: which codes survived is unprovable, so none are stamped.
+      stampCodes = [];
+    }
+    if (!stampCodes.length) return;
+    await db('short_codes').whereIn('code', stampCodes).whereNull('message_ref')
       .update({ message_ref: ref.slice(0, 60), updated_at: new Date() });
   } catch (err) {
     logger.warn(`[sms-link-wrap] message_ref stamp failed: ${errLabel(err)}`);
   }
 }
 
-module.exports = { wrapPortalLinks, settleWrappedLinks, _internals: { eligible, familyLabel } };
+module.exports = { wrapPortalLinks, settleWrappedLinks, _internals: { eligible, familyLabel, bodyCarriesCode } };
