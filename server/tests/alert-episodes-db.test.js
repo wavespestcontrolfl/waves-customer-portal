@@ -440,6 +440,43 @@ maybeDescribe('churned customer with live work: the finder (live Postgres)', () 
     expect(await legsOf(voided)).toBeNull();
   });
 
+  // A term the cancel machinery decided: 'cancelled' + renewal_decision 'cancel'.
+  const lapse = (c, disposition, inv) => insert('annual_prepay_terms', { customer_id: c.id, term_start: '2026-01-01', term_end: '2026-12-31',
+    status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: disposition, prepay_invoice_id: inv.id });
+  const paidInvoice = (c) => invoice(c, 'paid', { paid_at: new Date('2026-01-02T12:00:00Z'), sent_at: new Date('2026-01-01T12:00:00Z') });
+
+  test('a decided lapse is the cancel machinery\'s own outcome: an end-at-term lapse with its kept visits, or an end-now lapse awaiting its refund, never pages', async () => {
+    const endAtTerm = await customer();
+    const kept = await lapse(endAtTerm, 'end_at_term', await paidInvoice(endAtTerm));
+    await visit(endAtTerm, { annual_prepay_term_id: kept.id });
+    await visit(endAtTerm, { annual_prepay_term_id: kept.id, status: 'confirmed', scheduled_date: '2026-12-05' });
+    const endNow = await customer();
+    await lapse(endNow, 'end_now_refund', await paidInvoice(endNow));
+    expect(await legsOf(endAtTerm)).toBeNull();
+    expect(await legsOf(endNow)).toBeNull();
+  });
+
+  test('only a lapse\'s own kept visits ride out: an unlinked visit, a rescheduled rebook, a visit left on an end-now lapse, kept visits whose paid coverage was revoked, or visits on a live term still page', async () => {
+    const extra = await customer();
+    const kept = await lapse(extra, 'end_at_term', await paidInvoice(extra));
+    await visit(extra, { annual_prepay_term_id: kept.id });
+    await visit(extra, { service_type: 'Lawn Care' }); // not the term's: the cancel pulls it
+    await visit(extra, { annual_prepay_term_id: kept.id, status: 'rescheduled', scheduled_date: '2026-08-01' });
+    const endNow = await customer();
+    const refunding = await lapse(endNow, 'end_now_refund', await paidInvoice(endNow));
+    await visit(endNow, { annual_prepay_term_id: refunding.id });
+    const revoked = await customer(); // a lost dispute reopens the invoice: no longer paid coverage
+    const disputed = await lapse(revoked, 'end_at_term', await invoice(revoked, 'overdue', { sent_at: new Date('2026-01-01T12:00:00Z') }));
+    await visit(revoked, { annual_prepay_term_id: disputed.id });
+    const live = await customer(); // churned outside Cancel plan: the term was never decided
+    const active = await insert('annual_prepay_terms', { customer_id: live.id, term_start: '2026-01-01', term_end: '2026-12-31', status: 'active' });
+    await visit(live, { annual_prepay_term_id: active.id });
+    expect(await legsOf(extra)).toMatchObject({ live_visits: 2, prepay_terms: 0 });
+    expect(await legsOf(endNow)).toMatchObject({ live_visits: 1, prepay_terms: 0 });
+    expect(await legsOf(revoked)).toMatchObject({ live_visits: 1, prepay_terms: 0 });
+    expect(await legsOf(live)).toMatchObject({ live_visits: 1, prepay_terms: 1 });
+  });
+
   test('a payer\'s receivable is not the churned customer\'s unsent work: a third-party payer, a NET statement accrual, a draft withdrawn to the payer', async () => {
     const c = await customer();
     const payer = await insert('payers', { display_name: `Payer ${RUN}` });

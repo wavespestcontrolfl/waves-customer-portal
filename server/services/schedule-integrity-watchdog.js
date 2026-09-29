@@ -362,10 +362,11 @@ async function judgePrepayGaps(row, paidTermById) {
 // to churn (customer-lifecycle-guard.js churnGuardForRow), which a churn made
 // outside the app's cancel path never ran:
 //   - a live visit by the guard's tracker-aware rule (whereVisitRowLive: an
-//     upcoming or in-progress row, a rescheduled one whatever its old date);
+//     upcoming or in-progress row, a rescheduled one whatever its old date),
+//     except one an end-at-term lapse keeps (below);
 //   - a series anchor still marked recurring_ongoing (the guard's second leg);
 //   - a paid prepay term still covering (coveredTermsAsOf with a term_end
-//     floor, as findActivePrepayTerm reads it);
+//     floor, as findActivePrepayTerm reads it), except a decided lapse;
 //   - a payment_pending prepay term whose invoice is still payable (the rule
 //     findPendingPrepayInvoice applies);
 // plus, the owner's addition, an invoice that never reached the customer:
@@ -375,6 +376,14 @@ async function judgePrepayGaps(row, paidTermById) {
 // query, an EXISTS per leg, the counts as correlated subselects. The live
 // pipeline_stage is the churn marker (churned_at can outlive a reactivation);
 // a merge soft-deletes, so deleted_at must be null.
+//
+// The guard runs only on a churn TRANSITION, so its legs over-reach once the
+// cancel machinery has deliberately churned: a decided lapse (Cancel plan, or
+// an online renewal decline) is that machinery's own outcome, never residue.
+// "End of paid coverage" (cancel_disposition 'end_at_term') churns now and
+// keeps the term's paid visits through term_end (cancellation-processor.js
+// keepThrough, then keepEndAtTermLapseCoverage's upkeep); 'end_now_refund'
+// pulled every visit and waits on its recorded refund.
 const CHANNEL_ACCEPTED_MARKER = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
 async function findChurnedLiveWork(todayET) {
   const { whereVisitRowLive } = require('./customer-lifecycle-guard');
@@ -383,11 +392,26 @@ async function findChurnedLiveWork(todayET) {
   const collected = renewals._private.PREPAY_INVOICE_COLLECTED_STATUSES;
   const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
   const cancelled = [...INVOICE_CANCELLED_STATUSES];
+  // A visit an end-at-term lapse keeps: linked to that term (the link its
+  // upkeep attaches inside the paid window), the term still paid coverage and
+  // in isEndAtTermLapseInWindow's shape (the inline twin
+  // refreshActiveTermsForCustomer reads). A 'rescheduled' rebook intent is
+  // never kept: the cancel pulls it whatever its date.
+  const keptByEndAtTermLapse = () => coveredTermsAsOf(db, null)
+    .whereRaw('t.id = sv.annual_prepay_term_id').whereRaw('t.customer_id = sv.customer_id')
+    .where({ 't.status': 'cancelled', 't.renewal_decision': 'cancel', 't.cancel_disposition': 'end_at_term' })
+    .where('t.term_end', '>=', todayET)
+    .whereRaw("sv.status <> 'rescheduled'")
+    .select(db.raw('1'));
   const legs = {
     live_visits: () => db('scheduled_services as sv').whereRaw('sv.customer_id = c.id')
-      .where(function liveRow() { whereVisitRowLive(this, todayET); }),
+      .where(function liveRow() { whereVisitRowLive(this, todayET); })
+      .whereNotExists(keptByEndAtTermLapse()),
     ongoing_series: () => db('scheduled_services as so').whereRaw('so.customer_id = c.id').where('so.recurring_ongoing', true),
-    prepay_terms: () => coveredTermsAsOf(db, null).whereRaw('t.customer_id = c.id').where('t.term_end', '>=', todayET),
+    // 'cancelled' is covered only as a decided lapse (coveredTermsAsOf's
+    // lapsedRenewalStillInTerm arm), so this drops exactly those.
+    prepay_terms: () => coveredTermsAsOf(db, null).whereRaw('t.customer_id = c.id').where('t.term_end', '>=', todayET)
+      .whereNot('t.status', 'cancelled'),
     // Still payable AND not yet collected: a collected invoice whose term has
     // not advanced yet is paid coverage (the prepay_terms leg), never an
     // unpaid invoice. The exact, NULL-safe complement of
