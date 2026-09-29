@@ -15,12 +15,48 @@
 
 const db = require('../../models/db');
 const { etMonthStart, etMonthEnd } = require('../../utils/datetime-et');
-const { treatmentTargets } = require('./visit-products');
+const { treatmentTargets, treatmentTargetKey } = require('./visit-products');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
+const {
+  PEST_TARGET_SUGGESTIONS, LAWN_TARGET_SUGGESTIONS, ORNAMENTAL_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS,
+} = require('../../config/treatment-target-vocabulary');
 
 const MIN_CITY_CUSTOMERS = 5;
 const TARGET_READ_CHUNK = 1000;
+
+// The completion picker also accepts free text alongside its suggestion
+// lists (SchedulePage.jsx ~23610-23615: a custom chip on the datalist
+// input), so a hand-typed value ("technicians treated no pests -
+// prevention") persists on service_products.targets exactly like a real
+// species and would otherwise flow straight into a quoted customer
+// sentence if it landed on enough visits. A target is sentence-eligible
+// only when it is in the CANONICAL vocabulary — the union of the picker's
+// own suggestion lists (this static half) and products_catalog.target_pests
+// (the DB half, read fresh per run below) — never a keyword allowlist that
+// could silently drop a real, uncatalogued species (codex round 9 P2 on
+// #5164). A non-vocabulary target still counts toward `treatmentTargets`'
+// internal evidence elsewhere; it is only excluded from what this file
+// persists (the ONLY input to getAreaIntelSentence's quoted string).
+const PICKER_VOCAB_KEYS = new Set(
+  [...PEST_TARGET_SUGGESTIONS, ...LAWN_TARGET_SUGGESTIONS, ...ORNAMENTAL_TARGET_SUGGESTIONS, ...NUTRITION_TARGET_SUGGESTIONS]
+    .map((target) => treatmentTargetKey(target))
+    .filter(Boolean),
+);
+
+/** The full canonical target vocabulary for one compute run: the static
+ * picker lists above, unioned with every products_catalog.target_pests
+ * value read fresh from the DB (a catalog edit takes effect on the next
+ * run, no redeploy) — same key normalisation `treatmentTargets` already
+ * counts with, so the comparison is case-/space-insensitive. */
+async function canonicalTargetVocabulary(conn) {
+  const rows = await conn('products_catalog').select('target_pests');
+  const catalogKeys = rows
+    .flatMap((row) => (Array.isArray(row.target_pests) ? row.target_pests : []))
+    .map((target) => treatmentTargetKey(target))
+    .filter(Boolean);
+  return new Set([...PICKER_VOCAB_KEYS, ...catalogKeys]);
+}
 
 /** Recomputes and upserts every city's row for one ET calendar month.
  * Replaces the WHOLE month's aggregate atomically (a city with no
@@ -79,6 +115,8 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
     }
   }
 
+  const vocabulary = await canonicalTargetVocabulary(conn);
+
   const byCity = new Map();
   for (const row of rows) {
     const city = String(row.city || '').trim().toLowerCase();
@@ -102,8 +140,12 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
       // re-identification floor. `visits` (the raw record count) still
       // becomes the stored/sentence denominator once the floor clears.
       if (entry.customers.size < MIN_CITY_CUSTOMERS) continue;
+      // A non-vocabulary target (a hand-typed chip) is still evidence that a
+      // treatment happened, but it can never become the sentence's quoted
+      // string — dropped here rather than reaching email_area_intel_monthly
+      // at all, which is the ONLY table getAreaIntelSentence reads.
       const toInsert = [...entry.pestCounts.entries()]
-        .filter(([, count]) => count > 0)
+        .filter(([pestKey, count]) => count > 0 && vocabulary.has(pestKey))
         .map(([pestKey, count]) => ({
           month: monthStart, city, visits: entry.visits,
           pest_key: pestKey, visits_with_pest: count, computed_at: new Date(),
@@ -146,4 +188,4 @@ async function getAreaIntelSentence({ city, month = new Date(), minVisits = 20, 
   return `In ${monthName} our technicians treated ${targetForSentence(top.pest_key)} at ${pct}% of our ${top.visits} visits in ${String(city).trim()}.`;
 }
 
-module.exports = { computeAreaIntel, getAreaIntelSentence, targetForSentence, MIN_CITY_CUSTOMERS };
+module.exports = { computeAreaIntel, getAreaIntelSentence, targetForSentence, canonicalTargetVocabulary, MIN_CITY_CUSTOMERS };

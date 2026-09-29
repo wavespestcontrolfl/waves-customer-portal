@@ -495,4 +495,41 @@ suite('email division against real Postgres', () => {
     expect(rows).toMatchObject([{ visits: 21, pest_key: 'fleas', visits_with_pest: 2 }]);
     await expect(getAreaIntelSentence({ city: 'Palmetto', month: sentenceMonth, minVisits: 5, conn: trx })).resolves.toBeNull();
   });
+
+  test('computeAreaIntel: a free-text chip the completion picker also accepts never becomes the sentence, even at 100% of visits — a canonical target in the same month still does (codex round 9 P2)', async () => {
+    const month = new Date('2026-09-15T12:00:00Z');
+    const sentenceMonth = new Date('2026-09-20T12:00:00Z');
+    // A hand-typed chip (SchedulePage.jsx's free-text datalist input), well
+    // past both the 5-customer and 20-visit/10% floors.
+    await makeCityVisits('Duette', 25, { service_date: '2026-09-05', targets: ['technicians treated no pests - prevention'] });
+    // A canonical target in the SAME city-month, so both compete for "top".
+    await makeCityVisits('Duette', 25, { service_date: '2026-09-06', targets: ['Fire ants'] });
+    await computeAreaIntel({ month, conn: trx });
+    const rows = await trx('email_area_intel_monthly').where({ city: 'duette' });
+    // The free-text chip never reaches the table at all — only the
+    // canonical target does, even though it tied the chip's own count.
+    expect(rows).toMatchObject([{ visits: 50, pest_key: 'fire ants', visits_with_pest: 25 }]);
+    await expect(getAreaIntelSentence({ city: 'Duette', month: sentenceMonth, conn: trx })).resolves
+      .toBe('In September our technicians treated fire ants at 50% of our 50 visits in Duette.');
+  });
+
+  test('computeAreaIntel: a catalogued herbicide caught only by category (round 8 P2) still counts its canonical weed targets (round 9 P2) — exact Stonewall row', async () => {
+    const month = new Date('2026-09-15T12:00:00Z');
+    const sentenceMonth = new Date('2026-09-20T12:00:00Z');
+    // pricing.csv:146 — neither name nor active ingredient is in any
+    // FAMILIES list; only the recorded category says herbicide. Its AI text
+    // ALSO contains the nutrition family's generic '0-0-' NPK pattern, which
+    // would misclassify it 'nutrition' (excluded from target-counting)
+    // without the round 8/9 precedence fix.
+    await makeCityVisits('Myakka', 21, {
+      service_date: '2026-09-05',
+      product: { product_name: 'LESCO Stonewall 0.43% 0-0-7', active_ingredient: 'Prodiamine 0.43% + 0-0-7', product_category: 'Herbicide' },
+      targets: ['Crabgrass'],
+    });
+    await computeAreaIntel({ month, conn: trx });
+    const rows = await trx('email_area_intel_monthly').where({ city: 'myakka' });
+    expect(rows).toMatchObject([{ visits: 21, pest_key: 'crabgrass', visits_with_pest: 21 }]);
+    await expect(getAreaIntelSentence({ city: 'Myakka', month: sentenceMonth, conn: trx })).resolves
+      .toBe('In September our technicians treated crabgrass at 100% of our 21 visits in Myakka.');
+  });
 });

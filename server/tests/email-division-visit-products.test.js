@@ -163,6 +163,35 @@ describe('classifyProduct', () => {
     expect(secondary.productName).toBe('LESCO 6-0-0 Liquid');
   });
 
+  test('a recorded pesticide category outranks a generic NPK/nutrient-substring match (codex round 9 P2) — exact Stonewall row', () => {
+    // pricing.csv:146 — "LESCO Stonewall 0.43% 0-0-7" is a real pre-emergent
+    // herbicide + potassium combo, category Herbicide. Its AI text contains
+    // the nutrition family's generic '0-0-' NPK pattern, which the ai
+    // substring loop used to hit before the herbicide-category fallback
+    // ever ran, misclassifying it 'nutrition' and dropping its weed targets.
+    expect(classifyProduct({
+      productName: 'LESCO Stonewall 0.43% 0-0-7', activeIngredient: 'Prodiamine 0.43% + 0-0-7', catalogCategory: 'Herbicide',
+    })).toBe('herbicide');
+    // Same shape, a different NPK analysis and category spelling.
+    expect(classifyProduct({
+      productName: 'LESCO Stonewall 0.37% 18-0-10', activeIngredient: 'Prodiamine 0.37% + 18-0-10', productCategory: 'herbicide',
+    })).toBe('herbicide');
+    // No recorded category at all -> the generic NPK pattern is all that's
+    // left, and it still means nutrition (unchanged from before this fix).
+    expect(classifyProduct({ productName: 'Mystery 0-0-7 Blend', activeIngredient: '0-0-7' })).toBe('nutrition');
+  });
+
+  test('a specific pesticide ingredient/name match outranks a Fertilizer category (codex round 9 P2) — a weed-and-feed catalogued as Fertilizer still counts its herbicide targets', () => {
+    // Deliberate decision: the herbicide chemistry is real, so it is counted
+    // (safest for customer copy) rather than swallowed by the catalog's
+    // Fertilizer label.
+    expect(classifyProduct({ productName: 'Brand Weed & Feed', activeIngredient: 'dicamba', catalogCategory: 'Fertilizer' })).toBe('herbicide');
+    expect(classifyProduct({ productName: 'Talstar P', activeIngredient: 'bifenthrin', catalogCategory: 'Fertilizer' })).toBe('contact_residual');
+    // No specific ingredient/name match -> the Fertilizer category still wins
+    // (unchanged from round 7).
+    expect(classifyProduct({ productName: 'Brand Weed & Feed', activeIngredient: 'unlisted-chemistry', catalogCategory: 'Fertilizer' })).toBe('nutrition');
+  });
+
   test('a catalogued nutrition category decides nutrition even when name and analysis miss the lists (codex round 7 P2)', () => {
     for (const fields of [
       { catalogCategory: 'Fertilizer' }, { catalogCategory: 'Micronutrient Fertilizer' }, { productCategory: 'Soil Amendment / Biostimulant' },

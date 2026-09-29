@@ -92,6 +92,11 @@ const FAMILIES = {
   other: { ai: [], name: [], phrase: null, customerVisible: true, labels: [] },
 };
 const FAMILY_ORDER = Object.keys(FAMILIES).filter((f) => f !== 'other');
+// The pesticide families only — used to let a specific chemistry/name match
+// outrank nutrition (and the recorded pesticide category outrank nutrition's
+// own generic ai/name substrings) without disturbing adjuvant's existing
+// position at the end of FAMILY_ORDER (codex round 9 P2 on #5164).
+const PESTICIDE_FAMILY_ORDER = FAMILY_ORDER.filter((f) => f !== 'nutrition' && f !== 'adjuvant');
 // Customer-primacy ranking (adjuvant is never customer-visible, so never eligible).
 const PRIMARY_FAMILY_RANK = ['non_repellent', 'contact_residual', 'igr', 'fungicide', 'herbicide', 'nutrition', 'other'];
 
@@ -171,15 +176,41 @@ function allCustomerFacingStrings() {
 
 function classifyProduct({ productName, activeIngredient, productCategory, catalogCategory, catalogProductType } = {}) {
   if ([productCategory, catalogCategory, catalogProductType].some((c) => c && ADJUVANT_CATEGORY_RE.test(String(c)))) return 'adjuvant';
-  if ([productCategory, catalogCategory, catalogProductType].some((c) => c && NUTRITION_CATEGORY_RE.test(String(c)))) return 'nutrition';
   const ai = String(activeIngredient || '').toLowerCase();
   const name = String(productName || '').toLowerCase();
-  for (const family of FAMILY_ORDER) if (FAMILIES[family].ai.some((s) => ai.includes(s))) return family;
-  for (const family of FAMILY_ORDER) if (FAMILIES[family].name.some((s) => name.includes(s))) return family;
+
+  // A specific pesticide ingredient/name match always wins first — even over
+  // a recorded Fertilizer category (a weed-and-feed's herbicide chemistry is
+  // real: it counts its pest/weed targets, the safest reading for customer
+  // copy) and over nutrition's own generic ai/name substrings below (codex
+  // round 9 P2 on #5164).
+  for (const family of PESTICIDE_FAMILY_ORDER) if (FAMILIES[family].ai.some((s) => ai.includes(s))) return family;
+  for (const family of PESTICIDE_FAMILY_ORDER) if (FAMILIES[family].name.some((s) => name.includes(s))) return family;
+
+  if ([productCategory, catalogCategory, catalogProductType].some((c) => c && NUTRITION_CATEGORY_RE.test(String(c)))) return 'nutrition';
+
+  // The recorded category also decides the three generic pesticide families
+  // (codex round 8 P2): a catalogued herbicide or fungicide outside the
+  // narrow ingredient/name lists above — Prodiamine 65 WDG, Pillar G
+  // Intrinsic (both 20260401000017_dispatch.js:50-53). This must run BEFORE
+  // nutrition's own generic ai/name substrings below: LESCO Stonewall 0.43%
+  // 0-0-7 (AI "Prodiamine 0.43% + 0-0-7", category Herbicide,
+  // pricing.csv:146) contains the nutrition family's generic '0-0-' NPK
+  // pattern and would otherwise be misclassified 'nutrition' — dropping its
+  // weed targets — before this fallback ever ran (codex round 9 P2).
   const categories = [productCategory, catalogCategory, catalogProductType].filter(Boolean).map(String);
   if (categories.some((c) => HERBICIDE_CATEGORY_RE.test(c))) return 'herbicide';
   if (categories.some((c) => FUNGICIDE_CATEGORY_RE.test(c))) return 'fungicide';
   if (categories.some((c) => IGR_CATEGORY_RE.test(c))) return 'igr';
+
+  // Nutrition's own generic ai/name substrings (potassium, iron, an NPK
+  // analysis, "k-flow", "chelated") are the weakest signal — checked last so
+  // a specific ingredient/name match or a recorded pesticide category always
+  // wins first.
+  if (FAMILIES.nutrition.ai.some((s) => ai.includes(s))) return 'nutrition';
+  if (FAMILIES.nutrition.name.some((s) => name.includes(s))) return 'nutrition';
+  if (FAMILIES.adjuvant.ai.some((s) => ai.includes(s))) return 'adjuvant';
+  if (FAMILIES.adjuvant.name.some((s) => name.includes(s))) return 'adjuvant';
   return 'other';
 }
 
