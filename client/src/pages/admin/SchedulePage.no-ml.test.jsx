@@ -173,8 +173,8 @@ describe.each(LAYOUTS)('Complete Service form, %s layout', (_layout, width) => {
       expect(row.total.parentElement.textContent).not.toMatch(/\bml\b/i);
     }
     expect(mlOptions()).toEqual([]);
-    // The injection record's free-text dose asks for the truck's measures.
-    expect(screen.getByPlaceholderText('Dose (tsp or fl oz)')).toBeTruthy();
+    // The injection record's dose is a number of tsp or fl oz.
+    expect([...screen.getByLabelText('Dose unit').options].map((option) => option.value)).toEqual(['tsp', 'fl_oz']);
   });
 
   it('offers tsp only for a liquid, never a granule or gel bait', async () => {

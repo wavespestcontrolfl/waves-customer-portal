@@ -74,6 +74,7 @@ import {
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import { productDimension } from "../../lib/fast-complete-products";
+import { DOSE_UNITS, doseOverLabel, doseText, injectionDoseText, injectionLabelRate, injectionLabelText, parseDose, trunkInchesText } from "../../lib/injection-dose";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -10828,9 +10829,10 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     if (/\b0\s*-\s*0\s*-\s*\d+/.test(textValue)) return false;
     return /\b(fertiliz|fertiliser|fertilizer|fert\b|palm\s*fert|alfalfa|13\s*-\s*0\s*-\s*13|8\s*-\s*2\s*-\s*12)\b/.test(textValue);
   });
-  const hasInjectionProduct = selectedProducts.some((product) =>
+  const injectionRows = selectedProducts.filter((product) =>
     /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)),
   );
+  const hasInjectionProduct = injectionRows.length > 0;
   const missingActuals = selectedProducts.filter((product) => {
     const amount = treeShrubNumber(product.totalAmount);
     return !amount || amount <= 0 || !product.amountUnit;
@@ -10843,6 +10845,7 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     hasSnapshot,
     hasNpFertilizer,
     hasInjectionProduct,
+    injectionRows,
     missingActuals,
   };
 }
@@ -10942,11 +10945,12 @@ export function treeShrubCloseoutBlocksClient({
   return blocks;
 }
 
-function TreeShrubCloseoutBlock({
+export function TreeShrubCloseoutBlock({
   value,
   onChange,
   blocks,
   productFlags,
+  injectionProducts = [],
   inputStyle: baseInputStyle,
   selectStyle,
   textareaStyle,
@@ -10965,6 +10969,26 @@ function TreeShrubCloseoutBlock({
       },
     });
   const injectionVisible = value.injectionPerformed || productFlags.hasInjectionProduct;
+  // The injection dose in the truck's measures (lib/injection-dose.js): the
+  // record's product, if it is one of this visit's injection products, brings
+  // its label rate in mL per inch of trunk or per palm, shown in tsp or fl oz
+  // with the dose for the tree measured. The dose is a number of tsp or fl oz.
+  const record = value.injectionRecord || {};
+  const [otherProduct, setOtherProduct] = useState(false);
+  const [doseUnitPick, setDoseUnitPick] = useState("fl_oz");
+  const chosenInjection = injectionProducts.find((product) => product.name === record.product) || null;
+  const labelRate = chosenInjection?.rate || null;
+  const trunkInches = trunkInchesText(record.sizeClassOrDbh);
+  const doseRange = labelRate ? injectionDoseText(labelRate, trunkInches) : null;
+  const dose = parseDose(record.dose);
+  const doseUnit = dose.unit || doseUnitPick;
+  const overLabel = Boolean(labelRate) && doseOverLabel(labelRate, trunkInches, dose.amount, doseUnit);
+  // One injection product on this visit: the record names it.
+  const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
+  useEffect(() => {
+    if (injectionVisible && onlyInjection && !record.product) setInjectionField("product", onlyInjection);
+  }, [injectionVisible, onlyInjection, record.product]);
+  const caption = { display: "grid", gap: 4, fontSize: 13, color: colors.muted };
   return (
     <div style={{ display: "grid", gap: 8 }}>
       {blocks.length > 0 && (
@@ -11108,55 +11132,128 @@ function TreeShrubCloseoutBlock({
       </label>
       {injectionVisible && (
         <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          {injectionProducts.length > 0 && (
+            <select
+              aria-label="Injection product"
+              value={otherProduct ? "__other__" : chosenInjection?.name || ""}
+              onChange={(e) => {
+                const picked = e.target.value;
+                setOtherProduct(picked === "__other__");
+                setInjectionField("product", picked === "__other__" ? "" : picked);
+              }}
+              style={select}
+            >
+              <option value="" disabled>Injection product</option>
+              {injectionProducts.map((product) => (
+                <option key={product.name} value={product.name}>{product.name}</option>
+              ))}
+              <option value="__other__">Other product…</option>
+            </select>
+          )}
+          {(!injectionProducts.length || otherProduct || (record.product && !chosenInjection)) && (
             <input
-              value={value.injectionRecord?.plantSpecies || ""}
-              onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
-              placeholder="Plant species"
-              style={input}
-            />
-            <input
-              value={value.injectionRecord?.sizeClassOrDbh || ""}
-              onChange={(e) => setInjectionField("sizeClassOrDbh", e.target.value)}
-              placeholder="DBH / palm size"
-              style={input}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              value={value.injectionRecord?.product || ""}
+              value={record.product || ""}
               onChange={(e) => setInjectionField("product", e.target.value)}
               placeholder="Injection product"
               style={input}
             />
+          )}
+          {labelRate && (
+            <div style={{ fontSize: 13, color: colors.muted }}>
+              Label: <strong style={{ color: colors.text }}>{injectionLabelText(labelRate)}</strong>
+            </div>
+          )}
+          {labelRate?.basis === "inch" ? (
+            <label style={caption}>
+              Trunk (inches across, chest high)
+              <input
+                inputMode="decimal"
+                value={trunkInches}
+                onChange={(e) => {
+                  const inches = e.target.value.replace(/[^\d.]/g, "");
+                  setInjectionField("sizeClassOrDbh", inches ? `${inches} in DBH` : "");
+                }}
+                placeholder="Inches"
+                style={input}
+              />
+            </label>
+          ) : (
             <input
-              value={value.injectionRecord?.dose || ""}
-              onChange={(e) => setInjectionField("dose", e.target.value)}
-              placeholder="Dose (tsp or fl oz)"
+              value={record.sizeClassOrDbh || ""}
+              onChange={(e) => setInjectionField("sizeClassOrDbh", e.target.value)}
+              placeholder="DBH / palm size"
               style={input}
             />
+          )}
+          {doseRange && (
+            <div style={{ border: `1px solid ${colors.border}`, borderRadius: 10, padding: "10px 12px", background: colors.card }}>
+              <div style={{ fontSize: 13, color: colors.muted }}>{labelRate.basis === "palm" ? "Dose per palm" : "Dose for this tree"}</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: colors.text }}>{doseRange}</div>
+              <div style={{ fontSize: 12, color: colors.muted }}>
+                {labelRate.basis === "palm" ? "Rounded inside the label." : `Rounded inside the label for a ${trunkInches}-inch trunk.`}
+              </div>
+            </div>
+          )}
+          <div style={caption}>
+            <span>{labelRate?.basis === "palm" ? "Dose you put in, per palm" : "Dose you put in"}</span>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 8 }}>
+              <input
+                inputMode="decimal"
+                aria-label="Dose amount"
+                value={dose.amount}
+                onChange={(e) => setInjectionField("dose", doseText(e.target.value.replace(/[^\d.]/g, ""), doseUnit))}
+                placeholder="Dose"
+                style={input}
+              />
+              <select
+                aria-label="Dose unit"
+                value={doseUnit}
+                onChange={(e) => {
+                  setDoseUnitPick(e.target.value);
+                  if (dose.amount) setInjectionField("dose", doseText(dose.amount, e.target.value));
+                }}
+                style={select}
+              >
+                {DOSE_UNITS.map((unit) => (
+                  <option key={unit.value} value={unit.value}>{unit.label}</option>
+                ))}
+              </select>
+            </div>
           </div>
+          {overLabel && (
+            <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 13, lineHeight: 1.4 }}>
+              {`${doseText(dose.amount, doseUnit)} is more than the label allows ${labelRate.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`} (${doseRange}). Check the label before you inject.`}
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <input
               type="number"
-              value={value.injectionRecord?.numberOfPorts ?? ""}
+              value={record.numberOfPorts ?? ""}
               onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
               placeholder="Ports"
               style={input}
             />
             <input
               type="date"
-              value={value.injectionRecord?.followUpDate || ""}
+              value={record.followUpDate || ""}
               onChange={(e) => setInjectionField("followUpDate", e.target.value)}
               style={input}
             />
           </div>
-          <input
-            value={value.injectionRecord?.targetIssue || ""}
-            onChange={(e) => setInjectionField("targetIssue", e.target.value)}
-            placeholder="Injection target issue"
-            style={input}
-          />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <input
+              value={record.plantSpecies || ""}
+              onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
+              placeholder="Plant species"
+              style={input}
+            />
+            <input
+              value={record.targetIssue || ""}
+              onChange={(e) => setInjectionField("targetIssue", e.target.value)}
+              placeholder="Injection target issue"
+              style={input}
+            />
+          </div>
         </div>
       )}
     </div>
@@ -14398,6 +14495,14 @@ export function CompletionPanel({
     !isIncompleteVisit &&
     (treatmentPlanLoading || (isLawn && protocolActionsLoading));
   const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
+  // The injection record's product list: this visit's rows the closeout flags
+  // as injections, and any row whose catalog label is an injection rate in mL
+  // (per inch of trunk or per palm), with that rate for the dose helper.
+  const injectionProducts = selectedProducts.flatMap((row) => {
+    const catalogRow = (products || []).find((p) => String(p.id) === String(row.productId));
+    const rate = injectionLabelRate(catalogRow || {});
+    return rate || treeShrubProductFlags.injectionRows.includes(row) ? [{ name: row.name, rate }] : [];
+  });
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
         closeout: treeShrubCloseout,
@@ -19181,6 +19286,7 @@ export function CompletionPanel({
                   }
                   blocks={treeShrubCloseoutBlocks}
                   productFlags={treeShrubProductFlags}
+                  injectionProducts={injectionProducts}
                   inputStyle={mInput}
                   selectStyle={mSelect}
                   textareaStyle={mTextarea}
@@ -19190,6 +19296,7 @@ export function CompletionPanel({
                     text: M.ink,
                     muted: M.ink3,
                     error: M.err,
+                    warn: M.warn,
                   }}
                 />
               </Field>
@@ -21512,6 +21619,7 @@ export function CompletionPanel({
                 }
                 blocks={treeShrubCloseoutBlocks}
                 productFlags={treeShrubProductFlags}
+                injectionProducts={injectionProducts}
                 inputStyle={inputStyle}
                 selectStyle={inputStyle}
                 textareaStyle={{ ...inputStyle, minHeight: 82, resize: "vertical" }}
@@ -21521,6 +21629,7 @@ export function CompletionPanel({
                   text: D.text,
                   muted: D.muted,
                   error: D.red,
+                  warn: D.amber,
                 }}
               />
             </div>
