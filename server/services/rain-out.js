@@ -183,6 +183,36 @@ function measureAsSent(body) {
   return { sent, ...countSegments(sent) };
 }
 
+// Renders BOTH the linked and no-link variants of a Quick Move SMS through
+// the SAME renderer, and reports the WORSE (larger) segment count of the
+// two — a short-domain shortlink config, or a short legacy code, can make
+// the linked clause SHORTER than the fixed no-link reply fallback, so "the
+// no-link variant is always shorter" is not a safe assumption (codex round-3
+// P2). commit() and previewMovedSms both call this ONE function so the
+// sheet's advisory counter and the enforcer can never drift (codex round-4
+// P2 on PR #5308: previewMovedSms measured only the linked body, so the
+// sheet could green-light a boundary note that commit() then refused,
+// after the dispatcher had already acted on "fits").
+// `renderWithUrl(url)` is the caller's own render call shaped for its rung
+// (Custom vs preset+note) — called once with the real/placeholder url and
+// once with null. Returns { ok: false } if either render fails (caller
+// decides the failure reason); otherwise both bodies plus each one's own
+// measurement and `worst`, the measureAsSent() result for whichever body is
+// longer (ties keep the linked one, since that is what actually sends when
+// nothing is revoked).
+async function measureWorstLinkVariant(renderWithUrl, url) {
+  const withLinkBody = await renderWithUrl(url);
+  if (!withLinkBody) return { ok: false };
+  const noLinkBody = await renderWithUrl(null);
+  if (!noLinkBody) return { ok: false };
+  const withLinkSeg = measureAsSent(withLinkBody);
+  const noLinkSeg = measureAsSent(noLinkBody);
+  const worst = noLinkSeg.segmentCount > withLinkSeg.segmentCount ? noLinkSeg : withLinkSeg;
+  return {
+    ok: true, withLinkBody, noLinkBody, withLinkSeg, noLinkSeg, worst,
+  };
+}
+
 // The v3 rung's single render path — sendMovedSms and commit()'s pre-move
 // note cap both call THIS, so the body the cap was measured against is
 // shaped exactly like the body that sends (same template row, same link
@@ -387,18 +417,24 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
       return { ok: false, reason: 'note_cap_unavailable' };
     }
   }
-  const body = isCustom
-    ? await renderCustomMovedBody({
+  // Measures BOTH the linked and no-link variants — the SAME shared helper
+  // commit() uses, so the sheet's advisory counter and the enforcer can
+  // never drift (codex round-4 P2 on PR #5308: this preview used to measure
+  // only the linked body, so it could tell the sheet a boundary note fits
+  // when commit() — which already checked both — would then refuse it,
+  // after the dispatcher had already acted on "fits").
+  const measured = await measureWorstLinkVariant((rescheduleUrl) => (isCustom
+    ? renderCustomMovedBody({
       firstName: service.first_name,
       serviceType: service.service_type,
       date: target.date,
       window: target.window,
       customMessage: message || CUSTOM_DEFAULT_MESSAGE,
-      rescheduleUrl: url,
+      rescheduleUrl,
       serviceId,
     })
-    : await renderPresetMovedNotice({ service, reasonCode, target, note: message, rescheduleUrl: url, serviceId, templateBody });
-  if (!body) {
+    : renderPresetMovedNotice({ service, reasonCode, target, note: message, rescheduleUrl, serviceId, templateBody })), url);
+  if (!measured.ok) {
     return {
       ok: false,
       // A preset rung with a live snapshot that failed to render is a
@@ -407,7 +443,7 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
       reason: isCustom ? 'custom_message_unavailable' : (templateBody ? 'note_cap_unavailable' : 'uncapped'),
     };
   }
-  const seg = measureAsSent(body);
+  const seg = measured.worst;
   const perSegment = seg.encoding === 'GSM_7' ? 153 : 67;
   const used = seg.encoding === 'GSM_7' ? seg.gsmSlotCount : seg.sent.length;
   return {
@@ -1900,18 +1936,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         logger.warn(`[rain-out] pre-move link build failed for ${serviceId} — move refused: ${err.message}`);
         return { ok: false, reason: 'note_cap_unavailable' };
       }
-      const body = await renderCustomMovedBody({
-        firstName: service.first_name,
-        serviceType: service.service_type,
-        date: target.date,
-        window: target.window,
-        customMessage: note || CUSTOM_DEFAULT_MESSAGE,
-        rescheduleUrl: url,
-        serviceId,
-        templateBody: snap.body,
-      });
-      // Null render here means an admin edit deleted a required placeholder
-      // from the row the snapshot above already confirmed live
+      // Renders and measures BOTH the linked and no-link variants — the
+      // SAME shared helper previewMovedSms uses, so the sheet's advisory
+      // counter and this enforcer can never drift (codex round-4 P2 on PR
+      // #5308). Null render here means an admin edit deleted a required
+      // placeholder from the row the snapshot above already confirmed live
       // (renderCustomMovedBody passes requiredVars — enforced inside
       // getTemplate on the body that renders, pre-substitution): the ONE
       // remaining reason a live snapshot fails to render (mirrors the
@@ -1919,11 +1948,27 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       // move" case). Either way the message that IS the reason can't send,
       // so fail the move here instead of silently moving the visit
       // messageless.
-      if (!body) return { ok: false, reason: 'custom_message_unavailable' };
+      const measured = await measureWorstLinkVariant((rescheduleUrl) => renderCustomMovedBody({
+        firstName: service.first_name,
+        serviceType: service.service_type,
+        date: target.date,
+        window: target.window,
+        customMessage: note || CUSTOM_DEFAULT_MESSAGE,
+        rescheduleUrl,
+        serviceId,
+        templateBody: snap.body,
+      }), url);
+      if (!measured.ok) return { ok: false, reason: 'custom_message_unavailable' };
+      const { withLinkBody: body, noLinkBody } = measured;
       // Template statics can carry send-layer blockers the note guards
-      // never saw — reject pre-move, not after (codex r9 P2).
+      // never saw — reject pre-move, not after (codex r9 P2). Checked on
+      // BOTH variants: only the link clause differs between them.
       if (customBodySendBlocked(body)) {
         logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} assembled body trips the send guards for ${serviceId} — rejecting pre-move`);
+        return { ok: false, reason: 'custom_message_unavailable' };
+      }
+      if (customBodySendBlocked(noLinkBody)) {
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} no-link variant trips the send guards for ${serviceId} — rejecting pre-move`);
         return { ok: false, reason: 'custom_message_unavailable' };
       }
       // The NO-LINK variant is NOT always shorter (codex round-3 P2): on the
@@ -1931,26 +1976,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       // clause (` New time & other options: ${url}`) can be SHORTER than
       // the fixed 46-char reply fallback (' Need a different time? Reply to
       // this message.') — so a landed-state revocation could GROW a
-      // boundary-sized body past the cap AFTER the move. Measure BOTH
-      // variants here and refuse the move if either would exceed it: the
-      // send below can then swap link ⇄ no-link freely and never re-check.
-      const noLinkBody = await renderCustomMovedBody({
-        firstName: service.first_name,
-        serviceType: service.service_type,
-        date: target.date,
-        window: target.window,
-        customMessage: note || CUSTOM_DEFAULT_MESSAGE,
-        rescheduleUrl: null,
-        serviceId,
-        templateBody: snap.body,
-      });
-      if (!noLinkBody) return { ok: false, reason: 'custom_message_unavailable' };
-      if (customBodySendBlocked(noLinkBody)) {
-        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} no-link variant trips the send guards for ${serviceId} — rejecting pre-move`);
-        return { ok: false, reason: 'custom_message_unavailable' };
-      }
-      const worstSegments = Math.max(measureAsSent(body).segmentCount, measureAsSent(noLinkBody).segmentCount);
-      if (worstSegments > MOVED_SMS_MAX_SEGMENTS) {
+      // boundary-sized body past the cap AFTER the move. Refuse the move if
+      // EITHER variant would exceed it: the send below can then swap
+      // link ⇄ no-link freely and never re-check.
+      if (measured.worst.segmentCount > MOVED_SMS_MAX_SEGMENTS) {
         return { ok: false, reason: 'note_too_many_segments' };
       }
       // The send reuses this exact { url, body } verbatim, or — if the
@@ -2004,27 +2033,25 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           return { ok: false, reason: 'note_cap_unavailable' };
         }
         prebuiltSms.url = url;
-        const body = await renderPresetMovedNotice({
-          service, reasonCode, target, note, serviceId, rescheduleUrl: url, templateBody: snap.body,
-        });
-        // A live snapshot that fails to render (a transient renderer error —
-        // getTemplate swallows its own) is not an uncapped rung either.
-        if (!body) return { ok: false, reason: 'note_cap_unavailable' };
-        // See the header comment above: the no-link variant can be LONGER
-        // than the linked one, so both must fit before the move commits.
-        // This render is ONLY a pre-move cap measurement — unlike the
+        // Renders and measures BOTH the linked and no-link variants — the
+        // SAME shared helper previewMovedSms uses, so the sheet's advisory
+        // counter and this enforcer can never drift (codex round-4 P2 on PR
+        // #5308). This is ONLY a pre-move cap measurement — unlike the
         // Custom rung, the send never reuses either body verbatim: it
         // always re-renders (still from this SAME pinned templateBody, no
         // live read) with the LANDED window/weather lead, which this
         // worst-case pre-move measurement deliberately does not carry (a
         // grouped stop's window in particular can differ by the time the
         // send actually runs).
-        const noLinkBody = await renderPresetMovedNotice({
-          service, reasonCode, target, note, serviceId, rescheduleUrl: null, templateBody: snap.body,
-        });
-        if (!noLinkBody) return { ok: false, reason: 'note_cap_unavailable' };
-        const worstSegments = Math.max(measureAsSent(body).segmentCount, measureAsSent(noLinkBody).segmentCount);
-        if (worstSegments > MOVED_SMS_MAX_SEGMENTS) {
+        const measured = await measureWorstLinkVariant((rescheduleUrl) => renderPresetMovedNotice({
+          service, reasonCode, target, note, serviceId, rescheduleUrl, templateBody: snap.body,
+        }), url);
+        // A live snapshot that fails to render (a transient renderer error —
+        // getTemplate swallows its own) is not an uncapped rung either.
+        if (!measured.ok) return { ok: false, reason: 'note_cap_unavailable' };
+        // See the header comment above: the no-link variant can be LONGER
+        // than the linked one, so both must fit before the move commits.
+        if (measured.worst.segmentCount > MOVED_SMS_MAX_SEGMENTS) {
           return { ok: false, reason: 'note_too_many_segments' };
         }
         prebuiltSms.templateBody = snap.body;

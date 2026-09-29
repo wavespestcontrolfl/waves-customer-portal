@@ -2941,6 +2941,45 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://wvs.co/x1');
     });
 
+    // Codex round-4 P2: previewMovedSms (the Quick Move sheet's advisory
+    // counter) must measure the SAME worst-of-both-variants math commit()
+    // enforces, or the sheet can green-light a note commit() then refuses.
+    test('previewMovedSms: a short-domain link at the boundary reports withinCap:false, matching what commit() would refuse', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'equipment_issue', customMessage: 'x'.repeat(123),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.withinCap).toBe(false);
+      expect(result.segments).toBe(3);
+    });
+
+    // The companion normal case — one char shorter, both variants fit —
+    // reports withinCap:true, matching the commit() test above.
+    test('previewMovedSms: a short-domain link one char under the boundary reports withinCap:true', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'equipment_issue', customMessage: 'x'.repeat(122),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.withinCap).toBe(true);
+      expect(result.segments).toBe(2);
+    });
+
     test('gate on: a customer with no phone is never held to the cap — the move proceeds un-texted, nothing is measured', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
@@ -3432,6 +3471,47 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://wvs.co/x1');
+    });
+
+    // Codex round-4 P2: previewMovedSms (the Quick Move sheet's advisory
+    // counter) must measure the SAME worst-of-both-variants math commit()
+    // enforces, or the sheet can green-light a note commit() then refuses.
+    test('previewMovedSms: a short-domain link at the boundary reports withinCap:false, matching what commit() would refuse', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1',
+        reasonCode: 'custom',
+        customMessage: 'x'.repeat(176),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.withinCap).toBe(false);
+      expect(result.segments).toBe(3);
+    });
+
+    // The companion normal case — one char shorter, both variants fit —
+    // reports withinCap:true, matching the commit() test above.
+    test('previewMovedSms: a short-domain link one char under the boundary reports withinCap:true', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1',
+        reasonCode: 'custom',
+        customMessage: 'x'.repeat(175),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.withinCap).toBe(true);
+      expect(result.segments).toBe(2);
     });
 
     test('gate on: missing/disabled custom template rejects the move pre-commit (kill switch, fail closed)', async () => {
