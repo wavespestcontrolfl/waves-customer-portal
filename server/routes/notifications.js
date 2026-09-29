@@ -9,6 +9,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const { propertyDisplayLabel } = require('../utils/property-display');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 const { recordServiceContactChanges } = require('../services/service-contact-events');
 const {
@@ -964,7 +965,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     delete updates.propertyId;
     const targetCustomer = await db('customers')
       .where({ id: req.params.customerId })
-      .first('id', 'profile_label', 'address_line1', 'city');
+      .first('id', 'profile_label', 'address_line1', 'address_line2', 'city', 'state', 'zip');
     const dbUpdates = { updated_at: new Date() };
     if (updates.appointmentConfirmation !== undefined) dbUpdates.appointment_confirmation = updates.appointmentConfirmation;
     if (updates.serviceReminder72h !== undefined) dbUpdates.service_reminder_72h = updates.serviceReminder72h;
@@ -1144,7 +1145,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     sendAccountUpdatedForPrefs({
       req,
       targetCustomerId: req.params.customerId,
-      propertyLabel: targetCustomer?.profile_label || targetCustomer?.address_line1 || targetCustomer?.city || 'Service property',
+      propertyLabel: propertyDisplayLabel(targetCustomer || {}),
       items: preferenceChangeItems(updates, existing || {}, payload, { scope: 'Property' }),
       section: 'Property notifications',
     });
@@ -1168,7 +1169,7 @@ async function savePropertyToggles(req, res, updates) {
   }
   const property = await db('customer_properties')
     .where({ id: updates.propertyId, customer_id: req.params.customerId })
-    .first('id', 'customer_id', 'is_primary', 'active', 'relationship', 'label', 'address_line1', 'city');
+    .first('id', 'customer_id', 'is_primary', 'active', 'relationship', 'label', 'address_line1', 'address_line2', 'city', 'state', 'zip');
   if (!property || property.active === false) {
     res.status(404).json({ error: 'Property is not available for this account' });
     return true;
@@ -1219,7 +1220,7 @@ async function savePropertyToggles(req, res, updates) {
   sendAccountUpdatedForPrefs({
     req,
     targetCustomerId: req.params.customerId,
-    propertyLabel: property.label || property.address_line1 || property.city || 'Service property',
+    propertyLabel: propertyDisplayLabel(property),
     items: preferenceChangeItems(updates, before, payload, { scope: 'Property' }),
     section: 'Property notifications',
   });
