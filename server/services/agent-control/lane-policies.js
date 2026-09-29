@@ -78,6 +78,11 @@ const LANE_RUNTIME = {
   // PROMISE_CONTACT_CHECK: a 15-minute tick reads open Waves "other" call promises and, on a grounded model verdict, closes one in the ledger (internal_write; no customer message). Cadence stays 'event': a tick with no candidate makes no call.
   'call-commitment-contact-check': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'call-commitment-contact-check', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
+  // Email asks + staff promises (PR 1, 2026-09-29) — same shape as the SMS
+  // lane above, minus workflow_id/LONG_BATCH: it does not (yet) join the
+  // Control-center job-health mapping (LANE_RUNTIME's own workflow_id set is
+  // closed and asserted exhaustively by agent-control-run-index.test.js).
+  'email-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0' },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // GATE_REVIEW_DAY0_CONTEXT: classifies a Day-0 review-ask topic from a
   // customer's texts + completion notes and stores it on review_sequences —

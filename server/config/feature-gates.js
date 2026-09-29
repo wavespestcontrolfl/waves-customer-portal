@@ -1010,6 +1010,11 @@ const gates = {
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
 
+  // Email asks + staff promises, same shape as the SMS lane above. Also
+  // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
+  // email-operational-actions.js; this entry is for logGateStatus only.
+  emailOperationalActions: gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS'),
+
   // SMS real answers (owner ruling 2026-09-27) — the shadow drafter answers
   // from the facts (real OPEN TIMES from AvailabilityEngine for booking/
   // rescheduling, exact amounts + send_payment_link, portal/estimate links)

@@ -13,6 +13,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // ledger's callback proof (staff-contact.js).
 const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callContactSelects } = require('./staff-contact');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
+const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
 
 const LIMIT = 50;
 // A logged move: both dates present and either the date or the window
@@ -70,7 +71,17 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     whether it was done, not whether it was on time. An estimate-delivery
 //     email cited for an estimate that is itself admissible grounds on that
 //     estimate.
-const FULFILLMENT_POLICY = 23;
+// 24: a person's Gmail SENT row (email_reply), resolved to the ask's
+//     customer, closes a general ask exactly like sms/call, and a staff
+//     promise may cite it as delivery — D1 cross-channel (owner ruling
+//     2026-09-28, coordinator correction #1, 2026-09-29). email_delivery
+//     (automated SendGrid sends) is unchanged: never a person replying.
+//     Bumping this number re-checks EVERY open SMS row's cached verdict
+//     once, since fulfillmentFingerprint folds FULFILLMENT_POLICY into the
+//     evidence hash it compares against sms_context.fulfillment_check — one
+//     model call per still-open row on its next tick, expected and one-time
+//     (noted in the PR body).
+const FULFILLMENT_POLICY = 24;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -281,6 +292,34 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     email: conn('emails').where({ customer_id: customerId }).where('received_at', '>', after)
       .where('received_at', '<=', now).orderBy('received_at', 'desc').limit(LIMIT + 1)
       .select('id', 'label_ids', 'body_text', 'subject', 'has_attachments', 'received_at'),
+    // A Gmail SENT row (a person's reply, never an automated send — see
+    // email-customer-link.js) resolved to THIS customer: the D1 "a staff
+    // email reply closes an SMS ask, and an SMS reply/call back closes an
+    // email ask" rule (owner ruling 2026-09-28, coordinator correction #1,
+    // 2026-09-29). Distinct from `email` (inbound customer mail) and
+    // `email_delivery` (automated SendGrid sends, e.g. invoices/reminders —
+    // never "a person replied" and left untouched here). The candidate
+    // query is a cheap pre-filter (thread join, or to_address matching
+    // THIS customer's own email); resolveEmailCustomerLink is still the
+    // authoritative check below, so an ambiguous thread never counts.
+    email_reply: (async () => {
+      const candidates = await conn('emails as er')
+        .whereRaw(personSentFilter('er'))
+        .where('er.received_at', '>', after).where('er.received_at', '<=', now)
+        .where((q) => q.whereExists(function threadLink() {
+          this.select(1).from('emails as inbound').whereRaw('inbound.gmail_thread_id = er.gmail_thread_id')
+            .where('inbound.customer_id', customerId);
+        }).orWhereRaw(
+          `LOWER(TRIM(er.to_address)) = (SELECT LOWER(TRIM(email)) FROM customers WHERE id = ? AND deleted_at IS NULL AND email IS NOT NULL)`,
+          [customerId],
+        ))
+        .orderBy('er.received_at', 'desc').limit(LIMIT + 1)
+        .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.body_text', 'er.subject', 'er.received_at');
+      const resolved = await Promise.all(candidates.map(async (row) => ({
+        row, linkedCustomerId: await resolveEmailCustomerLink(conn, row),
+      })));
+      return resolved.filter((entry) => String(entry.linkedCustomerId) === String(customerId)).map((entry) => entry.row);
+    })(),
     // Unowned commercial proposals are sent to the lead, not the customer
     // row; their delivery emails are reached through the estimate they name.
     email_delivery: conn('email_messages').where(function addressee() {
@@ -686,8 +725,13 @@ function admissibleWitness(record, commitment, records = []) {
   // A general ask can name an address without asking for delivery to it
   // ("is jane@… the email on my account?"); a person's reply or call back
   // answers it whatever the address (Codex #5169 r1 P2, owner ruling
-  // 2026-09-28).
-  if (emails.size && record.type !== 'email_delivery' && !(['sms', 'call'].includes(record.type) && customerAsk(commitment))) return false;
+  // 2026-09-28). email_reply is a resolved reply from THIS customer by
+  // construction (email-customer-link.js), not a delivery-to-named-address
+  // claim, so it is exempt unconditionally like sms/call — never gated on
+  // customerAsk alone, so a staff promise mentioning an address elsewhere
+  // still admits its own later reply (coordinator correction #1, 2026-09-29).
+  if (emails.size && !['email_delivery', 'email_reply'].includes(record.type)
+    && !(['sms', 'call'].includes(record.type) && customerAsk(commitment))) return false;
   const after = new Date(commitment.sms_context?.source_at);
   const deliveredEstimate = () => !!linkedEstimate(record, commitment, records) && new Date(record.sent_at) > after;
   const witnesses = {
@@ -700,6 +744,12 @@ function admissibleWitness(record, commitment, records = []) {
     call: () => record.status === 'completed' && Number(record.duration_seconds) >= 60
       // A general ask takes only a call back that reached the customer.
       && (commitment.kind !== 'other' || personCallBack(record)),
+    // The candidate query already restricts this to a person-sent Gmail row
+    // (personSentFilter), after the request (received_at > after) and
+    // resolved to THIS customer (resolveEmailCustomerLink) — nothing further
+    // to check here, for either a customer's ask (person replied) or a
+    // staff promise (the model may cite it as the delivered item).
+    email_reply: () => true,
     // The SendGrid writer records an open or click as a timestamp without
     // moving status past 'sent'; engagement proves receipt even when the
     // delivery event was lost.
@@ -734,6 +784,7 @@ function admissibleWitness(record, commitment, records = []) {
 // is always fatal.
 const ORDERING_TIME = {
   sms: (row) => row.created_at, call: (row) => row.created_at, email: (row) => row.received_at,
+  email_reply: (row) => row.received_at,
   email_delivery: (row) => row.delivered_at || row.sent_at, invoice: (row) => row.sent_at,
   // Each payment leg's own sort key: settled_at (invoice and ledger legs),
   // received_at (deposits). With it a payment_truncated failure relaxes
@@ -753,8 +804,12 @@ function witnessTypes(commitment) {
   // close a customer's ask without the model (replyFulfillment) and are
   // judged by the model for a promise Waves made, as well as by a visit event
   // (R1) or money landing (R2), which the model still judges.
+  // email_reply (a person's Gmail SENT row resolved to this customer, D1
+  // coordinator correction #1, 2026-09-29) is the email-channel analog of
+  // operatorReply/personCallBack — never email_delivery, which is an
+  // AUTOMATED SendGrid send and never counts as a person replying.
   if (PAYMENT_WITNESS_KINDS.includes(commitment.kind)) {
-    return staffPromise(commitment) ? ['visit', 'payment', 'sms', 'call', 'email_delivery'] : ['visit', 'payment', 'sms', 'call'];
+    return staffPromise(commitment) ? ['visit', 'payment', 'sms', 'call', 'email_delivery', 'email_reply'] : ['visit', 'payment', 'sms', 'call', 'email_reply'];
   }
   // `callback` keeps its existing mix: a real call back, or the same visible
   // field progress that answers an "other" ask (owner ruling 2026-09-24).
@@ -882,7 +937,10 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
 // when nobody responded; the model then judges any event evidence.
 function replyFulfillment(evidence, commitment, { eventOnly = false } = {}) {
   if (!customerAsk(commitment)) return null;
-  const replies = evidence.records.filter((row) => ['sms', 'call'].includes(row.type)
+  // email_reply (a person's Gmail SENT row resolved to this customer) closes
+  // a general ask exactly like sms/call — NEVER email_delivery, which is an
+  // automated SendGrid send (coordinator correction #1, 2026-09-29).
+  const replies = evidence.records.filter((row) => ['sms', 'call', 'email_reply'].includes(row.type)
     && witnessAllowed(row, commitment, evidence.records, eventOnly));
   if (!replies.length) return null;
   const at = (row) => new Date(witnessTime(row, commitment)).getTime();
@@ -951,6 +1009,11 @@ async function holdsPaymentProperty(trx, invoiceId) {
 // re-read the same evidence before allowing a delayed verdict to close work.
 async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
   const tables = { sms: 'sms_log', call: 'call_log', email_delivery: 'email_messages',
+    // A person's Gmail SENT row (D1's new evidence type) — locked here so a
+    // fulfilled verdict citing it can actually commit; without this entry
+    // `table` would be undefined and every such verdict would silently fail
+    // to revalidate (never close).
+    email_reply: 'emails',
     estimate: 'estimates', visit: 'scheduled_services',
     // A 'payment' witness is one of three distinct rows (R2); which table to
     // lock depends on which leg matched, carried on the verdict as
@@ -1058,4 +1121,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, witness_refs: witnessR
   return groundFulfillment(result.json, evidence, commitment, { eventOnly });
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, replyFulfillment, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow };

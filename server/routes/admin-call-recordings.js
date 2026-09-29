@@ -262,11 +262,16 @@ router.get('/commitments/sms', async (req, res, next) => {
     if (!UUID_RE.test(String(customerId || ''))) return res.status(400).json({ error: 'customer_id must be a UUID' });
     if (offset !== undefined && !/^\d{1,9}$/.test(String(offset))) return res.status(400).json({ error: 'offset must be a non-negative integer' });
     const { listSmsCommitments, smsCommitmentsEnabled } = require('../services/sms-operational-actions');
+    const { gateEnvValue } = require('../config/feature-gates');
     const pageLimit = Math.max(1, Math.min(200, Number(limit) || 20));
     const pageOffset = Number(offset) || 0;
     const rows = await listSmsCommitments(db, { customerId, limit: pageLimit + 1, offset: pageOffset });
     const hasMore = rows.length > pageLimit;
-    res.json({ commitments: rows.slice(0, pageLimit), enabled: smsCommitmentsEnabled(),
+    // Either channel being live is enough to offer the buttons; a row whose
+    // OWN channel is off still fails closed with a clear reason from
+    // applySmsCommitmentUpdate's per-row gate check (coordinator correction
+    // #4, 2026-09-29 — email asks/staff promises share this list+close path).
+    res.json({ commitments: rows.slice(0, pageLimit), enabled: smsCommitmentsEnabled() || gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS'),
       has_more: hasMore, next_offset: hasMore ? pageOffset + pageLimit : null });
   } catch (err) { next(err); }
 });
@@ -446,13 +451,17 @@ router.patch('/commitments/:id', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Commitment id must be a UUID' });
     const { smsCommitmentsEnabled, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
-    const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('callCommitments') && !smsCommitmentsEnabled()) {
+    const { isEnabled, gateEnvValue } = require('../config/feature-gates');
+    // Email asks/staff promises (comms-promises plan PR 1) share this SMS
+    // gate check: a pure-email deployment (SMS commitments and callCommitments
+    // both off) must still be able to close its own email-sourced rows
+    // (coordinator correction #4, 2026-09-29).
+    if (!isEnabled('callCommitments') && !smsCommitmentsEnabled() && !gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS')) {
       return res.status(409).json({ error: 'Commitments are disabled', code: 'COMMITMENTS_DISABLED' });
     }
-    const existing = await db('call_commitments').where({ id: req.params.id }).first('call_log_id', 'sms_log_id', 'kind', 'party');
+    const existing = await db('call_commitments').where({ id: req.params.id }).first('call_log_id', 'sms_log_id', 'email_id', 'kind', 'party');
     if (!existing) return res.status(404).json({ error: 'Commitment not found' });
-    if (existing.sms_log_id) {
+    if (existing.sms_log_id || existing.email_id) {
       if (!UUID_RE.test(String(req.body?.customer_id || ''))) return res.status(400).json({ error: 'customer_id must be a UUID' });
       const row = await applySmsCommitmentUpdate(db, req.params.id, {
         customerId: req.body.customer_id, action: req.body.action, note: req.body.note, reviewedBy: req.technicianId || null,
