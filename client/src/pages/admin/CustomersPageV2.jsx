@@ -49,7 +49,8 @@ import {
 import Customer360Profile from "../../components/admin/Customer360ProfileV2";
 import Customer360Workspace from "../../components/admin/Customer360Workspace";
 import CustomerDirectoryTable from "../../components/admin/CustomerDirectoryTable";
-import CustomerGeocodeReviewPanel from "../../components/admin/CustomerGeocodeReviewPanel";
+import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "../../components/admin/CustomerGeocodeReviewPanel";
+import { registerLeaveGuard } from "../../lib/navigation-guard";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
@@ -1036,9 +1037,11 @@ function CustomerDirectoryView({
   loadCustomers,
   filteredSorted,
   openCustomerProfile,
+  onOpenCustomerProfile,
   startEdit,
   handleDeleteCustomer,
   geocodeReviewRefreshToken,
+  onDraftActiveChange,
   isAdmin,
   editingId,
   customerEditor,
@@ -1050,9 +1053,15 @@ function CustomerDirectoryView({
     view === "directory" && (
       <>
         {isAdmin && (
+          // The queue's own customer-name links already guard themselves
+          // against THIS row's draft (ReviewSummary's draftActive check) —
+          // raw openCustomerProfile, not the directory-level guarded one, so
+          // a confirmed discard here is never re-prompted by that guard.
           <CustomerGeocodeReviewPanel
             onSelectCustomer={openCustomerProfile}
             refreshToken={geocodeReviewRefreshToken}
+            onResolved={loadCustomers}
+            onDraftActiveChange={onDraftActiveChange}
           />
         )}
         {" "}
@@ -1119,7 +1128,7 @@ function CustomerDirectoryView({
               ...customer,
               address: formatCustomerAddress(customer.address),
             }))}
-            onOpen={openCustomerProfile}
+            onOpen={onOpenCustomerProfile}
             onEdit={startEdit}
             onDelete={handleDeleteCustomer}
             onCall={callCustomer}
@@ -1149,7 +1158,7 @@ function CustomerDirectoryView({
                           {" "}
                           <button data-ui-text-action
                             type="button"
-                            onClick={() => openCustomerProfile(c.id)}
+                            onClick={() => onOpenCustomerProfile(c.id)}
                             aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
                             className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
                           >
@@ -1200,12 +1209,12 @@ function CustomerDirectoryView({
                   })()
                 ) : (
                   <div
-                    onClick={() => openCustomerProfile(c.id)}
+                    onClick={() => onOpenCustomerProfile(c.id)}
                     onKeyDown={(event) => {
                       if (event.target !== event.currentTarget) return;
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        openCustomerProfile(c.id);
+                        onOpenCustomerProfile(c.id);
                       }
                     }}
                     role="button"
@@ -1643,6 +1652,8 @@ function CustomersWorkspacePage({
   selectedId,
   onSelect,
   onClose,
+  onCustomerMutation,
+  onDraftActiveChange,
   initialTab,
   tabKey,
   children,
@@ -1657,6 +1668,8 @@ function CustomersWorkspacePage({
           selectedId={selectedId}
           onSelect={onSelect}
           onClose={onClose}
+          onCustomerMutation={onCustomerMutation}
+          onDraftActiveChange={onDraftActiveChange}
         />
       ) : (
         children
@@ -1671,6 +1684,7 @@ function CustomersOverlayPage({
   onSelect,
   onClose,
   onCustomerMutation,
+  onDraftActiveChange,
   initialTab,
   tabKey,
   children,
@@ -1688,6 +1702,7 @@ function CustomersOverlayPage({
           onSelectCustomer={onSelect}
           onClose={onClose}
           onCustomerMutation={onCustomerMutation}
+          onDraftActiveChange={onDraftActiveChange}
         />
       )}
     </UiSurface>
@@ -1695,6 +1710,88 @@ function CustomersOverlayPage({
 }
 
 const CUSTOMER_PAGE_PRESENTATIONS = { true: CustomersWorkspacePage, false: CustomersOverlayPage };
+
+// App.jsx gives /admin/customers and /admin/customers/new sibling <Route>
+// elements that render the same AdminCustomersPage element, so React keeps
+// this page (and its panels) mounted across a move between them; those two
+// paths get the query-param analysis below instead of counting as an exit.
+const CUSTOMER_ROUTE_PATHS = new Set(["/admin/customers", "/admin/customers/new"]);
+
+// The query params that select which draft-bearing panel is mounted here:
+// `view` (normalised exactly like the `view` this component derives, a few
+// lines down — health/intelligence aliasing needs isAdmin), `customerId`,
+// and the customer360 workspace/overlay mode. Every other param (healthRisk,
+// tab, search/filter/sort/page, …) only changes what's rendered INSIDE an
+// already-mounted panel, so it's deliberately excluded — e.g. the sidebar's
+// "Customers" link from ?healthRisk=at_risk to the bare directory keeps the
+// same queue panel mounted underneath, filters and all.
+function customerRouteSignature(searchParams, isAdmin) {
+  const rawView = searchParams.get("view");
+  const view = new Map([
+    ["health", "directory"],
+    ["intelligence", isAdmin ? "intelligence" : "directory"],
+  ]).get(rawView) || rawView || "directory";
+  return {
+    view,
+    customerId: searchParams.get("customerId") || null,
+    workspaceMode: searchParams.get("customer360") !== "overlay",
+    // The profile is keyed on tabKey, which is location.key while
+    // tab=comms: every navigation to, from, or within Comms remounts it.
+    comms: searchParams.get("tab") === "comms",
+  };
+}
+
+// Mirrors CustomerDirectoryView's own mount condition (the queue only
+// renders under view === "directory", and only outside a workspace-mode
+// profile — CustomersWorkspacePage swaps it for Customer360Workspace once a
+// customerId is set) and CustomersWorkspacePage/CustomersOverlayPage's own
+// (a profile is mounted whenever a customerId is set, in either mode).
+function customerPanelsMounted(pathname, sig) {
+  if (!CUSTOMER_ROUTE_PATHS.has(pathname)) return { queue: false, profile: false };
+  return {
+    queue: sig.view === "directory" && (!sig.workspaceMode || !sig.customerId),
+    profile: Boolean(sig.customerId),
+  };
+}
+
+// The single predicate every navigation guard below asks: would moving from
+// `current` to `target` (each `{ pathname, params }`) unmount a panel that
+// presently holds an open draft? `draftActive` is this page's own
+// draftActiveRef.current snapshot ({ profile, queue }).
+//
+// Leaving the two customers routes always remounts this whole page, so no
+// query comparison is needed, just "is anything open at all"; a move
+// between those two routes keeps it mounted and is compared like any other
+// same-page change. On the same pathname, a customer360 mode
+// flip swaps CUSTOMER_PAGE_PRESENTATIONS to a different component type
+// (CustomersWorkspacePage <-> CustomersOverlayPage), which unmounts both
+// panels regardless of view/customerId. Otherwise: the queue is lost only
+// when it stops being mounted (customerPanelsMounted above), and the
+// profile is lost when it stops being mounted OR its customerId changes —
+// Customer360Workspace/Customer360Profile are keyed by selectedId
+// (~1665/1698), so switching to a DIFFERENT customer remounts it even
+// though "a profile" stays open in the boolean sense.
+function navigationDiscardsDraft(current, target, { draftActive, isAdmin }) {
+  const hasAnyDraft = Boolean(draftActive.queue || draftActive.profile);
+  const bothCustomerRoutes = CUSTOMER_ROUTE_PATHS.has(current.pathname) && CUSTOMER_ROUTE_PATHS.has(target.pathname);
+  if (target.pathname !== current.pathname && !bothCustomerRoutes) return hasAnyDraft;
+  const sigNow = customerRouteSignature(current.params, isAdmin);
+  const sigNext = customerRouteSignature(target.params, isAdmin);
+  if (sigNow.workspaceMode !== sigNext.workspaceMode) return hasAnyDraft;
+  const mountedNow = customerPanelsMounted(current.pathname, sigNow);
+  const mountedNext = customerPanelsMounted(target.pathname, sigNext);
+  const queueDiscarded = draftActive.queue && mountedNow.queue && !mountedNext.queue;
+  const profileDiscarded = draftActive.profile && mountedNow.profile
+    && (!mountedNext.profile || sigNow.customerId !== sigNext.customerId || sigNow.comms || sigNext.comms);
+  return queueDiscarded || profileDiscarded;
+}
+
+// Any pathname other than the two customers routes is "a different page" as
+// far as navigationDiscardsDraft is concerned — a marker guaranteed never to
+// match a real pathname (those always start with "/") stands in for one
+// without needing to know or guess it (an external origin, a route this
+// page has never heard of, …).
+const ELSEWHERE_PATHNAME = "elsewhere";
 
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
@@ -1797,12 +1894,16 @@ export default function CustomersPageV2() {
   };
 
   const changeView = (nextView) => {
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      if (nextView === "directory") next.delete("view");
-      else next.set("view", nextView);
-      return next;
-    });
+    // Switching away from "directory" unmounts the queue panel below
+    // (CustomerDirectoryView only renders it there) exactly like a route
+    // change would — same guardNavigateAway choke point, asked about the
+    // params THIS change actually produces (navigationDiscardsDraft already
+    // says no when nextView === view, so no separate check is needed for it).
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextView === "directory") nextParams.delete("view");
+    else nextParams.set("view", nextView);
+    if (!guardNavigateAway({ pathname: location.pathname, params: nextParams })) return;
+    setSearchParams(nextParams);
   };
 
   // The URL is the sole owner of view and selection, including back/forward
@@ -1847,12 +1948,18 @@ export default function CustomersPageV2() {
     }
     if (customer?.id) {
       createdCustomerIdRef.current = String(customer.id);
-      // Deep-link into the newly created profile.
-      openCustomerProfile(customer.id);
+      // Deep-link into the newly created profile. The queue panel underneath
+      // the (now-closing) Add Customer modal can still hold an open draft —
+      // route through the same guard as any other directory-level open.
+      guardedOpenCustomerProfile(customer.id);
     }
   };
 
   const closeAddCustomer = () => {
+    // Only the /new route actually changes the page's pathname below —
+    // an ordinary modal dismiss touches no route param and needs no guard.
+    if (isNewCustomerRoute
+      && !guardNavigateAway({ pathname: "/admin/customers", params: new URLSearchParams() })) return;
     const createdId = createdCustomerIdRef.current;
     createdCustomerIdRef.current = null;
     setShowAddModal(false);
@@ -1878,6 +1985,141 @@ export default function CustomersPageV2() {
   const closeCustomerProfile = () => {
     selectCustomer(null, { replace: true });
   };
+
+  // "draft active" reported up from EITHER address-review panel this page
+  // can have open: the embedded profile's own choke point
+  // (Customer360ProfileV2's useCustomerProfileNavigation / Customer360Workspace,
+  // customerId set) or the directory-level queue panel (CustomerDirectoryView,
+  // no customerId — the two never render at once in workspace mode, and in
+  // overlay mode a live draft in either is enough to warn). A ref, not
+  // state, so the guards below read it synchronously with no re-render
+  // dependency, same reasoning as that hook's own draftActiveRef. Neither
+  // browser Back/Forward (changes ?customerId= without ever firing
+  // beforeunload — same-document navigation) nor an in-app link push (the
+  // sidebar/tab bar in AdminLayoutV2, or any other <a href> — also never
+  // fires beforeunload) goes through that hook's own tab/close/switch
+  // guards, so this page needs its own.
+  // Tracked per panel: in overlay mode both can hold a draft at once, and
+  // closing one must not clear the other's warning.
+  const draftActiveRef = useRef({ profile: false, queue: false });
+  const hasOpenDraft = () => draftActiveRef.current.profile || draftActiveRef.current.queue;
+  const handleProfileDraftActiveChange = (active) => { draftActiveRef.current.profile = active; };
+  const handleQueueDraftActiveChange = (active) => { draftActiveRef.current.queue = active; };
+  // Sign-out (AdminLayoutV2's handleLogout) navigates from a plain button —
+  // no popstate, no <a href> click — so it reaches none of this page's own
+  // guards below. Register with the shared cross-page registry
+  // (client/src/lib/navigation-guard.js) for the life of this page instead.
+  useEffect(() => registerLeaveGuard(() => !hasOpenDraft() || confirmDiscardDraft()), []);
+  // Single choke point for every OTHER control on this page that can
+  // programmatically change pathname/customerId/view and unmount a
+  // draft-bearing panel with no popstate and no <a> click of its own to
+  // catch (guardHistory/guardLink below cover those) — changeView,
+  // closeAddCustomer's /new → /customers navigate, and opening a profile
+  // straight from the directory (table row, "Open profile" menu item, the
+  // mobile/legacy list, a fresh quick-add). Same shape as this page's own
+  // popstate/link guards and Customer360ProfileV2's guardNavigateAway.
+  // Takes the target location the caller is about to move to and asks the
+  // shared navigationDiscardsDraft predicate (module scope, above) whether
+  // that specific move would lose an open draft — not a blanket
+  // hasOpenDraft(), so switching between two params that mount the SAME
+  // panel (e.g. a filter-only change, or a same-view re-select) never
+  // prompts. NOT used for openCustomerProfile/selectCustomer generally —
+  // the calls that reach it through an already-guarded control (the queue's
+  // own row links, the profile's account-properties customer-switch links,
+  // Customer360Workspace's "All customers") have already resolved their own
+  // confirm before calling it, and this ref only clears once the panel that
+  // owned the draft actually unmounts, not the instant the confirm dialog
+  // closes — checking the predicate again here would double-prompt on the
+  // same navigation.
+  const guardNavigateAway = (target) => {
+    const current = { pathname: location.pathname, params: searchParams };
+    const discards = navigationDiscardsDraft(current, target, { draftActive: draftActiveRef.current, isAdmin });
+    return !discards || confirmDiscardDraft();
+  };
+  // Opening a profile sets customerId — navigationDiscardsDraft's own
+  // per-mode logic (customerPanelsMounted, module scope above) already knows
+  // that replaces the directory (and its queue) only in workspace mode; the
+  // overlay keeps the directory mounted, so there only an open profile
+  // draft would be at stake, and there isn't one yet (no profile is mounted
+  // before this call), so nothing prompts.
+  const guardedOpenCustomerProfile = (customerId) => {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("tab");
+    if (customerId) nextParams.set("customerId", String(customerId));
+    else nextParams.delete("customerId");
+    if (guardNavigateAway({ pathname: location.pathname, params: nextParams })) openCustomerProfile(customerId);
+  };
+  // BrowserRouter stamps an index on each history entry. Kept in sync on
+  // every settled render so a declined Back/Forward can step back to the
+  // draft's own entry instead of overwriting the one it popped to.
+  // lastLocationRef is the companion for navigationDiscardsDraft: by the
+  // time a popstate's capture-phase listener runs, window.location already
+  // reflects the POPPED-TO url (the browser applied it before dispatching
+  // the event), so "where we're navigating FROM" has to come from a ref
+  // updated on the previous settled render, exactly like entryIndexRef.
+  const entryIndexRef = useRef(window.history.state?.idx);
+  const lastLocationRef = useRef({ pathname: location.pathname, search: location.search });
+  useEffect(() => {
+    entryIndexRef.current = window.history.state?.idx;
+    lastLocationRef.current = { pathname: location.pathname, search: location.search };
+  }, [location.key]);
+  useEffect(() => {
+    // Same index-restore pattern as EstimateToolViewV2's unsaved-draft guard:
+    // a capture-phase listener runs before the router's own popstate
+    // handler, so a declined pop is undone before the draft can unmount.
+    let restoring = false;
+    const guardHistory = (event) => {
+      if (restoring) { restoring = false; event.stopImmediatePropagation(); return; }
+      const entryIndex = entryIndexRef.current;
+      const nextIndex = event.state?.idx;
+      if (!Number.isInteger(entryIndex) || !Number.isInteger(nextIndex) || entryIndex === nextIndex) return;
+      const current = {
+        pathname: lastLocationRef.current.pathname,
+        params: new URLSearchParams(lastLocationRef.current.search),
+      };
+      const target = { pathname: window.location.pathname, params: new URLSearchParams(window.location.search) };
+      if (!navigationDiscardsDraft(current, target, { draftActive: draftActiveRef.current, isAdmin })) return;
+      if (confirmDiscardDraft()) return;
+      event.stopImmediatePropagation();
+      restoring = true;
+      window.history.go(entryIndex - nextIndex);
+    };
+    // Same-document navigation via a real <a href> (react-router's <Link>,
+    // e.g. AdminLayoutV2's sidebar/tab bar) never fires 'popstate' at all —
+    // it's a push, not a pop — so guardHistory alone misses it. Same
+    // capture-phase anchor-click pattern as EstimateToolViewV2 (guardLink).
+    const guardLink = (event) => {
+      if (!hasOpenDraft()) return;
+      const link = event.target.closest?.("a[href]");
+      // shiftKey/altKey open a new window or trigger a download, same as
+      // _blank/meta/ctrl — none of those unmount this page, so none discard
+      // the draft (no shared modifier-click helper exists in the repo;
+      // AdminLayoutV2/AdminWorkspaceNavigation each inline this same check).
+      if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      // tel:/sms:/mailto: hand off to another app and a download link stays
+      // on this page — only a real http(s) page change can unmount a draft.
+      if (link.hasAttribute("download") || !/^https?:$/.test(link.protocol)) return;
+      // A link to another origin is definitely "a different page" —
+      // ELSEWHERE_PATHNAME forces navigationDiscardsDraft's pathname-changed
+      // branch without needing to know that origin's actual route shape.
+      // The router's own settled location, same source as guardHistory.
+      const current = { pathname: lastLocationRef.current.pathname, params: new URLSearchParams(lastLocationRef.current.search) };
+      const target = link.origin === window.location.origin
+        ? { pathname: link.pathname, params: new URLSearchParams(link.search) }
+        : { pathname: ELSEWHERE_PATHNAME, params: new URLSearchParams() };
+      if (!navigationDiscardsDraft(current, target, { draftActive: draftActiveRef.current, isAdmin })) return;
+      if (!confirmDiscardDraft()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("popstate", guardHistory, true);
+    document.addEventListener("click", guardLink, true);
+    return () => {
+      window.removeEventListener("popstate", guardHistory, true);
+      document.removeEventListener("click", guardLink, true);
+    };
+  }, [isAdmin]);
 
   function loadCustomers(p) {
     const pg = p || page;
@@ -2074,9 +2316,17 @@ export default function CustomersPageV2() {
   return (
     <PagePresentation
       selectedId={selected360Id}
+      // Raw, not guardedOpenCustomerProfile: Customer360ProfileV2's own
+      // guardedSelectCustomer already confirms its local draft before this
+      // ever fires (account-properties/address-neighbor customer switches),
+      // and neither presentation unmounts the queue on a customerId change
+      // in flight from there — workspace mode already dropped it opening
+      // the FIRST profile, overlay mode never unmounts it on customerId at
+      // all. A second check here would double-prompt that same click.
       onSelect={openCustomerProfile}
       onClose={closeCustomerProfile}
       onCustomerMutation={refreshCustomersAndGeocodeReview}
+      onDraftActiveChange={handleProfileDraftActiveChange}
       initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
       tabKey={searchParams.get("tab") === "comms" ? location.key : "overview"}
       overlays={
@@ -2223,9 +2473,11 @@ export default function CustomersPageV2() {
         loadCustomers={loadCustomers}
         filteredSorted={filteredSorted}
         openCustomerProfile={openCustomerProfile}
+        onOpenCustomerProfile={guardedOpenCustomerProfile}
         startEdit={startEdit}
         handleDeleteCustomer={handleDeleteCustomer}
         geocodeReviewRefreshToken={geocodeReviewRefreshToken}
+        onDraftActiveChange={handleQueueDraftActiveChange}
         isAdmin={isAdmin}
         editingId={editingId}
         customerEditor={customerEditor}
@@ -2240,7 +2492,7 @@ export default function CustomersPageV2() {
         error={error}
         loadCustomers={loadCustomers}
         customers={customers}
-        openCustomerProfile={openCustomerProfile}
+        openCustomerProfile={guardedOpenCustomerProfile}
       />
 
       {/* ======================= PIPELINE (V2 monochrome) ======================= */}

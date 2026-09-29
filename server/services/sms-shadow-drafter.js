@@ -450,6 +450,115 @@ function validateReserviceOffer({ reply, factsBlock }) {
   return { ok: true, violations: [] };
 }
 
+// Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
+// the structural fix for PR #5194): which job a reply's open times must be
+// sized for. Six Codex rounds on keyword tables kept finding new phrasings —
+// the bookable catalog has 16 termite, 7 rodent and 7 pest variants plus
+// the specialty services — so the model reads the text and picks one of the
+// customer's own visits, their open estimate, or one bookable catalog
+// service (the call pipeline's loadBookableCallServices list), and code
+// accepts only an answer that names an option it offered. An unclear text,
+// an invented option or a provider failure is uncertain, which withholds
+// OPEN TIMES: availability sized for the wrong job is worse than none
+// (Codex #5194 r4). Runs only for a live, gate-on draft about to fetch OPEN
+// TIMES (generateGroundedDraft).
+const SERVICE_IDENTITY_TIMEOUT_MS = 20000;
+
+// The visits a text can be about: every upcoming one (V1…) and the most
+// recent completed one (C1 — a callback on it).
+function serviceIdentityVisits(context) {
+  const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type)
+    .map((s, i) => ({ id: `V${i + 1}`, type: String(s.type), date: s.date, upcoming: true }));
+  const last = (context?.serviceHistory || []).find((s) => s && s.type);
+  return last ? [...upcoming, { id: 'C1', type: String(last.type), date: last.date, upcoming: false }] : upcoming;
+}
+
+function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
+  const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${formatEtDate(v.date)})` : ''}`);
+  return [
+    'A customer of Waves Pest Control texted:',
+    JSON.stringify(String(inboundMessage || '')),
+    '',
+    'Their visits:',
+    ...(visitLines.length ? visitLines : ['none on file']),
+    ...(openEstimate ? ['', `Their open estimate: ${openEstimate.service || 'service not stated'}`] : []),
+    '',
+    'Services Waves books (key: name):',
+    ...services.map((s) => `${s.service_key}: ${s.name}`),
+    '',
+    'A reply may offer open appointment times, sized for one job. Which job is this text about?',
+    ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
+    ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
+    ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
+    '- "none": the text names no service and points at no particular visit.',
+    '- "unclear": it could be more than one visit or service, or it asks about several at once.',
+    'Choose only from the lists above. When unsure, answer "unclear".',
+  ].join('\n');
+}
+
+// The provider can answer only with an offered option. A kind with nothing
+// to offer (a brand-new customer has no visit; a catalog load that failed
+// open has no service) is left out of the answer entirely rather than sent
+// as a bare null-typed property.
+function serviceIdentitySchema(visits, openEstimate, services) {
+  const nullableEnum = (ids) => ({ type: ['string', 'null'], enum: [...ids, null] });
+  const properties = {
+    about: { type: 'string', enum: [...(visits.length ? ['visit'] : []), ...(openEstimate ? ['estimate'] : []), ...(services.length ? ['new_service'] : []), 'none', 'unclear'] },
+    ...(visits.length ? { visit: nullableEnum(visits.map((v) => v.id)) } : {}),
+    ...(services.length ? { service: nullableEnum(services.map((s) => s.service_key)) } : {}),
+  };
+  return { type: 'object', additionalProperties: false, required: Object.keys(properties), properties };
+}
+
+// The text names no job: the one upcoming visit (a reschedule or "when can
+// you come" is about it), uncertain for several; with none upcoming, the
+// open estimate ("Sounds good, can we do Tuesday?", Codex #5194 r3), else
+// the last completed visit, else the engine's own default service for a
+// brand-new customer.
+function unnamedServiceIdentity(visits, openEstimate) {
+  const upcoming = visits.filter((v) => v.upcoming);
+  if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming' };
+  if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
+  if (openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
+  const completed = visits.find((v) => !v.upcoming);
+  if (completed) return { serviceType: completed.type, certain: true, reason: 'last_completed' };
+  return { serviceType: null, certain: true, reason: 'engine_default' };
+}
+
+// Code accepts only an option it offered (the schema already constrains the
+// provider; this re-checks) — anything else is uncertain.
+function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
+  const visit = visits.find((v) => v.id === answer?.visit);
+  const service = services.find((s) => s.service_key === answer?.service);
+  if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit' };
+  if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
+  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking' };
+  if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
+  return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
+}
+
+// { serviceType, certain, reason, estimateId? } — estimateId when the open
+// estimate is the job.
+async function serviceIdentityFor(inboundMessage, context, { openEstimate = null } = {}) {
+  const visits = serviceIdentityVisits(context);
+  try {
+    const services = (await require('./call-booking-catalog').loadBookableCallServices(db)).filter((s) => s && s.service_key && s.name);
+    const { dispatchWithFallback } = require('./llm/call');
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      laneId: 'sms_service_identity',
+      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services),
+      jsonMode: true,
+      jsonSchema: serviceIdentitySchema(visits, openEstimate, services),
+      maxTokens: 100,
+      timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
+    }, { reserveFallbackBudget: true });
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services);
+  } catch (err) {
+    logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
+    return { serviceType: null, certain: false, reason: 'no_valid_answer' };
+  }
+}
+
 // The service a live (non-estimate) scheduling reply is about: the next
 // scheduled visit's type, else the most recent completed one. Null when the
 // context names neither (the engine then keeps its own default).
@@ -849,34 +958,47 @@ function offerSpanInText(text, day, window) {
 // Language that states what is OWED or charged on an ongoing basis.
 const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
 const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', 'upcoming', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed', 'processing', 'requires_action']);
+// Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
+// USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
+// unit-less numerals stay out of the deterministic guard (dates, house
+// numbers, zone counts would false-positive) — those remain the verifier's
+// + reviewer's territory. One definition, with PAYMENT_ACK_RE, for this
+// draft-time guard and the send-time recheck (sms-amount-recheck).
 const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
 const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
-function replyQuotesUngroundedAmount(reply, context) {
+// The billing figures a reply may quote, in cents — one definition for this
+// draft-time guard and the send-time recheck (sms-amount-recheck): what is
+// OWED (balance, open invoice, published monthly dues) and what was PAID.
+// `settledOnly` keeps only payments that went through (Codex r7 —
+// recentPayments is attempted history and carries failed / pending /
+// overdue rows too, none of which back "your payment went through").
+function billingAmountCents(context, { settledOnly = false } = {}) {
+  const billing = context?.billing || {};
+  const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
+  const finiteSet = (list) => new Set(list.filter((v) => Number.isFinite(v)));
+  return {
+    owed: finiteSet([
+      billing.outstandingBalance > 0 ? centsOf(billing.outstandingBalance) : NaN,
+      centsOf(billing.openInvoice?.amountDue),
+      ...require('./context-aggregator').authorizedDuesCents(context),
+    ]),
+    paid: finiteSet((billing.recentPayments || [])
+      .filter((p) => !settledOnly || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
+      .map((p) => centsOf(p?.amount))),
+  };
+}
+
+// `opts.byMeaning` pins the strict clause/status-aware rule regardless of
+// the live gate (Codex #5194 r2 P1): a v12 review card that outlives a gate
+// rollback is still a v12 draft and is rechecked as one.
+function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   const suggestMode = require('./sms-suggest-mode');
   const centsOf = (v) => Math.round(Number(v) * 100);
   const text = String(reply || '');
-  const finite = (list) => list.filter((v) => Number.isFinite(v));
-  // What is OWED: balance, open invoice, monthly dues (shared definition).
-  const owedCents = new Set(finite([
-    context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
-    context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
-    ...require('./context-aggregator').authorizedDuesCents(context),
-  ]));
-  // What was PAID: payment history.
-  // Gate on: only payments that actually went through (Codex r7 —
-  // recentPayments is attempted history and carries failed / pending /
-  // overdue rows too, none of which back "your payment went through").
-  const realAnswers = gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const paidCents = new Set(finite((context.billing?.recentPayments || [])
-    .filter((p) => !realAnswers || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
-    .map((p) => (p?.amount != null ? centsOf(p.amount) : null))));
-  // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
-  // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
-  // unit-less numerals stay out of the deterministic guard (dates, house
-  // numbers, zone counts would false-positive) — those remain the
-  // verifier's + reviewer's territory.
-  const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-  const amountsIn = (t) => (t.match(AMOUNT_FORMS_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
+  // Gate on: only payments that actually went through back an acknowledgement.
+  const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
+  const amountsIn = (t) => (t.match(AMOUNT_MASK_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
   // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
   // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
   // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
@@ -906,9 +1028,15 @@ function replyQuotesUngroundedAmount(reply, context) {
   // at a period, and "$95.50" must not end it.
   const clauses = text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/);
   for (const clause of clauses) {
-    const amounts = amountsIn(String(clause || ''));
+    const text = String(clause || '');
+    const masked = text.replace(AMOUNT_MASK_RE, ' AMT ');
+    // Price grammar left once the readable figures are masked is a price the
+    // extractor cannot verify ("fifty dollars", "the fee is 45"): it fails
+    // closed even beside a grounded figure, in another clause (Codex #5194
+    // r4 P1) or the same one (r8 P1: "$95 plus a fee of fifty dollars").
+    if (suggestMode.hasPriceQuote(masked)) return true;
+    const amounts = amountsIn(text);
     if (!amounts.length) continue;
-    const masked = clause.replace(AMOUNT_MASK_RE, ' AMT ');
     const owed = AMOUNT_OWED_RE.test(masked);
     const ack = PAYMENT_ACK_RE.test(masked);
     if (owed === ack) return true;
@@ -1208,7 +1336,10 @@ function buildFactsBlock(context, extras = {}) {
   // an ordinary per-draft FACT the model quotes verbatim, same as OPEN
   // TIMES. Gate-on unconditional (not scheduling-intent-gated): ANY category
   // — a hand-off, a cancellation, a held complaint — may need to state it.
-  // `extras.now` is test-only.
+  // `extras.now` was test-only through PR #5194; generateGroundedDraft now
+  // passes its own captured factsAt here for every live draft too (Codex
+  // #5194 P2 — see its comment), so the phrase rendered here and the
+  // instant returned as factsGeneratedAt are always the same moment.
   const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
@@ -1674,15 +1805,21 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * adversarial verifier; if the draft asserts facts the context doesn't
  * support, feeds the violations back for a rewrite toward deferral, up to
  * MAX_REVISIONS times. Returns the final draft + loop telemetry
- * { parsed, passes, converged, model, servedModel, verifierModels }. converged=true means the verifier
+ * { parsed, passes, converged, model, servedModel, verifierModels, factsBlock,
+ * factsGeneratedAt }. converged=true means the verifier
  * signed off (or the reply was empty — nothing to assert). model identifies
  * the winning requested route; servedModel identifies the provider-reported
- * model that produced the FINAL draft. Verify failures
+ * model that produced the FINAL draft. factsGeneratedAt is the instant
+ * factsBlock was rendered (Codex #5194 P2) — null on a frozen replay
+ * (presetFactsBlock), which has no such instant of its own; a live caller
+ * persists it so the SLA phrase it carries can be re-anchored at send time
+ * instead of to the row's later created_at (see sms-followup-sla.js's
+ * slaDraftedAt). Verify failures
  * degrade gracefully: keep the current draft, stop, converged=false — a
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -1727,28 +1864,56 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // file's own save-the-sale routing already applies to intent + raw text
   // (SAVE_SALE_INTENT_RE / SAVE_SALE_TEXT_RE), so the two decisions can't
   // drift apart.
-  // Codex r3: the live inbound path has no estimate, so the engine fell
-  // back to General Pest Control minutes for every customer. The customer's
-  // own next visit (else last visit) names the service a reschedule/
-  // cancellation/complaint reply is about; an estimate's service_interest
-  // still wins inside the engine when estimateId is set. Carried on the
+  // Which job the OPEN TIMES are sized for (Codex r3, follow-up #5, owner
+  // 2026-09-28): serviceIdentityFor has the model pick the visit, open
+  // estimate or catalog service the text is about. An estimate the message
+  // is linked to (estimateId) pins the service itself — its service_interest
+  // wins inside the engine — so no classification then. Carried on the
   // snapshot so the send-time recheck asks the same question.
-  const serviceType = liveServiceType(context);
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
+  // The identity step runs only when a live, gate-on OPEN TIMES fetch is
+  // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
+  // or with no city to look up (fetchOpenTimesData returns nothing then —
+  // the backfill lane never passes one), drafting makes no catalog query and
+  // no extra model call.
+  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && Boolean(city) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const identity = willFetchOpenTimes && !estimateId
+    ? await serviceIdentityFor(inboundMessage, context, { openEstimate })
+    : { serviceType: liveServiceType(context), certain: true };
+  const serviceType = identity.serviceType;
+  const pricingEstimateId = estimateId || identity.estimateId || null;
+  // An estimate pins the service itself; otherwise an uncertain identity
+  // withholds OPEN TIMES rather than pricing the wrong job.
+  const identityCertain = Boolean(pricingEstimateId) || identity.certain;
+  if (willFetchOpenTimes && !identityCertain) {
+    logger.info(`[sms-shadow] OPEN TIMES withheld — service identity uncertain (${identity.reason})`);
+  }
   // A frozen replay validates offered_times against the OPEN TIMES it
   // actually saw (parsed back out of its own facts block); `block` stays
   // null there so no send-time snapshot is minted for a draft nothing sends.
   const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
-      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes, estimateId, serviceType,
+      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain, estimateId: pricingEstimateId, serviceType,
     });
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes });
+  // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
+  // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
+  // not off created_at — the row's created_at lands only after this whole
+  // draft→verify→revise loop finishes below, which can cross the 8am/8pm ET
+  // phrase boundary the send-time checks (sms-followup-sla.js) re-derive the
+  // deadline from. factsAt IS that instant; it rides straight into
+  // buildFactsBlock's `now` (so the rendered phrase and the timestamp this
+  // function returns are always the same moment) and out again as
+  // factsGeneratedAt on every return below, for the caller to persist. A
+  // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
+  // "generated now" instant of its own — it returns null.
+  const factsAt = presetFactsBlock ? null : new Date();
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -1781,7 +1946,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
   };
   let { parsed, model, servedModel } = first;
   // Kill switch / single-pass mode: no LLM verification claim, behave as
@@ -1803,7 +1968,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // also switches real answers off at the delivery boundary.
     logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
     return {
-      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
       openTimesSnapshot: null,
     };
   }
@@ -1825,14 +1990,14 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
-        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
         openTimesSnapshot: null,
       };
     }
     return {
-      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
       openTimesSnapshot: computeOpenTimesSnapshot({
-        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId, serviceType,
+        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType,
       }),
     };
   }
@@ -1917,12 +2082,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   }
 
   return {
-    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, promptVersion,
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion,
     // Computed off the FINAL parsed.reply (after every revision pass) — an
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
     openTimesSnapshot: computeOpenTimesSnapshot({
-      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId, serviceType,
+      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType,
     }),
   };
 }
@@ -2029,7 +2194,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot,
+      openTimesSnapshot, factsGeneratedAt,
     } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null,
     });
@@ -2202,6 +2367,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // TIMES at send time — dispatchClaimedSend re-fetches and refuses
           // to send if a quoted window is no longer offered.
           openTimesSnapshot,
+          // Codex #5194 P2: the instant the drafter rendered the SLA phrase
+          // into factsBlock — claimAutoSend persists it on the decision's
+          // input_snapshot so slaDraftedAt can anchor the deadline to it
+          // instead of the row's own (later) created_at.
+          factsGeneratedAt,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -2238,6 +2408,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               lintFailures: lint.failures,
               openTimesSnapshot,
               intendedActions: parsed.intended_actions,
+              // Codex #5194 P2 — see the maybeAutoSend call's comment above.
+              factsGeneratedAt,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -2287,6 +2459,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             lintFailures: lint.failures,
             openTimesSnapshot,
             intendedActions: parsed.intended_actions,
+            // Codex #5194 P2 — see the maybeAutoSend call's comment above.
+            factsGeneratedAt,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
@@ -2362,8 +2536,12 @@ module.exports = {
   replyPromisesFollowup: followupSla.replyPromisesFollowup,
   slaPhraseStatus: followupSla.slaPhraseStatus,
   replyQuotesUngroundedAmount,
+  billingAmountCents,
+  AMOUNT_MASK_RE,
+  PAYMENT_ACK_RE,
   replyBindsDeclaredDays,
   liveServiceType,
+  serviceIdentityFor,
   fetchReserviceLanes,
   reserviceFactLine,
   validateReserviceOffer,

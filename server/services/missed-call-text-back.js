@@ -638,6 +638,7 @@ async function dispatchOrThrown(row, phone, body, fromNumber, attempt) {
         call_sid: row.twilio_call_sid,
         call_log_id: row.id,
         fromNumber,
+        templateKey: MESSAGE_TYPE,
       },
     });
     return { value };

@@ -385,6 +385,34 @@ async function propagateCustomerEmailChange({
         });
     }
 
+    // Pending email-template-automation INTENT markers (#5154, codex P1
+    // round 5) are the step BEFORE a queued run: a marker still 'pending'
+    // (the automation gate off, or a direct emit that failed transiently)
+    // replays through processTrigger later, and the executor looks the
+    // customer's live address up only when the payload carries NONE — an
+    // estimate.expired marker snapshots the estimate's customer_email at
+    // the flip. The estimates rewrite above deliberately skips the
+    // now-expired row (terminal), so without this the replayed expiry email
+    // would go to the old address. Same ownership rule as the queued runs:
+    // customer-linked markers only
+    // (payload.customer_id), only a payload address still equal to the OLD
+    // one (a tenant's estimate with its own address is left alone), and
+    // only while still 'pending', so a replay that already settled the
+    // marker wins. ONE set-based jsonb_set statement — no per-row JS parse
+    // that a malformed payload could throw out of, aborting the whole
+    // customer email change (pre-push audit P1). Counted with templateRuns —
+    // both are not-yet-sent template sends. Residual (same as the 'running'
+    // run exclusion above): a replay that read the marker just before this
+    // commit sends from its in-memory copy.
+    counts.templateRuns += await conn('email_template_automation_intents')
+      .where({ status: 'pending' })
+      .whereRaw("payload->>'customer_id' = ?", [String(customerId)])
+      .whereRaw("LOWER(payload->>'customer_email') = ?", [oldEmail])
+      .update({
+        payload: conn.raw("jsonb_set(payload, '{customer_email}', to_jsonb(?::text))", [newEmail]),
+        updated_at: now,
+      });
+
     // Referral promoter rows snapshot the email at enrollment; reward
     // notifications send directly to it (referral-engine).
     counts.promoters += await conn('referral_promoters')

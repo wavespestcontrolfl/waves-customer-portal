@@ -35,6 +35,9 @@ const EVENT_MERGE_LOCK_KEY = 778001;
  *   digest-required fields like event_url from a loser when the survivor lacks
  *   them, so a merge never makes an otherwise-eligible event disappear). The
  *   manual route passes nothing → behavior unchanged.
+ * opts.afterMerge — optional async (trx) => void run inside the same txn after
+ *   the losers are merged, so a caller's follow-up write (ingestion moving the
+ *   dedup key onto the survivor) commits or rolls back with the merge.
  *
  * @returns {Promise<{ merged:number, calendarsUpdated:number }>}
  */
@@ -94,6 +97,8 @@ async function mergeEvents(primaryId, toMerge, opts = {}) {
         calendarsUpdated += 1;
       }
     }
+
+    if (opts.afterMerge) await opts.afterMerge(trx);
   });
 
   return { merged, calendarsUpdated };
@@ -141,7 +146,39 @@ function isCleanCrossSourceCluster(events) {
   return distinct >= 2 && distinct === sourceIds.length;
 }
 
-const normalizeVenue = (v) => String(v || '').trim().toLowerCase();
+// Tolerant of formatting drift between feeds — punctuation, commas, extra
+// whitespace, stray periods ("Van Wezel." vs "Van Wezel", "IMG Academy -
+// Field 3" vs "img academy field 3") — same idea as normalizeEventTitle but
+// without the noise-word strip (a venue name isn't prose).
+const normalizeVenue = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// A same-day cross-source pair whose times differ by more than this is
+// treated as a genuinely different showtime (matinee vs evening), not a
+// formatting/rounding difference between two feeds describing the same
+// happening. Deliberately small — this only absorbs seconds/minutes-level
+// drift (e.g. one feed truncates seconds, another rounds to the nearest 5
+// minutes), not hours.
+// 5 minutes: absorbs one feed truncating seconds or rounding to the nearest
+// 5 minutes, while two real sessions offered half an hour apart (10:00 and
+// 10:30 tours) stay distinct.
+const MAX_START_DRIFT_MS = 5 * 60 * 1000;
+
+// Whether every row's start_at agrees closely enough to be the same
+// happening: the spread between the earliest and latest must be within
+// MAX_START_DRIFT_MS. A date-only row (parsed to ET midnight) is NOT treated
+// as a wildcard: pickSurvivor ranks on curation/source quality, not time, so
+// a placeholder row could survive and suppress the only real start time.
+// Such clusters stay for the manual /events/duplicates review.
+function startTimesAgree(events) {
+  const times = [];
+  for (const e of events) {
+    if (!e.start_at) return false;
+    const t = new Date(e.start_at).getTime();
+    if (Number.isNaN(t)) return false;
+    times.push(t);
+  }
+  return Math.max(...times) - Math.min(...times) <= MAX_START_DRIFT_MS;
+}
 
 /**
  * Whether a cluster is safe to merge UNATTENDED. findDuplicateClusters matches
@@ -149,18 +186,18 @@ const normalizeVenue = (v) => String(v || '').trim().toLowerCase();
  * two genuinely different same-title events (e.g. "Trivia Night" at different
  * venues, or a matinee vs an evening showing) would group together. On top of
  * the pure cross-source check, require the rows to also agree on a non-empty
- * venue AND the exact start_at instant — a same-title/day/city/venue/time match
- * across ≥2 sources is almost certainly one real event. Anything looser
- * (different/blank venue, different time) is left for the manual
- * /events/duplicates review rather than auto-rejected.
+ * venue (tolerant of formatting — see normalizeVenue) AND a start_at that's
+ * either identical or within MAX_START_DRIFT_MS of every other row's — a
+ * same-title/day/city/venue/time match across ≥2 sources is
+ * almost certainly one real event. Anything looser (different/blank venue, a
+ * genuinely different time) is left for the manual /events/duplicates review
+ * rather than auto-rejected.
  */
 function isAutoMergeableCluster(events) {
   if (!isCleanCrossSourceCluster(events)) return false;
   const venues = events.map((e) => normalizeVenue(e.venue_name));
   if (venues.some((v) => !v) || new Set(venues).size !== 1) return false;
-  const starts = events.map((e) => (e.start_at ? new Date(e.start_at).getTime() : NaN));
-  if (starts.some((t) => Number.isNaN(t)) || new Set(starts).size !== 1) return false;
-  return true;
+  return startTimesAgree(events);
 }
 
 // Fields the survivor must carry to stay digest-eligible/complete. event_url is

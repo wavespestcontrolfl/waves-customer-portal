@@ -323,7 +323,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       return 'deduped';
     }
     const priorLedgerIds = pendingEmailEpisode.ledgerIds || [];
-    const pendingVerdict = await collectionsChannelPermitted(customer.id, inv.id, 'email', now, priorLedgerIds, true);
+    const pendingVerdict = await collectionsChannelPermitted(customer.id, inv.id, 'email', now, priorLedgerIds, true, true);
     if (!verdictAllows(pendingVerdict)) {
       // A durable denial (flag, suppression) means this Email is no longer
       // owed and must not hold the invoice on this tier forever; a spacing
@@ -389,7 +389,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       { microdeposit: true, channels: policyChannels });
     if (ownLedgerIds === null) return 'skip';
     const policyResults = await Promise.all(policyChannels.map((channel) =>
-      collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds, true)));
+      collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds, true, true)));
     const policy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
     const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
     const emailPermitted = policy.email;
@@ -484,9 +484,14 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = [], detail = false) {
+// A microdeposit verification reminder is written as purpose
+// payment_verification, not an overdue reminder, so it names no source and
+// the spacing shadow never observes it (Codex #5189 r5); its policy verdict
+// is unchanged.
+async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = [], detail = false, verification = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds, logTag: 'late-payment', detail,
+    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds,
+    ...(verification ? {} : { source: 'late_payment_checker' }), logTag: 'late-payment', detail,
   });
 }
 
@@ -830,6 +835,30 @@ const LatePaymentService = {
             const freshEmail = Number(!emailResult.deduped);
             notified += freshEmail;
             skipped += 1 - freshEmail;
+            // Sequence-less invoice, confirmed delivery on repair — same
+            // shared stamp as the normal path below (dunning unification,
+            // owner note: this checker is the only sender left for a 60/90
+            // -day invoice with no invoice_followup_sequences row once the
+            // legacy balance-reminder retires). Gated on
+            // GATE_BALANCE_REMINDER_LEGACY_OFF (Codex P1, round 3): unset,
+            // balance-reminder.js's OWN legacy latePaymentCheck() still runs
+            // unconditionally and already stamps every 60/90-day customer it
+            // reaches — but that method filters on customers.active AND
+            // waveguard_tier, while this checker does neither, so an
+            // unconditional stamp HERE would flip pipeline_stage for a
+            // customer legacy latePaymentCheck() would never have reached
+            // (an inactive-flagged or non-WaveGuard/flat-commercial account),
+            // breaking "unset = byte-identical." Run AFTER completePendingEmail
+            // above (the dedupe marker for this episode) and guarded (Codex
+            // P1): a failure here must never cost that marker.
+            if (tierDays >= 60 && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
+              && process.env.GATE_DUNNING_LADDER_90 === 'true') {
+              try {
+                await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
+              } catch (stampErr) {
+                logger.warn(`[late-payment] at-risk stamp failed for customer ${customer.id}: ${stampErr.message}`);
+              }
+            }
           } else if (emailResult?.resolved === true
             || (isTerminalEmailRefusal(emailResult)
               && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
@@ -914,6 +943,30 @@ const LatePaymentService = {
         });
         if (pendingEmail) await activityInsert;
         else await activityInsert.catch(() => {});
+
+        // Sequence-less invoice, confirmed delivery this tier (dunning
+        // unification, owner note): once the legacy balance-reminder's
+        // account-level 60/90-day late check retires, this checker is the
+        // only sender left for an invoice with no invoice_followup_sequences
+        // row (adoption, GATE_DUNNING_ADOPT_ORPHANS, is dark by default), so
+        // it now owns the shared at-risk stamp for those same tiers — same
+        // helper invoice-followups.js's fireTouch uses for its Day 60/90
+        // steps, so the two callers can't drift on which fields it stamps.
+        // Gated on GATE_BALANCE_REMINDER_LEGACY_OFF (Codex P1, round 3): see
+        // the matching gate above on the repair path for why an unconditional
+        // stamp here would break "unset = byte-identical" (this checker
+        // reaches customers legacy latePaymentCheck()'s own active/
+        // waveguard_tier filters would have excluded). Run AFTER the
+        // activity_log dedupe marker above (Codex P1): a failure here must
+        // never cost that marker and risk a re-send.
+        if (tierDays >= 60 && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
+              && process.env.GATE_DUNNING_LADDER_90 === 'true') {
+          try {
+            await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
+          } catch (stampErr) {
+            logger.warn(`[late-payment] at-risk stamp failed for customer ${customer.id}: ${stampErr.message}`);
+          }
+        }
       } catch (smsErr) {
         logger.error(`[late-payment] SMS failed for customer ${customer.id}: ${smsErr.message}`);
         skipped++;

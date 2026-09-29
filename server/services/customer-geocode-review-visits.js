@@ -104,10 +104,11 @@ function seriesParentId(row) {
 async function prelockVisitContext(trx, customerId) {
   const visits = await candidateVisits(trx, customerId);
   const roots = await recurringRoots(trx, customerId);
-  await lockTechDays(trx, visits.map(row => ({
+  const techDaysLocked = await lockTechDays(trx, visits.map(row => ({
     techId: row.technician_id,
     date: toDateStr(row.scheduled_date),
-  })));
+  })), { wait: false });
+  if (techDaysLocked === false) throw retry();
   const seriesIds = [...new Set([
     ...visits.map(seriesParentId), ...roots.map(row => row.id),
   ].filter(Boolean))].map(String).sort();

@@ -189,7 +189,7 @@ const ALLOWLIST = [
     reason: 'status filtered to \'scheduled\', which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
-    file: 'routes/admin-communications.js',
+    file: 'services/scheduled-sms-cancel.js',
     snippet: 'const sentSibling = await trx(\'sms_log\')',
     reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
@@ -292,8 +292,13 @@ const ALLOWLIST = [
   },
   {
     file: 'services/call-commitments.js',
-    snippet: 'const text = await conn("sms_log as os")',
-    reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+    snippet: 'const row = await conn("sms_log as os")',
+    reason: 'humanTextTo: status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+  },
+  {
+    file: 'services/call-commitments.js',
+    snippet: 'const row = await conn("sms_log")',
+    reason: 'reportTextTo: status filtered to sent/delivered (provider-accepted) and message_type to service_report*, so an unresolved \'sending\' reservation cannot match.',
   },
   {
     file: 'services/call-recording-processor.js',
@@ -344,6 +349,11 @@ const ALLOWLIST = [
     file: 'services/dropped-call-sms.js',
     snippet: 'const row = await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
+  },
+  {
+    file: 'services/intelligence-bar/comms-tools.js',
+    snippet: 'const rows = await db(\'sms_log\')',
+    reason: 'status filtered to \'scheduled\', which excludes \'sending\' — an unresolved reservation cannot match (list_queued_messages lists future sends only).',
   },
   {
     file: 'services/intelligence-bar/comms-tools.js',
@@ -425,6 +435,11 @@ const ALLOWLIST = [
     file: 'services/review-ask-history.js',
     snippet: 'const rows = await db(\'sms_log\')',
     reason: 'deliberately includes in-flight review-ask/reply reservations as ask-spacing evidence (the REBUTTED FINDING note at the top of review-ask-reservation.js) — excluding them here would break the spacing guarantee this function exists to provide.',
+  },
+  {
+    file: 'services/review-ask-topic.js',
+    snippet: 'let rows = await db("sms_log")',
+    reason: 'inbound-only (direction: "inbound") — the customer\'s own texts as Day-0 topic evidence; a send reservation is always an outbound row.',
   },
   {
     file: 'services/review-request.js',
@@ -607,6 +622,16 @@ const ALLOWLIST = [
     file: 'services/reschedule-link-promises.js',
     snippet: 'const sms = await conn(\'sms_log\').where({ twilio_sid: row.provider_message_id }).first(\'id\', \'status\');',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
+  },
+  {
+    file: 'services/email-division/eligibility.js',
+    snippet: "const staffSms = await database('sms_log')",
+    reason: 'RECENT_HUMAN_CONTACT existence check (direction outbound, admin_user_id NOT NULL): deliberately includes an in-flight reservation — a staff-initiated send attempt IS evidence a human just reached out, whether or not the provider has confirmed delivery yet; over-suppression (holding the marketing email) is the safe direction here, unlike the message-history readers this guard protects.',
+  },
+  {
+    file: 'services/email-division/eligibility.js',
+    snippet: "const inboundSms = await database('sms_log')",
+    reason: 'RECENT_HUMAN_CONTACT existence check (direction inbound): an inbound row is the customer\'s own message and is never a send reservation (those are always outbound placeholders), so the exclusion cannot apply regardless.',
   },
 ];
 

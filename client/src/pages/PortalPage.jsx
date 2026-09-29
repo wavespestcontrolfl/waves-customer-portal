@@ -44,6 +44,8 @@ import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcas
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
+import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
+import useSheetViewport from '../hooks/useSheetViewport';
 import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
@@ -2715,6 +2717,23 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   }, [nextService, calendarWindowTick]);
   const nextServiceStatus = nextRead.error ? 'error' : nextRead.data ? 'ready' : 'loading';
   const [confirmingVisit, setConfirmingVisit] = useState(false);
+  // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): the sheet mounts
+  // as a separate component (VisitPrepPhotoSheet) rather than growing this
+  // file further — see its own header. The button only shows while the
+  // server's own eligibility says so (nextService.prepPhotos.eligible),
+  // never inferred client-side.
+  // The visit id the sheet was opened for, not a bare boolean: the sheet is
+  // open only while the card still shows THAT visit, so a refresh that
+  // drops it (A → none → B) can never reopen the sheet for B on its own
+  // (Codex #5306 r3 P2).
+  const [visitPrepSheetFor, setVisitPrepSheetFor] = useState(null);
+  // Forget it as soon as the card shows anything else, so even the same
+  // visit coming back after a gap does not reopen the sheet by itself.
+  useEffect(() => {
+    if (visitPrepSheetFor != null && String(nextService?.id ?? '') !== String(visitPrepSheetFor)) {
+      setVisitPrepSheetFor(null);
+    }
+  }, [nextService?.id, visitPrepSheetFor]);
   const [stats, setStats] = useState(null);
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
@@ -3184,6 +3203,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                   position: 'relative',
                 }}>Add to Calendar</button>
               )}
+              {/* GATE_VISIT_PREP_PHOTOS (dark): shown only when the server's
+                  own eligibility says this visit currently takes photos —
+                  the same rule the appointment page's own block uses. */}
+              {nextService.prepPhotos?.eligible && (
+                <button type="button" onClick={() => setVisitPrepSheetFor(nextService.id)} data-glass-accent="" style={{
+                  ...dashboardSecondaryButton,
+                  position: 'relative',
+                }}>Send photos</button>
+              )}
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
@@ -3201,6 +3229,21 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             </div>
           )}
         </section>}
+
+        {/* GATE_VISIT_PREP_PHOTOS (dark): fixed-position overlay, so its
+            place in the tree doesn't affect layout. `photosRemaining`
+            defaults to the form's own full allowance when the read hasn't
+            landed yet — VisitPrepPhotoForm re-derives the real cap from it,
+            and the button itself only shows once eligible is true. */}
+        {nextService && (
+          <VisitPrepPhotoSheet
+            open={visitPrepSheetFor != null && String(visitPrepSheetFor) === String(nextService.id)}
+            onClose={() => setVisitPrepSheetFor(null)}
+            scheduledServiceId={nextService.id}
+            photosRemaining={nextService.prepPhotos?.photosRemaining}
+            onSent={() => { void nextRead.refresh(); }}
+          />
+        )}
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div data-glass="chip" style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
@@ -14692,33 +14735,6 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // =========================================================================
 // NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
-// Keyboard opening can resize AND pan the visual viewport on iOS.
-function useSheetViewport(open, dialogRef) {
-  const [viewport, setViewport] = useState(null);
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!open || !vv) return undefined;
-    const update = () => setViewport({ height: Math.round(vv.height), top: Math.round(vv.offsetTop) });
-    update();
-    vv.addEventListener('resize', update);
-    vv.addEventListener('scroll', update);
-    return () => {
-      vv.removeEventListener('resize', update);
-      vv.removeEventListener('scroll', update);
-    };
-  }, [open]);
-  useEffect(() => {
-    if (!open || !viewport) return undefined;
-    const frame = requestAnimationFrame(() => {
-      const focused = document.activeElement;
-      if (dialogRef.current?.contains(focused) && focused.matches('input, textarea')) {
-        focused.scrollIntoView({ block: 'nearest' });
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [open, viewport?.height, viewport?.top, dialogRef]);
-  return viewport;
-}
 
 // My Property under a SECONDARY saved-property selection (GitHub codex r4
 // P1): the tab's facts, gate codes, pet plan, irrigation settings and access

@@ -5,6 +5,7 @@
 const { getNewsletterType, isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
 const { validateVoice } = require('../config/voice-profiles');
 const { containsAffiliateMaterial } = require('./content/content-guardrails');
+const { findUnverifiedClaims } = require('./email-division/fact-register');
 
 // Phrases the flagship draft is NOT allowed to make up. The events_raw
 // table doesn't store admission, and the newsletter is an events guide
@@ -131,6 +132,67 @@ function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
 }
 
 /**
+ * Email-division fact register: hard-block a small set of known-false or
+ * overreaching claim shapes (e.g. a storm-triggered "second" termite swarm
+ * — the September 2026 Pest Insider draft's actual error) that no UF/IFAS
+ * source in the register supports. Scans the same segments as the
+ * hallucinated-claim check, deduped by rule so one draft never reports the
+ * same claim twice.
+ */
+// Inline tags render with no gap: "pet-<strong>safe</strong>" reads
+// "pet-safe" to a subscriber, so the scan removes them without a space
+// (codex round 10 P1). Block-level closers and <br> end a sentence; any
+// other tag is a space.
+const BLOCK_BREAK_TAG = /<\/(?:p|li|h[1-6]|div|tr|td|th|blockquote|section|article|ul|ol|table)\s*>|<br\s*\/?>/gi;
+const INLINE_TAG = /<\/?(?:strong|em|b|i|u|s|span|a|mark|small|sup|sub|code|font|abbr|del|ins|q|cite|time|label)\b[^>]*>/gi;
+// Markdown emphasis in text_body: "pet-**safe**", "sec*ond*", "_pet_-safe",
+// "`safe`". An asterisk touching a letter or digit is emphasis even inside
+// a word; an underscore is a marker only where it opens or closes a word,
+// so snake_case identifiers and URL underscores are left alone.
+const MARKDOWN_PAIR = /\*\*|__|~~|`/g;
+const MARKDOWN_SINGLE = /(?<=[\p{L}\p{N}])\*+|\*+(?=[\p{L}\p{N}])|(?<![\p{L}\p{N}])_+(?=[\p{L}\p{N}])|(?<=[\p{L}\p{N}])_+(?![\p{L}\p{N}])/gu;
+
+function claimScanText(body) {
+  return decodeEntities(String(body)
+    .replace(BLOCK_BREAK_TAG, '. ')
+    .replace(INLINE_TAG, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(?:rsquo|lsquo|#8217|#8216);/gi, "'")
+    .replace(/&(?:rdquo|ldquo|#8221|#8220);/gi, '"'))
+    .normalize('NFKC')
+    .replace(MARKDOWN_PAIR, '')
+    .replace(MARKDOWN_SINGLE, '');
+}
+
+function scanUnverifiedClaims(send) {
+  const errors = [];
+  const seen = new Set();
+  // subject_b is what variant-B recipients actually see, so it is scanned
+  // like the subject.
+  for (const body of [send.subject, send.subject_b, send.preview_text, send.html_body, send.text_body]) {
+    if (!body) continue;
+    // Block-level tags end a sentence (a heading glued to the paragraph
+    // under it must not read as one sentence — the register's denial
+    // windows are sentence- and clause-bound); inline tags vanish; every
+    // other tag is a space. Then the same normalisation as the
+    // hallucinated-claim scan: an entity-encoded or homoglyph "&#115;econd"
+    // / "ｓecond swarm" / "don&rsquo;t" renders as the claim to subscribers
+    // and must not slip past the rules; Markdown emphasis markers go too.
+    const bodyText = claimScanText(body);
+    // The Pest Insider is all treatment copy; the weekly events guide is
+    // not, so its safety/re-entry rules apply only to sentences about a
+    // treatment (codex round 15 P1) — the pest-fact rules apply in full.
+    const treatmentContextOnly = send.newsletter_type !== 'pest-insider-monthly';
+    for (const { rule, excerpt } of findUnverifiedClaims(bodyText, { treatmentContextOnly })) {
+      if (seen.has(rule)) continue;
+      seen.add(rule);
+      errors.push(`Unverified claim (${rule}): "${excerpt}" — not supported by the email-division fact register (server/services/email-division/fact-register.js)`);
+    }
+  }
+  return errors;
+}
+
+/**
  * Fetch the DB-locked price strings for a send's own lineup — the only
  * strings the claim scan may excise. Callers pass the result as
  * opts.lockedPrices; fail-open to [] (scan stays maximally strict).
@@ -208,9 +270,21 @@ function validateNewsletterDraft(send, opts = {}) {
         if (!claimSeen.has(err)) { claimSeen.add(err); errors.push(err); }
       }
     };
-    scanSegment([send.subject, send.preview_text].filter(Boolean).join('\n'), [], 'none');
+    scanSegment([send.subject, send.subject_b, send.preview_text].filter(Boolean).join('\n'), [], 'none');
     scanSegment(send.html_body, opts.lockedPrices || [], 'html');
     scanSegment(send.text_body, opts.lockedPrices || [], 'text');
+
+    // The register's rules are the Pest Insider's grounding: the weekly
+
+    // events flagship keeps its own claim patterns (an event blurb saying
+
+    // "family-safe fun" is not a pesticide claim and must not hold the week).
+
+    // Every claim-validated type: the weekly flagship sources the same
+    // register facts as the Pest Insider now, and the safety / re-entry /
+    // second-swarm rules are AGENTS.md rules for all customer copy
+    // (pre-push audit P1 on e0dd938596).
+    errors.push(...scanUnverifiedClaims(send));
   }
 
   // Affiliate links are WEB-ONLY (owner monetization pilot 2026-08-31: the
@@ -220,7 +294,7 @@ function validateNewsletterDraft(send, opts = {}) {
   // Scanned on EVERY newsletter type, manual included — no legitimate send
   // carries an affiliate/tracking URL.
   for (const [segment, label] of [
-    [send.subject, 'subject'], [send.preview_text, 'preview text'],
+    [send.subject, 'subject'], [send.subject_b, 'subject B'], [send.preview_text, 'preview text'],
     [send.html_body, 'HTML body'], [send.text_body, 'plain-text body'],
   ]) {
     if (segment && containsAffiliateMaterial(segment)) {

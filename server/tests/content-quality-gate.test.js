@@ -61,6 +61,20 @@ describe('hard checks: schema/canonical/indexable', () => {
   test('schema_valid fails without schema', () => {
     expect(checkSchemaValid({}).ok).toBe(false);
   });
+  test('schema_valid passes a refresh: its schema is frozen to the live page, the draft\'s never publishes', () => {
+    // prod run b48a687d: a refresh hard-failed no_schema_block over a field
+    // publishRefresh never reads.
+    expect(checkSchemaValid({ frontmatter: { schema_types: ['Article'] } }, { action_type: 'refresh_existing_page' }))
+      .toEqual({ ok: true, reason: 'refresh_schema_frozen_to_live_page' });
+    expect(checkSchemaValid({}, { action_type: 'new_supporting_blog' }).ok).toBe(false);
+    // Wired through evaluate(): every check receives the brief.
+    const gate = require('../services/content/content-quality-gate');
+    const draft = { url: '/pest-control/signs-of-termites/', body: 'Refreshed guidance about termite signs.', frontmatter: {} };
+    expect(gate.evaluate(draft, { action_type: 'refresh_existing_page', page_type: 'refresh' }, {}).checks.schema_valid)
+      .toMatchObject({ ok: true, reason: 'refresh_schema_frozen_to_live_page' });
+    expect(gate.evaluate(draft, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' }, {}).checks.schema_valid)
+      .toMatchObject({ ok: false, reason: 'no_schema_block' });
+  });
   test('title_meta_spam_free hard-fails stuffed title patterns', () => {
     const result = checkTitleMetaSpamFree({
       title: 'Pest Control Near Me in Anna Maria, FL | THE BEST Pest Control Anna Maria, FL | Top-Rated Exterminator Near Me',
@@ -663,8 +677,12 @@ describe('evaluate (full gate)', () => {
         // Realistic capitalization density: a two-sentence all-lowercase-ish
         // body dips under the redactor's effectively-lowercase threshold and
         // trips the (correct) pii_confidence_low hard fail — real drafts are
-        // article-length with headings and proper nouns.
-        body: 'A termite swarm means a mature colony is nearby — here is how to identify one fast. Swarmers in Southwest Florida usually appear after warm spring rain, and Sarasota homes see them first.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
+        // article-length with headings and proper nouns. Leads with the
+        // required verdict box (owner ruling 2026-09-28, C2: every
+        // customer-question draft opens on BottomLineBox, not a plain
+        // paragraph) — its own text still satisfies answer_in_first_paragraph
+        // (matches the brief's "termite"/"swarm" keywords).
+        body: '<BottomLineBox verdict="Yes — a termite swarm means a mature colony is nearby." recommendation="Photograph what you are seeing and call a licensed inspector before more swarmers appear." />\n\nSwarmers in Southwest Florida usually appear after warm spring rain, and Sarasota homes see them first.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
       }),
       brief({ page_type: 'customer-question' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }
@@ -1363,5 +1381,533 @@ describe('the stand-in city link must match the brief CITY too', () => {
     expect(cityServiceRoute('tree-shrub', 'Lakewood Ranch')).toBe('/tree-and-shrub-care-lakewood-ranch-fl/');
     expect(cityServiceRoute('lawn', null)).toBeNull();
     expect(cityServiceRoute('specialty', 'Sarasota')).toBeNull(); // no city-service slug
+  });
+});
+
+// ── citability nudges (supporting-blog, weight 0) ────────────────────
+
+describe('citability nudges (weight-0, signal-only)', () => {
+  const {
+    checkCitabilityNamedSources, checkCitabilityConcreteSpecifics,
+    checkCitabilityComparison, checkCitabilityHowToChoose, countConcreteSpecifics,
+    PAGE_TYPE_CHECKS,
+  } = require('../services/content/content-quality-gate')._internals;
+
+  test('all four are registered on supporting-blog as weight-0 soft checks (threshold unchanged at 51)', () => {
+    const names = ['citability_named_sources', 'citability_concrete_specifics', 'citability_comparison', 'citability_how_to_choose'];
+    for (const name of names) {
+      const c = PAGE_TYPE_CHECKS['supporting-blog'].find((x) => x.name === name);
+      expect(c).toBeDefined();
+      expect(c.weight).toBe(0);
+      expect(c.isHard).toBeFalsy();
+    }
+    expect(MIN_TOTAL_SCORES['supporting-blog']).toBe(51);
+  });
+
+  test('blog refreshes receive the same optional signals while page refreshes no-op', () => {
+    const names = ['citability_named_sources', 'citability_concrete_specifics', 'citability_comparison', 'citability_how_to_choose'];
+    for (const name of names) {
+      const check = PAGE_TYPE_CHECKS.refresh.find((entry) => entry.name === name);
+      expect(check).toMatchObject({ weight: 0 });
+      expect(check.isHard).toBeFalsy();
+      expect(check.evaluate({ body: 'During summer.' }, { target_page_type: 'page' }, {}))
+        .toEqual({ ok: true, reason: 'non_blog_target' });
+    }
+    expect(checkCitabilityConcreteSpecifics(
+      { body: 'During summer.' },
+      { target_page_type: 'supporting-blog' },
+      { previousVersion: { body: 'Wait 14 days.' } },
+    )).toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+  });
+
+  test('named_sources passes on a specific authority, fails on "experts say"', () => {
+    expect(checkCitabilityNamedSources({ body: 'Per UF/IFAS, chinch bugs peak in dry heat.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Read the product label before applying any bait.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Sarasota County Mosquito Management reports peaks after rain events.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The CDC recommends draining standing water weekly.' }).ok).toBe(true);
+    const r = checkCitabilityNamedSources({ body: 'Experts say chinch bugs are bad. Studies show they like heat.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('no_named_source_attribution');
+  });
+
+  test('named_sources recognizes any attributed proper-noun source, never our own company', () => {
+    expect(checkCitabilityNamedSources({ body: 'According to the Florida Forest Service, drought raises fire risk.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Florida Forest Service reports drought raises fire risk.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Mote Marine Laboratory recommends checking current red-tide reports.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Rainfall totals, per NOAA, ran above normal.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Data from Mote Marine Laboratory shows red tide peaks in fall.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Texas A&M University Extension notes fire ants mound after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to Cornell University, fire ants mound after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the University of Miami, rainfall was above normal.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Ohio State University Extension reports that ants mound after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to Waves Pest Control, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to WAVES PEST CONTROL, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to The Waves Pest Control, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to THE WAVES PEST CONTROL, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Leading Experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Industry Research, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Research, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the National Pest Management Association, ants are common.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Florida Pest Management Association reports ant activity changes after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Per NPMA, ant activity changes after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Pest Control Association, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Pest Professionals, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Pest Control Experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Local Department, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'The Pest Control Association reports ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the County Program, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Trusted Science Institute, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Sarasota County Program, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Local University Extension, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to This Article, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Our Guide, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Homeowners, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'Homeowners report ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'The Waves Pest Control reports ants are common.' }).ok).toBe(false);
+    // Our own service name is not an authority; a county program or district is.
+    expect(checkCitabilityNamedSources({ body: '## Mosquito Control in Venice\nWe treat yards monthly.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'The Manatee County Mosquito Control District reports aerial spray dates.' }).ok).toBe(true);
+    // Linked / emphasized sources read as their visible text (Codex r5 P2).
+    expect(checkCitabilityNamedSources({ body: 'According to [UF/IFAS](https://edis.ifas.ufl.edu/x), chinch bugs peak in May.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: '[UF/IFAS](https://edis.ifas.ufl.edu/x) recommends mowing at 4 inches.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The **CDC** recommends draining water; <a href="https://cdc.gov">CDC</a> data agrees.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Per [Mote Marine Laboratory](https://mote.org), red tide peaks in fall.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Use an [EPA](https://epa.gov)-registered product.' }).ok).toBe(false);
+    // A bare authority mention is not attribution (Codex P2, 2026-09-26).
+    expect(checkCitabilityNamedSources({ body: 'Use an EPA-registered product. We follow FDACS licensing.' }).ok).toBe(false);
+  });
+
+  test('concrete_specifics counts numbers with units, ignores dollars, years, and bare counts', () => {
+    expect(countConcreteSpecifics('Mow St. Augustine at 3.5–4 inches and water 1/2 inch per week; wait 10-14 days between applications.')).toBe(3);
+    expect(countConcreteSpecifics('It costs $120 and we were founded in 2024; here are 3 ways.')).toBe(0);
+    expect(countConcreteSpecifics('Plans cost $1,200 per year or $2,400–$3,000 per acre.')).toBe(0);
+    expect(countConcreteSpecifics('Plans cost $1,200 and include 3 visits per year.')).toBe(1);
+    // '%' is not a word char, so a trailing \b after it never matched (fallback auditor P2, 2026-09-25).
+    expect(countConcreteSpecifics('Chinch bug damage covered 20% of the lawn and 35 % of the swale.')).toBe(2);
+    expect(countConcreteSpecifics('The active window runs June 1 – Sept 30.')).toBe(1);
+    expect(countConcreteSpecifics('Use a 14-day interval, keep a 3.5-inch height, and wait 30-minutes.')).toBe(3);
+  });
+
+  test('concrete_specifics is not a quota: one supported number passes, a vague stand-in with none fails', () => {
+    expect(checkCitabilityConcreteSpecifics({ body: 'Reapply in 6 weeks.' }).ok).toBe(true);
+    // No measurement and no softening — nothing visible to nudge on.
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mud daubers are solitary wasps that rarely sting.' }).ok).toBe(true);
+    const r = checkCitabilityConcreteSpecifics({ body: 'Mow tall. Water deeply. Reapply in a few weeks.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^vague_qualifier_without_measurement:/);
+    expect(checkCitabilityConcreteSpecifics({ body: 'Use a spring trap; damaged branches fall after storms.' }).ok).toBe(true);
+    expect(checkCitabilityConcreteSpecifics({ body: 'Treat every spring when pressure rises.' }).reason)
+      .toBe('vague_qualifier_without_measurement:every spring');
+  });
+
+  test('concrete_specifics on refresh: dropping measurements the prior page stated is a nudge', () => {
+    const prev = { body: 'Mow at 4 inches. Water 30 minutes. Reapply in 6 weeks.' };
+    const r = checkCitabilityConcreteSpecifics({ body: 'Mow at 4 inches. Water well.' }, {}, { previousVersion: prev });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('refresh_dropped_measurements_3_to_1');
+    expect(checkCitabilityConcreteSpecifics({ body: `${prev.body} Wait 2 days after rain.` }, {}, { previousVersion: prev }).ok).toBe(true);
+    const calendar = { body: 'Treatment season runs June 1 – Sept 30.' };
+    const softened = checkCitabilityConcreteSpecifics({ body: 'Treatment season runs in summer.' }, {}, { previousVersion: calendar });
+    expect(softened).toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+  });
+
+  test('concrete_specifics on refresh compares each prior measurement, not the total count (Codex r4 P2)', () => {
+    const prev = { body: 'Mow at 4 inches and wait 10–14 days.' };
+    // Same count, but a retained value repeated in place of the dropped one.
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mow at 4 inches. Keep it at 4 inches.' }, {}, { previousVersion: prev }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_2_to_1' });
+    // Same count, but an unrelated new number in place of the dropped one.
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mow at 4 inches and water 30 minutes.' }, {}, { previousVersion: prev }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_2_to_1' });
+    // Rephrased units and range dashes still count as the same value.
+    expect(checkCitabilityConcreteSpecifics(
+      { body: 'Use a 4-inch mowing height and a 10-14 day wait. Season runs June 1 to September 30th.' },
+      {},
+      { previousVersion: { body: 'Mow at 4 inches, wait 10–14 days. Season runs Jun 1 – Sept 30.' } },
+    )).toEqual({ ok: true });
+  });
+
+  test('named_sources accepts specific centers, surveys, and clinics but not generic ones (Codex r4 P2)', () => {
+    expect(checkCitabilityNamedSources({ body: 'According to the National Hurricane Center, storms peak in September.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the U.S. Geological Survey, the aquifer sits close to the surface.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Per USGS, the aquifer sits close to the surface.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Mayo Clinic notes that stings can cause reactions.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the Research Center, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Local Health Clinic, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the County Hospital, ants are common.' }).ok).toBe(false);
+    // Unnamed institutional placeholders (5013 Codex r2 P2) stay unnamed.
+    expect(checkCitabilityNamedSources({ body: 'According to Trusted Research Institute, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Leading Industry Association, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Government Agency, ants are common.' }).ok).toBe(false);
+  });
+
+  test('fractional measurements compare as whole values; organizations and institutions count as named (Codex r5 P2)', () => {
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 3/2 inch per week.' }, {}, { previousVersion: { body: 'Water 1/2 inch per week.' } }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 1/2 inch each week.' }, {}, { previousVersion: { body: 'Water 1/2 inch per week.' } }))
+      .toEqual({ ok: true });
+    expect(checkCitabilityNamedSources({ body: 'According to the World Health Organization, dengue cases rose.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the Smithsonian Institution, termites swarm in spring.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the Local Health Organization, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Organization, ants are common.' }).ok).toBe(false);
+  });
+
+  test('comma-grouped and mixed-fraction measurements compare whole (Codex r6 P2)', () => {
+    expect(checkCitabilityConcreteSpecifics({ body: 'Covers 2,000 square feet.' }, {}, { previousVersion: { body: 'Covers 1,000 square feet.' } }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mow at 4 1/2 inches.' }, {}, { previousVersion: { body: 'Mow at 3 1/2 inches.' } }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics(
+      { body: 'Covers 1000 square feet; mow at 3 1/2 inches.' },
+      {},
+      { previousVersion: { body: 'Covers 1,000 sq ft; mow at 3 1/2 inches.' } },
+    )).toEqual({ ok: true });
+  });
+
+  test('unquoted attribute values are not rendered measurements (Codex r6 P2)', () => {
+    for (const body of [
+      '<aside aria-label=Recheck-in-14-days>During summer.</aside>',
+      '<aside aria-label="Recheck-in-14-days">During summer.</aside>',
+    ]) {
+      expect(checkCitabilityConcreteSpecifics({ body })).toEqual({ ok: false, reason: 'vague_qualifier_without_measurement:during summer' });
+    }
+  });
+
+  test('how_to_choose accepts noun-phrase conditions ahead of an arrow (Codex r6 P2)', () => {
+    const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- Active mud tubes → choose liquid\n- Recurring activity → use bait\n- A pending sale -> schedule an inspection` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- Inspect the area\n- Apply bait\n- Recheck the trail` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
+  });
+
+  test('a refresh reads the frozen live post_type, not the agent frontmatter (Codex r6 P2)', () => {
+    const draft = { title: 'Termite Treatment Costs in Bradenton', frontmatter: {}, body: '## Overview\nText.' };
+    const context = { previousVersion: { body: 'Prior.', frontmatter: { post_type: 'cost' } } };
+    expect(checkCitabilityComparison(draft, {}, context)).toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+    expect(checkCitabilityHowToChoose(draft, {}, context)).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+    const changed = { ...draft, frontmatter: { post_type: 'guide' } };
+    expect(checkCitabilityComparison(changed, {}, context).ok).toBe(false);
+    expect(checkCitabilityComparison(draft, {}, {})).toEqual({ ok: true, reason: 'no_choice_framed' });
+  });
+
+  test('measurement keys keep the trailing cadence (Codex r7 P2)', () => {
+    const prev = (body) => ({ previousVersion: { body } });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 1 inch per month.' }, {}, prev('Water 1 inch per week.')))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Apply 3 treatments per month.' }, {}, prev('Apply 3 treatments per year.')))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 1 inch.' }, {}, prev('Water 1 inch per week.')))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 1/2 inch each week.' }, {}, prev('Water 1/2 inch per week.')))
+      .toEqual({ ok: true });
+    expect(countConcreteSpecifics('Water 1 inch per week and 2 ounces per application.')).toBe(2);
+  });
+
+  test('legacy .md refresh targets get no ComparisonTable signal (Codex r7 P2)', () => {
+    const draft = { title: 'Bait vs. Spray for Ghost Ants', body: '## Overview\nText.' };
+    expect(checkCitabilityComparison(draft, { target_file_path: 'src/content/blog/ghost-ants.md' }))
+      .toEqual({ ok: true, reason: 'markdown_only_post_cannot_carry_ComparisonTable' });
+    expect(checkCitabilityComparison(draft, { target_file_path: 'src/content/blog/ghost-ants.mdx' }))
+      .toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+    expect(checkCitabilityComparison(draft, {})).toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+  });
+
+  test('choice framing reads rendered heading text only (Codex r4 P2)', () => {
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## [Related guide](/bait-vs-spray/)\nText.' }))
+      .toEqual({ ok: true, reason: 'no_choice_framed' });
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## [Bait or spray?](/bait-or-spray/)\nText.' }).ok).toBe(false);
+    const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
+    const bullets = '- If A → B\n- If C → D\n- If E → F';
+    expect(checkCitabilityHowToChoose({ body: `${table}## [Overview](/guide/ "How to choose")\n${bullets}` }))
+      .toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## [How to choose](/guide/)\n${bullets}` }).ok).toBe(true);
+  });
+
+  test('"which is better" and "which … should you choose" headings frame a choice (5013 Codex r1/r2 P2)', () => {
+    for (const heading of [
+      '## Which is better: bait or spray?',
+      '## Which works better, bait or spray?',
+      '## Which termite treatment should you choose?',
+      '## Which of these options is best for a slab home?',
+    ]) {
+      expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: `${heading}\nText.` }).reason)
+        .toBe('choice_framed_without_ComparisonTable');
+    }
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Which ants bite?\nText.' }).reason)
+      .toBe('no_choice_framed');
+  });
+
+  test('a seasonal word with no measurement is a vague-qualifier nudge; a calendar window satisfies it (5013 Codex r2 P2)', () => {
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mosquitoes peak in summer.' }).reason)
+      .toBe('vague_qualifier_without_measurement:in summer');
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mosquitoes peak in summer, roughly June 1 – Sept 30.' }).ok).toBe(true);
+  });
+
+  test('comparison: a post that frames no choice passes without a table', () => {
+    const r = checkCitabilityComparison({ title: 'Do Mud Daubers Sting?', body: '## What they are\nMud daubers are solitary wasps. DIY removal is fine.' });
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBe('no_choice_framed');
+  });
+
+  test('comparison: a choice framed in the title or a heading needs a ComparisonTable', () => {
+    const noTable = { title: 'Mosquito Misting vs. Barrier Treatment', body: '## Which one is right\nText.' };
+    expect(checkCitabilityComparison(noTable).ok).toBe(false);
+    expect(checkCitabilityComparison(noTable).reason).toBe('choice_framed_without_ComparisonTable');
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray?\nText.' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray: which works?\nText.' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray\nText.' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title: 'DIY or call a professional', body: '## Overview\nText.' }).ok).toBe(false);
+    const withTable = { ...noTable, body: '<ComparisonTable columns={["What to weigh","Misting","Barrier"]} rows={[]} />' };
+    expect(checkCitabilityComparison(withTable).ok).toBe(true);
+  });
+
+  test('comparison + how_to_choose apply by post_type for decision / comparison / cost posts', () => {
+    const draft = { title: 'Termite Bait or Liquid Treatment', frontmatter: { post_type: 'decision' }, body: '## Overview\nText.' };
+    expect(checkCitabilityComparison(draft).ok).toBe(false);
+    expect(checkCitabilityHowToChoose(draft).ok).toBe(false);
+    expect(checkCitabilityHowToChoose(draft).reason).toBe('no_how_to_choose_section');
+    const fixed = { ...draft, body: '<ComparisonTable columns={["a","b"]} rows={[]} />\n\n## How to choose between bait and liquid\n- If you see mud tubes → liquid.\n- If the slab is inaccessible → bait.\n- If a sale is pending → liquid for the WDO clearance.' };
+    expect(checkCitabilityComparison(fixed).ok).toBe(true);
+    expect(checkCitabilityHowToChoose(fixed).ok).toBe(true);
+  });
+
+  test('how_to_choose: not applicable without a table on a non-choice post; a table alone triggers it', () => {
+    const plain = { frontmatter: { post_type: 'diagnostic' }, body: '## Signs\n- Frass\n- Wings' };
+    expect(checkCitabilityHowToChoose(plain).ok).toBe(true);
+    expect(checkCitabilityHowToChoose(plain).reason).toBe('no_comparison_to_choose_from');
+    const tableOnly = { frontmatter: { post_type: 'diagnostic' }, body: '<ComparisonTable columns={["a"]} rows={[]} />\n## Next steps\nText.' };
+    expect(checkCitabilityHowToChoose(tableOnly).ok).toBe(false);
+    const withHeading = { ...tableOnly, body: `${tableOnly.body}\n## Which option fits your situation\n- If X → Y\n- If Z → W\n- If Q → R` };
+    expect(checkCitabilityHowToChoose(withHeading).ok).toBe(true);
+  });
+
+  test('how_to_choose reports alongside comparison as soon as the post frames a choice', () => {
+    const draft = { frontmatter: { post_type: 'diagnostic' }, body: '## Bait vs spray\nPlain prose.' };
+    expect(checkCitabilityComparison(draft)).toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+    expect(checkCitabilityHowToChoose(draft)).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+  });
+
+  test('how_to_choose requires an H2 with 3+ criteria — not an H3, not prose (Codex P2)', () => {
+    const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
+    const bullets = '- If A → B\n- If C → D\n- If E → F';
+    const h3 = checkCitabilityHowToChoose({ body: `${table}### How to choose\n${bullets}` });
+    expect(h3).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+    const prose = checkCitabilityHowToChoose({ body: `${table}## How to choose\nPick what fits.\n## FAQ\n- a\n- b\n- c` });
+    expect(prose).toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
+    const six = checkCitabilityHowToChoose({ body: `${table}## How to choose\n${bullets}\n- If G → H\n- If I → J\n- If K → L` });
+    expect(six).toEqual({ ok: false, reason: 'how_to_choose_has_6_criteria_max_5' });
+    // Nested explanation bullets are not criteria (Codex r7 P2).
+    const nested = checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → B\n  - because X\n  - and Y` });
+    expect(nested).toEqual({ ok: false, reason: 'how_to_choose_has_1_criteria_need_3+' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → B\n  - because X\n- If C → D\n- If E → F\n  1. detail` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- **If you see mud tubes** → call for an inspection\n- [When activity continues](/pest-control-services/) → choose professional service\n- *For a single visible ant* → use the identification guide` }).ok).toBe(true);
+    // H3 subsections inside the H2 stay part of it.
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n### Signs\n${bullets}` }).ok).toBe(true);
+    const numbered = checkCitabilityHowToChoose({ body: `${table}## How to choose\n1. Inspect the area\n2. Apply bait\n3. Recheck the trail` });
+    expect(numbered).toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
+    const procedural = checkCitabilityHowToChoose({ body: `${table}## How to choose\n- Inspect the area\n- Apply bait\n- Recheck the trail` });
+    expect(procedural).toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
+  });
+
+  test('evaluate(): citability misses surface in soft_failures but never change ok/score', () => {
+    const r = evaluate(
+      fullDraft({
+        title: 'Bait vs. Spray for Ghost Ants in Bradenton',
+        body: 'Ghost ants trail after afternoon storms in Bradenton and Sarasota. Experts say they like moisture. See our [pest control services](/pest-control-services/) for treatment options. You should watch your sink area; your lanai too; you can wait a few weeks and you will see them again.\n\nFAQ\n- Do they bite?\n- No.',
+      }),
+      brief({ page_type: 'supporting-blog' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    expect(r.hard_failures).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.total_score).toBe(57);
+    const softNames = r.soft_failures.map((f) => f.name);
+    expect(softNames).toEqual(expect.arrayContaining([
+      'citability_named_sources', 'citability_concrete_specifics', 'citability_comparison', 'citability_how_to_choose',
+    ]));
+  });
+});
+
+describe('citability rendered component and Markdown projection', () => {
+  const {
+    checkCitabilityNamedSources, checkCitabilityConcreteSpecifics,
+    checkCitabilityComparison, checkCitabilityHowToChoose, countConcreteSpecifics,
+  } = require('../services/content/content-quality-gate')._internals;
+
+  test('approved visible component fields count while config and excess cells do not', () => {
+    expect(checkCitabilityNamedSources({ body: '<ComparisonTable caption="According to UF/IFAS, timing varies." columns={["Step","Timing"]} rows={[]} />' }).ok).toBe(true);
+    expect(checkCitabilityConcreteSpecifics({ body: '<BottomLineBox verdict="Keep clear" recommendation="Maintain a 10-foot buffer." />' }).ok).toBe(true);
+    expect(checkCitabilityConcreteSpecifics({ body: '<PestEvidenceGrid items={[{ label: "Roots", note: "Larvae stay 3 inches deep." }]} />' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: '<SeasonalPressureChart caption="According to UF/IFAS, activity peaks after rain." />' }).ok).toBe(true);
+    expect(checkCitabilityConcreteSpecifics({ body: '<ComparisonTable columns={["Step","Timing"]} rows={[{ label: "Recheck", values: ["Varies", "10–14 days"] }]} />' }).ok).toBe(true);
+    expect(checkCitabilityConcreteSpecifics({ body: '<ComparisonTable columns={["Step","Option A","Option B"]} rows={[{ label: "Recheck", values: ["Varies", "10–14 days", "30 days"] }]} />' }, {}, { previousVersion: { body: 'Recheck in 10–14 days.' } }).ok).toBe(true);
+    expect(checkCitabilityConcreteSpecifics({ body: '<aside aria-label="Recheck in 10–14 days">During summer.</aside>' }, {}, { previousVersion: { body: 'Recheck in 10–14 days.' } }).ok).toBe(false);
+  });
+
+  test('component props cannot fabricate Markdown structure and hidden JSX does not project', () => {
+    const structuredProp = '<ComparisonTable columns={["## How to choose\\n- If A → B\\n- If C → D\\n- If E → F","Option"]} rows={[{ label: "Signal", values: ["Choice"] }]} />';
+    expect(checkCitabilityHowToChoose({ body: structuredProp })).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+    expect(checkCitabilityNamedSources({ body: '<comparisontable caption="According to UF/IFAS, timing varies." />' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: '{false && <ComparisonTable columns={["A","B"]} rows={[]} caption="According to UF/IFAS, timing varies." />}' }).ok).toBe(false);
+  });
+
+  test('Markdown destinations do not count as measurements', () => {
+    expect(countConcreteSpecifics('[Read the guide](https://example.com/recheck-in-14-days)')).toBe(0);
+    expect(checkCitabilityConcreteSpecifics({
+      body: '[Read the guide](https://example.com/recheck-in-14-days)\n[guide]: https://example.com/recheck-in-21-days\n![chart](https://example.com/30-days.png)\nDuring summer',
+    }).ok).toBe(false);
+  });
+
+  test('named publications count but generic research filler does not', () => {
+    for (const source of ['the Journal of Medical Entomology', 'Nature', 'Consumer Reports']) {
+      expect(checkCitabilityNamedSources({ body: `According to ${source}, mosquito activity changes.` }).ok).toBe(true);
+    }
+    expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Research, mosquito activity changes.' }).ok).toBe(false);
+  });
+
+  test('zero-to-three-space headings frame choices and delimit how-to sections', () => {
+    const table = '<ComparisonTable columns={["Factor","A"]} rows={[]} />\n';
+    expect(checkCitabilityComparison({ body: '  ## Bait or spray\nText.' }).ok).toBe(false);
+    expect(checkCitabilityHowToChoose({ body: `${table}  ## How to choose\n- If A → choose A\n- When B → use B\n- For C → call C` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}  ## How to choose\n- If A → choose A\n  ## Another section\n- When B → use B\n- For C → call C` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_1_criteria_need_3+' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n  - If A → choose A\n  - When B → use B\n- For C → call C\n- With D → pick D` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n - When B → use B\n- For C → call C` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n  - When B → use B\n- For C → call C` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_2_criteria_need_3+' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n - When B → use B\n  - For C → call C` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n - If A → choose A\n  - When B → use B\n   - For C → call C` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n - When B → use B\n   - For C → call C` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_2_criteria_need_3+' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n   - When B → use B\n- For C → call C` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_2_criteria_need_3+' });
+  });
+});
+
+describe('citability checks read rendered Markdown only (Codex r8 P2)', () => {
+  const { checkCitabilityComparison, checkCitabilityHowToChoose, checkCitabilityNamedSources } = require('../services/content/content-quality-gate')._internals;
+  test.each([
+    'Ants trail. <!-- Per UF/IFAS, ants trail. -->',
+    'Ants trail. {/* Per UF/IFAS, ants trail. */}',
+    'Ants trail. `Per UF/IFAS, ants trail.`',
+  ])('hidden attribution beside visible prose cannot close a source gap: %s', body => {
+    expect(checkCitabilityNamedSources({ body }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: `${body} Per UF/IFAS, ants trail after rain.` }).ok).toBe(true);
+  });
+  test('a ComparisonTable in a code fence or comment does not count', () => {
+    const title = 'Bait vs. Spray';
+    expect(checkCitabilityComparison({ title, body: '```mdx\n<ComparisonTable columns={[]} rows={[]} />\n```' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title, body: '{/* <ComparisonTable columns={[]} rows={[]} /> */}' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title, body: '<!-- <ComparisonTable columns={[]} rows={[]} /> -->' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title, body: '<ComparisonTable columns={[]} rows={[]} />' }).ok).toBe(true);
+  });
+  test('fenced how-to headings/bullets and commented attributions do not count', () => {
+    const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
+    expect(checkCitabilityHowToChoose({ body: `${table}\`\`\`md\n## How to choose\n- a\n- b\n- c\n\`\`\`` }).reason).toBe('no_how_to_choose_section');
+    expect(checkCitabilityNamedSources({ body: '<!-- Per UF/IFAS, ants trail. -->\nAnts trail after rain.' }).ok).toBe(false);
+  });
+  test('definitely hidden containers and tag attributes cannot satisfy citability checks', () => {
+    expect(checkCitabilityNamedSources({ body: '<div hidden>According to UF/IFAS, ants trail after rain.</div>' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: '<aside aria-label="According to UF/IFAS">Ants trail after rain.</aside>' }).ok).toBe(false);
+    expect(checkCitabilityComparison({
+      title: 'Bait vs spray',
+      body: '<div style="display:none"><ComparisonTable columns={["Bait","Spray"]} rows={[]} /></div>',
+    }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({
+      body: '<div style="display:block">According to UF/IFAS, ants trail after rain.</div>',
+    }).ok).toBe(true);
+  });
+});
+
+describe('citability backfill completion (refresh, weight-0 hard)', () => {
+  const {
+    checkCitabilityBackfillGapsCleared, checkImprovementOverPrior, isCitabilityBackfillBrief, PAGE_TYPE_CHECKS,
+  } = require('../services/content/content-quality-gate')._internals;
+  const backfill = (gaps, extra = {}) => ({ target_page_type: 'supporting-blog', ...extra, gsc_signal: { bucket: 'citability_backfill', citability_gaps: gaps } });
+  const prior = { previousVersion: { body: 'Experts say ants trail after rain. Water deeply.' } };
+  const table = '<ComparisonTable columns={["a","b"]} rows={[]} />';
+  const howTo = '## How to choose\n- If A → choose B\n- If C → choose D\n- If E → choose F';
+
+  test('registered on refresh as a weight-0 HARD check; refresh threshold unchanged', () => {
+    const c = PAGE_TYPE_CHECKS.refresh.find((x) => x.name === 'citability_backfill_gaps_cleared');
+    expect(c).toMatchObject({ weight: 0, isHard: true });
+    expect(MIN_TOTAL_SCORES.refresh).toBe(47);
+    expect(PAGE_TYPE_CHECKS['supporting-blog'].some((x) => x.name === 'citability_backfill_gaps_cleared')).toBe(false);
+  });
+
+  test('non-backfill and non-blog briefs are untouched', () => {
+    expect(isCitabilityBackfillBrief({ gsc_signal: { bucket: 'citability_backfill', citability_gaps: [] } })).toBe(false);
+    expect(checkCitabilityBackfillGapsCleared({ body: 'x' }, {}, {})).toEqual({ ok: true, reason: 'not_citability_backfill' });
+    expect(checkCitabilityBackfillGapsCleared({ body: 'x' }, backfill(['named_sources'], { target_page_type: 'page' }), {}))
+      .toEqual({ ok: true, reason: 'non_blog_target' });
+  });
+
+  test('an unresolved planned gap fails; clearing every planned gap passes', () => {
+    const r = checkCitabilityBackfillGapsCleared({ body: 'Experts say ants trail after rain. Water 1/2 inch per week.' }, backfill(['named_sources', 'concrete_specifics']), prior);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^planned_gaps_unresolved:named_sources\(no_named_source_attribution\)$/);
+    const fixed = checkCitabilityBackfillGapsCleared({ body: 'Per UF/IFAS, ants trail after rain. Water 1/2 inch per week.' }, backfill(['named_sources', 'concrete_specifics']), prior);
+    expect(fixed).toEqual({ ok: true });
+  });
+
+  test('evaluate(): an open planned gap fails the refresh bundle; a cleared one passes it', () => {
+    const { evaluate } = require('../services/content/content-quality-gate');
+    const brief = { page_type: 'refresh', ...backfill(['named_sources']) };
+    const open = evaluate({ body: 'Experts say ants trail after rain.' }, brief, prior);
+    expect(open.hard_failures.map((f) => f.name)).toContain('citability_backfill_gaps_cleared');
+    const cleared = evaluate({ body: 'Per UF/IFAS, ants trail after rain. Water deeply.' }, brief, prior);
+    expect(cleared.hard_failures.map((f) => f.name)).not.toContain('citability_backfill_gaps_cleared');
+  });
+
+  test('improvement_over_prior: a backfill targeted edit needs no +200 chars, but the 20% loss floor holds', () => {
+    const small = { body: 'Per UF/IFAS, ants trail after rain. Water deeply.' };
+    expect(checkImprovementOverPrior(small, {}, prior).ok).toBe(false);
+    expect(checkImprovementOverPrior(small, backfill(['named_sources']), prior)).toEqual({ ok: true, reason: 'citability_backfill_targeted_edit' });
+    expect(checkImprovementOverPrior({ body: 'Ants.' }, backfill(['named_sources']), prior).ok).toBe(false);
+    expect(checkImprovementOverPrior(small, backfill(['named_sources']), {}).ok).toBe(false);
+    // A backfill brief that lost its gap list gets no waiver.
+    expect(checkImprovementOverPrior(small, backfill([]), prior).ok).toBe(false);
+  });
+
+  test('planned structural gaps need the structure itself — reframing the heading does not clear them', () => {
+    const planned = backfill(['comparison', 'how_to_choose']);
+    const ctx = { previousVersion: { body: '## Bait or spray?\nPer UF/IFAS, both work.' } };
+    const reframed = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: '## Treatment overview\nPer UF/IFAS, both work.' }, planned, ctx);
+    expect(reframed).toEqual({ ok: false, reason: 'planned_gaps_unresolved:comparison(structure_missing),how_to_choose(structure_missing)' });
+    const done = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Treatment overview\nPer UF/IFAS, both work.\n${table}\n${howTo}` }, planned, ctx);
+    expect(done).toEqual({ ok: true });
+  });
+
+  test('a fenced table does not clear a planned comparison gap', () => {
+    const r = checkCitabilityBackfillGapsCleared({ title: 'Bait or spray?', body: `## Bait or spray?\n\`\`\`\n${table}\n\`\`\`` }, backfill(['comparison']), {});
+    expect(r).toEqual({ ok: false, reason: 'planned_gaps_unresolved:comparison(structure_missing)' });
+  });
+
+  test('a legacy .md target is never asked for the MDX table', () => {
+    const md = backfill(['comparison'], { target_file_path: 'src/content/blog/termite/bait-or-spray.md' });
+    expect(checkCitabilityBackfillGapsCleared({ title: 'Bait or spray?', body: '## Bait or spray?\nPer UF/IFAS, both work.' }, md, {})).toEqual({ ok: true });
+  });
+
+  test('a trait the prior page satisfied may not regress on a targeted edit', () => {
+    const prevBody = `## Bait or spray?\nExperts say both work.\n${table}\n${howTo}`;
+    const ctx = { previousVersion: { body: prevBody } };
+    const planned = backfill(['named_sources']);
+    expect(checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: '## Bait or spray?\nPer UF/IFAS, both work.' }, planned, ctx))
+      .toEqual({ ok: false, reason: 'citability_traits_regressed:comparison,how_to_choose' });
+    expect(checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Bait or spray?\nPer UF/IFAS, both work.\n${table}` }, planned, ctx))
+      .toEqual({ ok: false, reason: 'citability_traits_regressed:how_to_choose' });
+    expect(checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Bait or spray?\nPer UF/IFAS, both work.\n${table}\n${howTo}` }, planned, ctx))
+      .toEqual({ ok: true });
+  });
+
+  test('dropping a measurement or a named source the live page had is a regression', () => {
+    const measured = { previousVersion: { body: 'Per UF/IFAS, mosquitoes peak June 1 – Sept 30.' } };
+    expect(checkCitabilityBackfillGapsCleared({ body: 'Per UF/IFAS, mosquitoes peak in summer.' }, backfill(['comparison'], { target_file_path: 'x.md' }), measured))
+      .toEqual({ ok: false, reason: 'citability_traits_regressed:concrete_specifics' });
+    const sourced = { previousVersion: { body: 'Per UF/IFAS, ants trail after rain.' } };
+    expect(checkCitabilityBackfillGapsCleared({ body: 'Experts say ants trail after rain for 3 days.' }, backfill(['concrete_specifics']), sourced))
+      .toEqual({ ok: false, reason: 'citability_traits_regressed:named_sources' });
   });
 });

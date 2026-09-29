@@ -13,6 +13,13 @@
  *   - a tracking card for `follow_through_tracking` (no-show-detector.js: a
  *     missing-departure/arrival warning on one of this tech's own visits) —
  *     same kept-until-"Got it" rule and cap, sharing the visit-card slot
+ *   - an open-visits card for `tech_open_visit_nudge` (tech-open-visit-nudge.js:
+ *     the 7 PM "visits from today still open" reminder for techs who aren't
+ *     texted) — same kept-until-"Got it" rule and cap
+ *   - a photo card for `customer_visit_photos` (visit-prep-tech-alert.js,
+ *     GATE_VISIT_PREP_TECH_ALERTS: a customer sent prep photos for a stop
+ *     on this tech's route) — same kept-until-"Got it" rule and cap,
+ *     sharing the visit-card slot
  *
  * Mount once inside TechLayout / TechHomePage — it renders a fixed-position
  * container so the parent layout doesn't need to reserve space.
@@ -37,6 +44,7 @@
  */
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { formatETDateOnly } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '';
 const POLL_MS = 10_000;
@@ -58,7 +66,14 @@ const TEXT_TYPES = new Set(['tech_line_sms']);
 // en_route/arrived stamp, so it stays until the tech taps "Got it" (or the
 // server-side alert clears and the card falls out of the poll).
 const TRACKING_TYPES = new Set(['follow_through_tracking']);
-const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES]);
+// The 7 PM open-visits reminder (tech-open-visit-nudge.js) is kept too: it is
+// the durable copy when the push reaches no device.
+const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
+// A customer's visit-prep photo submission (visit-prep-tech-alert.js) —
+// kept until "Got it" the same way, so it isn't lost to the 5-min auto-
+// dismiss timer before the tech has opened the stop.
+const PHOTO_TYPES = new Set(['customer_visit_photos']);
+const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
 const VISIT_ACCENT = {
   visit_assigned: '#0ea5e9',
   visit_rescheduled: '#f59e0b',
@@ -127,11 +142,23 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       // burst) leaves this screen too — and is forgotten, so it can come
       // back if the feed lists it again. Timed cards stay client-owned.
       const listed = new Set(notifications.map((n) => n.id));
+      // A photo card's date is re-read from the live visit on every poll
+      // (visit-prep-tech-alert.js refreshPhotoCardDates), so a card already
+      // on screen takes the new payload when the visit moves (Codex #5303 r6).
+      const photoPayloads = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type)).map((n) => [n.id, n.payload]));
       setActive((prev) => {
         const gone = prev.filter((n) => KEPT_TYPES.has(n.type) && !listed.has(n.id));
         gone.forEach((n) => seenIds.current.delete(n.id));
-        if (gone.length === 0 && fresh.length === 0) return prev;
-        return [...prev.filter((n) => !gone.includes(n)), ...fresh];
+        let refreshed = false;
+        const kept = prev.filter((n) => !gone.includes(n)).map((n) => {
+          if (!photoPayloads.has(n.id)) return n;
+          const payload = photoPayloads.get(n.id);
+          if (JSON.stringify(payload) === JSON.stringify(n.payload)) return n;
+          refreshed = true;
+          return { ...n, payload };
+        });
+        if (gone.length === 0 && fresh.length === 0 && !refreshed) return prev;
+        return [...kept, ...fresh];
       });
     } catch {
       // network hiccups are fine; next poll will retry
@@ -292,6 +319,12 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
           {TRACKING_TYPES.has(n.type) && (
             <TrackingCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
+          {NUDGE_TYPES.has(n.type) && (
+            <OpenVisitsCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
+          )}
+          {PHOTO_TYPES.has(n.type) && (
+            <PhotoCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
+          )}
           {n.type === 'storm_watch_alert' && (
             <StormCard
               n={n}
@@ -433,6 +466,31 @@ function VisitCard({ n, onDismiss }) {
   );
 }
 
+// A customer's visit-prep photo submission (visit-prep-tech-alert.js,
+// GATE_VISIT_PREP_TECH_ALERTS). No customer name/address/note here — that
+// same lock-screen discipline extends to the card, not just the push. The
+// visit is usually days out and the tech app only opens today's route, so
+// the card names the visit's DATE instead of a tap-through that would dead-
+// end (Codex #5303 r1 P1); the photos are in that stop's Visit Brief.
+
+function PhotoCard({ n, onDismiss }) {
+  const visitDate = formatETDateOnly(n.payload?.scheduled_date, { weekday: 'short', month: 'short', day: 'numeric' }) || null;
+  return (
+    <div style={cardStyle(COLORS.teal)} data-testid="photo-notice">
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📷 Photos from a customer</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: visitDate ? 4 : 12 }}>
+        {n.message || 'A customer sent photos for a visit on your route'}
+      </div>
+      {visitDate && (
+        <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 12 }}>
+          Visit on {visitDate}. The photos are in that stop&apos;s Visit Brief.
+        </div>
+      )}
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
+    </div>
+  );
+}
+
 // A text on the tech's own Twilio line (tech-line.js). The office sees the
 // same thread in /admin/communications; this card is the tech's copy, kept
 // until "Got it" like a visit card. Replying from the line is a later PR.
@@ -449,6 +507,24 @@ function TextCard({ n, onDismiss }) {
       </div>
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
         {p.body || (media > 0 ? `${media} photo${media === 1 ? '' : 's'}` : '(empty message)')}
+      </div>
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
+    </div>
+  );
+}
+
+// The 7 PM reminder that visits from today are still open
+// (tech-open-visit-nudge.js). The server composes `message`: a count line,
+// then one line per stop. Kept until "Got it" like a visit card.
+function OpenVisitsCard({ n, onDismiss }) {
+  const p = n.payload || {};
+  return (
+    <div style={cardStyle(COLORS.amber)} data-testid="tech-open-visits">
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
+        📋 {p.headline || 'Visits from today still open'}
+      </div>
+      <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+        {n.message}
       </div>
       <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
     </div>

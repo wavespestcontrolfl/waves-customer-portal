@@ -166,7 +166,7 @@ async function sendReminderChannels({
   const pending = ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
     && !delivered.has(channel) && !resolved.has(channel));
   const permitted = await Promise.all(pending.map((channel) => collectionsChannelPermitted({
-    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), logTag: 'billing-reminder',
+    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), source, logTag: 'billing-reminder',
     invoiceIds: policyInvoiceIds ?? invoiceIds,
     detail: true,
   })));

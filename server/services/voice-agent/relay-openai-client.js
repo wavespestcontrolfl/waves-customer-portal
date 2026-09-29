@@ -10,17 +10,18 @@
  *
  * Built for GATE_VOICE_RELAY_OPENAI (server/services/voice-agent/
  * relay-conversation.js) — Sandy's benchmark/sandbox lane running on an
- * OpenAI model, never production inbound by default. Production callers stay
- * on Anthropic; this file is never imported by anything that isn't provider
- * === 'openai' for the pinned session model.
+ * OpenAI model — and, separately, GATE_VOICE_RELAY_OPENAI_INBOUND for
+ * production inbound (dark by default). This file is never imported by
+ * anything that isn't provider === 'openai' for the pinned session model.
  *
- * NO SILENT FALLBACK: this client never substitutes Claude on any failure —
- * an OpenAI error, a bad response shape, or an aborted stream all reject
+ * This client never substitutes Claude itself on any failure — an OpenAI
+ * error, a bad response shape, or an aborted stream all reject
  * `finalMessage()` with a descriptive Error (or one named 'AbortError'), the
- * exact shape relay-conversation.js's existing model-round catch block
- * already handles (increments `_modelFailures`, runs the provider-failure
- * handoff policy). A benchmark candidate that hits an OpenAI outage must
- * fail visibly, never quietly re-run on Sonnet.
+ * exact shape relay-conversation.js's model-round catch block handles. That
+ * caller decides what happens next: a live call switches to Claude for the
+ * rest of the call (_runModelRound); an eval-harness session counts it as an
+ * ordinary model failure, so a benchmark candidate that hits an OpenAI
+ * outage fails visibly, never quietly re-run on Sonnet.
  *
  * Request mapping (Anthropic-shaped params → OpenAI Responses body):
  *   system (array of {type:'text', text, cache_control?})  → instructions

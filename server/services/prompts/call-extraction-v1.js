@@ -49,7 +49,27 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // appointment to a start hour said without AM/PM reads it as business
 // hours (7-11 morning; 12 and 1-6 afternoon), so "two to four" is 2 PM.
 // New bookings keep the unstated-period rule. A new cohort.
-const PROMPT_VERSION = 'v15';
+// v16: caller.relationship_to_property "family_member" (schema 1.18.0;
+// owner ruling 2026-09-28: a relative of the homeowner/resident — child,
+// parent, grandchild, sibling, in-law — arranging service at THAT
+// relative's home is authorized when staff confirmed a time on the call).
+// Live miss (call f5a54dbd, 2026-09-28): the caller booked a paper-wasp
+// knockdown at "my grandfather's house", confirmed for Sunday 11am, and was
+// blocked on caller_not_authorized because "other" is the only value that
+// fit and it also covers strangers. Callers arranging service for their
+// OWN spouse/partner's household still use spouse_partner, unchanged. New
+// enum value the model must now choose between, so this is a new cohort.
+// v17: consent.sms_declined (schema 1.19.0; codex P1 on #5292). The
+// booking-link dry-run's removal of the sms_consent_given===false staging
+// check (that field is true only on an explicit yes, so false meant "never
+// asked" and blocked 151/159 real new-lead calls) also stopped catching an
+// explicit "no" to "may I text you?", recorded the SAME way. sms_declined
+// is a new, separately-judged field: true ONLY on an explicit decline of
+// texting. Additive/optional in both schemas (never added to `required`,
+// per AGENTS.md's extraction-schema rule), but the model is instructed to
+// always give an explicit true/false. New field and instructions: a new
+// cohort.
+const PROMPT_VERSION = 'v17';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -186,7 +206,8 @@ EMAIL:
 CALLER RELATIONSHIP (relationship_to_property) AND on_site_authorization:
 - A realtor / buyer's or seller's agent calling about a sale, closing, or inspection is "real_estate_agent". A lender, loan officer, or title/closing coordinator is "lender". A caller who is BUYING the property themselves (under contract, closing pending, not the owner yet — "we're buying the house", "we close next month") is "home_buyer"; once they say they already own it, they are "owner". Use "other" only when no enum value fits.
 - Most homeowners never say "it's my house". Someone arranging service for where they live ("my yard", "our kitchen", "come out to the house") is the owner or a household member: use "owner" when they speak as the resident, "spouse_partner" when they say so, and "unknown" ONLY when the call gives no signal either way. Never infer a non-owner relationship from a missing statement.
-- on_site_authorization is about whether THIS caller may authorize work at the property. It is true for an owner, a spouse/partner, and for any caller who says they can authorize it. Set it false ONLY when the caller is explicitly a third party (tenant, property manager, realtor, lender, home buyer, employee, HOA, other) AND nothing on the call says they may authorize the work. An "unknown" relationship never justifies false on its own.
+- A caller arranging service at a RELATIVE's home, not their own — "my grandfather's house", "my mom's place", "my daughter's apartment" — is "family_member" (grandchild, child, parent, sibling, in-law, any relative). This is distinct from "spouse_partner": a spouse/partner arranging service at the SAME household they themselves live in is still "spouse_partner", never "family_member". "family_member" is only for service at someone ELSE's residence.
+- on_site_authorization is about whether THIS caller may authorize work at the property. It is true for an owner, a spouse/partner, and for any caller who says they can authorize it. Set it false ONLY when the caller is explicitly a third party (tenant, property manager, realtor, lender, home buyer, family member, employee, HOA, other) AND nothing on the call says they may authorize the work. An "unknown" relationship never justifies false on its own.
 
 UNIT BEDROOMS (property.bedroom_count):
 - When the caller states the size of their apartment/condo UNIT in bedrooms ("one-bedroom", "2 bed 2 bath", "studio" = 0), set property.bedroom_count to that integer. Only what was spoken — never infer it from square footage, rent, or the property type; null otherwise.
@@ -266,6 +287,7 @@ CONSENT:
 - sms_consent_quote: Verbatim quote where consent was given. null if not given.
 - call_recording_disclosed: true if the greeting or agent mentioned recording/AI.
 - do_not_contact_request: true if caller explicitly asked not to be contacted.
+- sms_declined: true only if the caller explicitly declines text messages (says no when asked to be texted, or asks not to be texted / to be called instead of texted), even if calls are fine. false otherwise, including when texting never came up. Always true or false — never null.
 
 VOICEMAIL & SPAM (definitions tightened 2026-07 after a 1,000-call audit — these
 exact mistakes lost real leads; apply them literally):

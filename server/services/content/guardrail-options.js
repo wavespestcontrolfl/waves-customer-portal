@@ -150,8 +150,44 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     relatedPostLinks: relatedPostPaths,
     relatedPostHosts: frozenRelatedHosts,
     relatedPostLinksLive: relatedTargetMatches,
+    // The post's resolved publish host(s) — what an ABSOLUTE frontmatter
+    // next_steps href must name (content-guardrails nextStepsFrontmatter
+    // Finding): the effective spoke, else the hub. Never the whole fleet.
+    publishHosts: effectiveRelatedHosts,
     isRefresh,
   };
 }
 
-module.exports = { OPERATOR_INTERCEPT_BUCKET, briefForbidsCompetitorPrices, deriveSyncGuardrailOptions };
+// The operator-authored text of an intercept brief (title/keywords/thesis/
+// outline/sourcing), for the comparison gate's operator-authorized-
+// competitor exception: a recognized competitor the OPERATOR named there
+// (e.g. a detection-only brand an intercept brief names) routes the draft to the approvable
+// named-competitor review path instead of a hard UNKNOWN_COMPETITOR block.
+// Only operator_intercept opportunities produce text — mined briefs get '',
+// so nothing changes for them. Every gate call site (runNext, the approval
+// re-check, remediation, and the publisher's owner-list chokepoint) MUST
+// derive this identically, or a draft parked as approvable would fail its
+// own re-evaluation.
+function operatorBriefTextForComparisonGate(opp, brief) {
+  if (!opp || opp.bucket !== OPERATOR_INTERCEPT_BUCKET) return '';
+  const ob = brief?.voice_constraints?.operator_brief || null;
+  if (!ob) return '';
+  return [
+    ob.working_title,
+    ob.primary_kw,
+    ob.thesis,
+    ...(Array.isArray(ob.secondary_kws) ? ob.secondary_kws : []),
+    ...(Array.isArray(ob.outline) ? ob.outline : []),
+    // Sourcing fields are operator-authored too: a REQUIRED competitor
+    // citation (required_sources URL like https://www.orkin.com/...) or a
+    // source note naming the competitor authorizes that name exactly like
+    // the title/outline do. Without these, the binding citation URL itself
+    // read as an unauthorized mention in the draft and hard-blocked the
+    // run at comparison_table_failed instead of the review path the
+    // operator's own brief was steering it to.
+    ...(Array.isArray(ob.required_sources) ? ob.required_sources : []),
+    ...(Array.isArray(ob.source_notes) ? ob.source_notes : []),
+  ].filter(Boolean).join('\n');
+}
+
+module.exports = { OPERATOR_INTERCEPT_BUCKET, briefForbidsCompetitorPrices, deriveSyncGuardrailOptions, operatorBriefTextForComparisonGate };

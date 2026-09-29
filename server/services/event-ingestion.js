@@ -30,12 +30,20 @@
  *   - On failure: increments consecutive_failures, stores last_error.
  *     The dashboard can render a health badge from this; the cron
  *     does NOT auto-disable a failing source (operator decides).
+ *
+ * Claude-extracted startAt (scrape pages, news-mode RSS articles) is parsed
+ * through parseExtractedStartAt, NOT a bare `new Date()` — see that
+ * function's header for the ET-offset-dropping bug (prod, found
+ * 2026-09-27) it fixes, and extractedEventDedupKeys for the matching dedup
+ * key shape (ET calendar day + ET wall-clock time, with a legacy-shape
+ * fallback so the key-format change itself doesn't mint duplicates).
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-source-health');
+const { mergeEvents, pickSurvivor, computeSurvivorBackfill, EVENT_MERGE_LOCK_KEY } = require('./event-dedup');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
 // (a feed correcting/rescheduling a previously-expired event), re-queue the row
@@ -67,31 +75,38 @@ const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-
 //      now() would treat earlier-today as past and clobber that curation.
 // EXCLUDED.* is the proposed insert; events_raw.* is the existing row.
 const REVIVAL_COND = 'COALESCE(events_raw.end_at, events_raw.start_at) < :etMidnight AND COALESCE(EXCLUDED.end_at, EXCLUDED.start_at) >= :etMidnight';
+// A still-pending row whose feed moved it to a different ET day is a new
+// occurrence editorially too: re-queue it for the normalizer (freshness is
+// date-dependent, e.g. a limited run's opening week) and re-open curation, so
+// an earlier policy drop (e.g. "already featured this year") doesn't stick to
+// next year's date. Rows with approved_via set (an operator reset one) stay
+// with the operator.
+const REOPEN_CURATION_COND = `(${REVIVAL_COND}) OR (events_raw.admin_status = 'pending' AND events_raw.approved_via IS NULL AND (events_raw.start_at AT TIME ZONE 'America/New_York')::date IS DISTINCT FROM (EXCLUDED.start_at AT TIME ZONE 'America/New_York')::date)`;
 function revivalResetFields() {
   // ET-midnight-today as a bound timestamptz — identical to the sweep's
   // parseETDateTime(`${etDateString()}T00:00:00`) (avoids the naive-ISO leak).
   const etMidnight = parseETDateTime(`${etDateString()}T00:00:00`);
   return {
-    normalized_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.normalized_at END`, { etMidnight }),
-    freshness_revival_pending: db.raw(`CASE WHEN ${REVIVAL_COND} THEN true ELSE events_raw.freshness_revival_pending END`, { etMidnight }),
+    normalized_at: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.normalized_at END`, { etMidnight }),
+    freshness_revival_pending: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN true ELSE events_raw.freshness_revival_pending END`, { etMidnight }),
     // A revival is a NEW occurrence editorially — re-open auto-curation
     // (event-curation.js excludes rows with curated_at, so a previously
     // examined-but-not-approved event would otherwise never be looked at
     // again after its date moved back into the future). Safe for
     // approved rows: the curation candidate query also requires
     // admin_status='pending', so clearing the marker can't re-judge them.
-    curated_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curated_at END`, { etMidnight }),
-    curation_note: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curation_note END`, { etMidnight }),
+    curated_at: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.curated_at END`, { etMidnight }),
+    curation_note: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.curation_note END`, { etMidnight }),
     // The structured editorial assessment (2026-07-28 rubric) belongs to
     // the occurrence that was examined — a revived occurrence must start
     // clean, or a later missing/malformed reassessment would leave the
     // prior occurrence's score, codes, and evidence permanently attached.
-    editorial_score: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_score END`, { etMidnight }),
-    score_breakdown: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.score_breakdown END`, { etMidnight }),
-    rejection_codes: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.rejection_codes END`, { etMidnight }),
-    audience_tags: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.audience_tags END`, { etMidnight }),
-    novelty_type: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.novelty_type END`, { etMidnight }),
-    editorial_evidence: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_evidence END`, { etMidnight }),
+    editorial_score: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.editorial_score END`, { etMidnight }),
+    score_breakdown: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.score_breakdown END`, { etMidnight }),
+    rejection_codes: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.rejection_codes END`, { etMidnight }),
+    audience_tags: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.audience_tags END`, { etMidnight }),
+    novelty_type: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.novelty_type END`, { etMidnight }),
+    editorial_evidence: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.editorial_evidence END`, { etMidnight }),
     // Image handling (og:image backfill contract, event-image-backfill.js):
     // a feed that HAS an image always wins, but a feed null must not
     // clobber a backfilled value — EXCEPT on revival, where the old
@@ -148,6 +163,9 @@ const { stripThinkingBlocks } = require('./llm/deep');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 const HTTP_TIMEOUT_MS = 15000;
+// Per-request ceiling for the Claude extraction call — see
+// extractEventsWithClaude.
+const EXTRACTION_TIMEOUT_MS = 180000;
 const MAX_ITEMS_PER_FEED = 200;
 const FORWARD_WINDOW_DAYS = 90;
 
@@ -229,6 +247,115 @@ function parseDateOrNull(raw) {
     // malformed feed date doesn't fail the whole source ingestion run.
     return null;
   }
+}
+
+// Parse a Claude-extracted `startAt`. The extraction prompt asks for "ISO
+// 8601 datetime in America/New_York timezone", but the model doesn't always
+// include a UTC offset/Z suffix — sometimes it answers "2026-09-19T19:30:00"
+// (naive, meant as ET wall-clock), sometimes "2026-09-19T19:30:00-04:00"
+// (explicit offset). `parseDateOrNull` (bare `new Date()`) reads the naive
+// form as SERVER-local time; Railway runs with TZ=UTC, so a naive "19:30:00"
+// lands verbatim as 19:30 UTC instead of the correct 23:30 UTC (7:30pm EDT)
+// — silently DROPPING the ET→UTC offset entirely. Because ET is always
+// behind UTC, this always makes the stored instant too EARLY, never too
+// late, by exactly the ET offset in force (4h EDT / 5h EST) — confirmed
+// against prod on 2026-09-27: 13 of 14 near-duplicate pairs from the scrape
+// extraction path differed by EXACTLY 4 hours, earlier-wrong /
+// later-correct, e.g. "Sarasota Paradise vs. Greenville Triumph SC"
+// (Lakewood Ranch) stored 19:30Z (wrong; a naive-string pull) alongside
+// 23:30Z (right; an offset-bearing pull) for the same 7:30pm ET kickoff.
+//
+// Route every extracted startAt through parseETDateTime, which treats a
+// naive "YYYY-MM-DDTHH:MM[:SS]" string as an ET wall-clock time (DST-safe —
+// see its own header) and falls back to `new Date(input)` for anything else
+// (an explicit offset, a trailing Z, or unparseable text), matching
+// parseDateOrNull's behavior exactly in those cases.
+const HOUR_MS = 60 * 60 * 1000;
+
+// Date.UTC and new Date() both roll an impossible component forward into a
+// later valid instant (Feb 30 -> Mar 2, 24:00 -> the next midnight,
+// 99:00 -> four days on). A written date/time is real only if its components
+// survive the round trip unchanged.
+function isRealCalendarDateTime(year, month, day, hour = 0, minute = 0, second = 0) {
+  const t = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return t.getUTCFullYear() === year && t.getUTCMonth() === month - 1 && t.getUTCDate() === day
+    && t.getUTCHours() === hour && t.getUTCMinutes() === minute && t.getUTCSeconds() === second;
+}
+
+function parseExtractedStartAt(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const text = raw.trim();
+  // An explicit offset or Z is unambiguous.
+  const offsetForm = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)
+    && text.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (offsetForm) {
+    const [, y, mo, dd, h, mi, s] = offsetForm;
+    if (!isRealCalendarDateTime(+y, +mo, +dd, +h, +mi, +(s || 0))) return null;
+    const d = new Date(text.replace(' ', 'T'));
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  // Every naive form (T or space separator, optional seconds/fraction, or a
+  // bare date) is an ET wall-clock time; a bare date is ET midnight.
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/);
+  if (!m) return null; // free text ("Sept 19, 7:30 PM") would parse in server-local time: reject
+  const [, y, mo, dd, h = '00', mi = '00', s = '00', fraction = ''] = m;
+  if (!isRealCalendarDateTime(+y, +mo, +dd, +h, +mi, +s)) return null;
+  const d = parseETDateTime(`${y}-${mo}-${dd}T${h}:${mi}:${s}`);
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
+  // A wall clock inside a DST change names no single instant: 2:30 AM on the
+  // spring-forward Sunday never happens (parseETDateTime rolls it to 3:30)
+  // and 1:30 AM on the fall-back Sunday happens twice. Rather than store a
+  // guessed time, accept only a wall clock that names exactly one instant.
+  const namesWallClock = (instant) => {
+    const p = etParts(instant);
+    return p.year === +y && p.month === +mo && p.day === +dd && p.hour === +h && p.minute === +mi;
+  };
+  if (!namesWallClock(d)) return null;
+  if (namesWallClock(new Date(d.getTime() - HOUR_MS)) || namesWallClock(new Date(d.getTime() + HOUR_MS))) return null;
+  // Milliseconds survive (truncated, as new Date() does), so the pre-fix
+  // key of a "19:30:45.123" pull can still be reconstructed exactly.
+  return new Date(d.getTime() + Number(`${fraction}000`.slice(0, 3)));
+}
+
+// ET wall-clock 'HH:MM' for a given instant — minute precision, matching the
+// granularity Claude actually extracts (it never reports seconds).
+function etWallClockHHMM(date) {
+  const { hour, minute } = etParts(date);
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+// Dedup-key pair for a Claude-extracted event: the CURRENT key shape plus
+// the LEGACY (pre-fix) shape for the same title+start+url, so a caller can
+// migrate an existing legacy-shaped row onto the new shape instead of
+// minting a duplicate purely from the key-format change (see
+// upsertExtractedEvents).
+//
+// Current shape keys on title + ET calendar day + ET wall-clock time (HH:MM,
+// not the full UTC instant) + url. This is deliberately NOT the full ISO
+// instant: keying on the ET wall-clock reading — the thing the source page
+// actually advertises — makes the key immune to any residual TZ-conversion
+// drift in `start` (today's bug included), since two pulls that read the
+// same advertised time now always land on the same wall-clock string even
+// if some future bug perturbed the computed instant by seconds/ms. Minute
+// precision still keeps two genuinely different same-day showtimes at the
+// same URL (e.g. a 2pm matinee vs a 7:30pm evening show on one listing page)
+// as distinct rows, since their HH:MM differs.
+//
+// Legacy shape (pre-fix) keys on title + the full UTC ISO instant + url —
+// exactly what normalizeExtractedEvent computed before this change. It only
+// matches an existing row whose STORED instant already equals THIS pull's
+// (now-correct) `start` — i.e. a source that happened to extract the right
+// time even before the fix shipped. It does NOT retroactively match a row
+// still holding the old, timezone-dropped instant; reconciling those is a
+// data-quality cleanup, not something a key-shape change should do own its
+// own (see the ops note in ingestSource's module docstring / PR notes).
+function extractedEventDedupKeys(title, start, urlKey) {
+  const titleKey = title.toLowerCase().slice(0, 80);
+  const startKey = start ? `${etDateString(start)}T${etWallClockHHMM(start)}` : '';
+  const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
+  const legacyStartKey = start ? start.toISOString() : '';
+  const legacyExternalId = `${titleKey}|${legacyStartKey}|${urlKey}`.slice(0, 256);
+  return { externalId, legacyExternalId };
 }
 
 // Allowlist URL protocols. RSS data is external/untrusted; rendering a
@@ -567,7 +694,15 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents, requi
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
   }
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  // Bounded so one hung request cannot hold the sequential run for the
+  // SDK default (600s x 3 attempts). Generous on purpose: real extraction
+  // calls reach ~50s at ~6.6k output tokens (prod 2026-09-28), so a tight
+  // cap would cut off the biggest, best pages.
+  const anthropic = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    timeout: EXTRACTION_TIMEOUT_MS,
+    maxRetries: 1,
+  });
   // Anchor "today" in America/New_York, not UTC. The cron runs at 4am ET
   // which is in the UTC-day-overlap region; without ET anchoring the
   // prompt could tell Claude the wrong day and a same-evening event
@@ -643,19 +778,23 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents, requi
 
 // An extracted event in the prompt's shape: an object with a non-blank
 // string title; every other field a string or null; a startAt, when given,
-// that parses as a date.
+// that parses unambiguously.
 const EXTRACTED_EVENT_TEXT_FIELDS = ['startAt', 'venueName', 'city', 'description', 'eventUrl', 'imageUrl'];
 function isWellFormedExtractedEvent(ev) {
   if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return false;
   if (typeof ev.title !== 'string' || !ev.title.trim()) return false;
   if (!EXTRACTED_EVENT_TEXT_FIELDS.every((k) => ev[k] === undefined || ev[k] === null || typeof ev[k] === 'string')) return false;
-  return !(typeof ev.startAt === 'string' && ev.startAt.trim() && !parseDateOrNull(ev.startAt));
+  // Same parser normalization uses, so an accepted startAt is one that reads
+  // unambiguously (ISO with offset, or a naive ET date/time).
+  return !(typeof ev.startAt === 'string' && ev.startAt.trim() && !parseExtractedStartAt(ev.startAt));
 }
 
 /**
  * Validate one Claude-extracted event and shape it for upsert.
  * Pure — returns null when the event should be dropped, else
- * { row } where row holds the events_raw columns.
+ * { row, legacyExternalId } where row holds the events_raw columns and
+ * legacyExternalId is the pre-key-shape-change dedup key for the same
+ * title+start+url (see extractedEventDedupKeys / upsertExtractedEvents).
  *
  * opts.requireStart — drop events without a parseable start date.
  * News-mode RSS sets this: the articles contract says "no stated event
@@ -671,7 +810,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   const title = typeof ev.title === 'string' ? ev.title.trim().slice(0, 512) : '';
   if (!title) return null;
 
-  const start = parseDateOrNull(ev.startAt);
+  const start = parseExtractedStartAt(ev.startAt);
   if (opts.requireStart && !start) return null;
   if (start && start.getTime() > cutoffMs) return null;
   if (start && start.getTime() < nowMs - 24 * 60 * 60 * 1000) return null;
@@ -679,7 +818,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // Compute canonicalized fields BEFORE the dedup key so the key is
   // stable across pulls. Claude's raw startAt/eventUrl strings can
   // drift between runs (different timezone formatting, trailing
-  // slashes, etc) — the parsed Date's toISOString() and the
+  // slashes, etc) — the parsed Date's ET wall-clock reading and the
   // safeHttpUrl() canonical form don't.
   const description = typeof ev.description === 'string' && ev.description ? ev.description.slice(0, 2000) : null;
   const venueName = typeof ev.venueName === 'string' && ev.venueName ? ev.venueName.slice(0, 256) : null;
@@ -689,15 +828,13 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   const eventUrl = fitUrl(safeHttpUrl(ev.eventUrl));
   const imageUrl = fitUrl(safeHttpUrl(ev.imageUrl));
 
-  // Synthesize a stable dedup key from canonical title+date+url.
-  // Extracted events don't have a UID/guid, so we key on the
-  // post-normalization fields. Title is lowercased so casing drift
-  // from Claude (e.g. "Boat Parade" vs "BOAT PARADE") doesn't
-  // create duplicates either.
-  const titleKey = title.toLowerCase().slice(0, 80);
-  const startKey = start ? start.toISOString() : '';
-  const urlKey = eventUrl || '';
-  const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
+  // Synthesize a stable dedup key from canonical title+date+url — see
+  // extractedEventDedupKeys for the shape and why it keys on the ET
+  // wall-clock time rather than the full UTC instant. Extracted events
+  // don't have a UID/guid, so we key on the post-normalization fields.
+  // Title is lowercased so casing drift from Claude (e.g. "Boat Parade" vs
+  // "BOAT PARADE") doesn't create duplicates either.
+  const { externalId, legacyExternalId } = extractedEventDedupKeys(title, start, eventUrl || '');
 
   // Clamp to varchar(128) — events_raw.city per migration
   // 20260427000003. Claude can return long location strings; without
@@ -726,18 +863,179 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
       event_url: eventUrl,
       image_url: imageUrl,
     },
+    legacyExternalId,
   };
+}
+
+// Follow merged_into to the row a merge chain finally points at. mergeEvents
+// lets a former survivor be merged again later, so one hop is not enough.
+async function finalSurvivorId(id) {
+  let current = id;
+  for (let hop = 0; hop < 10; hop += 1) {
+    const found = await db('events_raw').select('id', 'merged_into').where({ id: current }).first();
+    if (!found || !found.merged_into) return found ? found.id : null;
+    current = found.merged_into;
+  }
+  return null;
+}
+
+// Move an existing row stored under the older dedup-key shape (the full UTC
+// instant) onto the current key, so this pull updates it instead of minting a
+// duplicate. When a row already holds the current key (a rolling deploy), the
+// pair is merged instead:
+// pickSurvivor's featured > approved > pending precedence decides which row
+// lives, and a merged-away current-key row sends the legacy row to its final
+// survivor.
+async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
+  let renamed = 0;
+  try {
+    renamed = await db('events_raw')
+      .where({ source_id: sourceId, external_id: legacyKey })
+      .whereNotExists(db('events_raw').select(1).where({ source_id: sourceId, external_id: currentKey }))
+      .update({ external_id: currentKey });
+  } catch (err) {
+    // An overlapping pull of the same source took the current key first (the
+    // unique (source_id, external_id) index); the rest of this batch goes on.
+    logger.warn(`[event-ingestion] legacy-key rename skipped for source ${sourceId}: ${err.message}`);
+    return;
+  }
+  if (renamed) return;
+
+  const legacyRow = await db('events_raw')
+    .where({ source_id: sourceId, external_id: legacyKey })
+    .whereNull('merged_into')
+    .first();
+  if (!legacyRow) return;
+  const currentRow = await db('events_raw').where({ source_id: sourceId, external_id: currentKey }).first();
+  if (!currentRow || currentRow.id === legacyRow.id) return;
+
+  try {
+    if (currentRow.merged_into) {
+      const survivorId = await finalSurvivorId(currentRow.merged_into);
+      if (survivorId === legacyRow.id) {
+        // The live survivor is the legacy row itself: move the current key
+        // off the merged-away row onto it, so this and later pulls update
+        // the live row instead of the dead one.
+        // Same advisory lock mergeEvents takes, so a concurrent merge can't
+        // move either row mid-transfer; both updates must land or it rolls
+        // back (the caller's upsert then just updates the dead row, as before).
+        await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(?)', [EVENT_MERGE_LOCK_KEY]);
+          const retired = await trx('events_raw')
+            .where({ id: currentRow.id, external_id: currentKey })
+            .whereNotNull('merged_into')
+            .update({ external_id: `retired:${currentRow.id}`, updated_at: trx.fn.now() });
+          const moved = await trx('events_raw').where({ id: legacyRow.id }).whereNull('merged_into')
+            .update({ external_id: currentKey, updated_at: trx.fn.now() });
+          if (retired !== 1 || moved !== 1) throw new Error('legacy-key transfer raced a merge — rolled back');
+        });
+      } else if (survivorId) {
+        // Survivor is another listing (cross-source dedup): the merged row
+        // keeps this source's key, as every cross-source merged row does.
+        const survivor = await db('events_raw').where({ id: survivorId }).first();
+        await mergeEvents(survivorId, [legacyRow.id], { backfill: computeSurvivorBackfill(survivor || {}, [legacyRow]) });
+      }
+      return;
+    }
+    // Every merge below carries the loser's event_url/image_url onto a
+    // survivor that lacks them, as autoMergeDuplicates does, so retiring the
+    // row that held a backfilled image never leaves the live event without it.
+    if (pickSurvivor([currentRow, legacyRow]).id === currentRow.id) {
+      await mergeEvents(currentRow.id, [legacyRow.id], { backfill: computeSurvivorBackfill(currentRow, [legacyRow]) });
+      return;
+    }
+    // The legacy row survives and takes the current key in the same
+    // transaction as the merge; the loser moves to a bounded retired key
+    // (external_id is varchar(256)).
+    await mergeEvents(legacyRow.id, [currentRow.id], {
+      backfill: computeSurvivorBackfill(legacyRow, [currentRow]),
+      afterMerge: async (trx) => {
+        await trx('events_raw').where({ id: currentRow.id })
+          .update({ external_id: `retired:${currentRow.id}`, updated_at: trx.fn.now() });
+        await trx('events_raw').where({ id: legacyRow.id })
+          .update({ external_id: currentKey, updated_at: trx.fn.now() });
+      },
+    });
+  } catch (err) {
+    // A concurrent pull or merge already resolved this pair; the next pull
+    // retries if it is still unresolved.
+    logger.warn(`[event-ingestion] legacy-key merge skipped for source ${sourceId}: ${err.message}`);
+  }
+}
+
+// Pre-fix rows extracted from a naive time were stored with the ET wall
+// clock read as UTC (7:30 PM ET became 19:30Z), under a legacy key built from
+// that shifted instant. A shifted key can't be migrated automatically (in EDT
+// a 7 PM event's shifted key equals a real 3 PM showtime's correct key), so
+// after a pull such a row is QUARANTINED instead: rejected with a suppression
+// reason, which keeps it out of every newsletter unless an operator
+// re-approves it. Only PENDING rows this pull did not refresh are touched,
+// because that same key can be a genuine matinee a partial pull left out:
+// an approved or featured row is an editorial decision this guess never
+// overrides (every known pre-fix pair in prod was pending/pending at
+// 2026-09-28), and a quarantined pending row carries the reason an operator
+// needs to restore it. Nothing is deleted or re-timed. The sweep can only
+// ever match a pre-fix row: since the fix, extraction writes the ET
+// wall-clock key (no ':00.000Z' instant), and RSS/iCal rows key on their
+// guid, link or uid, so no row written later can hold a shifted legacy key.
+const TZ_SHIFT_QUARANTINE = 'tz_shift_quarantine';
+
+function shiftedLegacyKey(title, start, urlKey) {
+  if (!start) return null;
+  // Seconds and milliseconds carry over: the old parser kept "19:30:45.123"
+  // as 19:30:45.123Z.
+  const seconds = String(etParts(start).second).padStart(2, '0');
+  const millis = String(start.getUTCMilliseconds()).padStart(3, '0');
+  const shiftedIso = `${etDateString(start)}T${etWallClockHHMM(start)}:${seconds}.${millis}Z`;
+  if (shiftedIso === start.toISOString()) return null;
+  return `${title.toLowerCase().slice(0, 80)}|${shiftedIso}|${urlKey}`.slice(0, 256);
+}
+
+async function quarantineShiftedLegacyRows(sourceId, pulledRows, batchStartedAt) {
+  let quarantined = 0;
+  for (const row of pulledRows) {
+    const key = shiftedLegacyKey(row.title, row.start_at, row.event_url || '');
+    if (!key) continue;
+    // Rejection is the durable quarantine: normalization never changes an
+    // admin decision (a freshness flag would be recomputed), rejected rows
+    // never ship, and an operator can re-approve a genuine showtime. Each row
+    // is quarantined at most once: approved_via 'tz_shift_quarantine' marks
+    // it, and an operator's later re-approval (which leaves approved_via
+    // alone) is never overridden by a later partial pull.
+    quarantined += await db('events_raw')
+      .where({ source_id: sourceId, external_id: key })
+      .whereNull('merged_into')
+      .where('pulled_at', '<', batchStartedAt)
+      .where('admin_status', 'pending')
+      .where((q) => q.whereNull('approved_via').orWhereNot('approved_via', TZ_SHIFT_QUARANTINE))
+      .update({
+        admin_status: 'rejected',
+        approved_via: TZ_SHIFT_QUARANTINE,
+        suppression_reason: `Possible time-shifted duplicate (pre-2026-09-28 parsing bug) of the listing now at ${etWallClockHHMM(row.start_at)} ET. Re-approve if this showtime is real.`.slice(0, 255),
+        updated_at: db.fn.now(),
+      });
+  }
+  return quarantined;
 }
 
 async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   const nowMs = Date.now();
+  // Rows this batch refreshes get pulled_at >= this; a small margin absorbs
+  // app/DB clock skew.
+  const batchStartedAt = new Date(nowMs - 1000);
+  const pulledRows = [];
   let upserted = 0;
   let dropped = 0;
 
   for (const ev of claudeEvents) {
     const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
     if (!normalized) { dropped += 1; continue; }
-    const { row } = normalized;
+    const { row, legacyExternalId } = normalized;
+    // Only the exact-instant legacy key is migrated automatically; rows at a
+    // shifted instant are quarantined after the batch (see above).
+    if (legacyExternalId && legacyExternalId !== row.external_id) {
+      await reconcileLegacyKey(source.id, row.external_id, legacyExternalId);
+    }
 
     await db('events_raw')
       .insert(row)
@@ -754,8 +1052,12 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
         ...revivalResetFields(),
       });
 
+    pulledRows.push(row);
     upserted += 1;
   }
+
+  const quarantined = await quarantineShiftedLegacyRows(source.id, pulledRows, batchStartedAt);
+  if (quarantined) logger.warn(`[event-ingestion] quarantined ${quarantined} possible time-shifted legacy row(s) for source ${source.id}`);
 
   return { upserted, dropped };
 }
@@ -1120,11 +1422,21 @@ async function ingestSource(source) {
  * and serial keeps log lines coherent + avoids hammering any single
  * shared CDN if multiple feeds happen to be on the same provider.
  */
-async function ingestAllEnabledSources() {
-  const sources = await db('event_sources')
+function enabledSourcesInPullOrder(conn = db) {
+  return conn('event_sources')
     .where({ enabled: true })
+    // Sources the last run never reached go first. The run is in-process
+    // and sequential, so a deploy restart mid-pull (2026-09-28 ~08:03Z,
+    // Mote / Sarasota Magazine / Wellen Park) used to starve the same
+    // tail of the tier/name order every time. Within one ET day, tier/name
+    // order is unchanged.
+    .orderByRaw("date_trunc('day', last_pulled_at AT TIME ZONE 'America/New_York') ASC NULLS FIRST")
     .orderBy('priority_tier', 'asc')
     .orderBy('name', 'asc');
+}
+
+async function ingestAllEnabledSources() {
+  const sources = await enabledSourcesInPullOrder();
 
   if (!sources.length) {
     logger.info('[event-ingestion] No enabled sources — nothing to do');
@@ -1158,11 +1470,15 @@ module.exports = {
   ingestSource, // exported for ad-hoc admin-triggered pulls
   revivalResetFields, // exported for unit testing the past→future revival SQL
   resolveProxyConfig, // exported for unit testing the proxy opt-in contract
+  enabledSourcesInPullOrder, // exported for the pull-order Postgres test
   // Exported for unit tests — pure pieces of the shared extraction path.
   buildArticleBundle,
   buildExtractionSystemPrompt,
   extractEventsWithClaude, // exported for the thinking-block regression test
   normalizeExtractedEvent,
+  parseExtractedStartAt, // exported for the ET-timezone-drift regression tests
+  extractedEventDedupKeys, // exported for the dedup-key-stability regression tests
+  upsertExtractedEvents, // exported for the legacy-key-migration DB test
   recurrenceMetadataFromIcalEvent,
   recoverEventObjectsFromTruncatedJson,
   escapeBareXmlEntities,

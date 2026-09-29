@@ -9,7 +9,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockNotifyAdmin = jest.fn(async () => ({}));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: (...a) => mockNotifyAdmin(...a),
+  // Pass-through: the digest rewrite's normalization (emoji strip + the
+  // ops_digest brevity cut) is pinned in notification-admin-brevity-and-activity.
+  normalizeAdminText: ({ title, body, detail }) => ({ title, body, detail }),
+}));
 const mockEmailSend = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/email', () => ({ send: (...a) => mockEmailSend(...a) }));
 let mockNotificationLockHeld = false;
@@ -99,6 +104,22 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
       .toMatchObject({ cls: 'silent_empty', severity: 'ACT' });
   });
 
+  test('a profile that has never had a review is quiet only when Google agrees and nothing was ever stored (Venice 2026-09-28)', () => {
+    // Also never stats_stale: Places writes no stats row for a listing with
+    // no reviews, so statsUpdatedAt stays null here.
+    const neverReviewed = { pulledCount: 0, rowCount: 0, storedCount: 0, placesTotal: 0, statsTotal: undefined, statsUpdatedAt: null, newestIngestAt: null };
+    expect(classify(neverReviewed)).toBeNull();
+    // Places did not answer this run: nothing confirms the profile is empty.
+    expect(classify({ ...neverReviewed, placesTotal: undefined })).toMatchObject({ cls: 'silent_empty' });
+    // Google's public listing shows reviews the feed does not return.
+    expect(classify({ ...neverReviewed, placesTotal: 12 })).toMatchObject({ cls: 'silent_empty' });
+    // A wipe: both sources now read zero, but the removal-stamped rows stay stored.
+    expect(classify({ ...neverReviewed, storedCount: 47, newestIngestAt: daysAgo(60) })).toMatchObject({ cls: 'silent_empty' });
+    // Google once showed reviews that were never ingested: the stats row
+    // alone is stored, and a later zero never clears it.
+    expect(classify({ ...neverReviewed, storedCount: 1, statsTotal: 3, statsUpdatedAt: daysAgo(40) })).toMatchObject({ cls: 'silent_empty' });
+  });
+
   test('Google shows more reviews than ever ingested + 14d of silence → ingest_stale ACT', () => {
     expect(classify({ rowCount: 47, statsTotal: 60, newestIngestAt: daysAgo(58) }))
       .toMatchObject({ cls: 'ingest_stale', severity: 'ACT' });
@@ -138,6 +159,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
         orWhereNot: jest.fn(function () { return this; }),
         whereNull: jest.fn(function () { return this; }),
         orWhereNull: jest.fn(function () { return this; }),
+        orWhereRaw: jest.fn(function () { return this; }),
         whereIn: jest.fn(function () { return this; }),
         orderBy: jest.fn(function () { return this; }),
         limit: jest.fn(function () { return this; }),
@@ -215,6 +237,41 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     });
   });
 
+  test('a never-reviewed profile Google confirms empty leaves the fleet healthy; the same empty feed after a wipe still escalates', async () => {
+    // Production 2026-09-28: Venice has no stored row at all, so the
+    // aggregate query returns no row for it. stored_count includes each
+    // location's _stats row.
+    const fleet = [
+      { location_id: 'bradenton', row_count: '117', stored_count: '120', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+      { location_id: 'parrish', row_count: '39', stored_count: '40', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+      { location_id: 'sarasota', row_count: '48', stored_count: '49', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+    ];
+    const sources = { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' };
+    const pulled = { bradenton: 117, parrish: 39, sarasota: 48, venice: 0 };
+    const observedAt = new Date(NOW).toISOString();
+
+    installDb({ aggregates: fleet, stats: [] });
+    expect(await gbp._assessReviewSyncHealth(sources, pulled, {}, observedAt, { venice: 0 })).toEqual({ healthy: true });
+    expect(mockEmailSend).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+
+    installDb({ aggregates: [...fleet, { location_id: 'venice', row_count: '0', stored_count: '12', newest_ingest_at: daysAgo(30), stats_updated_at: null }], stats: [] });
+    const out = await gbp._assessReviewSyncHealth(sources, pulled, {}, observedAt, { venice: 0 });
+    expect(out.emailed).toBe(true);
+    expect(mockNotifyAdmin.mock.calls[0][1]).toBe('Review sync health escalation [venice:silent_empty]');
+
+    // Google once showed reviews that never ingested: only the stats row is
+    // stored (no review rows), and today's zero leaves it in place.
+    mockEmailSend.mockClear();
+    mockNotifyAdmin.mockClear();
+    installDb({
+      aggregates: [...fleet, { location_id: 'venice', row_count: '0', stored_count: '1', newest_ingest_at: null, stats_updated_at: daysAgo(40) }],
+      stats: [{ location_id: 'venice', review_text: '{"rating":5,"totalReviews":3}' }],
+    });
+    expect((await gbp._assessReviewSyncHealth(sources, pulled, {}, observedAt, { venice: 0 })).emailed).toBe(true);
+    expect(mockNotifyAdmin.mock.calls[0][1]).toBe('Review sync health escalation [venice:silent_empty]');
+  });
+
   test('problems email contact@ FIRST with the ACT:/FIX: subject and bell as dedupe marker', async () => {
     installDb({ aggregates: [], stats: [] }); // venice-class everywhere: zero rows
     const out = await gbp._assessReviewSyncHealth(
@@ -274,13 +331,181 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(updates).toHaveLength(3);
     expect(JSON.parse(updates[1].metadata.bindings[0]).observedAt).toBe(t3);
     expect(updates[2]).toMatchObject({ read_at: null });
-    expect(updates[2].title).toMatch(/Google review sync/);
-    expect(typeof updates[2].body).toBe('string');
-    expect(JSON.parse(updates[2].metadata.bindings[0]).observedAt).toBe(t3);
+    // Same row shape deliverOpsDigest writes (codex r2 P1 on #5236): short
+    // title with no ACT:/FIX: prefix, the full report in `detail`, and the
+    // kind/audience/feed stamps refreshed with it.
+    expect(updates[2].title).not.toMatch(/^(ACT|FIX):/);
+    expect(updates[2].title.length).toBeLessThanOrEqual(60);
+    expect(updates[2].detail).toMatch(/Hourly Google review sync/);
+    const rewriteMeta = JSON.parse(updates[2].metadata.bindings[0]);
+    expect(rewriteMeta.observedAt).toBe(t3);
+    expect(rewriteMeta.subject).toMatch(/^(ACT|FIX): Google review sync/);
+    expect(['ACT', 'FIX']).toContain(rewriteMeta.kind);
+    expect(rewriteMeta.feed).toBe(rewriteMeta.kind === 'FIX' ? 'activity' : null);
+    expect(rewriteMeta.audience).toBe(rewriteMeta.kind === 'FIX' ? 'engineering' : 'owner');
     expect(await gbp._assessReviewSyncHealth({ venice: 'gbp' }, {}, {}, t2)).toEqual({ stale: true });
     expect(marker.metadata.observedAt).toBe(t3);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  // admin-alerts-ring scope (2026-09-28): this direct rewrite bypasses
+  // notifyAdmin entirely, so it applies the SAME ring-only-on-change test
+  // by hand (ringOnRefreshFrom) — a repeat same-signature failure that
+  // hasn't grown past the standing digest's own count keeps read_at AND
+  // feed/quiet exactly as they were, even though the content still
+  // rewrites (a later run's re-observed subject/detail).
+  test('a repeat same-signature failure with a flat or shrinking count keeps the digest quiet — read_at and feed/quiet stay as they were', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    // A standing digest that already reported MORE findings (10) than this
+    // 4-location wipe will (4) — no growth, so the ring test says quiet.
+    const marker = {
+      id: 'n_quiet_repeat', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 10 },
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    // Zero rows everywhere -> silent_empty at all 4 locations -> ACT (owner),
+    // same deterministic fixture as 'problems email contact@ FIRST...' above.
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(out).toEqual({ deduped: true });
+    expect(updates).toHaveLength(3);
+    const rewrite = updates[2];
+    expect(rewrite).not.toHaveProperty('read_at'); // kept as-is, not cleared
+    expect(rewrite.title).not.toMatch(/^(ACT|FIX):/); // content still rewrites
+    const rewriteMeta = JSON.parse(rewrite.metadata.bindings[0]);
+    expect(rewriteMeta.kind).toBe('ACT');
+    expect(rewriteMeta.audience).toBe('owner');
+    expect(rewriteMeta.count).toBe(4); // still stamped, unconditionally
+    expect(rewriteMeta).not.toHaveProperty('feed'); // dropped — existing feed/quiet stand
+    expect(rewriteMeta).not.toHaveProperty('quiet');
+  });
+
+  test('an engineering-audience (FIX) repeat rewrite always rings — never gated, byte-identical to before this scope', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    const marker = {
+      id: 'n_fix_repeat', created_at: t1,
+      // A count far above anything this run could report — if this were
+      // owner-gated it would go quiet; FIX must ring anyway.
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 999 },
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    // feed_down at one location -> FIX (engineering), same deterministic
+    // fixture as 'feed_down escalates the subject to FIX:' above.
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'none', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(out).toEqual({ deduped: true });
+    expect(updates).toHaveLength(3);
+    const rewrite = updates[2];
+    expect(rewrite).toMatchObject({ read_at: null });
+    const rewriteMeta = JSON.parse(rewrite.metadata.bindings[0]);
+    expect(rewriteMeta.kind).toBe('FIX');
+    expect(rewriteMeta.audience).toBe('engineering');
+    expect(rewriteMeta.feed).toBe('activity');
+    expect(rewriteMeta.quiet).toBe(false);
+  });
+
+  // admin-alerts-ring-v2 follow-up: an audience flip changes which surface
+  // the row belongs to, not merely whether it rings — a FIX->ACT flip whose
+  // count hasn't grown (quiet by the plain ring test) must still land the
+  // owner's row visible, or it stays hidden behind a stale feed:'activity'.
+  test('a FIX->ACT flip rings into the owner bell even with a flat/shrinking count (the FIX row may have been read in Activity)', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    // The standing row is CURRENTLY engineering/Activity-only, with a count
+    // well above anything this run's 4-location wipe reports (4) — the
+    // plain ring-only-on-change test alone would say quiet.
+    const marker = {
+      id: 'n_flip_quiet', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, audience: 'engineering', feed: 'activity', count: 10 },
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    // Zero rows everywhere -> silent_empty at all 4 locations -> ACT (owner).
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(out).toEqual({ deduped: true });
+    expect(updates).toHaveLength(3);
+    const rewrite = updates[2];
+    expect(rewrite.read_at).toBeNull(); // entering the owner audience rings even though the count fell (10 -> 4)
+    const rewriteMeta = JSON.parse(rewrite.metadata.bindings[0]);
+    expect(rewriteMeta.kind).toBe('ACT');
+    expect(rewriteMeta.audience).toBe('owner');
+    // The flip still applies, despite the quiet refresh: the row is owner
+    // now, so it must not stay hidden behind the old engineering feed.
+    expect(rewriteMeta.feed).toBeNull();
+    expect(rewriteMeta.quiet).toBe(false);
+  });
+
+  // admin-alerts-ring follow-up (codex r8 P1): item identity from the
+  // findings themselves — `<location id>:<class>` — the same pair the
+  // dedupe signature already sorts and joins, on both surfaces this
+  // finding reaches (the direct same-signature rewrite, and the standing
+  // ops_digest row deliverOpsDigest writes/refreshes). An empty aggregate
+  // with no pulledCount given classifies stats_stale at all 4 locations
+  // (no _stats row) — the same fixture the quiet-repeat/FIX->ACT tests above
+  // use; only the class label matters here, not which one it is.
+  test('a pre-identity standing row rings on its first identified same-count refresh (codex r1 on #5282)', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    const marker = {
+      id: 'n_legacy_identity', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 4 }, // no itemKeys/itemSetHash
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(updates[2].read_at).toBeNull(); // rang: first identity at an equal count (4 -> 4)
+  });
+
+  test('the direct rewrite stamps itemKeys/itemSetHash unconditionally, like count', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    // Same shrinking-count fixture as the quiet-repeat test above — the
+    // identity stamp is unconditional, independent of whether it rings.
+    const marker = {
+      id: 'n_item_identity', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 10 },
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(out).toEqual({ deduped: true });
+    const rewriteMeta = JSON.parse(updates[2].metadata.bindings[0]);
+    expect(rewriteMeta.itemKeys).toEqual(['bradenton:stats_stale', 'parrish:stats_stale', 'sarasota:stats_stale', 'venice:stats_stale']);
+    expect(typeof rewriteMeta.itemSetHash).toBe('string');
+    expect(rewriteMeta.itemSetHash).toHaveLength(64); // sha256 hex, itemSetHashFor
+  });
+
+  test('deliverOpsDigest wires the same item identity through to notifyAdmin: a same-count finding swap rings, the same set stays quiet', async () => {
+    process.env.GATE_OPS_DIGESTS_IN_APP = 'true';
+    process.env.GATE_AGENT_ACTIVITY = 'true';
+    try {
+      installDb({ aggregates: [], stats: [] }); // no standing 'review' row -> the fresh-marker branch runs
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-digest', deduped: false });
+      await gbp._assessReviewSyncHealth({ bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {});
+      const digestCall = mockNotifyAdmin.mock.calls.find(([category]) => category === 'ops_digest');
+      expect(digestCall).toBeDefined();
+      const opts = digestCall[3];
+      const itemKeys = ['bradenton:stats_stale', 'parrish:stats_stale', 'sarasota:stats_stale', 'venice:stats_stale'];
+      expect(opts.metadata.itemKeys).toEqual(itemKeys);
+      expect(typeof opts.ringOnRefresh).toBe('function');
+      // Same set at the same count -> quiet; a swapped location -> rings,
+      // even though the count is unchanged (4 -> 4) in both cases.
+      expect(opts.ringOnRefresh({}, { count: 4, itemKeys })).toBe(false);
+      expect(opts.ringOnRefresh({}, {
+        count: 4, itemKeys: ['bradenton:stats_stale', 'parrish:stats_stale', 'sarasota:stats_stale', 'venice:feed_degraded'],
+      })).toBe(true);
+    } finally {
+      delete process.env.GATE_OPS_DIGESTS_IN_APP;
+      delete process.env.GATE_AGENT_ACTIVITY;
+    }
   });
 
   test('a delayed older failure cannot resurrect after the durable newer clean watermark', async () => {

@@ -197,6 +197,25 @@ describe('termite annual plan activation on sign', () => {
     expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
   });
 
+  test('#5311 r1: replays the persisted createdCustomerId into convertEstimate; a legacy boolean customerCreatedAtAccept in an old context is NOT replayed', async () => {
+    const withId = setup({
+      contract: makeContract(),
+      estimate: makeEstimate({ annual_plan_deferred_invoice: makeAcceptContext({ createdCustomerId: 'customer-1' }) }),
+    });
+    await withId.activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn: withId.conn });
+    expect(withId.convertEstimate.mock.calls[0][1].createdCustomerId).toBe('customer-1');
+
+    jest.resetModules();
+    const legacy = setup({
+      contract: makeContract(),
+      estimate: makeEstimate({ annual_plan_deferred_invoice: makeAcceptContext({ customerCreatedAtAccept: true, createdCustomerId: null }) }),
+    });
+    await legacy.activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn: legacy.conn });
+    const opts = legacy.convertEstimate.mock.calls[0][1];
+    expect(opts.createdCustomerId).toBeUndefined();
+    expect(opts.customerCreatedAtAccept).toBeUndefined();
+  });
+
   test('codex round-3 P2: the activation-attempt stamp is committed on its own, BEFORE the conversion transaction opens', async () => {
     const contract = makeContract();
     const estimate = makeEstimate();

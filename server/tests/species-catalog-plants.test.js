@@ -18,11 +18,13 @@
  * checks the L1b assignment calls for (pest resolution unchanged, a
  * plant/condition alias resolves to its own node).
  *
- * Every one of these 119 entries carries `review.status: "draft"` — none of
- * them is nameable by any engine yet (species-catalog.test.js's "every pest
- * entry is owner-approved; every plant/condition entry is still draft" pins
- * that fact; `pest-engine.js`'s `resolveCandidate` also refuses any node
- * outside `section: 'pest'`, per PR #5143). No model providers are called.
+ * Every one of these 119 entries is owner-approved (owner decision
+ * 2026-09-28) against its current content — the "every entry is
+ * owner-approved" test below and species-catalog.test.js's catalog-wide
+ * approval test pin that, so an unreviewed content edit fails CI. Only the
+ * plant engine names them; `pest-engine.js`'s `resolveCandidate` still
+ * refuses any node outside `section: 'pest'` (PR #5143). No model providers
+ * are called.
  */
 
 const catalog = require('../services/species-catalog');
@@ -86,16 +88,16 @@ describe('L1b catalog size (72 plant + 47 condition + 239 pest = 358)', () => {
     }
   });
 
-  test('every entry is a draft — L1b lands no owner approval', () => {
+  test('every entry is owner-approved against its current content (owner decision 2026-09-28)', () => {
     for (const e of l1bEntries) {
-      expect(e.review.status).toBe('draft');
-      expect(catalog.isApproved(e)).toBe(false);
+      expect(e.review.status).toBe('owner_approved');
+      expect(catalog.isApproved(e)).toBe(true);
     }
   });
 });
 
 describe('L1b: service.key is null for every plant/condition entry', () => {
-  test.each(l1bEntries.map((e) => [e.slug, e]))('%s carries service.key: null (owner decision 4 pending — nothing auto-prices)', (_slug, e) => {
+  test.each(l1bEntries.map((e) => [e.slug, e]))('%s carries service.key: null (owner decision 4, 2026-09-27: nothing auto-prices)', (_slug, e) => {
     expect(e.service.key).toBeNull();
   });
 });

@@ -50,7 +50,8 @@ const {
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
-const { expectedServiceMinutes, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
+const { expectedServiceMinutes, expectedMinutesForServices, ensureCatalogLoaded } = require('./scheduling/expected-service-minutes');
+const { violatesTravelGap } = require('./scheduling/travel-gap');
 
 // The candidate's own expected-minutes padding credit (owner ruling
 // 2026-09-23) for the travel-gap probes below (occupancy.js decides
@@ -162,8 +163,8 @@ function requireKnownBookingWindowConfig(slotIdOrNull) {
 // Slot IDs come from PR A's getAvailableSlots:
 //   `${date}_${startTime.replace(':', '-')}_${techId || 'unassigned'}`
 // with the signed-offer segments appended by signCustomerFacingSlots:
-//   `${base}.${exp}.${sig}`
-// e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.dGhl..."
+//   `${base}.${exp}.${arrivalGrace}.${sig}`
+// e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.90.dGhl..."
 const SLOT_ID_RE = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_(.+)$/;
 
 function parseSlotId(slotId) {
@@ -189,6 +190,12 @@ function parseSlotId(slotId) {
     techId: techRaw === 'unassigned' ? null : techRaw,
     offerExp: signed ? signed.exp : null,
     offerSig: signed ? signed.sig : null,
+    // The EXACT self-serve arrival grace this offer was signed under (owner
+    // ruling 2026-09-28, Codex round 2 on #5314) — cleartext but HMAC-bound,
+    // so reserveSlot applies the grace that certified the OFFER, never a
+    // live env re-read that could have changed since. 0 for an unsigned/
+    // pre-v3 slotId (signed === null): no offer to trust a grace value from.
+    offerArrivalGrace: signed ? signed.arrivalGrace : 0,
   };
 }
 
@@ -680,6 +687,73 @@ async function prepareReservationCommit(scheduledServiceId, options = {}) {
  * opts: { estimateId, slotId, holdMinutes?, durationMinutes?, serviceMode?, selectedFrequency? }
  * returns: { scheduledServiceId, expiresAt }
  */
+// Why a slot's date can't be reserved, or null. A past date never can; a
+// graced offer minted before ET midnight for "tomorrow" is now same-day,
+// and same-day picks never get grace (Codex r3 P2 on #5314), so the
+// customer must refresh into a grace-0 offer.
+function slotDateRefusal(date, todayEt, offerArrivalGrace) {
+  if (date < todayEt) return 'slot date has already passed';
+  if (date === todayEt && offerArrivalGrace > 0) return 'graced offer is now same-day';
+  return null;
+}
+
+// Codex r4 P1 on #5314: another estimate's live hold on this same tech/date
+// can be minted DURING a signed offer's 45-minute life. reserveSlot's grace
+// check (verifyArrivalCapacity's arrivalGraceMinutes) only compares the
+// candidate's OWN simulated arrival delay against the signed grace — it
+// never re-applies the strict travel-gap BUFFER to a hold that didn't exist
+// yet when packCapacityEnds screened this offer, so two holds could graduate
+// without the buffer the contract promises a live hold always keeps ("a live
+// hold never gets the waiver" — travel-gap.js, graceWaivesBufferOnly).
+// Runs ONLY for a graced offer (grace 0 is byte-identical — a whole-route
+// FEASIBILITY conflict with a new hold is still caught by
+// verifyArrivalCapacity itself regardless of grace; this closes the
+// STRICT-BUFFER gap grace specifically reopens). Reuses find-time.js's own
+// row-expansion + entity-shaping (expandRowsWithCredit/capacityNeighbourEntity)
+// so the entity shape here can never drift from the offer side's. Owns its
+// own guard + candidate construction (rather than the reserveSlot call site)
+// so reserveSlot's transaction callback keeps origin/main's complexity.
+async function refuseGracedOfferOnRivalHoldConflict(trx, {
+  useCapacity, offerArrivalGrace, estimateId, date, techId,
+  slotStartMinutes, effectiveDurationMinutes, holdPin, candidateExpectedMinutes,
+}) {
+  if (!useCapacity || !(offerArrivalGrace > 0)) return;
+  const rivalHolds = await trx('scheduled_services')
+    .where({ scheduled_date: date })
+    .whereNot({ source_estimate_id: estimateId })
+    .whereNull('customer_id')
+    .whereNotNull('reservation_expires_at')
+    .whereRaw('reservation_expires_at > NOW()')
+    // This candidate's OWN technician, or an unassigned hold — an unassigned
+    // hold could still be assigned to this tech, same convention
+    // graceWaivesBufferOnly's own hold filter uses (find-time.js
+    // sameAssignedTech, Codex r3 P2).
+    .where((q) => {
+      q.whereNull('technician_id');
+      if (techId) q.orWhere('technician_id', techId);
+    })
+    .select('*');
+  if (!rivalHolds.length) return;
+  await ensureCatalogLoaded(trx);
+  // Lazy require (matches this file's convention for same-directory
+  // scheduling modules, e.g. combined-visit-capacity below): find-time.js is
+  // mocked WITHOUT `_internals` by several unrelated test suites, and this
+  // whole function is already a no-op above for every grace-0 caller (every
+  // test that never exercises a graced offer), so nothing should pay for the
+  // require at module-load time.
+  const { expandRowsWithCredit, capacityNeighbourEntity } = require('./scheduling/find-time')._internals;
+  const candidate = {
+    startMin: slotStartMinutes, endMin: slotStartMinutes + effectiveDurationMinutes,
+    lat: holdPin?.lat ?? null, lng: holdPin?.lng ?? null, windowMinutes: effectiveDurationMinutes,
+    expectedMinutes: Number.isFinite(candidateExpectedMinutes)
+      ? Math.min(candidateExpectedMinutes, effectiveDurationMinutes) : effectiveDurationMinutes,
+  };
+  for (const row of expandRowsWithCredit(rivalHolds)) {
+    const neighbour = capacityNeighbourEntity(row);
+    if (neighbour && violatesTravelGap(candidate, [neighbour])) throw capacityError('rival_hold_travel_gap');
+  }
+}
+
 async function reserveSlot({
   estimateId,
   slotId,
@@ -701,7 +775,7 @@ async function reserveSlot({
     err.code = 'INVALID_SLOT_ID';
     throw err;
   }
-  const { date, windowStart, techId, offerExp, offerSig } = parsed;
+  const { date, windowStart, techId, offerExp, offerSig, offerArrivalGrace } = parsed;
 
   // Signed-offer gate (booking-audit round 2): every slot the generator
   // returns carries `.exp.sig` inside its slotId — a bare/hand-crafted id
@@ -747,8 +821,12 @@ async function reserveSlot({
   // starts AT the boundary (startMin >= earliest), so equality must pass
   // here too or a just-fetched boundary slot 409s on the first tap.
   const todayEt = etDateString();
-  if (date < todayEt) {
-    const err = new Error('slot date has already passed');
+  // A graced offer minted before ET midnight for "tomorrow" is now same-day,
+  // and same-day picks never get grace (Codex r3 P2 on #5314): refuse it so
+  // the customer refreshes into a grace-0 offer.
+  const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace);
+  if (dateRefusal) {
+    const err = new Error(dateRefusal);
     err.code = 'SLOT_UNAVAILABLE';
     err.slotId = slotId;
     throw err;
@@ -839,9 +917,13 @@ async function reserveSlot({
       });
       // Authenticate the offered tuple before spending the shared traffic budget.
       // The transaction repeats this check against the locked estimate profile.
+      // arrivalGrace: echo the token's OWN embedded value (offerArrivalGrace)
+      // back into the reconstruction — never a live selfServeArrivalGraceMinutes()
+      // read, which could disagree with what was actually signed and fail a
+      // legitimate offer closed (owner ruling 2026-09-28, Codex round 2 #5314).
       if (!verifySlotOffer({ surface: 'estimate', scopeId: String(estimateId), date,
         startMinutes: slotStartMinutes, technicianId: techId, durationMinutes: profile.durationMinutes,
-        exp: offerExp, policy: CAPACITY_OFFER_POLICY }, offerSig)) throw capacityError('invalid_offer');
+        exp: offerExp, policy: CAPACITY_OFFER_POLICY, arrivalGrace: offerArrivalGrace }, offerSig)) throw capacityError('invalid_offer');
       preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
         prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
           service_type: profile.services.map(service => service.service).join(' ') },
@@ -1032,6 +1114,9 @@ async function reserveSlot({
         durationMinutes: effectiveDurationMinutes,
         exp: offerExp,
         policy: useCapacity ? CAPACITY_OFFER_POLICY : undefined,
+        // The token's own embedded grace (owner ruling 2026-09-28, Codex
+        // round 2 #5314) — never a live re-read; see the pre-txn check above.
+        arrivalGrace: offerArrivalGrace,
       }, offerSig)) {
         const err = new Error('slot was not offered for this estimate');
         err.code = 'SLOT_UNAVAILABLE';
@@ -1079,7 +1164,20 @@ async function reserveSlot({
       const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
         conn: trx, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
         serviceTypes: serviceProfile.services.map(service => service.label || service.service),
+        // The grace that CERTIFIED THIS OFFER (owner ruling 2026-09-28, Codex
+        // round 2 P0 on #5314) — the token's own HMAC-verified value, never a
+        // live selfServeArrivalGraceMinutes() re-read: the hold is certified
+        // ONCE, here, at reserve; commitReservation below never re-applies it.
+        arrivalGraceMinutes: offerArrivalGrace,
       }) : null;
+      // Rival-hold strict buffer (Codex r4 P1 on #5314) — the helper itself
+      // no-ops unless this offer is graced (grace 0 is byte-identical). Runs
+      // under the SAME row lock verifyArrivalCapacity just took, so this
+      // reads a consistent, already-locked snapshot of the date/tech.
+      await refuseGracedOfferOnRivalHoldConflict(trx, {
+        useCapacity, offerArrivalGrace, estimateId, date, techId,
+        slotStartMinutes, effectiveDurationMinutes, holdPin, candidateExpectedMinutes,
+      });
       // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
       // graduated visit carries it even if the profile can't be re-resolved
       // at commit; commitReservation backfills it when this returns null.
@@ -1819,6 +1917,14 @@ async function commitReservation({
       }
     }
 
+    // GRACE-EXEMPT: no arrivalGraceMinutes here (owner ruling 2026-09-28,
+    // Codex round 2 P0 on #5314): a hold is certified ONCE, at reserveSlot — re-applying a
+    // freshly re-read grace here would let a since-LOWERED
+    // SELF_SERVE_ARRIVAL_GRACE_MINUTES fail a hold that was already validly
+    // reserved (a hold reserved at grace 90 with an 80-minute delay must not
+    // fail acceptance because the setting later dropped to 30). This keeps
+    // the existing 120-minute arrival promise as verifyArrivalCapacity's
+    // only bound here, exactly as it is on origin/main.
     const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
       conn: client, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
       serviceTypes: serviceProfile?.services.map(service => service.label || service.service),
@@ -2412,6 +2518,22 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // re-picks, and /reserve runs the full capacity path). A live hold's
     // allocation is still on the row, so extending its expiry alone changes
     // no occupancy.
+    //
+    // Self-serve arrival grace write-up (owner ruling 2026-09-28, decision 4
+    // of that lane, #5314): a still-live hold's expiry-only extend NEVER
+    // re-verifies whole-route capacity fitness here — pre-existing, not new
+    // with grace. A hold accepted under a since-lowered
+    // SELF_SERVE_ARRIVAL_GRACE_MINUTES (or a route the day's stops have since
+    // reshuffled) keeps whatever grace certification it received at RESERVE
+    // time; extending only pushes reservation_expires_at forward and touches
+    // no occupancy. Re-running verifyArrivalCapacity here would need a fresh
+    // prepareArrivalCapacity call (the original prepared/fingerprint object
+    // lives only in the reserve request's memory, never persisted) — a full
+    // whole-route simulation on every extend, which this function already
+    // deliberately avoids for the SAME reason above. Not implemented: no
+    // cheaper option exists, and adding it would extend well past a genuine
+    // grace-only fix into re-verifying every capacity hold's fitness on every
+    // extend, gate-0 included.
     if (alreadyLapsed && rowUnderCapacity) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
@@ -2577,5 +2699,6 @@ module.exports = {
     notesWithServiceMix,
     catalogLinkForProfile,
     candidateExpectedMinutesFromRow,
+    refuseGracedOfferOnRivalHoldConflict,
   },
 };

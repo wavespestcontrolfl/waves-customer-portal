@@ -495,7 +495,13 @@ describe('model-switchboard', () => {
     expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
     expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
-    expect(deepSafe).toEqual(['DEEP', 'EXTREME']);
+    // NEWSLETTER is reached only through the newsletterWriter policy in
+    // llm/call.js, whose wire cap gives always-thinking models their floor;
+    // its default (Opus 5.5) is itself a requires:'deep' model.
+    expect(deepSafe).toEqual(['DEEP', 'EXTREME', 'NEWSLETTER']);
+    expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
+    expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
+    expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);
     for (const id of Object.keys(sb.MODEL_CATALOG).filter((k) => /fable|mythos/.test(k))) {
       expect(sb.MODEL_CATALOG[id].requires).toBe('deep');
     }
@@ -686,5 +692,80 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
     expect(inbound.primary.accepts.allowedIds).toEqual([...ALLOWED_OVERRIDE_MODEL_IDS]);
     expect(inbound.primary.accepts.allowedIds).toContain('claude-haiku-4-5-20251001');
     expect(inbound.primary.accepts.allowedIds.some((id) => id.includes('fable'))).toBe(false);
+  });
+
+  // GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling 2026-09-28, GPT-6 Luna): the
+  // voice_relay row must show what production inbound ACTUALLY resolves — a
+  // separate gate from GATE_VOICE_RELAY_OPENAI (sandbox/eval only).
+  describe('GATE_VOICE_RELAY_OPENAI_INBOUND', () => {
+    const INBOUND_GATE_ENV = 'GATE_VOICE_RELAY_OPENAI_INBOUND';
+    let savedGate;
+    beforeEach(() => { savedGate = process.env[INBOUND_GATE_ENV]; delete process.env[INBOUND_GATE_ENV]; });
+    afterEach(() => { if (savedGate === undefined) delete process.env[INBOUND_GATE_ENV]; else process.env[INBOUND_GATE_ENV] = savedGate; });
+
+    it('off — the picker allowlist is unchanged (Anthropic-only, same as before this gate existed)', () => {
+      const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+      const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+      expect(inbound.primary.accepts.allowedIds).toEqual([...ALLOWED_OVERRIDE_MODEL_IDS]);
+      expect(inbound.primary.accepts.allowedIds).not.toContain('gpt-6-luna');
+      expect(inbound.primary.accepts.providers).toEqual(['anthropic']);
+    });
+
+    it('off — a gpt-6-luna VOICE_RELAY_INBOUND_MODEL shows as rejected, falling back to the shared chain', () => {
+      process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-6-luna';
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const { resolveSessionModel } = require('../services/voice-agent/relay-conversation');
+      const inbound = lanes.find((l) => l.id === 'voice_relay');
+      const expected = require('../config/models').DEFAULTS.VOICE;
+      expect(inbound.primary.model).toBe(expected);
+      expect(inbound.primary.via).toMatch(/VOICE_RELAY_INBOUND_MODEL rejected/);
+      expect(resolveSessionModel({ sandbox: false }).model).toBe(expected);
+    });
+
+    it('on — the picker allowlist grows to include gpt-6-luna, and the row shows what production inbound resolves', () => {
+      process.env[INBOUND_GATE_ENV] = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-6-luna';
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const { resolveSessionModel } = require('../services/voice-agent/relay-conversation');
+      const inbound = lanes.find((l) => l.id === 'voice_relay');
+      expect(inbound.primary.accepts.allowedIds).toContain('gpt-6-luna');
+      // The picker filters by provider before the allowlist (codex r1 P2 on #5209).
+      expect(inbound.primary.accepts.providers).toEqual(expect.arrayContaining(['anthropic', 'openai']));
+      expect(inbound.primary.model).toBe('gpt-6-luna');
+      expect(resolveSessionModel({ sandbox: false })).toEqual({ model: 'gpt-6-luna', fallbackReason: null });
+    });
+
+    // GATE_VOICE_RELAY_OPENAI (the sandbox/eval gate) must never be what the
+    // voice_relay row (production inbound) reads.
+    it('GATE_VOICE_RELAY_OPENAI alone never opens the voice_relay row to an OpenAI id', () => {
+      const savedOther = process.env.GATE_VOICE_RELAY_OPENAI;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-6-luna';
+      try {
+        jest.resetModules();
+        const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+        expect(inbound.primary.accepts.allowedIds).not.toContain('gpt-6-luna');
+        expect(inbound.primary.model).toBe(require('../config/models').DEFAULTS.VOICE);
+      } finally {
+        if (savedOther === undefined) delete process.env.GATE_VOICE_RELAY_OPENAI; else process.env.GATE_VOICE_RELAY_OPENAI = savedOther;
+      }
+    });
+
+    // The shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only
+    // regardless of this gate — collections-conversation.js shares it.
+    it('the shared chain still rejects an OpenAI VOICE_RELAY_MODEL with the inbound gate on', () => {
+      process.env[INBOUND_GATE_ENV] = 'true';
+      process.env.VOICE_RELAY_MODEL = 'gpt-6-luna';
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const inbound = lanes.find((l) => l.id === 'voice_relay');
+      const collections = lanes.find((l) => l.id === 'voice_relay_collections');
+      const expected = require('../config/models').VOICE;
+      expect(inbound.primary.model).toBe(expected);
+      expect(inbound.primary.via).toMatch(/VOICE_RELAY_MODEL rejected/);
+      expect(collections.primary.model).toBe(expected);
+    });
   });
 });

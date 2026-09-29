@@ -405,6 +405,11 @@ describe('rain-out service', () => {
       const legacyVars = renderSmsTemplate.mock.calls[1][1];
       expect(legacyVars.weather_phrase).toBe('heavy rain');
       expect(legacyVars.weather_lead).toBeUndefined();
+      // The legacy rung records its own key, not v2's.
+      const meta = sendCustomerMessage.mock.calls[0][0].metadata;
+      expect(meta.templateKey).toBe('rain_out_moved');
+      // …while original_message_type keeps the v2 kill-switch key.
+      expect(meta.original_message_type).toBe('rain_out_moved_v2');
     });
 
     test('a DISABLED v2 template row is the kill switch — no legacy reroute, no SMS', async () => {
@@ -449,6 +454,8 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
         original_message_type: 'rain_out_moved_v2',
         reason_code: 'weather_rain',
+        // Same rung, threaded to the audit-mapping field too.
+        templateKey: 'rain_out_moved_v2',
       });
     });
 
@@ -695,6 +702,7 @@ describe('rain-out service', () => {
       expect(vars.forecast_clause).toBeUndefined();
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
         original_message_type: 'rain_out_moved_v3',
+        templateKey: 'rain_out_moved_v3',
       });
     });
 
@@ -2883,11 +2891,118 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       // Measured on the v3 rung — the one that sends — with its real link
-      // clause, not a bare template.
-      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      // clause, not a bare template. BOTH the linked and no-link variants
+      // are measured (codex round-3 P2: the no-link fallback is not always
+      // shorter), so the with-200-char-note case that already exceeds the
+      // cap on the linked body still renders the no-link one too.
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(2);
       expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v3');
       expect(renderSmsTemplate.mock.calls[0][1].link_clause)
         .toBe(' New time, forecast & other options: https://waves.test/r/tok123');
+      expect(renderSmsTemplate.mock.calls[1][1].link_clause)
+        .toBe(' Need a different time? Reply to this message.');
+    });
+
+    // Codex round-3 P2: on the short-domain shortlink config (or a short
+    // legacy code), the linked clause can be SHORTER than the fixed 46-char
+    // no-link fallback. Uses an EXTRA reason (no "forecast" wording in its
+    // link clause, unlike weather reasons — see renderV3MovedBody) so a
+    // short url can actually beat the fallback's length.
+    test('gate on: a short link shorter than the no-link fallback is refused pre-move when the no-link variant alone would exceed the cap', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'equipment_issue', customerNote: 'x'.repeat(123) });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_too_many_segments' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: a short link that leaves BOTH variants inside the cap moves and sends normally', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+      // Pre-move mint, then the send-time pinnedUrl re-check confirming the
+      // SAME url still holds — not revoked.
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' })
+        .mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      // One char shorter than the refused boundary above.
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'equipment_issue', customerNote: 'x'.repeat(122) });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://wvs.co/x1');
+    });
+
+    // Codex round-4 P2: previewMovedSms (the Quick Move sheet's advisory
+    // counter) must measure the SAME worst-of-both-variants math commit()
+    // enforces, or the sheet can green-light a note commit() then refuses.
+    test('previewMovedSms: a short-domain link at the boundary reports withinCap:false, matching what commit() would refuse', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'equipment_issue', customMessage: 'x'.repeat(123),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.withinCap).toBe(false);
+      expect(result.segments).toBe(3);
+    });
+
+    // The companion normal case — one char shorter, both variants fit —
+    // reports withinCap:true, matching the commit() test above.
+    test('previewMovedSms: a short-domain link one char under the boundary reports withinCap:true', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'equipment_issue', customMessage: 'x'.repeat(122),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.withinCap).toBe(true);
+      expect(result.segments).toBe(2);
+    });
+
+    // Codex round-5 P2: at this exact note length, BOTH variants land in
+    // segmentCount 2 (a tie) but use different capacity — the linked body
+    // (296 of 306 GSM-7 slots) has headroom the no-link fallback (306 of
+    // 306, the true worst case) does not. A tie-break that always kept the
+    // linked variant reported 10 slots of remaining headroom a landed-state
+    // link revocation would not actually have.
+    test('previewMovedSms: an equal-segment-count tie reports the no-link variant\'s (truly worse) remaining capacity, not the linked one\'s', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'equipment_issue', customMessage: 'x'.repeat(122),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.segments).toBe(2);
+      // 153 slots/segment * 2 segments = 306; the no-link fallback uses all
+      // 306, so 0 remain — a wrong linked-favoring tie-break would report 10.
+      expect(result.remaining).toBe(0);
     });
 
     test('gate on: a customer with no phone is never held to the cap — the move proceeds un-texted, nothing is measured', async () => {
@@ -2982,8 +3097,11 @@ describe('rain-out service', () => {
       expect(buildRescheduleLink).toHaveBeenNthCalledWith(1, 'svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
       expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', pinnedUrl: 'https://waves.test/r/tok123' });
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
+      // Pre-move renders BOTH the linked and no-link variants (codex
+      // round-3 P2: both must fit before the move commits), then the send
+      // — link not revoked here — renders once more with the real link.
       const v3Calls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3');
-      expect(v3Calls).toHaveLength(2);
+      expect(v3Calls).toHaveLength(3);
       for (const call of v3Calls) expect(call[3]).toEqual({ noVariants: true, templateBody: V3_BODY });
     });
 
@@ -2995,7 +3113,12 @@ describe('rain-out service', () => {
       const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
 
       expect(result.ok).toBe(true);
-      const [preCheck, send] = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3').map((c) => c[1]);
+      // Three v3 renders: pre-move linked, pre-move no-link (codex round-3
+      // P2), then the send (link not revoked here, so it re-renders with
+      // the real link) — the send is always the LAST one.
+      const v3VarCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3').map((c) => c[1]);
+      expect(v3VarCalls).toHaveLength(3);
+      const [preCheck, , send] = v3VarCalls;
       expect(preCheck.new_option).toBe('Fri, Jun 12, 10:00 AM - 12:00 PM');
       expect(send.new_option).toBe('Fri, Jun 12, 1:00 PM - 3:00 PM');
       expect(preCheck.new_option.length).toBeGreaterThanOrEqual(send.new_option.length);
@@ -3209,9 +3332,16 @@ describe('rain-out service', () => {
       delete process.env.GATE_QUICKMOVE_CUSTOM_REASON;
     });
 
-    function wireSingle() {
+    // Default: a live custom-template row for customTemplateSnapshot's
+    // pre-move read (mirrors the preset rung's own v3 row default). Exactly
+    // ONE sms_templates queue entry — the send-time link-revoked re-render
+    // must pin and reuse THIS snapshot rather than read the row again, so a
+    // test proving "no second read" can rely on wireDb throwing if one ever
+    // happens.
+    function wireSingle({ customTemplateRow = { body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true } } = {}) {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(customTemplateRow) })],
       });
     }
 
@@ -3294,13 +3424,20 @@ describe('rain-out service', () => {
       // No weather claims and no NWS fetches on a custom move.
       expect(getDailyRainOutlook).not.toHaveBeenCalled();
       expect(getHourlyRainOutlook).not.toHaveBeenCalled();
-      // Checked body == sent body: the link is built once and the template
-      // rendered once (pre-move segment check); the send reuses both — an
-      // admin template edit or a shortener long-URL fallback between check
-      // and send could otherwise exceed the cap the check passed.
-      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      // Checked body == sent body: the send reuses the pre-move-rendered
+      // body verbatim (never a re-render) — an admin template edit or a
+      // shortener long-URL fallback between check and send could otherwise
+      // exceed the cap the check passed. The link itself is built TWICE:
+      // once pre-move (mint/reuse) and once more at send time as a
+      // pinnedUrl re-check against the LANDED row (independent-reviewer
+      // finding on PR #5308) — here the landed state still agrees, so the
+      // pre-move body sends verbatim. Pre-move ALSO renders the no-link
+      // variant (codex round-3 P2: both must fit before the move commits),
+      // so there are two template renders total, zero at send time.
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', pinnedUrl: 'https://waves.test/r/tok123' });
       const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
-      expect(customCalls).toHaveLength(1);
+      expect(customCalls).toHaveLength(2);
     });
 
     test('gate on: a body that would send as 3 segments is rejected BEFORE the move', async () => {
@@ -3315,6 +3452,91 @@ describe('rain-out service', () => {
       expect(result).toMatchObject({ ok: false, reason: 'note_too_many_segments' });
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    // Codex round-3 P2: on the short-domain shortlink config (or a short
+    // legacy code), the linked clause can be SHORTER than the fixed 46-char
+    // no-link fallback — the OPPOSITE of "dropping the link only shrinks
+    // it". A boundary-sized note that fits WITH this short link (297 GSM
+    // slots, 2 segments) would grow past the cap (307 slots, 3 segments) if
+    // the link were ever dropped — commit() must catch this BEFORE the
+    // move, not strand an already-moved visit with no notice.
+    test('gate on: a short link shorter than the no-link fallback is refused pre-move when the no-link variant alone would exceed the cap', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      // 44-char clause (28-char prefix + a 17-char short-domain url) vs the
+      // fixed 46-char no-link fallback — the link is the SHORTER one here.
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(176) });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_too_many_segments' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    // The companion case: both variants fit, so the move proceeds and a
+    // later landed-state revocation can safely swap to the pinned no-link
+    // body (covered by the "swaps to the pinned no-link body" test above).
+    test('gate on: a short link that leaves BOTH variants inside the cap moves and sends normally', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      // Pre-move mint, then the send-time pinnedUrl re-check confirming the
+      // SAME url still holds (landed state agrees) — not revoked.
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' })
+        .mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      // One char shorter than the refused boundary above — both the linked
+      // (296 slots) and no-link (306 slots) variants now fit in 2 segments.
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(175) });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://wvs.co/x1');
+    });
+
+    // Codex round-4 P2: previewMovedSms (the Quick Move sheet's advisory
+    // counter) must measure the SAME worst-of-both-variants math commit()
+    // enforces, or the sheet can green-light a note commit() then refuses.
+    test('previewMovedSms: a short-domain link at the boundary reports withinCap:false, matching what commit() would refuse', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1',
+        reasonCode: 'custom',
+        customMessage: 'x'.repeat(176),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.withinCap).toBe(false);
+      expect(result.segments).toBe(3);
+    });
+
+    // The companion normal case — one char shorter, both variants fit —
+    // reports withinCap:true, matching the commit() test above.
+    test('previewMovedSms: a short-domain link one char under the boundary reports withinCap:true', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1',
+        reasonCode: 'custom',
+        customMessage: 'x'.repeat(175),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.withinCap).toBe(true);
+      expect(result.segments).toBe(2);
     });
 
     test('gate on: missing/disabled custom template rejects the move pre-commit (kill switch, fail closed)', async () => {
@@ -3347,7 +3569,10 @@ describe('rain-out service', () => {
 
     test('gate on: emoji notes and template text reach the SMS send intact', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
-      renderSmsTemplate.mockImplementationOnce(async (key, vars) => `${vars.custom_message} ☔`);
+      // Persistent (not Once): commit() now renders BOTH the linked and
+      // no-link variants pre-move (codex round-3 P2) — both must get this
+      // same custom-message-based body.
+      renderSmsTemplate.mockImplementation(async (key, vars) => `${vars.custom_message} ☔`);
       wireSingle();
       const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow 👍🏽' });
       expect(result.ok).toBe(true);
@@ -3378,9 +3603,128 @@ describe('rain-out service', () => {
       const result = await RainOut.commit(COMMIT_ARGS);
 
       expect(result.ok).toBe(true);
-      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
+      // Pre-move mint/reuse, then the send-time pinnedUrl re-check against
+      // the landed row (independent-reviewer finding on PR #5308) — here it
+      // still agrees, so the pre-move body sends verbatim.
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(1, 'svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', pinnedUrl: 'https://waves.test/r/tok123' });
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
+    });
+
+    // Independent-reviewer finding on PR #5308: the Custom rung's pre-move
+    // build runs with assumeConfirmed, which the link builder deliberately
+    // exempts from the C3/C6 dead-link move-window guard (it reads the OLD,
+    // about-to-be-superseded row) — so a visit that landed too soon to move
+    // online again (or went grouped/frozen) must be caught HERE, at send
+    // time, or the customer gets a link the reschedule page then refuses.
+    test('gate on: the send drops a link revoked by the landed-state re-check (too soon to move online again, or grouped/frozen) — re-renders with the no-link clause, never a stale link', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      // Pre-move: eligible, existing code reused. Send: the builder
+      // re-validates the pinned url against the LANDED row and now refuses.
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
+        .mockResolvedValueOnce({ url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true });
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).not.toContain('New time & other options:');
+      expect(body).toContain(' Need a different time? Reply to this message.');
+      expect(body).not.toContain('waves.test');
+      expect(body).toContain(MESSAGE); // the dispatcher's own message is untouched
+      // commit() measured BOTH variants pre-move (codex round-3 P2: the
+      // no-link fallback is not always shorter), so this is a real, already-
+      // proven-to-fit cap, not an assumption.
+      const { countSegments } = require('../services/messaging/segment-counter');
+      const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+      const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+      expect(countSegments(normalizeGsmPunctuation(stripSmsUrlScheme(body))).segmentCount).toBeLessThanOrEqual(2);
+      // The template renders TWICE — both PRE-MOVE (linked, then no-link) —
+      // and the send just SWAPS to the pinned noLinkBody, never rendering
+      // again (codex round-3 P2 simplification of the round-2 fix): both
+      // calls carry the SAME pinned templateBody (customTemplateSnapshot's
+      // one pre-move read), so a send-time re-read is architecturally
+      // impossible, not just avoided.
+      const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
+      expect(customCalls).toHaveLength(2);
+      expect(customCalls[0][3].templateBody).toEqual(expect.any(String));
+      expect(customCalls[1][3].templateBody).toBe(customCalls[0][3].templateBody);
+      // Exactly ONE sms_templates read for the whole commit.
+      expect(db.mock.calls.filter(([table]) => table === 'sms_templates')).toHaveLength(1);
+    });
+
+    // Codex round-2 P1 on PR #5308: a landed-state link revocation must
+    // swap to the PINNED pre-move noLinkBody, never read the template row
+    // again (round-3 P2 simplified the fix from a send-time re-render to a
+    // plain property swap — see sendMovedSms) — otherwise a row that went
+    // disabled, lost a required placeholder, or grew past the segment cap
+    // between the pre-move check and the send would strand an already-moved
+    // visit with NO notice at all. This proves the invariant directly: the
+    // row `wireSingle` would serve on a SECOND read is a poisoned marker
+    // that must never reach the customer, and exactly one read happens
+    // regardless.
+    test('gate on: a landed-state link revocation swaps to the pinned no-link body and never re-reads the template row — a row that went disabled/lost its placeholder/grew longer in between cannot strand the move without a notice', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      const POISON = 'POISONED-SECOND-READ-MUST-NEVER-RENDER';
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // Only the FIRST entry (pre-move) should ever be consumed. A second
+        // read would find this row disabled (the kill switch), so if the
+        // send-time re-render mistakenly re-read the row, it would either
+        // throw finding the poisoned marker in its output or the move would
+        // silently go unnotified — either way this test would fail.
+        sms_templates: [
+          chain({ first: jest.fn().mockResolvedValue({ body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true }) }),
+          chain({ first: jest.fn().mockResolvedValue({ body: POISON, is_active: false }) }),
+        ],
+      });
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
+        .mockResolvedValueOnce({ url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true });
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      // The move notice still sent — a disabled/changed row after the move
+      // must never strand the customer with nothing.
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).not.toContain(POISON);
+      expect(body).toContain(' Need a different time? Reply to this message.');
+      expect(body).toContain(MESSAGE);
+      // Exactly one sms_templates read for the whole commit — the second
+      // (poisoned) queue entry is never touched.
+      expect(db.mock.calls.filter(([table]) => table === 'sms_templates')).toHaveLength(1);
+    });
+
+    // Codex round-2 P1, {failed:true} variant: a plain read failure on the
+    // send-time pinnedUrl re-check must be treated exactly like an explicit
+    // refusal — rescheduleUrl still lands on null, and the swap still uses
+    // the pinned noLinkBody rather than re-reading or re-rendering.
+    test('gate on: a {failed:true} landed-state re-check (read failure, not a refusal) also drops the link and uses the pinned snapshot', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
+        .mockResolvedValueOnce({ url: null, line: '', failed: true });
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).not.toContain('waves.test');
+      expect(body).toContain(' Need a different time? Reply to this message.');
+      expect(body).toContain(MESSAGE);
+      const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
+      expect(customCalls).toHaveLength(2);
+      expect(customCalls[1][3].templateBody).toBe(customCalls[0][3].templateBody);
+      expect(db.mock.calls.filter(([table]) => table === 'sms_templates')).toHaveLength(1);
     });
 
     test('custom renders pin the base row and demand the load-bearing placeholders (renderer opts contract)', async () => {
@@ -3401,9 +3745,12 @@ describe('rain-out service', () => {
       const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
       expect(customCalls.length).toBeGreaterThan(0);
       for (const call of customCalls) {
+        // templateBody pins the pre-move snapshot (customTemplateSnapshot)
+        // so the render never re-reads the live row (codex round-2 P1).
         expect(call[3]).toEqual({
           noVariants: true,
           requiredVars: ['custom_message', 'new_option', 'link_clause'],
+          templateBody: expect.any(String),
         });
       }
     });
@@ -3419,6 +3766,7 @@ describe('rain-out service', () => {
         mockCustomRender();
         wireDb({
           scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, is_recurring: true }) })],
+          sms_templates: [chain({ first: jest.fn().mockResolvedValue({ body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true }) })],
         });
 
         const result = await RainOut.commit({

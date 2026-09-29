@@ -118,7 +118,7 @@ function buildInputPayload(brief) {
     // previously-registered agent IDs would otherwise still run the old
     // call-emit-exactly-once prompt, turning the first in-session lint
     // rejection into agent_did_not_emit_draft instead of a redraft.
-    instruction: `You have been dispatched to produce a draft for opportunity ${brief.opportunity_id}. Start by calling get_content_brief(opportunity_id="${brief.opportunity_id}") to load the full brief. The shape summary below is what was composed; the get_content_brief call returns the canonical JSON to work from.${brief.facts_pack ? ' This brief includes a facts_pack: every local claim in your body must be grounded in one of its fact ids, and you must emit a claims_ledger.' : ''}${operatorBrief ? ' IMPORTANT: this is an OPERATOR-AUTHORED intercept brief. The operator_brief block below (also at voice_constraints.operator_brief in the canonical brief) is BINDING: follow its binding_instructions exactly — the working title/thesis/outline are the content plan, required_sources must be linked in-post with explicit attribution, verify_notes are mandatory verification steps, and the internal links and author block are required as given. Do not re-derive the topic, angle, slug, or sources.' : ''} NOTE ON EMIT RETRIES: if an emit tool result comes back with draft_rejected or metadata_rejected, your submission was NOT captured — revise it per the returned directives and call the SAME emit tool again in this session. Any call-once rule applies only to ACCEPTED submissions, never to rejected ones.`,
+    instruction: `You have been dispatched to produce a draft for opportunity ${brief.opportunity_id}. Start by calling get_content_brief(opportunity_id="${brief.opportunity_id}") to load the full brief. The shape summary below is what was composed; the get_content_brief call returns the canonical JSON to work from.${brief.facts_pack ? ' This brief includes a facts_pack: every local claim in your body must be grounded in one of its fact ids, and you must emit a claims_ledger.' : ''}${operatorBrief ? ' IMPORTANT: this is an OPERATOR-AUTHORED intercept brief. The operator_brief block below (also at voice_constraints.operator_brief in the canonical brief) is BINDING: follow its binding_instructions exactly — the working title/thesis/outline are the content plan, required_sources must be cited in-post with explicit attribution and linked (a competitor website is named but never linked; its URL goes under "Evidence sources" in notes_for_reviewer), verify_notes are mandatory verification steps, and the internal links and author block are required as given. Do not re-derive the topic, angle, slug, or sources.' : ''} NOTE ON EMIT RETRIES: if an emit tool result comes back with draft_rejected or metadata_rejected, your submission was NOT captured — revise it per the returned directives and call the SAME emit tool again in this session. Any call-once rule applies only to ACCEPTED submissions, never to rejected ones.`,
     brief_summary: {
       operator_brief: operatorBrief,
       opportunity_id: brief.opportunity_id,
@@ -223,7 +223,11 @@ class AgentDispatcher {
     // guardrail options — the runner derives them from the SAME shared
     // module gate 3c uses, so the lint can never disagree with the gate
     // that parks runs. Cleared with clearDraft below.
-    if (selfLintOptions) registerSessionLint(sessionId, selfLintOptions);
+    if (selfLintOptions) {
+      const newBlog = brief.action_type !== 'refresh_existing_page'
+        && (brief.page_type === 'supporting-blog' || brief.action_type === 'new_supporting_blog');
+      registerSessionLint(sessionId, selfLintOptions, { citabilityBrief: newBlog ? brief : null });
+    }
     try {
       await registerSessionEditorial(sessionId, brief);
     } catch (err) {

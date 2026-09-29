@@ -12,6 +12,7 @@
 const {
   SLOT_OFFER_TTL_MS,
   CAPACITY_OFFER_POLICY,
+  BOOK_INSERTION_OFFER_POLICY,
   signSlotOffer,
   verifySlotOffer,
   appendOfferToSlotId,
@@ -74,6 +75,7 @@ describe('signSlotOffer / verifySlotOffer', () => {
       { startMinutes: 600 },
       { technicianId: 'tech-2' },
       { durationMinutes: 60 },
+      { arrivalGrace: 90 }, // v3: self-serve arrival grace (signed as 0)
       { exp: exp + 1 }, // expiry is inside the signed string
     ];
     for (const change of variants) {
@@ -119,17 +121,151 @@ describe('signSlotOffer / verifySlotOffer', () => {
   });
 });
 
-describe('estimate-surface carrier — sig+exp inside the slotId', () => {
-  test('append + split round-trip; unsigned ids split to null', () => {
+describe('BOOK_INSERTION_OFFER_POLICY — /book mid-route insertion offers (Codex round 2, PR #5231)', () => {
+  const BOOKING = {
+    surface: 'booking', scopeId: '', serviceKey: 'pest_control', locationKey: '27.34,-82.53',
+    date: '2027-05-20', startMinutes: 540, technicianId: 'tech-1', durationMinutes: 60,
+  };
+
+  test('a field minted WITH the policy verifies only WITH the same policy', () => {
+    const field = mintSlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY });
+    expect(verifySlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY }, field)).toBe(true);
+    // Minted tagged, verified untagged (the gate flipped off after mint) — mismatch.
+    expect(verifySlotOfferField(BOOKING, field)).toBe(false);
+  });
+
+  test('a field minted WITHOUT the policy verifies only WITHOUT it', () => {
+    const field = mintSlotOfferField(BOOKING);
+    expect(verifySlotOfferField(BOOKING, field)).toBe(true);
+    // Minted untagged, verified tagged (the gate flipped on after mint) — mismatch.
+    expect(verifySlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY }, field)).toBe(false);
+  });
+
+  test('distinct from CAPACITY_OFFER_POLICY — one policy tag never redeems for the other', () => {
+    const field = mintSlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY });
+    expect(verifySlotOfferField({ ...BOOKING, policy: CAPACITY_OFFER_POLICY }, field)).toBe(false);
+  });
+});
+
+// Frozen reference implementation of origin/main's PRE-arrival-grace v2
+// canonical string + carrier shape (Codex round 3 on #5314: the estimate
+// surface's v2/v3 split must be genuinely bidirectional with the code that
+// shipped before this whole lane, not just internally self-consistent).
+// Deliberately NOT imported from the module under test — a real second
+// implementation of the exact algorithm origin/main signs with, so a
+// regression in the module's own "ungraced = v2" branch shows up as a
+// mismatch here instead of both sides drifting together. Mirrors
+// slot-offer-token.js's OFFER_KEY derivation exactly (same env, same
+// fallback chain) so both sides derive the identical key.
+const crypto = require('crypto');
+const MAIN_OFFER_KEY = crypto.createHash('sha256')
+  .update(`waves:slot-offer:v1:${process.env.JWT_SECRET || process.env.BOOKING_CAPTURE_SECRET || 'waves-booking-capture-dev'}`)
+  .digest();
+function mainCanonicalOfferStringV2(payload = {}) {
+  return [
+    'waves-slot-offer.v2',
+    String(payload.surface || ''),
+    String(payload.scopeId ?? ''),
+    String(payload.serviceKey ?? ''),
+    String(payload.locationKey ?? ''),
+    String(payload.date || ''),
+    String(Number(payload.startMinutes)),
+    String(payload.technicianId || ''),
+    String(Number(payload.durationMinutes)),
+    String(Number(payload.exp)),
+    ...(payload.policy ? [String(payload.policy)] : []),
+  ].join('|');
+}
+function mainSignSlotOffer(payload, now = Date.now()) {
+  const exp = now + SLOT_OFFER_TTL_MS;
+  const sig = crypto.createHmac('sha256', MAIN_OFFER_KEY)
+    .update(mainCanonicalOfferStringV2({ ...payload, exp }))
+    .digest('base64url');
+  return { exp, sig };
+}
+function mainAppendOfferToSlotId(slotId, { exp, sig }) {
+  return `${slotId}.${exp}.${sig}`;
+}
+
+describe('estimate-surface carrier — sig+exp[+arrivalGrace] inside the slotId (v2/v3 backward compat, Codex round 3 on #5314)', () => {
+  test('an UNGRACED offer (no arrivalGrace / 0) mints the EXACT v2 shape — byte-for-byte identical to origin/main\'s minting for the same inputs', () => {
+    const now = Date.now();
+    const mainOffer = mainSignSlotOffer(OFFER, now);
+    const newOffer = signSlotOffer(OFFER, now); // no arrivalGrace at all
+    expect(newOffer.exp).toBe(mainOffer.exp);
+    expect(newOffer.sig).toBe(mainOffer.sig); // identical HMAC — same canonical string
+    const mainSlotId = mainAppendOfferToSlotId('2027-05-20_09-00_tech-1', mainOffer);
+    const newSlotId = appendOfferToSlotId('2027-05-20_09-00_tech-1', newOffer);
+    expect(newSlotId).toBe(mainSlotId); // identical wire shape too — 2 dots, no grace segment
+
+    const newOfferZero = signSlotOffer({ ...OFFER, arrivalGrace: 0 }, now); // explicit 0, same result
+    expect(newOfferZero.sig).toBe(mainOffer.sig);
+  });
+
+  test('a v2 token MINTED BY ORIGIN/MAIN\'S CODE verifies under the new code (an in-flight offer straddling this deploy)', () => {
+    const now = Date.now();
+    const mainOffer = mainSignSlotOffer(OFFER, now);
+    const mainSlotId = mainAppendOfferToSlotId('2027-05-20_09-00_tech-1', mainOffer);
+    const split = splitSignedSlotId(mainSlotId);
+    expect(split).toEqual({
+      baseSlotId: '2027-05-20_09-00_tech-1', exp: mainOffer.exp, arrivalGrace: 0, sig: mainOffer.sig,
+    });
+    expect(verifySlotOffer({ ...OFFER, exp: split.exp, arrivalGrace: split.arrivalGrace }, split.sig)).toBe(true);
+  });
+
+  test('a graced offer signs a genuinely different HMAC than an ungraced one for the SAME tuple+exp — arrivalGrace really is bound in, only for v3', () => {
+    const now = Date.now();
+    const ungraced = signSlotOffer(OFFER, now);
+    const graced = signSlotOffer({ ...OFFER, arrivalGrace: 90 }, now);
+    expect(graced.exp).toBe(ungraced.exp); // same expiry clock
+    expect(graced.sig).not.toBe(ungraced.sig); // different signed string (v3 vs v2)
+    // And origin/main's v2-only computation for the same tuple+exp matches
+    // the UNGRACED signature, never the graced one — confirming the graced
+    // signature is not just "some other v2 string" but the genuine v3 shape.
+    expect(mainSignSlotOffer(OFFER, now).sig).toBe(ungraced.sig);
+    expect(mainSignSlotOffer(OFFER, now).sig).not.toBe(graced.sig);
+  });
+
+  test('append + split round-trip (no arrivalGrace given): the v2 shape, unsigned ids split to null', () => {
     const { exp, sig } = signSlotOffer(OFFER);
     const slotId = appendOfferToSlotId('2027-05-20_09-00_tech-1', { exp, sig });
     expect(splitSignedSlotId(slotId)).toEqual({
       baseSlotId: '2027-05-20_09-00_tech-1',
       exp,
+      arrivalGrace: 0,
       sig,
     });
     expect(splitSignedSlotId('2027-05-20_09-00_tech-1')).toBeNull();
     expect(splitSignedSlotId(null)).toBeNull();
+  });
+
+  // Self-serve arrival grace (owner ruling 2026-09-28, Codex round 2 on
+  // #5314): the grace value rides in CLEARTEXT (round-trips exactly) but is
+  // ALSO bound into the HMAC — tampering the cleartext segment alone must
+  // fail verification, not just silently change what reserveSlot reads back.
+  test('a non-zero arrivalGrace round-trips exactly (v3 shape) and is bound into the signature', () => {
+    const offer = signSlotOffer({ ...OFFER, arrivalGrace: 90 });
+    const slotId = appendOfferToSlotId('2027-05-20_09-00_tech-1', { ...offer, arrivalGrace: 90 });
+    expect((slotId.match(/\./g) || []).length).toBe(3); // base.exp.grace.sig
+    const split = splitSignedSlotId(slotId);
+    expect(split.arrivalGrace).toBe(90);
+    expect(verifySlotOffer({ ...OFFER, exp: split.exp, arrivalGrace: split.arrivalGrace }, split.sig)).toBe(true);
+    // A client that edits the cleartext segment to claim a higher grace than
+    // was actually signed must fail verification, not silently succeed with
+    // the tampered number.
+    const tampered = slotId.replace(`.${split.exp}.90.`, `.${split.exp}.120.`);
+    const tamperedSplit = splitSignedSlotId(tampered);
+    expect(tamperedSplit.arrivalGrace).toBe(120);
+    expect(verifySlotOffer(
+      { ...OFFER, exp: tamperedSplit.exp, arrivalGrace: tamperedSplit.arrivalGrace }, tamperedSplit.sig,
+    )).toBe(false);
+  });
+
+  test('a non-zero arrivalGrace never verifies against a different (or missing) grace — EVERY signed field binding, extended', () => {
+    const { exp, sig } = signSlotOffer({ ...OFFER, arrivalGrace: 90 });
+    expect(verifySlotOffer({ ...OFFER, exp, arrivalGrace: 90 }, sig)).toBe(true);
+    expect(verifySlotOffer({ ...OFFER, exp, arrivalGrace: 30 }, sig)).toBe(false);
+    expect(verifySlotOffer({ ...OFFER, exp }, sig)).toBe(false); // omitted defaults to 0, not 90
   });
 });
 

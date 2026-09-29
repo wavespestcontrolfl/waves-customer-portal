@@ -122,7 +122,7 @@ async function getReviewItem(opportunityId) {
  * path (which updates the opportunity), so the run reselect that follows
  * sees the true current run.
  */
-async function lockCurrentRun(trx, opportunityId, run, expectedRunId) {
+async function lockCurrentRun(trx, opportunityId, run, expectedRunId, decision = null) {
   const lockedOpp = await trx('opportunity_queue').where({ id: opportunityId }).forUpdate().first();
   if (!lockedOpp || lockedOpp.status !== 'pending_review') {
     const err = new Error('Opportunity review state changed; refresh before applying a decision');
@@ -130,6 +130,7 @@ async function lockCurrentRun(trx, opportunityId, run, expectedRunId) {
     err.isOperational = true;
     throw err;
   }
+  assertPageEditNotSuperseded(lockedOpp, decision);
   const current = await trx('autonomous_runs')
     .where('opportunity_id', opportunityId)
     .orderBy('claimed_at', 'desc')
@@ -160,6 +161,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     err.isOperational = true;
     throw err;
   }
+  assertPageEditNotSuperseded(opportunity, normalizedDecision);
 
   const run = await db('autonomous_runs')
     .where('opportunity_id', opportunityId)
@@ -188,7 +190,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     await db.transaction(async (trx) => {
       // Reselect + lock the current run and re-assert its state on the
       // LOCKED copy — the pre-transaction read can be stale (Codex r19).
-      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId);
+      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId, normalizedDecision);
       assertTrustBuildRun(currentRun);
       if (currentRun.trust_build_approved_at) {
         const err = new Error('This item was already decided; refresh before applying a decision');
@@ -247,7 +249,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     }
   } else if (normalizedDecision === 'requeue') {
     await db.transaction(async (trx) => {
-      await lockCurrentRun(trx, opportunityId, run, expectedRunId);
+      await lockCurrentRun(trx, opportunityId, run, expectedRunId, normalizedDecision);
       await updatePendingReviewOpportunity(trx, opportunityId, {
         status: 'pending',
         claim_id: null,
@@ -284,7 +286,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
       // Reselect + lock the current run — a dismiss must act on the run
       // the reviewer saw, not silently skip a replacement that parked
       // after the pre-transaction read (Codex r19).
-      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId);
+      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId, normalizedDecision);
       if (currentRun) {
         if (currentRun.outcome !== 'completed_pending_review' || currentRun.skip_reason === 'astro_pr_pending_merge') {
           const err = new Error('This item was already decided (a publish is in flight or completed); refresh before applying a decision');
@@ -446,13 +448,55 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
 }
 
 function reviewActions({ opportunity, run }) {
-  const pendingReview = opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
+  const superseded = pageEditSuperseded(opportunity);
+  const inReview = opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
+  const unreconciled = unreconciledRefreshHold(opportunity);
+  const pendingReview = !superseded && !unreconciled && inReview;
   return {
     can_requeue: pendingReview,
-    can_dismiss: pendingReview,
+    can_dismiss: pendingReview || (inReview && (unreconciled || supersededReconciliationHold(opportunity))),
     can_approve_trust_build: pendingReview && isTrustBuildRun(run),
     can_approve_named_competitor: pendingReview && isNamedCompetitorReviewRun(run),
   };
+}
+
+function pageEditSuperseded(opportunity) {
+  if (opportunity?.bucket !== 'citability_backfill') return false;
+  return require('./opportunity-queue')._internals.pageEditSuperseded(opportunity);
+}
+
+// A superseded reconciliation hold may record an external write nobody could
+// confirm. Dismiss (terminal, never revives the row) stays available so a
+// person who has checked GitHub can retire it; every other decision is off.
+function supersededReconciliationHold(opportunity) {
+  const { RECONCILIATION_HOLD_REASONS } = require('./opportunity-queue')._internals;
+  return pageEditSuperseded(opportunity) && RECONCILIATION_HOLD_REASONS.includes(opportunity?.skip_reason);
+}
+
+// Holds whose publish may already have reached GitHub: a timed-out refresh
+// write that could not be reconciled, and an approval publish the janitor
+// found interrupted (including one whose unreconciled park itself failed).
+// Only Dismiss (terminal, after a person has checked GitHub) is allowed;
+// requeue or approval could open a duplicate PR (owner ruling 2026-09-28).
+const MAY_HAVE_PUBLISHED_HOLD_REASONS = ['refresh_publish_unreconciled', 'named_competitor_publish_interrupted'];
+
+function unreconciledRefreshHold(opportunity) {
+  return opportunity?.status === 'pending_review' && MAY_HAVE_PUBLISHED_HOLD_REASONS.includes(opportunity?.skip_reason);
+}
+
+function assertPageEditNotSuperseded(opportunity, decision = null) {
+  if (decision && decision !== 'dismiss' && unreconciledRefreshHold(opportunity)) {
+    const err = new Error('This publish may have opened a PR that could not be confirmed; check GitHub, then dismiss it');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
+  if (!pageEditSuperseded(opportunity)) return;
+  if (decision === 'dismiss' && supersededReconciliationHold(opportunity)) return;
+  const err = new Error('This citability backfill was superseded by an ordinary page edit; review decisions are disabled while its PR is retired');
+  err.statusCode = 409;
+  err.isOperational = true;
+  throw err;
 }
 
 function isTrustBuildRun(run) {

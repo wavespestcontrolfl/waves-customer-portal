@@ -9017,6 +9017,119 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
   return isCommercialAccept === true || siteConfirmationHold === true;
 }
 
+// Geo visibility for future route scoring: the accept path creates the
+// visit series with no coordinates, and find-time's detour math silently
+// treats coordless stops as zero drive time — so these visits are
+// invisible as route anchors to every later offer. Geocode the ESTIMATE
+// property once (the offer generator already geocoded the same string,
+// so this is usually an in-process memo hit) and stamp lat/lng onto the
+// accepted rows, keyed by source_estimate_id so the reserved parent,
+// standalone units, and seeded follow-ups are all covered.
+//
+// Same-property proof (Codex 2026-07-20 ×3): the rows' displayed
+// destination is the customer's primary address (service_address_* is
+// not stamped on this path), so coordinates may only be written when
+// the estimate property IS that address — proven by comparing GEOCODE
+// RESULTS (estimate address vs the customer's own address, ≤0.15 mi),
+// which string heuristics can't do safely ('1 Main St' vs '21 Main
+// St', same street in two cities). A phone-matched accept reusing an
+// existing customer for a different property skips the stamp entirely
+// rather than making coords contradict the displayed address. When the
+// properties match and the customer had no coords, backfill
+// customers.latitude/longitude from the same result — coherent by
+// construction. Called post-commit, fire-and-forget, fail-soft — extracted
+// to a named function (byte-identical logic) so it can be unit tested
+// without driving the whole accept transaction.
+// Every field the pre-lock/fenced-reread comparison below uses to decide
+// whether the customer's address moved out from under custCoords (Codex
+// P1): omitting address_line2 here made two customers.js reads disagree
+// with the review snapshot whenever a unit was on file (see
+// ADDRESS_SNAPSHOT_FIELDS' use below and customer-geocode-review.js's own
+// ADDRESS_FIELDS, which this must always mirror).
+const ADDRESS_SNAPSHOT_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+
+async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
+  const { geocodeAddress, buildAddress } = require('../services/geocoder');
+  const { haversine } = require('../services/route-optimizer');
+  const estCoords = await geocodeAddress(estimate.address);
+  if (!estCoords) return;
+  const cust = await db('customers')
+    .where({ id: customerId })
+    .first('address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+  if (!cust) return;
+  const review = require('../services/customer-geocode-review');
+  const reviewedCust = await review.reviewedCustomerLocation({ ...cust, id: customerId }, db);
+  if (reviewedCust.geocode_review_blocked) return;
+  const custCoords = (reviewedCust.latitude != null && reviewedCust.longitude != null)
+    ? { lat: Number(reviewedCust.latitude), lng: Number(reviewedCust.longitude) }
+    : await geocodeAddress(buildAddress(reviewedCust));
+  if (!custCoords) return;
+  const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
+  if (!(samePlaceMiles <= 0.15)) return;
+  // The exact address custCoords was computed against, pre-lock (Codex
+  // P1): if the customer's address is edited before the fenced reread
+  // below sees it, custCoords describes a property that is no longer this
+  // customer's — the fenced reread must abort rather than carry it across
+  // the edit, never re-validate under the lock (a network geocode call is
+  // never made while holding this fence).
+  const addressSnapshot = ADDRESS_SNAPSHOT_FIELDS.map((field) => cust[field] ?? null);
+  await review.withCustomerReviewWriteFence(customerId, db, async (conn) => {
+    // No excludeCustomerAutomaticGeocodeForId fence on the visit write
+    // (Codex P1 round 1): that fence exists to stop an automatic geocode
+    // from overwriting a staff-reviewed customer/property pin, but this
+    // write stamps the AUTHORITATIVE reviewed pin itself onto a coordless
+    // visit, already proven same-place as the estimate address.
+    //
+    // custCoords above was read BEFORE any lock (Codex P1 round 2, fallback
+    // auditor 2026-09-28: a TOCTOU race, unlike the customers-table write
+    // below whose excludeCustomerAutomaticGeocodeForId filter is evaluated
+    // live at write time) — a staff outside_area/needs_pin decision landing
+    // between that read and this fenced callback, including while blocked
+    // waiting on the fence's own customer-row lock, must not have its
+    // rejection overwritten by the now-stale pin. Re-derive under the SAME
+    // locked connection so it sees the fence's FOR-UPDATE-consistent state
+    // (the same lock-then-reread idiom reuseMatchedProfile's fenced re-read
+    // uses), and skip the write if the customer is blocked as of THIS read.
+    const freshCust = await conn('customers')
+      .where({ id: customerId })
+      .first('address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+    if (!freshCust) return;
+    // The address may have been edited after the pre-lock read while this
+    // fire-and-forget task waited for the fence (Codex P1): custCoords was
+    // geocoded for THAT snapshot, so a fresh row with a different address
+    // must never fall back to it below — abort instead of stamping the
+    // accepted visits (and possibly backfilling the customer) with a pin
+    // for a property this customer no longer has on file. A same-property
+    // edit (unchanged snapshot) proceeds exactly as before.
+    const freshSnapshot = ADDRESS_SNAPSHOT_FIELDS.map((field) => freshCust[field] ?? null);
+    if (JSON.stringify(freshSnapshot) !== JSON.stringify(addressSnapshot)) return;
+    const freshReviewed = await review.reviewedCustomerLocation({ ...freshCust, id: customerId }, conn);
+    if (freshReviewed.geocode_review_blocked) return;
+    // A network geocode call is never made under this lock (this file's own
+    // established rule elsewhere) — when the fresh read has no live pin to
+    // offer (not blocked, just nothing stored yet), the pre-lock provider
+    // result stands, same as before this round's fix.
+    const freshCoords = (freshReviewed.latitude != null && freshReviewed.longitude != null)
+      ? { lat: Number(freshReviewed.latitude), lng: Number(freshReviewed.longitude) }
+      : custCoords;
+    await conn('scheduled_services')
+      .where({ source_estimate_id: estimate.id })
+      .whereNull('lat')
+      .update({ lat: freshCoords.lat, lng: freshCoords.lng });
+    if (review.needsCoordinatePairRepair(freshCust)) {
+      let customerUpdate = conn('customers').where({ id: customerId }).where(function () {
+        this.whereNull('latitude').orWhereNull('longitude');
+      });
+      customerUpdate = review.excludeCustomerAutomaticGeocodeForId(customerUpdate, customerId);
+      await customerUpdate.update({
+        latitude: freshCoords.lat,
+        longitude: freshCoords.lng,
+        updated_at: new Date(),
+      });
+    }
+  });
+}
+
 // PUT /api/estimates/:token/accept — customer accepts
 // Body (backward compatible — both optional):
 //   { slotId?: string, paymentMethodPreference?: 'card_on_file' | 'deposit_now' | 'pay_at_visit' | 'prepay_annual' }
@@ -10574,6 +10687,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
           await acquireScheduledInvoiceMintLock(trx, acceptHoldRow.id);
         }
+        // EVERY adopted existing appointment, not only a reservation-held
+        // one, takes the mint lock here, before any row lock (Codex r5 P1 on
+        // #5253): update-details' re-price takes mint lock → customer row,
+        // while this txn updates the customer (service_preferences) before
+        // the adopt block's own mint acquisition — ABBA. Re-acquiring it
+        // there is a reentrant no-op. Same mint → catalog order the held
+        // path already uses; nothing later in this txn takes occupancy or
+        // tech-day locks for a non-held row.
+        if (existingAppointmentRow?.id && existingAppointmentRow.id !== acceptHoldRow?.id) {
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, existingAppointmentRow.id);
+        }
       }
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r21/r22): an
       // existing customer's accept graduates a held slot / books visits, so
@@ -10974,6 +11099,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       };
       let customerId = estimate.customer_id;
+      // True only when THIS accept minted the profile below (no linked,
+      // sibling, or phone-matched customer). Handed to the converter so the
+      // insert's own defaults (pipeline_stage 'active_customer' + the quoted
+      // monthly_rate) are never read as a pre-existing monthly membership.
+      let customerCreatedThisAccept = false;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -11121,11 +11251,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // explicit non-membership tier (the column defaults to 'Bronze'
             // if omitted, so it must be set).
             waveguard_tier: treatAsOneTime ? 'One-Time' : (estimate.waveguard_tier || 'Bronze'),
-            monthly_rate: treatAsOneTime ? null : effectiveMonthlyTotal,
+            // A termite-annual sign-before-pay accept PARKS in the converter
+            // before any customer write (activation, after signature, replays
+            // the whole conversion and re-stamps monthly_rate from the
+            // estimate's own monthly_total). Minting the profile with the
+            // quoted rate here would leave a bundled estimate's customer for
+            // up to 45 days with monthly_rate > 0 and billing_mode NULL —
+            // read as a monthly member by a second accept's phone match and
+            // admitted to the 1st-of-month charge sweep. NULL keeps it a
+            // non-member until the signature commits.
+            monthly_rate: (treatAsOneTime || isTermiteAnnualSignBeforePay) ? null : effectiveMonthlyTotal,
             member_since: etDateString(),
             referral_code: code,
           })).returning('*');
           customerId = newCust.id;
+          customerCreatedThisAccept = true;
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
@@ -11916,6 +12056,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          // IDENTITY of the profile this accept minted (null otherwise); the
+          // converter honors it only for that same row while its lane is
+          // still unstamped (see holdsExistingMembership).
+          createdCustomerId: customerCreatedThisAccept ? customerId : null,
           skipAutoSchedule: true,
           skipMembershipEmail: true,
           // Labeled manual-discount itemization on the prepay invoice (owner
@@ -12093,6 +12237,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          // IDENTITY of the profile this accept minted (null otherwise); the
+          // converter honors it only for that same row while its lane is
+          // still unstamped (see holdsExistingMembership).
+          createdCustomerId: customerCreatedThisAccept ? customerId : null,
           firstApplicationRowAmounts: firstApplicationRowAmounts.length ? firstApplicationRowAmounts : null,
           // The converter's own STANDARD draft-invoice branch runs on the
           // GLOBAL pool (its internal db.transaction + ledger reads), which
@@ -12123,6 +12271,47 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ? existingAppointmentRow.id
             : null,
         });
+        // Durable combined-invoice provenance for the INVOICE-MODE mint
+        // above (Codex round-9 P1 on #5021): that invoice is created BEFORE
+        // this convertEstimate() call, so any same-day sibling program it
+        // promotes (reservedAcceptPerVisitSplit) does not exist yet at
+        // invoice-mode's own mint time — the stamp can only run here, after
+        // the siblings are in place, keyed off the invoice already minted
+        // (invoiceIdResult) and the same reserved anchor
+        // (acceptLinkedSsId) that invoice was attached to. memberIds is
+        // convertEstimate's own additive combinedInvoiceMemberIds — the
+        // ids it just promoted for THIS accept (Codex round-12 P2) — never
+        // a same-date guess that could also catch an unrelated,
+        // pre-existing same-day program. No-ops (via the stamper's own
+        // single-program guard) when there is no sibling to cover, and does
+        // nothing at all when invoice-mode wasn't used or the invoice-mode
+        // invoice was never attached to a scheduled row.
+        //
+        // Codex r15 P1 (PR #5021): acceptLinkedSsId is deliberately null for
+        // a NEW slotId and for a no-slot estimate with no pre-existing
+        // visit, so the invoice-mode invoice above was minted with no
+        // scheduled_service_id at all and this stamp never ran; the
+        // converter then created the anchor (firstScheduledServiceId) and
+        // its same-day members, all invisible to the sweep and to the
+        // stamped completion lookup. Use the converter's anchor when the
+        // pre-conversion link is absent: attach the invoice to it (same
+        // column every other first-application mint site sets, same
+        // transaction) and stamp. A pre-linked invoice keeps its own anchor
+        // and this changes nothing for it.
+        if (invoiceModeResult && invoiceIdResult) {
+          const invoiceModeAnchorId = acceptLinkedSsId || standardConversionResult?.firstScheduledServiceId || null;
+          if (invoiceModeAnchorId) {
+            if (!acceptLinkedSsId) {
+              await trx('invoices').where({ id: invoiceIdResult }).whereNull('scheduled_service_id')
+                .update({ scheduled_service_id: invoiceModeAnchorId });
+            }
+            await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
+              invoiceId: invoiceIdResult,
+              anchorId: invoiceModeAnchorId,
+              memberIds: standardConversionResult?.combinedInvoiceMemberIds,
+            });
+          }
+        }
         // Mint the standard setup/first-application invoice on THIS
         // transaction — the same invoice the converter's standard branch
         // builds (same gates, line items, title, notes, deposit credit),
@@ -12293,6 +12482,29 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             standardInvoiceMinted = true;
             standardInvoiceAttached = !!attachScheduledServiceId;
             invoiceIdResult = inv.id;
+            // Durable combined-invoice provenance (Codex round-9 P1 on
+            // #5021): the public accept path mints this standard
+            // first-application invoice itself (the converter ran with
+            // skipSetupInvoice above) and, unlike estimate-converter.js's
+            // own standard branch, never called the stamper — so a
+            // multi-program public acceptance was invisible to the
+            // sibling-split sweep. memberIds is convertEstimate's own
+            // additive combinedInvoiceMemberIds — the ids it actually
+            // created for THIS accept and shares the combined invoice with
+            // (Codex round-12 P2 for a reserved-slot accept's promoted
+            // siblings; Codex round-13 P1-B for a PLAIN auto-scheduled
+            // accept's own same-day recurring parents, e.g. pest + lawn
+            // both auto-scheduled with no slot reservation at all) — never
+            // a same-date guess. Same transaction the invoice itself
+            // commits in; no-ops (via the stamper's own single-program
+            // guard) when only one program shares this invoice.
+            if (attachScheduledServiceId) {
+              await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
+                invoiceId: inv.id,
+                anchorId: attachScheduledServiceId,
+                memberIds: standardConversionResult?.combinedInvoiceMemberIds,
+              });
+            }
             // Immutable ledger for the setup this invoice bills (codex #3591
             // r68 P1) — the same setup_fee_claims record the prepay and
             // completion mints write, so a later void/refund of a renamed
@@ -12841,55 +13053,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       void AppointmentTagger.onServiceScheduled(appointment.id, { suppressWelcome: true })
         .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
-    // Geo visibility for future route scoring: the accept path creates the
-    // visit series with no coordinates, and find-time's detour math silently
-    // treats coordless stops as zero drive time — so these visits are
-    // invisible as route anchors to every later offer. Geocode the ESTIMATE
-    // property once (the offer generator already geocoded the same string,
-    // so this is usually an in-process memo hit) and stamp lat/lng onto the
-    // accepted rows, keyed by source_estimate_id so the reserved parent,
-    // standalone units, and seeded follow-ups are all covered.
-    //
-    // Same-property proof (Codex 2026-07-20 ×3): the rows' displayed
-    // destination is the customer's primary address (service_address_* is
-    // not stamped on this path), so coordinates may only be written when
-    // the estimate property IS that address — proven by comparing GEOCODE
-    // RESULTS (estimate address vs the customer's own address, ≤0.15 mi),
-    // which string heuristics can't do safely ('1 Main St' vs '21 Main
-    // St', same street in two cities). A phone-matched accept reusing an
-    // existing customer for a different property skips the stamp entirely
-    // rather than making coords contradict the displayed address. When the
-    // properties match and the customer had no coords, backfill
-    // customers.latitude/longitude from the same result — coherent by
-    // construction. Post-commit, fail-soft.
+    // Geo visibility for future route scoring — see stampAcceptedVisitCoordinates
+    // above for the full rationale. Post-commit, fire-and-forget, fail-soft.
     if (estimate.address && customerId) {
-      void (async () => {
-        const { geocodeAddress, buildAddress } = require('../services/geocoder');
-        const { haversine } = require('../services/route-optimizer');
-        const estCoords = await geocodeAddress(estimate.address);
-        if (!estCoords) return;
-        const cust = await db('customers')
-          .where({ id: customerId })
-          .first('address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
-        if (!cust) return;
-        const custCoords = (cust.latitude != null && cust.longitude != null)
-          ? { lat: Number(cust.latitude), lng: Number(cust.longitude) }
-          : await geocodeAddress(buildAddress(cust));
-        if (!custCoords) return;
-        const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
-        if (!(samePlaceMiles <= 0.15)) return;
-        await db('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNull('lat')
-          .update({ lat: estCoords.lat, lng: estCoords.lng });
-        if (cust.latitude == null || cust.longitude == null) {
-          await db('customers').where({ id: customerId }).update({
-            latitude: custCoords.lat,
-            longitude: custCoords.lng,
-            updated_at: new Date(),
-          });
-        }
-      })().catch((e) => logger.warn(`[estimate-accept] visit geocode stamp failed (non-blocking) for estimate ${estimate.id}: ${e.message}`));
+      void stampAcceptedVisitCoordinates({ estimate, customerId, db })
+        .catch((e) => logger.warn(`[estimate-accept] visit geocode stamp failed (non-blocking) for estimate ${estimate.id}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
       ? acceptConversion.deferredFollowUpReminderRows
@@ -28308,6 +28476,10 @@ module.exports.planCreditFirstVisitSlice = planCreditFirstVisitSlice;
 // keeps an already-sent Tree & Shrub quote at its sent price after an admin
 // flips the v4.7 pricing_config knobs.
 module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-shrub-knob-replay').treeShrubKnobSignalForReplay;
+// Test hook (geocode review fence P1, PR #5064): the post-accept visit
+// coordinate stamp, extracted so it can be unit tested without driving the
+// whole accept transaction.
+module.exports.stampAcceptedVisitCoordinates = stampAcceptedVisitCoordinates;
 module.exports.estimateTermiteKnobSignal = require('../services/estimate-tree-shrub-knob-replay').termiteKnobSignalForReplay;
 // Test hooks (measured-basis lane 2026-08-12): the treatable-area line the
 // lawn PriceCard renders beside its per-application price.

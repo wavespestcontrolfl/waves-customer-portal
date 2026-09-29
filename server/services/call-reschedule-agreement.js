@@ -113,7 +113,7 @@ function parseTurns(transcript) {
     // Sentences (on . ! ?) with their normalized text, for the screen below.
     // Each keeps whether it was a question ("Will we see you Thursday at two?").
     const sentences = (joinMeridiem(m[2]).match(/[^.!?]+[.!?]*/g) || [])
-      .map((raw) => ({ ns: normalize(raw), question: /\?/.test(raw) })).filter((x) => x.ns);
+      .map((raw) => ({ ns: normalize(raw), question: /\?/.test(raw), leadingNo: /^\s*no\s*,/i.test(raw) })).filter((x) => x.ns);
     turns.push({ agent: m[1].toLowerCase() === 'agent', raw: m[2], ns: normalize(m[2]), sentences });
   }
   return turns;
@@ -153,10 +153,38 @@ function sentencesAround(turn, quote) {
 // to the quote's sentences rather than its whole turn so an unrelated "No
 // worries." earlier in the turn does not void a real commitment — and, for
 // the agent's commitment and the slot, must not be a question.
-function plainlySaid(turn, quote, askingFails) {
+// A caller naming the visit to move usually says why they can't keep it
+// ("we're not going to be home tomorrow", "I can't make the 24th"): those
+// availability phrases are not a negation of the move. "Do not move my 24th
+// visit" still is.
+const AVAILABILITY_PHRASES = / (?:can t|cant|cannot|can not|won t|wont|will not|not going to|not gonna|am not|are not|re not|m not|not) (?:be )?(?:able to )?(?:be )?(?:home|there|around|available|in town|make it|make that|make the|make my|make our|do it|do that|do the|do my)(?= )/g;
+// Strips an availability phrase only where it governs the moved visit: the
+// moved date's own words follow it directly ("not going to be home
+// tomorrow" for tomorrow's visit). "I'm not home tomorrow, but my
+// appointment is Friday" keeps its negation for a Friday move.
+function stripAvailability(text, movedWords) {
+  const padded2 = ` ${text} `;
+  const mw = normalize(movedWords);
+  return padded2.replace(AVAILABILITY_PHRASES, (m, offset) => {
+    // The moved date's words must come next (after at most "on"/"the"),
+    // with no clause break between: "not home tomorrow, but Friday works"
+    // never strips for a Friday move.
+    const after = padded2.slice(offset + m.length).replace(/^ (?:on |the |on the )?/, ' ');
+    return after.startsWith(` ${mw} `) ? ' ' : m;
+  }).trim();
+}
+
+function plainlySaid(turn, quote, { askingFails = false, movedDate = false, movedWords = null, commitment = false, slot = false } = {}) {
   const around = sentencesAround(turn, quote);
-  const text = around.map((x) => x.ns).join(' ');
-  return Boolean(text) && !turnHasNegationOrHedge(text) && !turnHasUnresolvedConditional(text)
+  // An agent's leading "No," answers the caller ("No, we'll just pop in for
+  // noon"); it is not a refusal of what follows (commitment, or a slot quote
+  // the agent said).
+  const answersNo = commitment || (slot && turn.agent);
+  // Only before an affirmative head ("No, we'll ..."), never "No, Thursday at
+  // two is unavailable".
+  const text = around.map((x) => (answersNo && x.leadingNo && /^no (?:we|i) (?:ll|will) /.test(x.ns) ? x.ns.replace(/^no /, '') : x.ns)).join(' ');
+  const screened = movedDate && movedWords ? stripAvailability(text, movedWords) : text;
+  return Boolean(text) && !turnHasNegationOrHedge(screened) && !turnHasUnresolvedConditional(screened)
     && !(askingFails && around.some((x) => x.question));
 }
 
@@ -292,8 +320,15 @@ function movedAppointmentGrounded(scheduling, quotes, started) {
 // contract ("Can you do Thursday at two?"), and a caller naming the visit to
 // move usually asks ("Can you move my September 24th visit?").
 const ASKING_FAILS = new Set(['/scheduling/agent_committed_booking', '/scheduling/confirmed_start_at']);
-function isPlain(holding, quote, fieldPath) {
-  return holding.length > 0 && holding.every((turn) => plainlySaid(turn, quote, ASKING_FAILS.has(fieldPath)));
+function isPlain(holding, quote, fieldPath, movedWords = null) {
+  const how = {
+    movedWords,
+    askingFails: ASKING_FAILS.has(fieldPath),
+    movedDate: fieldPath === '/scheduling/moved_appointment_date',
+    commitment: fieldPath === '/scheduling/agent_committed_booking',
+    slot: fieldPath === '/scheduling/confirmed_start_at',
+  };
+  return holding.length > 0 && holding.every((turn) => plainlySaid(turn, quote, how));
 }
 
 // Is a number a clock hour or a named one? A clock's ":00" minutes ("2:00
@@ -367,7 +402,7 @@ const EXACT_TAILS = new Set(['o', 'oclock', 'on', 'then', 'this', 'next', 'pleas
 function saidExactly(quote, words, turns) {
   const nq = padded(normalize(quote));
   const holding = turns.filter((t) => padded(t.ns).includes(nq));
-  return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words));
+  return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words, !t.agent));
 }
 
 // Days that may lead straight into an hour ("Tuesday, 2 to 4"). Never a
@@ -385,32 +420,80 @@ const AFTER_HOUR_WORDS = new Set([
   'we', 'will', 'ill', 'll', 'see', 'you', 'guys', 'the', 'a', 'tech', 'technician', 'call', 'text', 'much',
   'thank', 'thanks', 'okay', 'ok', 'great', 'perfect', 'good', 'sounds', 'works', 'that', 'is', 'it', 'its', 's',
   'all', 'set', 'be', 'there', 'have', 'nice', 'day', 'bye', 'yes', 'yeah', 'yep', 'for', 'your', 'appointment', 'visit',
+  'them', 'him', 'her', 'us', 'sure', 'alright', 'awesome', 'wonderful', 'then',
+]);
+// A caller may add "I'll let them know" after the hour; from the agent
+// "I will let you know" / "let me know" is a follow-up offer, not a booking.
+const CALLER_AFTER_HOUR_WORDS = new Set(['i', 'let', 'me', 'know']);
+
+// Anywhere in a turn whose hour takes the business-hours reading: an
+// alternative, correction or approximation ("at three or Thursday at two",
+// "actually", "arrive around Thursday at two") sends the call to the office.
+const ALTERNATIVE_WORDS = new Set([
+  'or', 'either', 'actually', 'instead', 'rather',
+  'around', 'about', 'approximately', 'roughly', 'ish', 'maybe', 'probably', 'sometime', 'somewhere',
 ]);
 
-function hourExactIn(text, words) {
+// Is the hour at this span said exactly: an exact lead, an exact tail, and
+// only courtesy after it? Marks the tokens it explains (the hour, ":00", a
+// range end) in `explained`.
+// "9 o'clock" with no lead word only at a clause start or after a plain
+// yes: never after a verb that bounds or rejects it ("by 9 o'clock",
+// "avoid 9 o'clock", "anything but 9 o'clock").
+const OCLOCK_OPENERS = new Set([',', 'okay', 'ok', 'yes', 'yeah', 'yep', 'sure', 'so', 'then', 'alright']);
+function exactLead(toks, ha, next, hb) {
+  const prev = toks[ha - 1];
+  // "9 o'clock" needs no lead word, unless the word before bounds it.
+  const oclock = (next === 'oclock' || (next === 'o' && toks[hb + 1] === 'clock')) && OCLOCK_OPENERS.has(prev ?? ',');
+  return oclock || EXACT_LEADS.has(prev) || HOUR_LEAD_DAYS.has(prev) || (prev === ',' && HOUR_LEAD_DAYS.has(toks[ha - 2]));
+}
+
+function isRangeEnd(toks, prev, next, hb) {
+  return (next === 'to' || next === 'through' || (next === 'and' && prev === 'between'))
+    && (hourNumber(toks[hb + 1]) != null || /^(?:noon|midnight)$/.test(toks[hb + 1] || ''));
+}
+
+function isCourtesy(t, callerTurn) {
+  return AFTER_HOUR_WORDS.has(t) || HOUR_LEAD_DAYS.has(t) || (callerTurn && CALLER_AFTER_HOUR_WORDS.has(t));
+}
+
+function exactHourAt(toks, [ha, end], dayIdx, explained, callerTurn) {
+  const prev = toks[ha - 1];
+  const hb = toks[end] === '00' ? end + 1 : end; // "2:00" is exact; what follows it decides
+  const next = toks[hb];
+  const lead = exactLead(toks, ha, next, hb);
+  const rangeEnd = isRangeEnd(toks, prev, next, hb);
+  const tail = next === undefined || EXACT_TAILS.has(next) || isCourtesy(next, callerTurn) || rangeEnd;
+  const from = rangeEnd ? hb + 2 : hb;
+  const clean = toks.slice(from).every((t, k) => isCourtesy(t, callerTurn) || dayIdx.has(from + k));
+  for (let k = ha; k < hb; k += 1) explained.add(k);
+  if (rangeEnd) explained.add(hb + 1);
+  return lead && tail && clean && (prev !== 'between' || rangeEnd);
+}
+
+function hourExactIn(text, words, callerTurn = false) {
   // Tokens keeping clause punctuation, so "at two, a tech will call" ends
   // the hour at the comma.
   const toks = joinMeridiem(text).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
-  const at = spans(toks, words.hour);
-  return at.length > 0 && at.every(([ha, end]) => {
-    const prev = toks[ha - 1];
-    const hb = toks[end] === '00' ? end + 1 : end; // "2:00" is exact; what follows it decides
-    const next = toks[hb];
-    const lead = EXACT_LEADS.has(prev) || HOUR_LEAD_DAYS.has(prev) || (prev === ',' && HOUR_LEAD_DAYS.has(toks[ha - 2]));
-    const rangeEnd = (next === 'to' || next === 'through' || (next === 'and' && prev === 'between'))
-      && (hourNumber(toks[hb + 1]) != null || /^(?:noon|midnight)$/.test(toks[hb + 1] || ''));
-    const tail = next === undefined || next === ',' || EXACT_TAILS.has(next) || HOUR_LEAD_DAYS.has(next) || rangeEnd;
-    const rest = toks.slice(rangeEnd ? hb + 2 : hb);
-    const clean = rest.every((t) => AFTER_HOUR_WORDS.has(t) || HOUR_LEAD_DAYS.has(t));
-    return lead && tail && clean && (prev !== 'between' || rangeEnd);
-  });
+  if (toks.some((t) => ALTERNATIVE_WORDS.has(t))) return false;
+  // Tokens of the recorded day words ("October 10") are the date, not an hour.
+  // A day phrase describing an appointment ("your 10th appointment") is a
+  // count, not the date, and gets no exemption.
+  const dayIdx = new Set((typeof words.day === 'string' ? spans(toks, words.day) : [])
+    .filter(([, b]) => !/^(?:appointment|appointments|visit|visits|treatment|service|time)$/.test(toks[b] || ''))
+    .flatMap(([a, b]) => Array.from({ length: b - a }, (_, k) => a + k)));
+  const at = spans(toks, words.hour).filter(([a]) => !dayIdx.has(a));
+  const explained = new Set(dayIdx);
+  const exact = at.length > 0 && at.every((span) => exactHourAt(toks, span, dayIdx, explained, callerTurn));
+  // No other number or hour word anywhere in the turn.
+  return exact && toks.every((t, k) => explained.has(k) || !(/^\d+$/.test(t) || hourNumber(t) != null || t === 'noon' || t === 'midnight'));
 }
 
 function statesSlotWords(quote, words, turns, agreementQuotes = []) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
-    // "Next" near the slot ("two next Thursday") names a later week than the
-    // recorded day words can: it never grounds.
-    && !padded(sentencesHolding(turns, quote)).includes(' next ')
+    // "Next", "a week from now", "the following Thursday" near the slot name
+    // a later week than the recorded day words can: they never ground.
+    && !/ (?:next|week|weeks|following) /.test(padded(sentencesHolding(turns, quote)))
     && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
@@ -447,8 +530,21 @@ function mayStatePeriod(text) {
 // or part of the day but the slot's.
 function commitsToSlot(quote, words, hour24, turns) {
   const withoutPeriod = { ...words, period: null };
+  const around = sentencesHolding(turns, quote);
+  const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
-    && (typeof words.day === 'string' ? holds(quote, words.day) : !namesAnyDay(quote))
+    // Offering alternatives is not committing ("No, we'll see you Thursday
+    // at two or Friday at three"), and a trailing "right" asks ("see you
+    // at 9, right."); "right now" mid-sentence does not.
+    && !/ (?:or|either) /.test(padded(around)) && !/(?:^| )right$/.test(around)
+    // The agent need not repeat the day when its sentence is plain
+    // commitment ("Yep, we'll see them at 9", plainCommitment); otherwise it
+    // must say the recorded day, and a same-day change's commitment names
+    // none.
+    && (typeof words.day === 'string' ? holds(around, words.day) || plainCommitment(around, words) : !namesAnyDay(around))
+    // An hour read as business hours must be said exactly by the agent too
+    // ("we should arrive around two" fails).
+    && (!unstatedHour || saidExactly(quote, words, turns))
     // Read in the sentences it sits in: "at two" cut from "at two AM".
     && halvesSaid(sentencesHolding(turns, quote)).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
 }
@@ -463,8 +559,33 @@ const DAY_WORDS = new Set([
   'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
   'today', 'tonight', 'tomorrow',
 ]);
+// A commitment that leaves the day to the caller's words may say nothing
+// but these (plus the hour and its period words): "Yep, we'll see them at
+// 9". Anything else ("in two days", "May 3", "9/25", a weekday) and it must
+// say the recorded day itself.
+const PLAIN_COMMIT_WORDS = new Set([
+  'we', 'll', 'will', 'i', 'ill', 'see', 'you', 'them', 'him', 'her', 'guys', 'at', 'to', 'for', 'be', 'there', 'come',
+  'out', 'pop', 'in', 'put', 'down', 'switch', 'it', 'move', 'moved', 'make', 'mark', 'get', 'have', 'the', 'a',
+  'tech', 'technician', 'okay', 'ok', 'yep', 'yes', 'yeah', 'sure', 'sounds', 'good', 'great', 'perfect', 'then',
+  'so', 'and', 'all', 'set', 've', 'got', 'your', 'appointment', 'visit', 'just', 's', 'over',
+  'o', 'clock', 'oclock', '00', 'thank', 'thanks', 'awesome', 'alright',
+]);
+function plainCommitment(text, words) {
+  const allowed = new Set([...normalize(words.hour).split(' '), ...normalize(words.period || '').split(' ').filter(Boolean)]);
+  return normalize(text).split(' ').every((t) => PLAIN_COMMIT_WORDS.has(t) || allowed.has(t));
+}
+
+// Words that say a day relatively ("in two days", "the day after", "next
+// week"): a commitment using them names a day too.
+const RELATIVE_DAY_WORDS = new Set(['days', 'week', 'weeks', 'weekend', 'next', 'following', 'yesterday']);
 function namesAnyDay(quote) {
-  return normalize(quote).split(' ').some((t) => DAY_WORDS.has(t) || /^\d{1,2}(?:st|nd|rd|th)$/.test(t));
+  const toks = normalize(quote).split(' ');
+  return toks.some((t, i) => DAY_WORDS.has(t) || RELATIVE_DAY_WORDS.has(t) || /^\d{1,2}(?:st|nd|rd|th)$/.test(t)
+    // "May 3" (the month, not the verb), and a written date "9/24".
+    || (t === 'may' && /^\d/.test(toks[i + 1] || ''))
+    // "the day after", "a day later" (a bare "day" in "have a nice day" is not)
+    || (t === 'day' && /^(?:after|later|before)$/.test(toks[i + 1] || ''))
+    || (/^\d{1,2}$/.test(t) && /^\d{1,2}$/.test(toks[i + 1] || '') && toks[i + 1] !== '00'));
 }
 
 // The halves of the day this quote's am/pm and part-of-day words state
@@ -523,7 +644,7 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   // said wherever they appear (isPlain).
   const grounded = (fieldPath, speaker = null) => (Array.isArray(v2.evidence) ? v2.evidence : [])
     .filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker)
-      && isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath))
+      && isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath, stringOrNull(scheduling.moved_appointment_words)))
     .map((e) => e.quote);
   const commitments = grounded('/scheduling/agent_committed_booking', 'agent');
   if (!commitments.length) return fail('agent_commitment_ungrounded');
