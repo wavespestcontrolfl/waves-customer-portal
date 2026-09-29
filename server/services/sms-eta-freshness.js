@@ -48,7 +48,11 @@
 //      stamps one the moment a token is minted (backfill + INSERT/
 //      reschedule triggers, migrations 20260422000009/20260429000002/
 //      20260505000001) — a live-ETA-eligible row missing it is unexpected,
-//      not trusted.
+//      not trusted. Codex round-6 P2: the token's OWN row must also itself
+//      be customer-facing live — a grouped-stop entry's `some()`-across-
+//      siblings liveness check (condition 3) must never let a cancelled
+//      sibling's own token ride through because another sibling sharing the
+//      same physical stop is still en route.
 // Missing evidence fails CLOSED: no live_eta_snapshot, a snapshot in the old
 // flat shape (no `entries` — that shape never shipped to prod, this branch
 // isn't merged), no facts_generated_at, or a claim that can't be bound to
@@ -118,7 +122,7 @@ function sendTimeTrackTokenLive(expiresAt) {
  * instead of round-tripping through JSON.
  */
 async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, now = new Date(), dbh = db }) {
-  const { findEtaMinutesClaims, bodyMentionsArrival, bodyHasTimedArrivalPhrase } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
+  const { findEtaMinutesClaims, bodyMentionsArrival, bodyHasTimedArrivalPhrase, bodyHasUnclassifiedArrivalDigit } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
   const claims = findEtaMinutesClaims(outgoingBody);
   // TIMED unparsed claim (Codex round-5 P2): a vague/approximate duration
   // ("half an hour away", "an hour out", "a few minutes away", "a couple
@@ -134,7 +138,14 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // it's checked independently, BEFORE the status-only backstop, so a timed
   // phrase is never waved through as status copy just because it also
   // happens to contain the word "minutes".
-  const timedArrivalClaim = !claims.length && bodyHasTimedArrivalPhrase(outgoingBody);
+  // Round 6 (Codex P2): a digit sitting in a STRONG-arrival-triggered
+  // sentence that findEtaMinutesClaims could not turn into a claim (a
+  // phrasing this module's parser doesn't yet read) is treated exactly like
+  // a vague timed phrase — fails closed as unbound rather than falling
+  // through to the lenient status-only path below, which would recheck only
+  // the CURRENT tracker state and never bind the unread figure to anything.
+  const timedArrivalClaim = !claims.length
+    && (bodyHasTimedArrivalPhrase(outgoingBody) || bodyHasUnclassifiedArrivalDigit(outgoingBody));
   // Backstop (audit P1, round 4): the claim parser can't read every way a
   // person or model writes an ETA. A body that talks about the tech arriving
   // is checked whenever the draft carried a LIVE ETA, or whenever it mentions
@@ -251,7 +262,14 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, dbh, trackToke
         // A token with no matching row here would already have failed the
         // untracked-link check above — guarded again defensively rather than
         // assumed live.
-        if (!row || !sendTimeTrackTokenLive(row.track_token_expires_at)) return 'eta_claim_link_expired';
+        if (!row) return 'eta_claim_link_expired';
+        // Codex round-6 P2: allBoundEntriesLive above uses `some()` across a
+        // grouped entry's sibling ids — a cancelled/terminal sibling's own
+        // token must never ride through just because ANOTHER sibling sharing
+        // the same physical stop is still live. The row that OWNS this exact
+        // token must itself be customer-facing live.
+        if (!liveById.get(row.id)) return 'eta_claim_link_expired';
+        if (!sendTimeTrackTokenLive(row.track_token_expires_at)) return 'eta_claim_link_expired';
       }
     }
   } catch (err) {

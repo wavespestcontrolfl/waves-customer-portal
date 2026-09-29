@@ -497,6 +497,48 @@ const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)
 // excluded when a unit word DOES follow (seconds/hours/etc., or "minutes" —
 // which the ordinary unit-based pass above already claims on its own).
 const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up)\s+in\s+(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+// Bare-integer ETA claims (Codex round-6 P2, PR #5334): "ETA: 20", "his ETA
+// is 20", "ETA 20", "eta ~20" carry no "minutes"/"in" wording at all — every
+// pass above requires SOME unit or connector word, so these skipped number
+// binding AND the send-time freshness window entirely (an unparsed status
+// claim never rechecks a stated figure). A STRONG arrival trigger anywhere
+// in the sentence — "eta" itself included — makes ANY bare integer 1-180 in
+// that sentence a minutes claim, UNLESS it reads as a time of day or an
+// address/phone-like token (see looksLikeTimeAddressOrPhone below); a number
+// with no trigger in its sentence at all is never touched by this pass.
+// Numbers already carrying a unit word are left to the passes above (the
+// negative lookahead here just keeps this pass from re-judging them under a
+// different rule).
+const BARE_ETA_NUMBER_RE = /\b(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|hrs?|days?|weeks?|months?|years?|%|st|nd|rd|th)\b)/gi;
+// "<N> out" with no unit and no OTHER trigger at all (round 6): the bare
+// "out" idiom ("20 out", "5 out") states an ETA exactly like "20 minutes
+// out" even though findEtaMinutesClaims has no unit to key off — the phrase
+// itself IS the trigger, same reasoning as IMPLICIT_MINUTES_ARRIVAL_RE above.
+// Scoped tightly to the word immediately following the number so an
+// unrelated count ("20 out of 30 completed", "call him — 20 out from
+// retirement") never claims; "of" is excluded outright, and "from" is left
+// to the STRONG-trigger pass above ("out from" is already its own trigger
+// phrase there).
+const BARE_MINUTES_OUT_RE = /\b(\d{1,3})\s+out\b(?!\s+(?:of|from))/gi;
+// A bare integer that reads as a time of day (preceded by at/by/around, or
+// followed by am/pm/a colon-minutes/an "and <N> am/pm" range) or an
+// address/phone-like token (a street name right after it, or a digit group
+// on either side joined by a dash/dot, the shape of a phone number segment)
+// is never an ETA claim, however strong the sentence's arrival trigger is.
+const TIME_OF_DAY_BEFORE_RE = /(?:\b(?:at|by|around)|\d{1,2}:)\s*$/i;
+const TIME_OF_DAY_AFTER_RE = /^\s*(?::\d{2}\b|(?:am|pm|a\.m\.|p\.m\.)\b|(?:and|or|-|–|—|to)\s*\d{1,3}\s*(?:am|pm|a\.m\.|p\.m\.)\b)/i;
+const STREET_SUFFIX_RE = /^\s+[A-Z][A-Za-z.]*(?:\s+[A-Z][A-Za-z.]*)?\s+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Terrace|Trail)\b/;
+const PHONE_DIGIT_BEFORE_RE = /\d[-.]$/;
+const PHONE_DIGIT_AFTER_RE = /^[-.]\d/;
+function looksLikeTimeAddressOrPhone(str, index, length) {
+  const before = str.slice(Math.max(0, index - 12), index);
+  const after = str.slice(index + length, index + length + 24);
+  if (TIME_OF_DAY_BEFORE_RE.test(before)) return true;
+  if (TIME_OF_DAY_AFTER_RE.test(after)) return true;
+  if (STREET_SUFFIX_RE.test(after)) return true;
+  if (PHONE_DIGIT_BEFORE_RE.test(before) || PHONE_DIGIT_AFTER_RE.test(after)) return true;
+  return false;
+}
 // Sentence spans over raw sentence-boundary punctuation only (. ? ! or a
 // newline) — an em dash, comma, or "—" never splits a sentence, so "heading
 // your way — 12 minutes" is one sentence and the trigger/number share it.
@@ -635,7 +677,67 @@ function findEtaMinutesClaims(text) {
   while ((im = implicitRe.exec(str))) {
     claims.push({ minutes: parseInt(im[1], 10), index: im.index });
   }
+
+  // "<N> out" pass (round 6): the bare "out" idiom carries no unit at all —
+  // the phrase itself is the trigger, same reasoning as the implicit-minutes
+  // pass above.
+  const outRe = new RegExp(BARE_MINUTES_OUT_RE.source, BARE_MINUTES_OUT_RE.flags);
+  let om;
+  while ((om = outRe.exec(str))) {
+    // Never re-judge a number a range match (e.g. "between 10 and 12
+    // minutes") already consumed — the range's OWN index is its match
+    // start, not each bound's own position, so a bound sitting mid-range
+    // ("10" in "between 10 and 12 minutes") would otherwise dodge the
+    // index-equality dedup below and double-push the same claim.
+    if (consumed.some(([s, e]) => om.index >= s && om.index < e)) continue;
+    const minutes = parseInt(om[1], 10);
+    if (minutes < 1 || minutes > 180) continue;
+    if (looksLikeTimeAddressOrPhone(str, om.index, om[0].length)) continue;
+    if (claims.some((c) => c.index === om.index)) continue;
+    claims.push({ minutes, index: om.index });
+  }
+
+  // Bare-integer pass (round 6): "ETA: 20" / "his ETA is 20" / "ETA 20" /
+  // "eta ~20" carry no unit and no connector word at all — nothing above can
+  // ever catch them however the trigger words are extended. A STRONG arrival
+  // trigger anywhere in the sentence (see maybeClaim above — "eta" itself is
+  // one) makes ANY bare integer 1-180 in that sentence a claim, unless it
+  // reads as a time of day or an address/phone-like token.
+  const bareRe = new RegExp(BARE_ETA_NUMBER_RE.source, BARE_ETA_NUMBER_RE.flags);
+  let bm;
+  while ((bm = bareRe.exec(str))) {
+    // Same range-consumed guard as the "out" pass above — a range bound
+    // that isn't immediately adjacent to the unit word ("10" in "between 10
+    // and 12 minutes") must not double-claim under this rule too.
+    if (consumed.some(([s, e]) => bm.index >= s && bm.index < e)) continue;
+    if (claims.some((c) => c.index === bm.index)) continue;
+    const sentence = sentenceFor(bm.index);
+    if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) continue;
+    const minutes = parseInt(bm[1], 10);
+    if (minutes < 1 || minutes > 180) continue;
+    if (looksLikeTimeAddressOrPhone(str, bm.index, bm[0].length)) continue;
+    claims.push({ minutes, index: bm.index });
+  }
+
   return claims;
+}
+// Backstop for sms-eta-freshness.js (round 6): does the outgoing body carry
+// an arrival-triggered sentence with a digit findEtaMinutesClaims could NOT
+// turn into a claim? Scoped to a STRONG-trigger sentence, same as the
+// bare-integer pass above, so this never fires on an unrelated digit
+// elsewhere in the message (a dollar amount, an address in another
+// sentence). Exists so a future phrasing this module's own parser still
+// can't read fails the send-time recheck closed rather than passing as pure
+// status copy.
+function bodyHasUnclassifiedArrivalDigit(text) {
+  const str = normalizeNumberWords(text);
+  const spans = sentenceSpans(str);
+  const claims = findEtaMinutesClaims(text);
+  return spans.some(([s, e]) => {
+    const sentence = str.slice(s, e);
+    if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !/\d/.test(sentence)) return false;
+    return !claims.some((c) => c.index >= s && c.index < e);
+  });
 }
 // The send-time freshness recheck (sms-eta-freshness.js) needs only "does
 // this outgoing body make an ETA-style minutes claim at all" — never the
@@ -2873,6 +2975,7 @@ module.exports = {
   validateLiveEtaMinutes,
   findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival,
   bodyHasTimedArrivalPhrase,
+  bodyHasUnclassifiedArrivalDigit,
   replyClaimsEtaMinutes,
   buildLiveEtaSnapshot,
   replyBindsDeclaredDays,

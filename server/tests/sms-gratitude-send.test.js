@@ -171,6 +171,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   findEtaMinutesClaims: jest.fn(() => []),
   bodyMentionsArrival: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
+  bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
 }));
 jest.mock('../services/sms-graduation', () => ({
   evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true, blockers: [] })),

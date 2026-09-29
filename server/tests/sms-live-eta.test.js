@@ -743,6 +743,66 @@ describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes 
   });
 });
 
+describe('round 6 (Codex P2): bare numeric ETA claims with no unit and no "in"/duration wording at all', () => {
+  let prior;
+  beforeEach(() => { prior = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; });
+
+  test.each([
+    ['ETA: 20', 20],
+    ['His ETA is 20.', 20],
+    ['ETA 20', 20],
+    ['eta ~20', 20],
+    ['20 out.', 20],
+  ])('%p is parsed as a minutes claim at draft time and blocked when it does not match the facts', (reply, minutes) => {
+    expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual([minutes]);
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(new RegExp(`${minutes} minute`));
+  });
+
+  test.each([
+    ['ETA: 20', 20],
+    ['His ETA is 20.', 20],
+    ['ETA 20', 20],
+    ['eta ~20', 20],
+    ['20 out.', 20],
+  ])('%p passes validateLiveEtaMinutes when it DOES match the facts', (reply, minutes) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: `LIVE ETA: about ${minutes} minutes (GPS, as of 2:45 PM ET)` });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  test('negative: a clock time ("at 2:30") is never parsed as an ETA minutes claim', () => {
+    expect(findEtaMinutesClaims('He\'ll be there at 2:30.')).toEqual([]);
+    expect(validateLiveEtaMinutes({ reply: 'He\'ll be there at 2:30.', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('negative: "by 3" (no am/pm, still clearly a time) is never parsed as an ETA minutes claim', () => {
+    expect(findEtaMinutesClaims('He should be there by 3.')).toEqual([]);
+  });
+
+  test('negative: a time-of-day range ("arriving between 2 and 4 pm") is never parsed as an ETA minutes claim', () => {
+    expect(findEtaMinutesClaims('He\'s arriving between 2 and 4 pm.')).toEqual([]);
+  });
+
+  test('negative: an address after the number ("on the way to 123 Main St") is never parsed as an ETA minutes claim', () => {
+    expect(findEtaMinutesClaims('He\'s on the way to 123 Main St.')).toEqual([]);
+  });
+
+  test('a bare number with no arrival trigger anywhere in the sentence is never a claim', () => {
+    expect(findEtaMinutesClaims('Your invoice total is 20.')).toEqual([]);
+  });
+
+  test('"20 out of 30 jobs done today" never claims — "out of" is excluded', () => {
+    expect(findEtaMinutesClaims('20 out of 30 jobs done today.')).toEqual([]);
+  });
+
+  test('gate off: never runs (byte-identical to v11)', () => {
+    delete process.env[GATE];
+    expect(validateLiveEtaMinutes({ reply: 'ETA: 99', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+});
+
 describe('round 3 (audit P1s): arrival wording beats duration exclusions; every LIVE ETA line grounds', () => {
   const { findEtaMinutesClaims, validateLiveEtaMinutes } = require('../services/sms-shadow-drafter');
   let prior;

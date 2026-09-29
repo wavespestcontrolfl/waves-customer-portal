@@ -18,6 +18,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   findEtaMinutesClaims: jest.fn(),
   bodyMentionsArrival: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
+  bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
 }));
 jest.mock('../services/track-transitions', () => ({
   customerTrackState: jest.fn((row) => row?.track_state || null),
@@ -445,6 +446,92 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
       outgoingBody: 'The tech is 12 minutes away: wavespestcontrol.com/track/abc123',
       now: NOW,
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: FUTURE }]),
+    });
+    expect(reason).toBeNull();
+  });
+});
+
+describe('round 6 (Codex P2): an arrival sentence with a digit findEtaMinutesClaims could not classify fails closed like a timed phrase', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const liveEtaSnapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] };
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+
+  beforeEach(() => {
+    findEtaMinutesClaims.mockReset().mockReturnValue([]);
+    drafter.bodyHasUnclassifiedArrivalDigit.mockReset().mockReturnValue(true);
+  });
+
+  test('within the freshness window it fails closed as unbound — never waved through as status-only copy', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody: 'ETA: 20', now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_unbound');
+  });
+
+  test('past the freshness window it fails closed as stale, not unbound', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: STALE, outgoingBody: 'ETA: 20', now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_stale_facts');
+  });
+
+  test('with no facts_generated_at at all it fails closed', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: null, outgoingBody: 'ETA: 20', now: NOW,
+    });
+    expect(reason).toBe('eta_claim_no_facts_time');
+  });
+
+  test('an ordinary reply with no unclassified digit is unaffected', async () => {
+    drafter.bodyHasUnclassifiedArrivalDigit.mockReturnValue(false);
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'Thanks, see you soon!', now: NOW,
+    });
+    expect(reason).toBeNull();
+  });
+});
+
+describe('round 6 (Codex P2): a token\'s OWNING row must itself be live — a grouped-stop sibling\'s liveness never covers it', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    drafter.findEtaMinutesClaims.mockReset().mockImplementation(real.findEtaMinutesClaims);
+    drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
+    drafter.bodyHasUnclassifiedArrivalDigit.mockReset().mockReturnValue(false);
+  });
+
+  test('a cancelled sibling\'s own token is blocked even though another sibling sharing the stop is still en route', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: {
+        entries: [{ minutes: 9, scheduledServiceIds: ['svc-cancelled', 'svc-live'], trackTokens: ['cancelled-token', 'live-token'] }],
+      },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/cancelled-token',
+      now: NOW,
+      dbh: fakeDb([
+        { id: 'svc-cancelled', status: 'cancelled', track_state: null, track_view_token: 'cancelled-token', track_token_expires_at: FUTURE },
+        { id: 'svc-live', status: 'en_route', track_state: 'en_route', track_view_token: 'live-token', track_token_expires_at: FUTURE },
+      ]),
+    });
+    // The entry-level check passes on svc-live alone; the fix requires the
+    // TOKEN'S OWN row (svc-cancelled) to be live, which it is not.
+    expect(reason).toBe('eta_claim_link_expired');
+  });
+
+  test('the SAME grouped entry\'s still-live sibling token passes normally', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: {
+        entries: [{ minutes: 9, scheduledServiceIds: ['svc-cancelled', 'svc-live'], trackTokens: ['cancelled-token', 'live-token'] }],
+      },
+      factsGeneratedAt: FRESH,
+      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/live-token',
+      now: NOW,
+      dbh: fakeDb([
+        { id: 'svc-cancelled', status: 'cancelled', track_state: null, track_view_token: 'cancelled-token', track_token_expires_at: FUTURE },
+        { id: 'svc-live', status: 'en_route', track_state: 'en_route', track_view_token: 'live-token', track_token_expires_at: FUTURE },
+      ]),
     });
     expect(reason).toBeNull();
   });
