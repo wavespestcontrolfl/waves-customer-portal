@@ -445,6 +445,35 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
     expect(packCapacityEnds([candidate(6, holdRow)], GRACE_CALLER)).toEqual([]);
   });
 
+  // Codex r2 P1 (#5314): capacityGapNeighbours picks only the LATEST-starting
+  // anchor as the "previous" neighbour — correct for real committed stops
+  // (later start = later end), but a hold's stored window is a PROMISE, so
+  // an EARLIER-starting hold can still end LATER than a later-starting
+  // committed stop. Here the committed stop (10:00-10:50, chosen as prevId)
+  // clears grace fine on its own, but an unrelated hold (09:00-10:55, never
+  // chosen as prevId/nextId) independently violates the same buffer — grace
+  // must check it too, not just the one row it was asked about.
+  test('an earlier-starting, later-ending live hold that is never chosen as the neighbour still blocks grace', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    const committedPrevRow = { startMin: 600, endMin: 650, lat: 27.4, lng: -82.4, expectedMinutes: 50 }; // 10:00-10:50
+    const unrelatedHold = {
+      startMin: 540, endMin: 655, lat: 27.4, lng: -82.4, expectedMinutes: 115, // 09:00-10:55
+      reservation_expires_at: '2099-01-01T00:00:00Z', customer_id: null,
+    };
+    const slot = {
+      date: '2099-10-01', technician: { id: 't1' }, start_time: '11:00', end_time: '12:00',
+      arrival_delay_minutes: 6,
+      _gap: { prevId: 's1', nextId: null, prevRow: committedPrevRow, holdRows: [unrelatedHold] },
+    };
+    // Sanity: the chosen neighbour ALONE would have granted grace (matches
+    // the earlier "grace 90, a 6-minute delay" fixture's own numbers).
+    const withoutHoldCheck = { ...slot, _gap: { ...slot._gap, holdRows: [] } };
+    expect(packCapacityEnds([withoutHoldCheck], GRACE_CALLER).map((s) => s.start_time)).toEqual(['11:00']);
+    // With the unrelated hold present, grace must be refused.
+    expect(packCapacityEnds([slot], GRACE_CALLER)).toEqual([]);
+  });
+
   test('offer/commit parity: the grace-kept slot\'s own delay is exactly what verifyArrivalCapacity would compare against the same grace', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env[GRACE_ENV] = '90';
@@ -595,7 +624,31 @@ describe('capacityGapNeighbours — unassigned blockers count as time-based anch
     };
     const fit = { routeOrder: ['__candidate__'] };
     expect(capacityGapNeighbours(context, fit, 13 * 60))
-      .toEqual({ prevId: null, nextId: null, prevRow: null, nextRow: null });
+      .toEqual({ prevId: null, nextId: null, prevRow: null, nextRow: null, holdRows: [] });
+  });
+
+  // Codex r2 P1 (#5314): every live hold on the day, regardless of whether
+  // it was picked as prevId/nextId — the self-serve arrival grace check
+  // needs the full set, not just the nearest anchor per side.
+  test('holdRows collects every live hold on the day, chosen neighbour or not', () => {
+    const context = {
+      target: { id: '__candidate__' },
+      rows: [
+        { id: 'committed', technician_id: 't1', status: 'confirmed', window_start: '10:00', window_end: '10:50' },
+        {
+          id: 'hold1', technician_id: 't1', status: 'confirmed', window_start: '09:00', window_end: '10:55',
+          reservation_expires_at: '2099-01-01T00:00:00Z', customer_id: null,
+        },
+      ],
+    };
+    // routeOrder puts the committed stop right before the candidate — that's
+    // the chosen prevId — but hold1 (earlier start, later end) must still
+    // appear in holdRows even though it's never prevId or nextId.
+    const fit = { routeOrder: ['hold1', 'committed', '__candidate__'] };
+    const result = capacityGapNeighbours(context, fit, 11 * 60);
+    expect(result.prevId).toBe('committed');
+    expect(result.holdRows).toHaveLength(1);
+    expect(result.holdRows[0]).toMatchObject({ id: 'hold1', startMin: 540, endMin: 655 });
   });
 });
 

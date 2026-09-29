@@ -75,6 +75,7 @@ describe('signSlotOffer / verifySlotOffer', () => {
       { startMinutes: 600 },
       { technicianId: 'tech-2' },
       { durationMinutes: 60 },
+      { arrivalGrace: 90 }, // v3: self-serve arrival grace (signed as 0)
       { exp: exp + 1 }, // expiry is inside the signed string
     ];
     for (const change of variants) {
@@ -146,17 +147,49 @@ describe('BOOK_INSERTION_OFFER_POLICY — /book mid-route insertion offers (Code
   });
 });
 
-describe('estimate-surface carrier — sig+exp inside the slotId', () => {
-  test('append + split round-trip; unsigned ids split to null', () => {
+describe('estimate-surface carrier — sig+exp+arrivalGrace inside the slotId', () => {
+  test('append + split round-trip (no arrivalGrace given): defaults to 0; unsigned or pre-v3 ids split to null', () => {
     const { exp, sig } = signSlotOffer(OFFER);
     const slotId = appendOfferToSlotId('2027-05-20_09-00_tech-1', { exp, sig });
     expect(splitSignedSlotId(slotId)).toEqual({
       baseSlotId: '2027-05-20_09-00_tech-1',
       exp,
+      arrivalGrace: 0,
       sig,
     });
     expect(splitSignedSlotId('2027-05-20_09-00_tech-1')).toBeNull();
     expect(splitSignedSlotId(null)).toBeNull();
+    // A pre-v3 offer (only two trailing segments) no longer parses — the
+    // same fail-closed "pick another time" recovery the v1→v2 bump relies on.
+    expect(splitSignedSlotId(`2027-05-20_09-00_tech-1.${exp}.${sig}`)).toBeNull();
+  });
+
+  // Self-serve arrival grace (owner ruling 2026-09-28, Codex round 2 on
+  // #5314): the grace value rides in CLEARTEXT (round-trips exactly) but is
+  // ALSO bound into the HMAC — tampering the cleartext segment alone must
+  // fail verification, not just silently change what reserveSlot reads back.
+  test('a non-zero arrivalGrace round-trips exactly and is bound into the signature', () => {
+    const offer = signSlotOffer({ ...OFFER, arrivalGrace: 90 });
+    const slotId = appendOfferToSlotId('2027-05-20_09-00_tech-1', { ...offer, arrivalGrace: 90 });
+    const split = splitSignedSlotId(slotId);
+    expect(split.arrivalGrace).toBe(90);
+    expect(verifySlotOffer({ ...OFFER, exp: split.exp, arrivalGrace: split.arrivalGrace }, split.sig)).toBe(true);
+    // A client that edits the cleartext segment to claim a higher grace than
+    // was actually signed must fail verification, not silently succeed with
+    // the tampered number.
+    const tampered = slotId.replace(`.${split.exp}.90.`, `.${split.exp}.120.`);
+    const tamperedSplit = splitSignedSlotId(tampered);
+    expect(tamperedSplit.arrivalGrace).toBe(120);
+    expect(verifySlotOffer(
+      { ...OFFER, exp: tamperedSplit.exp, arrivalGrace: tamperedSplit.arrivalGrace }, tamperedSplit.sig,
+    )).toBe(false);
+  });
+
+  test('a non-zero arrivalGrace never verifies against a different (or missing) grace — EVERY signed field binding, extended', () => {
+    const { exp, sig } = signSlotOffer({ ...OFFER, arrivalGrace: 90 });
+    expect(verifySlotOffer({ ...OFFER, exp, arrivalGrace: 90 }, sig)).toBe(true);
+    expect(verifySlotOffer({ ...OFFER, exp, arrivalGrace: 30 }, sig)).toBe(false);
+    expect(verifySlotOffer({ ...OFFER, exp }, sig)).toBe(false); // omitted defaults to 0, not 90
   });
 });
 

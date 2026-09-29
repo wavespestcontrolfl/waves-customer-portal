@@ -8,9 +8,18 @@
  * verifyArrivalCapacity — the estimate picker's own commit
  * (slot-reservation.js) has no such probe under capacity.
  *
+ * Per-CALL-SITE, not per-file (Codex r2 P0, #5314): slot-reservation.js
+ * itself now has BOTH kinds of call — reserveSlot passes arrivalGraceMinutes,
+ * commitReservation deliberately never does (a hold is certified ONCE, at
+ * reserve; re-applying a freshly re-read grace at accept could fail a hold
+ * that a since-lowered env value would refuse today even though it was
+ * validly reserved). A blanket per-FILE allowlist can't express "this file
+ * has one of each," so a documented non-grace call site is marked with a
+ * literal `GRACE-EXEMPT` comment immediately before it instead.
+ *
  * 1. Every non-test call to verifyArrivalCapacity either passes
- *    `arrivalGraceMinutes` (a self-serve caller opting in) or is explicitly
- *    listed on the ALLOWLIST below as a documented non-grace caller.
+ *    `arrivalGraceMinutes` or is immediately preceded by a `GRACE-EXEMPT`
+ *    comment explaining why (grep the file for the current reasons).
  * 2. `packEnds: true` (packCapacityEnds' own admission) is only ever passed
  *    by the two self-serve availability builders.
  * 3. `arrivalGrace: true` (packCapacityEnds' GRACE opt-in) is only ever
@@ -18,7 +27,7 @@
  *    though it shares packEnds:true.
  *
  * A NEW call site that forgets the right signal fails until it is reviewed
- * and either wired or allowlisted — same shape as
+ * and either wired or marked GRACE-EXEMPT with a reason — same shape as
  * stamped-zero-charge-fallback-guard.test.js.
  */
 const fs = require('fs');
@@ -27,15 +36,13 @@ const path = require('path');
 const SERVER_ROOT = path.join(__dirname, '..');
 const SCAN_DIRS = ['services', 'routes'];
 const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', 'coverage', 'dist']);
-
-// { 'relative/path.js': 'why every verifyArrivalCapacity call there is a
-// documented non-grace caller' }.
-const ALLOWLIST = {
-  'routes/booking.js':
-    'createSelfBooking runs findConflictingVisits with a strict `travel` probe before this check — a grace-kept slot would already be refused SLOT_TAKEN (Codex r1 P1, #5314); grace is estimate-picker only',
-  'services/rebooker.js':
-    "the single-visit move's own pre-verify conflict probe is equally strict — the ONE caller that could opt in (reschedule-public.js) deliberately never sets arrivalGraceMinutes for the same reason (Codex r1 P1, #5314)",
-};
+// A GRACE-EXEMPT marker is honored either INSIDE the call's own argument
+// object (booking.js/rebooker.js's style — a comment beside the options it
+// explains) or shortly BEFORE the call itself (slot-reservation.js's style —
+// a comment on the statement as a whole). This window covers "shortly
+// before": generous enough for a multi-line reason, tight enough that it
+// must actually sit right above THIS call, not some earlier unrelated one.
+const EXEMPT_MARKER_LOOKBACK = 700;
 
 function walk(dir, out) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -48,11 +55,12 @@ function walk(dir, out) {
   }
 }
 
-// Extract every `verifyArrivalCapacity(...)` call's argument text — matching
-// parens by hand since the options object itself contains nested parens/
-// braces (arrow functions, template calls) a regex can't balance.
-function callArgSpans(source) {
-  const spans = [];
+// Extract every `verifyArrivalCapacity(...)` call's start index + argument
+// text — matching parens by hand since the options object itself contains
+// nested parens/braces (arrow functions, template calls) a regex can't
+// balance.
+function callSites(source) {
+  const sites = [];
   const needle = 'verifyArrivalCapacity(';
   let from = 0;
   while (true) {
@@ -72,10 +80,10 @@ function callArgSpans(source) {
       if (source[i] === '(') depth++;
       else if (source[i] === ')') depth--;
     }
-    spans.push(source.slice(at, i));
+    sites.push({ at, span: source.slice(at, i) });
     from = i;
   }
-  return spans;
+  return sites;
 }
 
 function scanFiles() {
@@ -84,33 +92,34 @@ function scanFiles() {
   return files;
 }
 
-test('every verifyArrivalCapacity call site passes arrivalGraceMinutes or is allowlisted as non-grace', () => {
+test('every verifyArrivalCapacity call site passes arrivalGraceMinutes or carries a GRACE-EXEMPT marker', () => {
   const offenders = [];
   let totalCalls = 0;
+  let exemptCalls = 0;
   for (const file of scanFiles()) {
     const rel = path.relative(SERVER_ROOT, file).replace(/\\/g, '/');
     if (rel === 'services/scheduling/arrival-route.js') continue; // the function's own definition/export
     const source = fs.readFileSync(file, 'utf8');
     if (!source.includes('verifyArrivalCapacity(')) continue;
-    const spans = callArgSpans(source);
-    for (const span of spans) {
+    for (const { at, span } of callSites(source)) {
       totalCalls++;
-      if (span.includes('arrivalGraceMinutes')) continue;
-      if (ALLOWLIST[rel]) continue;
-      offenders.push(rel);
+      // A real KEY (`arrivalGraceMinutes:`), never a bare mention — the
+      // GRACE-EXEMPT reason comments below say "no arrivalGraceMinutes
+      // here", which would otherwise false-match a plain substring check.
+      if (/arrivalGraceMinutes\s*:/.test(span)) continue;
+      const lookback = source.slice(Math.max(0, at - EXEMPT_MARKER_LOOKBACK), at);
+      if (span.includes('GRACE-EXEMPT') || lookback.includes('GRACE-EXEMPT')) { exemptCalls++; continue; }
+      offenders.push(`${rel}:${at}`);
     }
   }
-  // Sanity: this scan actually finds calls (a refactor that renamed the
-  // function everywhere would otherwise make this test vacuously pass).
+  // Sanity: this scan actually finds calls, and finds the exempt ones too —
+  // a refactor that renamed the function or moved a marker too far from its
+  // call would otherwise make this test vacuously pass.
   expect(totalCalls).toBeGreaterThanOrEqual(4);
+  // booking.js createSelfBooking, rebooker.js single-visit move, and
+  // slot-reservation.js commitReservation (the P0 fix, Codex r2 #5314).
+  expect(exemptCalls).toBe(3);
   expect(offenders).toEqual([]);
-  // The two allowlisted files must each still actually call the function —
-  // an allowlist entry for a call site that no longer exists is dead
-  // documentation, not a guard.
-  for (const rel of Object.keys(ALLOWLIST)) {
-    const source = fs.readFileSync(path.join(SERVER_ROOT, rel), 'utf8');
-    expect(callArgSpans(source).length).toBeGreaterThan(0);
-  }
 });
 
 // The offer-side mirror: packCapacityEnds' own admission (packEnds:true) is

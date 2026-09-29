@@ -43,7 +43,7 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
-const { capacityEnabled, placementFitsShift, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
+const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const {
   overlapsLunch, refreshCustomerBookingWindowConfig, currentDayEndMinutes, bookingWindowConfigKnown,
 } = require('./scheduling/customer-windows');
@@ -162,8 +162,8 @@ function requireKnownBookingWindowConfig(slotIdOrNull) {
 // Slot IDs come from PR A's getAvailableSlots:
 //   `${date}_${startTime.replace(':', '-')}_${techId || 'unassigned'}`
 // with the signed-offer segments appended by signCustomerFacingSlots:
-//   `${base}.${exp}.${sig}`
-// e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.dGhl..."
+//   `${base}.${exp}.${arrivalGrace}.${sig}`
+// e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.90.dGhl..."
 const SLOT_ID_RE = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_(.+)$/;
 
 function parseSlotId(slotId) {
@@ -189,6 +189,12 @@ function parseSlotId(slotId) {
     techId: techRaw === 'unassigned' ? null : techRaw,
     offerExp: signed ? signed.exp : null,
     offerSig: signed ? signed.sig : null,
+    // The EXACT self-serve arrival grace this offer was signed under (owner
+    // ruling 2026-09-28, Codex round 2 on #5314) — cleartext but HMAC-bound,
+    // so reserveSlot applies the grace that certified the OFFER, never a
+    // live env re-read that could have changed since. 0 for an unsigned/
+    // pre-v3 slotId (signed === null): no offer to trust a grace value from.
+    offerArrivalGrace: signed ? signed.arrivalGrace : 0,
   };
 }
 
@@ -701,7 +707,7 @@ async function reserveSlot({
     err.code = 'INVALID_SLOT_ID';
     throw err;
   }
-  const { date, windowStart, techId, offerExp, offerSig } = parsed;
+  const { date, windowStart, techId, offerExp, offerSig, offerArrivalGrace } = parsed;
 
   // Signed-offer gate (booking-audit round 2): every slot the generator
   // returns carries `.exp.sig` inside its slotId — a bare/hand-crafted id
@@ -839,9 +845,13 @@ async function reserveSlot({
       });
       // Authenticate the offered tuple before spending the shared traffic budget.
       // The transaction repeats this check against the locked estimate profile.
+      // arrivalGrace: echo the token's OWN embedded value (offerArrivalGrace)
+      // back into the reconstruction — never a live selfServeArrivalGraceMinutes()
+      // read, which could disagree with what was actually signed and fail a
+      // legitimate offer closed (owner ruling 2026-09-28, Codex round 2 #5314).
       if (!verifySlotOffer({ surface: 'estimate', scopeId: String(estimateId), date,
         startMinutes: slotStartMinutes, technicianId: techId, durationMinutes: profile.durationMinutes,
-        exp: offerExp, policy: CAPACITY_OFFER_POLICY }, offerSig)) throw capacityError('invalid_offer');
+        exp: offerExp, policy: CAPACITY_OFFER_POLICY, arrivalGrace: offerArrivalGrace }, offerSig)) throw capacityError('invalid_offer');
       preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
         prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
           service_type: profile.services.map(service => service.service).join(' ') },
@@ -1032,6 +1042,9 @@ async function reserveSlot({
         durationMinutes: effectiveDurationMinutes,
         exp: offerExp,
         policy: useCapacity ? CAPACITY_OFFER_POLICY : undefined,
+        // The token's own embedded grace (owner ruling 2026-09-28, Codex
+        // round 2 #5314) — never a live re-read; see the pre-txn check above.
+        arrivalGrace: offerArrivalGrace,
       }, offerSig)) {
         const err = new Error('slot was not offered for this estimate');
         err.code = 'SLOT_UNAVAILABLE';
@@ -1079,8 +1092,11 @@ async function reserveSlot({
       const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
         conn: trx, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
         serviceTypes: serviceProfile.services.map(service => service.label || service.service),
-        // Self-serve estimate hold — owner ruling 2026-09-28 arrival grace.
-        arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date }),
+        // The grace that CERTIFIED THIS OFFER (owner ruling 2026-09-28, Codex
+        // round 2 P0 on #5314) — the token's own HMAC-verified value, never a
+        // live selfServeArrivalGraceMinutes() re-read: the hold is certified
+        // ONCE, here, at reserve; commitReservation below never re-applies it.
+        arrivalGraceMinutes: offerArrivalGrace,
       }) : null;
       // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
       // graduated visit carries it even if the profile can't be re-resolved
@@ -1821,11 +1837,17 @@ async function commitReservation({
       }
     }
 
+    // GRACE-EXEMPT: no arrivalGraceMinutes here (owner ruling 2026-09-28,
+    // Codex round 2 P0 on #5314): a hold is certified ONCE, at reserveSlot — re-applying a
+    // freshly re-read grace here would let a since-LOWERED
+    // SELF_SERVE_ARRIVAL_GRACE_MINUTES fail a hold that was already validly
+    // reserved (a hold reserved at grace 90 with an 80-minute delay must not
+    // fail acceptance because the setting later dropped to 30). This keeps
+    // the existing 120-minute arrival promise as verifyArrivalCapacity's
+    // only bound here, exactly as it is on origin/main.
     const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
       conn: client, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
       serviceTypes: serviceProfile?.services.map(service => service.label || service.service),
-      // Self-serve estimate accept — owner ruling 2026-09-28 arrival grace.
-      arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date: scheduledDate }),
     }) : null;
 
     if (windowEnd && !useCapacity) {

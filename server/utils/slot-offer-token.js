@@ -20,14 +20,39 @@
  *
  * Two carrier shapes, one canonical string:
  *   - Estimate surface: the sig + exp ride INSIDE the slotId string
- *     (`<date>_<HH-MM>_<techId>.<exp>.<sig>`), because the estimate clients
- *     (SlotPicker/EstimateViewPage, the server-rendered estimate page) only
- *     ever send `{ slotId }` — no client change needed. scopeId = estimate id,
- *     so an offer minted for one estimate can't reserve under another.
+ *     (`<date>_<HH-MM>_<techId>.<exp>.<arrivalGrace>.<sig>`), because the
+ *     estimate clients (SlotPicker/EstimateViewPage, the server-rendered
+ *     estimate page) only ever send `{ slotId }` — no client change needed.
+ *     scopeId = estimate id, so an offer minted for one estimate can't
+ *     reserve under another.
  *   - /book surface: the funnel posts explicit slot fields, so the offer is a
  *     separate `slot_sig` field shaped `<exp>.<sig>` that the client passes
  *     through untouched. scopeId = '' (the funnel is anonymous; /availability
  *     is public, so the offer binds WHAT was offered, not who fetched it).
+ *     /book never opts into arrivalGrace (self-serve arrival grace,
+ *     scheduling/policy.js — owner ruling 2026-09-28, scoped to the estimate
+ *     picker only), so its canonical string always signs arrivalGrace as 0.
+ *
+ * arrivalGrace (self-serve arrival grace, owner ruling 2026-09-28, Codex
+ * round 2 on #5314): the estimate surface's ONLY additional signed field.
+ * A hold is certified ONCE, at reserve — never re-derived from the LIVE env
+ * value again at accept, which could have changed underneath an in-flight
+ * hold (the P0 this closes: a hold reserved at grace 90 must not fail
+ * acceptance because someone later lowered the env to 30). reserveSlot must
+ * therefore apply the EXACT grace that justified the offer, not whatever the
+ * env reads at reserve time — and since that number determines whether a
+ * customer-facing leniency applies, it has to ride in the tamper-proof HMAC
+ * exactly like date/startMinutes/technicianId, not as a trusted-on-its-word
+ * client field. Unlike duration or policy (independently re-derivable at
+ * verify time from other authoritative state, so they only need to be
+ * INPUTS to the signature, not readable OUTPUTS of it), arrivalGrace is a
+ * point-in-time policy snapshot nothing else can reconstruct — so it also
+ * rides in CLEARTEXT as its own segment (verified, not just signed) for
+ * reserveSlot to read back and feed into verifyArrivalCapacity.
+ * canonicalOfferString bumped to v3 for the shape change: every offer
+ * in flight at deploy time (all carrier shapes, capacity or not) fails
+ * verification once, the same accepted trade the v1→v2 bump made — the
+ * client's existing "pick another time" 409 recovery re-signs fresh.
  *
  * Key derivation: purpose-specific key = SHA-256('waves:slot-offer:v1:' +
  * secret), where secret is the server's existing required JWT_SECRET (same
@@ -79,10 +104,11 @@ function bookInsertionOfferPolicy(insertion) {
 
 function canonicalOfferString(payload = {}) {
   return [
-    // v2: serviceKey + locationKey joined the signed scope (round 3). The tag
-    // bump makes every v1 offer fail verification outright rather than
-    // depending on field-count coincidences.
-    'waves-slot-offer.v2',
+    // v3: arrivalGrace joined the signed scope (self-serve arrival grace,
+    // owner ruling 2026-09-28, Codex round 2 on #5314). The tag bump makes
+    // every v2 offer fail verification outright rather than depending on
+    // field-count coincidences — same accepted trade the v1→v2 bump made.
+    'waves-slot-offer.v3',
     String(payload.surface || ''),
     String(payload.scopeId ?? ''),
     String(payload.serviceKey ?? ''),
@@ -91,6 +117,11 @@ function canonicalOfferString(payload = {}) {
     String(Number(payload.startMinutes)),
     String(payload.technicianId || ''),
     String(Number(payload.durationMinutes)),
+    // Always present (0 default), never conditional like `policy` below —
+    // arrivalGrace also rides in cleartext (appendOfferToSlotId/
+    // splitSignedSlotId) so reserveSlot can read back the EXACT value that
+    // justified the offer instead of re-deriving it live.
+    String(Number(payload.arrivalGrace) || 0),
     String(Number(payload.exp)),
     ...(payload.policy ? [String(payload.policy)] : []),
   ].join('|');
@@ -133,21 +164,32 @@ function verifySlotOffer(payload, sig, now = Date.now()) {
   }
 }
 
-// ---- estimate-surface carrier: sig+exp inside the slotId ----
+// ---- estimate-surface carrier: sig+exp+arrivalGrace inside the slotId ----
 
-function appendOfferToSlotId(slotId, { exp, sig }) {
-  return `${slotId}.${exp}.${sig}`;
+// arrivalGrace rides in CLEARTEXT (not just signed) — reserveSlot reads it
+// back to know the exact grace that justified this offer, never a live
+// env re-read (owner ruling 2026-09-28, Codex round 2 on #5314). Defaults
+// to 0 so every caller that predates this field (every non-capacity offer,
+// and /book's separate carrier below, which never calls this function at
+// all) signs and appends identically to before.
+function appendOfferToSlotId(slotId, { exp, sig, arrivalGrace = 0 }) {
+  return `${slotId}.${exp}.${Math.round(Number(arrivalGrace) || 0)}.${sig}`;
 }
 
-// exp is a ms-epoch integer; sig is base64url. The base slotId never contains
-// a '.' (dates/times/uuids), so the two trailing segments are unambiguous.
-const SIGNED_SLOT_ID_RE = /^(.+)\.(\d+)\.([A-Za-z0-9_-]+)$/;
+// exp and arrivalGrace are decimal integers; sig is base64url. The base
+// slotId never contains a '.' (dates/times/uuids), so the three trailing
+// segments are unambiguous. A pre-v3 offer (`<base>.<exp>.<sig>`, only two
+// trailing segments) no longer matches and splits to null — the same
+// fail-closed "pick another time" recovery the v1→v2 canonical-string bump
+// already relies on for an in-flight offer at deploy time.
+const SIGNED_SLOT_ID_RE = /^(.+)\.(\d+)\.(\d+)\.([A-Za-z0-9_-]+)$/;
 
-/** Split `<base>.<exp>.<sig>` → { baseSlotId, exp, sig }, or null when unsigned. */
+/** Split `<base>.<exp>.<arrivalGrace>.<sig>` → { baseSlotId, exp,
+ * arrivalGrace, sig }, or null when unsigned or pre-v3. */
 function splitSignedSlotId(slotId) {
   const m = typeof slotId === 'string' ? slotId.match(SIGNED_SLOT_ID_RE) : null;
   if (!m) return null;
-  return { baseSlotId: m[1], exp: Number(m[2]), sig: m[3] };
+  return { baseSlotId: m[1], exp: Number(m[2]), arrivalGrace: Number(m[3]), sig: m[4] };
 }
 
 // ---- /book-surface carrier: standalone `<exp>.<sig>` field ----

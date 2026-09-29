@@ -31,7 +31,7 @@ const db = require('../models/db');
 const { applyAssignable, absentTechDays } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
-const { capacityEnabled } = require('./scheduling/policy');
+const { capacityEnabled, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -1719,14 +1719,22 @@ function stampSlotRainChances(slots, outlook) {
 }
 
 // Sign the final customer-facing slots (booking-audit round 2): the HMAC
-// binds surface + THIS estimate + date/start/tech/duration + expiry, and the
-// sig+exp ride INSIDE the slotId (`base.exp.sig`) so every client — SlotPicker,
-// EstimateViewPage, the server-rendered estimate page — keeps sending
-// `{ slotId }` untouched. reserveSlot refuses any slotId that doesn't verify,
-// so the constraint checks it also runs are defense-in-depth, not the gate.
+// binds surface + THIS estimate + date/start/tech/duration + arrival grace +
+// expiry, and the sig+exp+arrivalGrace ride INSIDE the slotId
+// (`base.exp.arrivalGrace.sig`) so every client — SlotPicker, EstimateViewPage,
+// the server-rendered estimate page — keeps sending `{ slotId }` untouched.
+// reserveSlot refuses any slotId that doesn't verify, so the constraint
+// checks it also runs are defense-in-depth, not the gate.
 // Runs LAST (after dedupe/spread/selection, which key off the base slotId).
+//
+// arrivalGrace (owner ruling 2026-09-28, Codex round 2 on #5314): the exact
+// grace value THIS slot was offered under, resolved fresh per slot's own
+// date (today's ET exclusion, capacity-mode check) — never re-derived live
+// at reserve/accept time, which could read a since-changed env value for a
+// hold that was already validly certified under the value at THIS instant.
 function signCustomerFacingSlots(slots, estimateId) {
   return (Array.isArray(slots) ? slots : []).map((slot) => {
+    const arrivalGrace = selfServeArrivalGraceMinutes({ date: slot.date });
     const offer = signSlotOffer({
       surface: 'estimate',
       scopeId: String(estimateId),
@@ -1735,8 +1743,9 @@ function signCustomerFacingSlots(slots, estimateId) {
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
       policy: capacityEnabled() ? CAPACITY_OFFER_POLICY : undefined,
+      arrivalGrace,
     });
-    const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+    const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, { ...offer, arrivalGrace }) };
     delete publicSlot.routeMode;
     return publicSlot;
   });

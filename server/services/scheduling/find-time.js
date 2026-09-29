@@ -338,10 +338,23 @@ function capacityGapNeighbours(context, fit, startMin) {
   // facing travel-gap predicate before picking a group's packed endpoint.
   // Resolved from the SAME expanded map as the anchors above (Codex r8 P1)
   // — never the raw context.rows member.
+  //
+  // Every live hold on this tech/date (Codex r2 P1, #5314): prevId/nextId
+  // above keep only the SINGLE nearest anchor per side (latest-starting
+  // before, earliest-starting after) — the right approximation for a real
+  // committed route, where the latest-starting earlier stop is also the
+  // latest-ENDING one. A hold's stored window is a PROMISE, not a fixed
+  // slot, so an earlier-starting hold can still end later than a
+  // later-starting committed stop that the anchor scan picked instead,
+  // leaving that hold's own buffer requirement against the candidate
+  // completely unchecked. packCapacityEnds' grace only ever waives the ONE
+  // neighbour it was asked about — never a hold — so it must check every
+  // live hold explicitly before granting.
   return {
     prevId, nextId,
     prevRow: prevId != null ? expandedById.get(prevId) : null,
     nextRow: nextId != null ? expandedById.get(nextId) : null,
+    holdRows: expanded.filter((row) => isHoldStop(row)),
   };
 }
 
@@ -417,7 +430,19 @@ function graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbou
   const grace = selfServeArrivalGraceMinutes({ date: slot.date });
   if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return false;
   if (slot.arrival_delay_minutes > grace) return false;
-  return travelGapConflicts(candidate, [neighbour]).every((c) => c.reason === 'travel_gap');
+  if (!travelGapConflicts(candidate, [neighbour]).every((c) => c.reason === 'travel_gap')) return false;
+  // Codex r2 P1 (#5314): the single chosen `row` above cleared, but it is
+  // only the nearest anchor capacityGapNeighbours picked — a DIFFERENT live
+  // hold on this same tech/date can still sit close enough to violate the
+  // buffer without ever being examined (see capacityGapNeighbours' own
+  // header). Grace never applies to a hold itself, so any such violation
+  // blocks the grant outright, even though it isn't the neighbour being
+  // waived.
+  const holdRows = slot._gap?.holdRows || [];
+  return holdRows.every((holdRow) => {
+    const holdNeighbour = capacityNeighbourEntity(holdRow);
+    return !holdNeighbour || !violatesTravelGap(candidate, [holdNeighbour]);
+  });
 }
 
 // Offer/commit parity: with grace opted in and on for the slot's date,
