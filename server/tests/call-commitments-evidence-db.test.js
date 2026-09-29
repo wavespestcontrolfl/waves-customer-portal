@@ -929,7 +929,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await inbound(steady);
     await cc.refreshFulfillment(db, steady.call.id);
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toEqual(expect.arrayContaining([worlds[0].w.call.id]));
-    for (const { w, talk, change } of worlds) await db('call_log').where({ id: talk.id }).update(change);
+    for (const { talk, change } of worlds) await db('call_log').where({ id: talk.id }).update(change);
     const lapsed = await cc.listLapsedEvidenceClosedCallIds(db);
     expect(lapsed).not.toContain(steady.call.id);
     for (const { w, change } of worlds) {
