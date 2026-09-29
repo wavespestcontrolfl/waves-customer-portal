@@ -10,7 +10,7 @@ jest.mock('../services/logger', () => ({
 
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const { recordPageView, DEDUPE_MINUTES } = require('../services/customer-page-views');
+const { recordPageView, logViewFailure, DEDUPE_MINUTES } = require('../services/customer-page-views');
 
 const HUMAN_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1';
 
@@ -108,6 +108,26 @@ describe('recordPageView', () => {
     mockRaw.mockRejectedValue(new Error('relation "customer_page_views" does not exist'));
     await expect(recordPageView({ req: mkReq(), page: 'appointment', customerId: 'c' })).resolves.toBe(false);
     expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining('insert failed'));
+  });
+
+  test('a Knex-style failure is logged without its message (SQL text / bound token never reach the log)', async () => {
+    const secret = 'SeCrEtBearerToken0123456789abc';
+    const err = new Error(`select * from "appointment_card_requests" where "token" = '${secret}' limit 1 - connection terminated`);
+    err.code = '57P01';
+    mockRaw.mockRejectedValue(err);
+    await expect(recordPageView({ req: mkReq(), page: 'secure-card', subjectType: 'appointment_card_request', subjectId: 'r' })).resolves.toBe(false);
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    const line = mockWarn.mock.calls[0].join(' ');
+    expect(line).not.toContain(secret);
+    expect(line).not.toContain('select *');
+    expect(line).toContain('secure-card');
+    expect(line).toContain('appointment_card_request');
+    expect(line).toContain('57P01');
+  });
+
+  test('logViewFailure tolerates a non-Error rejection', () => {
+    expect(() => logViewFailure('lookup', 'secure-card', 'x', undefined)).not.toThrow();
+    expect(mockWarn.mock.calls[0][0]).toContain('code=unknown');
   });
 
   test('never throws when db.raw throws synchronously', async () => {

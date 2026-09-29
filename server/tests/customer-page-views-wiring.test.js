@@ -1,9 +1,12 @@
 /**
  * Route wiring for the customer-page-view recorder (services/
- * customer-page-views.js): each token page's data GET records exactly one
- * view for the right page/subject once the token has resolved, records
- * nothing for a bad/unknown token, and a failing recorder never changes the
- * response. The recorder itself is unit-tested in customer-page-views.test.js.
+ * customer-page-views.js): the appointment / reschedule / reservice /
+ * secure-card / inspection data GETs record exactly one view for the right
+ * page/subject once the token has resolved (their contract entries do not
+ * make the GET read-only), and record nothing for a bad/unknown token. The
+ * track GET is contractually read-only, so it never writes; its view comes
+ * from POST /:token/view (once, 404 + no write for a bad/expired token). A
+ * failing recorder never changes the response. The recorder itself is unit-tested in customer-page-views.test.js.
  *
  * Handlers are driven directly off the router stack (no supertest in this
  * repo); the DB is a permissive chain whose .first() returns a canned row.
@@ -14,8 +17,10 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'page-views-wiring-secret';
 process.env.GATE_LEAD_INSPECTION_LINK = 'true';
 
 const mockRecord = jest.fn(() => Promise.resolve(true));
+const mockLogViewFailure = jest.fn();
 jest.mock('../services/customer-page-views', () => ({
   recordPageView: (...a) => mockRecord(...a),
+  logViewFailure: (...a) => mockLogViewFailure(...a),
 }));
 
 let mockRows = {};
@@ -68,13 +73,13 @@ const req = (token, extra = {}) => ({
   params: { token }, query: {}, headers: {}, ip: '203.0.113.5', get: () => 'Mozilla/5.0', ...extra,
 });
 
-function getHandler(router) {
-  const layer = router.stack.find((l) => l.route && l.route.path === '/:token' && l.route.methods.get);
+function getHandler(router, method = 'get', path = '/:token') {
+  const layer = router.stack.find((l) => l.route && l.route.path === path && l.route.methods[method]);
   const stack = layer.route.stack;
   return stack[stack.length - 1].handle;
 }
 
-async function drive(router, request) {
+async function drive(router, request, method = 'get', path = '/:token', next = jest.fn()) {
   const res = {
     statusCode: 200,
     set: jest.fn(() => res),
@@ -82,13 +87,15 @@ async function drive(router, request) {
     status: jest.fn((c) => { res.statusCode = c; return res; }),
     json: jest.fn(() => res),
     send: jest.fn(() => res),
+    end: jest.fn(() => res),
   };
-  await getHandler(router)(request, res, jest.fn());
+  await getHandler(router, method, path)(request, res, next);
   return res;
 }
 
 beforeEach(() => {
   mockRecord.mockClear();
+  mockLogViewFailure.mockClear();
   mockRecord.mockImplementation(() => Promise.resolve(true));
   mockRows = {};
 });
@@ -147,21 +154,95 @@ describe('customer page view wiring', () => {
     }));
   });
 
-  test('track: records the visit view (60-minute window so the 30s poll is not a view)', async () => {
+  test('track: the GET stays read-only (no view write, polls included)', async () => {
     mockRows = { scheduled_services: { id: 'svc-6', customer_id: 'cust-6', status: 'confirmed', track_token_expires_at: null } };
+    await drive(trackRouter, req(TOKEN));
+    await drive(trackRouter, req(TOKEN));
+    await new Promise((r) => setImmediate(r));
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
+  test('track: POST /:token/view records ONE view and answers 204', async () => {
+    mockRows = { scheduled_services: { id: 'svc-6', customer_id: 'cust-6', track_token_expires_at: null } };
     const request = req(TOKEN);
-    await drive(trackRouter, request);
+    const res = await drive(trackRouter, request, 'post', '/:token/view');
+    expect(res.statusCode).toBe(204);
+    expect(res.end).toHaveBeenCalled();
     expect(mockRecord).toHaveBeenCalledTimes(1);
     expect(mockRecord).toHaveBeenCalledWith({
-      req: request, page: 'track', customerId: 'cust-6', subjectType: 'scheduled_service', subjectId: 'svc-6', dedupeMinutes: 60,
+      req: request, page: 'track', customerId: 'cust-6', subjectType: 'scheduled_service', subjectId: 'svc-6',
     });
   });
 
-  test('track: an expired token records nothing', async () => {
+  test('track: POST /:token/view with an expired, unknown, or malformed token is a 404 with no write', async () => {
     mockRows = { scheduled_services: { id: 'svc-6', customer_id: 'cust-6', track_token_expires_at: '2000-01-01T00:00:00.000Z' } };
-    const res = await drive(trackRouter, req(TOKEN));
-    expect(res.statusCode).toBe(404);
+    const expired = await drive(trackRouter, req(TOKEN), 'post', '/:token/view');
+    expect(expired.statusCode).toBe(404);
+    mockRows = {};
+    const unknown = await drive(trackRouter, req(TOKEN), 'post', '/:token/view');
+    expect(unknown.statusCode).toBe(404);
+    const malformed = await drive(trackRouter, req('nope'), 'post', '/:token/view');
+    expect(malformed.statusCode).toBe(404);
     expect(mockRecord).not.toHaveBeenCalled();
+  });
+
+  test('track: POST /:token/view hands a bot to the recorder, which skips it (no write reaches the DB)', async () => {
+    // The route defers bot/staff filtering to the recorder (unit-tested in
+    // customer-page-views.test.js); pin that the real recorder rejects a bot
+    // request so the route cannot write for one.
+    const real = jest.requireActual('../services/customer-page-views');
+    expect(real.shouldRecord(req(TOKEN, { get: () => 'Slackbot-LinkExpanding 1.0' }))).toBe(false);
+    expect(real.shouldRecord(req(TOKEN))).toBe(true);
+  });
+
+  test('track: POST /:token/view lookup failure is logged code-only and never forwarded', async () => {
+    const err = Object.assign(new Error(`select ... where track_view_token = '${TOKEN}'`), { code: '57014' });
+    mockRows = { get scheduled_services() { throw err; } };
+    const next = jest.fn();
+    const res = await drive(trackRouter, req(TOKEN), 'post', '/:token/view', next);
+    expect(res.statusCode).toBe(204);
+    expect(next).not.toHaveBeenCalled();
+    expect(mockLogViewFailure).toHaveBeenCalledWith('lookup', 'track', 'scheduled_service', err);
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
+  test('track: privacy headers are mounted ahead of the global /api limiter', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../index.js'), 'utf8');
+    const headers = src.indexOf("app.use('/api/public/track', (req, res, next) => {");
+    const limiter = src.indexOf("app.use('/api/', limiter);");
+    expect(headers).toBeGreaterThan(-1);
+    expect(limiter).toBeGreaterThan(-1);
+    expect(headers).toBeLessThan(limiter);
+    const block = src.slice(headers, headers + 300);
+    expect(block).toContain("'Cache-Control', 'private, no-store'");
+    expect(block).toContain("'X-Robots-Tag', 'noindex, nofollow'");
+    expect(block).toContain("'Referrer-Policy', 'no-referrer'");
+  });
+
+  test('track: POST /:token/view is rate-limited like stops-ahead (router-level limiter)', () => {
+    // The limiter is a router-level middleware registered before every route,
+    // so it precedes the /view layer (same as /stops-ahead).
+    const idx = (m, p) => trackRouter.stack.findIndex((l) => l.route && l.route.path === p && l.route.methods[m]);
+    const firstRoute = trackRouter.stack.findIndex((l) => l.route);
+    expect(firstRoute).toBeGreaterThan(0);
+    expect(trackRouter.stack.slice(0, firstRoute).some((l) => !l.route)).toBe(true);
+    expect(idx('post', '/:token/view')).toBeGreaterThan(firstRoute - 1);
+  });
+
+  test('secure-card: a failed request-row lookup logs page/subject/code only, never the Knex message', async () => {
+    const secret = 'SeCrEtBearerToken0123456789abc';
+    mockLoadSecure.mockResolvedValue({ state: 'closed' });
+    const knexErr = new Error(`select "id" from "appointment_card_requests" where "token" = '${secret}' - timeout`);
+    knexErr.code = '57014';
+    const savedRows = mockRows;
+    mockRows = { appointment_card_requests: null };
+    mockDb.mockImplementationOnce(() => { throw knexErr; }); // the GET's follow-up read
+    await drive(secureCardRouter, req(TOKEN));
+    await new Promise((r) => setImmediate(r));
+    mockRows = savedRows;
+    expect(mockLogViewFailure).toHaveBeenCalledTimes(1);
+    expect(mockLogViewFailure).toHaveBeenCalledWith('lookup', 'secure-card', 'appointment_card_request', knexErr);
+    expect(require('../services/logger').warn.mock.calls.flat().join(' ')).not.toContain(secret);
   });
 
   test('inspection: records a lead-scoped view attributed to no unproven customer', async () => {
