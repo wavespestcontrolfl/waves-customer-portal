@@ -50,6 +50,57 @@ describe('preserved recurring visit staff alert', () => {
   );
 });
 
+// Admin alerts check the live record (owner ruling 2026-09-28): a date the move
+// only flagged for arrival-window route review (rebooker.js arrivalWindowDates —
+// no other appointment sits on it) is a heads-up, not work, so with nothing
+// preserved, untimed or truly overlapping it lands in the Activity feed only.
+describe('series move card rings only when there is something to act on', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.fn = { now: () => new Date() };
+    db.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        status: 'committed', conflict_card_at: null, reminders_synced_at: new Date(), notified_at: new Date(),
+      }),
+      update: jest.fn(async () => 1),
+    }));
+    notifyAdmin.mockResolvedValue({ id: 'staff-alert' });
+  });
+
+  const move = (result) => applySeriesMoveEffects({
+    result: { seriesMoveId: 'move-1', notifyRequested: false, rescheduledOccurrences: [], ...result },
+    serviceId: 'visit-1', newDate: '2099-01-01', newWindow: { start: '09:00', end: '10:00' },
+  });
+  const cardOpts = () => notifyAdmin.mock.calls[0][3];
+
+  test('a pure route-review move (only arrival-window dates, nothing preserved or untimed) goes to the Activity feed', async () => {
+    await move({ overlapDates: ['2099-02-01', '2099-03-01'], arrivalWindowDates: ['2099-02-01', '2099-03-01'] });
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][1]).toBe('Series move needs route review');
+    expect(cardOpts().metadata).toMatchObject({ quiet: true, feed: 'activity', seriesMoveId: 'move-1' });
+  });
+
+  test.each([
+    ['a real overlap with another appointment', { overlapDates: ['2099-02-01'], arrivalWindowDates: [] }],
+    ['a real overlap beside a route-review date', { overlapDates: ['2099-02-01', '2099-03-01'], arrivalWindowDates: ['2099-02-01'] }],
+    ['a preserved future visit beside a route-review date', {
+      overlapDates: ['2099-02-01'], arrivalWindowDates: ['2099-02-01'], preservedOccurrences: [{ id: 'visit-2', date: '2099-04-01' }],
+    }],
+    ['a visit left without a time window', {
+      overlapDates: ['2099-02-01'], arrivalWindowDates: ['2099-02-01'],
+      rescheduledOccurrences: [{ id: 'visit-3', date: '2099-05-01', conflicted: true }],
+    }],
+  ])('still rings for %s', async (_label, result) => {
+    await move(result);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(cardOpts().metadata.quiet).toBeUndefined();
+    expect(cardOpts().metadata.feed).toBeUndefined();
+    expect(cardOpts()).toMatchObject({ bell: true });
+  });
+});
+
 describe('recurring confirmation describes the recorded placement policy', () => {
   test.each([
     [3, 'appointment_recurring_placement_confirmed'],
