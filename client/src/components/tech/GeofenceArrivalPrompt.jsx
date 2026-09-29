@@ -16,6 +16,10 @@
  *   - an open-visits card for `tech_open_visit_nudge` (tech-open-visit-nudge.js:
  *     the 7 PM "visits from today still open" reminder for techs who aren't
  *     texted) — same kept-until-"Got it" rule and cap
+ *   - a photo card for `customer_visit_photos` (visit-prep-tech-alert.js,
+ *     GATE_VISIT_PREP_TECH_ALERTS: a customer sent prep photos for a stop
+ *     on this tech's route) — same kept-until-"Got it" rule and cap,
+ *     sharing the visit-card slot
  *
  * Mount once inside TechLayout / TechHomePage — it renders a fixed-position
  * container so the parent layout doesn't need to reserve space.
@@ -64,7 +68,11 @@ const TRACKING_TYPES = new Set(['follow_through_tracking']);
 // The 7 PM open-visits reminder (tech-open-visit-nudge.js) is kept too: it is
 // the durable copy when the push reaches no device.
 const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
-const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES]);
+// A customer's visit-prep photo submission (visit-prep-tech-alert.js) —
+// kept until "Got it" the same way, so it isn't lost to the 5-min auto-
+// dismiss timer before the tech has opened the stop.
+const PHOTO_TYPES = new Set(['customer_visit_photos']);
+const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
 const VISIT_ACCENT = {
   visit_assigned: '#0ea5e9',
   visit_rescheduled: '#f59e0b',
@@ -118,7 +126,7 @@ function getPosition() {
   });
 }
 
-export default function GeofenceArrivalPrompt({ onStormReview }) {
+export default function GeofenceArrivalPrompt({ onStormReview, onOpenVisit }) {
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
 
@@ -301,6 +309,9 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
           {NUDGE_TYPES.has(n.type) && (
             <OpenVisitsCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
+          {PHOTO_TYPES.has(n.type) && (
+            <PhotoCard n={n} onOpen={() => onOpenVisit?.(n.payload || {})} onDismiss={() => dismissVisitCard(n.id)} />
+          )}
           {n.type === 'storm_watch_alert' && (
             <StormCard
               n={n}
@@ -437,6 +448,28 @@ function VisitCard({ n, onDismiss }) {
             : <div key={i} style={{ textDecoration: 'line-through', color: '#64748b' }}>{line.text}</div>
         ))}
       </div>
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
+    </div>
+  );
+}
+
+// A customer's visit-prep photo submission (visit-prep-tech-alert.js,
+// GATE_VISIT_PREP_TECH_ALERTS). No customer name/address/note here — that
+// same lock-screen discipline extends to the card, not just the push: the
+// tech opens the stop for the details. Tapping the card (not "Got it")
+// deep-links to the stop via onOpenVisit, same shape as onStormReview.
+function PhotoCard({ n, onOpen, onDismiss }) {
+  return (
+    <div style={cardStyle(COLORS.teal)} data-testid="photo-notice">
+      <button
+        onClick={onOpen}
+        style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+      >
+        <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📷 Photos from a customer</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>
+          {n.message || 'A customer sent photos for a visit on your route'}
+        </div>
+      </button>
       <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
     </div>
   );

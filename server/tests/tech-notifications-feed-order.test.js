@@ -47,7 +47,7 @@ test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit
   // with them allowed (codex P2, PR #4403 rounds 8 and 17).
   expect(sql).toMatch(/WHEN type = 'follow_through_tracking' THEN 0/);
   expect(sql.indexOf("follow_through_tracking")).toBeLessThan(sql.indexOf("interval '6 hours'"));
-  expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 3/);
+  expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type IN \('tech_line_sms', 'customer_visit_photos'\) THEN 3/);
   expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 2/);
   expect(sql).toMatch(/interval '6 hours' THEN 1 ELSE 3 END/);
   // Stage 2 before stage 1 inside the tracking bucket, before the limit

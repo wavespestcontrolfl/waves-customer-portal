@@ -28,6 +28,10 @@ jest.mock('../services/photos', () => ({
 jest.mock('../services/visit-groups', () => ({
   lockStopForRow: (...args) => mockLockStopForRow(...args),
 }));
+const mockNotifyTechVisitPrepPhotos = jest.fn().mockResolvedValue(undefined);
+jest.mock('../services/visit-prep-tech-alert', () => ({
+  notifyTechVisitPrepPhotos: (...args) => mockNotifyTechVisitPrepPhotos(...args),
+}));
 // sharp stand-in (identity): the real decode/normalize path is proven in
 // visit-prep-image-decode.test.js; here the stages are the subject.
 jest.mock('sharp', () => (input) => {
@@ -372,5 +376,45 @@ describe('createVisitPrepSubmission', () => {
     await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() }))
       .rejects.toMatchObject({ statusCode: 404, code: 'PREP_NOT_FOUND', message: 'Not found' });
     expect(mockLockStopForRow).toHaveBeenCalledTimes(3); // initial + 2 retries
+  });
+
+  // PR 6 (tech card + push): the ONE post-commit hook lives inside this
+  // function (see its own comment above `return`), so both the appointment
+  // page and any future customer-auth route inherit it with no per-caller
+  // wiring. visit-prep-tech-alert.js owns its own gate and silence rules —
+  // here we only prove the hook fires exactly when a submission actually
+  // stored something new, with the RECHECKED row's id/visit_id, and never
+  // for a duplicate-only resubmit.
+  describe('tech alert hook (visit-prep-tech-alert.js)', () => {
+    test('a new submission triggers the hook with the RECHECKED row', async () => {
+      const currentRow = { id: 'svc-RECHECKED', customer_id: 'cust-1', property_id: 'prop-1', visit_id: 'visit-9' };
+      const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+      const result = await createVisitPrepSubmission({
+        svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck(currentRow),
+      });
+      expect(result.created).toBe(true);
+      expect(mockNotifyTechVisitPrepPhotos).toHaveBeenCalledTimes(1);
+      expect(mockNotifyTechVisitPrepPhotos).toHaveBeenCalledWith({
+        scheduledServiceId: 'svc-RECHECKED',
+        visitId: 'visit-9',
+      });
+    });
+
+    test('a duplicate-only resubmit (nothing new stored) never triggers the hook', async () => {
+      const { hashBuffer } = require('../services/service-report/photo-chain');
+      const dupHash = hashBuffer(JPEG_BYTES);
+      mockDb.mockImplementation((table) => {
+        const api = chain(table);
+        if (table === 'visit_prep_photos') api.select = async () => [{ image_sha256: dupHash }];
+        return api;
+      });
+      const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+      const result = await createVisitPrepSubmission({
+        svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck(),
+      });
+      expect(result.created).toBe(false);
+      expect(result.stored).toBe(0);
+      expect(mockNotifyTechVisitPrepPhotos).not.toHaveBeenCalled();
+    });
   });
 });
