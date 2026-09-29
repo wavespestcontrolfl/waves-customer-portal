@@ -96,7 +96,17 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // instead of parsing speech itself (call-reschedule-agreement.js). Nothing
 // consumes them yet outside that gated consumer. Optional/nullable: older
 // payloads still validate.
-const SCHEMA_VERSION = '1.17.0';
+// 1.18.0: additive enum widening — caller.relationship_to_property gains
+// family_member (owner ruling 2026-09-28: a relative of the homeowner or
+// resident — grandchild, child, parent, sibling, in-law — arranging service
+// at THAT relative's home, e.g. "my grandfather's house", is authorized when
+// staff confirmed a time on the call). Live miss (call f5a54dbd, 2026-09-28):
+// the caller booked a paper-wasp knockdown at "my grandfather's house",
+// confirmed Sun Oct 4 11am, and was blocked on caller_not_authorized because "other"
+// covers both family and strangers alike. A spouse/partner still uses
+// spouse_partner, not this value. Feeds isAuthorizedFamilyMemberBooking
+// (call-triage-flags.js). Older payloads still validate.
+const SCHEMA_VERSION = '1.18.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

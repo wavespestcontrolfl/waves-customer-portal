@@ -66,6 +66,9 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // round-1 P2) — the status flip alone is editable, but this tool's money
   // effects are not, so the card must say so.
   'cancel_appointment',
+  // No un-cancel tool exists — once cancelled, that queued attempt is gone
+  // for good (the original sender would need to queue a fresh one).
+  'cancel_queued_message',
 ]);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
@@ -155,6 +158,7 @@ const ACTION_LABELS = {
   request_instant_payout: 'Request an INSTANT payout',
   request_standard_payout: 'Request a standard payout',
   cancel_pending_payout: 'Cancel a pending payout',
+  cancel_queued_message: 'Cancel a queued message',
   run_seo_pipeline: 'Run the SEO pipeline',
   approve_seo_action: 'Approve an SEO action',
 };

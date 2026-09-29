@@ -18,7 +18,10 @@ vi.mock('../../components/admin/Customer360ProfileV2', () => ({
 }));
 vi.mock('../../components/admin/MobileNewCustomerSheet', () => ({ default: () => null }));
 vi.mock('../../components/admin/CustomerGeocodeReviewPanel', () => ({
-  default: ({ refreshToken = 0 }) => <output data-testid="geocode-review-refresh">{refreshToken}</output>,
+  default: ({ refreshToken = 0, onResolved }) => <>
+    <output data-testid="geocode-review-refresh">{refreshToken}</output>
+    <button type="button" onClick={onResolved}>Resolve address review</button>
+  </>,
 }));
 vi.mock('../../components/AddressAutocomplete', () => ({
   default: ({ id, value, onChange, onSelect }) => (
@@ -212,6 +215,54 @@ describe('CustomersPageV2 workflow state', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Save profile address' }));
     await waitFor(() => expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('2'));
+  });
+
+  it.each(['/admin/customers', '/admin/customers?customer360=workspace'])('refreshes the directory after a workspace address review at %s', async (entry) => {
+    let customerReads = 0;
+    const reviewedAddress = '25 Reviewed Ave, Naples FL 34102';
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      customerReads += 1;
+      return response({
+        ...list,
+        customers: [{ ...list.customers[0], address: customerReads > 1 ? reviewedAddress : list.customers[0].address }],
+      });
+    }));
+
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Save profile address' }));
+    await waitFor(() => expect(customerReads).toBe(2));
+    fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
+    expect(await screen.findByText(reviewedAddress)).toBeInTheDocument();
+    expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('1');
+  });
+
+  it('refreshes the displayed customer list after a queue resolution', async () => {
+    let customerReads = 0;
+    const addresses = ['10 Palm Ave, Unit 4, Naples FL 34102', '25 Reviewed Ave, Naples FL 34102'];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      return response({
+        ...list,
+        customers: [{
+          ...list.customers[0],
+          address: addresses[Math.min(customerReads++, 1)],
+        }],
+      });
+    }));
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    expect(await screen.findByText('10 Palm Ave, Unit 4, Naples FL 34102')).toBeInTheDocument();
+    expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('0');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve address review' }));
+
+    expect(await screen.findByText('25 Reviewed Ave, Naples FL 34102')).toBeInTheDocument();
+    expect(customerReads).toBe(2);
+    expect(screen.getByTestId('geocode-review-refresh')).toHaveTextContent('0');
   });
 
   it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {

@@ -417,8 +417,16 @@ describe('visit facts contract registry', () => {
       for (const key of required) {
         if (!fields.has(key)) problems.push(`${line}: REQUIRED_FINDINGS_FIELDS.${def.typedForm} names ${key}, not a field of the form`);
       }
+      // Mirrors typedFactFields()'s own inclusion rule exactly (independent
+      // re-derivation, not a call into it): a pesticideOnly internal field
+      // (pollinator_status / irac_frac_logged) is CONDITIONALLY required —
+      // validateTreeShrubTypedCompliance enforces it whenever a pesticide
+      // product is on the visit — which REQUIRED_FINDINGS_FIELDS has no way
+      // to express, so it must be included here too or a bypass of
+      // typedFactFields's own filter would go undetected (codex follow-up on
+      // #5190).
       const expected = cfg.findingsFields
-        .filter((f) => !f.internal || required.has(f.key))
+        .filter((f) => !f.internal || required.has(f.key) || f.pesticideOnly)
         .map((f) => f.key)
         .sort();
       const typed = def.facts.filter((f) => f.typedForm === def.typedForm);
@@ -489,6 +497,66 @@ describe('visit facts contract registry', () => {
       if (fact && fact.typedForm !== undefined) problems.push(`${line}.typed_activity_score: should not carry typedForm (not a findingsFields entry)`);
     }
     expect(problems).toEqual([]);
+  });
+
+  // On a combined visit where this form runs as a COMPANION, the score is
+  // ALSO frozen onto the companion's own typed snapshot
+  // (service_data.companionReportSnapshots[].activity.score) before the
+  // service_activity_scores trend row inserts — a fact naming only the
+  // trend-table storage would silently miss that path (codex follow-up on
+  // #5190). Not covered by the generic typedFormFacts companion checks below
+  // (this fact carries no typedForm), so it needs its own assertion.
+  test('typed activity score records its companion storage path and writer edges', () => {
+    const problems = [];
+    for (const [line, def] of typedLines) {
+      const fact = def.facts.find((f) => f.key === 'typed_activity_score');
+      if (!fact) continue;
+      const expectedCompanionStorage = 'service_data.companionReportSnapshots[].activity.score';
+      if (fact.companionStorage !== expectedCompanionStorage) {
+        problems.push(`${line}.typed_activity_score: companionStorage missing/incorrect (expected ${expectedCompanionStorage})`);
+      }
+      const hasSymbol = (sym) => fact.writers.some((w) => w && typeof w === 'object' && w.writerSymbol === sym);
+      if (!hasSymbol('companionReportSnapshots') || !hasSymbol('companionFindings') || !hasSymbol('finalScore')) {
+        problems.push(`${line}.typed_activity_score: missing companion writer edges (companionReportSnapshots / companionFindings / finalScore)`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('each pesticideOnly compliance fact names the predicate its own validation branch uses', () => {
+    const closeout = readRepoFile('server/services/tree-shrub-closeout.js') || '';
+    const PREDICATES = ['hasInsectProduct', 'needsIracFracLog'];
+    const problems = [];
+    for (const [line, def] of typedLines) {
+      const cfg = PROJECT_TYPES[def.typedForm];
+      for (const field of (cfg?.findingsFields || []).filter((f) => f.pesticideOnly)) {
+        const fact = def.facts.find((f) => f.key === field.key);
+        const reader = fact?.readers.find((r) => r.file === 'server/services/tree-shrub-closeout.js');
+        const named = reader && (reader.section.match(new RegExp(`\\((${PREDICATES.join('|')})\\)`)) || [])[1];
+        // The validation branch that blocks on this field: the blank-line
+        // separated block holding its first pushBlock(..., '<field>').
+        const at = closeout.search(new RegExp(`pushBlock\\([^;]*'${field.key}'\\)`));
+        const branch = at < 0 ? '' : closeout.slice(closeout.lastIndexOf('\n\n', at), at);
+        const used = PREDICATES.filter((p) => new RegExp(`\\b${p}\\b`).test(branch));
+        if (!named) problems.push(`${line}.${field.key}: server reader does not name its condition`);
+        else if (used.length !== 1 || used[0] !== named) {
+          problems.push(`${line}.${field.key}: registry names ${named}, validation branch uses ${used.join(', ') || 'none'}`);
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('the flea work-sentence reader is pinned to the field WORK_PHRASE_FIELDS.flea actually reads', () => {
+    const src = readRepoFile('server/services/service-report/activity-indicators.js') || '';
+    const block = src.slice(src.indexOf('const WORK_PHRASE_FIELDS = {'));
+    const flea = /\n\s{2}flea:\s*\{\s*field:\s*'([a-z_]+)'/.exec(block);
+    const fact = VISIT_FACTS_CONTRACT.flea.facts.find((f) => f.readers.some((r) => /WORK_PHRASE_FIELDS\.flea/.test(r.section || '')));
+    expect(flea && flea[1]).toBe(fact && fact.key);
+  });
+
+  test('bora_care registers no pest activity rating (never captured for a termite-classified service)', () => {
+    expect(VISIT_FACTS_CONTRACT.bora_care.facts.map((f) => f.key)).not.toContain('pest_activity_rating');
   });
 
   test('typed builders read exactly the keys registered for them, all defined by the form', () => {

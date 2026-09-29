@@ -26,7 +26,7 @@ function jpegOf(file) {
 }
 
 function fileInput() {
-  return document.querySelector('input[type="file"]');
+  return screen.getByTestId('visit-prep-library-input');
 }
 
 beforeEach(() => {
@@ -53,8 +53,6 @@ describe('VisitPrepPhotoForm', () => {
     const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5, photosAdded: 1 } });
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
 
-    fireEvent.click(screen.getByText('Pest'));
-    fireEvent.click(screen.getByText('Back yard'));
     fireEvent.change(screen.getByLabelText('A short note (optional)'), { target: { value: 'Ants by the pool' } });
     fireEvent.change(fileInput(), { target: { files: [photoFile()] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
@@ -67,25 +65,49 @@ describe('VisitPrepPhotoForm', () => {
     expect(formData.getAll('photos')).toHaveLength(1);
     expect(formData.get('photos').name).toBe('bug.jpg');
     expect(formData.get('note')).toBe('Ants by the pool');
-    expect(formData.get('topic')).toBe('pest');
-    expect(formData.get('locationOnProperty')).toBe('back_yard');
+    // No topic/location choices on this form (owner 2026-09-28): note + photos only.
+    expect(formData.get('topic')).toBeNull();
+    expect(formData.get('locationOnProperty')).toBeNull();
   });
 
-  it('the instruction names the real remaining limit, and both chip groups are labelled', () => {
+  it('the instruction names the real remaining limit, and there are no topic or location choices', () => {
     render(<VisitPrepPhotoForm photosRemaining={1} onSubmit={vi.fn()} />);
     expect(screen.getByText('Add up to 1 photo and a short note.')).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: "What it's about" })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: 'Where on the property?' })).toBeInTheDocument();
+    expect(screen.queryByRole('group')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pest')).not.toBeInTheDocument();
+  });
+
+  it('offers both Take a photo (camera) and Upload a photo (library), feeding the same picker', async () => {
+    render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={vi.fn()} />);
+    const camera = screen.getByTestId('visit-prep-camera-input');
+    const library = screen.getByTestId('visit-prep-library-input');
+    expect(camera.getAttribute('capture')).toBe('environment');
+    expect(library.hasAttribute('capture')).toBe(false);
+    expect(library.multiple).toBe(true);
+
+    const clickCamera = vi.spyOn(camera, 'click');
+    const clickLibrary = vi.spyOn(library, 'click');
+    fireEvent.click(screen.getByRole('button', { name: 'Take a photo' }));
+    expect(clickCamera).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Upload a photo' }));
+    expect(clickLibrary).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(camera, { target: { files: [photoFile('cam.jpg')] } });
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /Remove photo/ })).toHaveLength(1));
+    fireEvent.change(library, { target: { files: [photoFile('lib.jpg')] } });
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /Remove photo/ })).toHaveLength(2));
   });
 
   it('meets the customer-surface floors: 48 px touch targets and 16 px text on every control', () => {
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={vi.fn()} />);
-    for (const name of ['Pest', 'Back yard', 'Add photos', 'Send']) {
+    for (const name of ['Take a photo', 'Upload a photo', 'Send']) {
       const control = screen.getByRole('button', { name });
       expect(control.style.minHeight).toBe('48px');
       expect(control.style.fontSize).toBe('16px');
     }
     expect(screen.getByLabelText('A short note (optional)').style.fontSize).toBe('16px');
+    // The glass theme's accent rule forces 44px unless the primary size tag is set.
+    expect(screen.getByRole('button', { name: 'Send' }).getAttribute('data-glass-size')).toBe('primary');
   });
 
   it('caps the picker at min(3, photosRemaining)', async () => {
@@ -94,8 +116,9 @@ describe('VisitPrepPhotoForm', () => {
     fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), photoFile('b.jpg'), photoFile('c.jpg')] } });
 
     await waitFor(() => expect(screen.getAllByRole('button', { name: /Remove photo/ })).toHaveLength(2));
-    // Room is used up — the Add photos button drops off.
-    expect(screen.queryByText('Add photos')).not.toBeInTheDocument();
+    // Room is used up — both picker buttons drop off.
+    expect(screen.queryByText('Take a photo')).not.toBeInTheDocument();
+    expect(screen.queryByText('Upload a photo')).not.toBeInTheDocument();
   });
 
   it('shows the acknowledgment with a count of the photos just sent, never the photos themselves', async () => {
@@ -197,7 +220,9 @@ describe('VisitPrepPhotoForm', () => {
     await waitFor(() => expect(encodeJpegFile).toHaveBeenCalledTimes(1));
     // Still processing — Send must stay disabled and say nothing is picked.
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Adding…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('Adding photos…');
+    expect(screen.getByRole('button', { name: 'Take a photo' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Upload a photo' })).toBeDisabled();
 
     releaseEncode();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
@@ -324,7 +349,6 @@ describe('VisitPrepPhotoForm', () => {
     const onSubmit = vi.fn(() => new Promise((resolve) => { resolveSubmit = resolve; }));
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
 
-    fireEvent.click(screen.getByText('Pest'));
     fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), photoFile('b.jpg')] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -332,10 +356,9 @@ describe('VisitPrepPhotoForm', () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     // The button's own label flips to "Sending…" while in flight.
     expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled();
-    expect(screen.getByText('Pest')).toBeDisabled();
-    expect(screen.getByText('Back yard')).toBeDisabled();
     expect(screen.getByLabelText('A short note (optional)')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Add photos' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Take a photo' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Upload a photo' })).toBeDisabled();
     screen.getAllByRole('button', { name: /Remove photo/ }).forEach((btn) => expect(btn).toBeDisabled());
 
     resolveSubmit({ ok: true, prepPhotos: { eligible: true, photoCount: 2, photosRemaining: 4 } });

@@ -396,6 +396,64 @@ describe('the check -> destination map fills in what the caller did not send', (
     });
   });
 
+  // Follow-up to #5269 (codex r8 P1): e22's key is JUST `<check-id>:<finding>
+  // -<date>` — nothing else variable — so it collapses to the alert class
+  // once the date is stripped and proves nothing about which visits the
+  // finding names. `itemIds` lets the check hand over that identity itself.
+  describe('date-only ops-cron keys: itemIds carries the identity the key cannot', () => {
+    const { itemSetHashFor } = require('../services/ops-digest');
+
+    test('no count, no itemIds, a prior rung row of the same class -> rings (key alone proves nothing)', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-e22-i', deduped: false });
+      mockStanding.row = { metadata: { opsKey: 'e22-schedule-integrity:overlaps-2026-09-10' } };
+      await post(good()); // key: overlaps-2026-09-11 — same alertClass, subject has no leading count
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.quiet).toBe(false);
+      expect(opts.metadata.feed).toBeNull();
+    });
+
+    test('itemIds naming the same visits as the prior row -> quiet', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-e22-ii', deduped: false });
+      mockStanding.row = {
+        metadata: {
+          opsKey: 'e22-schedule-integrity:overlaps-2026-09-10',
+          itemKeys: ['0b9fce27', '11425c5f'],
+          itemSetHash: itemSetHashFor(['0b9fce27', '11425c5f']),
+        },
+      };
+      await post({ ...good(), itemIds: ['0b9fce27', '11425c5f'] });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.quiet).toBe(true);
+      expect(opts.metadata.feed).toBe('activity');
+      expect(opts.metadata.itemKeys).toEqual(['0b9fce27', '11425c5f']);
+      expect(opts.metadata.itemSetHash).toBe(itemSetHashFor(['0b9fce27', '11425c5f']));
+    });
+
+    test('itemIds with one new id at an equal (absent) count -> rings', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-e22-iii', deduped: false });
+      mockStanding.row = {
+        metadata: {
+          opsKey: 'e22-schedule-integrity:overlaps-2026-09-10',
+          itemKeys: ['0b9fce27', '11425c5f'],
+          itemSetHash: itemSetHashFor(['0b9fce27', '11425c5f']),
+        },
+      };
+      await post({ ...good(), itemIds: ['0b9fce27', '1a7f3f9a'] }); // 1a7f3f9a is new
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.quiet).toBe(false);
+    });
+
+    test('invalid itemIds -> 400', async () => {
+      expect((await post({ ...good(), itemIds: 'not-an-array' })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: null })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: [123] })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: [''] })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: ['x'.repeat(201)] })).status).toBe(400);
+      expect((await post({ ...good(), itemIds: Array.from({ length: 2001 }, (_, i) => `id-${i}`) })).status).toBe(400);
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    });
+  });
+
   // For an unmapped check with no route.counts(), the generic fallback is
   // the first integer anywhere in the subject (never a newCount — a bare
   // number's meaning isn't safely guessable for an unconverted check).

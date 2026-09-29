@@ -1053,6 +1053,7 @@ function CustomerDirectoryView({
           <CustomerGeocodeReviewPanel
             onSelectCustomer={openCustomerProfile}
             refreshToken={geocodeReviewRefreshToken}
+            onResolved={loadCustomers}
           />
         )}
         {" "}
@@ -1643,6 +1644,7 @@ function CustomersWorkspacePage({
   selectedId,
   onSelect,
   onClose,
+  onCustomerMutation,
   initialTab,
   tabKey,
   children,
@@ -1657,6 +1659,7 @@ function CustomersWorkspacePage({
           selectedId={selectedId}
           onSelect={onSelect}
           onClose={onClose}
+          onCustomerMutation={onCustomerMutation}
         />
       ) : (
         children
