@@ -18,12 +18,13 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
   TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal,
+  CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -433,18 +434,87 @@ function withCacheBreakpoint(messages) {
 // /confirm-action commits) while reads stay available; the fallback for a
 // broken confirm UI is the normal admin screen, never ungated AI execution.
 // (GATE_IB_UI_CONFIRM is retired and intentionally ignored.)
-// cancel_appointment is NOT card-confirmable (W0B): its post-commit rails
-// (late-cancel fee, invoice void via the shared status writer, inspection-
-// credit reversal) settle amounts by re-reading state after commit, so no
-// contract the card shows can be exact. Cancels happen on the Dispatch
-// screen, which owns the waiver and review controls, until a rails-binding
-// lane makes the effect set pinnable.
-// PR A of that lane (ib-cancel-pinned-effects) built the deterministic
-// pre-commit impact computation (server/services/appointment-cancel-
-// impact.js) and the commit-side refuse-on-drift check (tools.js
-// cancelAppointment) but ships DARK — this refusal is deliberately left in
-// place here. PR B removes it and wires proposePendingWrite to populate
-// preview.cancellation from that module, once it has been reviewed.
+// cancel_appointment card-confirm (ib-cancel-pinned-effects lane, owner
+// ruling 2026-09-28): its post-commit rails (late-cancel fee, invoice void
+// via the shared status writer, inspection-credit reversal) settle amounts
+// by re-reading state after commit, so no contract the card shows can be
+// exact UNLESS the exact effect set is pinned and re-verified immediately
+// before commit. PR A (server/services/appointment-cancel-impact.js) built
+// the deterministic pre-commit impact computation and the commit-side
+// refuse-on-drift check (tools.js cancelAppointment reads
+// input._frozen_cancellation_impact); it shipped dark. PR B wires this
+// route: behind GATE_IB_CANCEL_APPOINTMENT (ibCancelAppointmentLive()),
+// proposePendingWrite computes the impact fresh, refuses a non-simple visit
+// (card_cancel_refusals — a card fee agreement, a card payment on the
+// invoice, an estimate deposit, a possible plan make-up visit, or a
+// grouped visit (row.visit_id set — Codex round-4 P2: cancelling one
+// member can detach or dissolve the group via visit-groups.js's
+// handleChildTerminal, a side effect this card does not disclose); the bar
+// cancels SIMPLE, UNGROUPED visits only, everything else goes to Dispatch)
+// or a not-found/unreadable appointment, and otherwise pins the impact onto
+// params._frozen_cancellation_impact and preview.cancellation so the card
+// renders it and the contract hash covers it (authorization-contract.js's
+// cancel_appointment branch, already wired by PR A). /confirm-action only
+// dispatches a cancel_appointment pending action when the gate is live AND
+// the stored action carries that frozen pin — a legacy row minted before
+// this pin existed (or a row minted while the gate was on, then turned off)
+// still refuses, never executes unpinned. A terminal appointment (already
+// completed/cancelled/skipped/no_show) also refuses AT PROPOSAL, before any
+// pending action is minted — a fresh proposal is never the commit-time
+// idempotent-replay path. The impact also carries card_cancel_refusals'
+// invoice_holds_money (an invoice the void preview EXCLUDES — paid,
+// processing, or on a finalized statement — that would still hold money;
+// card_payment_on_invoice alone only covers a PaymentIntent on a WOULD-VOID
+// candidate) and inspection_credit (ANY redeemed inspection-credit offer —
+// reversed, deferred, or rebound — refuses outright: inspection-credit.js's
+// independent HOURLY sweepInspectionCreditRedemptions sweep later re-voids
+// a stale redeemed offer's booking UNPINNED, no card, no way for this lane
+// to thread a skip into a cron; refusing here means it never has a
+// bar-cancelled booking to touch, Codex round-2 P1), plus customer_notice
+// ('none' | 'may_send' — the existing GATE_CANCEL_NOTICE_HOOK cancellation-
+// text hook may still text the customer; this card DISCLOSES that, via
+// job-status.js's read-only previewCancellationNoticeVerdict, rather than
+// the earlier draft of this lane silently claiming cancellations never
+// contact anyone — 'none' ONLY when the gate is off (a process-level value
+// that cannot change mid-transaction); every DB-backed condition, a live
+// merged-slot survivor (Codex round-2 P1) AND whether an appointment_
+// reminders row currently exists (Codex round-3 P1b — the reminder self-
+// healer can insert one before commit), is mutable and never grounds
+// 'none'), plus a human-readable appointment window (Codex round-3/round-4
+// P1 — so two same-day visits for the same customer are distinguishable on
+// the card; prefers formatting the AUTHORITATIVE window_start/window_end
+// bounds — every mover of the row writes these — and falls back to the
+// legacy time_window label only when no bounds are stored at all, since
+// the label is never kept in sync by a reschedule, tools.js ~3517), plus
+// the visit's effective service address (Codex round-4 P1 —
+// switchAppointmentProperty can move a visit to a different saved
+// property than the customer's primary one; the stamped service_address_*
+// columns on the row, falling back to the customer's primary address for
+// a legacy unstamped row), plus identity_fingerprint (a hash over EVERY
+// scheduled_services column bar a tiny denylist of columns that churn for
+// unrelated operational reasons — route_order, the stops-ahead display
+// cache, updated_at — appointment-cancel-impact.js's computeRowFingerprint;
+// so a same-day window move, a property switch, a recurrence-flag change,
+// or a repoint to a differently-owned but identically-named customer is
+// drift too, even though the display facts alone would read identical.
+// Replaces an earlier hand-picked identity subset — proposal-pins.js's
+// normalizeAppointmentPin/appointmentPinFingerprint — that rounds 2
+// through 4 of review each found one more relevant column missing from,
+// a non-converging pattern the whole-row fingerprint closes structurally).
+// That fingerprint is re-verified TWICE at confirm: once by the pre-check
+// below (computeCancelAppointmentImpact, outside any lock) and once more
+// by tools.js cancelAppointment itself, which locks the scheduled_services
+// row FOR UPDATE inside its own mutation transaction and recomputes the
+// fingerprint from what THAT lock sees before transitioning anything
+// (Codex round-3 P1a — closes the race in the gap between the pre-check's
+// read and the transaction's own commit); the same locked read also
+// re-derives the plan-reseed and grouped-visit refusal verdicts directly
+// (Codex round-4 P1/P2), rather than relying only on the fingerprint
+// match to imply them. Gate off
+// (default) is byte-identical to before this lane: every cancel_appointment
+// proposal and confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE,
+// and cancels happen from the Dispatch screen, which owns the waiver and
+// review controls.
 const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {
@@ -1243,7 +1313,52 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
     }
     if (toolUse.name === 'cancel_appointment') {
-      return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
+      if (!ibCancelAppointmentLive()) {
+        return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
+      }
+      // Gate on: compute the SAME deterministic pre-commit impact the
+      // commit path (tools.js cancelAppointment) recomputes and compares
+      // against — fee, invoices, inspection-credit, the technician/customer
+      // notice verdicts, and the card_cancel_refusals verdict
+      // (appointment-cancel-impact.js). A throw means some part of that
+      // effect set could not be read, which must refuse rather than
+      // propose an unverified card. actorId is the proposing operator —
+      // the SAME id the commit-time recheck passes as its own confirming
+      // actor in the common case (propose then immediately confirm), so
+      // technician_notice reads the same at both points.
+      const { computeCancelAppointmentImpact } = require('../services/appointment-cancel-impact');
+      let impact;
+      try {
+        impact = await computeCancelAppointmentImpact(params.appointment_id, { actorId: getAdminActorId(req) });
+      } catch (err) {
+        logger.warn(`[intelligence-bar] cancel proposal impact unavailable for ${params.appointment_id}: ${err.message}`);
+        return { failed: true, modelResult: { error: 'The cancellation effects could not be verified right now — nothing was proposed.' } };
+      }
+      if (!impact) {
+        return { failed: true, modelResult: { error: 'Appointment not found — nothing was proposed.' } };
+      }
+      // Terminal appointments — including one already cancelled — refuse
+      // at proposal (Codex round-1 P2): computeCancelAppointmentImpact does
+      // not check status (it previews the money rails only), so without
+      // this a terminal visit would mint a full confirmation card that
+      // tools.js's own commit-time guard then refuses outright (or, for an
+      // already-cancelled row, silently re-runs the idempotent replay path
+      // — never a fresh cancellation a NEW proposal should represent).
+      // Same set the reschedule_appointment proposal pin already refuses on.
+      if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(impact.appointment?.status))) {
+        return { failed: true, modelResult: { error: `This appointment is already ${impact.appointment.status} and can't be cancelled.` } };
+      }
+      // Owner ruling 2026-09-28: the bar cancels BARE visits only — no
+      // invoice of any kind on record, no inspection-credit offer tied to
+      // it, no card fee agreement or hold, no plan make-up visit, not a
+      // follow-up visit, not grouped — sends the operator to Dispatch
+      // instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with the
+      // commit-side refusal (tools.js) rather than a second copy.
+      if ((impact.card_cancel_refusals || []).length) {
+        return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE } };
+      }
+      params._frozen_cancellation_impact = impact;
+      preview = { ...preview, cancellation: impact };
     }
     if (toolUse.name === 'approve_price' && params.approval_id) {
       // The card must show WHAT price is being authorized (product, vendor,
@@ -3219,11 +3334,19 @@ router.post('/confirm-action', async (req, res, next) => {
     }
     const action = claim.action;
     claimedAction = action;
-    // cancel_appointment is not card-confirmable (rails not pinnable) — a
-    // pending row minted by PRE-refusal code can still be claimed for its
-    // TTL during a rolling deploy (GH r21 P1): refuse it here too, never
-    // dispatch the stored tool.
-    if (action.tool_name === 'cancel_appointment') {
+    // cancel_appointment dispatches only when the gate is live AND the
+    // stored action carries the proposal-time frozen impact pin (PR B of
+    // ib-cancel-pinned-effects). This covers: the gate off (today's
+    // refusal — also what a row minted while the gate was ON, then turned
+    // OFF before Confirm, gets, during a rolling deploy or a mid-window
+    // flip); and a pending row with no frozen pin at all, which only
+    // pre-PR-B code could have minted (this route refused cancel_appointment
+    // unconditionally before this lane) — never dispatch a cancel unpinned.
+    // A gate-on row that DOES carry the pin falls through to the normal
+    // claim/dispatch path below; tools.js cancelAppointment re-verifies the
+    // pin against a fresh impact read and refuses on drift.
+    if (action.tool_name === 'cancel_appointment'
+      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
       await PendingActions.recordResult(action.id, result);
       return res.status(409).json(result);
