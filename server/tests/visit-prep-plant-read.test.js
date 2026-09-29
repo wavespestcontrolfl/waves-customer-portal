@@ -387,3 +387,15 @@ describe('one engine per row (Codex #5320 r1)', () => {
     expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('pending');
   });
 });
+
+describe('service labels (Codex #5320 r2)', () => {
+  const { isTreeShrubOnlyServiceType, isLawnOnlyServiceType } = require('../services/visit-prep-plant-applicability');
+  test.each([
+    ['Quarterly Trees & Shrubs', 'tree_shrub'],
+    ['Tree & Shrub Care', 'tree_shrub'],
+    ['Weekly Lawn Care', 'lawn'],
+    ['Lawns Program', 'lawn'],
+  ])('%s → %s', (label, kind) => {
+    expect(kind === 'tree_shrub' ? isTreeShrubOnlyServiceType(label) : isLawnOnlyServiceType(label)).toBe(true);
+  });
+});

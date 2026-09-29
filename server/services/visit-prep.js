@@ -878,8 +878,12 @@ async function customerFlaggedFacts(svc, conn = db) {
   // too). Checked for running reads too, so "Photo read pending" never
   // outlives a reclassification (r13). The applicability modules never
   // load a vision engine here.
-  const needPest = readsLive && submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
-  const needPlant = plantReadsLive && submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
+  // Applicability is resolved for a fresh 'none' row too, so a submission
+  // whose read hasn't been claimed yet stays 'none' (and keeps the client
+  // polling) instead of reading 'unsupported' (Codex #5320 r2 P2).
+  const hasReadState = submissions.some((s) => ['done', 'pending', 'none'].includes(s.read_status || 'none'));
+  const needPest = readsLive && hasReadState;
+  const needPlant = plantReadsLive && hasReadState;
   let snapshot;
   try {
     snapshot = await finalStopSnapshot(svc, conn, needPest, needPlant);

@@ -87,7 +87,7 @@ describe('customerFlaggedFacts', () => {
 
   test('ungrouped stop with submissions: shaped entries, ordered photo ids, no S3 keys/URLs', async () => {
     const conn = fakeConn({
-      scheduled_services: [{ id: 'svc-1', visit_id: null }],
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
       visit_prep_submissions: [
         {
           id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T23:42:00Z'),
@@ -148,7 +148,7 @@ describe('customerFlaggedFacts', () => {
 
   test('submissions exist for the stop but none carry photos yet (note-only submission)', async () => {
     const conn = fakeConn({
-      scheduled_services: [{ id: 'svc-1', visit_id: null }],
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
       visit_prep_submissions: [
         { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: 'other', location_on_property: null, note: 'Ants near the mailbox' },
       ],
@@ -713,6 +713,18 @@ describe('customerFlaggedFacts — plant read integration (GATE_VISIT_PREP_PLANT
     });
     const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
     expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a fresh unclaimed (none) row on a lawn stop stays none, so the tech panel keeps polling', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'none', read_result: null },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'none' });
   });
 
   test('a PENDING plant read on a currently-lawn stop shows pending', async () => {
