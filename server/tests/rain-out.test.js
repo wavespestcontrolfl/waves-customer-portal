@@ -2980,6 +2980,31 @@ describe('rain-out service', () => {
       expect(result.segments).toBe(2);
     });
 
+    // Codex round-5 P2: at this exact note length, BOTH variants land in
+    // segmentCount 2 (a tie) but use different capacity — the linked body
+    // (296 of 306 GSM-7 slots) has headroom the no-link fallback (306 of
+    // 306, the true worst case) does not. A tie-break that always kept the
+    // linked variant reported 10 slots of remaining headroom a landed-state
+    // link revocation would not actually have.
+    test('previewMovedSms: an equal-segment-count tie reports the no-link variant\'s (truly worse) remaining capacity, not the linked one\'s', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: 'https://wvs.co/x1', line: '' });
+
+      const result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'equipment_issue', customMessage: 'x'.repeat(122),
+        target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.segments).toBe(2);
+      // 153 slots/segment * 2 segments = 306; the no-link fallback uses all
+      // 306, so 0 remain — a wrong linked-favoring tie-break would report 10.
+      expect(result.remaining).toBe(0);
+    });
+
     test('gate on: a customer with no phone is never held to the cap — the move proceeds un-texted, nothing is measured', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();

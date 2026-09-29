@@ -7,7 +7,7 @@
 // copy of the missed-appointment rule would drift (codex #4293 r3 P2).
 // Grouped-visit membership needs a query and stays with each caller.
 
-const { etDateString, etParts } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
 const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
@@ -44,21 +44,38 @@ function hhmm(t) {
 function visitTimeElapsed(svc, now = new Date()) {
   const dateStr = apptDateStr(svc.scheduled_date);
   if (!dateStr) return false;
-  const todayEt = etDateString(now);
-  if (dateStr < todayEt) return true;
-  if (dateStr !== todayEt) return false;
-  const toMin = (t) => {
-    const [h, m] = String(t).split(':').map(Number);
-    return h * 60 + (m || 0);
-  };
-  const candidates = [];
   const start = hhmm(svc.window_start);
+  if (!start) {
+    // Windowless: no instant to reason about — a past calendar date is
+    // elapsed, today's or a future date never is. Unchanged from before
+    // (codex round-5 P2 only touches the windowed, instant-based path
+    // below).
+    return dateStr < etDateString(now);
+  }
+  // A real window exists: compare real INSTANTS end to end, never a
+  // calendar-date shortcut, so a window that crosses midnight (e.g.
+  // 23:00-00:30) reads correctly from ANY viewing instant. The old
+  // "elapsed the moment the calendar flips to the next day" rule said a
+  // visit was missed one minute past midnight, well before its quoted
+  // arrival promise — or even its own job block — had actually ended
+  // (codex round-5 P2 on PR #5308).
+  const startInstant = parseETDateTime(`${dateStr}T${start}`);
+  if (Number.isNaN(startInstant.getTime())) return false;
+  const candidates = [new Date(startInstant.getTime() + ARRIVAL_PROMISE_MINUTES * 60000)];
   const end = hhmm(svc.window_end);
-  if (end) candidates.push(toMin(end));
-  if (start) candidates.push(toMin(start) + ARRIVAL_PROMISE_MINUTES);
-  if (!candidates.length) return false;
-  const nowEt = etParts(now);
-  return Math.max(...candidates) <= nowEt.hour * 60 + nowEt.minute;
+  if (end) {
+    let endInstant = parseETDateTime(`${dateStr}T${end}`);
+    if (!Number.isNaN(endInstant.getTime())) {
+      // window_end's clock time before window_start's means the job block
+      // crosses midnight onto the next calendar day.
+      if (endInstant.getTime() < startInstant.getTime()) {
+        endInstant = new Date(endInstant.getTime() + 24 * 60 * 60 * 1000);
+      }
+      candidates.push(endInstant);
+    }
+  }
+  const worstInstant = candidates.reduce((a, b) => (b.getTime() > a.getTime() ? b : a));
+  return now.getTime() >= worstInstant.getTime();
 }
 
 // Customer-facing eligibility for the appointment behind the token.

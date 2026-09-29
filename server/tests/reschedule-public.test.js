@@ -90,6 +90,32 @@ describe('reschedule-public eligibility', () => {
     }, NOW)).toEqual({ ok: true });
   });
 
+  // codex round-5 P2: an overnight window (window_end's clock time before
+  // window_start's, e.g. 23:00-00:30) must be judged on real INSTANTS, not
+  // "is the calendar date before today" — the old shortcut called the
+  // visit missed the instant the calendar flipped to the next day, well
+  // before either the job block or the quoted 2-hour arrival promise had
+  // actually elapsed.
+  test('an overnight window crossing midnight is judged by real instants, not the calendar date alone', () => {
+    // 23:00 start on 07-01, 00:30 end (rolls to 07-02) — viewed at 00:10 ET
+    // on 07-02: only 70 minutes past start, inside both the job block and
+    // the arrival promise (01:00 on 07-02). Not missed.
+    expect(eligibility({
+      status: 'confirmed',
+      scheduled_date: '2026-07-01',
+      window_start: '23:00:00',
+      window_end: '00:30:00',
+    }, new Date('2026-07-02T04:10:00.000Z'))).toEqual({ ok: true });
+    // Same visit viewed at 01:05 ET on 07-02: past both window_end (00:30)
+    // and the arrival promise (01:00) — genuinely missed.
+    expect(eligibility({
+      status: 'confirmed',
+      scheduled_date: '2026-07-01',
+      window_start: '23:00:00',
+      window_end: '00:30:00',
+    }, new Date('2026-07-02T05:05:00.000Z'))).toEqual({ ok: true, missed: true });
+  });
+
   test('same-day appointment with a window still ahead stays reschedulable', () => {
     expect(eligibility({
       status: 'confirmed',

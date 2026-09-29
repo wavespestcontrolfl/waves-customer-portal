@@ -104,6 +104,61 @@ async function hasUnblockedVisitGroup(conn, visitId) {
   return !(await vg.frozenVisitVerdict(conn, visitId)).frozen;
 }
 
+// GROUPED / FROZEN visits self-serve-reschedule as a whole (or not at all)
+// — /reschedule/:token deterministically refuses their rows, so a
+// "Reschedule here" line would be a dead end (codex #3609 on-merge r3).
+// Same verdict the page applies: 2+ live members, or a frozen visit,
+// suppresses the link; an unreadable membership fails closed. Extracted
+// out of buildRescheduleLink to keep the builder's own branching down
+// (AGENTS.md — see deadLinkGuardVerdict's header for the fuller rationale)
+// — no behavior change.
+async function linkSuppressedByVisitGroup(svc, scheduledServiceId) {
+  if (!svc.visit_id) return false;
+  try {
+    return !(await hasUnblockedVisitGroup(db, svc.visit_id));
+  } catch (vgErr) {
+    logger.warn(`[reschedule-link] grouped-visit check failed for ${scheduledServiceId} — link suppressed: ${vgErr.message}`);
+    return true;
+  }
+}
+
+// Dead-link guard (C3/C6, see header) — the same chokepoint every OTHER
+// refusal in buildRescheduleLink runs through, so a plain (non-preview,
+// non-assumeConfirmed) caller — reminders, admin quick-send, the legacy
+// Twilio reminder — inherits it automatically. That is NOT every caller,
+// though: previewOnly skips it outright (its own doc comment above), and
+// assumeConfirmed skips it HERE but is not exempt from the underlying
+// rule — rain-out's pre-move measurement/reuse reads the OLD,
+// about-to-be-superseded row (checking the move window against it would
+// refuse a link for a visit whose NEW slot may be fine), so it must
+// re-run this same check itself against the LANDED row once the move
+// commits (its own pinnedUrl re-validation at send time — see
+// rain-out.js's sendMovedSms) rather than inherit it from here.
+// assumeConfirmed already means "trust the caller, this row's real-world
+// state is about to differ from what's stored" for the dispatch-pending
+// refusal above; the same reasoning applies here.
+// Returns the refusal object when the guard applies, or null when the
+// link may proceed. Extracted out of buildRescheduleLink verbatim so the
+// builder's own branching doesn't keep growing past its pre-round-5
+// baseline (AGENTS.md: extract new decision paths into small named
+// helpers rather than grow an already-flagged function) — no behavior
+// change.
+function deadLinkGuardVerdict(svc, { previewOnly, assumeConfirmed }) {
+  if (previewOnly || assumeConfirmed) return null;
+  const now = new Date();
+  const verdict = eligibility(svc, now);
+  if (require('./reschedule-link-promises').tooSoonToSelfServeMove(svc, verdict, now)) {
+    // tooSoonToMove: true lets a caller that must explain WHY there is no
+    // link (e.g. the admin composer's reschedule-link lookup) tell this
+    // apart from every other null-url reason (no token, grouped/frozen,
+    // dispatch-owned-pending, shortener failure) — those are dead ends;
+    // this one just means "too soon, ask them to reply or call"
+    // (independent-reviewer finding on PR #5308).
+    return { url: null, line: NO_LINK_LINE, tooSoonToMove: true };
+  }
+  return null;
+}
+
 async function buildRescheduleLink(scheduledServiceId, { customerId = null, reuseExisting = false, previewOnly = false, assumeConfirmed = false, pinnedUrl = undefined } = {}) {
   try {
     if (!scheduledServiceId) return { url: null, line: '' };
@@ -112,19 +167,7 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
       .first('id', 'customer_id', 'reschedule_token', 'source_action', 'status', 'customer_confirmed',
         'visit_id', 'scheduled_date', 'window_start', 'window_end');
     if (!svc?.reschedule_token) return { url: null, line: '' };
-    // GROUPED / FROZEN visits self-serve-reschedule as a whole (or not at
-    // all) — /reschedule/:token deterministically refuses their rows, so
-    // a "Reschedule here" line would be a dead end (codex #3609 on-merge
-    // r3). Same verdict the page applies: 2+ live members, or a frozen
-    // visit, suppresses the link; an unreadable membership fails closed.
-    if (svc.visit_id) {
-      try {
-        if (!(await hasUnblockedVisitGroup(db, svc.visit_id))) return { url: null, line: '' };
-      } catch (vgErr) {
-        logger.warn(`[reschedule-link] grouped-visit check failed for ${scheduledServiceId} — link suppressed: ${vgErr.message}`);
-        return { url: null, line: '' };
-      }
-    }
+    if (await linkSuppressedByVisitGroup(svc, scheduledServiceId)) return { url: null, line: '' };
     // Never mint a self-serve link for a dispatch-owned booking the office
     // hasn't reviewed (codex #3429 r2 P1): reminders now arm before office
     // confirm, and a bearer reschedule URL would let the recipient move a
@@ -136,34 +179,13 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
       && !svc.customer_confirmed) {
       return { url: null, line: '' };
     }
-    // Dead-link guard (C3/C6, see header) — the same chokepoint every OTHER
-    // refusal above runs through, so a plain (non-preview, non-
-    // assumeConfirmed) caller — reminders, admin quick-send, the legacy
-    // Twilio reminder — inherits it automatically. That is NOT every
-    // caller, though: previewOnly skips it outright (its own doc comment
-    // above), and assumeConfirmed skips it HERE but is not exempt from the
-    // underlying rule — rain-out's pre-move measurement/reuse reads the
-    // OLD, about-to-be-superseded row (checking the move window against it
-    // would refuse a link for a visit whose NEW slot may be fine), so it
-    // must re-run this same check itself against the LANDED row once the
-    // move commits (its own pinnedUrl re-validation at send time — see
-    // rain-out.js's sendMovedSms) rather than inherit it from here.
-    // assumeConfirmed already means "trust the caller, this row's real-
-    // world state is about to differ from what's stored" for the dispatch-
-    // pending refusal above; the same reasoning applies here.
-    if (!previewOnly && !assumeConfirmed) {
-      const now = new Date();
-      const verdict = eligibility(svc, now);
-      if (require('./reschedule-link-promises').tooSoonToSelfServeMove(svc, verdict, now)) {
-        // tooSoonToMove: true lets a caller that must explain WHY there is
-        // no link (e.g. the admin composer's reschedule-link lookup) tell
-        // this apart from every other null-url reason (no token, grouped/
-        // frozen, dispatch-owned-pending, shortener failure) — those are
-        // dead ends; this one just means "too soon, ask them to reply or
-        // call" (independent-reviewer finding on PR #5308).
-        return { url: null, line: NO_LINK_LINE, tooSoonToMove: true };
-      }
-    }
+    // Dead-link guard (C3/C6, see header + deadLinkGuardVerdict's own
+    // comment) — the same chokepoint every OTHER refusal above runs
+    // through, so a plain (non-preview, non-assumeConfirmed) caller —
+    // reminders, admin quick-send, the legacy Twilio reminder — inherits it
+    // automatically.
+    const guardVerdict = deadLinkGuardVerdict(svc, { previewOnly, assumeConfirmed });
+    if (guardVerdict) return guardVerdict;
 
     if (pinnedUrl !== undefined) return { url: pinnedUrl, line: smsLineFor(pinnedUrl) };
     if (reuseExisting || previewOnly) {

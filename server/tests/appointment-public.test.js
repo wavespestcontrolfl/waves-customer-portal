@@ -97,6 +97,27 @@ describe('appointment page state', () => {
     }, new Date('2026-08-01T16:30:00.000Z')).state).toBe('past');
   });
 
+  // codex round-5 P2: an overnight window (window_end's clock time before
+  // window_start's, e.g. 23:00-00:30) must be judged on real INSTANTS, not
+  // "is the calendar date before today" — that shortcut called the visit
+  // past the instant the clock crossed midnight, well before either the
+  // job block (00:30 the next day) or the quoted arrival promise (01:00
+  // the next day) had actually elapsed.
+  test('an overnight window crossing midnight stays upcoming until its real end instant, not merely "yesterday"', () => {
+    // 23:00 start, 00:30 end (next calendar day) — viewed at 00:10 the next
+    // day: only 70 minutes past start, well inside both the job block and
+    // the 2-hour arrival promise (01:00). The old date-only rule would call
+    // this "past" the instant the calendar flipped, at 00:00:01.
+    expect(pageState({
+      status: 'confirmed', scheduled_date: '2026-08-01', window_start: '23:00:00', window_end: '00:30:00',
+    }, new Date('2026-08-02T04:10:00.000Z')).state).toBe('upcoming');
+    // Same visit viewed at 01:05 the next day: past both window_end (00:30)
+    // and the arrival promise (01:00) — genuinely elapsed.
+    expect(pageState({
+      status: 'confirmed', scheduled_date: '2026-08-01', window_start: '23:00:00', window_end: '00:30:00',
+    }, new Date('2026-08-02T05:05:00.000Z')).state).toBe('past');
+  });
+
   test('the arrival range is the canonical helper, not a second implementation', () => {
     // AGENTS.md pins customer-facing arrival copy to arrivalWindowRange();
     // the page previously recomputed start+120 in the client, where the
