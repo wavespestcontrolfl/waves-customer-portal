@@ -231,16 +231,17 @@ async function triggerVisitPrepPestRead({
     return;
   }
 
-  let readRef;
+  // The identification and the submission's done/read_ref commit together
+  // (Codex #5305 r5): never an orphaned paid read with the row left pending.
   try {
-    readRef = await storeIdentification(conn, { svc, submissionId, result });
+    await conn.transaction(async (trx) => {
+      const readRef = await storeIdentification(trx, { svc, submissionId, result });
+      await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'done', read_ref: readRef });
+    });
   } catch (err) {
-    logger.error(`[visit-prep-pest-read] storing pest_identifications failed submission=${submissionId}: ${err.message}`);
+    logger.error(`[visit-prep-pest-read] storing the read failed submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');
-    return;
   }
-
-  await setReadStatus(conn, submissionId, 'done', readRef);
 }
 
 module.exports = {
