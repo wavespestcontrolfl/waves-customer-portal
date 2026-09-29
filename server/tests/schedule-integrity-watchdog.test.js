@@ -150,23 +150,6 @@ describe('classifiers', () => {
     }))).toBe(false);
   });
 
-  test('a visit priced by a LIVE combined first-application invoice is not unpriced; a dead invoice does not cover it', () => {
-    // A new customer's same-trip second service rides the anchor's combined
-    // invoice (first_application_invoice_id) and is deliberately unpriced.
-    for (const status of ['draft', 'sent', 'viewed', 'paid', 'processing']) {
-      expect(isUnpricedSeriesVisit(unpricedChild({
-        first_application_invoice_id: 'inv-1', first_application_invoice_status: status,
-      }))).toBe(false);
-    }
-    for (const status of ['void', 'refunded', 'canceled', 'cancelled']) {
-      expect(isUnpricedSeriesVisit(unpricedChild({
-        first_application_invoice_id: 'inv-1', first_application_invoice_status: status,
-      }))).toBe(true);
-    }
-    // A stamp whose invoice row is gone (status null from the LEFT JOIN) covers nothing.
-    expect(isUnpricedSeriesVisit(unpricedChild({ first_application_invoice_id: 'inv-1', first_application_invoice_status: null }))).toBe(true);
-  });
-
   test('seriesRootId collapses recurring children onto the parent; boosters stand alone', () => {
     expect(seriesRootId(unpricedChild())).toBe('ss-parent-1');
     expect(seriesRootId(unpricedChild({ recurring_parent_id: null }))).toBe('ss-child-1');
@@ -208,19 +191,6 @@ describe('runInner alerting', () => {
     expect(title).not.toContain('never completed');
     expect(opts.metadata.dedupeKey).not.toMatch(/^stale-visit:/);
     expect(opts.metadata.dedupeKey).toBe('unpriced-series:ss-parent-1');
-  });
-
-  test('a covered same-trip sibling rings no unpriced-series bell; once its combined invoice is void it does', async () => {
-    const covered = unpricedChild({
-      id: 'ss-second-service', recurring_parent_id: null, first_application_invoice_id: 'inv-1', first_application_invoice_status: 'sent',
-    });
-    makeDbMock({ coverageRows: [covered] });
-    expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 0, alerted: 0 });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-
-    makeDbMock({ coverageRows: [{ ...covered, first_application_invoice_status: 'void' }] });
-    expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1, alerted: 1 });
-    expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey).toBe('unpriced-series:ss-second-service');
   });
 
   test('an unpriced series rings ONE bell for many child visits', async () => {

@@ -362,14 +362,21 @@ function putBack(row) {
 // the stamp, and puts back any row whose rule no longer holds. Also the
 // retry for a retire whose put-back failed. A retirement older than that is
 // final: a subject that comes back weeks later is a new event, not this bell.
+// Walked across runs like the retire pass (resumeAfter below): a run that
+// stops at the page cap leaves where it stopped, so rows past it are reached
+// by the next run instead of waiting behind the same first pages.
+let rearmResumeAfter = null;
+
 async function rearmRelevantAgain(now, todayET) {
   const since = new Date(now.getTime() - REARM_DAYS * 24 * 60 * 60 * 1000).toISOString();
   let rearmed = 0;
-  let cursor = null;
+  let cursor = rearmResumeAfter;
+  rearmResumeAfter = null;
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const rows = await retiredQuery(cursor, since);
     if (!rows.length) break;
     cursor = rows[rows.length - 1].id;
+    if (rows.length === PAGE_SIZE && page === MAX_PAGES - 1) rearmResumeAfter = cursor;
     const judged = rows.map((row) => ({ row, bell: { ...row, metadata: unretired(row.metadata) } }));
     const data = await loadSubjects(judged.map((j) => j.bell));
     for (const { row, bell } of judged) {
@@ -472,20 +479,23 @@ function quietedAtRingTime(row) {
 }
 
 // Whether a trigger's push stays silent because the event's subject has
-// already moved on: its bell row was written activity-only at ring time, or —
-// when no bell row was written at all (every admin who gets the event has the
-// bell off and push on) — the same verdict judged here directly, so the
-// push-only path is as quiet as the bell would have been. Fails open (pushes).
+// moved on, judged live here: for a bell row written activity-only at ring
+// time (the subject can come back between that write and this push — a
+// booking cancelled — and the event's one push must not rest on the earlier
+// verdict; the re-arm pass then puts that bell back), and when no bell row
+// was written at all (every admin who gets the event has the bell off and
+// push on), so the push-only path is as quiet as the bell would have been.
+// A rung bell pushes. Fails open (pushes).
 async function pushIsMovedOn({ bellRow, bellWritten, pushTo, category, link, metadata }) {
-  if (bellRow && quietedAtRingTime(bellRow)) return true;
-  if (bellWritten || !pushTo?.length) return false;
+  const quieted = !!bellRow && quietedAtRingTime(bellRow);
+  if (!quieted && (bellWritten || !pushTo?.length)) return false;
   try {
     const row = { category, link, metadata };
     const cls = classify(row);
     if (!cls || !adminAlertRelevanceLive()) return false;
     return !!cls.rule(subjectFor(row, await loadSubjects([row]), etDateString(new Date())));
   } catch (err) {
-    logger.warn(`[alert-relevance] push-only check failed: ${err.message}`);
+    logger.warn(`[alert-relevance] push-time check failed: ${err.message}`);
     return false;
   }
 }

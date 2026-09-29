@@ -327,13 +327,19 @@ describe('triggerNotification bell outcome', () => {
   });
 
   // admin-alert-relevance.js: a new-lead bell whose lead was already worked is
-  // written to the Activity feed only — nothing rang, so no phone buzzes.
+  // written to the Activity feed only — nothing rang, so no phone buzzes while
+  // the verdict still holds at the push (judged there again; its own suite).
   test('a bell the relevance check wrote activity-only never pushes; an ordinary quiet row still does', async () => {
     const PushService = require('../services/push-notifications');
-    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'quiet-bell',
-      metadata: { feed: 'activity', quiet: true, retired: { by: 'alert-relevance', reason: 'Lead is won', at: '2026-09-28T16:00:00.000Z' } } });
+    const relevance = require('../services/admin-alert-relevance');
+    const quietBell = { id: 'quiet-bell',
+      metadata: { feed: 'activity', quiet: true, retired: { by: 'alert-relevance', reason: 'Lead is won', at: '2026-09-28T16:00:00.000Z' } } };
+    NotificationService.notifyAdmin.mockResolvedValueOnce(quietBell);
+    const verdict = jest.spyOn(relevance, 'pushIsMovedOn').mockResolvedValueOnce(true);
     expect(await triggerNotification('new_lead', { leadId: 'fixture-lead-1', name: 'Fixture Lead', service: 'Pest Control' }))
       .toMatchObject({ bellWritten: true, quiet: true, suppressed: true, push: { sent: 0, skipped: 'moved_on' } });
+    expect(verdict).toHaveBeenCalledWith(expect.objectContaining({ bellRow: quietBell, bellWritten: true, category: 'new_lead' }));
+    verdict.mockRestore();
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
     // A sweep retirement (read + stamp, no activity feed) is not this: the push path is untouched.
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'rung-bell', metadata: { retired: { by: 'alert-relevance' } } });

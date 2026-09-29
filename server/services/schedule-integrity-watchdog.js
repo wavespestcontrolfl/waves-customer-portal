@@ -17,8 +17,7 @@
  *     carries a price (estimated_price / primary_line_price). Children
  *     legitimately ride with NULL price and inherit from their parent at
  *     invoice time, so only a series with no price ANYWHERE pages. One bell
- *     per series (root id), not per visit. A visit priced by a live combined
- *     first-application invoice (first_application_invoice_id) never pages.
+ *     per series (root id), not per visit.
  *  2. LAWN-EMAIL AUDIENCE GAP — a customer with live recurring-lawn
  *     evidence who cannot receive the Monday irrigation email (no email /
  *     no coordinates / lead-stage / inactive). The email's audience is
@@ -136,25 +135,12 @@ function manualSeriesStampIssue(row) {
   return allocationsMatch && inferredMatch ? null : 'manual_series_stamp_conflict';
 }
 
-// A visit stamped onto a combined first-application invoice (a new customer's
-// same-trip second service; estimate-converter.js stamps the anchor and every
-// covered sibling) is priced by that invoice, not by its own row — the one
-// stamp billing-lane.js and first-application-sibling-split.js both read. Live
-// = the invoice exists and has not gone terminal (billing-lane.js's
-// TERMINAL_STATUSES); a voided combined invoice leaves the visit uncovered.
-const DEAD_INVOICE_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
-function coveredByFirstApplicationInvoice(row) {
-  return !!row?.first_application_invoice_id && !!row.first_application_invoice_status
-    && !DEAD_INVOICE_STATUSES.includes(String(row.first_application_invoice_status));
-}
-
 function isUnpricedSeriesVisit(row) {
   // Preserve the original pricing query's status eligibility; the broader
   // coverage scan also handles legacy null-status visits.
   if (row?.status == null) return false;
   if (rowHasPrice(row)) return false;
   if (hasOutOfBandPrepaidStamp(row)) return false;
-  if (coveredByFirstApplicationInvoice(row)) return false;
   const inheritsFromParent = !!row.recurring_parent_id && row.is_recurring !== false;
   if (!inheritsFromParent) return true;
   return toMoney(row.parent_estimated_price) == null && toMoney(row.parent_primary_line_price) == null;
@@ -191,7 +177,6 @@ async function runInner({ now = new Date() } = {}) {
     .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
     .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.id', 'ss.annual_prepay_term_id')
     .leftJoin('invoices as prepay_invoice', 'prepay_invoice.id', 'prepay_term.prepay_invoice_id')
-    .leftJoin('invoices as first_application_invoice', 'first_application_invoice.id', 'ss.first_application_invoice_id')
     .where(function whereLive() {
       this.whereNull('ss.status').orWhereNotIn('ss.status', LIVE_STATUS_EXCLUSIONS);
     })
@@ -212,8 +197,7 @@ async function runInner({ now = new Date() } = {}) {
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
       'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount',
       'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.recurring_parent_id',
-      'ss.created_at', 'ss.prepaid_at', 'ss.first_application_invoice_id',
-      'first_application_invoice.status as first_application_invoice_status',
+      'ss.created_at', 'ss.prepaid_at',
       db.raw('ss.xmin::text as row_revision'),
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',

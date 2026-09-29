@@ -372,11 +372,19 @@ describe('pushIsMovedOn (the push verdict for the trigger dispatcher)', () => {
   const leadEvent = { category: 'new_lead', link: null, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } } };
   const leadRow = (over = {}) => ({ id: LEAD, status: 'new', converted_at: null, deleted_at: null, created_at: new Date('2026-09-28T12:00:00Z'), customer_id: CUST, estimate_id: null, ...over });
 
-  test('a bell row written activity-only at ring time stays silent; a rung or sweep-retired row pushes', async () => {
-    const quiet = { metadata: { feed: 'activity', quiet: true, retired: { by: 'alert-relevance', reason: 'x' } } };
+  const quiet = { metadata: { feed: 'activity', quiet: true, retired: { by: 'alert-relevance', reason: 'x' } } };
+
+  test('a bell written activity-only at ring time is judged again at the push: still moved on stays silent, relevant again pushes', async () => {
+    mockTables.leads = [leadRow({ status: 'won' })];
     expect(await pushIsMovedOn({ bellRow: quiet, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(true);
+    // The lead came back between the bell write and the push: the push goes out.
+    mockTables.leads = [leadRow()];
+    expect(await pushIsMovedOn({ bellRow: quiet, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
+    // A rung or sweep-retired row pushes without a read.
+    db.mockClear();
     expect(await pushIsMovedOn({ bellRow: { metadata: { retired: { by: 'alert-relevance' } } }, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
     expect(await pushIsMovedOn({ bellRow: { metadata: JSON.stringify({ triggerKey: 'new_lead' }) }, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
+    expect(db).not.toHaveBeenCalled();
   });
 
   test('push-only (no bell row): judged directly — a worked lead stays silent, a new one pushes, nobody to push or the switch off never reads', async () => {
@@ -396,6 +404,7 @@ describe('pushIsMovedOn (the push verdict for the trigger dispatcher)', () => {
     mockTables.leads = [leadRow({ status: 'won' })];
     mockFailTable = 'leads';
     expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], ...leadEvent })).toBe(false);
+    expect(await pushIsMovedOn({ bellRow: quiet, bellWritten: true, pushTo: ['a'], ...leadEvent })).toBe(false);
     mockFailTable = null;
     expect(await pushIsMovedOn({ bellRow: null, bellWritten: false, pushTo: ['a'], category: 'inbound_sms', metadata: { customerId: CUST } })).toBe(false);
   });
@@ -686,6 +695,18 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     const live = (id) => mockTables.notifications.find((r) => r.id === id);
     expect(live(rewritten.id).read_at).toBe(READ_AT);
     expect(live(reread.id).read_at).toEqual(new Date('2026-09-28T15:00:00Z'));
+  });
+
+  test('a backlog past the page cap is walked across runs: the next run resumes where the last one stopped', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' }), visit({ id: OPEN_VISIT, status: 'on_site' })];
+    // 50 pages of 200 retired rows still moved on, then one relevant again.
+    const backlog = Array.from({ length: 50 * 200 }, (_, i) => swept(staleNote(uid(10000 + i)), 'Visit is no longer in progress'));
+    const last = swept(staleNote(uid(30000), { scheduled_service_id: OPEN_VISIT }), 'Visit is no longer in progress');
+    mockTables.notifications = [...backlog, last];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
+    expect(last.read_at).toBe(READ_AT);
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
+    expect(last.read_at).toBeNull();
   });
 
   test('a retire whose put-back failed is judged again by the next run: kept while still moved on, put back once relevant', async () => {
