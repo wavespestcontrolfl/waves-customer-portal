@@ -493,12 +493,18 @@ async function createVisitPrepSubmission({
   // species catalog it loads) out of every caller of this module that
   // never actually creates a submission.
   if (result.created) {
-    const { triggerVisitPrepPestRead } = require('./visit-prep-pest-read');
-    void triggerVisitPrepPestRead({
-      submissionId: result.submissionId,
-      svc: result.current,
-      photos: result.photos,
-    }).catch((err) => logger.error(`[visit-prep] pest read trigger failed for submission ${result.submissionId}: ${err.message}`));
+    // The upload is already committed: a failure to even load or start the
+    // read (e.g. a module load error) is logged, never a 500 to the customer.
+    try {
+      const { triggerVisitPrepPestRead } = require('./visit-prep-pest-read');
+      void triggerVisitPrepPestRead({
+        submissionId: result.submissionId,
+        svc: result.current,
+        photos: result.photos,
+      }).catch((err) => logger.error(`[visit-prep] pest read trigger failed for submission ${result.submissionId}: ${err.message}`));
+    } catch (err) {
+      logger.error(`[visit-prep] pest read could not start for submission ${result.submissionId}: ${err.message}`);
+    }
   }
 
   return { created: result.created, stored: result.stored, summary: result.summary, svc: result.current };
