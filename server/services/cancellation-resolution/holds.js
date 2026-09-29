@@ -21,7 +21,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, dateOnlyString } = require('../../utils/datetime-et');
 const { CANCELLABLE_STATUSES } = require('../cancellation-eligibility');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 const { resolveBillingLane } = require('../billing-lane');
@@ -34,6 +34,10 @@ function codedError(code, message) {
   return err;
 }
 
+// pg hydrates every DATE column here (scheduled_date, resume_on,
+// tier_protected_until) as a Date, and String() of one reads "Mon Oct 05 …":
+// read them through dateOnlyString, never String(…).slice(0, 10). ymd() is
+// for the customer's typed dates, which arrive as strings.
 function ymd(value) {
   const s = String(value || '').slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
@@ -150,9 +154,9 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   const movedTechIds = new Map();
   if (visits.length) {
     const SmartRebooker = require('../rebooker');
-    const delta = daysBetween(String(visits[0].scheduled_date).slice(0, 10), resume);
+    const delta = daysBetween(dateOnlyString(visits[0].scheduled_date), resume);
     for (const visit of visits) {
-      const from = String(visit.scheduled_date).slice(0, 10);
+      const from = dateOnlyString(visit.scheduled_date);
       const to = addDays(from, delta);
       try {
         // suppressTechNotice: a later visit in this loop, or the hold write
@@ -232,7 +236,7 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
         const scalar = Math.round(rows.reduce((sum, r) => sum + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
         await trx('customers').where({ id: customerId }).update({ monthly_rate: scalar, updated_at: new Date() });
       }
-      const protectedUntil = live.tier_protected_until && String(live.tier_protected_until).slice(0, 10) > resume
+      const protectedUntil = live.tier_protected_until && dateOnlyString(live.tier_protected_until) > resume
         ? live.tier_protected_until
         : resume;
       await trx('customers').where({ id: customerId }).update({ tier_protected_until: protectedUntil, updated_at: new Date() });
@@ -329,14 +333,14 @@ async function cancelHold(holdId, { compensateVisits = true } = {}) {
  * family is still held at $0 (codex r2 P1).
  */
 async function shiftHoldResume(hold, newResume) {
-  const oldResume = String(hold.resume_on).slice(0, 10);
+  const oldResume = dateOnlyString(hold.resume_on);
   const delta = daysBetween(oldResume, newResume);
   if (delta <= 0) return { shifted: 0 };
   const visits = await familyUpcomingVisits(hold.customer_id, hold.family_key);
   const SmartRebooker = require('../rebooker');
   const moved = [];
   for (const visit of visits) {
-    const from = String(visit.scheduled_date).slice(0, 10);
+    const from = dateOnlyString(visit.scheduled_date);
     try {
       await SmartRebooker.reschedule(visit.id, addDays(from, delta), {
         start: visit.window_start || null, end: visit.window_end || null,
@@ -390,7 +394,7 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
         const body = await renderRequiredSmsTemplate('plan_hold_resume_reminder', {
           first_name: gsmSafeName(customer.first_name),
           service: familyLabel(hold.family_key) || hold.family_key,
-          resume_date: displayDate(String(hold.resume_on).slice(0, 10)),
+          resume_date: displayDate(dateOnlyString(hold.resume_on)),
         }, { workflow: 'plan_hold_resume_reminder', entity_type: 'plan_hold', entity_id: hold.id });
         const smsResult = await sendCustomerMessage({
           to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'support_resolution',
@@ -428,12 +432,12 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
         if (today < effective) {
           // Late notice: the restart (and the parked visits) move out to
           // seven days after delivery — once, idempotently.
-          if (String(hold.resume_on).slice(0, 10) < effective) await shiftHoldResume(hold, effective);
+          if (dateOnlyString(hold.resume_on) < effective) await shiftHoldResume(hold, effective);
           continue;
         }
       }
       if (!hold.reminder_sent_at) {
-        if (String(hold.resume_on).slice(0, 10) <= today) {
+        if (dateOnlyString(hold.resume_on) <= today) {
           // Undeliverable notice: push the restart a week, park a bell —
           // the visits must not sit on a past date while the family is $0.
           const pushed = addDays(today, 7);
@@ -492,7 +496,7 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
           customer_id: hold.customer_id,
           interaction_type: 'note',
           subject: `${hold.family_key} hold resumed`,
-          body: `Hold ${hold.id} resumed on schedule (${String(hold.resume_on).slice(0, 10)}); billing component restored.`,
+          body: `Hold ${hold.id} resumed on schedule (${dateOnlyString(hold.resume_on)}); billing component restored.`,
         });
       } catch (noteErr) { logger.warn(`[holds] resume note failed for hold ${hold.id}: ${noteErr.message}`); }
       out.resumed += 1;
