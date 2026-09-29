@@ -2954,6 +2954,16 @@ reader and hands a third party an identity they were never told. Do not
 reintroduce it. window_end is never returned — customer surfaces quote
 start + 2h only, and the range is derived server-side with
 `arrivalWindowRange()` so the page cannot drift from the reminders.
+`rescheduleToken` (the "See open times" CTA's destination, `/reschedule/
+:token`) is null — suppressing the card — for a grouped/frozen visit, a
+dispatch-owned unreviewed booking, or an inactive/cancelled account.
+`canMoveOnline` (dead-link guard, C3/C6, 2026-09-28) is an additional
+boolean, false when the visit itself already starts inside the self-serve
+MOVE notice window (`SELF_SERVE_MOVE_NOTICE_HOURS`, `visitInsideMoveNoticeWindow`)
+— the CTA's own destination would refuse the move — and the client hides
+the card when either is falsy. The separate missed-visit "pick a new time"
+recovery link (a different, `state: 'past'` branch of this same GET) is
+unaffected; it is not gated on either field.
 The confirm write is a status-only `pending -> confirmed`
 transition guarded on the status AND the date/window that were read, plus
 a `job_status_history` row. The client posts the slot it rendered and the
