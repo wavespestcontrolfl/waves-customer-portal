@@ -338,6 +338,10 @@ class AutonomousRunner {
     run.page_type = brief.page_type;
     run.action_type = brief.action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
+    // In-memory only (finalize persists named columns): the composed
+    // backfill brief — its live gap list — for the retry feedback in
+    // _gateFailRetryOrSkip.
+    run.citability_backfill_brief = brief.gsc_signal?.bucket === 'citability_backfill' ? brief : null;
 
     const finalProtected = await this._checkProtectedPage(opp, brief);
     if (finalProtected?.protected) {
@@ -2194,6 +2198,16 @@ class AutonomousRunner {
   async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
     claimToken, skipReason, notes, blocking, advisoryMessages = [],
   }) {
+    // A citability backfill's one redraft must hear its completion contract
+    // (and the optional signals) whichever gate rejected the draft. Early
+    // gates (editorial, guardrails, topic, comparison) return here before
+    // the quality gate runs, so the feedback is judged here against the live
+    // page when no quality result exists yet.
+    if (run?.citability_backfill_brief) {
+      const feedback = await this._citabilityBackfillRetryFeedback(run);
+      blocking = [...(blocking || []), ...feedback.blocking];
+      if (!advisoryMessages.length) advisoryMessages = feedback.advisory;
+    }
     const findings = (blocking || []).map((finding) => ({
       severity: finding.severity,
       code: finding.code,
@@ -2213,6 +2227,49 @@ class AutonomousRunner {
       exhaustedNote: 'redraft with gate feedback failed the gate again; skipped (exceptions-only review queue).',
       unrecordedNote: 'could not record retry feedback; skipped (exceptions-only review queue).',
     });
+  }
+
+  /**
+   * Retry feedback for a citability backfill draft: the hard completion
+   * finding (CITABILITY_BACKFILL_GAPS_CLEARED, with the unresolved gaps or
+   * regressed traits) plus the optional citability advisories. Reuses the
+   * quality gate's own result when it ran; otherwise evaluates the same
+   * checks against the live page as the prior version. Never throws.
+   */
+  async _citabilityBackfillRetryFeedback(run) {
+    const empty = { blocking: [], advisory: [] };
+    try {
+      const qualityResult = run.quality_gate_result;
+      if (qualityResult && Array.isArray(qualityResult.hard_failures)) {
+        const unresolved = qualityResult.hard_failures.find((f) => f?.name === 'citability_backfill_gaps_cleared');
+        return {
+          blocking: unresolved
+            ? [{ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: String(unresolved.reason || 'planned citability gaps unresolved') }]
+            : [],
+          advisory: citabilityAdvisoryMessages(qualityResult),
+        };
+      }
+      const draft = run.draft_payload;
+      const gate = getQualityGate();
+      const checkGaps = gate?._internals?.checkCitabilityBackfillGapsCleared;
+      if (!draft || typeof draft !== 'object' || typeof checkGaps !== 'function') return empty;
+      const brief = run.citability_backfill_brief;
+      const publisher = getAstroPublisher();
+      const targetUrl = brief.target_url || brief.page_url || draft.url;
+      const prior = await loadRefreshPriorBody(publisher, targetUrl);
+      const ctx = prior ? { previousVersion: prior } : {};
+      const gateBrief = { ...brief, ...(await refreshTargetFields(publisher, targetUrl)) };
+      const r = checkGaps(draft, gateBrief, ctx);
+      return {
+        blocking: r && r.ok === false
+          ? [{ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: String(r.reason) }]
+          : [],
+        advisory: typeof gate.citabilityAdvisories === 'function' ? gate.citabilityAdvisories(draft, gateBrief, ctx) : [],
+      };
+    } catch (err) {
+      logger.warn(`[autonomous-runner] citability backfill retry feedback unavailable: ${err.message}`);
+      return empty;
+    }
   }
 
   async _infrastructureRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes }) {
