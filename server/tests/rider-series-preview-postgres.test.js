@@ -71,7 +71,9 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
   });
 
   afterEach(async () => { if (trx && !trx.isCompleted()) await trx.rollback().catch(() => {}); });
-  afterAll(async () => { await database?.destroy(); });
+  // The preview lazily loads modules that open the shared models/db pool;
+  // close it too, or Jest never exits (CI runs without --forceExit).
+  afterAll(async () => { await database?.destroy(); await require('../models/db').destroy(); });
 
   // --- fixture helpers ------------------------------------------------------
   function dateOnlyStr(d) {
@@ -771,8 +773,13 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       try {
         await jest.isolateModulesAsync(async () => {
           const { previewRiderPair: freshPreviewRiderPair } = require('../services/rider-series-preview');
-          const preview = await freshPreviewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
-          expect(preview.reasons).toContain('plan_hold');
+          try {
+            const preview = await freshPreviewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+            expect(preview.reasons).toContain('plan_hold');
+          } finally {
+            // This isolated registry has its own models/db pool; close it.
+            await require('../models/db').destroy();
+          }
         });
       } finally {
         if (previous === undefined) delete process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE;
@@ -975,10 +982,15 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
         getBlackoutLayers: jest.fn(async () => { throw new Error('synthetic blackout read failure'); }),
       }));
       const { previewRiderPair: freshPreviewRiderPair } = require('../services/rider-series-preview');
-      const preview = await freshPreviewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
-      expect(preview.reasons).toContain('blackout_check_error');
-      expect(preview.eligible).toBe(false);
-      expect(preview.plan.length).toBeGreaterThan(0);
+      try {
+        const preview = await freshPreviewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+        expect(preview.reasons).toContain('blackout_check_error');
+        expect(preview.eligible).toBe(false);
+        expect(preview.plan.length).toBeGreaterThan(0);
+      } finally {
+        // This isolated registry has its own models/db pool; close it.
+        await require('../models/db').destroy();
+      }
     });
     jest.dontMock('../services/scheduling/blackout-dates');
   });
