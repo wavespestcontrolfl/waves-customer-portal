@@ -84,21 +84,11 @@ async function customerCallDoNotContact(customerId, dbh) {
 // itself would honor blocks the release — a group-scoped suppression for an
 // unrelated stream (e.g. service_operational) must not bury it.
 // A Google address also matches a suppression stored under any spelling of
-// the same mailbox (dots, +tag, googlemail): Gmail delivers them all to one
-// inbox, so confirming "janedoe@gmail.com" on a read-back card must not mail
-// an inbox suppressed as "jane.doe@gmail.com" (codex #5323 r2 P1).
+// the same mailbox (suppressionCoversEmail; codex #5323 r2 P1).
 async function emailSuppressedForNewLead(email, dbh) {
   if (!(await dbh.schema.hasTable('email_suppressions'))) return false;
-  const normalized = String(email).trim().toLowerCase();
-  const { googleMailboxIdentity, GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
-  const mailbox = googleMailboxIdentity(normalized);
   const rows = await dbh('email_suppressions')
-    .where((q) => {
-      q.whereRaw('LOWER(email) = ?', [normalized]);
-      if (mailbox) {
-        q.orWhereRaw(`(${GOOGLE_MAILBOX_SQL.isGoogle('email')} AND ${GOOGLE_MAILBOX_SQL.mailbox('email')} = ?)`, [mailbox.split('@')[0]]);
-      }
-    })
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
     .where({ status: 'active' });
   if (!rows.length) return false;
   const { automationSuppressionMatches } = require('./automation-runner');

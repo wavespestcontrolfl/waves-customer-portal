@@ -96,7 +96,7 @@ async function activeAutomationSuppressionFor(template, email, database = db) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) return null;
   const rows = await database('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [normalizedEmail])
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(normalizedEmail))
     .where({ status: 'active' });
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
 }

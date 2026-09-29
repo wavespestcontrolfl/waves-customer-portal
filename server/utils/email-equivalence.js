@@ -57,4 +57,27 @@ function sameGmailInbox(values) {
   return [...canon][0];
 }
 
-module.exports = { gmailCanonicalMailbox, sameGmailInbox, GOOGLE_DOT_INSENSITIVE_DOMAINS };
+/**
+ * Knex condition for "an email_suppressions row covers this address": the
+ * exact address, and — for a Google address — any row on the same Google
+ * mailbox under another spelling (dots, +tag, googlemail), since Gmail
+ * delivers them all to one inbox (owner decision 2026-09-29). Strictly
+ * wider than the exact match, so it can only ever block more mail.
+ * Use as `.where(suppressionCoversEmail(email))`.
+ */
+function suppressionCoversEmail(email, column = 'email') {
+  const normalized = String(email || '').trim().toLowerCase();
+  const { googleMailboxIdentity, GOOGLE_MAILBOX_SQL } = require('./customer-comms-lock');
+  const mailbox = normalized ? googleMailboxIdentity(normalized) : null;
+  return function suppressionMatch() {
+    this.whereRaw(`LOWER(${column}) = ?`, [normalized]);
+    if (mailbox) {
+      this.orWhereRaw(
+        `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?)`,
+        [mailbox.split('@')[0]],
+      );
+    }
+  };
+}
+
+module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, GOOGLE_DOT_INSENSITIVE_DOMAINS };

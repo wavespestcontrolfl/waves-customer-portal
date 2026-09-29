@@ -68,7 +68,7 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
       // checked here before enrolling. Fails toward suppressed.
       try {
         const referralSuppression = await db('email_suppressions')
-          .whereRaw('LOWER(email) = ?', [email.toLowerCase()])
+          .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
           .where({ status: 'active' })
           .where(function referralStream() {
             this.where('group_key', 'marketing_referral')

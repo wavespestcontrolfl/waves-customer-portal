@@ -2432,8 +2432,11 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
   // send path matches suppressions by exact spelling — but it says so, and
   // either spelling is right to confirm.
   // Only when EVERY candidate on the card is that one inbox — a decoder
-  // candidate that genuinely differs keeps its own question (codex #5323 r4).
-  const oneInbox = sameGmailInbox(existing.map((c) => c?.value));
+  // candidate that genuinely differs keeps its own question (codex #5323 r4)
+  // — and no decoder/arbiter question is already there: that one carries
+  // the evidence-specific warning (a risk flag, a contradiction) and must
+  // not be traded for the generic wording (codex #5323 r6).
+  const oneInbox = !payload.confirmation_question && sameGmailInbox(existing.map((c) => c?.value));
   if (oneInbox) {
     payload.confirmation_question = `Both spellings are the same Gmail inbox (Gmail ignores dots) — confirm either one: "${v1Email}" or "${v2Email}".`;
     payload.gmail_same_inbox = oneInbox;

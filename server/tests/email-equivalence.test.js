@@ -63,13 +63,15 @@ describe('the read-back card says a dot-only Gmail pair is one inbox (owner ruli
     expect(out.dictationEmailPayload.gmail_same_inbox).toBe('jqsample1990@gmail.com');
     expect(out.dictationEmailPayload.confirmation_question).toContain('Both spellings are the same Gmail inbox');
   });
-  test('the same-inbox wording replaces a decoder question already on the payload', () => {
+  test('a decoder/arbiter question already on the payload is kept (codex #5323 r6)', () => {
     const out = applyEmailDisagreementHold(
       { email: null, email_candidates: ['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com'] },
-      { confirmation_question: 'Is it j q sample?' },
+      { confirmation_question: 'The transcript contradicts the dictated letters — read it back.' },
     );
-    expect(out.dictationEmailPayload.confirmation_question).toContain('Both spellings are the same Gmail inbox');
+    expect(out.dictationEmailPayload.confirmation_question).toBe('The transcript contradicts the dictated letters — read it back.');
+    expect(out.dictationEmailPayload.gmail_same_inbox).toBeUndefined();
   });
+
   test('a genuinely different decoder candidate keeps the decoder question (codex #5323 r4)', () => {
     const out = applyEmailDisagreementHold(
       { email: null, email_candidates: ['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com'] },
@@ -102,7 +104,7 @@ describe('first-touch release suppression check matches the Google mailbox under
             whereRaw: (sql, b) => { calls.raw.push({ sql, b }); return sub; },
             orWhereRaw: (sql, b) => { calls.raw.push({ sql, b, or: true }); return sub; },
           };
-          arg(sub);
+          arg.call(sub, sub);
         }
         return chain;
       },
@@ -149,5 +151,42 @@ describe('email review card signature: same-inbox marker counts for open cards o
   test('only the live-card comparison opts into wording', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(src.match(/\{ wording: true \}/g)).toHaveLength(2);
+  });
+});
+
+// Owner decision 2026-09-29 (after codex #5323 r6): every send gate treats all
+// spellings of one Gmail inbox as one suppressed address.
+describe('suppressionCoversEmail — one Gmail inbox, any spelling', () => {
+  const { suppressionCoversEmail } = require('../utils/email-equivalence');
+  function capture(email) {
+    const calls = [];
+    const ctx = {
+      whereRaw: (sql, b) => { calls.push({ sql, b }); return ctx; },
+      orWhereRaw: (sql, b) => { calls.push({ sql, b, or: true }); return ctx; },
+    };
+    suppressionCoversEmail(email).call(ctx);
+    return calls;
+  }
+  test('a Gmail address matches exactly OR by mailbox identity', () => {
+    const calls = capture('J.Q.Sample1990+x@GoogleMail.com');
+    expect(calls[0]).toEqual({ sql: 'LOWER(email) = ?', b: ['j.q.sample1990+x@googlemail.com'] });
+    expect(calls[1].or).toBe(true);
+    expect(calls[1].sql).toContain("SPLIT_PART(LOWER(email), '@', 2) IN ('gmail.com', 'googlemail.com')");
+    expect(calls[1].b).toEqual(['jqsample1990']);
+  });
+  test('a non-Google address keeps the exact match only', () => {
+    expect(capture('j.q.sample1990@example.com')).toHaveLength(1);
+  });
+  test.each([
+    'server/services/email-template-library.js',
+    'server/services/automation-runner.js',
+    'server/services/email-bounce-recovery.js',
+    'server/services/email-bounce-rescue.js',
+    'server/services/referral-invite-email.js',
+    'server/services/lead-first-touch-resume.js',
+  ])('%s gates sends through suppressionCoversEmail', (file) => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../..', file), 'utf8');
+    expect(src).toContain('suppressionCoversEmail(');
+    expect(src).not.toMatch(/email_suppressions'\)\s*\.whereRaw\('LOWER\(email\) = \?'/);
   });
 });
