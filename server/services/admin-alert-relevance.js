@@ -226,7 +226,10 @@ function seriesMoveMovedOn(s) {
     && s.affectedVisits.every((v) => !v || CLOSED_VISIT_STATUSES.has(String(v.status)))) {
     return 'Every visit it named is closed';
   }
-  return customerLeft(s);
+  // Never "customer left": the card is written once per move (conflict_card_at),
+  // so a customer reactivated with the visits still standing would keep
+  // dispatch work with no card. Only the visits and dates themselves settle it.
+  return null;
 }
 
 function newLeadMovedOn(s) {
@@ -254,7 +257,8 @@ const CLASSES = [
       ? 'Customer left and the combined invoice is an unsent draft or void' : null),
   },
   { // emitter removed in #5223; unread rows remain
-    key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: (s) => customerLeft(s) || visitClosed(s),
+    // Its emitter is gone, so nothing could raise it again: only the visit itself settles it.
+    key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: visitClosed,
   },
   { // schedule-integrity-watchdog.js prepaid-coverage + manual-series-stamp reviews — a
     // forever dedupe on an evidence key a reactivation need not change, so a retire re-arms it
@@ -368,23 +372,24 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
 }
 
 // An emitter's clear-on-absence (schedule-integrity-watchdog.js): after a
-// COMPLETE scan, every unread bell under `prefix` whose key the scan no longer
-// raised is retired with the sweep's own stamp — the gap was fixed, or its
-// evidence changed and the scan raised a new key beside it. It re-arms, as a
-// `rearm` class does: the key moves into the stamp, so the same gap raised
-// again later (a customer reactivated, an estimate restored) is a new bell.
-// A pure read_at + stamp like every other retire; no row locks; a person's
-// read is untouched.
+// COMPLETE scan, every bell under `prefix` whose key the scan no longer raised
+// — the gap was fixed, or its evidence changed and the scan raised a new key
+// beside it — is retired with the sweep's own stamp and re-armed, as a
+// `rearm` class is: the key moves into the stamp, so the same gap raised again
+// later (a price removed again, a customer reactivated) is a new bell. That
+// includes a bell a person already read (their read_at stands): the
+// resolution is the scan's, not theirs. No row locks.
 async function retireKeysNoLongerRaised({ category = 'alert', prefix, liveKeys, reason, now = new Date() }) {
   if (!adminAlertRelevanceLive()) return 0;
-  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   const stamp = { by: RETIRED_BY, reason, at: now.toISOString() };
-  const retired = await excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin', category }))
-    .whereNull('read_at')
+  // Every row still holding a key the scan did not raise — read by a person
+  // or not — has its key moved into the stamp, so the gap recurring later is a
+  // new bell; a person's read_at stands, an unread bell is marked read.
+  const retired = await db('notifications').where({ recipient_type: 'admin', category })
     .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [prefix.length, prefix])
     .whereRaw("NOT (metadata->>'dedupeKey' = ANY(?::text[]))", [liveKeys])
     .update({
-      read_at: new Date(),
+      read_at: db.raw('COALESCE(read_at, ?)', [new Date()]),
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('retired', ?::jsonb || jsonb_build_object('dedupeKey', metadata->'dedupeKey'), 'dedupeKey', NULL)", [JSON.stringify(stamp)]),
     })
     .returning(['id']);

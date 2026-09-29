@@ -71,6 +71,8 @@ jest.mock('../models/db', () => {
         applied = hit();
         applied.forEach((r) => {
           const { metadata, ...rest } = patch;
+          // COALESCE(read_at, ?): a person's read stands, an unread row takes the bound time.
+          if (rest.read_at && rest.read_at.__raw && /COALESCE\(read_at/.test(rest.read_at.__raw)) rest.read_at = r.read_at ?? rest.read_at.bindings[0];
           Object.assign(r, rest);
           if (metadata && metadata.__raw && /jsonb_build_object\('retired'/.test(metadata.__raw)) {
             // Clear-on-absence: the stamp takes the row's own key, and the key is freed.
@@ -286,7 +288,7 @@ describe('class rules', () => {
     expect((await reasonFor(prepay(CUST2))).reason).toBeNull();
   });
 
-  test.each([['stale-visit:', 'stale_visit'], ['prepay-coverage:', 'prepay_coverage']])('%s alerts retire when the visit closed or the customer left', async (prefix, key) => {
+  test.each([['stale-visit:', 'stale_visit', false], ['prepay-coverage:', 'prepay_coverage', true]])('%s alerts retire when the visit closed; customer left retires it too: %p', async (prefix, key, leftRetires) => {
     const row = note({ category: 'alert', metadata: { dedupeKey: `${prefix}${VISIT}:x`, scheduled_service_id: VISIT, customer_id: CUST } });
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
     expect(await reasonFor(row)).toEqual({ cls: key, reason: null });
@@ -294,7 +296,8 @@ describe('class rules', () => {
     expect((await reasonFor(row)).reason).toEqual(expect.stringContaining('no longer open'));
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
     mockTables.customers = [customer({ churned_at: new Date() })];
-    expect((await reasonFor(row)).reason).toBe('Customer left');
+    // The stale-visit emitter is gone, so nothing could raise it again: churn alone never settles it.
+    expect((await reasonFor(row)).reason).toBe(leftRetires ? 'Customer left' : null);
   });
 
   test('accepted recurring plan review retires only when the customer left', async () => {
@@ -315,15 +318,16 @@ describe('class rules', () => {
     expect((await reasonFor(move({ overlapDates: ['2026-09-20'], conflicts: [{ id: VISIT, date: '2026-09-28' }] }))).reason).toBeNull();
   });
 
-  test('series move: every overlap / conflict / preserved date in the past (Eastern), every visit it named closed, or the customer left', async () => {
+  test('series move: every overlap / conflict / preserved date in the past (Eastern), or every visit it named closed — never the customer leaving', async () => {
     mockTables['scheduled_services as ss'] = [visit()];
     expect((await reasonFor(move({ overlapDates: ['2026-09-20', '2026-09-27'], conflicts: [{ id: VISIT, date: '2026-09-01' }], preservedOccurrences: [{ date: '2026-08-01' }] }))).reason)
       .toEqual(expect.stringContaining('passed'));
     mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' })];
     expect((await reasonFor(move({ overlapDates: [], conflicts: [{ id: VISIT, date: '2026-10-05' }] }))).reason).toEqual(expect.stringContaining('closed'));
+    // Never on churn alone: the card is written once, so a reactivated customer would keep its work with no card.
     mockTables['scheduled_services as ss'] = [visit()];
     mockTables.customers = [customer({ churned_at: new Date() })];
-    expect((await reasonFor(move())).reason).toBe('Customer left');
+    expect((await reasonFor(move())).reason).toBeNull();
   });
 
   test('series move: a card with an overlap date names only the moved visit, not the sibling on that date — closing every visit it names keeps it until the date passes', async () => {
@@ -693,24 +697,27 @@ describe('retireKeysNoLongerRaised (an emitter\'s clear-on-absence)', () => {
   const standing = (id, key, extra = {}) => note({ id, category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT, ...extra } });
   const REASON = 'The schedule watchdog no longer finds this gap';
 
-  test('retires only the unread, bell-visible bells under the prefix whose key the scan did not raise', async () => {
+  test('retires every bell under the prefix whose key the scan did not raise: an unread one is marked read, a read one keeps its read_at, each is re-armed', async () => {
     const live = standing(uid(580), 'prepay-coverage:v1:annual_coverage_unverified:aaa');
     const gone = standing(uid(581), 'prepay-coverage:v1:annual_coverage_unverified:old');
     const theirs = { ...standing(uid(582), 'prepay-coverage:v2:x:y'), read_at: new Date('2026-09-28T10:00:00Z') };
     const other = standing(uid(583), 'accepted-schedule:e1:pest_control');
     const quiet = standing(uid(584), 'prepay-coverage:v3:x:y', { feed: 'activity' });
     mockTables.notifications = [live, gone, theirs, other, quiet];
-    expect(await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: ['prepay-coverage:v1:annual_coverage_unverified:aaa'], reason: REASON, now: NOW })).toBe(1);
+    expect(await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: ['prepay-coverage:v1:annual_coverage_unverified:aaa'], reason: REASON, now: NOW })).toBe(3);
     expect(gone.read_at).toBeInstanceOf(Date);
     // Re-armed: the key moves into the stamp, so the same gap raised again later is a new bell.
     expect(JSON.parse(gone.metadata)).toMatchObject({
       dedupeKey: null, retired: { by: 'alert-relevance', reason: REASON, at: NOW.toISOString(), dedupeKey: 'prepay-coverage:v1:annual_coverage_unverified:old' },
     });
-    for (const r of [live, other, quiet]) {
+    for (const r of [live, other]) {
       expect(r.read_at).toBeNull();
       expect(JSON.parse(r.metadata).retired).toBeUndefined();
     }
+    // A person read it first: their read stands, but the key is freed so a recurrence rings.
     expect(theirs.read_at).toEqual(new Date('2026-09-28T10:00:00Z'));
+    expect(JSON.parse(theirs.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: 'prepay-coverage:v2:x:y' } });
+    expect(JSON.parse(quiet.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: 'prepay-coverage:v3:x:y' } });
   });
 
   test('a reactivated customer\'s accepted-plan gap rings again: cleared while they were churned (absent from the scan), the same key and evidence raised after reactivation is a fresh bell', async () => {
