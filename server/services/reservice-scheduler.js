@@ -260,6 +260,17 @@ function reportedReserviceLane(text) {
   return null;
 }
 
+// Codex round-5 P1: reportedReserviceLane folds an excluded-specialty report
+// (termites/rodents/mosquitoes/tree/shrub) into the same null it returns for
+// an ambiguous or unmatched report — validateReserviceOffer needs to tell
+// the two apart, since an excluded specialty must reject a re-service
+// promise outright even when the reply itself names an eligible pest/lawn
+// lane (a termite report never rides a free PEST re-service link, whatever
+// the reply promises). Same regex reportedReserviceLane already guards with.
+function reportedReserviceExcludedSpecialty(text) {
+  return EXCLUDED_RESERVICE_SPECIALTY_RE.test(String(text || ''));
+}
+
 // Statuses that keep a callback "open" for the lane dedupe: booked
 // (pending/confirmed) AND live (en_route/on_site) — a tech already on the
 // way is the strongest possible reason not to book a second free visit in
@@ -381,6 +392,7 @@ module.exports = {
   reserviceLanesForCustomer,
   loadEligibleReserviceLanes,
   reportedReserviceLane,
+  reportedReserviceExcludedSpecialty,
   openReserviceCallbacks,
   openCallbackExistsForLane,
 };

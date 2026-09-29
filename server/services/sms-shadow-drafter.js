@@ -554,17 +554,49 @@ function namedReserviceLanesInText(text) {
   const t = String(text || '');
   return RESERVICE_LANE_NAME_PATTERNS.filter(([, rx]) => rx.test(t)).map(([lane]) => lane);
 }
-function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage }) {
+function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
   if (!isReserviceOfferPromise(text)) return { ok: true, violations: [] };
+  const actions = Array.isArray(intendedActions) ? intendedActions : [];
+  // Codex round-5 P2 (finding #3): the re-service link page shows the
+  // customer its OWN real availability — a promise that ALSO offers or
+  // books a specific slot right here is a second, conflicting offer (and a
+  // book_appointment with no eligibility/pricing checks of its own). Reject
+  // outright rather than let the times/booking checks elsewhere silently
+  // coexist with a free-re-service promise.
+  const offeredTimesList = Array.isArray(offeredTimes) ? offeredTimes : [];
+  if (offeredTimesList.length) {
+    return { ok: false, violations: ['the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'] };
+  }
+  if (actions.some((a) => a?.type === 'book_appointment')) {
+    return { ok: false, violations: ['the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'] };
+  }
   const lanes = eligibleReserviceLanes(factsBlock);
   if (!lanes.length) {
     return { ok: false, violations: ['the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'] };
   }
+  // Codex round-5 P1 (finding #1): the reported issue's own lane, from the
+  // customer's inbound text, is resolved and checked EVERY time — not only
+  // when the reply names no lane (the old gap: a reply naming an eligible
+  // lane sailed through even when the customer's OWN report was about a
+  // different lane, or an excluded specialty entirely). reservice-scheduler
+  // is the SAME classifier the no-named-lane branch below already uses (NOT
+  // sms-service-intent.js's lead-intake regexClassify, which lumps
+  // termite/rodent/mosquito words into its 'pest' bucket — that bucket is
+  // for lead-intake ROUTING, not the re-service mechanism's own pest/lawn
+  // split, which categorically excludes those specialties).
+  const { reportedReserviceLane, reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
+  if (reportedReserviceExcludedSpecialty(inboundMessage)) {
+    return { ok: false, violations: ['the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'] };
+  }
+  const reportedLane = reportedReserviceLane(inboundMessage);
   // Codex r7: eligibility is per service line — a pest-only customer must
   // not be offered a free LAWN re-service (or the reverse).
   const named = namedReserviceLanesInText(text);
+  if (named.length && reportedLane && !named.includes(reportedLane)) {
+    return { ok: false, violations: [`the reply offers a free ${named.join(' and ')} re-service but the customer reported a ${reportedLane} issue`] };
+  }
   const wrong = named.filter((lane) => !lanes.includes(lane));
   if (wrong.length) {
     return { ok: false, violations: [`the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
@@ -578,20 +610,11 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     // Codex round-1 P2 (d): a GENERIC "we'll send your free re-service link"
     // names no service line in the reply, so the named-lane check above has
     // nothing to run against — a pest customer offered a lawn-only
-    // entitlement (or the reverse) would sail through. Resolve the REPORTED
-    // issue's own lane from the customer's inbound text, via
-    // reservice-scheduler's OWN lane classifier (Codex round-4 P2) — NOT
-    // sms-service-intent.js's lead-intake regexClassify, which lumps
-    // termite/rodent/mosquito words into its 'pest' bucket and would let a
-    // termite report ride the free pest re-service link (that classifier's
-    // 'pest' bucket is for lead-intake ROUTING, not for the re-service
-    // mechanism's own pest/lawn lane split, which categorically excludes
-    // those specialties) — and require it to intersect what FREE RE-SERVICE
+    // entitlement (or the reverse) would sail through. reportedLane was
+    // already resolved above; require it to intersect what FREE RE-SERVICE
     // actually lists. An unresolved report (neither/both/ambiguous, an
     // excluded specialty, or no inbound text at all) has no lane to check,
     // so the reply itself must name a covered one.
-    const { reportedReserviceLane } = require('./reservice-scheduler');
-    const reportedLane = reportedReserviceLane(inboundMessage);
     if (reportedLane && !lanes.includes(reportedLane)) {
       return { ok: false, violations: [`the reply offers a free re-service but the customer reported a ${reportedLane} issue and FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
     }
@@ -604,7 +627,6 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // {"type":"escalate","note":"send_reservice_link"} in intended_actions is
   // a broken promise — the ONLY thing that actually gets a teammate to text
   // the link is that action, and nothing else in this pipeline sends it.
-  const actions = Array.isArray(intendedActions) ? intendedActions : [];
   const hasSendLinkAction = actions.some((a) => a?.type === 'escalate' && a?.note === 'send_reservice_link');
   if (!hasSendLinkAction) {
     return { ok: false, violations: ['the reply promises a free re-service but intended_actions is missing {"type":"escalate","note":"send_reservice_link"} — nothing would actually send the link'] };
@@ -2269,7 +2291,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
     }
-    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage });
+    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage, offeredTimes: parsed?.offered_times });
     if (!singlePassReservice.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassReservice.violations);
@@ -2304,7 +2326,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
-    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage });
+    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
     for (const check of [reserviceCheck, complianceCheck]) {
       if (!check.ok) {
@@ -2652,7 +2674,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // escalate action makes autoSendActionsSafe return false, so these
     // drafts never reach the auto-send claim/executor path at all.
     const reserviceLanesSnapshot = validateReserviceOffer({
-      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage,
+      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times,
     }).promisedLanes || null;
 
     // Only verified-clean drafts (verify loop converged) may leave the silent

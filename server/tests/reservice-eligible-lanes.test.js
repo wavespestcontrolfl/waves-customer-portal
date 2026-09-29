@@ -52,7 +52,7 @@ function makeDb({ customerRow, scheduledRows = [] } = {}) {
   });
 }
 
-const { loadEligibleReserviceLanes, reportedReserviceLane } = require('../services/reservice-scheduler');
+const { loadEligibleReserviceLanes, reportedReserviceLane, reportedReserviceExcludedSpecialty } = require('../services/reservice-scheduler');
 
 const PEST_COVERAGE_ROW = { service_type: 'Quarterly Pest Control', is_callback: false, service_key: null, category: 'pest_control' };
 
@@ -134,5 +134,32 @@ describe('reportedReserviceLane', () => {
     expect(reportedReserviceLane('can you come back out?')).toBeNull();
     expect(reportedReserviceLane('')).toBeNull();
     expect(reportedReserviceLane(null)).toBeNull();
+  });
+});
+
+// Codex round-5 P1: validateReserviceOffer needs to tell an excluded
+// specialty apart from an ambiguous/unresolved report — reportedReserviceLane
+// folds both into the same null, so this is its own exported check.
+describe('reportedReserviceExcludedSpecialty', () => {
+  test.each([
+    'the termites are back',
+    'saw a mosquito problem again',
+    'rats in the attic again',
+    'there is a mouse in the garage',
+    'the shrubs look sick',
+    'the trees look sick',
+  ])('%s → true', (text) => {
+    expect(reportedReserviceExcludedSpecialty(text)).toBe(true);
+  });
+
+  test.each([
+    'the ants are back',
+    'the grass is looking bad again',
+    'can you come back out?',
+    '',
+    null,
+    undefined,
+  ])('%s → false', (text) => {
+    expect(reportedReserviceExcludedSpecialty(text)).toBe(false);
   });
 });

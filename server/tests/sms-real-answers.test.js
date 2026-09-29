@@ -2033,6 +2033,84 @@ describe('free re-service is an entitlement resolved through the existing mechan
     });
   });
 
+  // Codex round-5 P1: the reported issue's own lane from the inbound is
+  // resolved and checked EVERY time — not only when the reply names no lane.
+  // A reply naming a lane that IS itself eligible must still be rejected
+  // when the customer's own report is about an excluded specialty or a
+  // different (also-eligible) lane.
+  describe('validateReserviceOffer: the reported lane is checked even when the reply NAMES a lane', () => {
+    const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+    const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+
+    test('pest-only customer reports a lawn issue, reply promises a (technically eligible) pest re-service → rejected', () => {
+      const pestOnly = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const out = validateReserviceOffer({
+        reply: 'We will come back for a free pest re-service.',
+        factsBlock: pestOnly,
+        inboundMessage: 'the grass is looking bad again',
+        intendedActions: sendLink,
+      });
+      expect(out.ok).toBe(false);
+    });
+
+    test('customer reports termites (excluded specialty), reply promises a free pest re-service → rejected', () => {
+      const pestOnly = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const out = validateReserviceOffer({
+        reply: 'We will come back for a free pest re-service.',
+        factsBlock: pestOnly,
+        inboundMessage: 'the termites are back',
+        intendedActions: sendLink,
+      });
+      expect(out.ok).toBe(false);
+    });
+
+    test('customer reports ants (pest), reply promises a free pest re-service → ok', () => {
+      const pestOnly = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const out = validateReserviceOffer({
+        reply: 'We will come back for a free pest re-service.',
+        factsBlock: pestOnly,
+        inboundMessage: 'the ants are back',
+        intendedActions: sendLink,
+      });
+      expect(out.ok).toBe(true);
+    });
+  });
+
+  // Codex round-5 P2: the re-service link page shows the customer its own
+  // real availability — a promise must never ALSO offer or book a specific
+  // appointment slot right in the reply.
+  describe('validateReserviceOffer: rejects appointment slots in a free re-service reply', () => {
+    const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+    const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+    const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+    const reply = 'We will come back for a free pest re-service. How about Tuesday 9:00 AM - 11:00 AM?';
+
+    test('non-empty offered_times on a re-service promise → rejected', () => {
+      const out = validateReserviceOffer({
+        reply, factsBlock: eligible, inboundMessage: 'the ants are back', intendedActions: sendLink,
+        offeredTimes: [{ date: 'Tuesday', window: '9:00 AM - 11:00 AM' }],
+      });
+      expect(out.ok).toBe(false);
+    });
+
+    test('a book_appointment action on a re-service promise → rejected', () => {
+      const out = validateReserviceOffer({
+        reply, factsBlock: eligible, inboundMessage: 'the ants are back',
+        intendedActions: [...sendLink, { type: 'book_appointment' }],
+        offeredTimes: [],
+      });
+      expect(out.ok).toBe(false);
+    });
+
+    test('no offered_times and no book_appointment action → the offer itself still passes', () => {
+      const out = validateReserviceOffer({
+        reply: 'We will come back for a free pest re-service.',
+        factsBlock: eligible, inboundMessage: 'the ants are back', intendedActions: sendLink, offeredTimes: [],
+      });
+      expect(out.ok).toBe(true);
+    });
+  });
+
   // Codex round-2 finding: validateReserviceOffer returned early (ok:true,
   // no checks run at all) unless the reply said "free"/"complimentary" —
   // "Your pest re-service is covered; we'll text the booking link now"
