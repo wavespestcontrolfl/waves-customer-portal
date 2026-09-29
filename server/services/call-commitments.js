@@ -2510,9 +2510,13 @@ async function listSlotKeptCallIds(conn) {
 // (the live stage).
 // The periodic sweep refreshes them beside the calls with open promises, so
 // the lapse reopens the promise whenever it happened; the sweep's work
-// follows the lapses, not every promise ever closed. Sent texts, emails,
+// follows the lapses, not every promise ever closed — and only closes from
+// the last LAPSE_SCAN_DAYS: a promise closed longer ago than that is history,
+// and reopening it would put a stale promise back on the Owed list (a refresh
+// of its call for any other reason still re-judges it). Sent texts, emails,
 // calls and estimates are not taken back. Nothing while the switch is off
 // (refreshFulfillment does not re-judge those rows then).
+const LAPSE_SCAN_DAYS = 30;
 async function listLapsedEvidenceClosedCallIds(conn) {
   if (!promiseEvidenceCloseLive()) return [];
   const rows = await conn.raw(
@@ -2523,12 +2527,13 @@ async function listLapsedEvidenceClosedCallIds(conn) {
        LEFT JOIN customers cu ON (cc.fulfillment ->> 'kind') = ? AND cu.id::text = cc.fulfillment ->> 'record_id'
       WHERE cc.human_state IS NULL AND cc.status IN ('fulfilled', 'dismissed')
         AND (cc.fulfillment ->> 'closed_by') = ?
+        AND cc.updated_at > NOW() - make_interval(days => ?)
         AND ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           OR ((cc.fulfillment ->> 'kind') = ?
               AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id)))`,
-    [CUSTOMER_LEFT, CLOSED_BY_EVIDENCE, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT],
+    [CUSTOMER_LEFT, CLOSED_BY_EVIDENCE, LAPSE_SCAN_DAYS, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT],
   );
   return (rows?.rows || []).map((r) => r.call_log_id);
 }

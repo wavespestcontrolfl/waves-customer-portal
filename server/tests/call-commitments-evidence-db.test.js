@@ -355,6 +355,13 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     }
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toEqual(expect.arrayContaining([booked.call.id, left.call.id]));
+    // A lapse on a promise closed more than 30 days ago is history: not listed.
+    const old = await world({ kind: 'other' });
+    const oldVisit = await visit(old);
+    await cc.refreshFulfillment(db, old.call.id);
+    await db('call_commitments').where({ id: old.commitment.id }).update({ updated_at: new Date(Date.now() - 31 * DAY) });
+    await db('scheduled_services').where({ id: oldVisit.id }).update({ status: 'cancelled' });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(old.call.id);
     // Off: nothing is listed.
     process.env.PROMISE_EVIDENCE_CLOSE = 'off';
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).toEqual([]);
