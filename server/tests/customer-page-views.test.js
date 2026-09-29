@@ -47,7 +47,14 @@ describe('recordPageView', () => {
     expect(params.slice(0, 6)).toEqual(['cust-1', 'appointment', 'scheduled_service', '42', expectedHash, longUa.slice(0, 500)]);
     // the dedupe probe repeats page/subject/ip/customer and carries the window
     expect(sql).toMatch(/customer_id IS NOT DISTINCT FROM/);
-    expect(params.slice(6)).toEqual(['appointment', 'scheduled_service', '42', expectedHash, 'cust-1', DEDUPE_MINUTES]);
+    expect(params.slice(6)).toEqual(['appointment', '42', 'cust-1', false, 'scheduled_service', expectedHash, DEDUPE_MINUTES]);
+  });
+
+  test('dedupeForever (with a subject id) turns on the ip/time bypass; without a subject id it is ignored', async () => {
+    await recordPageView({ req: mkReq(), page: 'push:open', customerId: 'cust-1', subjectType: 'ios', subjectId: 'tap:abc', dedupeForever: true });
+    await recordPageView({ req: mkReq(), page: 'push:open', customerId: 'cust-1', subjectType: 'ios', dedupeForever: true });
+    expect(mockRaw.mock.calls[0][1][9]).toBe(true);
+    expect(mockRaw.mock.calls[1][1][9]).toBe(false);
   });
 
   test('a caller-supplied dedupe window replaces the default; a bad one falls back', async () => {

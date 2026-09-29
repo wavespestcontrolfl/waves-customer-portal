@@ -13,7 +13,7 @@ vi.mock('../utils/api', async () => {
 });
 vi.mock('../native/platform', () => ({ nativePlatform: () => platform.value }));
 
-import { flushPendingPushOpen, reportPortalHeartbeat, reportPortalPageView, reportPushOpen, resetPortalActivityForTests } from './portalActivity';
+import { reportPortalHeartbeat, reportPortalPageView, reportPushOpen, resetPortalActivityForTests } from './portalActivity';
 
 beforeEach(() => {
   beacon.mockReset();
@@ -110,186 +110,56 @@ describe('push-open beacon', () => {
   });
 });
 
-describe('push-open survives a page navigation', () => {
-  const KEY = 'waves_pending_push_open';
-  const pending = () => JSON.parse(localStorage.getItem(KEY) || 'null');
-
-  it('parks the open in storage and clears it once the server answers', async () => {
-    reportPushOpen({ notificationId: 'n-1' });
-    expect(pending().body.notificationId).toBe('n-1');
-    await flush();
-    expect(pending()).toBeNull();
-  });
-
-  it('keeps it when the beacon fails or is refused, and a flush retries it', async () => {
-    beacon.mockRejectedValueOnce(new Error('page unloaded'));
-    reportPushOpen({ notificationId: 'n-2', category: 'billing' });
-    await flush();
-    expect(pending().body.notificationId).toBe('n-2');
-
-    beacon.mockResolvedValueOnce(null); // non-OK answer (e.g. session refresh lost)
-    flushPendingPushOpen();
-    await flush();
-    expect(pending()).not.toBeNull();
-
-    flushPendingPushOpen();
-    await flush();
-    expect(beacon).toHaveBeenLastCalledWith('/customer/activity/push-open', expect.objectContaining({ notificationId: 'n-2', category: 'billing' }));
-    expect(pending()).toBeNull();
-  });
-
-  it('never replays a pending open under a different sign-in', async () => {
-    beacon.mockRejectedValueOnce(new Error('page unloaded'));
-    reportPushOpen({ notificationId: 'n-a' });
-    await flush();
-    expect(pending().session).toBe('fam-a');
-
-    // Customer A signs out, customer B signs in on the same device.
-    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-b', sessionId: 'fam-b' }));
-    flushPendingPushOpen();
-    await flush();
-    expect(beacon).toHaveBeenCalledTimes(1);
-    expect(pending()).toBeNull();
-  });
-
-  it('an older open finishing late does not delete a newer parked open', async () => {
-    let releaseFirst;
-    beacon.mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = () => resolve({ ok: true, enabled: true }); }));
-    beacon.mockResolvedValueOnce(null); // the new open's own beacon is not answered -> stays parked
-    reportPushOpen({ notificationId: 'n-old' });
-    reportPushOpen({ notificationId: 'n-new' }); // parked over the old one
-    releaseFirst();
-    await flush();
-    expect(pending().body.notificationId).toBe('n-new');
-  });
-
-  it('a request clears the parked entry when it is still its own', async () => {
-    reportPushOpen({ notificationId: 'n-own' });
-    const id = pending().id;
-    expect(typeof id).toBe('string');
-    await flush();
-    expect(pending()).toBeNull();
-  });
-
-  it('keeps a pending open across token rotation and a same-account profile switch', async () => {
-    beacon.mockRejectedValueOnce(new Error('page unloaded'));
-    reportPushOpen({ notificationId: 'n-r' });
-    await flush();
-    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-a2', sessionId: 'fam-a' }));
-    flushPendingPushOpen();
-    await flush();
-    expect(beacon).toHaveBeenLastCalledWith('/customer/activity/push-open', expect.objectContaining({ notificationId: 'n-r' }));
-  });
-
-  it('sends but does not park an open when nobody is signed in', async () => {
-    localStorage.removeItem('waves_token');
-    reportPushOpen({ notificationId: 'n-x' });
-    expect(pending()).toBeNull();
-    await flush();
-    expect(beacon).toHaveBeenCalledTimes(1);
-  });
-
-  it('drops a stale pending open instead of sending it', async () => {
-    localStorage.setItem(KEY, JSON.stringify({ body: { platform: 'ios', notificationId: 'old' }, session: 'fam-a', at: Date.now() - 25 * 60 * 60 * 1000 }));
-    flushPendingPushOpen();
-    await flush();
-    expect(beacon).not.toHaveBeenCalled();
-    expect(pending()).toBeNull();
-  });
-
-  it('a flush with nothing pending, or garbage in storage, is a no-op', async () => {
-    flushPendingPushOpen();
-    localStorage.setItem(KEY, '{not json');
-    flushPendingPushOpen();
-    await flush();
-    expect(beacon).not.toHaveBeenCalled();
-  });
-
-  it('a dark gate clears the parked open on the first answer and blocks later ones', async () => {
-    beacon.mockResolvedValue({ ok: true, enabled: false });
-    reportPushOpen({ notificationId: 'n-3' });
-    await flush();
-    expect(pending()).toBeNull();
-    reportPushOpen({ notificationId: 'n-4' });
-    expect(pending()).toBeNull();
-    expect(beacon).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('per-tap id', () => {
-  const pending = () => JSON.parse(localStorage.getItem('waves_pending_push_open') || 'null');
-
-  it('each tap gets its own id; a retry of the same tap reuses it', async () => {
-    beacon.mockRejectedValueOnce(new Error('page unloaded'));
-    reportPushOpen({ tag: 'push-routed:receipt' });
-    await flush();
-    const first = beacon.mock.calls[0][1].tapId;
-    expect(pending().body.tapId).toBe(first);
-    flushPendingPushOpen(); // the retry
-    await flush();
-    expect(beacon.mock.calls[1][1].tapId).toBe(first);
-    reportPushOpen({ tag: 'push-routed:receipt' }); // a second, separate tap
-    await flush();
-    expect(beacon.mock.calls[2][1].tapId).not.toBe(first);
-  });
-});
-
-describe('push-open for another profile of the account', () => {
-  const KEY = 'waves_pending_push_open';
-  const pending = () => JSON.parse(localStorage.getItem(KEY) || 'null');
+describe('push-open: one fire-and-forget beacon, nothing parked or replayed', () => {
   const tapFor = (target) => ({ notificationId: 'n-t', url: `/?tab=visits&notificationProperty=${target}` });
 
-  it('is only parked when the link targets a different profile: nothing is sent with the wrong token', async () => {
+  it('a tap with no target profile sends exactly one POST and stores nothing', async () => {
+    reportPushOpen({ notificationId: 'n-1', url: '/?tab=billing' });
+    await flush();
+    expect(beacon).toHaveBeenCalledTimes(1);
+    expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', expect.objectContaining({ notificationId: 'n-1' }));
+    expect(localStorage.getItem('waves_pending_push_open')).toBeNull();
+  });
+
+  it('a tap that targets another profile records nothing at all', async () => {
     reportPushOpen(tapFor('cust-b'));
     await flush();
     expect(beacon).not.toHaveBeenCalled();
-    expect(pending().targetCustomerId).toBe('cust-b');
+    expect(localStorage.getItem('waves_pending_push_open')).toBeNull();
   });
 
-  it('is sent once, with the target profile token, after the switch (flush on portal mount)', async () => {
-    reportPushOpen(tapFor('cust-b'));
-    flushPendingPushOpen(); // still profile A: keeps waiting
-    await flush();
-    expect(beacon).not.toHaveBeenCalled();
-    expect(pending()).not.toBeNull();
-
-    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-b', sessionId: 'fam-a' })); // switched, same family
-    flushPendingPushOpen();
-    await flush();
-    expect(beacon).toHaveBeenCalledTimes(1);
-    expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', expect.objectContaining({ notificationId: 'n-t' }));
-    expect(pending()).toBeNull();
-    flushPendingPushOpen(); // a later mount does not send it again
-    await flush();
-    expect(beacon).toHaveBeenCalledTimes(1);
-  });
-
-  it('a tap for the profile already signed in (or a link naming none) sends immediately', async () => {
+  it('a tap that targets the active profile sends exactly one POST', async () => {
     reportPushOpen(tapFor('cust-a'));
-    reportPushOpen({ notificationId: 'n-u', url: '/?tab=billing' });
+    await flush();
+    expect(beacon).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed or refused beacon is not retried or kept (an uncounted open)', async () => {
+    beacon.mockRejectedValueOnce(new Error('page unloaded'));
+    reportPushOpen({ notificationId: 'n-2' });
+    await flush();
+    beacon.mockResolvedValueOnce(null);
+    reportPushOpen({ notificationId: 'n-3' });
     await flush();
     expect(beacon).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem('waves_pending_push_open')).toBeNull();
   });
 
-  it('a targeted open that is stale is dropped even when the session now matches the target', async () => {
-    reportPushOpen(tapFor('cust-b'));
-    const at = pending().at;
-    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-b', sessionId: 'fam-a' })); // manual switch, much later
-    flushPendingPushOpen(at + 3 * 60 * 60_000);
+  it('each tap gets its own tap id', async () => {
+    reportPushOpen({ tag: 'push-routed:receipt' });
+    reportPushOpen({ tag: 'push-routed:receipt' });
     await flush();
-    expect(beacon).not.toHaveBeenCalled();
-    expect(pending()).toBeNull();
+    expect(beacon.mock.calls[0][1].tapId).toMatch(UUID);
+    expect(beacon.mock.calls[1][1].tapId).not.toBe(beacon.mock.calls[0][1].tapId);
   });
 
-  it('a switch that never happens is dropped after ten minutes, never sent', async () => {
-    reportPushOpen(tapFor('cust-b'));
-    const at = pending().at;
-    flushPendingPushOpen(at + 9 * 60_000);
-    expect(pending()).not.toBeNull();
-    flushPendingPushOpen(at + 11 * 60_000);
-    expect(pending()).toBeNull();
+  it('a dark gate answer blocks later opens for the session', async () => {
+    beacon.mockResolvedValueOnce({ enabled: false });
+    reportPushOpen({ notificationId: 'n-4' });
     await flush();
-    expect(beacon).not.toHaveBeenCalled();
+    reportPushOpen({ notificationId: 'n-5' });
+    await flush();
+    expect(beacon).toHaveBeenCalledTimes(1);
   });
 });
 

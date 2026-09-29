@@ -3,15 +3,13 @@ import { cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const report = vi.hoisted(() => vi.fn());
-const flushPending = vi.hoisted(() => vi.fn());
 const heartbeat = vi.hoisted(() => vi.fn());
-vi.mock('../lib/portalActivity', () => ({ reportPortalPageView: report, flushPendingPushOpen: flushPending, reportPortalHeartbeat: heartbeat }));
+vi.mock('../lib/portalActivity', () => ({ reportPortalPageView: report, reportPortalHeartbeat: heartbeat }));
 
 import usePortalActivity from './usePortalActivity';
 
 beforeEach(() => {
   report.mockReset();
-  flushPending.mockReset();
   heartbeat.mockReset();
   vi.useFakeTimers();
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
@@ -107,12 +105,6 @@ it('does nothing without a route', () => {
   renderHook(() => usePortalActivity(null));
   vi.advanceTimersByTime(2000);
   expect(report).not.toHaveBeenCalled();
-});
-
-it('retries a push open that never got an answer, once per mount', () => {
-  const { rerender } = renderHook(({ tab }) => usePortalActivity(tab), { initialProps: { tab: 'dashboard' } });
-  rerender({ tab: 'visits' });
-  expect(flushPending).toHaveBeenCalledTimes(1);
 });
 
 const MIN = 60 * 1000;

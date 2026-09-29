@@ -23,6 +23,9 @@
  *     The check lives in SQL (INSERT ... WHERE NOT EXISTS) so it holds across
  *     pods and deploys; two simultaneous first loads can both pass it (no
  *     unique constraint) — an accepted, rare double count.
+ *   - `dedupeForever: true` (with a subjectId) drops the ip, time and
+ *     subject_type conditions: page + subject + customer is unique for good. For subjects
+ *     that are a stable id for one event (a push-open tap id).
  *
  * ip_hash is sha256 of the client IP, hex — identical to short_code_clicks.
  */
@@ -103,7 +106,7 @@ function logViewFailure(what, page, subjectType, err) {
  * skipped or failed). Callers should NOT await it on the response path.
  */
 function recordPageView({
-  req, page, customerId = null, subjectType = null, subjectId = null, dedupeMinutes = DEDUPE_MINUTES,
+  req, page, customerId = null, subjectType = null, subjectId = null, dedupeMinutes = DEDUPE_MINUTES, dedupeForever = false,
 } = {}) {
   try {
     if (!req || !page) return Promise.resolve(false);
@@ -115,6 +118,10 @@ function recordPageView({
     const subjId = subjectId == null ? null : String(subjectId);
     const custId = customerId || null;
     const windowMinutes = Number.isInteger(dedupeMinutes) && dedupeMinutes > 0 ? dedupeMinutes : DEDUPE_MINUTES;
+    // dedupeForever: the subject_id is a stable id for ONE event (a push tap),
+    // so the same page + customer + subject is never written twice, whatever
+    // the ip or how much later a duplicate arrives. Needs a subject id.
+    const forever = dedupeForever === true && subjId != null;
 
     return Promise.resolve(db.raw(
       `INSERT INTO customer_page_views (customer_id, page, subject_type, subject_id, ip_hash, user_agent)
@@ -122,13 +129,15 @@ function recordPageView({
        WHERE NOT EXISTS (
          SELECT 1 FROM customer_page_views
          WHERE page = ?::text
-           AND subject_type IS NOT DISTINCT FROM ?::text
            AND subject_id IS NOT DISTINCT FROM ?::text
-           AND ip_hash IS NOT DISTINCT FROM ?::text
            AND customer_id IS NOT DISTINCT FROM ?::uuid
-           AND viewed_at > now() - (?::int * interval '1 minute')
+           AND (?::boolean OR (
+             subject_type IS NOT DISTINCT FROM ?::text
+             AND ip_hash IS NOT DISTINCT FROM ?::text
+             AND viewed_at > now() - (?::int * interval '1 minute')
+           ))
        )`,
-      [custId, page, subjType, subjId, ipHash, ua, page, subjType, subjId, ipHash, custId, windowMinutes],
+      [custId, page, subjType, subjId, ipHash, ua, page, subjId, custId, forever, subjType, ipHash, windowMinutes],
     )).then((res) => !!(res && (res.rowCount === undefined || res.rowCount > 0)))
       .catch((err) => {
         logViewFailure('insert', page, subjType, err);

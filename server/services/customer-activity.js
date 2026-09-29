@@ -27,10 +27,11 @@
  *                 when the push carried a bell notification id (the
  *                 notifyCustomer path sends notificationId), else
  *                 'tap:<uuid>' — a per-tap id the client generates when the
- *                 tap happens and reuses on every retry of that tap, so a
- *                 retry dedupes but two genuine opens of the same push type do
- *                 not collapse (routed-SMS pushes have no stable id at send
- *                 time: push-channel-routing's sendPush writes its sms_log row
+ *                 tap happens. Both id forms dedupe forever per customer (no
+ *                 ip or time window), so a duplicate delivery collapses but
+ *                 two genuine opens of the same push type do not collapse
+ *                 (routed-SMS pushes have no stable id at send time:
+ *                 push-channel-routing's sendPush writes its sms_log row
  *                 after delivery). 'type:<name>' (routed tag / category) is
  *                 only the fallback for an older client that sends no tap id.
  *
@@ -121,14 +122,21 @@ function pushSubjectId({ notificationId, tapId, tag, category } = {}) {
   return null;
 }
 
-/** Record one app open from a push notification. */
+/**
+ * Record one app open from a push notification. A stable id (bell
+ * 'notification:<uuid>' or per-tap 'tap:<uuid>') dedupes forever for that
+ * customer, regardless of ip or how much later a duplicate arrives; only the
+ * legacy 'type:<name>' fallback keeps the recorder's normal ip + window dedupe.
+ */
 function recordPushOpen(req, { customerId, platform, notificationId, tapId, tag, category }) {
+  const subjectId = pushSubjectId({ notificationId, tapId, tag, category });
   return recordPageView({
     req,
     page: 'push:open',
     customerId,
     subjectType: sanitizePlatform(platform),
-    subjectId: pushSubjectId({ notificationId, tapId, tag, category }),
+    subjectId,
+    dedupeForever: typeof subjectId === 'string' && /^(notification|tap):/.test(subjectId),
   });
 }
 

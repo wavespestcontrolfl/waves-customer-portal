@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { flushPendingPushOpen, reportPortalHeartbeat, reportPortalPageView } from '../lib/portalActivity';
+import { reportPortalHeartbeat, reportPortalPageView } from '../lib/portalActivity';
 
 const DEBOUNCE_MS = 800;
 // Foreground heartbeat: every minute, if the page is visible and the customer
@@ -22,8 +22,6 @@ const INTERACTION_EVENTS = ['pointerdown', 'keydown', 'scroll', 'touchstart'];
  * customer has interacted recently.
  */
 export default function usePortalActivity(route) {
-  // A push open whose beacon was cut off by the tap's page navigation.
-  useEffect(() => { flushPendingPushOpen(); }, []);
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     let lastInteraction = Date.now(); // the portal just mounted for a customer

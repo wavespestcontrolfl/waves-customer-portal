@@ -108,4 +108,32 @@ const settle = () => new Promise((r) => setTimeout(r, 200));
     const rows = await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c }).select('subject_id');
     expect(rows.map((r) => r.subject_id).sort()).toEqual([`tap:${t1}`, `tap:${t2}`].sort());
   });
+
+  test('a tap id dedupes forever: same id from another IP more than 10 minutes later is still one row', async () => {
+    const c = randomUUID();
+    await mockPg('customers').insert({ id: c, first_name: 'G' });
+    const otherIpReq = { ...HUMAN_REQ, ip: '198.51.100.77' };
+    const tapId = randomUUID();
+    const notificationId = randomUUID();
+    const open = (req, ids) => recordPushOpen(req, { customerId: c, platform: 'ios', ...ids });
+    expect(await open(HUMAN_REQ, { tapId })).toBe(true);
+    expect(await open(HUMAN_REQ, { notificationId })).toBe(true);
+    await mockPg('customer_page_views').where({ customer_id: c }).update({ viewed_at: mockPg.raw("now() - interval '3 hours'") });
+    expect(await open(otherIpReq, { tapId })).toBe(false);
+    expect(await open(otherIpReq, { notificationId })).toBe(false);
+    const rows = await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c }).select('subject_id');
+    expect(rows.map((r) => r.subject_id).sort()).toEqual([`notification:${notificationId}`, `tap:${tapId}`].sort());
+    // a different tap id from the other IP still counts
+    expect(await open(otherIpReq, { tapId: randomUUID() })).toBe(true);
+  });
+
+  test('the legacy type fallback still dedupes by ip + window only', async () => {
+    const c = randomUUID();
+    await mockPg('customers').insert({ id: c, first_name: 'H' });
+    const otherIpReq = { ...HUMAN_REQ, ip: '198.51.100.78' };
+    const open = (req) => recordPushOpen(req, { customerId: c, platform: 'ios', tag: 'push-routed:receipt' });
+    expect(await open(HUMAN_REQ)).toBe(true);
+    expect(await open(otherIpReq)).toBe(true);
+    expect(await open(HUMAN_REQ)).toBe(false);
+  });
 });

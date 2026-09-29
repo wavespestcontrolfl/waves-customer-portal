@@ -304,6 +304,15 @@ describe('POST /api/customer/activity/push-open', () => {
     await call('POST', '/api/customer/activity/push-open', { body: body(TAP_B) });
     await tick();
     expect(inserts().map((c) => c[1][3])).toEqual([`tap:${TAP_A}`, `tap:${TAP_A}`, `tap:${TAP_B}`]);
+    // stable ids dedupe forever (ip/time bypass flag = true); the type fallback keeps the window
+    expect(inserts().map((c) => c[1][9])).toEqual([true, true, true]);
+  });
+
+  test('the legacy type fallback keeps the normal ip + window dedupe', async () => {
+    await call('POST', '/api/customer/activity/push-open', { body: { platform: 'ios', tag: 'push-routed:receipt' } });
+    await tick();
+    expect(inserts()[0][1][3]).toBe('type:receipt');
+    expect(inserts()[0][1][9]).toBe(false);
   });
 
   test('a bell notification id still wins over the tap id; a malformed tap id falls back to type', async () => {
