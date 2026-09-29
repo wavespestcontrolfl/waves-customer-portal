@@ -320,6 +320,9 @@ describe('resolveStopCoords', () => {
 
 describe('selfServeArrivalGraceMinutes (SELF_SERVE_ARRIVAL_GRACE_MINUTES, A1)', () => {
   const { etDateString } = require('../utils/datetime-et');
+  // GATE_SLOT_TRAVEL_GAP on for every test in this block except the
+  // dedicated "gate off" test below, which explicitly unsets it.
+  beforeEach(gateOn);
 
   test('unset/blank/garbage/negative -> 0; a clean value passes through', () => {
     expect(selfServeArrivalGraceMinutes()).toBe(0);
@@ -375,6 +378,25 @@ describe('selfServeArrivalGraceMinutes (SELF_SERVE_ARRIVAL_GRACE_MINUTES, A1)', 
     expect(selfServeArrivalGraceMinutes()).toBe(60);
     delete process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
     expect(selfServeArrivalGraceMinutes()).toBe(0);
+  });
+
+  // Codex round 1 on #5310: with the gate off, the commit-side probes fall
+  // back to plain overlap SQL (no concept of "arrival" at all), so grace
+  // can never be enforced there — an offer must not promise lateness the
+  // commit gate can't check for. Forced to 0 regardless of the configured
+  // value, the date, or whether it would otherwise have been clamped/warned.
+  test('GATE_SLOT_TRAVEL_GAP off forces grace to 0 regardless of the configured value or date', () => {
+    delete process.env.GATE_SLOT_TRAVEL_GAP;
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
+    expect(selfServeArrivalGraceMinutes()).toBe(0);
+    expect(selfServeArrivalGraceMinutes({ date: '2099-01-01' })).toBe(0);
+    expect(selfServeArrivalGraceMinutes({ date: etDateString() })).toBe(0);
+    // Explicitly off (not just unset) behaves the same.
+    process.env.GATE_SLOT_TRAVEL_GAP = 'false';
+    expect(selfServeArrivalGraceMinutes()).toBe(0);
+    // Flipping the gate back on (read at call time, no caching) restores it.
+    gateOn();
+    expect(selfServeArrivalGraceMinutes({ date: '2099-01-01' })).toBe(90);
   });
 });
 

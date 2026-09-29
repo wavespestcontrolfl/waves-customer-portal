@@ -157,6 +157,14 @@ function customerFacingBufferMinutes() {
 // every read of the same one.
 let lastWarnedRawGrace;
 function selfServeArrivalGraceMinutes({ date } = {}) {
+  // GATE_SLOT_TRAVEL_GAP off (Codex round 1 on #5310): the commit-side
+  // probes fall back to the plain overlap SQL (findConflictingVisits'
+  // travel branch never runs — see its own header), which has no concept
+  // of "arrival" at all and so cannot enforce a grace bound. An offer built
+  // with grace > 0 while the gate is off would promise lateness the commit
+  // gate can't actually check for. One reader, so every offer and commit
+  // site agrees without each having to remember this precondition itself.
+  if (!travelGapEnabled()) return 0;
   const raw = process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
   if (raw == null || String(raw).trim() === '') return 0;
   const n = Number(raw);

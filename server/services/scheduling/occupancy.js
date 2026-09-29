@@ -432,7 +432,7 @@ const CONFLICT_COLUMNS = [
  *                                          reservation_expires_at) from the
  *                                          result; default true — holds
  *                                          occupy real route time.
- * @param {{lat:number|null,lng:number|null,graceMinutes?:number,technicianId?:string}} [args.travel]
+ * @param {{lat:number|null,lng:number|null,graceMinutes?:number}} [args.travel]
  *                                          The NEW stop's pin. When given AND
  *                                          GATE_SLOT_TRAVEL_GAP is on, a row
  *                                          also conflicts when the free time
@@ -447,12 +447,8 @@ const CONFLICT_COLUMNS = [
  *                                          owner ruling 2026-09-28) rides
  *                                          straight onto the travel-gap
  *                                          candidate — 0/omitted is
- *                                          byte-identical. `technicianId`
- *                                          scopes a GRACED check to that
- *                                          technician's own rows + unassigned
- *                                          (multi-tech parity, see
- *                                          findConflictingVisitsWithTravel);
- *                                          ignored at grace 0 or when omitted.
+ *                                          byte-identical. Tech-blind either
+ *                                          way (see findConflictingVisitsWithTravel).
  * @returns {Promise<Array>} overlapping rows (chronological), [] if none.
  */
 async function findConflictingVisits({
@@ -700,19 +696,22 @@ function stopCreditResolver(rows) {
  * stamped straight onto the candidate travelGapConflicts reads — omitted or
  * 0 (every caller before this lane) is byte-identical.
  *
- * Multi-tech parity (`travel.technicianId`, owner ruling 2026-09-28): a
- * GRACED candidate (graceMinutes > 0) with a known assigned technician is
- * measured only against that technician's OWN rows plus unassigned ones
- * (which could still become this technician's) — never every technician's
- * rows chained as one fictitious route. This module is deliberately
- * tech-blind for plain overlap (see header — one active technician, so any
- * overlap is a real clash); grace changes that assumption for a second
- * technician, because the PROJECTION this file's caller (travel-gap.js)
- * now runs would otherwise chain an unrelated technician's stops into this
- * candidate's own lateness math — an offer computed per-technician
- * (find-time.js's findCapacitySlots) and a commit computed across every
- * technician's combined day would disagree. Grace 0, or no `technicianId`
- * given, keeps the full tech-blind row set — byte-identical to before.
+ * Tech-blind on purpose, grace included (Codex round 1 on #5310): an
+ * earlier version of this lane scoped a GRACED candidate to its own
+ * assigned technician's rows + unassigned ones, but the OFFER-side mirrors
+ * this probe backstops (routes/booking.js addCandidate's legacy-mode
+ * dayOccupied, estimate-slot-availability.js's committed-overlap set,
+ * rebooker.js's series `seriesTravel`) stayed tech-blind, so a graced
+ * commit could accept a slot a tech-blind offer mirror would have hidden as
+ * occupied — an offer/commit DISAGREEMENT in the opposite direction from
+ * the one this predicate exists to prevent. Reverted: every row on the date
+ * counts regardless of technician_id, exactly like the plain-overlap path
+ * above and every caller before this lane, with or without grace. This is
+ * conservative for a second technician (it can only make capacity look
+ * FULLER than it is — hiding a graced slot, never double-booking one), and
+ * matches the header's existing tech-blind rule for overlap. Proper
+ * per-technician scoping needs the offer mirrors AND this probe changed
+ * together in one lane — tracked as a follow-up, not part of this PR.
  */
 // The date's occupying rows for the travel-gap probe — same status/hold/
 // exclusion conventions as every other gate. Pulled out of
@@ -803,12 +802,8 @@ async function findConflictingVisitsWithTravel({
   if (!Array.isArray(rows)) return [];
 
   const stops = buildTravelGapStops(rows);
-  // Multi-tech parity (see header): a graced candidate with a known
-  // technician is measured only against ITS route + unassigned rows.
-  const travelStops = graceMinutes > 0 && travel?.technicianId
-    ? stops.filter((stop) => stop.row.technician_id == null || String(stop.row.technician_id) === String(travel.technicianId))
-    : stops;
-  const reasonByRow = new Map(travelGapConflicts(candidate, travelStops).map(({ stop, reason }) => [stop.row.id, reason]));
+  // Tech-blind (see header) — every row on the date counts, grace or not.
+  const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row.id, reason]));
   // Query order (window_start asc), not conflict order.
   return rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
 }

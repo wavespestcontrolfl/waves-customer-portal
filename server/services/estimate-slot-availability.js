@@ -1565,11 +1565,6 @@ async function filterCollidingSlots(slots, {
       lat: row.lat ?? null,
       lng: row.lng ?? null,
       hold: row.reservation_expires_at != null && row.customer_id == null,
-      // Multi-tech parity (owner ruling 2026-09-28): the assigned technician
-      // of THIS row, so a graced candidate's travel-gap check can be scoped
-      // to its own assigned tech's route instead of every tech's combined
-      // rows — see the technician filter below.
-      technician_id: row.technician_id ?? null,
       // Expected-minutes padding credit for THIS row (owner ruling
       // 2026-09-23) — only resolved when the travel-gap check runs; no
       // service_key_snapshot/service_type match falls back to the window
@@ -1624,16 +1619,12 @@ async function filterCollidingSlots(slots, {
     // Same-day strict (decision 2) — this is the one place this slot's own
     // date resolves its grace; every date at/before today gets 0.
     const grace = arrivalGraceMinutes > 0 && s.date !== etDateString() ? arrivalGraceMinutes : 0;
-    // Multi-tech parity (owner ruling 2026-09-28): a graced candidate's
-    // travel-gap check is scoped to its OWN assigned technician's rows (plus
-    // unassigned, which could still become this tech's) rather than every
-    // tech's rows chained as one fictitious route — exactly what the
-    // per-tech offer generator (find-time.js) already assumed. Grace 0 (or
-    // no assigned tech yet) keeps the full tech-blind list, byte-identical
-    // to before this lane.
-    const travelNeighbours = grace > 0 && s.techId
-      ? (allByDate.get(s.date) || []).filter((b) => b.technician_id == null || String(b.technician_id) === String(s.techId))
-      : (allByDate.get(s.date) || []);
+    // Tech-blind, grace included (Codex round 1 on #5310): an earlier
+    // version scoped a graced candidate's travel-gap check to its own
+    // assigned technician's rows, but the overlap check two lines above
+    // (`committed`) stayed tech-blind — that disagreement, and the matching
+    // one in occupancy.js's commit-side probe, is reverted together. Every
+    // live row that day counts, grace or not, same as `committed` above.
     return !violatesTravelGap(
       {
         startMin: slotStart, endMin: slotEnd, ...candidatePin,
@@ -1643,7 +1634,7 @@ async function filterCollidingSlots(slots, {
           : candidateWindow,
         graceMinutes: grace,
       },
-      travelNeighbours,
+      allByDate.get(s.date) || [],
     );
   });
 }

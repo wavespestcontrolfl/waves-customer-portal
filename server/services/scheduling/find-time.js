@@ -25,7 +25,7 @@ const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes } =
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 const {
   travelGapEnabled, violatesTravelGap, travelGapViolation, annotateProjectedArrivals,
-  effectiveEndMinutes, requiredGapMinutes,
+  effectiveEndMinutes, requiredGapMinutes, paddingMinutesOf,
 } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
@@ -353,11 +353,17 @@ function capacityGapNeighbours(context, fit, startMin) {
 // A capacityGapNeighbours neighbour (occupiedRows' allocation-expanded
 // startMin/endMin, plus stopCreditResolver's summed expectedMinutes — Codex
 // r8 P1) reshaped into the {startMin, endMin, lat, lng, windowMinutes,
-// expectedMinutes} entity travel-gap.js's violatesTravelGap reads. Mirrors
-// buildDayStops' Codex r7 P1 fix so capacity and legacy paths share one
-// neighbour representation; expectedMinutes falls back to the full window
-// (no credit) only for a malformed row missing the resolver's attached
-// value, which production never produces.
+// expectedMinutes, hold} entity travel-gap.js's violatesTravelGap reads.
+// Mirrors buildDayStops' Codex r7 P1 fix so capacity and legacy paths share
+// one neighbour representation; expectedMinutes falls back to the full
+// window (no credit) only for a malformed row missing the resolver's
+// attached value, which production never produces. `hold` (A6, owner
+// ruling 2026-09-28) carries the row's live-estimate-hold identity through
+// — `row` (from arrival-route.js's context.rows, spread by
+// capacityGapNeighbours) already selects customer_id/reservation_expires_at,
+// but this reshape used to drop both, so a live hold neighbour read back as
+// an ordinary committed stop and a graced candidate could consume grace
+// against it (violating "whoever holds a window first keeps it").
 function capacityNeighbourEntity(row) {
   if (!row || !Number.isFinite(row.startMin) || !Number.isFinite(row.endMin)) return null;
   const windowMinutes = Math.max(0, row.endMin - row.startMin);
@@ -365,6 +371,7 @@ function capacityNeighbourEntity(row) {
     startMin: row.startMin, endMin: row.endMin,
     lat: row.lat ?? null, lng: row.lng ?? null, windowMinutes,
     expectedMinutes: Number.isFinite(row.expectedMinutes) ? row.expectedMinutes : windowMinutes,
+    hold: row.reservation_expires_at != null && row.customer_id == null,
   };
 }
 
@@ -712,6 +719,26 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
   if (!nextIsStop && grace > 0) {
     const arrivalFloorForThisGap = prevIsStop ? prevArrivalFloor : hqStartArrivalFloor;
     if (arrivalFloorForThisGap + durationMinutes + driveOut > next.startMin) latestStartFloor = -Infinity;
+  }
+  // Leading-gap sentinel (prev=HQ_START, next=a REAL stop; Codex round 1 on
+  // #5310): packedBounds above was called with `prev: null` (prevIsStop is
+  // false), so its OWN sentinel never runs for this gap — `latestFromNextStop`
+  // is the ordinary "candidate as early side of next" bound, computed purely
+  // from the candidate's own credited work, with no idea the OFFERED start
+  // may sit up to `grace` minutes before the tech can genuinely leave HQ.
+  // Without this, a graced-early leading-gap start could let the candidate's
+  // real (late) HQ arrival run the job past next's promised start — exactly
+  // the "never make an existing stop late" rule (decision 5) this file must
+  // never violate, on the one gap shape packedBounds itself can't see.
+  // Mirrors packedBounds' own formula: ownExpected/nextBuffer against the
+  // REAL (un-graced) HQ arrival floor, not the offered start.
+  if (!prevIsStop && nextIsStop && grace > 0) {
+    const ownExpectedForGap = Number.isFinite(candidateExpectedMinutes)
+      ? Math.min(candidateExpectedMinutes, durationMinutes) : durationMinutes;
+    const nextBufferForGap = Math.max(
+      0, stopBuffer - paddingMinutesOf({ startMin: 0, endMin: durationMinutes, expectedMinutes: ownExpectedForGap }),
+    );
+    if (hqStartArrivalFloor + ownExpectedForGap + driveOut + nextBufferForGap > next.startMin) latestStartFloor = -Infinity;
   }
 
   // A coordless anchor (ungeocoded stop, or a divergent stamped rental

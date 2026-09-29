@@ -839,15 +839,25 @@ projected chain of that day's real stops (`annotateProjectedArrivals`), not
 each stop's stored, never-adjusted end, so lateness cannot silently stack
 past the 2-hour promise. The AI assistant / lead-response booking engine
 (`services/availability.js`'s `check_availability` tool) is explicitly
-EXCLUDED — offer and commit there stay strict together. With a second
-active technician, a graced candidate's commit check is scoped to its own
-ASSIGNED technician's rows (+ unassigned) rather than every technician's
-rows chained as one route (`travel.technicianId` on the shared
-`findConflictingVisits`/`travelGapConflicts` probe) — voice, staff, the
-rebooker's non-customer callers, and the optimizer are unaffected; they
-never set `graceMinutes` and stay byte-identical. Unsetting the env (or `0`)
-is the kill switch; a live graced hold fails at accept with a clear re-pick
-when it lands mid-flip.
+EXCLUDED — offer and commit there stay strict together. Grace is forced to
+`0` whenever `GATE_SLOT_TRAVEL_GAP` is off (the commit-side probes fall
+back to plain overlap SQL with no concept of "arrival," so a grace bound
+could never actually be enforced there). Tech-blind with a second active
+technician (owner decision 2026-09-28): every technician's rows on the date
+count for the graced commit check, same as the plain-overlap path always
+has — an earlier version of this lane scoped the check to the candidate's
+own assigned technician's rows, but Codex round 1 on #5310 found the
+offer-side mirrors this predicate backstops (`routes/booking.js`
+`addCandidate`'s legacy-mode occupancy set, this file's own committed-
+overlap set, `rebooker.js`'s series travel pin) stayed tech-blind, so a
+scoped commit could accept a slot a tech-blind offer mirror had hidden as
+occupied. Reverted: conservative for a second technician (it can only hide
+a graced slot, never double-book one); proper per-technician scoping needs
+the offer mirrors and the commit probe changed together in one lane, a
+tracked follow-up. Voice, staff, the rebooker's non-customer callers, and
+the optimizer are unaffected; they never set `graceMinutes` and stay
+byte-identical. Unsetting the env (or `0`) is the kill switch; a live
+graced hold fails at accept with a clear re-pick when it lands mid-flip.
 Self-serve notice window (owner ruling 2026-09-23,
 `scheduling/self-serve-notice.js`, `SELF_SERVE_NOTICE_HOURS`, default 24 h):
 every SELF-SERVE offer and commit surface — the estimate slot picker and its

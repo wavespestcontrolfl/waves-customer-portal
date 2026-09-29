@@ -30,9 +30,9 @@ const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = r
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
 
-// Arrival grace (A1, owner ruling 2026-09-28): stamps `graceMinutes` (and,
-// when known, the moving row's own assigned `technicianId` — multi-tech
-// parity) onto a resolveStopCoords() `travel` pin. `travel` undefined
+// Arrival grace (A1, owner ruling 2026-09-28): stamps `graceMinutes` onto a
+// resolveStopCoords() `travel` pin. Tech-blind, same as every other travel
+// probe (occupancy.js findConflictingVisitsWithTravel). `travel` undefined
 // (options.travelGap !== true, the legacy overlap-only probe) or
 // `graceMinutes` 0/omitted (every caller before this lane; staff/SMS/voice
 // moves never set options.arrivalGraceMinutes at all) passes `travel`
@@ -40,11 +40,11 @@ const { resolveStopCoords } = require('./scheduling/travel-gap');
 // pin from its anchor row and reuses it for every sibling probe
 // (`seriesTravel`); grace is stamped once here for the same reason — every
 // occurrence in one sweep shares the anchor's grace, not its own date's.
-function withArrivalGrace(travel, graceMinutes, technicianId) {
+function withArrivalGrace(travel, graceMinutes) {
   if (!travel) return travel;
   const grace = Math.max(0, Number(graceMinutes) || 0);
   if (grace <= 0) return travel;
-  return { ...travel, graceMinutes: grace, technicianId: technicianId || null };
+  return { ...travel, graceMinutes: grace };
 }
 const { arrivalWindowRoutingEnabled, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { guardedCoordSelects, preloadServiceLocations } = require('./scheduling/day-stops');
@@ -1157,7 +1157,7 @@ class SmartRebooker {
     };
     const travel = withArrivalGrace(
       options.travelGap === true ? await resolveStopCoords(conn, serviceId) : undefined,
-      options.arrivalGraceMinutes, technicianId,
+      options.arrivalGraceMinutes,
     );
     const { snapshot } = await probeMoveConflicts({
       conn,
@@ -1684,7 +1684,7 @@ class SmartRebooker {
         // keeping Preview and Apply on one policy.
         const travel = withArrivalGrace(
           options.travelGap === true ? await resolveStopCoords(trx, serviceId) : undefined,
-          options.arrivalGraceMinutes, keptTechId,
+          options.arrivalGraceMinutes,
         );
         const { rows: occupancyClash, snapshot } = await probeMoveConflicts({
           conn: trx,
@@ -2453,7 +2453,7 @@ class SmartRebooker {
       // the legacy overlap probe, no coordinate read.
       const seriesTravel = withArrivalGrace(
         options.travelGap === true ? await resolveStopCoords(trx, serviceId) : undefined,
-        options.arrivalGraceMinutes, service.technician_id,
+        options.arrivalGraceMinutes,
       );
 
       // Same-series same-DATE collisions are hard-blocked regardless of
@@ -3668,7 +3668,7 @@ class SmartRebooker {
       && arrivalWindowRoutingEnabled()) await preloadServiceLocations(conn, sweptIds);
     const seriesTravel = withArrivalGrace(
       options.travelGap === true ? await resolveStopCoords(conn, serviceId) : undefined,
-      options.arrivalGraceMinutes, service.technician_id,
+      options.arrivalGraceMinutes,
     );
     for (let i = 0; i < swept.length; i++) {
       const row = swept[i];

@@ -1221,11 +1221,9 @@ async function reserveSlot({
             expectedMinutes: candidateExpectedMinutes
               ?? await candidateExpectedMinutesFromRow(trx, sameSlotHold, effectiveDurationMinutes),
             // Arrival grace (A1, owner ruling 2026-09-28) — the estimate
-            // picker is always self-serve; `technicianId` (multi-tech
-            // parity) is this hold's own assigned tech, same identity the
-            // sameSlotHold match above already pinned it to.
+            // picker is always self-serve. Tech-blind, same as every other
+            // travel probe (occupancy.js findConflictingVisitsWithTravel).
             graceMinutes: selfServeArrivalGraceMinutes({ date }),
-            technicianId: techId || null,
           },
         });
         if (refreshClash.length) {
@@ -1378,13 +1376,12 @@ async function reserveSlot({
         // above; null → buffer-only, never a skipped check. Same
         // expected-minutes credit find-time/filterCollidingSlots resolved
         // when this window was offered (owner ruling 2026-09-23). Arrival
-        // grace (A1) + multi-tech parity (`technicianId`) — same as the
-        // refresh leg above.
+        // grace (A1) — same as the refresh leg above. Tech-blind, same as
+        // every other travel probe.
         travel: {
           ...(holdPin || { lat: null, lng: null }),
           expectedMinutes: candidateExpectedMinutes,
           graceMinutes: selfServeArrivalGraceMinutes({ date }),
-          technicianId: techId || null,
         },
       });
       if (committedClash.length) {
@@ -1911,10 +1908,9 @@ async function commitReservation({
           lat: row.lat ?? null, lng: row.lng ?? null,
           expectedMinutes: (await candidateExpectedMinutesFromProfile(client, serviceProfile, probeWindowMinutes))
             ?? (await candidateExpectedMinutesFromRow(client, row, probeWindowMinutes)),
-          // Arrival grace (A1) + multi-tech parity (`technicianId`, owner
-          // ruling 2026-09-28) — this hold row's own assigned tech.
+          // Arrival grace (A1, owner ruling 2026-09-28). Tech-blind, same as
+          // every other travel probe.
           graceMinutes: selfServeArrivalGraceMinutes({ date: scheduledDate }),
-          technicianId: row.technician_id || null,
         },
       });
       // Capacity mode keeps its own visit check (verifyArrivalCapacity,
@@ -2500,13 +2496,12 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       includeHolds: alreadyLapsed,
       // Same expected-minutes credit find-time/filterCollidingSlots
       // resolved when this window was offered (owner ruling 2026-09-23).
-      // Arrival grace (A1) + multi-tech parity (`technicianId`, owner
-      // ruling 2026-09-28) — this hold row's own assigned tech.
+      // Arrival grace (A1, owner ruling 2026-09-28). Tech-blind, same as
+      // every other travel probe.
       travel: {
         lat: row.lat ?? null, lng: row.lng ?? null,
         expectedMinutes: await candidateExpectedMinutesFromRow(trx, row, extendWindowMinutes),
         graceMinutes: selfServeArrivalGraceMinutes({ date: scheduledDate }),
-        technicianId: row.technician_id || null,
       },
     });
     if (clash.length) {

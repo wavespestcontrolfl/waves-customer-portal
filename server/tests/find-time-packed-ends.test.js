@@ -481,6 +481,39 @@ describe('packCapacityEnds — capacity results keep only the packed ends per ga
         .map((s) => s.start_time);
       expect(kept).toEqual(['11:25']);
     });
+
+    // Codex round 1 on #5310: capacityNeighbourEntity used to drop a row's
+    // customer_id/reservation_expires_at entirely, so a live estimate hold
+    // neighbour read back indistinguishable from an ordinary committed stop
+    // and a graced candidate could consume grace against it — violating A6
+    // ("whoever holds a window first keeps it," never graced away).
+    test('a capacity gap bordered by a LIVE HOLD gets no grace at all (A6), even though the identical committed stop would', () => {
+      const cap = (prevRow, start, endTime) => ({
+        date: '2026-10-01', technician: { id: 't1' }, start_time: start, end_time: endTime,
+        arrival_delay_minutes: 0, route_arrivals: [],
+        _gap: { prevId: 's1', nextId: null, prevRow },
+      });
+      // Coordless (buffer-only, required 25 with SLOT_TRAVEL_BUFFER_MINUTES
+      // set to 25 by the outer beforeEach); candidate touches prev's raw end
+      // exactly (0 free minutes) -> 25 minutes late, well within a 90-minute
+      // grace IF this neighbour were graceable.
+      const holdRow = {
+        startMin: 600, endMin: 660, lat: null, lng: null, expectedMinutes: 60,
+        customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z',
+      };
+      const heldGap = packCapacityEnds([cap(holdRow, '11:00', '11:30')], {
+        lat: null, lng: null, durationMinutes: 30, graceMinutes: 90, today: '2099-01-01',
+      });
+      expect(heldGap).toEqual([]); // A6: no grace for a live hold neighbour.
+
+      // The IDENTICAL row, but committed (no hold columns) — grace 90
+      // clears its 25-minute lateness normally.
+      const committedRow = { startMin: 600, endMin: 660, lat: null, lng: null, expectedMinutes: 60 };
+      const committedGap = packCapacityEnds([cap(committedRow, '11:00', '11:30')], {
+        lat: null, lng: null, durationMinutes: 30, graceMinutes: 90, today: '2099-01-01',
+      }).map((s) => s.start_time);
+      expect(committedGap).toEqual(['11:00']);
+    });
   });
 });
 

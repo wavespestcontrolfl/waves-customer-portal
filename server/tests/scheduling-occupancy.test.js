@@ -147,106 +147,56 @@ describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () =>
     expect(found.map((r) => r.id)).toEqual(['touching', 'overlap', 'coordless-near']);
   });
 
-  describe('arrival grace + multi-tech parity (owner ruling 2026-09-28)', () => {
-    // A candidate 10:00-10:30 (PALMETTO) packed AFTER a 09:00-10:00
-    // (BRADENTON) stop — the graced side (decision 5: only a candidate
-    // packed AFTER a real stop can ever accept lateness). ~48 required
-    // minutes, 0 free -> 48 late, clears a 90-minute grace but not 0.
-    // Stamped to a DIFFERENT technician than the candidate's own.
-    const otherTechRow = {
-      id: 'other-tech-before', technician_id: 'tech-B',
-      window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, ...BRADENTON,
-    };
-    const otherTechOverlap = {
-      id: 'other-tech-overlap', technician_id: 'tech-B',
-      window_start: '10:15:00', window_end: '10:45:00', estimated_duration_minutes: 30, ...PALMETTO,
-    };
-    const ownTechRow = {
-      id: 'own-tech-far', technician_id: 'tech-A',
-      window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, ...BRADENTON,
-    };
-    const unassignedRow = {
-      id: 'unassigned-far', technician_id: null,
-      window_start: '15:00:00', window_end: '16:00:00', estimated_duration_minutes: 60, ...BRADENTON,
-    };
-    const candidateWindow = { date: '2099-01-05', windowStart: '10:00', windowEnd: '10:30' };
-
-    test('graceMinutes 0 (or omitted) stays fully tech-blind — every row counts, technicianId ignored', async () => {
+  describe('arrival grace stays tech-blind (owner decision 2026-09-28, Codex round 1 on #5310)', () => {
+    // An earlier version of this lane scoped a GRACED candidate's travel-gap
+    // check to its own assigned technician's rows + unassigned ones — but
+    // the offer-side mirrors this probe backstops (routes/booking.js
+    // addCandidate's legacy-mode dayOccupied, estimate-slot-availability.js's
+    // committed-overlap set, rebooker.js's series seriesTravel) stayed
+    // tech-blind, so a graced commit could accept a slot a tech-blind offer
+    // mirror would have hidden as occupied. Reverted: `travel` no longer
+    // carries a technician identity at all, and this module never reads
+    // row.technician_id for the travel-gap check — a second technician's row
+    // is measured exactly like the candidate's own tech's row would be.
+    test('grace > 0 does not exempt a different technician\'s row from the travel-gap check', async () => {
       process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-      const q = makeQuery([otherTechRow, otherTechOverlap, ownTechRow]);
+      // A generous buffer makes the required gap (drive + buffer) far
+      // bigger than even a 90-minute grace can forgive, so this row stays a
+      // violation regardless of grace — the point is that it is COUNTED at
+      // all despite belonging to a technician other than the candidate's.
+      process.env.SLOT_TRAVEL_BUFFER_MINUTES = '150';
+      const otherTechRow = {
+        id: 'other-tech-before', technician_id: 'tech-B',
+        window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, ...BRADENTON,
+      };
+      const q = makeQuery([otherTechRow]);
       db.mockReturnValue(q);
       const found = await findConflictingVisits({
-        db, ...candidateWindow, travel: { ...PALMETTO, technicianId: 'tech-A' },
-      });
-      expect(found.map((r) => r.id).sort()).toEqual(['other-tech-before', 'other-tech-overlap'].sort());
-    });
-
-    test('graceMinutes > 0 with a technicianId scopes the travel-gap check to that tech + unassigned — a different tech\'s rows never count', async () => {
-      process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-      const q = makeQuery([otherTechRow, otherTechOverlap, ownTechRow, unassignedRow]);
-      db.mockReturnValue(q);
-      const found = await findConflictingVisits({
-        db, ...candidateWindow,
-        travel: { ...PALMETTO, graceMinutes: 90, technicianId: 'tech-A' },
-      });
-      // Neither the other tech's before-stop NOR its overlap count — they
-      // belong to a different technician's route entirely. The candidate's
-      // own tech's far stop and the unassigned far stop are unaffected
-      // (too far in time to be neighbours either way).
-      expect(found).toEqual([]);
-    });
-
-    test('graceMinutes > 0 with NO technicianId keeps the full tech-blind row set (byte-identical fallback)', async () => {
-      process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-      const q = makeQuery([otherTechRow, otherTechOverlap, ownTechRow]);
-      db.mockReturnValue(q);
-      const found = await findConflictingVisits({
-        db, ...candidateWindow,
+        db, date: '2099-01-05', windowStart: '10:00', windowEnd: '10:30',
         travel: { ...PALMETTO, graceMinutes: 90 },
       });
-      // Overlap is unconditional regardless of grace; the before-stop is
-      // graced away since 90 minutes clears its 48-minute requirement.
-      expect(found.map((r) => r.id)).toEqual(['other-tech-overlap']);
+      expect(found.map((r) => r.id)).toEqual(['other-tech-before']);
     });
 
-    test('a graced candidate still catches a SAME-tech live hold (A6 — a hold gets no grace at all, whatever the tech)', async () => {
+    test('a live hold still gets no grace at all (A6), regardless of grace or any technician identity', async () => {
       process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-      const sameTechHold = {
-        id: 'same-tech-hold', technician_id: 'tech-A', customer_id: null,
+      const hold = {
+        id: 'live-hold', technician_id: 'tech-B', customer_id: null,
         reservation_expires_at: '2099-01-01T00:00:00Z',
         window_start: '08:00:00', window_end: '08:47:00', estimated_duration_minutes: 47,
         lat: null, lng: null,
       };
-      const q = makeQuery([sameTechHold]);
+      const q = makeQuery([hold]);
       db.mockReturnValue(q);
       // Coordless (buffer-only, required 15); the hold ends 13 minutes
       // before the candidate's 09:00 start -> 2 minutes late against a
       // required-15 gap. A hold's own next-side check is always strict
-      // (A6), so even a 90-minute grace on the ASSIGNED tech's own hold
-      // does not save it.
+      // (A6), so a 90-minute grace does not save it.
       const found = await findConflictingVisits({
         db, date: '2099-01-05', windowStart: '09:00', windowEnd: '10:00',
-        travel: { lat: null, lng: null, graceMinutes: 90, technicianId: 'tech-A' },
+        travel: { lat: null, lng: null, graceMinutes: 90 },
       });
-      expect(found.map((r) => r.id)).toEqual(['same-tech-hold']);
-    });
-
-    // Claude fallback pre-push review (2026-09-28) P1: the multi-tech scope
-    // above reads `row.technician_id` off the SQL result — if the real
-    // SELECT ever stopped projecting that column, `undefined == null` would
-    // be true for every row and the scoping would silently fall back to
-    // tech-blind (the exact offer/commit disagreement this lane fixes).
-    // CONFLICT_COLUMNS is the query's actual select list — pin it directly
-    // rather than trusting the mocked test rows above to catch a regression
-    // there (they always carry the field by construction).
-    test('CONFLICT_COLUMNS (the real SELECT list findConflictingVisitsWithTravel uses) includes technician_id', () => {
-      const fs = require('fs');
-      const path = require('path');
-      const src = fs.readFileSync(path.join(__dirname, '../services/scheduling/occupancy.js'), 'utf8');
-      const idx = src.indexOf('const CONFLICT_COLUMNS = [');
-      expect(idx).toBeGreaterThan(-1);
-      const block = src.slice(idx, src.indexOf('];', idx));
-      expect(block).toMatch(/'technician_id'/);
+      expect(found.map((r) => r.id)).toEqual(['live-hold']);
     });
   });
 });

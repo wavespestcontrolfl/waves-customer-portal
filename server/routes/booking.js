@@ -3928,12 +3928,10 @@ async function createSelfBooking(payload = {}) {
           // Same credit buildBookingAvailability offered this window under.
           // expectedIdentity: consultation page only (#4737 r1 P2).
           expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
-          // Arrival grace (A1) — createSelfBooking is self-serve-only (never
-          // voice); `date` is this commit's own date (decision 2).
-          // `technicianId` scopes the multi-tech projection to this
-          // booking's assigned tech (owner ruling 2026-09-28).
+          // Arrival grace (A1) — self-serve-only (never voice); `date` is
+          // this commit's own date (decision 2). Tech-blind, grace included
+          // (#5310 r1) — the offer mirrors this backstops are tech-blind too.
           graceMinutes: selfServeArrivalGraceMinutes({ date: slotDateStr }),
-          technicianId: technician_id || null,
         },
       });
       if (globalClash.length) {
@@ -5289,13 +5287,13 @@ async function createSelfBooking(payload = {}) {
               // the booking pin the parent commit measured with — the
               // mirrored guard every commit surface carries (pre-push P1).
               // Self-serve arrival grace (P5, owner ruling 2026-09-28): this
-              // sweep only ever runs behind a self-serve createSelfBooking
+              // sweep only runs behind a self-serve createSelfBooking
               // activation, so it always may carry grace, resolved for THIS
-              // row's own date (decision 2).
+              // row's own date (decision 2). Tech-blind, same as every other
+              // travel probe.
               travel: {
                 ...seededRowPin(row, bookingLat, bookingLng),
                 graceMinutes: selfServeArrivalGraceMinutes({ date: rowDate }),
-                technicianId: row.technician_id ?? null,
               },
             });
             if (clashes.length > 0) {
