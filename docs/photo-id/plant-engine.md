@@ -414,12 +414,13 @@ referee's own top for that slot:
   as the escalation left it: no append, no re-rank, no partial credit.
   `internal.referee.outcome[slot]` reads `'no_majority'` (a third name) or
   `'unavailable'` (no usable referee answer for that slot).
-- The referee's own `quality`/`shows` verdict always joins the conservative
-  photo-quality combine (`photoReadFor`), alongside every other leg's. When
-  it says the photos are unusable (`quality.usable === false` or
-  `shows === 'nothing'`), its identity vote is not merged at all — every
-  disagreed lane is left exactly as it was — but the quality read still
-  counts.
+- The referee's own `quality`/`shows` verdict joins the conservative
+  photo-quality combine (`photoReadFor`) only when its vote actually settled
+  a lane. When it says the photos are unusable (`quality.usable === false`
+  or `shows === 'nothing'`), its identity vote is not merged at all, every
+  disagreed lane is left exactly as it was, and its quality read does not
+  count either: a tie-break that changed nothing never downgrades the
+  Gemini/Sol answer that stands.
 
 Diagnostics land in `internal` only (never `v2`): `internal.models.referee`
 (the leg, like every other model call) and `internal.referee: { triggered,

@@ -2044,7 +2044,12 @@ function photoReadFor(identity, conditions, escalation) {
   // must join the conservative combine like every other leg — an "unusable"
   // referee read (Codex #5307 r1 finding 4) still counts here even though
   // its votes are never merged.
-  const refereeJson = escalation.refereeInfo?.json || null;
+  // The referee's own quality verdict tightens the read only when its vote
+  // actually decided a lane: a tie-break that merged nothing (an unusable
+  // referee read included — it never merges) must never downgrade the
+  // Gemini/Sol answer that stands (pre-push audit on Codex #5307 r8).
+  const refereeSettled = Object.values(escalation.refereeInfo?.outcomes || {}).includes('settled');
+  const refereeJson = refereeSettled ? escalation.refereeInfo.json : null;
   return combineQuality(
     [identity.candidatesJson?.quality, conditions.json?.quality, escalation.json?.quality, escalation.rerun?.quality, refereeJson?.quality],
     [identity.candidatesJson?.shows, escalation.json?.shows, refereeJson?.shows],

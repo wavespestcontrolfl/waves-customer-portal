@@ -2006,7 +2006,7 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.internal.referee.triggered).toBe(false);
     });
 
-    test('finding: an unusable referee read never merges its vote, but its own quality still counts', async () => {
+    test('an unusable referee read never merges its vote, and never downgrades the Gemini/Sol answer that stands', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       const unusableRefereeLeg = {
         ok: true,
@@ -2022,11 +2022,11 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       // are unusable.
       expect(result.internal.referee.outcome.turf).toBe('unavailable');
       expect(result.internal.identity.turf.disagreed).toBe(true);
-      // Its own quality read folds into the combined verdict — usable:false
-      // blocks naming entirely (the unknown answer + retake, same as any
-      // other leg's unusable read).
-      expect(result.v2.quality.usable).toBe(false);
-      expect(result.v2.answer).toMatchObject({ level: 'unknown' });
+      // Pre-push audit on Codex #5307 r8: a tie-break that merged nothing
+      // must not veto the earlier reads' usable photo — the answer is the
+      // same Gemini/Sol split it would have been without the referee.
+      expect(result.v2.quality.usable).toBe(true);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
     });
 
     test('finding 5: a tree_shrub run with a total Gemini miss and a confident Sol host makes NO referee call (turf/weeds never apply, and no disagreement)', async () => {
