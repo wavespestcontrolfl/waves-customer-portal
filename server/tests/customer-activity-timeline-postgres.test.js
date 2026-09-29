@@ -66,6 +66,11 @@ pg('getCustomerActivity on Postgres', () => {
       { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'failed', message_type: 'billing', message_body: 'x'.repeat(400), created_at: T(2) },
       { id: randomUUID(), customer_id: cust, direction: 'inbound', status: 'received', message_type: null, message_body: 'Sounds good, thanks', created_at: T(3) },
       { id: randomUUID(), customer_id: other, direction: 'inbound', status: 'received', message_type: null, message_body: 'not mine', created_at: T(90) },
+      // queued for later / cancelled / held: never left, so never listed
+      { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'scheduled', message_type: 'reminder', message_body: 'scheduled reminder', created_at: T(80) },
+      { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'sending', message_type: 'reminder', message_body: 'sending reminder', created_at: T(81) },
+      { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'canceled', message_type: 'reminder', message_body: 'canceled reminder', created_at: T(82) },
+      { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'cancelled', message_type: 'reminder', message_body: 'cancelled reminder', created_at: T(83) },
     ]);
 
     // link clicks: one by customer, one by the customer's lead, one bot (excluded)
@@ -153,7 +158,7 @@ pg('getCustomerActivity on Postgres', () => {
       'Opened their service report', 'Opened their inspection report', 'Opened a contract',
       'Opened the price-change notice', 'Clicked an outside link in the prep guide', 'Called us', 'Last seen in the portal',
     ]));
-    expect(r.events.some((e) => /not mine|admin copy|test send|other owner|recruiting|payer statement|promoter mail/.test(`${e.title} ${e.detail}`))).toBe(false);
+    expect(r.events.some((e) => /not mine|admin copy|test send|other owner|recruiting|payer statement|promoter mail|scheduled reminder|sending reminder|canceled reminder|cancelled reminder/.test(`${e.title} ${e.detail}`))).toBe(false);
     // 2 clicks only: the bot click is filtered
     expect(r.events.filter((e) => e.source === 'link')).toHaveLength(2);
     // the lead-linked click carries the email channel

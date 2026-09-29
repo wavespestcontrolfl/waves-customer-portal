@@ -109,6 +109,14 @@ describe('engagement rule', () => {
     expect(map({ direction: 'outbound', status: 'delivered' })).toMatchObject({ kind: 'delivered', engaged: false });
     expect(map({ direction: 'outbound', status: 'undelivered' })).toMatchObject({ kind: 'failed', engaged: false });
     expect(map({ direction: 'outbound', status: 'queued' })).toMatchObject({ kind: 'sent', engaged: false });
+    expect(map({ direction: 'outbound', status: null })).toMatchObject({ kind: 'sent' });
+  });
+
+  test('texts: scheduled, sending and cancelled rows never left, so they produce no "sent" event', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    for (const status of ['scheduled', 'sending', 'canceled', 'cancelled', 'draft', 'held', 'pending', 'skipped', 'blocked', 'suppressed']) {
+      expect(source('texts').toEvents({ id: 'x', direction: 'outbound', status, message_body: 'hi', created_at: t })).toEqual([]);
+    }
   });
 
   test('portal page views ride the portal channel; token pages ride the page channel', () => {

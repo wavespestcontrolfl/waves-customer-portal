@@ -160,10 +160,21 @@ function pageViewTitle(page) {
 // row (all of its timestamps) and the runner drops the ones at/after the
 // cursor. `engaged` / `open` feed the first-page summary.
 // ---------------------------------------------------------------------------
+// sms_log outbound statuses that mean the text was handed to the carrier (or
+// failed trying). 'queued' / 'accepted' are the provider's own handed-off states.
+const OUTBOUND_LEFT = ['', 'sent', 'queued', 'accepted', 'delivered', 'failed', 'undelivered'];
+
 const SOURCES = [
   {
     name: 'texts',
-    from: (dbh, ctx) => dbh('sms_log as sl').where('sl.customer_id', ctx.customerId),
+    // An outbound row only counts once the text actually left: 'scheduled' /
+    // 'sending' (queued for a later send), 'canceled' / 'cancelled', 'draft',
+    // 'held', 'pending', 'skipped', 'blocked' and 'suppressed' rows never
+    // reached the customer, so listing them as "Text sent" would be false.
+    // An empty status is a legacy row written before statuses existed.
+    from: (dbh, ctx) => dbh('sms_log as sl').where('sl.customer_id', ctx.customerId)
+      .where((w) => w.where('sl.direction', 'inbound')
+        .orWhereRaw(`LOWER(COALESCE(sl.status, '')) IN (${OUTBOUND_LEFT.map(() => '?').join(', ')})`, OUTBOUND_LEFT)),
     select: ['sl.id', 'sl.direction', 'sl.status', 'sl.message_type', 'sl.message_body', 'sl.created_at'],
     ts: ['sl.created_at'],
     engaged: { expr: 'sl.created_at', where: (q) => q.where('sl.direction', 'inbound') },
@@ -175,6 +186,7 @@ const SOURCES = [
         })]);
       }
       const status = String(r.status || '').toLowerCase();
+      if (!OUTBOUND_LEFT.includes(status)) return [];
       const kind = status === 'delivered' ? 'delivered'
         : ['failed', 'undelivered'].includes(status) ? 'failed' : 'sent';
       const title = { delivered: 'Text delivered', failed: 'Text failed', sent: 'Text sent' }[kind];
