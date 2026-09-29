@@ -163,11 +163,11 @@ suite('public accept — billing lane of the customer the accept creates', () =>
 
   // Estimate with NO customer_id (phone unmatched → the accept mints the
   // customer) unless `linkedCustomer` is given.
-  async function estimateFixture(trx, { estimateData = RECURRING_DATA, linkedCustomer = null, monthly = 15, annual = 180, onetime = 0 } = {}) {
+  async function estimateFixture(trx, { estimateData = RECURRING_DATA, linkedCustomer = null, monthly = 15, annual = 180, onetime = 0, phone: phoneOverride = null } = {}) {
     const estimateId = randomUUID();
     const token = randomUUID().replace(/-/g, '');
     const tag = estimateId.slice(0, 8);
-    const phone = `+1941555${String(parseInt(tag, 16)).slice(-4).padStart(4, '0')}`;
+    const phone = phoneOverride || `+1941555${String(parseInt(tag, 16)).slice(-4).padStart(4, '0')}`;
     if (linkedCustomer) await trx('customers').insert(linkedCustomer);
     await trx('estimates').insert({
       id: estimateId,
@@ -276,5 +276,143 @@ suite('public accept — billing lane of the customer the accept creates', () =>
     expect(customer.per_application_fee == null).toBe(true);
     expect(customer.monthly_rate == null).toBe(true);
     expect(customer.waveguard_tier).toBe('One-Time');
+  });
+  // ---------------------------------------------------------------------
+  // Round 1 (#5311): identity-scoped exemption + parked minted customer.
+  // ---------------------------------------------------------------------
+  describe('converter: createdCustomerId is honored only for that same, still-unstamped row', () => {
+    const EstimateConverter = () => require('../services/estimate-converter');
+    const convertOpts = { skipSetupInvoice: true, skipAutoSchedule: true, autoSendInvoice: false, skipMembershipEmail: true };
+
+    async function linkedFixture(customerOverrides) {
+      const customer = existingCustomer({
+        pipeline_stage: 'active_customer', monthly_rate: 15, waveguard_tier: 'Bronze', ...customerOverrides,
+      });
+      const fx = await estimateFixture(mockTransaction, { linkedCustomer: customer });
+      // convertEstimate requires an accepted estimate (the route stamps this at accept).
+      await mockTransaction('estimates').where({ id: fx.estimateId }).update({ status: 'accepted', accepted_at: new Date() });
+      return { ...fx, customerId: customer.id };
+    }
+    const reread = (customerId) => mockTransaction('customers').where({ id: customerId }).first();
+
+    test('same customer id + billing_mode NULL: converts like a non-member (per_application + fee)', async () => {
+      const { estimateId, customerId } = await linkedFixture({});
+      await EstimateConverter().convertEstimate(estimateId, { database: mockTransaction, ...convertOpts, createdCustomerId: customerId });
+      const row = await reread(customerId);
+      expect(row.billing_mode).toBe('per_application');
+      expect(Number(row.per_application_fee)).toBe(PEST_PER_VISIT);
+    });
+
+    test('control: no option — the same row is read as an existing monthly member (predicate unchanged)', async () => {
+      const { estimateId, customerId } = await linkedFixture({});
+      await EstimateConverter().convertEstimate(estimateId, { database: mockTransaction, ...convertOpts });
+      const row = await reread(customerId);
+      expect(row.billing_mode == null).toBe(true);
+      expect(row.per_application_fee == null).toBe(true);
+    });
+
+    test('a DIFFERENT customer id (minted profile merged/repointed to an existing member) is NOT honored', async () => {
+      const { estimateId, customerId } = await linkedFixture({});
+      await EstimateConverter().convertEstimate(estimateId, {
+        database: mockTransaction, ...convertOpts, createdCustomerId: randomUUID(),
+      });
+      const row = await reread(customerId);
+      expect(row.billing_mode == null).toBe(true);
+      expect(row.per_application_fee == null).toBe(true);
+    });
+
+    test('same id but billing_mode already stamped monthly_membership since the park is NOT honored and the lane is kept', async () => {
+      const { estimateId, customerId } = await linkedFixture({ billing_mode: 'monthly_membership' });
+      await EstimateConverter().convertEstimate(estimateId, {
+        database: mockTransaction, ...convertOpts, createdCustomerId: customerId,
+      });
+      const row = await reread(customerId);
+      expect(row.billing_mode).toBe('monthly_membership');
+      expect(row.per_application_fee == null).toBe(true);
+    });
+
+    test('a legacy boolean customerCreatedAtAccept opt is ignored (status-quo predicate)', async () => {
+      const { estimateId, customerId } = await linkedFixture({});
+      await EstimateConverter().convertEstimate(estimateId, {
+        database: mockTransaction, ...convertOpts, customerCreatedAtAccept: true,
+      });
+      const row = await reread(customerId);
+      expect(row.billing_mode == null).toBe(true);
+    });
+
+    test('prepay_annual call site: the same-id exemption is honored there too (per_application + fee, never the NULL monthly lane); a different id is not', async () => {
+      const prepayOpts = {
+        ...convertOpts, billingTerm: 'prepay_annual', prepayInvoiceAmount: 180, allowFirstApplicationFallback: false,
+      };
+      const same = await linkedFixture({});
+      await EstimateConverter().convertEstimate(same.estimateId, {
+        database: mockTransaction, ...prepayOpts, createdCustomerId: same.customerId,
+      });
+      const sameRow = await reread(same.customerId);
+      expect(sameRow.billing_mode).toBe('per_application');
+      expect(Number(sameRow.per_application_fee)).toBe(PEST_PER_VISIT);
+
+      const other = await linkedFixture({});
+      await EstimateConverter().convertEstimate(other.estimateId, {
+        database: mockTransaction, ...prepayOpts, createdCustomerId: randomUUID(),
+      });
+      const otherRow = await reread(other.customerId);
+      expect(otherRow.billing_mode == null).toBe(true);
+    });
+  });
+
+  describe('termite-annual sign-before-pay park (bundled estimate)', () => {
+    const TERMITE_BUNDLE = {
+      commercialEstimatedPricing: true, // bypasses the slot requirement so the accept reaches the park
+      result: {
+        lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 250 }],
+        recurring: {
+          discount: 0,
+          monthlyTotal: 15,
+          services: [
+            { name: 'Termite Bait Stations', service: 'termite_bait', annual: 250 },
+            { name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 4, perTreatment: PEST_PER_VISIT },
+          ],
+        },
+        oneTime: { items: [], membershipFee: 0 },
+      },
+    };
+    const gates = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
+    const savedGates = {};
+    beforeAll(() => { gates.forEach((g) => { savedGates[g] = process.env[g]; process.env[g] = 'true'; }); });
+    afterAll(() => { gates.forEach((g) => { if (savedGates[g] === undefined) delete process.env[g]; else process.env[g] = savedGates[g]; }); });
+
+    test('the minted customer parks with monthly_rate NULL, is outside billing-cron\'s selection, and a second accept on that phone converts per_application', async () => {
+      const first = await estimateFixture(mockTransaction, {
+        estimateData: TERMITE_BUNDLE, monthly: 15, annual: 430,
+      });
+      const res = await putAccept(first.token, { paymentMethodPreference: 'prepay_annual' });
+      const body = await res.clone().json();
+      expect(res.status).toBe(200);
+      const parkedEst = await mockTransaction('estimates').where({ id: first.estimateId }).first();
+      expect(parkedEst.annual_plan_activation_status).toBe('awaiting_signature');
+      const minted = await customerForEstimate(first.estimateId);
+      expect(body).toBeTruthy();
+      expect(minted.monthly_rate == null).toBe(true);
+      expect(minted.billing_mode == null).toBe(true);
+
+      // billing-cron's monthly sweep selection (services/billing-cron.js processMonthlyBilling)
+      const swept = await mockTransaction('customers')
+        .where({ active: true })
+        .where('monthly_rate', '>', 0)
+        .whereNull('service_paused_at')
+        .whereNull('deleted_at')
+        .where({ id: minted.id });
+      expect(swept).toHaveLength(0);
+
+      // A second accept in the park window phone-matches the minted profile
+      // and must NOT read it as an existing monthly member.
+      const second = await estimateFixture(mockTransaction, { phone: first.phone });
+      expect((await putAccept(second.token)).status).toBe(200);
+      const after = await customerForEstimate(second.estimateId);
+      expect(after.id).toBe(minted.id);
+      expect(after.billing_mode).toBe('per_application');
+      expect(Number(after.per_application_fee)).toBe(PEST_PER_VISIT);
+    });
   });
 });
