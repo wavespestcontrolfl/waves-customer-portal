@@ -92,7 +92,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers2');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -264,7 +264,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     for (const g of CATEGORY_GATES) process.env[g] = 'true';
     const allFour = currentPromptVersion();
     expect(allFour).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`);
-    expect(allFour.length).toBe(33);
+    expect(allFour.length).toBe(34);
     expect(allFour.length).toBeLessThanOrEqual(40);
   });
 
@@ -893,7 +893,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers2');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1126,7 +1126,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers2');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1135,7 +1135,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers2'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 
@@ -1685,13 +1685,15 @@ describe('free re-service is an entitlement resolved through the existing mechan
     expect(prompt).not.toContain('offer a free re-service using 2–3 SPECIFIC times from OPEN TIMES');
   });
 
-  test('facts block: the line renders only with BOTH gates on, and fails closed to "not eligible"', () => {
+  test('facts block: the line renders off GATE_SMS_REAL_ANSWERS alone (decoupled from complaints 2026-09-29), and fails closed to "not eligible"', () => {
     const { buildFactsBlock } = require('../services/sms-shadow-drafter');
     expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest', 'lawn'] })).toContain('FREE RE-SERVICE: eligible for pest and lawn');
     expect(buildFactsBlock(CONTEXT, { reserviceLanes: [] })).toContain('FREE RE-SERVICE: not eligible');
     expect(buildFactsBlock(CONTEXT)).toContain('FREE RE-SERVICE: not eligible'); // no lanes passed
+    // The fact renders with the complaints gate OFF — its default in prod —
+    // since the PEST REPORTS rule needs it there too.
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
-    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE');
+    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).toContain('FREE RE-SERVICE: eligible for pest');
     process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
     delete process.env.GATE_SMS_REAL_ANSWERS;
     expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE');
@@ -1722,11 +1724,18 @@ describe('free re-service is an entitlement resolved through the existing mechan
     await expect(loadWith({ throws: true }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
   });
 
-  test('fetchReserviceLanes: either gate off → null (no fact rendered, mechanism never consulted)', async () => {
-    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+  test('fetchReserviceLanes: real-answers gate off → null (no fact rendered, mechanism never consulted)', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
     const { drafter, reserviceLanesForCustomer } = loadWith({});
     await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toBeNull();
     expect(reserviceLanesForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('fetchReserviceLanes: complaints gate off (its default in prod) still consults the mechanism — decoupled 2026-09-29', async () => {
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+    const { drafter, reserviceLanesForCustomer } = loadWith({ lanes: ['lawn'] });
+    await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual(['lawn']);
+    expect(reserviceLanesForCustomer).toHaveBeenCalled();
   });
 
   test('validateReserviceOffer: a free-visit offer is a violation unless the facts say eligible', () => {
@@ -1741,6 +1750,54 @@ describe('free re-service is an entitlement resolved through the existing mechan
     expect(validateReserviceOffer({ reply: 'I am sorry about that — a manager will reach out within the hour.', factsBlock: notEligible }).ok).toBe(true);
     delete process.env.GATE_SMS_REAL_ANSWERS; // gate off: the check does not run
     expect(validateReserviceOffer({ reply: 'We can come back for a free re-service.', factsBlock: notEligible }).ok).toBe(true);
+  });
+});
+
+// Owner ruling 2026-09-29: a pest report ("pests came back", "still seeing X
+// after service") is NOT a complaint for hand-off purposes — the AI offers
+// the free re-service itself when eligible, instead of handing off, with
+// GATE_SMS_AGENT_COMPLAINTS at its prod default (off).
+describe('PEST REPORTS rule — offers the free re-service directly, independent of GATE_SMS_AGENT_COMPLAINTS (owner ruling 2026-09-29)', () => {
+  const prior = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS; // prod default: off
+  });
+  afterEach(() => {
+    if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior;
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+  });
+
+  test('the prompt carries the PEST REPORTS rule with complaints OFF, and still holds real complaints for a person', () => {
+    const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain('PEST REPORTS');
+    expect(prompt).toContain('are NOT a complaint for hand-off purposes');
+    expect(prompt).toContain('Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible');
+    expect(prompt).toContain('{"type":"escalate","note":"send_reservice_link"}');
+    expect(prompt).toContain('NEVER quote OPEN TIMES for a re-service');
+    // Real complaints (angry/damage/disputes) still hold while the gate is off.
+    expect(prompt).toMatch(/HELD FOR A PERSON: complaints,/);
+  });
+
+  test('not eligible (or the fact is absent): routes to a normal visit via OPEN TIMES, never a free offer', () => {
+    const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain('never offer or imply a free visit');
+    expect(prompt).toContain('offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present');
+    expect(prompt).toContain('only when OPEN TIMES is absent');
+  });
+
+  test('the FREE RE-SERVICE fact is available to this rule with complaints off', () => {
+    const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+    const context = { summary: 'Dana — Quarterly Pest, Venice', upcomingServices: [] };
+    expect(buildFactsBlock(context, { reserviceLanes: ['pest'] })).toContain('FREE RE-SERVICE: eligible for pest');
+  });
+
+  test('validateReserviceOffer still blocks an ineligible offer with complaints off', () => {
+    const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+    const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+    expect(validateReserviceOffer({ reply: 'Good news — we will come back for a free re-service.', factsBlock: notEligible }).ok).toBe(false);
   });
 });
 

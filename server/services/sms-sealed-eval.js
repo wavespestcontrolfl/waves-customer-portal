@@ -120,29 +120,42 @@ const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
 // drafted) and are unaffected — this only excludes items being graded AS v12
 // evidence that were never given v12 facts.
 const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
+// Free re-service eligibility (Codex r6 P1) used to render ONLY with
+// GATE_SMS_AGENT_COMPLAINTS also on, so it lived in CATEGORY_FACT_MARKERS
+// below keyed to that category's 'c' tag. Decoupled 2026-09-29 (owner
+// ruling: a pest report is not a complaint, so the PEST REPORTS rule needs
+// this fact with that gate OFF) — sms-shadow-drafter.js's buildFactsBlock
+// now renders it on EVERY v12 real-answers facts block unconditionally,
+// same as V12_FACTS_MARKER, so it joins the BASE contract here instead.
+const RESERVICE_FACTS_MARKER = 'FREE RE-SERVICE:';
+const V12_BASE_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, RESERVICE_FACTS_MARKER]);
 
 function isV12PromptVersion(promptVersion) {
   return typeof promptVersion === 'string' && promptVersion.startsWith('house_voice_v12');
 }
 
 // Follow-up #4 (Codex r7): compatibility is the FULL fact contract of the
-// prompt version, not just the base v12 line. A category gate adds its own
-// fact (complaints: the FREE RE-SERVICE eligibility line), and an exam
-// stamped with that category's tag must grade only items frozen with it —
-// otherwise it scores category behavior on inputs live drafts never lack.
-const CATEGORY_FACT_MARKERS = Object.freeze({ c: 'FREE RE-SERVICE:' });
+// prompt version, not just the base v12 lines. A category gate that adds its
+// OWN fact to the block (none currently do — billing disputes/chemical-
+// medical/legal only change PROMPT WORDING via realAnswersHandoffBullets,
+// and complaints' old FREE RE-SERVICE marker moved to the base contract
+// above) would register here, keyed to its tag, so an exam stamped with
+// that tag grades only items frozen with it — otherwise it would score
+// category behavior on inputs live drafts never lack. Kept as a map (not
+// deleted) so a future category fact has somewhere to go.
+const CATEGORY_FACT_MARKERS = Object.freeze({});
 function requiredFactMarkers(promptVersion) {
   if (!isV12PromptVersion(promptVersion)) return [];
   const tags = String(promptVersion).split('+')[1] || '';
-  return [V12_FACTS_MARKER, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
+  return [...V12_BASE_FACT_MARKERS, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
-// carry must be ABSENT too — an item frozen while complaints were on carries
-// FREE RE-SERVICE, which live gate-off drafts never receive, so it must not
-// grade the plain v12 prompt after a rollback or switch. Every version has
-// one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
-// replay items frozen with the v12 SLA or category lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)]);
+// carry must be ABSENT too — an item frozen before FREE RE-SERVICE rendered
+// unconditionally (pre 2026-09-29, complaints gate off) lacks it and must
+// not grade the current base contract, which now requires it. Every version
+// has one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must
+// not replay items frozen with the v12 SLA or re-service lines either.
+const CONTRACT_FACT_MARKERS = Object.freeze([...V12_BASE_FACT_MARKERS, ...Object.values(CATEGORY_FACT_MARKERS)]);
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));

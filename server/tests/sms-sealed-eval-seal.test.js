@@ -183,7 +183,8 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     dbi.raw = (sql) => sql;
     return Object.assign(dbi, { calls, inserts, updates });
   }
-  const v12cand = (id, createdAt) => ({ ...cand(id, 'SCHEDULING', createdAt), facts_block: `CUSTOMER: x\n${MARKER} within the hour\n` });
+  const RESERVICE_MARKER = 'FREE RE-SERVICE:';
+  const v12cand = (id, createdAt) => ({ ...cand(id, 'SCHEDULING', createdAt), facts_block: `CUSTOMER: x\n${MARKER} within the hour\n${RESERVICE_MARKER} not eligible\n` });
 
   test('v12: a pool FULL of pre-v12 items still seals compatible candidates and retires the displaced oldest pre-v12 items', async () => {
     versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers+b');
@@ -274,7 +275,9 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       expect(restoreUpdates).toHaveLength(1);
       expect(retireUpdates).toHaveLength(1); // the incompatible complaint overflow still gets retired
 
-      // filtered by the EXACT current contract: SLA line required, FREE RE-SERVICE forbidden
+      // filtered by the EXACT current contract: BOTH the SLA line and the
+      // FREE RE-SERVICE line are required now (decoupled from the complaints
+      // tag 2026-09-29) — nothing is forbidden for plain v12 any more.
       const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
       expect(likeRaws.length).toBeGreaterThanOrEqual(2); // the compat count + the restore filter
       for (const [, args] of likeRaws) {
@@ -328,9 +331,13 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
 });
 
 
-// #5194 r1 P1: the contract is exact — under plain v12 (complaints off) the
-// freezer counts, selects and keeps only rows WITHOUT the FREE RE-SERVICE line.
-test('v12 without +c: the compatibility SQL requires the SLA line AND forbids the FREE RE-SERVICE line', async () => {
+// #5194 r1 P1, updated 2026-09-29: the contract is exact. FREE RE-SERVICE
+// used to be forbidden under plain v12 (complaints off) — decoupling it from
+// GATE_SMS_AGENT_COMPLAINTS (owner ruling: a pest report is not a complaint)
+// means it now renders unconditionally, so plain v12 REQUIRES it too, same
+// as the SLA line — the freezer counts, selects and keeps only rows WITH
+// BOTH lines.
+test('v12 without +c: the compatibility SQL requires BOTH the SLA line and the FREE RE-SERVICE line', async () => {
   const drafter = require('../services/sms-shadow-drafter');
   const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
   try {
@@ -346,7 +353,7 @@ test('v12 without +c: the compatibility SQL requires the SLA line AND forbids th
     dbi.raw = (sql) => sql;
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
-    expect(compat[1][0]).toBe("COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') NOT LIKE ?");
+    expect(compat[1][0]).toBe("COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') LIKE ?");
     expect(compat[1][1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
   } finally {
     spy.mockRestore();

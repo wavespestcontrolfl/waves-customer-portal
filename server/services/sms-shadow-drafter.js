@@ -97,7 +97,22 @@ const PROMPT_VERSION = 'house_voice_v11';
 // cancellation). generateGroundedDraft stamps this version instead of
 // PROMPT_VERSION on a draft that actually used the rewritten prompt, so
 // judge/ledger rows tell the two cohorts apart.
-const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers';
+// v12 update (2026-09-29, owner ruling): a pest report ("still seeing bugs",
+// "they're back") is NOT a complaint for hand-off purposes — the PEST
+// REPORTS rule (realAnswersHandoffBullets) now answers it unconditionally,
+// offering the free re-service off the SAME FREE RE-SERVICE fact the
+// COMPLAINTS rule uses. That fact (reserviceFactLine / fetchReserviceLanes)
+// is no longer gated on GATE_SMS_AGENT_COMPLAINTS — it renders on EVERY
+// gate-on facts block now, same as FOLLOW-UP SLA RIGHT NOW. This is an
+// UNCONDITIONAL change to the bare v12 prompt (no gate protects it), so the
+// identity below is bumped ("2") to keep pre-PR bare-v12 judge/graduation/
+// sealed-eval evidence from pooling with post-PR evidence under one
+// identity — the exact pooling hazard this stamp exists to prevent (see the
+// currentPromptVersion() comment below). The 'house_voice_v12' PREFIX is
+// unchanged on purpose: every other reader that matches it (sms-followup-sla,
+// sms-amount-recheck, agent-decision-send-checks, sms-sealed-eval) keys off
+// that prefix, not the exact string, so they need no change.
+const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers2';
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -187,11 +202,11 @@ const INTENDED_ACTION_TYPES = [
 // (pre-push audit P1 round 3): prompt_version is varchar(40) across
 // message_drafts, agent_decisions, shadow_draft_judgments,
 // sms_pathology_entries and sms_sealed_eval_runs, and REAL_ANSWERS_PROMPT_VERSION
-// alone is 28 chars — a full-word tag like 'billing_disputes' would already
+// alone is 29 chars — a full-word tag like 'billing_disputes' would already
 // overflow the column with just ONE category gate on. Concatenated with no
 // separator (currentPromptVersion() sorts them, so order is still
 // deterministic) every one of these codes must stay a single character, or
-// the worst case (all four gates on) must still fit in `28 + 1 + N` chars.
+// the worst case (all four gates on) must still fit in `29 + 1 + N` chars.
 const REAL_ANSWERS_HANDOFF_CATEGORIES = [
   { gate: 'GATE_SMS_AGENT_COMPLAINTS', label: 'complaints', tag: 'c' },
   { gate: 'GATE_SMS_AGENT_BILLING_DISPUTES', label: 'billing disputes', tag: 'b' },
@@ -263,6 +278,18 @@ function realAnswersHandoffBullets() {
   if (gateEnvValue('GATE_SMS_AGENT_LEGAL')) {
     lines.push('- LEGAL THREATS: answer from the facts only.');
   }
+  // PEST REPORTS (owner ruling 2026-09-29): "pests came back" / "still
+  // seeing X after service" is NOT a complaint for hand-off purposes —
+  // unconditional, independent of GATE_SMS_AGENT_COMPLAINTS (an ANGRY tone,
+  // property damage, or a dispute over what happened is still a complaint
+  // and stays on the HELD-FOR-A-PERSON list above while that gate is off).
+  // Same entitlement mechanism and wording contract as the COMPLAINTS rule
+  // (FREE RE-SERVICE fact, per-service-line, re-service link never OPEN
+  // TIMES) so the two rules can never drift on what "eligible" means — but
+  // ineligible routes to a normal PAID visit via OPEN TIMES instead of an
+  // unconditional escalate, since staff replay showed these get booked, not
+  // just acknowledged.
+  lines.push('- PEST REPORTS ("still seeing bugs/ants/etc", "they\'re back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don\'t hold this for a person. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they\'re seeing, say CONCRETELY that you\'re sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says not eligible, is absent, or doesn\'t list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
   lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
   return lines.join('\n');
 }
@@ -342,15 +369,19 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
   }
 }
 
-// Free re-service eligibility for the facts block (Codex r6 P1), through
-// the EXISTING mechanism — reservice-scheduler.reserviceLanesForCustomer,
-// the same check the composer's /reservice-link helper and the public
-// /reservice page run. Only when the real-answers AND complaints gates are
-// on. Fail-closed everywhere: self-serve off, an inactive or missing
-// customer, a lookup error or a timeout all resolve to [] (not eligible).
-// Returns null when the gates are off (no fact is rendered at all).
+// Free re-service eligibility for the facts block (Codex r6 P1; decoupled
+// from GATE_SMS_AGENT_COMPLAINTS 2026-09-29, owner ruling: a pest report —
+// "still seeing bugs", "they're back" — is not a complaint, so the fact
+// must be available to the PEST REPORTS rule below with that gate OFF, its
+// default in prod), through the EXISTING mechanism —
+// reservice-scheduler.reserviceLanesForCustomer, the same check the
+// composer's /reservice-link helper and the public /reservice page run.
+// Only when real-answers is on. Fail-closed everywhere: self-serve off, an
+// inactive or missing customer, a lookup error or a timeout all resolve to
+// [] (not eligible). Returns null when the gate is off (no fact is rendered
+// at all).
 async function fetchReserviceLanes({ customerId } = {}) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return null;
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
   if (!customerId) return [];
   let timer = null;
   try {
@@ -1343,10 +1374,13 @@ function buildFactsBlock(context, extras = {}) {
   const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
-  // Free re-service eligibility (Codex r6 P1) — only when the real-answers
-  // AND complaints gates are on; a caller that passes no lanes renders
-  // "not eligible" (fail closed). Resolved upstream (fetchReserviceLanes).
-  const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS') && gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
+  // Free re-service eligibility (Codex r6 P1; decoupled from the complaints
+  // gate 2026-09-29 — see fetchReserviceLanes's comment) — renders whenever
+  // real-answers is on, for both the COMPLAINTS rule (when that gate is on)
+  // and the unconditional PEST REPORTS rule below; a caller that passes no
+  // lanes renders "not eligible" (fail closed). Resolved upstream
+  // (fetchReserviceLanes).
+  const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `${reserviceFactLine(extras.reserviceLanes)}\n`
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
