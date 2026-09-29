@@ -359,6 +359,27 @@ describe('sweepVisitPrepPestReads — retry wiring', () => {
     expect(conn._store.activityLog).toHaveLength(1);
   });
 
+  test('a retry the trigger reports as failed (it never throws) fails the run', async () => {
+    mockTrigger.mockResolvedValueOnce('failed');
+    const conn = fakeConn({
+      submissions: [submission({ id: 'sub-1', read_status: 'none', created_at: new Date(NOW.getTime() - 20 * MIN) })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'a.jpg', mime_type: 'image/jpeg' }],
+    });
+    const err = await sweepVisitPrepPestReads(conn, NOW).catch((e) => e);
+    expect(err.result).toEqual({ enabled: true, candidates: 1, retried: 0, failed: 1 });
+  });
+
+  test('a capped or taken retry is not a failure', async () => {
+    mockTrigger.mockResolvedValueOnce('capped');
+    const conn = fakeConn({
+      submissions: [submission({ id: 'sub-1', read_status: 'none', created_at: new Date(NOW.getTime() - 20 * MIN) })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'a.jpg', mime_type: 'image/jpeg' }],
+    });
+    await expect(sweepVisitPrepPestReads(conn, NOW)).resolves.toMatchObject({ retried: 1 });
+  });
+
   test('a trigger failure for one row does not stop the rest of the batch, then fails the run (job_health)', async () => {
     mockTrigger
       .mockRejectedValueOnce(new Error('boom'))

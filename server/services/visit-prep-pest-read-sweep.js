@@ -199,9 +199,14 @@ async function retryOne(conn, row) {
   // The trigger claims only while the row is still in the case this sweep
   // selected (re-checked under a row lock): an original read that finished
   // meanwhile is left alone, never re-run (Codex #5319 r1 P1).
-  await triggerVisitPrepPestRead({
+  const outcome = await triggerVisitPrepPestRead({
     submissionId: row.submission_id, svc, photos, conn, expectStatus: [row.read_status],
   });
+  // The trigger never throws (it must never break a customer's upload), so
+  // its outcome is how a failed recovery reaches job health (Codex #5319 r4).
+  if (outcome === 'failed' || outcome === 'error') {
+    throw new Error(`read retry ended ${outcome}`);
+  }
 }
 
 /**

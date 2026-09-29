@@ -195,15 +195,16 @@ async function storeIdentification(conn, { svc, submissionId, result }) {
  *                                            must never be handed that transaction (a caller
  *                                            passing one is a bug: it would hold the connection
  *                                            open across a network vision call).
- * @returns {Promise<void>} never throws — every failure is caught, logged, and written as
+ * @returns {Promise<'done'|'failed'|'error'|'capped'|'unsupported'|'taken'|'skipped'>} how the
+ *          attempt ended (the recovery sweep reports 'failed'/'error' to job health); never throws — every failure is caught, logged, and written as
  *          read_status='failed' so the row never sticks on 'pending'.
  */
 async function triggerVisitPrepPestRead({
   submissionId, svc, photos, conn = db, expectStatus = FRESH_STATUSES,
 } = {}) {
-  if (!submissionId || !svc?.id) return;
-  if (!visitPrepPestReadLive()) return; // gate off — leave read_status at its 'none' default
-  if (!Array.isArray(photos) || photos.length === 0) return;
+  if (!submissionId || !svc?.id) return 'skipped';
+  if (!visitPrepPestReadLive()) return 'skipped'; // gate off — leave read_status at its 'none' default
+  if (!Array.isArray(photos) || photos.length === 0) return 'skipped';
 
   let applicability;
   try {
@@ -212,12 +213,12 @@ async function triggerVisitPrepPestRead({
     logger.error(`[visit-prep-pest-read] applicability check failed submission=${submissionId}: ${err.message}`);
     // Never reached the engine: 'none', so it never counts against the cap.
     await writeUnclaimed(conn, submissionId, 'none', expectStatus);
-    return;
+    return 'error';
   }
 
   if (applicability === 'unsupported') {
     await writeUnclaimed(conn, submissionId, 'unsupported', expectStatus);
-    return;
+    return 'unsupported';
   }
 
   // Photos BEFORE the daily-slot claim: a storage failure never reaches the
@@ -230,7 +231,7 @@ async function triggerVisitPrepPestRead({
   } catch (err) {
     logger.error(`[visit-prep-pest-read] photo load failed for submission=${submissionId}: ${err.message}`);
     await writeUnclaimed(conn, submissionId, 'none', expectStatus);
-    return;
+    return 'error';
   }
 
   let claimed;
@@ -239,12 +240,12 @@ async function triggerVisitPrepPestRead({
   } catch (err) {
     logger.error(`[visit-prep-pest-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
     await writeUnclaimed(conn, submissionId, 'none', expectStatus);
-    return;
+    return 'error';
   }
-  if (claimed === 'taken') return; // finished or claimed meanwhile: leave it
+  if (claimed === 'taken') return 'taken'; // finished or claimed meanwhile: leave it
   if (claimed === 'unsupported') {
     await writeUnclaimed(conn, submissionId, 'unsupported', expectStatus);
-    return;
+    return 'unsupported';
   }
   if (claimed !== 'claimed') {
     logger.warn(`[visit-prep-pest-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
@@ -252,7 +253,7 @@ async function triggerVisitPrepPestRead({
     // must not hold the count up if the cap is raised the same day
     // (Codex #5305 r1 P2). The tech sees no read line either way.
     await writeUnclaimed(conn, submissionId, 'none', expectStatus);
-    return;
+    return 'capped';
   }
 
   let result;
@@ -261,13 +262,13 @@ async function triggerVisitPrepPestRead({
   } catch (err) {
     logger.error(`[visit-prep-pest-read] engine threw for submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');
-    return;
+    return 'failed';
   }
 
   if (!result.ok) {
     logger.warn(`[visit-prep-pest-read] engine miss (${result.reason}) submission=${submissionId}`);
     await setReadStatus(conn, submissionId, 'failed');
-    return;
+    return 'failed';
   }
 
   // The identification and the submission's done/read_ref commit together
@@ -280,7 +281,9 @@ async function triggerVisitPrepPestRead({
   } catch (err) {
     logger.error(`[visit-prep-pest-read] storing the read failed submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');
+    return 'failed';
   }
+  return 'done';
 }
 
 module.exports = {

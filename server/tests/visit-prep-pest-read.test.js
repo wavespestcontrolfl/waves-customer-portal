@@ -430,7 +430,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     mockIdentifyPestV2.mockRejectedValue(new Error('vision provider down'));
     await expect(triggerVisitPrepPestRead({
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
-    })).resolves.toBeUndefined();
+    })).resolves.toBe('failed');
     expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
 
@@ -474,7 +474,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     mockIdentifyPestV2.mockResolvedValue(okEngineResult());
     await expect(triggerVisitPrepPestRead({
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: wrapped,
-    })).resolves.toBeUndefined();
+    })).resolves.toBe('failed');
     expect(readStatusWrites(wrapped, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
 });
@@ -553,5 +553,17 @@ describe('claim day', () => {
     await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_ref: null }]);
+  });
+});
+
+describe('trigger outcome', () => {
+  test('reports done on success, failed when the engine throws, skipped with the gate off', async () => {
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    mockIdentifyPestV2.mockResolvedValueOnce(okEngineResult());
+    await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() })).resolves.toBe('done');
+    mockIdentifyPestV2.mockRejectedValueOnce(new Error('down'));
+    await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() })).resolves.toBe('failed');
+    mockGateOn = false;
+    await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() })).resolves.toBe('skipped');
   });
 });
