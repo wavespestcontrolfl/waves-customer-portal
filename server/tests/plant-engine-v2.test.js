@@ -1860,6 +1860,9 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(dispatch.mock.calls.map(([, p]) => [p.laneId, p.promptVersion.split(':')[1]])).toEqual([
         ['plant_id', 'candidates'], ['plant_id', 'verify'], ['plant_id', 'escalation'], ['plant_id_referee', 'referee'],
       ]);
+      // The first live run (2026-09-29) found every Fable call 400ing on the
+      // schema's numeric bounds: the referee's wire schema carries none.
+      expect(JSON.stringify(dispatch.mock.calls[3][1].jsonSchema)).not.toMatch(/"(minimum|maximum|exclusiveMinimum|exclusiveMaximum|multipleOf)"/);
       // A tie-break never holds the request for the whole 4-minute ladder budget.
       expect(dispatch.mock.calls[3][1].timeoutMs).toBeLessThanOrEqual(engine._test.REFEREE_MAX_MS);
       // Settled on Gemini's own top — never pretty_sure, even though its own

@@ -1801,6 +1801,15 @@ const REFEREE_MAX_TOKENS = 8192;
 // the referee gets at most this long (or what is left, if less), and a
 // timeout leaves the lane exactly as the escalation left it.
 const REFEREE_MAX_MS = 60 * 1000;
+// Anthropic's structured-output grammar rejects numeric bounds ("For 'number'
+// type, properties maximum, minimum are not supported" — a 400 on every
+// referee call, found by the first live run 2026-09-29), and the shared
+// llm/call.js sanitizer does not strip them yet. The referee's wire copy of
+// ESCALATION_SCHEMA drops them; validJson still checks the answer against the
+// full schema (confidence 0..1 included). Deep copy — the shared schema object
+// is never mutated.
+const NUMERIC_BOUND_KEYWORDS = new Set(['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf']);
+const REFEREE_WIRE_SCHEMA = JSON.parse(JSON.stringify(ESCALATION_SCHEMA, (key, value) => (NUMERIC_BOUND_KEYWORDS.has(key) ? undefined : value)));
 
 function describeIdentityRead(candidate) {
   if (!candidate) return null;
@@ -1917,7 +1926,7 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
     text: 'Identify and assess these photos fresh, as the deciding vote.',
     images: run.images,
     jsonMode: true,
-    jsonSchema: ESCALATION_SCHEMA,
+    jsonSchema: REFEREE_WIRE_SCHEMA,
     maxTokens: REFEREE_MAX_TOKENS,
     timeoutMs: Math.min(remainingMs, REFEREE_MAX_MS),
     laneId: 'plant_id_referee',
