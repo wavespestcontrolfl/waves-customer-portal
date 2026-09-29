@@ -2303,7 +2303,8 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // above passed, then the clock crossed 20:00 mid-flight) back out so
       // the hold defers instead of burning the confirmation below.
       const smsOutcome = {};
-      const confirmationMeta = { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined };
+      // Filled at the call below; the render adds templateKey before the send.
+      const confirmationMeta = {};
       const sent = await deliverAppointmentNotice({
         channel: prefs.confirmationChannel,
         kind: 'confirmation',
@@ -2345,7 +2346,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
           // the send records the row that actually rendered (v2 or base).
           if (ladder.templateKey) confirmationMeta.templateKey = ladder.templateKey;
           return appendHeldEstimateAcceptLine(rendered, { record, contact, customer, scheduledServiceId });
-        }, 'confirmation', 'appointment_confirmation', confirmationMeta, { sendOutcome: smsOutcome }),
+        }, 'confirmation', 'appointment_confirmation', Object.assign(confirmationMeta, { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }), { sendOutcome: smsOutcome }),
       });
 
       // Boundary hold — same treatment as the pre-check above: return
@@ -3731,7 +3732,8 @@ const AppointmentReminders = {
               continue;
             }
             const smsOutcome24 = {};
-            const reminder24Meta = { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined };
+            // Filled at the call below; the render adds templateKey before the send.
+            const reminder24Meta = {};
             const reached24 = await withReminderSendFence(r, '24h', () => deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
@@ -3771,7 +3773,7 @@ const AppointmentReminders = {
                 // confirmation twin): the row that rendered, v2 or base.
                 if (ladder.templateKey) reminder24Meta.templateKey = ladder.templateKey;
                 return rendered24;
-              }, 'appointment_reminder', 'appointment_reminder_24h', reminder24Meta, { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
+              }, 'appointment_reminder', 'appointment_reminder_24h', Object.assign(reminder24Meta, { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }), { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
               smsOutcome: smsOutcome24,
             }));
             if (reached24 === null) smsOutcome24.blockedCode = 'MOVE_HOLD';
