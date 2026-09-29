@@ -510,6 +510,46 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect((await row(direct.commitment.id)).fulfillment).toMatchObject({ record_id: booked.id, strength: 'direct' });
   });
 
+  test('a reprocess that gives a closed promise a later stated time judges it again at once; the periodic scan finds one whose refresh never ran', async () => {
+    const statedAt = new Date(Date.now() - 1 * DAY); // two days after the call
+    // Through the processor's own entry point: the V2 callback seed carries
+    // the row's key, so the reprocess rewrites it with that stated time.
+    const w = await world({ kind: 'callback' });
+    await visit(w); // half an hour after the call: before the stated time
+    await cc.refreshFulfillment(db, w.call.id);
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { closed_by: 'promise_evidence' } });
+    const out = await cc.recordCallCommitments({
+      conn: db, call: w.call, runModel: false,
+      transcript: 'Agent: I will call you back on Thursday afternoon, thank you for calling.',
+      v2: {
+        scheduling: { callback_window_start: statedAt.toISOString() },
+        confidence: { scheduling_window: 0.9 },
+        evidence: [{ field_path: '/scheduling/callback_window_start', quote: 'I will call you back on Thursday afternoon', speaker: 'agent', transcript_offset_ms: null }],
+      },
+    });
+    expect(out).toMatchObject({ seeds: 1, written: 1, ownershipLost: false });
+    expect(out.error).toBeUndefined();
+    const reopened = await row(w.commitment.id);
+    expect(reopened).toMatchObject({ status: 'open', fulfilled_at: null });
+    expect(new Date(reopened.due_at).getTime()).toBe(statedAt.getTime());
+    expect(reopened.fulfillment?.closed_by).toBeUndefined();
+
+    // The same rewrite with no refresh after it (the refresh failed, or the switch was off then).
+    const s = await world({ kind: 'other' });
+    await visit(s);
+    await cc.refreshFulfillment(db, s.call.id);
+    const restate = (patch) => db('call_commitments').where({ id: s.commitment.id }).update({ ...patch, updated_at: new Date() });
+    await restate({ due_at: statedAt, due_type: 'deadline' }); // a deadline never moves where an association counts from
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(s.call.id);
+    await restate({ due_at: later(10), due_type: 'floor' }); // a stated time before the proof leaves it standing
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(s.call.id);
+    await restate({ due_at: statedAt, due_type: 'floor' });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(s.call.id);
+    expect(await cc.refreshFulfillment(db, s.call.id)).toMatchObject({ reopened: 1, failed: 0 });
+    expect(await row(s.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(s.call.id);
+  });
+
   test('a relink the refresh never saw is found by the periodic scan whatever evidence closed the promise; a merge that moves the evidence with the call keeps it and stops listing it', async () => {
     const w = await world({ kind: 'other' });
     await visit(w);

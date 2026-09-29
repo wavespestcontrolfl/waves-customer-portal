@@ -167,10 +167,10 @@ function AutoClosedList({ party, rows, canReopen, busyId, onReopen, hasMore, loa
   if (party === "customer" || !rows.length) return null;
   return (
     <section className="space-y-1.5" aria-label="Closed automatically">
-      <h3 className="text-13 md:text-12 text-ink-secondary">Closed automatically (last {AUTO_CLOSED_DAYS} days)</h3>
+      <h3 className="text-14 text-ink-secondary">Closed automatically (last {AUTO_CLOSED_DAYS} days)</h3>
       <ul className="space-y-1.5">
         {rows.map((row) => (
-          <li key={row.id} className="border-hairline rounded-md bg-white p-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-13 md:text-12">
+          <li key={row.id} className="border-hairline rounded-md bg-white p-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-14">
             <span className="text-ink-primary">{whoLabel(row)}</span>
             <span className="text-ink-tertiary">· {KIND_LABEL[row.kind] || humanize(row.kind)}</span>
             <span className="text-ink-secondary">· {proofLabel(row)}</span>
@@ -182,7 +182,7 @@ function AutoClosedList({ party, rows, canReopen, busyId, onReopen, hasMore, loa
         ))}
       </ul>
       {hasMore && (
-        <div className="flex items-center gap-2 text-13 md:text-12 text-ink-tertiary">
+        <div className="flex items-center gap-2 text-14 text-ink-tertiary">
           <span>Showing {rows.length} — more closed this week.</span>
           <Button size="sm" variant="ghost" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more"}</Button>
         </div>

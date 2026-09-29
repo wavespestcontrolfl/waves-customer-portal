@@ -1075,6 +1075,16 @@ async function recordCallCommitments({
     if (!result.ownershipLost && require('./callback-cards').enabled()) {
       await require('./callback-cards').prepareCallbackCards(conn, { callId: call.id });
     }
+    // A reprocess rewrites an untouched row the portal closed on its own
+    // (its stated time, and so where an association starts to count): judge
+    // it again now, not at the next sweep. Best-effort, like the refresh
+    // after a reschedule apply; the lapse scan finds one this misses
+    // (listLapsedEvidenceClosedCallIds).
+    if (!result.ownershipLost && promiseEvidenceCloseLive()) {
+      await refreshFulfillment(conn, call.id).catch((err) => {
+        logger.warn(`[call-commitments] fulfillment refresh after recording failed for call ${call.id}: ${err.message}`);
+      });
+    }
     return summary;
   } catch (err) {
     logger.warn(`[call-commitments] recording failed for call ${call?.id}: ${err.message}`);
@@ -2461,8 +2471,10 @@ async function listSlotKeptCallIds(conn) {
 // the proof was judged for (a relink, whenever it happened and whatever
 // kind of evidence closed it — the gate off at the time, or the refresh
 // after it failed), a visit booked or done that is now gone or off the
-// books, or a customer-left dismissal whose customer is no longer churned
-// (the live stage).
+// books, a customer-left dismissal whose customer is no longer churned
+// (the live stage), or an association proof from no later than the stated
+// time a reprocess has since given the promise (associationFrom: the
+// association no longer counts).
 // The periodic sweep refreshes them beside the calls with open promises, so
 // the lapse reopens the promise whenever it happened; the sweep's work
 // follows the lapses, not every promise ever closed — and only closes from
@@ -2482,7 +2494,7 @@ async function listLapsedEvidenceClosedCallIds(conn) {
   // guarded by the record type, so another kind of record id never reaches it.
   const rows = await conn.raw(
     `WITH closes AS MATERIALIZED (
-       SELECT cc.call_log_id, cc.fulfillment
+       SELECT cc.call_log_id, cc.fulfillment, cc.due_at, cc.due_type
          FROM call_commitments cc
         WHERE cc.human_state IS NULL AND cc.status IN ('fulfilled', 'dismissed')
           AND (cc.fulfillment ->> 'closed_by') = '${CLOSED_BY_EVIDENCE}'
@@ -2497,8 +2509,12 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           OR ((cc.fulfillment ->> 'kind') = ?
-              AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id)))`,
-    [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000).toISOString(), CUSTOMER_LEFT, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT],
+              AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id))
+          -- ISO-Z text both sides (the stored proof's matched_at), so a
+          -- stored value that is not a timestamp can never fail the scan.
+          OR ((cc.fulfillment ->> 'kind') IS DISTINCT FROM ? AND cc.due_at IS NOT NULL AND cc.due_type IS DISTINCT FROM 'deadline'
+              AND (cc.fulfillment ->> 'matched_at') <= to_char(cc.due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))`,
+    [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000).toISOString(), CUSTOMER_LEFT, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT, CUSTOMER_LEFT],
   );
   return (rows?.rows || []).map((r) => r.call_log_id);
 }
