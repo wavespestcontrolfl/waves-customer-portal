@@ -112,6 +112,18 @@ const PAGE_EDIT_LOCK_POLL_MS = 250;
 const PAGE_EDIT_LOCK_HOLD_MS_DEFAULT = 5 * 60_000;
 const PAGE_EDIT_LOCK_STATEMENT_TIMEOUT_MS = 30_000;
 
+async function raceDeadline(promise, deadlineAt, message) {
+  let timer = null;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Check a connection out of the pool, giving up at `deadlineAt`. A checkout
 // that completes after the deadline is returned to the pool at once.
 async function acquireConnectionBy(deadlineAt) {
@@ -1721,13 +1733,23 @@ class AutonomousRunner {
     const reason = 'refresh_publish_unreconciled';
     const notes = `${err.message}. Close any PR on that branch and delete the branch, then dismiss.`.slice(0, 4000);
     const now = new Date();
-    await db('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
-      .update({ outcome: 'completed_pending_review', skip_reason: reason, failure_message: String(err.message).slice(0, 4000), reviewer_notes: notes, updated_at: now })
-      .catch((e) => logger.error(`[autonomous-runner] unreconciled approval run park failed (run ${run.id}); manual reconcile needed: ${e.message}`));
-    await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
-      .where('claimed_at', approvalClaimedAt)
-      .update({ status: 'pending_review', skip_reason: reason, updated_at: now })
-      .catch((e) => logger.error(`[autonomous-runner] unreconciled approval queue park failed (opp ${opportunityId}); manual reconcile needed: ${e.message}`));
+    // One transaction: a run parked without its queue row (or the reverse)
+    // would let the interrupted-publish janitor make it requeueable, or leave
+    // a dismiss-only row whose run still reads as publishing.
+    try {
+      await db.transaction(async (trx) => {
+        const runRows = await trx('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
+          .update({ outcome: 'completed_pending_review', skip_reason: reason, failure_message: String(err.message).slice(0, 4000), reviewer_notes: notes, updated_at: now });
+        const oppRows = await trx('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+          .where('claimed_at', approvalClaimedAt)
+          .update({ status: 'pending_review', skip_reason: reason, updated_at: now });
+        if (Number(runRows) !== 1 || Number(oppRows) !== 1) throw new Error(`approval claims moved (run ${runRows}, queue ${oppRows})`);
+      });
+    } catch (parkErr) {
+      // Both records stay as they were (publishing), which the
+      // interrupted-publish janitor parks for a person rather than retrying.
+      logger.error(`[autonomous-runner] unreconciled approval park failed (opp ${opportunityId}, run ${run.id}); left in its publishing state for the janitor: ${parkErr.message}`);
+    }
   }
 
   // Under the page-edit lock: the backfill must still hold its queue claim
@@ -1779,8 +1801,16 @@ class AutonomousRunner {
       // Every statement on this dedicated session (lock polling, the
       // ownership read, unlock) is bounded, so a stalled query cannot keep
       // the shared lock held past the hold budget. Reset before the session
-      // returns to the pool.
-      await lockConn.query(`SET statement_timeout = ${PAGE_EDIT_LOCK_STATEMENT_TIMEOUT_MS}`);
+      // returns to the pool. The SET itself runs before any server-side
+      // timeout exists, so it is raced against the remaining wait budget; a
+      // session that stalls here is destroyed, never pooled.
+      try {
+        await raceDeadline(lockConn.query(`SET statement_timeout = ${PAGE_EDIT_LOCK_STATEMENT_TIMEOUT_MS}`), waitUntil,
+          'timed out configuring the page-edit lock session');
+      } catch (setErr) {
+        unlockError = setErr;
+        throw setErr;
+      }
       timeoutSet = true;
       for (;;) {
         const res = await lockConn.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked', ['opportunity_page_edit']);

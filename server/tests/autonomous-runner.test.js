@@ -2875,6 +2875,23 @@ describe('runNext post-publish bookkeeping', () => {
       expect(lock.conn.__knex__disposed).toMatch(/reset failed/);
     });
 
+    test('a session that stalls configuring its statement timeout is destroyed, not pooled', async () => {
+      process.env.CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS = '20';
+      const lock = pageEditLockHarness(lockedRow);
+      lock.conn.query.mockImplementationOnce(() => new Promise(() => {}));
+      const write = jest.fn();
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_set_stall'), briefBuilder: {}, publisher: { publishRefresh: guardedPublishRefresh(write) },
+        dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_set_stall'),
+      )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST', message: expect.stringMatching(/configuring the page-edit lock session/) });
+      expect(write).not.toHaveBeenCalled();
+      expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
+    });
+
     test('a GitHub call that outlives the hold deadline fails and the lock is still released', async () => {
       process.env.CONTENT_PAGE_EDIT_LOCK_HOLD_MS = '30';
       process.env.GITHUB_TOKEN = 'test-token';
@@ -4408,13 +4425,15 @@ describe('approveAndPublishNamedCompetitor — superseded in-flight approval', (
     jest.resetModules();
     const updates = [];
     const wheres = [];
-    const dbMock = jest.fn((table) => {
+    const trx = jest.fn((table) => {
       const q = {
         where: jest.fn((...args) => { wheres.push({ table, args }); return q; }),
         update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
       };
       return q;
     });
+    const dbMock = jest.fn(() => { throw new Error('approval park must run inside one transaction'); });
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
     jest.doMock('../models/db', () => dbMock);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
@@ -4434,6 +4453,32 @@ describe('approveAndPublishNamedCompetitor — superseded in-flight approval', (
     // No approval path claims this reason, and a superseded row stays for a person.
     const { RECONCILIATION_HOLD_REASONS } = jest.requireActual('../services/content/opportunity-queue')._internals;
     expect(RECONCILIATION_HOLD_REASONS).toContain('refresh_publish_unreconciled');
+    expect(dbMock.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('an approval park that cannot move both records rolls back as one', async () => {
+    jest.resetModules();
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        update: jest.fn(async () => (table === 'opportunity_queue' ? 0 : 1)),
+      };
+      return q;
+    });
+    const dbMock = jest.fn();
+    let rolledBack = null;
+    dbMock.transaction = jest.fn(async (callback) => {
+      try { return await callback(trx); } catch (e) { rolledBack = e; throw e; }
+    });
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => logger);
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+
+    await expect(new AutonomousRunner()._parkUnreconciledApproval('opp-q', { id: 'run-q' }, new Date(), new Error('x')))
+      .resolves.toBeUndefined();
+    expect(rolledBack?.message).toMatch(/approval claims moved \(run 1, queue 0\)/);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/left in its publishing state for the janitor/));
   });
 
   test('crash recovery preserves an uncertain superseded publication for interrupted-publish reconciliation', async () => {
