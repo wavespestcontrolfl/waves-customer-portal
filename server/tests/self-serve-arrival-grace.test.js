@@ -7,16 +7,15 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../utils/datetime-et', () => {
-  const actual = jest.requireActual('../utils/datetime-et');
-  const PINNED_NOW = new Date('2026-09-29T16:00:00Z'); // 2026-09-29 is "today" ET for these tests
-  return { ...actual, etDateString: (date) => actual.etDateString(date || PINNED_NOW) };
-});
 
 const { selfServeArrivalGraceMinutes } = require('../services/scheduling/policy');
 
-const FUTURE_DATE = '2026-10-06'; // clearly a different ET day than the pinned "today"
-const TODAY = '2026-09-29';
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
+// Computed from the real clock so the same-day rule is tested on whatever
+// day the suite runs (no near-today literals).
+const TODAY = etDateString(new Date());
+const FUTURE_DATE = etDateString(addETDays(new Date(), 7));
 
 const ENV_KEYS = ['GATE_SCHEDULING_CAPACITY', 'SELF_SERVE_ARRIVAL_GRACE_MINUTES'];
 const saved = {};
