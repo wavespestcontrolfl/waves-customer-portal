@@ -74,7 +74,7 @@ const limit = positiveIntFlag('limit') ?? null;
       // Planned rows can be skipped (a page already has an in-flight edit, or
       // an ordinary edit superseded it): report what was actually written.
       const skipped = result.rows.length - result.count;
-      console.log(`Seeded ${result.count} of ${result.rows.length} planned row(s) from ${s.scanned} scanned post(s) across ${s.days} ET day(s)${skipped > 0 ? `; ${skipped} skipped (page already being edited or superseded) — re-run later to pick them up` : ''}.`);
+      console.log(`Seeded ${result.count} of ${result.rows.length} planned row(s) from ${s.scanned} scanned post(s) across ${s.days} ET day(s)${skipped > 0 ? `; ${skipped} skipped (already queued, being edited, or superseded)` : ''}.`);
     }
     process.exit(0);
   } catch (err) {
