@@ -128,7 +128,14 @@ function customLinkClause(rescheduleUrl) {
 //     static template text can't mask the loss (codex r3 P2). The list is
 //     the SHARED map the template write validator enforces at save time
 //     (codex r8 P1) — one source, so save and render can never disagree.
-async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId }) {
+//   templateBody: render THIS snapshot of the row's body instead of
+//     re-reading it (customTemplateSnapshot) — the send-time re-render that
+//     drops a link the landed-state check just revoked must not touch the
+//     live row a second time: an admin edit, disable, or a required-
+//     placeholder removal between the pre-move check and the send would
+//     otherwise strand the customer with NO move notice at all, even
+//     though the visit already moved (codex round-2 P1 on PR #5308).
+async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId, templateBody = null }) {
   const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
   return renderSmsTemplate(CUSTOM_TEMPLATE_KEY, {
     first_name: firstName || 'there',
@@ -143,6 +150,7 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
   }, {
     noVariants: true,
     requiredVars: REQUIRED_TEMPLATE_PLACEHOLDERS[CUSTOM_TEMPLATE_KEY],
+    ...(templateBody != null ? { templateBody } : {}),
   });
 }
 
@@ -208,6 +216,27 @@ async function renderV3MovedBody({ firstName, serviceType, date, window, weather
     noVariants: true,
     ...(templateBody != null ? { templateBody } : {}),
   });
+}
+
+// The Custom rung's row as it stands NOW — the ONE observation the
+// pre-move segment cap measures against, pinned onto prebuiltSms so the
+// SEND (including a link-revoked re-render — see renderCustomMovedBody's
+// templateBody param) renders from this snapshot and never re-reads the
+// live row (codex round-2 P1 on PR #5308: a second read means a row an
+// admin disabled, or edited to drop a required placeholder or grow past
+// the segment cap, between the pre-move check and the send would silently
+// strand an already-moved visit with no notice at all). Unlike
+// v3TemplateSnapshot there is no dark-gate/absent-row fallback rung for
+// Custom (renderCustomMovedBody's own header: "there is no honest fallback
+// rung") — { state: 'absent' } / { state: 'disabled' } both end the move
+// notice at custom_message_unavailable, exactly like a render returning
+// null does today. A READ FAILURE throws — callers fail the move closed
+// (note_cap_unavailable), same posture as v3TemplateSnapshot.
+async function customTemplateSnapshot() {
+  const row = await db('sms_templates').where({ template_key: CUSTOM_TEMPLATE_KEY }).first('body', 'is_active');
+  if (!row) return { state: 'absent' };
+  if (row.is_active === false || !row.body) return { state: 'disabled' };
+  return { state: 'live', body: String(row.body) };
 }
 
 // The v3 row as it stands NOW — the one observation both the pre-move cap
@@ -1533,12 +1562,43 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // pre-move build runs with assumeConfirmed, which the link builder
     // deliberately exempts from the move-window guard, so this send-time
     // re-check is the only place it can catch a visit that landed too soon
-    // to move online again). When that happens, re-render with the SAME
-    // landed inputs and no link — dropping the link only SHRINKS the body
-    // (customLinkClause(null) is 46 chars vs >=67 for any link clause), so
-    // the cap this body already passed cannot be exceeded by the swap.
+    // to move online again — including a plain read failure, {failed:true},
+    // which also lands rescheduleUrl on null).
     if (prebuiltSms?.body && rescheduleUrl === prebuiltSms.url) {
       body = prebuiltSms.body;
+    } else if (prebuiltSms?.body) {
+      // Re-render with no link — dropping it only SHRINKS the body
+      // (customLinkClause(null) is 46 chars vs >=67 for any link clause),
+      // so the cap this body already passed cannot be exceeded by the
+      // swap. templateBody PINS commit()'s own snapshot (customTemplateSnapshot)
+      // so this NEVER re-reads the live row: the visit has already moved,
+      // and an admin edit/disable/placeholder removal/lengthening of the
+      // template in the meantime must not strand the customer with no move
+      // notice at all (codex round-2 P1 on PR #5308).
+      body = await renderCustomMovedBody({
+        firstName: customer.first_name,
+        serviceType: job.service_type,
+        date: chosen.date,
+        window: chosen.window,
+        customMessage: customerNote || CUSTOM_DEFAULT_MESSAGE,
+        rescheduleUrl: null,
+        serviceId,
+        templateBody: prebuiltSms.templateBody,
+      });
+      if (!body) {
+        // Unreachable in practice (the pinned snapshot already rendered
+        // successfully once, pre-move, with the SAME requiredVars); fail
+        // exactly like a genuinely dead template would, rather than send
+        // nothing silently.
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} pinned-snapshot re-render (link revoked post-move) failed for ${serviceId} — moved without SMS`);
+        return { sent: false, reason: 'missing_template' };
+      }
+      if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
+        // Unreachable (dropping the link only shrinks the body — see
+        // above), but never send an over-cap body.
+        logger.warn(`[rain-out] custom body for ${serviceId} unexpectedly exceeded the segment cap after the link was revoked — moved without SMS`);
+        return { sent: false, reason: 'too_many_segments' };
+      }
     } else {
       body = await renderCustomMovedBody({
         firstName: customer.first_name,
@@ -1807,11 +1867,34 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // CUSTOM_DEFAULT_MESSAGE fills the front instead of rejecting. The exact
   // send body is rendered here, pre-move, through the same
   // renderCustomMovedBody + link the send will use — reject BEFORE anything
-  // moves, never after.
+  // moves, never after. The template row is snapshotted FIRST
+  // (customTemplateSnapshot, mirroring the preset rung's v3TemplateSnapshot)
+  // and pinned onto prebuiltSms.templateBody: the send (and its own
+  // link-revoked re-render — see sendMovedSms) renders from THIS snapshot,
+  // never a live re-read, so a template disabled/edited/lengthened between
+  // this check and the send cannot strand an already-moved visit with no
+  // notice at all (codex round-2 P1 on PR #5308).
   let prebuiltSms = null;
   if (reasonCode === CUSTOM_REASON) {
     if (scope === 'route') return { ok: false, reason: 'custom_route_scope' };
     if (notifyCustomer) {
+      let snap;
+      try {
+        snap = await customTemplateSnapshot();
+      } catch (err) {
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} snapshot read failed for ${serviceId} — move refused: ${err.message}`);
+        return { ok: false, reason: 'note_cap_unavailable' };
+      }
+      // No honest fallback rung for Custom (renderCustomMovedBody's own
+      // header: "there is no honest fallback rung, the older bodies all
+      // render a reason the dispatcher didn't pick") — a missing/disabled
+      // row is the SAME kill switch a null render already reported; pinning
+      // the observation here just moves it earlier so the send can never
+      // act on a DIFFERENT read of the row than this check made.
+      if (snap.state !== 'live') {
+        logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} ${snap.state} — move refused for ${serviceId}`);
+        return { ok: false, reason: 'custom_message_unavailable' };
+      }
       let url;
       try {
         url = await preMoveRescheduleUrl(serviceId, service);
@@ -1827,13 +1910,17 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         customMessage: note || CUSTOM_DEFAULT_MESSAGE,
         rescheduleUrl: url,
         serviceId,
+        templateBody: snap.body,
       });
-      // Null render = the row is missing/disabled (the ops kill switch) OR
-      // an admin edit deleted a required placeholder (renderCustomMovedBody
-      // passes requiredVars — enforced inside getTemplate on the body that
-      // renders, pre-substitution). Either way the message that IS the
-      // reason can't send, so fail the move here instead of silently
-      // moving the visit messageless.
+      // Null render here means an admin edit deleted a required placeholder
+      // from the row the snapshot above already confirmed live
+      // (renderCustomMovedBody passes requiredVars — enforced inside
+      // getTemplate on the body that renders, pre-substitution): the ONE
+      // remaining reason a live snapshot fails to render (mirrors the
+      // preset rung's own "a live snapshot that FAILS to render refuses the
+      // move" case). Either way the message that IS the reason can't send,
+      // so fail the move here instead of silently moving the visit
+      // messageless.
       if (!body) return { ok: false, reason: 'custom_message_unavailable' };
       // Template statics can carry send-layer blockers the note guards
       // never saw — reject pre-move, not after (codex r9 P2).
@@ -1844,10 +1931,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
         return { ok: false, reason: 'note_too_many_segments' };
       }
-      // The send reuses this exact { url, body } — templates are
-      // admin-editable, so a re-render at send time could exceed the cap
-      // this check just passed (codex pre-push P1).
-      prebuiltSms = { url, body };
+      // The send reuses this exact { url, body }, and — if the landed-state
+      // link re-check revokes url — re-renders the no-link variant from
+      // templateBody (the PINNED snapshot, never a live re-read).
+      prebuiltSms = { url, body, templateBody: snap.body };
     }
   } else if (notifyCustomer && note && service.phone) {
     // Preset reason with a note: the same 2-segment cap, measured on the

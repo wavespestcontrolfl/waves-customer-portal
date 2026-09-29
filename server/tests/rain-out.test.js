@@ -3217,9 +3217,16 @@ describe('rain-out service', () => {
       delete process.env.GATE_QUICKMOVE_CUSTOM_REASON;
     });
 
-    function wireSingle() {
+    // Default: a live custom-template row for customTemplateSnapshot's
+    // pre-move read (mirrors the preset rung's own v3 row default). Exactly
+    // ONE sms_templates queue entry — the send-time link-revoked re-render
+    // must pin and reuse THIS snapshot rather than read the row again, so a
+    // test proving "no second read" can rely on wireDb throwing if one ever
+    // happens.
+    function wireSingle({ customTemplateRow = { body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true } } = {}) {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(customTemplateRow) })],
       });
     }
 
@@ -3432,9 +3439,84 @@ describe('rain-out service', () => {
       const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
       expect(countSegments(normalizeGsmPunctuation(stripSmsUrlScheme(body))).segmentCount).toBeLessThanOrEqual(2);
       // The template renders TWICE: once pre-move (with the link) and once
-      // more at send time (without it) — never the same body reused.
+      // more at send time (without it) — never the same body reused. Both
+      // calls carry the SAME pinned templateBody (customTemplateSnapshot's
+      // pre-move read) — the send-time call never re-reads the live row.
       const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
       expect(customCalls).toHaveLength(2);
+      expect(customCalls[0][3].templateBody).toEqual(expect.any(String));
+      expect(customCalls[1][3].templateBody).toBe(customCalls[0][3].templateBody);
+      // Exactly ONE sms_templates read for the whole commit — the send-time
+      // re-render used the pinned snapshot, not a second query.
+      expect(db.mock.calls.filter(([table]) => table === 'sms_templates')).toHaveLength(1);
+    });
+
+    // Codex round-2 P1 on PR #5308: the send-time link-revoked re-render
+    // must use the PINNED pre-move snapshot, never read the template row
+    // again — otherwise a row that went disabled, lost a required
+    // placeholder, or grew past the segment cap between the pre-move check
+    // and the send would strand an already-moved visit with NO notice at
+    // all. This proves the invariant directly: the row `wireSingle` would
+    // serve on a SECOND read is a poisoned marker that must never reach the
+    // customer, and exactly one read happens regardless.
+    test('gate on: the send-time link-revoked re-render never re-reads the template row — a row that went disabled/lost its placeholder/grew longer in between cannot strand the move without a notice', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      const POISON = 'POISONED-SECOND-READ-MUST-NEVER-RENDER';
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // Only the FIRST entry (pre-move) should ever be consumed. A second
+        // read would find this row disabled (the kill switch), so if the
+        // send-time re-render mistakenly re-read the row, it would either
+        // throw finding the poisoned marker in its output or the move would
+        // silently go unnotified — either way this test would fail.
+        sms_templates: [
+          chain({ first: jest.fn().mockResolvedValue({ body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true }) }),
+          chain({ first: jest.fn().mockResolvedValue({ body: POISON, is_active: false }) }),
+        ],
+      });
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
+        .mockResolvedValueOnce({ url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true });
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      // The move notice still sent — a disabled/changed row after the move
+      // must never strand the customer with nothing.
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).not.toContain(POISON);
+      expect(body).toContain(' Need a different time? Reply to this message.');
+      expect(body).toContain(MESSAGE);
+      // Exactly one sms_templates read for the whole commit — the second
+      // (poisoned) queue entry is never touched.
+      expect(db.mock.calls.filter(([table]) => table === 'sms_templates')).toHaveLength(1);
+    });
+
+    // Codex round-2 P1, {failed:true} variant: a plain read failure on the
+    // send-time pinnedUrl re-check must be treated exactly like an explicit
+    // refusal — rescheduleUrl still lands on null, and the no-link
+    // re-render still uses the pinned snapshot rather than re-reading.
+    test('gate on: a {failed:true} landed-state re-check (read failure, not a refusal) also drops the link and uses the pinned snapshot', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      mockCustomRender();
+      wireSingle();
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
+        .mockResolvedValueOnce({ url: null, line: '', failed: true });
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).not.toContain('waves.test');
+      expect(body).toContain(' Need a different time? Reply to this message.');
+      expect(body).toContain(MESSAGE);
+      const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
+      expect(customCalls).toHaveLength(2);
+      expect(customCalls[1][3].templateBody).toBe(customCalls[0][3].templateBody);
+      expect(db.mock.calls.filter(([table]) => table === 'sms_templates')).toHaveLength(1);
     });
 
     test('custom renders pin the base row and demand the load-bearing placeholders (renderer opts contract)', async () => {
@@ -3455,9 +3537,12 @@ describe('rain-out service', () => {
       const customCalls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_custom_v1');
       expect(customCalls.length).toBeGreaterThan(0);
       for (const call of customCalls) {
+        // templateBody pins the pre-move snapshot (customTemplateSnapshot)
+        // so the render never re-reads the live row (codex round-2 P1).
         expect(call[3]).toEqual({
           noVariants: true,
           requiredVars: ['custom_message', 'new_option', 'link_clause'],
+          templateBody: expect.any(String),
         });
       }
     });
@@ -3473,6 +3558,7 @@ describe('rain-out service', () => {
         mockCustomRender();
         wireDb({
           scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, is_recurring: true }) })],
+          sms_templates: [chain({ first: jest.fn().mockResolvedValue({ body: 'CUSTOM TEMPLATE {custom_message} {new_option} {link_clause}', is_active: true }) })],
         });
 
         const result = await RainOut.commit({
