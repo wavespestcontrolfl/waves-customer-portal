@@ -125,6 +125,15 @@ describe('the injection record', () => {
     expect(screen.getByPlaceholderText('DBH / palm size')).toBeTruthy();
   });
 
+  it('keeps a leading decimal point while the dose is typed', () => {
+    render(<Block injectionProducts={[]} initial={{ injectionRecord: { product: 'Tree-age' } }} />);
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '.' } });
+    expect(screen.getByLabelText('Dose amount').value).toBe('.');
+    fireEvent.change(screen.getByLabelText('Dose amount'), { target: { value: '.5' } });
+    expect(screen.getByLabelText('Dose amount').value).toBe('.5');
+    expect(record().dose).toBe('.5 fl oz');
+  });
+
   it('reads a dose saved before this form, and shows one it cannot read', () => {
     const { unmount } = render(<Block injectionProducts={[]} initial={{ injectionRecord: { product: 'Tree-age', dose: '½ fl oz' } }} />);
     expect(screen.getByLabelText('Dose amount').value).toBe('0.5');

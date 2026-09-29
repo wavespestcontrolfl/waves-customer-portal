@@ -10939,7 +10939,7 @@ export function treeShrubCloseoutBlocksClient({
     else if (hasMlAmount(injection.dose)) push("Injection dose must be in tsp or fl oz, not mL.", "injectionRecord.dose");
     // A dose saved before the dose became a number of tsp or fl oz, and not
     // readable as one, is entered again rather than sent unseen.
-    else if (!parseDose(injection.dose).amount) push("Enter the injection dose as a number of tsp or fl oz.", "injectionRecord.dose");
+    else if (!(Number(parseDose(injection.dose).amount) > 0)) push("Enter the injection dose as a number of tsp or fl oz.", "injectionRecord.dose");
     if (treeShrubNumber(injection.numberOfPorts) === null) push("Injection record requires number of ports.", "injectionRecord.numberOfPorts");
     if (!String(injection.targetIssue || "").trim()) push("Injection record requires target issue.", "injectionRecord.targetIssue");
     if (!String(injection.followUpDate || "").trim()) push("Injection record requires follow-up date.", "injectionRecord.followUpDate");

@@ -79,11 +79,12 @@ const UNIT_WORDS = [
   [/^(fl\.?\s*oz\.?|floz|fluid\s+ounces?|oz\.?|ounces?)$/, "fl_oz"],
 ];
 
-// A typed quantity: "2", "1.5", "2." while typing (kept as typed), or a
-// fraction a dose typed before this form may hold: "½", "1½", "1 1/2".
+// A typed quantity: "2", "1.5", or "2." / "." / ".5" while typing (kept as
+// typed, so a dot is never lost mid-entry), or a fraction a dose typed before
+// this form may hold: "½", "1½", "1 1/2".
 function quantityOf(text) {
   const t = text.trim();
-  if (/^(\d+\.?\d*|\.\d+)$/.test(t)) return t;
+  if (/^(\d+\.?\d*|\.\d*)$/.test(t)) return t;
   let match = /^(?:(\d+)\s*)?([⅛¼⅜½⅝¾⅞])$/.exec(t);
   if (match) return String(Number(match[1] || 0) + FRACTIONS[match[2]]);
   match = /^(?:(\d+)\s+)?(\d+)\/(\d+)$/.exec(t);

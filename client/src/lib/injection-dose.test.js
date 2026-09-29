@@ -86,8 +86,10 @@ describe('the stored dose and trunk size', () => {
     expect(doseText('', 'tsp')).toBe('');
     expect(parseDose('1 fl oz')).toEqual({ amount: '1', unit: 'fl_oz' });
     expect(parseDose('1.5 tsp')).toEqual({ amount: '1.5', unit: 'tsp' });
-    // A dot typed mid-number survives the round trip.
+    // A dot typed mid-number, or first, survives the round trip.
     expect(parseDose(doseText('2.', 'tsp'))).toEqual({ amount: '2.', unit: 'tsp' });
+    expect(parseDose(doseText('.', 'tsp'))).toEqual({ amount: '.', unit: 'tsp' });
+    expect(parseDose(doseText('.5', 'fl_oz'))).toEqual({ amount: '.5', unit: 'fl_oz' });
     // A dose typed before this form reads when it is a number of tsp or fl oz,
     // fractions and unit words included.
     expect(parseDose('½ fl oz')).toEqual({ amount: '0.5', unit: 'fl_oz' });

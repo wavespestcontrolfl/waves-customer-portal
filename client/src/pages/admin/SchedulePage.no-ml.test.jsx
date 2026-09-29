@@ -293,6 +293,10 @@ describe('the Tree & Shrub injection dose', () => {
     expect(doseBlocks('')).toEqual(['Injection record requires dose.']);
     // A saved dose that is not a number of tsp or fl oz is entered again.
     expect(doseBlocks('a squirt')).toEqual(['Enter the injection dose as a number of tsp or fl oz.']);
+    // A dose left mid-entry, or zero, is not a dose.
+    expect(doseBlocks('. fl oz')).toEqual(['Enter the injection dose as a number of tsp or fl oz.']);
+    expect(doseBlocks('0 tsp')).toEqual(['Enter the injection dose as a number of tsp or fl oz.']);
+    expect(doseBlocks('.5 tsp')).toEqual([]);
   });
 });
 
