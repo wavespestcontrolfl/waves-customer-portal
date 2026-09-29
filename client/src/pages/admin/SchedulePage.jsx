@@ -13762,7 +13762,8 @@ export function CompletionPanel({
         // area: the area still follows, the dose stays (audit P1).
         totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
           ? product.totalAmount
-          : lawnDerivedTotal(product, lawnVisitArea) } : product));
+          // In the rate's unit, or in spoons while the tech reads it in tsp.
+          : amountInUnit(lawnDerivedTotal(product, lawnVisitArea), baseUnitOf(product.rateUnit), product.amountUnit) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
