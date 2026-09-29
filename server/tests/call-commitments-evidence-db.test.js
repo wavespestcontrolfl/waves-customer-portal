@@ -115,7 +115,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   const track = (list) => async (query) => { const [r] = await query.returning('id'); list.push(r.id); return r; };
   const addSms = track(made.smsIds);
   const addVisit = track(made.visitIds);
-  const addEmail = track(made.emailIds);
 
   // Each evidence path: the seed that makes it true, the basis it is stored
   // under, and a near-miss that must not close.
@@ -123,9 +122,11 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     twilio_call_sid: `CA${'5'.repeat(24)}${w.n}in${Object.keys(extra).length}`, direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, status: 'completed',
     duration_seconds: 75, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }), customer_id: w.customerId, created_at: later(), ...extra,
   }).returning('id').then(([r]) => { made.callIds.push(r.id); return r; });
+  // A call a person placed through the staff bridge that reached a live conversation.
   const outboundCall = (w, extra = {}) => db('call_log').insert({
-    twilio_call_sid: `CA${'4'.repeat(24)}${w.n}ou`, direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, status: 'completed',
-    duration_seconds: 80, customer_id: w.customerId, created_at: later(), ...extra,
+    twilio_call_sid: `CA${'4'.repeat(24)}${w.n}ou${Object.keys(extra).length}`, direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, status: 'completed',
+    duration_seconds: 80, customer_id: w.customerId, created_at: later(), source: 'admin-click',
+    v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }), ...extra,
   }).returning('id').then(([r]) => { made.callIds.push(r.id); return r; });
   const sms = (w, message_type, extra = {}) => addSms(db('sms_log').insert({
     direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, customer_id: w.customerId, message_type, status: 'sent', created_at: later(), ...extra }));
@@ -133,9 +134,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   const staffText = (w, extra = {}) => sms(w, 'manual', { metadata: JSON.stringify({ human_authored: true }), ...extra });
   const visit = (w, extra = {}) => addVisit(db('scheduled_services').insert({
     scheduled_date: '2026-12-01', service_type: 'General Pest Control', status: 'pending', customer_id: w.customerId, created_at: later(), ...extra }));
-  const staffEmail = (w, extra = {}) => addEmail(db('emails').insert({
-    gmail_id: `g-${w.n}-${Object.keys(extra).length}`, gmail_thread_id: `t-${w.n}`, from_address: 'office@wavespestcontrol.com', to_address: w.email,
-    customer_id: w.customerId, label_ids: JSON.stringify(['SENT']), received_at: later(), ...extra }));
   const estimate = async (w) => {
     const [r] = await db('estimates').insert({
       status: 'sent', customer_id: w.customerId, customer_phone: w.phone, sent_at: later(), created_at: later(),
@@ -160,7 +158,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     ['other', 'a visit completed for the customer', (w) => visit(w, { status: 'completed', completed_at: later(), created_at: new Date(Date.now() - 20 * DAY) }), 'visit_completed_for_same_customer_within_14_days', 'visit_completed'],
     ['other', 'an estimate sent to the customer', (w) => estimate(w), 'estimate_sent_to_same_customer_within_14_days', 'estimate_sent'],
     ['callback', 'a completed inbound call from the caller', (w) => inbound(w), 'completed_inbound_call_from_caller_within_14_days', 'inbound_call'],
-    ['callback', 'a staff email to the customer', (w) => staffEmail(w), 'staff_email_to_customer_within_14_days', 'email_sent'],
     ['callback', 'a visit booked for the customer', (w) => visit(w), 'visit_booked_for_same_customer_within_14_days', 'appointment_booked'],
     ['callback', 'an estimate sent to the customer', (w) => estimate(w), 'estimate_sent_to_same_customer_within_14_days', 'estimate_sent'],
     ['send_estimate', 'a visit booked for the customer', (w) => visit(w), 'visit_booked_for_same_customer_within_14_days', 'appointment_booked'],
@@ -168,9 +165,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     ['schedule_visit', 'a visit completed for the customer', (w) => visit(w, { status: 'completed', completed_at: later(), created_at: new Date(Date.now() - 20 * DAY) }), 'visit_completed_for_same_customer_within_14_days', 'visit_completed'],
     ['send_report', 'a service report text to the caller', (w) => sms(w, 'service_report'), 'service_report_text_to_caller_within_14_days', 'sms_sent'],
     ['send_report', 'a service report email to the customer', (w) => reportEmail(w), 'service_report_email_to_customer_within_14_days', 'email_sent'],
-    ['send_report', 'a staff email to the customer', (w) => staffEmail(w), 'staff_email_to_customer_within_14_days', 'email_sent'],
     ['send_paperwork', 'a service report text to the caller', (w) => sms(w, 'service_report_ready'), 'service_report_text_to_caller_within_14_days', 'sms_sent'],
-    ['send_paperwork', 'a staff email to the customer', (w) => staffEmail(w), 'staff_email_to_customer_within_14_days', 'email_sent'],
   ];
 
   test.each(CASES)('%s: %s closes the promise with the proof stored; with the switch off it stays open and unchanged', async (kind, _what, seed, basis, proofKind) => {
@@ -211,13 +206,14 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       made.visitIds.push(parent.id);
       await visit(w, { recurring_parent_id: parent.id });
     });
-    await stayOpen('callback', (w) => staffEmail(w, { label_ids: JSON.stringify(['SENT', 'INBOX']) }));
-    await stayOpen('callback', (w) => staffEmail(w, { label_ids: JSON.stringify(['INBOX']), from_address: w.email, to_address: 'office@wavespestcontrol.com' }));
-    await stayOpen('callback', (w) => staffEmail(w, { from_address: 'someone@example.invalid' }));
-    await stayOpen('callback', (w) => staffEmail(w, { to_address: `x${w.email}` }));
-    await stayOpen('callback', (w) => staffEmail(w, { received_at: new Date(Date.now() - 3 * DAY - 60 * 1000) }));
-    // The exact address, but the sync linked the message to no one, or to another customer.
-    await stayOpen('callback', (w) => staffEmail(w, { customer_id: null }));
+    // An outbound call a person did not place (the collections voice agent), one
+    // that reached voicemail, or one with no reviewed recording keeps nothing.
+    await stayOpen('other', (w) => outboundCall(w, { source: 'collections_voice' }));
+    await stayOpen('other', (w) => outboundCall(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) }));
+    await stayOpen('other', (w) => outboundCall(w, { v2_extraction_status: null }));
+    // A staff email is not closing evidence: the Gmail sync links no customer to outbound mail.
+    await stayOpen('callback', (w) => db('emails').insert({ gmail_id: `g-${w.n}`, gmail_thread_id: `t-${w.n}`, from_address: 'office@wavespestcontrol.com',
+      to_address: w.email, label_ids: JSON.stringify(['SENT']), received_at: later() }).returning('id').then(([r]) => { made.emailIds.push(r.id); }));
     await stayOpen('send_report', (w) => sms(w, 'service_report', { status: 'failed' }));
     // Queued for quiet hours, or never accepted by the provider, is not sent.
     await stayOpen('send_report', (w) => sms(w, 'service_report_v1', { status: 'scheduled' }));
@@ -229,7 +225,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       return other.id;
     };
     await stayOpen('send_report', async (w) => sms(w, 'service_report', { customer_id: await householdMember(w) }));
-    await stayOpen('callback', async (w) => staffEmail(w, { customer_id: await householdMember(w) }));
     await stayOpen('send_appointment_confirmation', async (w) => sms(w, 'confirmation', { customer_id: await householdMember(w) }));
     await stayOpen('send_report', (w) => reportEmail(w, { status: 'bounced' }));
     await stayOpen('send_report', (w) => reportEmail(w, { status: 'dropped' }));
@@ -243,13 +238,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       await inbound(w, { customer_id: other.id });
     });
     await stayOpen('send_estimate', (w) => visit(w, { status: 'completed', completed_at: new Date(Date.now() - 4 * DAY), created_at: new Date(Date.now() - 20 * DAY) }));
-  });
-
-  test('a staff email finds the customer by one exact address among several recipients, case-insensitively', async () => {
-    const w = await world({ kind: 'callback' });
-    const e = await staffEmail(w, { to_address: `"Someone" <other@example.invalid>, ${w.email.toUpperCase()}` });
-    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
-    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: e.id, basis: 'staff_email_to_customer_within_14_days' });
   });
 
   test('a callback whose card already placed a call never takes the new evidence (the card attempt early-return is kept)', async () => {
@@ -492,7 +480,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     try {
       const w = await world({ kind: 'callback', human_state: 'confirmed', customerExtra: churnedStage(1) });
       await inbound(w);
-      await staffEmail(w);
       await visit(w);
       expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ checked: 1, fulfilled: 0, hinted: 0 });
       expect(await row(w.commitment.id)).toMatchObject({ status: 'open', human_state: 'confirmed', fulfillment: null });
@@ -511,21 +498,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const hint = await row(w.commitment.id);
     expect(hint).toMatchObject({ status: 'open', fulfillment: { record_id: v.id, strength: 'association' } });
     expect(hint.fulfillment.closed_by).toBeUndefined();
-  });
-
-  test('a staff email to an address another live customer shares proves nothing; a merged (soft-deleted) duplicate with it does not count', async () => {
-    const shared = await world({ kind: 'callback' });
-    const [spouse] = await db('customers').insert({ first_name: `Spouse${shared.n}`, phone: `+1555557${shared.n}`, email: ` ${shared.email.toUpperCase()}` }).returning('id');
-    made.customerIds.push(spouse.id);
-    await staffEmail(shared);
-    expect(await cc.refreshFulfillment(db, shared.call.id)).toMatchObject({ fulfilled: 0 });
-    expect(await row(shared.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
-    const merged = await world({ kind: 'callback' });
-    const [duplicate] = await db('customers').insert({ first_name: `Duplicate${merged.n}`, phone: `+1555557${merged.n}`, email: merged.email, deleted_at: new Date() }).returning('id');
-    made.customerIds.push(duplicate.id);
-    const e = await staffEmail(merged);
-    expect(await cc.refreshFulfillment(db, merged.call.id)).toMatchObject({ fulfilled: 1 });
-    expect((await row(merged.commitment.id)).fulfillment).toMatchObject({ record_id: e.id });
   });
 
   test('an association counts only from a later stated time that is not a deadline; a deadline, or direct proof, keeps the promise early', async () => {

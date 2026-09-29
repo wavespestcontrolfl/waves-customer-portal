@@ -1542,13 +1542,6 @@ const WITHIN = `within_${ASSOCIATION_WINDOW_DAYS}_days`;
 // A report counts once the provider accepted it — never a row still queued
 // for quiet hours (scheduled / sending), blocked, or failed.
 const PROVIDER_ACCEPTED = ["sent", "delivered"];
-// A person's mailbox: an address at Waves' own domain (the Gmail-sync
-// `emails` rows carry the bare address; a display-name wrapper is tolerated).
-const STAFF_ADDRESS_RE = "@wavespestcontrol\\.com>{0,1}[[:space:]]*$";
-// Each address in a to/cc header, lower-cased — the exact-match unit, so a
-// short customer address is never found inside a longer one.
-const ADDRESS_TOKEN_RE = "[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}";
-
 const sameCustomerWhere = (b, column, customerId) => { if (customerId) b.where(column, customerId); };
 
 // The callback promise's own completion rules, shared with kind 'other':
@@ -1558,10 +1551,23 @@ const sameCustomerWhere = (b, column, customerId) => { if (customerId) b.where(c
 // automatic reply, and not a proactive draft with no inbound anchor).
 // `until` is the window's end for evidence that has one; a callback returned
 // late was still returned, so the callback case passes none.
-async function returnedOutboundCall(conn, { after, until = null, phone, customerId }) {
+async function returnedOutboundCall(conn, { after, until = null, phone, customerId, personPlaced = false }) {
   const row = await conn("call_log")
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
     .where("direction", "outbound")
+    // Closing evidence also needs a person on it — the SMS promise tracker's
+    // personCallBack rule: placed through the staff bridge (an allowlist;
+    // automated outbound calls such as collections_voice log other sources),
+    // and the recording's reviewed extraction heard a live conversation, not
+    // voicemail; a callback-card call's customer leg completed (>= 60 s).
+    .modify((b) => {
+      if (!personPlaced) return;
+      b.whereIn("source", require("./sms-commitment-fulfillment").STAFF_CALL_SOURCES)
+        .where("v2_extraction_status", "valid")
+        .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+        .whereRaw("(metadata->'customer_leg'->>'status' IS NULL OR (metadata->'customer_leg'->>'status' = 'completed'"
+          + " AND CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END))");
+    })
     .where("created_at", ">", after)
     .modify((b) => { if (until) b.where("created_at", "<=", until); })
     .whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
@@ -1651,35 +1657,6 @@ async function inboundConversation(conn, { callId, after, until, phone, customer
   return row ? { id: row.id, at: row.created_at } : null;
 }
 
-// A message a person at Waves sent from the Gmail-synced mailbox to the
-// customer: SENT and not INBOX (a self-addressed control message is both),
-// from a Waves address, with the customer's exact address as one recipient.
-// The sync must have linked the message to this customer (emails.customer_id,
-// recorded at sync time), so a later change of address cannot re-bind it.
-// An address another live customer also has (a household sharing one) does
-// not say which of them the message was for, so it proves nothing.
-async function staffEmailTo(conn, { after, until, customerId }) {
-  if (!customerId) return null;
-  const customer = await conn("customers").where({ id: customerId }).first("email");
-  const address = String(customer?.email || "").trim().toLowerCase();
-  if (!address) return null;
-  const shared = await conn("customers").whereNot("id", customerId).whereNull("deleted_at")
-    .whereRaw("lower(trim(email)) = ?", [address]).first("id");
-  if (shared) return null;
-  const row = await conn("emails")
-    .where("customer_id", customerId)
-    .where("received_at", ">", after)
-    .where("received_at", "<=", until)
-    .whereRaw("lower(from_address) ~ ?", [STAFF_ADDRESS_RE])
-    .whereRaw("jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'SENT')")
-    .whereRaw("NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'INBOX')")
-    .whereRaw("NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'DRAFT')")
-    .whereRaw("? = ANY (ARRAY(SELECT (regexp_matches(lower(COALESCE(to_address, '')), ?, 'g'))[1]))", [address, ADDRESS_TOKEN_RE])
-    .orderBy("received_at", "asc")
-    .first("id", "received_at");
-  return row ? { id: row.id, at: row.received_at } : null;
-}
-
 // send_estimate's association lookup, shared with kind 'other': an estimate
 // handed off to the same customer after the call (or, for an unlinked call,
 // an unlinked estimate on the caller's phone).
@@ -1734,10 +1711,9 @@ async function reportEmailTo(conn, { after, until, customerId }) {
 
 // name → how to look, and what the proof is called.
 const EVIDENCE = {
-  staff_call: { find: returnedOutboundCall, kind: "outbound_call", type: "call_log", basis: `staff_call_to_caller_${WITHIN}` },
+  staff_call: { find: (conn, x) => returnedOutboundCall(conn, { ...x, personPlaced: true }), kind: "outbound_call", type: "call_log", basis: `staff_call_to_caller_${WITHIN}` },
   staff_text: { find: (conn, x) => humanTextTo(conn, { ...x, operatorSent: true }), kind: "sms_sent", type: "sms_log", basis: `staff_text_to_caller_${WITHIN}` },
   inbound_call: { find: inboundConversation, kind: "inbound_call", type: "call_log", basis: `completed_inbound_call_from_caller_${WITHIN}` },
-  staff_email: { find: staffEmailTo, kind: "email_sent", type: "email", basis: `staff_email_to_customer_${WITHIN}` },
   visit_booked: { find: bookedVisit, kind: "appointment_booked", type: "scheduled_service", basis: `visit_booked_for_same_customer_${WITHIN}` },
   visit_done: { find: completedVisit, kind: "visit_completed", type: "scheduled_service", basis: `visit_completed_for_same_customer_${WITHIN}` },
   estimate: { find: (conn, x) => (x.customerId ? estimateSentTo(conn, x) : null), kind: "estimate_sent", type: "estimate", basis: `estimate_sent_to_same_customer_${WITHIN}` },
@@ -1749,11 +1725,11 @@ const EVIDENCE_BY_KIND = {
   other: ["staff_call", "staff_text", "inbound_call", "visit_booked", "visit_done", "estimate"],
   // A callback exists to reach a decision: once the visit it was about is
   // booked, or the quote went out, the call back is moot.
-  callback: ["inbound_call", "staff_email", "visit_booked", "estimate"],
+  callback: ["inbound_call", "visit_booked", "estimate"],
   send_estimate: ["visit_booked", "visit_done"],
   schedule_visit: ["visit_done"],
-  send_report: ["report_text", "report_email", "staff_email"],
-  send_paperwork: ["report_text", "report_email", "staff_email"],
+  send_report: ["report_text", "report_email"],
+  send_paperwork: ["report_text", "report_email"],
 };
 
 // The kinds an association closes (every other kind keeps it as a hint): a
