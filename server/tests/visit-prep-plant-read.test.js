@@ -351,7 +351,7 @@ describe('a successful read', () => {
     expect(mockGetPhotoBase64).toHaveBeenCalledWith('visitprep/a.jpg');
     const writes = readStatusWrites(conn, 'sub-1');
     // The claim stamps the engine marker so the display knows who owns it.
-    expect(writes[0]).toEqual({ read_status: 'pending', read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn' }) });
+    expect(writes[0]).toEqual({ read_status: 'pending', read_attempts: 1, read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn' }) });
     expect(writes[1].read_status).toBe('done');
     const stored = JSON.parse(writes[1].read_result);
     expect(stored.subject_type).toBe('lawn');
@@ -484,5 +484,39 @@ describe('the stop changes while the engine runs (Codex #5320 r8)', () => {
     await tick(); await tick();
     expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(1);
     expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('none');
+  });
+});
+
+describe('released attempts still count against the daily cap (Codex #5320 r8 audit)', () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  test('cap 1: a read released because the stop changed mid-read is not re-read (the first engine call used the slot)', async () => {
+    process.env.VISIT_PREP_READ_DAILY_CAP = '1';
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    mockIdentifyPlantV2.mockImplementation(async () => {
+      conn._store.scheduled_services.forEach((r) => { if (r.id === 'svc-1') r.service_type = 'Tree & Shrub Care'; });
+      return okEngineResult();
+    });
+    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
+    await tick(); await tick();
+    const row = conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1');
+    expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(1);
+    expect(row.read_status).toBe('none');
+    expect(row.read_attempts).toBe(1);
+  });
+
+  test('readsToday sums attempts, and counts a claimed row with no attempts recorded (pre-column) once', async () => {
+    const { readsToday } = require('../services/visit-prep-read-claim');
+    const conn = fakeConn({
+      visit_prep_submissions: [
+        { id: 'a', read_status: 'done', read_attempts: 0 },
+        { id: 'b', read_status: 'none', read_attempts: 1 },
+        { id: 'c', read_status: 'done', read_attempts: 2 },
+        { id: 'd', read_status: 'unsupported', read_attempts: 0 },
+      ],
+    });
+    // sub-1 is seeded at 'none' with no attempts.
+    expect(await readsToday(conn)).toBe(4);
   });
 });

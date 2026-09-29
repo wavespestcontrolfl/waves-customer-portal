@@ -31,17 +31,21 @@ function etDayStart(now = new Date()) {
   return parseETDateTime(`${etDateString(now)}T00:00`);
 }
 
-// Every read ATTEMPTED today, not only the ones that stored a result: an
-// engine call that failed still cost a vision call. pending/done/failed are
-// the statuses a claimed submission can reach (none/unsupported never
-// claimed a slot and never count).
+// Every engine ATTEMPT today, not only the ones that stored a result: an
+// engine call that failed, or whose result was released because the stop
+// changed mid-read, still cost a vision call. Each claim bumps
+// read_attempts; rows claimed before that column existed count once while
+// they sit in a claimed status (pending/done/failed). Today's rows are few
+// (the cap bounds the claimed ones), so they are summed here.
+const CLAIMED_STATUSES = ['pending', 'done', 'failed'];
+function attemptsOf(row) {
+  return Math.max(Number(row.read_attempts) || 0, CLAIMED_STATUSES.includes(row.read_status) ? 1 : 0);
+}
 async function readsToday(conn, now = new Date()) {
-  const row = await conn('visit_prep_submissions')
-    .whereIn('read_status', ['pending', 'done', 'failed'])
+  const rows = await conn('visit_prep_submissions')
     .where('created_at', '>=', etDayStart(now))
-    .count('id as count')
-    .first();
-  return Number(row?.count || 0);
+    .select('read_status', 'read_attempts');
+  return rows.reduce((sum, row) => sum + attemptsOf(row), 0);
 }
 
 /**
@@ -72,7 +76,7 @@ async function claimReadSlot(conn, submissionId, svc, {
         const value = await applicable(svc, trx);
         if (!value) return 'unsupported';
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
-        const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
+        const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at', 'read_attempts');
         if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
         if (await readsToday(trx, now) >= dailyCap()) return 'refused';
         // Claimed only from a status the caller expected (no engine holds the
@@ -80,7 +84,11 @@ async function claimReadSlot(conn, submissionId, svc, {
         // (Codex #5320 r1 P2).
         const updated = await trx('visit_prep_submissions').where({ id: submissionId })
           .whereIn('read_status', expectStatus)
-          .update({ read_status: 'pending', ...(typeof pendingPatch === 'function' ? pendingPatch(value) : pendingPatch) });
+          .update({
+            read_status: 'pending',
+            read_attempts: (Number(own.read_attempts) || 0) + 1,
+            ...(typeof pendingPatch === 'function' ? pendingPatch(value) : pendingPatch),
+          });
         if (!updated) return 'taken';
         return { claimed: true, value };
       });
@@ -97,7 +105,8 @@ async function claimReadSlot(conn, submissionId, svc, {
  * call runs outside any transaction, and the stop can change lines (or
  * subject) while it runs. Under the same stop lock + share locks as the
  * claim, re-proves applicability; a match runs `store(trx)`, anything else
- * releases the claim back to 'none' (uncounted) and returns 'changed' so the
+ * releases the claim back to 'none' (its attempt stays counted in
+ * read_attempts) and returns 'changed' so the
  * caller re-dispatches for the stop as it is now (Codex #5320 r8 P2).
  *
  * @param {object} opts

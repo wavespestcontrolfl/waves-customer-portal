@@ -498,7 +498,7 @@ describe('a successful read', () => {
     expect(stored.mode).toBe('internal');
     expect(stored.customer_id).toBe('cust-1');
     const writes = readStatusWrites(conn, 'sub-1');
-    expect(writes[0]).toEqual({ read_status: 'pending', read_ref: null, read_result: null });
+    expect(writes[0]).toEqual({ read_status: 'pending', read_attempts: 1, read_ref: null, read_result: null });
     expect(writes[1].read_status).toBe('done');
     expect(writes[1].read_ref).toBe(stored.id);
   });
