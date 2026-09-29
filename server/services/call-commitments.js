@@ -1572,10 +1572,15 @@ async function returnedOutboundCall(conn, { after, until = null, phone, customer
   return row ? { id: row.id, at: row.created_at } : null;
 }
 
-async function humanTextTo(conn, { after, until = null, phone, customerId }) {
+async function humanTextTo(conn, { after, until = null, phone, customerId, operatorSent = false }) {
   const row = await conn("sms_log as os")
     .where("os.direction", "outbound")
     .whereIn("os.message_type", ["manual", "ai_approved", "ai_revised"])
+    // Closing evidence also needs persisted operator provenance — the
+    // composer's human_authored stamp or the sending admin (the SMS promise
+    // tracker's operator_sent rule): 'manual' alone is overloaded across
+    // automated senders (twilio.js), such as the reschedule acknowledgement.
+    .modify((b) => { if (operatorSent) b.whereRaw("(COALESCE(os.metadata->>'human_authored', '') = 'true' OR os.admin_user_id IS NOT NULL)"); })
     .whereIn("os.status", ["queued", "sent", "delivered"])
     .where("os.created_at", ">", after)
     .modify((b) => { if (until) b.where("os.created_at", "<=", until); })
@@ -1727,7 +1732,7 @@ async function reportEmailTo(conn, { after, until, customerId }) {
 // name → how to look, and what the proof is called.
 const EVIDENCE = {
   staff_call: { find: returnedOutboundCall, kind: "outbound_call", type: "call_log", basis: `staff_call_to_caller_${WITHIN}` },
-  staff_text: { find: humanTextTo, kind: "sms_sent", type: "sms_log", basis: `staff_text_to_caller_${WITHIN}` },
+  staff_text: { find: (conn, x) => humanTextTo(conn, { ...x, operatorSent: true }), kind: "sms_sent", type: "sms_log", basis: `staff_text_to_caller_${WITHIN}` },
   inbound_call: { find: inboundConversation, kind: "inbound_call", type: "call_log", basis: `completed_inbound_call_from_caller_${WITHIN}` },
   staff_email: { find: staffEmailTo, kind: "email_sent", type: "email", basis: `staff_email_to_customer_${WITHIN}` },
   visit_booked: { find: bookedVisit, kind: "appointment_booked", type: "scheduled_service", basis: `visit_booked_for_same_customer_${WITHIN}` },
@@ -2146,10 +2151,12 @@ async function resolveFulfillment(conn, commitment, call) {
   const phone = contactPhoneOf(call);
   const customerId = call?.customer_id || null;
   // `evidence` counts from the boundary (direct proof); `associated` from
-  // where an association that could close the promise starts to count.
+  // where an association that could close the promise starts to count, up to
+  // the SAME window end: a later start never buys a new 14 days (a start past
+  // the end leaves no association at all).
   const evidence = { callId: call.id, phone, customerId, after, until };
   const from = associationCloses(commitment) ? associationFrom(commitment, after) : after;
-  const associated = from === after ? evidence : { ...evidence, after: from, until: windowEnd(from) };
+  const associated = from === after ? evidence : { ...evidence, after: from };
   return resolver({ conn, commitment, call, after, until, phone, customerId, leadIds: leadIdsOf(call), evidence, associated });
 }
 
@@ -2277,10 +2284,14 @@ async function judgeOpenRow(conn, commitment, call) {
 // writer stored is never re-judged or listed as this file's. Beside it, the
 // customer the call had when the proof was judged: a call relinked since —
 // whenever, and however the refresh after it went — is found by the sweep
-// (listLapsedEvidenceClosedCallIds) and judged again.
+// (listLapsedEvidenceClosedCallIds) and judged again. And when the portal
+// closed it (`closed_at`): fixed for as long as the row stays closed, unlike
+// updated_at, which a reprocess of the call rewrites on every untouched row.
 const CLOSED_BY_EVIDENCE = "promise_evidence";
-const storedProof = (proof, customerId) => (proof.strength === "direct" ? proof
-  : { ...proof, closed_by: CLOSED_BY_EVIDENCE, judged_customer_id: customerId || null });
+const storedProof = (proof, customerId, closedAt = new Date().toISOString()) => (proof.strength === "direct" ? proof
+  : { ...proof, closed_by: CLOSED_BY_EVIDENCE, judged_customer_id: customerId || null, closed_at: closedAt });
+// The same instant as SQL over a call_commitments alias.
+const closedAtSql = (cc = "cc") => `(${cc}.fulfillment ->> 'closed_at')::timestamptz`;
 
 // An association proof closes a promise the portal may close, of a kind an
 // association closes (associationCloses) — never one bound to a confirmed
@@ -2421,7 +2432,8 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
     if (proof === LOOKUP_FAILED) { failed += 1; continue; }
     const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
     const keeps = proofThatKeeps(c, proof, prior);
-    const stored = keeps ? storedProof(keeps, row.customer_id) : null;
+    // A row still closed keeps the time it first closed.
+    const stored = keeps ? storedProof(keeps, row.customer_id, prior?.closed_at) : null;
     // Same record, judged for the same customer: nothing to write.
     if (stored && stored.basis === prior?.basis && stored.record_id === prior?.record_id
       && (stored.judged_customer_id ?? null) === (prior?.judged_customer_id ?? null)) continue;
@@ -2527,7 +2539,7 @@ async function listLapsedEvidenceClosedCallIds(conn) {
        LEFT JOIN customers cu ON (cc.fulfillment ->> 'kind') = ? AND cu.id::text = cc.fulfillment ->> 'record_id'
       WHERE cc.human_state IS NULL AND cc.status IN ('fulfilled', 'dismissed')
         AND (cc.fulfillment ->> 'closed_by') = ?
-        AND cc.updated_at > NOW() - make_interval(days => ?)
+        AND ${closedAtSql('cc')} > NOW() - make_interval(days => ?)
         AND ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
@@ -2739,14 +2751,15 @@ const AUTO_CLOSED_LIMIT = 100;
 async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_LIMIT, before = null } = {}) {
   const since = new Date(Date.now() - Math.max(1, Math.min(30, Number(days) || 7)) * 24 * 60 * 60 * 1000);
   const pageSize = Math.max(1, Math.min(AUTO_CLOSED_LIMIT, Number(limit) || AUTO_CLOSED_LIMIT));
-  // Milliseconds on both sides: the cursor comes back from a JS Date.
-  const position = "date_trunc('milliseconds', cc.updated_at)";
+  // When the portal closed it (storedProof's closed_at, a JS instant, so the
+  // cursor round-trips exactly) — never updated_at, which a reprocess rewrites.
+  const position = closedAtSql('cc');
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')
     .whereNotNull('cc.call_log_id')
     .where('cc.party', 'waves')
-    .where('cc.updated_at', '>=', since)
+    .whereRaw(`${position} >= ?`, [since])
     .whereRaw("cc.human_state IS DISTINCT FROM 'dismissed'")
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
     // Closed by this file on its own (the CLOSED_BY_EVIDENCE marker): an
@@ -2762,9 +2775,10 @@ async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_L
       'cl.customer_id', 'cu.first_name as customer_first_name', 'cu.last_name as customer_last_name',
     );
   const last = rows.length > pageSize ? rows[pageSize - 1] : null;
+  const lastProof = last && (typeof last.fulfillment === 'string' ? JSON.parse(last.fulfillment) : last.fulfillment);
   return {
     commitments: rows.slice(0, pageSize).map(normalizeRow),
-    next: last ? { at: new Date(last.updated_at).toISOString(), id: last.id } : null,
+    next: last ? { at: new Date(lastProof.closed_at).toISOString(), id: last.id } : null,
   };
 }
 

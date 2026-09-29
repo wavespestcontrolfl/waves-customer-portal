@@ -94,6 +94,9 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     return { n, phone, email, customerId, call, commitment };
   }
   const later = (minutes = 30) => new Date(Date.now() - 3 * DAY + (90 + minutes * 60) * 1000);
+  // When the portal closed a row (the proof's closed_at), set back for a test.
+  const closedAt = (ids, at) => db('call_commitments').whereIn('id', [].concat(ids))
+    .update({ fulfillment: db.raw("fulfillment || jsonb_build_object('closed_at', ?::text)", [at.toISOString()]) });
   // A churned customer: the live stage plus the churn date, N days ago.
   const churnedStage = (daysAgo) => ({ pipeline_stage: 'churned', churned_at: new Date(Date.now() - daysAgo * DAY).toISOString().slice(0, 10) });
   // Every page of the closed-automatically list, walked with its cursor.
@@ -126,6 +129,8 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   }).returning('id').then(([r]) => { made.callIds.push(r.id); return r; });
   const sms = (w, message_type, extra = {}) => addSms(db('sms_log').insert({
     direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, customer_id: w.customerId, message_type, status: 'sent', created_at: later(), ...extra }));
+  // A text a person wrote in the composer: 'manual' plus the human_authored stamp.
+  const staffText = (w, extra = {}) => sms(w, 'manual', { metadata: JSON.stringify({ human_authored: true }), ...extra });
   const visit = (w, extra = {}) => addVisit(db('scheduled_services').insert({
     scheduled_date: '2026-12-01', service_type: 'General Pest Control', status: 'pending', customer_id: w.customerId, created_at: later(), ...extra }));
   const staffEmail = (w, extra = {}) => addEmail(db('emails').insert({
@@ -149,7 +154,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
 
   const CASES = [
     ['other', 'a connected staff call to the caller', (w) => outboundCall(w), 'staff_call_to_caller_within_14_days', 'outbound_call'],
-    ['other', 'a human-typed text to the caller', (w) => sms(w, 'manual'), 'staff_text_to_caller_within_14_days', 'sms_sent'],
+    ['other', 'a human-typed text to the caller', (w) => staffText(w), 'staff_text_to_caller_within_14_days', 'sms_sent'],
     ['other', 'a completed inbound call from the caller', (w) => inbound(w), 'completed_inbound_call_from_caller_within_14_days', 'inbound_call'],
     ['other', 'a visit booked for the customer', (w) => visit(w), 'visit_booked_for_same_customer_within_14_days', 'appointment_booked'],
     ['other', 'a visit completed for the customer', (w) => visit(w, { status: 'completed', completed_at: later(), created_at: new Date(Date.now() - 20 * DAY) }), 'visit_completed_for_same_customer_within_14_days', 'visit_completed'],
@@ -359,7 +364,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const old = await world({ kind: 'other' });
     const oldVisit = await visit(old);
     await cc.refreshFulfillment(db, old.call.id);
-    await db('call_commitments').where({ id: old.commitment.id }).update({ updated_at: new Date(Date.now() - 31 * DAY) });
+    await closedAt(old.commitment.id, new Date(Date.now() - 31 * DAY));
     await db('scheduled_services').where({ id: oldVisit.id }).update({ status: 'cancelled' });
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(old.call.id);
     // Off: nothing is listed.
@@ -461,8 +466,10 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await db('call_commitments').where({ id: direct.commitment.id }).update({ status: 'fulfilled', fulfillment: JSON.stringify({ kind: 'appointment_booked', strength: 'direct', basis: 'visit_booked_from_this_call' }) });
     await db('call_commitments').where({ id: manual.commitment.id }).update({ status: 'fulfilled', human_state: 'confirmed', fulfillment: JSON.stringify({ kind: 'manual', basis: 'marked_done_by_office' }) });
     await db('call_commitments').where({ id: humanDismissed.commitment.id }).update({ status: 'dismissed', human_state: 'dismissed', fulfillment: JSON.stringify({ kind: 'customer_left', strength: 'association' }) });
-    await db('call_commitments').where({ id: old.commitment.id }).update({ updated_at: new Date(Date.now() - 10 * DAY) });
-    await db('call_commitments').where({ id: kept.commitment.id }).update({ updated_at: new Date(Date.now() - 2 * 60 * 1000) });
+    await closedAt(old.commitment.id, new Date(Date.now() - 10 * DAY));
+    await closedAt(kept.commitment.id, new Date(Date.now() - 2 * 60 * 1000));
+    // A reprocess of the old call rewrites updated_at on its untouched rows: it did not close again.
+    await db('call_commitments').where({ id: old.commitment.id }).update({ updated_at: new Date() });
     const week = await allAutoClosed(7);
     const mine = week.filter((c) => [kept, left, direct, manual, humanDismissed, old].some((w) => w.commitment.id === c.id));
     expect(ids(mine)).toEqual([left.commitment.id, kept.commitment.id]);
@@ -522,21 +529,21 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const statedAt = new Date(Date.now() - 1 * DAY); // two days after the call
     const floored = await world({ kind: 'other' });
     await db('call_commitments').where({ id: floored.commitment.id }).update({ due_at: statedAt, due_type: 'floor' });
-    await sms(floored, 'manual'); // half an hour after the call: before the stated time
+    await staffText(floored); // half an hour after the call: before the stated time
     expect(await cc.refreshFulfillment(db, floored.call.id)).toMatchObject({ fulfilled: 0 });
     expect(await row(floored.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
-    const onTime = await sms(floored, 'manual', { created_at: new Date(statedAt.getTime() + 60 * 60 * 1000) });
+    const onTime = await staffText(floored, { created_at: new Date(statedAt.getTime() + 60 * 60 * 1000) });
     expect(await cc.refreshFulfillment(db, floored.call.id)).toMatchObject({ fulfilled: 1 });
     expect((await row(floored.commitment.id)).fulfillment).toMatchObject({ record_id: onTime.id });
     // Untyped is a floor too.
     const untyped = await world({ kind: 'other' });
     await db('call_commitments').where({ id: untyped.commitment.id }).update({ due_at: statedAt });
-    await sms(untyped, 'manual');
+    await staffText(untyped);
     expect(await cc.refreshFulfillment(db, untyped.call.id)).toMatchObject({ fulfilled: 0 });
     // A deadline is the latest moment, not the first.
     const deadline = await world({ kind: 'other' });
     await db('call_commitments').where({ id: deadline.commitment.id }).update({ due_at: statedAt, due_type: 'deadline' });
-    const early = await sms(deadline, 'manual');
+    const early = await staffText(deadline);
     expect(await cc.refreshFulfillment(db, deadline.call.id)).toMatchObject({ fulfilled: 1 });
     expect((await row(deadline.commitment.id)).fulfillment).toMatchObject({ record_id: early.id });
     // Direct proof is not held to the stated time.
@@ -549,7 +556,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
 
   test('a relink the refresh never saw is found by the periodic scan whatever evidence closed the promise; a merge that moves the evidence with the call keeps it and stops listing it', async () => {
     const w = await world({ kind: 'other' });
-    await sms(w, 'manual');
+    await staffText(w);
     await cc.refreshFulfillment(db, w.call.id);
     expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'sms_sent', judged_customer_id: w.customerId });
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
@@ -583,7 +590,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       worlds.push(w);
     }
     const tied = worlds.slice(0, 2).map((w) => w.commitment.id);
-    await db('call_commitments').whereIn('id', tied).update({ updated_at: new Date(Date.now() - 60 * 1000) });
+    await closedAt(tied, new Date(Date.now() - 60 * 1000));
     const seen = (await allAutoClosed(7, 1)).map((c) => c.id);
     expect(new Set(seen).size).toBe(seen.length);
     const mine = new Set(worlds.map((w) => w.commitment.id));
@@ -635,5 +642,49 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await db('estimates').where({ id: est.id }).update(handedOff(later()));
     expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
     expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: est.id, strength: 'association' });
+  });
+
+  test('a staff text closes a promise only with a person\'s provenance: an automated send typed \'manual\' (the reschedule acknowledgement) is not a follow-up', async () => {
+    const automated = await world({ kind: 'other' });
+    await sms(automated, 'manual'); // no human_authored stamp, no sending admin
+    expect(await cc.refreshFulfillment(db, automated.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(automated.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    const typed = await world({ kind: 'other' });
+    const text = await staffText(typed);
+    expect(await cc.refreshFulfillment(db, typed.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(typed.commitment.id)).fulfillment).toMatchObject({ record_id: text.id, basis: 'staff_text_to_caller_within_14_days' });
+  });
+
+  test('a later stated time moves the start of the association window, never its end: 14 days from the call still closes it', async () => {
+    const callEnd = (w) => new Date(new Date(w.call.created_at).getTime() + 90 * 1000);
+    const late = await world({ kind: 'other' });
+    await db('call_commitments').where({ id: late.commitment.id }).update({ due_at: new Date(callEnd(late).getTime() + 13 * DAY), due_type: 'floor' });
+    // Day 20 after the call: past the original 14-day window, however late the stated time.
+    await staffText(late, { created_at: new Date(callEnd(late).getTime() + 20 * DAY) });
+    expect(await cc.refreshFulfillment(db, late.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(late.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    // Day 13.5: after the stated time and inside the window, it closes.
+    const inside = await staffText(late, { created_at: new Date(callEnd(late).getTime() + 13.5 * DAY) });
+    expect(await cc.refreshFulfillment(db, late.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(late.commitment.id)).fulfillment).toMatchObject({ record_id: inside.id });
+  });
+
+  test('the closed-automatically list and the lapse scan read when the portal closed a row, not updated_at: a reprocess never makes an old close look new', async () => {
+    const w = await world({ kind: 'other' });
+    const v = await visit(w);
+    await cc.refreshFulfillment(db, w.call.id);
+    const closed = await row(w.commitment.id);
+    expect(closed.fulfillment.closed_at).toEqual(expect.any(String));
+    await closedAt(w.commitment.id, new Date(Date.now() - 40 * DAY));
+    await db('call_commitments').where({ id: w.commitment.id }).update({ updated_at: new Date() });
+    expect((await allAutoClosed(30)).map((c) => c.id)).not.toContain(w.commitment.id);
+    await db('scheduled_services').where({ id: v.id }).update({ status: 'cancelled' });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+    // A re-judge that keeps the row closed on another record keeps its first close time.
+    await closedAt(w.commitment.id, new Date(Date.now() - 2 * DAY));
+    const firstClose = (await row(w.commitment.id)).fulfillment.closed_at;
+    const other = await visit(w, { scheduled_date: '2026-12-20' });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 0 });
+    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: other.id, closed_at: firstClose });
   });
 });
