@@ -162,6 +162,44 @@ class SearchConsoleService {
   }
 
   /**
+   * Resolve a domain to the EXACT Search Console property identifier this
+   * service account can actually reach — reusing the same URL-prefix vs
+   * sc-domain: representations syncDailyData's retry already tries (a
+   * property can be verified in either form; only sites.list can say which
+   * one this account holds). Used by the Intelligence Bar's
+   * submit_gsc_sitemap preview (seo-tools.js) so a sitemap submission is
+   * pinned to a property Search Console will actually accept, never a
+   * synthesized URL that merely looks right (codex r3 P1 on #5275).
+   *
+   * Returns { siteUrl, permissionLevel } on a match, or { error } when GSC
+   * is not configured/reachable or neither representation is accessible.
+   */
+  async resolveAccessibleProperty(domain) {
+    const ready = await this.init();
+    if (!ready) return { error: 'Google Search Console is not configured or failed to initialize.' };
+    const urlPrefix = siteUrlForDomain(domain);
+    const domainProp = domainPropertyUrl(domain);
+    let sites;
+    try {
+      // Bounded like every other request here (GSC_REQUEST_TIMEOUT_MS) —
+      // this lookup runs synchronously inside a bar preview.
+      const res = await this.webmasters.sites.list({}, gscRequestOptions());
+      sites = res?.data?.siteEntry || [];
+    } catch (err) {
+      return { error: `Could not list Search Console properties: ${err.message}` };
+    }
+    // sites.list also returns properties this account only has
+    // siteUnverifiedUser / siteRestrictedUser on; sitemaps.submit needs owner
+    // or full user, so only those count — and when both representations are
+    // listed, the one with enough permission wins.
+    const canSubmit = (entry) => ['siteOwner', 'siteFullUser'].includes(entry?.permissionLevel);
+    const bySiteUrl = new Map(sites.map((s) => [String(s.siteUrl || '').toLowerCase(), s]));
+    const match = [bySiteUrl.get(urlPrefix.toLowerCase()), bySiteUrl.get(domainProp.toLowerCase())].find(canSubmit);
+    if (!match) return { error: 'not_accessible', checked: [urlPrefix, domainProp] };
+    return { siteUrl: match.siteUrl, permissionLevel: match.permissionLevel || null };
+  }
+
+  /**
    * Sync daily performance data from GSC.
    * Pulls query-level and page-level data for the given date range.
    */

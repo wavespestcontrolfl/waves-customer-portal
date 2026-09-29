@@ -956,7 +956,11 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       // the hold rail immediately before the row lands, serialized on the
       // same scheduled_services row the repair script locks to repoint.
       const inserted = await db.transaction(async (trx) => {
-        await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
+        // Liveness re-read UNDER the lock (Codex r9 on #5244): a cancel that
+        // took this row lock first and committed while this waited must
+        // not get a fresh request (or, on the SMS branch, a text) after it.
+        const lockedVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id', 'status');
+        if (!lockedVisit || !LIVE_VISIT_STATUSES.includes(lockedVisit.status)) return 'visit_not_live';
         const holdRow = await trx('estimate_card_holds')
           .where({ scheduled_service_id: visit.id })
           .first('id');
@@ -974,6 +978,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           .returning('id');
       });
       if (inserted === 'card_hold_lane') return skip('card_hold_lane');
+      if (inserted === 'visit_not_live') return skip('visit_not_live');
       if (!inserted || !inserted.length) {
         const raced = await db('appointment_card_requests')
           .where({ scheduled_service_id: visit.id })
@@ -1072,7 +1077,8 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         // the row must not land after a repoint that committed since the
         // fast-path check — serialize on the visit row the script locks.
         const inserted = await db.transaction(async (trx) => {
-          await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
+          const lockedVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id', 'status');
+          if (!lockedVisit || !LIVE_VISIT_STATUSES.includes(lockedVisit.status)) return 'visit_not_live';
           const holdRow = await trx('estimate_card_holds')
             .where({ scheduled_service_id: visit.id })
             .first('id');
@@ -1093,10 +1099,28 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           await releaseClaim();
           return skip('card_hold_lane');
         }
+        if (inserted === 'visit_not_live') {
+          await releaseClaim();
+          return skip('visit_not_live');
+        }
         if (!inserted || !inserted.length) {
           // A row landed between check 3 and the claim — funnel already ran.
           await releaseClaim();
           return skip('request_exists');
+        }
+      } else {
+        // Re-sending an existing pending request inserts nothing, so it never
+        // reached the locked insert above — re-read liveness under the same
+        // visit lock before texting the link (Fable review on #5309: a
+        // cancel committed after the fast-path read would otherwise still get
+        // a card text pointing at a dead /secure page).
+        const live = await db.transaction(async (trx) => {
+          const lockedVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id', 'status');
+          return Boolean(lockedVisit && LIVE_VISIT_STATUSES.includes(lockedVisit.status));
+        });
+        if (!live) {
+          await releaseClaim();
+          return skip('visit_not_live');
         }
       }
     } catch (insertErr) {

@@ -61,6 +61,18 @@ const DECLINE_RE = new RegExp([
   String.raw`\b(?:isn['’]t|not) (?:available|possible) (?:from here|(?:from|in|through) (?:the|this) bar)\b`,
 ].join('|'), 'i');
 
+// The tech-bar `ask` fallback has no search behind it, so it needs a refusal
+// that names the bar itself: a field answer can say "not supported by the
+// label" or "no way to treat that indoors" and still be a real answer.
+const BAR_DECLINE_RE = new RegExp([
+  String.raw`\bno tools?\b`,
+  String.raw`\bdon['’]t have (?:a|an|any)\b[^.!?\n]{0,40}?\b(?:tools?|capability)\b`,
+  String.raw`\b(?:not|isn['’]t) something i can\b`,
+  String.raw`\boutside (?:of )?what i can\b`,
+  String.raw`\b(?:can(?:not|['’]t)|could(?: not|n['’]t)|unable to|not able to)\b[^.!?\n]{0,80}?\b(?:from here|(?:from|in|through|with) (?:the|this) bar)\b`,
+  String.raw`\b(?:isn['’]t|not) (?:available|possible) (?:from here|(?:from|in|through) (?:the|this) bar)\b`,
+].join('|'), 'i');
+
 // Kill switch (CLAUDE.md rule 14): AGENT_GAP_REPORTS=off stops the prompt
 // line, the collector's writes and the Monday digest. Read at call time, so
 // a flip needs no redeploy. Default on.
@@ -157,6 +169,16 @@ async function upsertGapRow(row) {
 }
 
 /**
+ * One-shot record for a source with no per-request collector to sample (the
+ * texting AI and phone-agent hooks each observe exactly one signal per
+ * event, not a discovery loop). Same table, same dedupe-by-fingerprint;
+ * never throws.
+ */
+async function recordGap({ source, summary, attempted, closestTool } = {}) {
+  return writeGapRows([{ source, kind: 'missing_capability', summary, attempted, closestTool }]);
+}
+
+/**
  * Records each distinct signal once (deduped by fingerprint, so a search the
  * model retried in several rounds counts one occurrence for the request).
  * Returns the saved { id, occurrences, status } per written row. Never
@@ -243,6 +265,7 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
   const searches = []; // { query, domain, closestTool, surfaced:Set, relatedToolRan }
   const unknownTools = new Set();
   const refusedCases = new Map(); // registered tool -> its own unsupported-case message
+  let toolBroke = false; // a genuine tool failure this request (Tool Health's, not a gap)
 
   function discovery(input, result) {
     const status = result?.status;
@@ -267,6 +290,8 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
       // revision). Keep the tool's own description of the latter.
       if (isRegisteredTool(name)) refusedCases.set(name, result.error || 'This case is not supported');
       else unknownTools.add(name);
+    } else {
+      toolBroke = true;
     }
   }
 
@@ -285,11 +310,24 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
     return signals;
   }
 
-  async function flush({ reply } = {}) {
+  // `ask` (the caller's own request text) is the tech-bar's fallback signal:
+  // that context has no discover_capabilities search, so a decline with
+  // nothing collected would otherwise vanish. Admin platform requests keep
+  // their existing behaviour — they always searched first, so an empty
+  // `signals` there already means nothing worth recording.
+  async function flush({ reply, ask } = {}) {
     try {
       if (!gapReportsEnabled() || !DECLINE_RE.test(String(reply || ''))) return;
       const signals = pendingSignals();
-      if (!signals.length) return;
+      if (!signals.length) {
+        // A decline after a tool broke is an outage talking, not a missing
+        // feature — the failure is already in tool_health_events.
+        if (toolBroke || !BAR_DECLINE_RE.test(String(reply || ''))) return;
+        const asked = cleanText(ask);
+        if (asked) await writeGapRows([{ source, kind: 'missing_capability', summary: asked,
+          attempted: 'The bar declined; no capability search ran' }]);
+        return;
+      }
       await writeGapRows(signals);
     } catch (err) {
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
@@ -305,8 +343,9 @@ module.exports = {
   gapReportsEnabled,
   gapReportPromptLine,
   writeGapRows,
+  recordGap,
   listRecentGaps,
   setGapStatus,
   createGapCollector,
-  _private: { prepareGapRow, gapWindowCutoff, DECLINE_RE },
+  _private: { prepareGapRow, gapWindowCutoff, DECLINE_RE, BAR_DECLINE_RE },
 };

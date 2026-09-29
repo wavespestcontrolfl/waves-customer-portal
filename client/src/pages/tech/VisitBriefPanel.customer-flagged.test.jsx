@@ -41,7 +41,7 @@ const CUSTOMER_FLAGGED = [{
   photoIds: ['photo-a', 'photo-b'],
 }];
 
-function renderPanel({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async () => ({ photos: [] })) } = {}) {
+function renderPanel({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async () => ({ photos: [] })), onRetry = vi.fn() } = {}) {
   const detail = detailFor({
     'svc-1': { estimate: null, brief: { brief: null, facts: { access: null, last_visit: null, customerFlagged } } },
   });
@@ -50,10 +50,10 @@ function renderPanel({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async
       stop={stopOf(BASE_SERVICE)}
       detail={detail}
       request={request}
-      onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      onRetry={onRetry} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
     />,
   );
-  return { request };
+  return { request, onRetry };
 }
 
 describe('VisitBriefPanel — Customer flagged section', () => {
@@ -146,6 +146,153 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('shows the pest read as an AI suggestion built only from fixed fields', () => {
+    renderPanel({ customerFlagged: [{
+      ...CUSTOMER_FLAGGED[0],
+      read: {
+        status: 'done', wordingTier: 'likely', commonName: 'German cockroach',
+        matches: ['Two dark stripes behind the head'], stillNeed: ['A clear top-down photo'],
+        referralKind: null, hazards: { disease_vector: true },
+      },
+    }] });
+    expect(screen.getByText(
+      'Photo read (AI suggestion, not confirmed): Likely: German cockroach. Matches: Two dark stripes behind the head. Still need: A clear top-down photo. Hazard: disease vector.',
+    )).toBeInTheDocument();
+  });
+
+  it('shows "Photo read pending" while a read runs, and nothing for unsupported/failed/none', () => {
+    renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] });
+    expect(screen.getByText('Photo read pending')).toBeInTheDocument();
+    cleanup();
+    for (const status of ['unsupported', 'failed', 'none']) {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status } }] });
+      expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it('a group-only read names the catalog group', () => {
+    renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', wordingTier: 'group_only', commonName: null, groupLabel: 'Ants' } }] });
+    expect(screen.getByText('Photo read (AI suggestion, not confirmed): Looks like: Ants.')).toBeInTheDocument();
+  });
+
+  it('re-reads the brief every 30 s while a read is pending, and stops once it is not', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }], onRetry });
+      await act(async () => { vi.advanceTimersByTime(29 * 1000); });
+      expect(onRetry).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(2 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      cleanup();
+      const onRetryDone = vi.fn();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', commonName: 'German cockroach' } }], onRetry: onRetryDone });
+      await act(async () => { vi.advanceTimersByTime(60 * 1000); });
+      expect(onRetryDone).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a just-sent submission whose read has not started yet is polled, silently', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], sentAt: new Date().toISOString(), read: { status: 'none' } }], onRetry });
+      expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      cleanup();
+      const onRetryOld = vi.fn();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], sentAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(), read: { status: 'none' } }], onRetry: onRetryOld });
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetryOld).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a slow refresh is awaited before the next poll is armed', async () => {
+    vi.useFakeTimers();
+    try {
+      let settle;
+      const onRetry = vi.fn(() => new Promise((resolve) => { settle = resolve; }));
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }], onRetry });
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      // Still in flight: no second poll however long it takes.
+      await act(async () => { vi.advanceTimersByTime(90 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      await act(async () => { settle(); await Promise.resolve(); });
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetry).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a parent re-render with a new retry callback does not restart the 30 s timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = [];
+      const panel = (fn) => (
+        <VisitBriefPanel
+          stop={stopOf(BASE_SERVICE)}
+          detail={detailFor({ 'svc-1': { estimate: null, brief: { brief: null, facts: { access: null, last_visit: null, customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] } } } })}
+          request={vi.fn(async () => ({ photos: [] }))}
+          onRetry={fn} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+        />
+      );
+      const { rerender } = render(panel(() => calls.push('first')));
+      await act(async () => { vi.advanceTimersByTime(20 * 1000); });
+      rerender(panel(() => calls.push('second')));
+      await act(async () => { vi.advanceTimersByTime(11 * 1000); });
+      // Fired at 30 s from the first render, with the LATEST callback.
+      expect(calls).toEqual(['second']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a new pending read gets a fresh refresh budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      const panel = (entries) => (
+        <VisitBriefPanel
+          stop={stopOf(BASE_SERVICE)}
+          detail={detailFor({ 'svc-1': { estimate: null, brief: { brief: null, facts: { access: null, last_visit: null, customerFlagged: entries } } } })}
+          request={vi.fn(async () => ({ photos: [] }))}
+          onRetry={onRetry} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+        />
+      );
+      const { rerender } = render(panel([{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }]));
+      for (let i = 0; i < 31; i += 1) {
+        await act(async () => { vi.advanceTimersByTime(30 * 1000); });
+        rerender(panel([{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }]));
+      }
+      const spent = onRetry.mock.calls.length;
+      expect(spent).toBe(30);
+      // Another submission's read starts pending: polling resumes.
+      rerender(panel([{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', commonName: 'German cockroach' } }, { ...CUSTOMER_FLAGGED[0], id: 'sub-2', read: { status: 'pending' } }]));
+      await act(async () => { vi.advanceTimersByTime(30 * 1000); });
+      expect(onRetry.mock.calls.length).toBe(spent + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a category-level read shows the engine headline', () => {
+    renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', wordingTier: 'group_only', commonName: null, groupLabel: null, groupHeadline: 'Looks like a beetle' } }] });
+    expect(screen.getByText('Photo read (AI suggestion, not confirmed): Looks like a beetle.')).toBeInTheDocument();
+  });
+
+  it('a done read with no named species says so plainly', () => {
+    renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', wordingTier: 'unknown', commonName: null } }] });
+    expect(screen.getByText('Photo read (AI suggestion, not confirmed): No species named from these photos.')).toBeInTheDocument();
   });
 
   it('renders nothing when facts carry no customerFlagged entries (gate off, or nothing sent)', () => {

@@ -155,9 +155,10 @@ test('a missed appointment is still promised the link the page would honour', ()
   expect(select({ candidates: [{ ...visit, status: 'rescheduled' }], now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_elapsed');
 });
 
-test('a visit starting inside the self-serve notice window is parked, not sent the link the page would refuse (owner ruling 2026-09-23)', () => {
-  const prev = process.env.SELF_SERVE_NOTICE_HOURS;
-  delete process.env.SELF_SERVE_NOTICE_HOURS; // default 24 h
+test('a visit starting inside the self-serve MOVE notice window is parked, not sent the link the page would refuse (owner ruling 2026-09-23; split into its own env var 2026-09-28)', () => {
+  const prevMove = process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+  const prevBook = process.env.SELF_SERVE_NOTICE_HOURS;
+  delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS; // default 24 h
   try {
     // Fixture `now` is 07:00 ET on 01-07 — 26 h before the 09:00 visit on
     // 01-08: outside the window, eligible (the baseline every test above uses).
@@ -166,12 +167,19 @@ test('a visit starting inside the self-serve notice window is parked, not sent t
     expect(select({ now: parseETDateTime('2030-01-07T15:00') }).reason).toBe('visit_not_self_service');
     // A MISSED visit is being rebooked, not moved off a too-soon start: still sent.
     expect(select({ now: parseETDateTime('2030-01-08T11:00') }).visit?.id).toBe('visit');
-    // A shorter configured window re-admits the 18 h case.
-    process.env.SELF_SERVE_NOTICE_HOURS = '6';
+    // A shorter configured MOVE window re-admits the 18 h case.
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = '6';
     expect(select({ now: parseETDateTime('2030-01-07T15:00') }).visit?.id).toBe('visit');
+    // The BOOK var (SELF_SERVE_NOTICE_HOURS) must have NO effect on this
+    // worker's move check — the production incident this PR fixes.
+    delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    process.env.SELF_SERVE_NOTICE_HOURS = '1';
+    expect(select({ now: parseETDateTime('2030-01-07T15:00') }).reason).toBe('visit_not_self_service');
   } finally {
-    if (prev === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
-    else process.env.SELF_SERVE_NOTICE_HOURS = prev;
+    if (prevMove === undefined) delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    else process.env.SELF_SERVE_MOVE_NOTICE_HOURS = prevMove;
+    if (prevBook === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
+    else process.env.SELF_SERVE_NOTICE_HOURS = prevBook;
   }
 });
 

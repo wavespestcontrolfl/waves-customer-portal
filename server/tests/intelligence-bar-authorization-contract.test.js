@@ -38,6 +38,13 @@ test('tier mirrors write-gates: two-step/legacy-bare = yellow, confirmed-endpoin
   expect(tierFor('query_customers')).toBe('green');
 });
 
+test('every outside-write tool (Sentry/Cloudflare/Railway/GitHub/GSC) is irreversible — none has a portal-side undo', () => {
+  for (const n of gates.OUTSIDE_WRITE_TOOL_NAMES) {
+    expect(buildContract({ toolName: n, params: {}, displayParams: {} }).irreversible).toBe(true);
+  }
+  expect(gates.OUTSIDE_WRITE_TOOL_NAMES.size).toBe(11);
+});
+
 test('send_sms: pinned recipient becomes a comms effect, internals hidden, irreversible + notifies', () => {
   const c = buildContract({
     toolName: 'send_sms',
@@ -198,9 +205,77 @@ test('two-step previews surface their resolved facts as effects (capped) and fin
 
 test('schedule moves/cancels are NOT marked as contacting the customer; sends and bookings are', () => {
   expect(buildContract({ toolName: 'reschedule_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+  // cancel_appointment with no cancellation impact pinned (or customer_notice
+  // 'none') is genuinely NOT contacting the customer — see the next test for
+  // the customer_notice: 'may_send' case, which flips this on (Codex
+  // round-1 P1: the real GATE_CANCEL_NOTICE_HOOK can still text one, and
+  // this card must disclose it, never silently claim otherwise).
   expect(buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
   expect(buildContract({ toolName: 'trigger_review_request', params: {}, displayParams: {} }).notifies_customer).toBe(true);
   expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+});
+
+// Codex round-1 P1/P2 on the ib-cancel-appointment-live lane: cancel_appointment's
+// SHARED status-writer hook (job-status.js#previewCancellationNoticeVerdict,
+// mirrored into the pinned impact as customer_notice) may text the
+// customer a cancellation notice — a real effect the card must disclose
+// and hash, never silently claim away. cancel_appointment is also always
+// irreversible now (money moves no portal path undoes, whether or not it
+// notifies).
+test('cancel_appointment: customer_notice may_send discloses the notice, marks notifies_customer, and binds the hash', () => {
+  const maySend = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), customer_notice: 'may_send' } },
+  });
+  const none = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), customer_notice: 'none' } },
+  });
+  expect(maySend.notifies_customer).toBe(true);
+  expect(maySend.effects.some((e) => e.kind === 'comms' && /cancellation notice/.test(e.label))).toBe(true);
+  // Wording never claims to know WHEN — only that the existing hook may
+  // still text (evidence-independent, per previewCancellationNoticeVerdict).
+  expect(maySend.effects.find((e) => e.kind === 'comms').label).toMatch(/MAY be texted/);
+  expect(none.notifies_customer).toBe(false);
+  expect(none.effects.some((e) => e.kind === 'comms')).toBe(false);
+  expect(contractHash(maySend)).not.toBe(contractHash(none));
+});
+
+// Codex round-5 P2: the assigned technician's cancel notice
+// (tech-visit-notifications.js#notifyVisitCancelled, wired unconditionally
+// into every transitionJobStatus cancel) is a real staff-comms effect the
+// card must disclose, separately from the customer notice above.
+test('cancel_appointment: technician_notice may_notify discloses the notice, marks notifies_technician, and binds the hash', () => {
+  const mayNotify = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), technician_notice: 'may_notify' } },
+  });
+  const none = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), technician_notice: 'none' } },
+  });
+  expect(mayNotify.notifies_technician).toBe(true);
+  expect(mayNotify.effects.some((e) => e.kind === 'comms' && /technician/i.test(e.label))).toBe(true);
+  expect(mayNotify.effects.find((e) => e.kind === 'comms' && /technician/i.test(e.label)).label).toMatch(/MAY get a cancelled-visit notice/);
+  expect(none.notifies_technician).toBe(false);
+  expect(none.effects.some((e) => e.kind === 'comms' && /technician/i.test(e.label))).toBe(false);
+  expect(contractHash(mayNotify)).not.toBe(contractHash(none));
+  // Absent entirely (no cancellation preview at all) reads as 'none', same
+  // safe default as customer_notice.
+  expect(buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {} }).notifies_technician).toBe(false);
+});
+
+test('cancel_appointment is irreversible unconditionally — money moves no portal path undoes, notice or not', () => {
+  const notified = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), customer_notice: 'may_send' } },
+  });
+  const silent = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), customer_notice: 'none' } },
+  });
+  expect(notified.irreversible).toBe(true);
+  expect(silent.irreversible).toBe(true);
 });
 
 test('create_appointment: card bookings are credit-free by construction; a windowless one never sends a booking confirmation', () => {
@@ -428,6 +503,76 @@ const synthCancellationBase = () => ({
   fee: { applies: false, amount: null, unresolved: false, rail: 'none', hold_disposition: null },
   invoices: [],
   inspection_credit_reversal: null,
+});
+
+// Codex round-3 P1: two same-day visits for the same customer are
+// otherwise indistinguishable on the card — the window (pinned
+// automatically as part of preview.cancellation.appointment) makes the
+// "Cancel <service> on <date>, <window> for <customer>" line unambiguous.
+test('cancel_appointment: the appointment window is rendered in the cancel line when present', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), appointment: { ...synthCancellationBase().appointment, window: '1:00 PM–3:00 PM' } } },
+  });
+  expect(c.effects).toContainEqual(expect.objectContaining({
+    kind: 'operational',
+    label: 'Cancel pest_control on 2026-10-02, 1:00 PM–3:00 PM for Synthia Tester',
+  }));
+});
+
+test('cancel_appointment: no window on the row omits the clause — byte-identical to before this lane', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: synthCancellationBase() },
+  });
+  expect(c.effects).toContainEqual(expect.objectContaining({
+    kind: 'operational',
+    label: 'Cancel pest_control on 2026-10-02 for Synthia Tester',
+  }));
+});
+
+// Codex round-4 P1: switch_appointment_property can move a visit to a
+// DIFFERENT saved property than the customer's primary one — the address
+// (pinned automatically as part of preview.cancellation.appointment) tells
+// the operator which house this cancels, not just which customer.
+test('cancel_appointment: the effective service address is rendered when present', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), appointment: { ...synthCancellationBase().appointment, address: '123 Main St, Bradenton, FL, 34209' } } },
+  });
+  expect(c.effects).toContainEqual(expect.objectContaining({
+    kind: 'operational',
+    label: 'Cancel pest_control on 2026-10-02 for Synthia Tester at 123 Main St, Bradenton, FL, 34209',
+  }));
+});
+
+test('cancel_appointment: no address on the row omits the clause', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: synthCancellationBase() },
+  });
+  expect(c.effects).toContainEqual(expect.objectContaining({
+    kind: 'operational',
+    label: 'Cancel pest_control on 2026-10-02 for Synthia Tester',
+  }));
+});
+
+// Two visits, same date, same customer, different window: the hash must
+// never collide (mirrors the identity_fingerprint drift guarantee — the
+// CARD itself must show operators the difference, not just refuse silently
+// later).
+test('cancel_appointment: two same-day visits with different windows render different lines and hash differently', () => {
+  const morning = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), appointment: { ...synthCancellationBase().appointment, window: '8:00 AM–11:00 AM' } } },
+  });
+  const afternoon = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), appointment: { ...synthCancellationBase().appointment, window: '1:00 PM–3:00 PM' } } },
+  });
+  expect(morning.effects.some((e) => e.label.includes('8:00 AM'))).toBe(true);
+  expect(afternoon.effects.some((e) => e.label.includes('1:00 PM'))).toBe(true);
+  expect(contractHash(morning)).not.toBe(contractHash(afternoon));
 });
 
 test('cancel_appointment: a late-cancel fee that applies is disclosed with its exact amount', () => {
@@ -795,4 +940,14 @@ test('lead status derived effects: the funnel advance is conditional, never prom
   // result warning — the card must not report the advance as a done deal.
   expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^If the lead has a linked ad-attribution row, its funnel stage advances/));
   expect(c.effects.some((e) => /^Advances/.test(e.label))).toBe(false);
+});
+
+// Codex rounds 9-10 on #5244: the cancel auto-resolves the visit's open
+// overdue dispatch alerts; alert creation doesn't lock the visit, so the card
+// discloses it as a standing conditional effect rather than a frozen count.
+test('cancel_appointment always discloses that it closes any open overdue dispatch alert', () => {
+  const { buildContract } = require('../services/intelligence-bar/authorization-contract');
+  const preview = { cancellation: { appointment: { id: 'svc-1' }, customer_notice: 'none', technician_notice: 'none' } };
+  const contract = buildContract({ toolName: 'cancel_appointment', params: { appointment_id: 'svc-1' }, preview });
+  expect(contract.effects.some((e) => e.kind === 'operational' && /running-late \/ unassigned-overdue dispatch alert/.test(e.label))).toBe(true);
 });

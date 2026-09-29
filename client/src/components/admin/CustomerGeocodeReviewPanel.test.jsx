@@ -3,7 +3,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import CustomerGeocodeReviewPanel from "./CustomerGeocodeReviewPanel";
+import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 
 vi.mock("@react-google-maps/api", () => ({
   useJsApiLoader: () => ({ isLoaded: true, loadError: null }),
@@ -915,6 +915,21 @@ describe("CustomerGeocodeReviewPanel", () => {
     await act(async () => pendingSave.resolve(await response({ enabled: true, ...record(), review: { status: "verified" } })));
   });
 
+  it("reports no open draft once the panel unmounts with a draft open", async () => {
+    const onDraftActiveChange = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(() => response({ enabled: true, records: [record()], total: 1 })));
+
+    const view = render(<CustomerGeocodeReviewPanel onDraftActiveChange={onDraftActiveChange} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    expect(onDraftActiveChange).toHaveBeenLastCalledWith(true);
+
+    // The page-level navigation guards rely on this to stop asking once the
+    // panel that owned the draft is gone.
+    view.unmount();
+    expect(onDraftActiveChange).toHaveBeenLastCalledWith(false);
+  });
+
   it.each([
     ["reports the queue disabled", () => response({ enabled: false })],
     ["answers 404 because the route went away", () => response({ error: "Not found" }, 404)],
@@ -1029,5 +1044,46 @@ describe("CustomerGeocodeReviewPanel", () => {
     await act(async () => oldSave.resolve(await response({ enabled: true, ...first })));
     expect(onResolved).not.toHaveBeenCalled();
     expect(screen.getByText("200 Current Ave, Bradenton, FL, 34205")).toBeInTheDocument();
+  });
+
+  function dispatchBeforeUnload() {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event;
+  }
+
+  it("warns on the native beforeunload while a draft is open with no approved discard", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => response({ enabled: true, records: [record()], total: 1 })));
+    render(<CustomerGeocodeReviewPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+
+    const event = dispatchBeforeUnload();
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  // A same-tab plain <a href> whose capture-phase click guard (CustomersPageV2's
+  // guardLink, Customer360ProfileV2's guardNavigateAway) already confirmed the
+  // discard through this exported function, then lets the click become a real
+  // document navigation, which fires this native prompt a moment later — one
+  // confirm is enough for that one navigation.
+  it("does not re-prompt the native beforeunload right after confirmDiscardDraft approves a navigation, but re-arms once that tick passes", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.stubGlobal("fetch", vi.fn(() => response({ enabled: true, records: [record()], total: 1 })));
+    render(<CustomerGeocodeReviewPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+
+    expect(confirmDiscardDraft()).toBe(true);
+    const approvedEvent = dispatchBeforeUnload();
+    expect(approvedEvent.defaultPrevented).toBe(false);
+
+    // The approval covers that one navigation only — once its tick passes
+    // (the confirmed click did not actually leave the page, e.g. a
+    // guardHistory revert or a same-page link), the guard re-arms so a
+    // later real navigation is never silently unguarded.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const laterEvent = dispatchBeforeUnload();
+    expect(laterEvent.defaultPrevented).toBe(true);
   });
 });
