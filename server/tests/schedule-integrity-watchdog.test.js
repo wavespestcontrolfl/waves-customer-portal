@@ -23,6 +23,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   coveredTermsAsOf: jest.fn(() => require('../models/db')('annual_prepay_terms')),
   serviceMatchesCoverage: jest.fn((row, type) => row.service_type === type),
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
+  _private: { PREPAY_INVOICE_COLLECTED_STATUSES: ['paid', 'prepaid'] },
 }));
 jest.mock('../services/invoice', () => ({
   anyInvoiceLinkedToVisit: jest.fn(),
@@ -119,7 +120,7 @@ function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], comp
     let completedCheck = false;
     const c = {};
     if (table === 'customers as c') churnedChain = c;
-    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'join', 'select', 'count', 'as', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'leftJoin', 'join', 'select', 'count', 'as', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
       c[m] = jest.fn(() => c);
     }
     c.where = jest.fn((...args) => { if (args[0] === 'ss.status' && args[1] === 'completed') completedCheck = true; return c; });

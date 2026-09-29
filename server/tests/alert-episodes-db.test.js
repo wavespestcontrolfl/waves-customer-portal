@@ -352,7 +352,7 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
 maybeDescribe('churned customer with live work: the finder (live Postgres)', () => {
   let db;
   let watchdog;
-  const made = { invoices: [], scheduled_services: [], customers: [], annual_prepay_terms: [] };
+  const made = { invoices: [], scheduled_services: [], customers: [], annual_prepay_terms: [], payer_statements: [], payers: [] };
   const RUN = `w${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const TODAY = '2026-09-29';
   let n = 0;
@@ -364,7 +364,7 @@ maybeDescribe('churned customer with live work: the finder (live Postgres)', () 
   });
   beforeEach(() => { mine = []; });
   afterAll(async () => {
-    for (const table of ['annual_prepay_terms', 'invoices', 'scheduled_services', 'customers']) {
+    for (const table of ['annual_prepay_terms', 'invoices', 'payer_statements', 'payers', 'scheduled_services', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
     }
   });
@@ -438,6 +438,31 @@ maybeDescribe('churned customer with live work: the finder (live Postgres)', () 
     expect(await legsOf(term)).toMatchObject({ prepay_terms: 1 });
     expect(await legsOf(pending)).toMatchObject({ pending_prepay_invoices: 1 });
     expect(await legsOf(voided)).toBeNull();
+  });
+
+  test('a payer\'s receivable is not the churned customer\'s unsent work: a third-party payer, a NET statement accrual, a draft withdrawn to the payer', async () => {
+    const c = await customer();
+    const payer = await insert('payers', { display_name: `Payer ${RUN}` });
+    const statement = await insert('payer_statements', { payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30',
+      terms_snapshot: JSON.stringify({ net_days: 30 }), token: `${RUN}-stmt` });
+    await invoice(c, 'draft', { payer_id: payer.id });
+    await invoice(c, 'draft', { payer_statement_id: statement.id });
+    await invoice(c, 'scheduled', { scheduled_send_error: 'payer_billed: withdrawn to the payer' });
+    expect(await legsOf(c)).toBeNull();
+  });
+
+  test('a collected prepay invoice whose term has not advanced yet is paid coverage, never an unpaid invoice; a status-less unpaid one is still unpaid', async () => {
+    const pendingTerm = (c, inv) => insert('annual_prepay_terms', { customer_id: c.id, term_start: '2026-10-01', term_end: '2027-09-30', status: 'payment_pending', prepay_invoice_id: inv.id });
+    const paid = await customer();
+    await pendingTerm(paid, await invoice(paid, 'paid', { paid_at: new Date('2026-09-25T12:00:00Z'), sent_at: new Date('2026-09-20T12:00:00Z') }));
+    const credit = await customer();
+    await pendingTerm(credit, await invoice(credit, 'prepaid', { sent_at: new Date('2026-09-20T12:00:00Z') }));
+    const paidAtOnly = await customer();
+    await pendingTerm(paidAtOnly, await invoice(paidAtOnly, 'sent', { paid_at: new Date('2026-09-25T12:00:00Z'), sent_at: new Date('2026-09-20T12:00:00Z') }));
+    const statusless = await customer();
+    await pendingTerm(statusless, await invoice(statusless, null, { sent_at: new Date('2026-09-20T12:00:00Z') }));
+    for (const c of [paid, credit, paidAtOnly]) expect(await legsOf(c)).toMatchObject({ prepay_terms: 1, pending_prepay_invoices: 0 });
+    expect(await legsOf(statusless)).toMatchObject({ prepay_terms: 0, pending_prepay_invoices: 1 });
   });
 
   test('an invoice that already reached the customer is not unsent: any delivery stamp, or Text/App accepted with only the email retrying', async () => {

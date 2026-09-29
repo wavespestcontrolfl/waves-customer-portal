@@ -378,7 +378,9 @@ async function judgePrepayGaps(row, paidTermById) {
 const CHANNEL_ACCEPTED_MARKER = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
 async function findChurnedLiveWork(todayET) {
   const { whereVisitRowLive } = require('./customer-lifecycle-guard');
-  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  const renewals = require('./annual-prepay-renewals');
+  const { coveredTermsAsOf } = renewals;
+  const collected = renewals._private.PREPAY_INVOICE_COLLECTED_STATUSES;
   const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
   const cancelled = [...INVOICE_CANCELLED_STATUSES];
   const legs = {
@@ -386,13 +388,27 @@ async function findChurnedLiveWork(todayET) {
       .where(function liveRow() { whereVisitRowLive(this, todayET); }),
     ongoing_series: () => db('scheduled_services as so').whereRaw('so.customer_id = c.id').where('so.recurring_ongoing', true),
     prepay_terms: () => coveredTermsAsOf(db, null).whereRaw('t.customer_id = c.id').where('t.term_end', '>=', todayET),
+    // Still payable AND not yet collected: a collected invoice whose term has
+    // not advanced yet is paid coverage (the prepay_terms leg), never an
+    // unpaid invoice. The exact, NULL-safe complement of
+    // wherePrepayInvoiceCollected (status IN collected OR paid_at set), so a
+    // status-less unpaid invoice still counts.
     pending_prepay_invoices: () => db('annual_prepay_terms as pt').join('invoices as pi', 'pi.id', 'pt.prepay_invoice_id')
       .whereRaw('pt.customer_id = c.id').where('pt.status', 'payment_pending')
-      .whereRaw(`lower(COALESCE(pi.status, '')) NOT IN (${cancelled.map(() => '?').join(', ')})`, cancelled),
+      .whereRaw(`lower(COALESCE(pi.status, '')) NOT IN (${cancelled.map(() => '?').join(', ')})`, cancelled)
+      .whereRaw(`COALESCE(pi.status, '') NOT IN (${collected.map(() => '?').join(', ')})`, collected)
+      .whereNull('pi.paid_at'),
+    // The customer's own: a third-party payer's invoice (payer_id), one
+    // accrued on a payer's NET statement (payer_statement_id, never sent on
+    // its own) or one withdrawn to the payer (invoice-helpers.js's
+    // payer_billed: stamp) is the payer's receivable, never the churned
+    // customer's to void.
     unsent_invoices: () => db('invoices as inv').whereRaw('inv.customer_id = c.id').whereNull('inv.archived_at')
       .whereIn('inv.status', UNSENT_INVOICE_STATUSES)
+      .whereNull('inv.payer_id').whereNull('inv.payer_statement_id')
       .whereNull('inv.sent_at').whereNull('inv.sms_sent_at').whereNull('inv.email_sent_at').whereNull('inv.viewed_at')
-      .whereRaw("COALESCE(inv.scheduled_send_error, '') NOT LIKE ?", [`${CHANNEL_ACCEPTED_MARKER}%`]),
+      .whereRaw("COALESCE(inv.scheduled_send_error, '') NOT LIKE ?", [`${CHANNEL_ACCEPTED_MARKER}%`])
+      .whereRaw("COALESCE(inv.scheduled_send_error, '') NOT LIKE 'payer\\_billed:%'"),
   };
   const names = Object.keys(legs);
   return db('customers as c')
