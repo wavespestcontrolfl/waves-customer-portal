@@ -341,6 +341,21 @@ describe('selfServeArrivalGraceMinutes (SELF_SERVE_ARRIVAL_GRACE_MINUTES, A1)', 
     warn.mockRestore();
   });
 
+  // Claude fallback pre-push review (2026-09-28) P1: this reader runs on
+  // every candidate slot, so a misconfigured value must not flood the log.
+  test('the clamp warning never repeats for the SAME misconfigured value, but fires again for a NEW one', () => {
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '250';
+    expect(selfServeArrivalGraceMinutes({ date: '2099-01-01' })).toBe(120);
+    expect(selfServeArrivalGraceMinutes({ date: '2099-01-02' })).toBe(120);
+    expect(selfServeArrivalGraceMinutes()).toBe(120);
+    expect(warn).toHaveBeenCalledTimes(1);
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '300';
+    expect(selfServeArrivalGraceMinutes()).toBe(120);
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+
   test('returns 0 for today (ET) regardless of the configured value; a future date passes through', () => {
     process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
     expect(selfServeArrivalGraceMinutes({ date: etDateString() })).toBe(0);

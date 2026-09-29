@@ -147,6 +147,15 @@ function customerFacingBufferMinutes() {
 // Callers with no single date (a multi-date find-time sweep) omit `date` and
 // zero out today's OWN candidates themselves (see find-time.js), so this
 // reader still returns the raw configured value for them.
+// Clamp-warning de-dup (Claude fallback pre-push review, 2026-09-28): this
+// reader runs per candidate slot (booking.js addCandidate), per
+// filterCollidingSlots pass, per reserve/commit/extend, and per debug call
+// — every one of them on every self-serve request. Without this latch, one
+// mis-set env value (e.g. 200) would log the clamp warning on every such
+// call instead of the "one warning" the header promises. Warns again only
+// when the raw value actually CHANGES (a fresh misconfiguration), not on
+// every read of the same one.
+let lastWarnedRawGrace;
 function selfServeArrivalGraceMinutes({ date } = {}) {
   const raw = process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
   if (raw == null || String(raw).trim() === '') return 0;
@@ -154,7 +163,10 @@ function selfServeArrivalGraceMinutes({ date } = {}) {
   if (!Number.isFinite(n) || n < 0) return 0;
   let minutes = Math.round(n);
   if (minutes > ARRIVAL_WINDOW_MINUTES) {
-    logger.warn(`[travel-gap] SELF_SERVE_ARRIVAL_GRACE_MINUTES=${raw} exceeds the ${ARRIVAL_WINDOW_MINUTES}-minute arrival promise — clamped`);
+    if (lastWarnedRawGrace !== raw) {
+      logger.warn(`[travel-gap] SELF_SERVE_ARRIVAL_GRACE_MINUTES=${raw} exceeds the ${ARRIVAL_WINDOW_MINUTES}-minute arrival promise — clamped`);
+      lastWarnedRawGrace = raw;
+    }
     minutes = ARRIVAL_WINDOW_MINUTES;
   }
   if (date && String(date).slice(0, 10) === etDateString()) return 0;

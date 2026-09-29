@@ -230,6 +230,24 @@ describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () =>
       });
       expect(found.map((r) => r.id)).toEqual(['same-tech-hold']);
     });
+
+    // Claude fallback pre-push review (2026-09-28) P1: the multi-tech scope
+    // above reads `row.technician_id` off the SQL result — if the real
+    // SELECT ever stopped projecting that column, `undefined == null` would
+    // be true for every row and the scoping would silently fall back to
+    // tech-blind (the exact offer/commit disagreement this lane fixes).
+    // CONFLICT_COLUMNS is the query's actual select list — pin it directly
+    // rather than trusting the mocked test rows above to catch a regression
+    // there (they always carry the field by construction).
+    test('CONFLICT_COLUMNS (the real SELECT list findConflictingVisitsWithTravel uses) includes technician_id', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(path.join(__dirname, '../services/scheduling/occupancy.js'), 'utf8');
+      const idx = src.indexOf('const CONFLICT_COLUMNS = [');
+      expect(idx).toBeGreaterThan(-1);
+      const block = src.slice(idx, src.indexOf('];', idx));
+      expect(block).toMatch(/'technician_id'/);
+    });
   });
 });
 
