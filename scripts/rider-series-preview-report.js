@@ -155,6 +155,10 @@ async function clusterIntoPropertyBuckets(trx, group) {
       if (other.scopes.every((sc) => seriesPropertyVerdict(sc, c.scope) === 'same')) {
         other.ambiguous = true;
         c.bucket.ambiguous = true;
+        // Join that bucket too, so every compatible pairing is emitted
+        // (all flagged property_ambiguous), not just the first bucket's.
+        const side = other[c.family === 'lawn_care' ? 'lawn' : 'pest'];
+        if (!side.some((r) => String(r.id) === String(c.row.id))) side.push(c.row);
       }
     }
   }

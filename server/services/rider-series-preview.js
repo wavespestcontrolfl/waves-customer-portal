@@ -28,6 +28,9 @@ const {
   parseETDateTime, etDateString, addETDays, etCalendarDayOf,
 } = require('../utils/datetime-et');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
+// The canonical plan-row predicate: the root, explicit or legacy NULL-flagged
+// children; never a booster, a callback or an included follow-up.
+const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
 const { LIVE_COMPLETION_CLAIM_STATUSES } = require('./visit-groups');
 const { getBlackoutLayers } = require('./scheduling/blackout-dates');
 const { clearOfBlackout } = require('./scheduling/blackout-nudge');
@@ -314,7 +317,8 @@ async function attributeReasonMap(conn, rowIds) {
 
 // Classifies one rider row for the preview: {terminal:true} (excluded from
 // both the movable and the pinned picture — history, never touched),
-// {booster:true} (never a move/cancel/anchor candidate), {pinned:true, why}
+// {booster:true} (not a plan row: booster, callback or included follow-up;
+// never a move/cancel/anchor candidate), {pinned:true, why}
 // (a live row that cannot move, with the reason), or {movable:true}.
 // Byte-identical rule set to the write engine's immovableByOwnFields +
 // attributeImmovable + near-term cutoff (services/rider-series.js), with
@@ -335,11 +339,11 @@ async function attributeReasonMap(conn, rowIds) {
 //    from the anchor computation even though it is `pinned`, the one case
 //    where a pinned row does not anchor.
 function classifyRiderRow(row, reasonMap, nearTermCutoff) {
-  if (row.is_recurring === true && row.status === 'rescheduled') {
+  if (isPlanSeriesRow(row) && row.status === 'rescheduled') {
     return { pinned: true, why: 'rescheduled_pending' };
   }
   if (JOIN_INELIGIBLE_STATUSES.includes(row.status)) return { terminal: true };
-  if (row.is_recurring !== true) return { booster: true };
+  if (!isPlanSeriesRow(row)) return { booster: true };
   if (IN_PROGRESS_STATUSES.includes(row.status)) return { pinned: true, why: 'in_progress' };
   if (row.prepaid_amount != null) return { pinned: true, why: 'prepaid' };
   if (row.customer_confirmed === true) return { pinned: true, why: 'customer_confirmed' };
@@ -528,11 +532,15 @@ async function loadHostDates(conn, hostParent, cols, todayStr, hostScope) {
   ].filter((c) => cols[c]);
   const hostRowsRaw = await conn('scheduled_services')
     .where((q) => { q.where('id', hostParent.id).orWhere('recurring_parent_id', hostParent.id); })
-    .where('is_recurring', true)
     .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
     .where('scheduled_date', '>=', todayStr)
     .orderBy('scheduled_date', 'asc')
-    .select('id', 'scheduled_date', ...(cols.property_id ? ['property_id'] : []), ...addressCols);
+    .select(
+      'id', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
+      ...['is_callback', 'followup_included'].filter((c) => cols[c]),
+      ...(cols.property_id ? ['property_id'] : []), ...addressCols,
+    )
+    .then((rows) => rows.filter(isPlanSeriesRow));
   const filtered = (cols.property_id && hostScope?.resolved)
     ? hostRowsRaw.filter((r) => {
       if (String(r.id) === String(hostParent.id)) return true;
@@ -562,9 +570,10 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
   for (const r of riderRows) {
     const c = classifyRiderRow(r, reasonMap, nearTermCutoff);
     classifications.set(r.id, c);
-    const isReschedulePending = r.is_recurring === true && r.status === 'rescheduled';
+    const isPlanRow = isPlanSeriesRow(r);
+    const isReschedulePending = isPlanRow && r.status === 'rescheduled';
     if (isReschedulePending) reschedulePending = true;
-    if (r.is_recurring === true && !isReschedulePending && (r.status === 'completed' || c.pinned === true)) {
+    if (isPlanRow && !isReschedulePending && (r.status === 'completed' || c.pinned === true)) {
       const d = dateOnly(r.scheduled_date);
       if (d && (!lastRiderDate || d > lastRiderDate)) lastRiderDate = d;
     }

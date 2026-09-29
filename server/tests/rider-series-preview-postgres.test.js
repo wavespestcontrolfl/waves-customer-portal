@@ -824,4 +824,20 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     expect(literal).toBeTruthy();
     expect(EXCLUDED_ROOT_STATUSES).toEqual(JSON.parse(literal[1].replace(/'/g, '"')));
   });
+
+  test('plan rows follow isPlanSeriesRow: a legacy NULL-flag child is a real visit, a callback child is not', async () => {
+    const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+    const legacy = await row({
+      recurring_parent_id: pestParent.id, status: 'pending', is_recurring: null, recurring_pattern: 'quarterly',
+      service_type: 'Quarterly Pest Control', scheduled_date: addDays(ANCHOR, 91),
+    });
+    const callback = await row({
+      recurring_parent_id: pestParent.id, status: 'pending', is_recurring: true, is_callback: true, recurring_pattern: 'quarterly',
+      service_type: 'Quarterly Pest Control', scheduled_date: addDays(ANCHOR, 100),
+    });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    const acted = [...preview.keep, ...preview.move, ...preview.cancel, ...preview.retained, ...preview.pinned].map((r) => r.id);
+    expect(acted).toContain(legacy.id);
+    expect(acted).not.toContain(callback.id);
+  });
 });
