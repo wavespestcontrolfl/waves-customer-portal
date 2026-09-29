@@ -105,6 +105,7 @@ import {
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
 import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.json";
+import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
@@ -306,12 +307,27 @@ export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, 
   // value; new typed selections remain authoritative once present.
   return typedAreas.length ? typedAreas : (genericAreas || []);
 }
+// One parser for every marker line ("[Tag] text"), built from the same
+// grammar the server reads (shared/completion-marker-grammar.json): whitespace
+// after the closing bracket is optional, so "[Protocol]Label" is a live marker
+// here exactly when the server reconstructs it. Active-marker detection,
+// pruning and the completed-actions count all go through this, so they cannot
+// disagree (codex P2 #5051). `tag` is lowercased, `text` trimmed.
+const MARKER_LINE_RX = new RegExp(completionMarkerGrammar.lineSource);
+const PROTOCOL_MARKER_TAGS = ["protocol", "protocol optional", "action"];
+function parseMarkerLine(line) {
+  const match = String(line || "").trim().match(MARKER_LINE_RX);
+  return match ? { tag: match[1].toLowerCase(), text: match[2].trim() } : null;
+}
+function markerLines(notes) {
+  return String(notes || "").split("\n").map(parseMarkerLine).filter(Boolean);
+}
+function markerTexts(notes, tags) {
+  const wanted = new Set(tags);
+  return markerLines(notes).filter((entry) => wanted.has(entry.tag)).map((entry) => entry.text);
+}
 export function labelsPresentInMarkerNotes(notes, labels) {
-  const markerValues = new Set(String(notes || "")
-    .split("\n")
-    .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
-    .map((line) => line.replace(/^\s*\[[^\]]+\]\s*/, "").trim().toLowerCase())
-    .filter(Boolean));
+  const markerValues = new Set(markerLines(notes).map((entry) => entry.text.toLowerCase()));
   return (Array.isArray(labels) ? labels : []).filter((label) => (
     markerValues.has(String(label || "").trim().toLowerCase())
   ));
@@ -320,15 +336,62 @@ export function labelsPresentInMarkerNotes(notes, labels) {
 // marker lines back out of the technician notes as completed actions, so a
 // dropped label must leave the notes too. Only the markers for `labels` go;
 // every other line (a free-typed action included) stays.
-function withoutProtocolMarkerLines(notes, labels) {
+export function withoutProtocolMarkerLines(notes, labels) {
   const drop = new Set(labels.map((label) => String(label || "").trim().toLowerCase()));
   return String(notes || "")
     .split("\n")
     .filter((line) => {
-      const match = line.trim().match(/^\[(?:protocol|protocol optional|action)\]\s*(.+)$/i);
-      return !match || !drop.has(match[1].trim().toLowerCase());
+      const entry = parseMarkerLine(line);
+      return !entry
+        || !PROTOCOL_MARKER_TAGS.includes(entry.tag)
+        || !drop.has(entry.text.toLowerCase());
     })
     .join("\n");
+}
+// Submit-time allowlist for restored/selected protocol action labels. First
+// rule with an opinion decides (true keep / false drop / null pass); no
+// opinion at all drops the label. Table-driven so handleSubmit carries no
+// branching for it.
+const SAVED_TREATMENT_SCOPES = new Set(["interior", "exterior"]);
+const PROTOCOL_ACTION_RULES = [
+  // Specialty preset lanes (any service) accept only the preset's own actions
+  // — membership cannot be bypassed by saved scope (codex P2 r7 #3701).
+  (label, c) => (c.specialtyProtocolActions.length
+    ? c.specialtyProtocolActions.some((action) => action.label === label)
+    : null),
+  // Saved treatment scope stays authoritative only while the action source is
+  // unavailable (still loading, or loaded with no items). Once a completion
+  // actions load returns items, THAT list is the allowlist (codex P2 r13 #5051).
+  (label, c) => (!(c.protocolActionsLoaded && c.protocolActions.length)
+    && SAVED_TREATMENT_SCOPES.has(c.actionScopeByLabel[label]?.scope)
+    ? true
+    : null),
+  // Non-lawn keeps its fallback-chip labels; lawn requires a product-backed
+  // action from the loaded list (or an enabled field action).
+  (label, c) => !c.isLawn
+    || (c.completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label))
+    || (c.protocolActionsLoaded
+      && c.protocolActions.some((action) => (action.label || action.note || action.raw || "") === label)),
+];
+export function protocolActionAllowed(label, context) {
+  return Boolean(PROTOCOL_ACTION_RULES.map((rule) => rule(label, context)).find((verdict) => verdict !== null));
+}
+// What a submit sends for protocol actions: the labels that pass the
+// allowlist, plus the notes with the rejected labels' marker lines removed
+// (the server rebuilds actions from those markers), plus the merged
+// completed-actions list the payload cap is checked against.
+export function reconcileProtocolActions({ labels, notes, context }) {
+  const reportProtocolActions = labels.filter((label) => protocolActionAllowed(label, context));
+  const reportTechnicianNotes = withoutProtocolMarkerLines(
+    notes,
+    labels.filter((label) => !reportProtocolActions.includes(label)),
+  );
+  const seen = new Set();
+  const completedActions = [
+    ...reportProtocolActions,
+    ...markerTexts(reportTechnicianNotes, PROTOCOL_MARKER_TAGS),
+  ].filter((line) => !seen.has(line.toLowerCase()) && seen.add(line.toLowerCase()));
+  return { reportProtocolActions, reportTechnicianNotes, completedActions };
 }
 // Specialty preset actions carry a default scope, but the treated areas say
 // where the work actually happened: when every classified area sits on one
@@ -15799,7 +15862,7 @@ export function CompletionPanel({
     if (generating) return;
     invalidateGeneratedReportOnTypedEdit();
     const markerTags = kind === "protocol"
-      ? new Set(["protocol", "protocol optional", "action"])
+      ? new Set(PROTOCOL_MARKER_TAGS)
       : new Set([kind === "observation" ? "found" : "next"]);
     const normalizedLabel = String(label || "").trim().toLowerCase();
     // Marker lines reconstruct structured selections on the server. Remove a
@@ -15812,10 +15875,10 @@ export function CompletionPanel({
     setNotes((current) => current
       .split("\n")
       .filter((line) => {
-        const match = line.match(/^\s*\[([^\]]+)\]\s*(.+)$/);
-        return !match
-          || !markerTags.has(match[1].trim().toLowerCase())
-          || match[2].trim().toLowerCase() !== normalizedLabel;
+        const entry = parseMarkerLine(line);
+        return !entry
+          || !markerTags.has(entry.tag.trim())
+          || entry.text.toLowerCase() !== normalizedLabel;
       })
       .join("\n")
       .trim());
@@ -15868,11 +15931,8 @@ export function CompletionPanel({
   // the textareas they must reach the AI draft, the recap grounding and the
   // photo-caption context the same way. The textarea text still merges for
   // gate-off and restored drafts; the server dedupes.
-  function taggedNoteLines(tag, source = notes) {
-    const rx = new RegExp(`^\\[${tag}\\]\\s*(.+)$`, "i");
-    return freeTextLines(source)
-      .map((line) => line.match(rx)?.[1]?.trim() || "")
-      .filter(Boolean);
+  function taggedNoteLines(tag) {
+    return markerTexts(notes, [tag]);
   }
   function uniqueLines(lines) {
     const seen = new Set();
@@ -17037,47 +17097,21 @@ export function CompletionPanel({
     // Lawn closeouts enforce the product-backed rule at submit too: a
     // draft saved before the scout/task rows were filtered out can restore
     // labels the selector no longer offers — they must not persist as
-    // completed protocol actions. Only applied once the (filtered) action
-    // set has loaded; pest keeps its fallback-chip labels untouched.
-    // Specialty preset lanes (any service) accept only the preset's own
-    // actions — a restored label from a previously served list is stale
-    // and must not reach the customer report (codex P2 r7 #3701).
-    const reportProtocolActions = activeSelectedLabels(
-      selectedProtocolActionLabels,
-    ).filter((label) => {
-      if (specialtyProtocolActions.length > 0) {
-        return specialtyProtocolActions.some((action) => action.label === label);
-      }
-      // Saved treatment scope remains authoritative only while the current
-      // action source is unavailable — still loading, or loaded with no
-      // items (this service type has no assigned protocol program, so
-      // there is no allowlist to check against). Once a successful
-      // completion-actions load returns actual items, THAT list is the
-      // allowlist and a saved scope from a since-changed protocol or
-      // appointment plan must not bypass it (codex P2 r13 #5051: a restored
-      // label the loaded list no longer offers stayed selected, and its
-      // marker survived into technicianNotes for the customer report).
-      // Specialty membership stays first and cannot be bypassed by saved
-      // scope either way.
-      const savedScope = actionScopeByLabel[label];
-      const currentListHasItems = protocolActionsLoaded && protocolActions.length > 0;
-      if (
-        !currentListHasItems &&
-        (savedScope?.scope === "interior" || savedScope?.scope === "exterior")
-      ) return true;
-      return !isLawn ||
-        (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
-        (protocolActionsLoaded &&
-          protocolActions.some(
-            (action) =>
-              (action.label || action.note || action.raw || "") === label,
-          ));
+    // completed protocol actions (allowlist rules: PROTOCOL_ACTION_RULES).
+    // The server also rebuilds actions from marker notes, so rejected
+    // selections leave the notes too and validation sees what the server will.
+    const { reportProtocolActions, reportTechnicianNotes, completedActions } = reconcileProtocolActions({
+      labels: activeSelectedLabels(selectedProtocolActionLabels),
+      notes,
+      context: {
+        specialtyProtocolActions,
+        protocolActions,
+        protocolActionsLoaded,
+        actionScopeByLabel,
+        isLawn,
+        completionImprovements,
+      },
     });
-    // The server also reconstructs actions from marker notes. Remove rejected
-    // selections there so validation and submission see the same action set.
-    const excludedProtocolLabels = selectedProtocolActionLabels
-      .filter((label) => !reportProtocolActions.includes(label));
-    const reportTechnicianNotes = withoutProtocolMarkerLines(notes, excludedProtocolLabels);
     // The server normalizer silently trims each observation/recommendation
     // line to 240 chars and keeps at most 20 entries — reject oversized
     // input here instead of letting the saved report lose text without
@@ -17089,12 +17123,6 @@ export function CompletionPanel({
     // first).
     {
       const freeTextProblems = [];
-      const completedActions = uniqueLines([
-        ...reportProtocolActions,
-        ...taggedNoteLines("protocol", reportTechnicianNotes),
-        ...taggedNoteLines("protocol optional", reportTechnicianNotes),
-        ...taggedNoteLines("action", reportTechnicianNotes),
-      ]);
       const mergedCounts = [
         [
           "Completed actions",

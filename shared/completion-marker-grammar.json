@@ -1,0 +1,4 @@
+{
+  "_comment": "Grammar of a completion technician-notes marker line, after the line is trimmed: [Tag] text, whitespace after the closing bracket optional. Read by the server (taggedCompletionNoteLines in services/complete-scheduled-service.js) and the admin completion panel (SchedulePage.jsx), so the client's active-marker detection and pruning can never disagree with what the server reconstructs.",
+  "lineSource": "^\\[([^\\]]+)\\]\\s*(.+)$"
+}

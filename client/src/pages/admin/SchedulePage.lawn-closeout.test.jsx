@@ -175,6 +175,47 @@ it('removes a detached marker with no space after the tag, matching the server g
   expect(submit.mock.calls[0][1].technicianNotes).not.toContain(label);
 });
 
+it('keeps a completed action through submit when its marker is edited to no-space', async () => {
+  const label = 'Inspected the recorded lawn service areas.';
+  completionActions = integrityActionList({ label, scope: 'exterior', treatmentApplied: false });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  expect(notes.value).toContain(`[Protocol] ${label}`);
+  // The server grammar makes the space after "]" optional, so the edited
+  // line is still a live marker: the action and its scope must survive.
+  fireEvent.change(notes, { target: { value: `[Protocol]${label}` } });
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted).toContain(label);
+  expect(body.protocolActionScopesCompleted).toContainEqual({ label, scope: 'exterior', treatmentApplied: false });
+  expect(body.technicianNotes).toBe(`[Protocol]${label}`);
+});
+
+it('still prunes a no-space marker for a label the loaded list no longer offers', async () => {
+  const retiredAction = 'Retired planned lawn application.';
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(),
+    notes: `Handwritten visit note.\n[Protocol]${retiredAction}`,
+    preGenerationNotes: `[Protocol]${retiredAction}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'], selectedProtocolActionLabels: [retiredAction],
+    chipLinesDetached: false,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('completion-actions'))).toBe(true));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(retiredAction);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(retiredAction);
+});
+
 it.each([
   ['spray application', {}, 1],
   ['no-dry-down application', { dryDown: false }, 0],

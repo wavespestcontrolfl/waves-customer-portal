@@ -1709,13 +1709,17 @@ function completedProtocolActionScopes(actions, scopeEntries, serviceLine) {
     .filter(Boolean);
 }
 
+// Marker-line grammar shared with the admin completion panel (SchedulePage.jsx)
+// so its active-marker detection and pruning match this parser exactly.
+const COMPLETION_MARKER_LINE = new RegExp(require('../../shared/completion-marker-grammar.json').lineSource);
+
 function taggedCompletionNoteLines(notes, tags) {
   const tagSet = new Set(tags.map((tag) => tag.toLowerCase()));
   return String(notes || '')
     .split(/\r?\n/)
     .map((line) => line.trim())
     .map((line) => {
-      const match = line.match(/^\[([^\]]+)\]\s*(.+)$/);
+      const match = line.match(COMPLETION_MARKER_LINE);
       if (!match) return null;
       return { tag: match[1].toLowerCase(), text: match[2].trim() };
     })
