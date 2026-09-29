@@ -106,7 +106,19 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // covers both family and strangers alike. A spouse/partner still uses
 // spouse_partner, not this value. Feeds isAuthorizedFamilyMemberBooking
 // (call-triage-flags.js). Older payloads still validate.
-const SCHEMA_VERSION = '1.18.0';
+// 1.19.0: additive — consent.sms_declined (boolean|null). Codex P1 on
+// #5292: the dry-run removal of the sms_consent_given===false staging check
+// (owner ruling — that field is true only on an explicit yes, so false
+// means "never asked", not "refused", and blocked 151/159 real new-lead
+// calls) also stopped catching an explicit "no" to "may I text you?",
+// which the model recorded the SAME way (sms_consent_given=false).
+// sms_declined is the dedicated field: true ONLY on an explicit decline,
+// judged separately from sms_consent_given. Optional/nullable in BOTH
+// schemas (AGENTS.md: extraction schema changes never add to `required`) —
+// a pre-1.19 row, which never has the field at all, still validates. The
+// booking-link staging check (call-booking-link-text.js) fails CLOSED
+// whenever the field is absent or not a boolean: 'sms_refusal_unrecorded'.
+const SCHEMA_VERSION = '1.19.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

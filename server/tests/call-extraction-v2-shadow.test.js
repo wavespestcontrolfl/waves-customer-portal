@@ -148,6 +148,15 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values');
   });
 
+  test('includes the sms_declined consent rule (schema 1.19.0, codex P1 on #5292)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('sms_declined: true only if the caller explicitly declines text messages');
+    expect(prompt).toContain('even if calls are fine');
+    expect(prompt).toContain('false otherwise, including when texting never came up');
+    // sms_consent_given's own wording is unchanged by this addition.
+    expect(prompt).toContain('sms_consent_given: true only if the caller explicitly agrees to receive text messages. Implied consent (giving a phone number) does NOT count.');
+  });
+
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
     const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
     expect(prompt).toContain('Capture ANY price stated on the call by EITHER party');
@@ -305,7 +314,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.18.0');
+    expect(SCHEMA_VERSION).toBe('1.19.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

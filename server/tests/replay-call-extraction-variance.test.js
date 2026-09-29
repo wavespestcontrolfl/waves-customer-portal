@@ -886,4 +886,36 @@ describe('call extraction replay variance reporting', () => {
       expect(variances).toEqual([]);
     });
   });
+
+  // consent.sms_declined (schema 1.19.0, codex P1 on #5292): the dedicated
+  // explicit-SMS-refusal field the booking-link staging check reads
+  // (call-booking-link-text.js) — without it in FIELD_GROUPS, a model that
+  // stops catching (or starts hallucinating) a refusal would go unnoticed
+  // by the weekly replay/model bake-off.
+  describe('consent.sms_declined variance coverage', () => {
+    test('sms_declined is registered in FIELD_GROUPS', () => {
+      const allFields = new Set(Object.values(FIELD_GROUPS).flat());
+      expect(allFields.has('sms_declined')).toBe(true);
+    });
+
+    test('compareFlatFields reports a variance when sms_declined flips', () => {
+      const variances = compareFlatFields({ sms_declined: null }, { sms_declined: true }, true);
+      const variance = variances.find((v) => v.field === 'sms_declined');
+      expect(variance).toBeDefined();
+      expect(variance.severity).toBe('medium');
+    });
+
+    test('normalizeField keeps sms_declined a genuine tri-state (null distinct from false)', () => {
+      expect(normalizeField('sms_declined', null)).toBeNull();
+      expect(normalizeField('sms_declined', false)).toBe(false);
+      expect(normalizeField('sms_declined', true)).toBe(true);
+      expect(normalizeField('sms_declined', null)).not.toBe(normalizeField('sms_declined', false));
+    });
+
+    test('compareFlatFields reports no variance when nothing changed', () => {
+      const flat = { sms_declined: false };
+      const variances = compareFlatFields(flat, { ...flat }, true).filter((v) => v.field === 'sms_declined');
+      expect(variances).toEqual([]);
+    });
+  });
 });

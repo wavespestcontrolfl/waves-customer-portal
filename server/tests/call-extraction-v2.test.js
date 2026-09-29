@@ -32,6 +32,7 @@ function validModelOutput() {
       sms_consent_quote: 'Yes, you can text me at this number.',
       call_recording_disclosed: true,
       do_not_contact_request: false,
+      sms_declined: false,
     },
     property: {
       service_address: {
@@ -137,8 +138,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.18.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.18.0');
+  test('schema version is 1.19.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.19.0');
   });
 
   describe('model-output schema', () => {
@@ -307,6 +308,36 @@ describe('schema validation', () => {
     test('1.17.0: moved_appointment_words rejects an empty string', () => {
       const out = validModelOutput();
       out.scheduling.moved_appointment_words = '';
+      expect(validateModelOutput(out).valid).toBe(false);
+    });
+
+    // consent.sms_declined (schema 1.19.0, codex P1 on #5292): the
+    // booking-link dry run's removal of the sms_consent_given===false
+    // staging check also stopped catching an explicit refusal, which the
+    // model recorded the same way. Additive/optional in BOTH schemas
+    // (AGENTS.md: extraction schema changes are never added to `required`)
+    // — a pre-1.19 row, which never has the field at all, still validates.
+    // The booking-link staging check itself (not schema validation) is what
+    // fails closed on that absent-field shape (call-booking-link-text.js).
+    test('1.19.0: sms_declined is optional and nullable in the model output, and older rows without it still validate', () => {
+      const out = validModelOutput();
+      delete out.consent.sms_declined;
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.consent.sms_declined = null;
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.consent.sms_declined = false;
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.consent.sms_declined = true;
+      expect(validateModelOutput(out).valid).toBe(true);
+      const old = validPersisted();
+      old.meta.schema_version = '1.17.0';
+      delete old.consent.sms_declined;
+      expect(validatePersisted(old).valid).toBe(true);
+    });
+
+    test('1.19.0: sms_declined must be a boolean or null', () => {
+      const out = validModelOutput();
+      out.consent.sms_declined = 'yes';
       expect(validateModelOutput(out).valid).toBe(false);
     });
 
@@ -845,6 +876,27 @@ describe('normalize extraction v2', () => {
     expect(validatePersisted(result).valid).toBe(true);
   });
 
+  // consent.sms_declined (schema 1.19.0, codex P1 on #5292) MUST survive
+  // normalizeExtractionV2 — the top-level spread passes `consent` through
+  // unchanged (no per-field consent normalizer exists), so it is never
+  // explicitly overridden. Asserted directly through the real normalizer
+  // rather than trusted from reading the source (pre-push review flagged
+  // the same gap for caller_id_disclaimed above, even though it was never
+  // actually dropped). call-booking-link-text.test.js separately proves the
+  // staging check reads it correctly after this same real normalization.
+  test('normalizeExtractionV2 preserves consent.sms_declined', () => {
+    const extraction = validModelOutput();
+    extraction.consent.sms_declined = true;
+    const result = normalizeExtractionV2(extraction);
+    expect(result.consent.sms_declined).toBe(true);
+    // The normalized shape still validates end to end.
+    result.meta.schema_version = SCHEMA_VERSION;
+    result.meta.call_id = '550e8400-e29b-41d4-a716-446655440000';
+    result.meta.extracted_at = '2026-09-28T00:00:00.000Z';
+    result.meta.extraction_model = 'test-model';
+    expect(validatePersisted(result).valid).toBe(true);
+  });
+
   test('normalizeExtractionV2 clamps an over-length phone_note to 160 chars', () => {
     const extraction = validModelOutput();
     extraction.caller.caller_id_disclaimed = true;
@@ -1239,6 +1291,20 @@ describe('extraction compat adapter', () => {
 
     v2.scheduling = { status: 'requested', confirmed_start_at: null, requested_date_range_start: '2026-05-28', blackout_dates: [] };
     expect(flatView(v2).preferred_date_time).toBeNull();
+  });
+
+  // sms_declined (schema 1.19.0, codex P1 on #5292) — tri-state like
+  // caller_id_disclaimed: null (never judged, including every pre-1.19 row,
+  // which lacks the field entirely) is distinct from an explicit false.
+  // Watched by replay variance (FIELD_GROUPS medium).
+  test('flatView maps consent.sms_declined, tri-state like caller_id_disclaimed', () => {
+    const v2 = validPersisted();
+    v2.consent.sms_declined = true;
+    expect(flatView(v2).sms_declined).toBe(true);
+    v2.consent.sms_declined = false;
+    expect(flatView(v2).sms_declined).toBe(false);
+    delete v2.consent.sms_declined;
+    expect(flatView(v2).sms_declined).toBeNull();
   });
 
   test('flatView preserves _v2 reference', () => {
