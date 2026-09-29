@@ -57,9 +57,14 @@ function normalizePhone(raw) {
 
 // A keyed Static Maps URL becomes an absolute, short-lived, signed proxy URL
 // (or null when it cannot be signed — the form then simply shows no image).
+// Lifetime is the 24 h cap, not the 2 h default: the marketing quote form
+// cannot re-request the lookup, so a form left open on the confirm step must
+// not blank its satellite image. Tradeoff: a leaked lookup URL replays for up
+// to a day (rate-limited, and it only ever shows that one already-shown map).
+const LOOKUP_IMAGE_TTL_SECONDS = 24 * 60 * 60;
 function publicSatelliteImageUrl(raw) {
   if (!raw) return null;
-  return signedMapImagePathFromStaticUrl(raw, { absolute: true });
+  return signedMapImagePathFromStaticUrl(raw, { absolute: true, ttlSeconds: LOOKUP_IMAGE_TTL_SECONDS });
 }
 
 function publicSatellitePayload(satellite) {

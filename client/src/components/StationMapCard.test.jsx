@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StationMapCard, eligibleTrapIndices } from './StationMapCard';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
@@ -245,5 +245,14 @@ describe('StationMapCard — signed map proxy path', () => {
   it('rebases the proxy path onto a separate API origin (VITE_API_URL builds)', () => {
     expect(resolveApiAssetUrl('/api/public/map-image/v1.abc.def', 'https://api.example.test/api'))
       .toBe('https://api.example.test/api/public/map-image/v1.abc.def');
+  });
+});
+
+describe('StationMapCard — image error hook', () => {
+  it('reports a map image that fails to load (expired signed link) to the caller', () => {
+    const onImageError = vi.fn();
+    const { container } = render(<StationMapCard stationMap={STATION_MAP} onImageError={onImageError} />);
+    fireEvent.error(container.querySelector('svg image'));
+    expect(onImageError).toHaveBeenCalledTimes(1);
   });
 });

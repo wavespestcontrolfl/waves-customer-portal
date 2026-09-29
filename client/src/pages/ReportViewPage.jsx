@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
@@ -9660,6 +9660,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   );
 }
 
+function reportDataUrl(token, mode, pinnedAssessment) {
+  return `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
+    + (pinnedAssessment
+      ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
+        + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
+        + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
+        + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
+      : '');
+}
+
+// The report's satellite images are signed proxy links that expire (2 h). A
+// page left open (or restored from the background) past this re-requests just
+// the map fields, silently, instead of leaving a dead map behind.
+const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
+
 export default function ReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -9702,17 +9717,14 @@ export default function ReportViewPage() {
   const glassActive = mode === 'live';
   useGlassSurface(glassActive);
 
+  const mapsLoadedAt = useRef(0);
+  const mapsRefreshing = useRef(false);
+  const mapErrorRefetched = useRef(false);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(false);
-    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
-      + (pinnedAssessment
-        ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
-          + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
-          + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
-          + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
-        : '');
+    const dataUrl = reportDataUrl(token, mode, pinnedAssessment);
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only. Guarded:
@@ -9757,6 +9769,7 @@ export default function ReportViewPage() {
           if (d.staffViewer) staffViewTokens.add(token);
           else staffViewTokens.delete(token);
         }
+        mapsLoadedAt.current = Date.now();
         setData(d);
       })
       .catch(() => {
@@ -9774,6 +9787,65 @@ export default function ReportViewPage() {
     if (!data || data.error) return;
     applyReportDocumentMetadata(data);
   }, [data]);
+
+  // Silent refresh of ONLY the map fields (fresh signed links); never touches
+  // the loading state or any other part of the rendered report.
+  const dataHasMaps = Boolean(data && !data.error
+    && (data.treatmentMap?.satellite?.live?.url || data.stationMap?.image?.url));
+  const refreshReportMaps = useCallback(() => {
+    if (mode !== 'live' || mapsRefreshing.current) return;
+    mapsRefreshing.current = true;
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
+    fetch(reportDataUrl(token, mode, pinnedAssessment), {
+      cache: 'no-store',
+      headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((fresh) => {
+        if (!fresh || fresh.error) return;
+        mapsLoadedAt.current = Date.now();
+        setData((prev) => (prev && !prev.error ? {
+          ...prev,
+          treatmentMap: prev.treatmentMap
+            ? { ...prev.treatmentMap, satellite: fresh.treatmentMap?.satellite ?? prev.treatmentMap.satellite }
+            : prev.treatmentMap,
+          stationMap: fresh.stationMap ?? prev.stationMap,
+        } : prev));
+      })
+      .catch(() => {})
+      .finally(() => { mapsRefreshing.current = false; });
+  }, [token, mode, pinnedAssessment]);
+  useEffect(() => {
+    if (mode !== 'live' || !dataHasMaps) return undefined;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - mapsLoadedAt.current > REPORT_MAP_STALE_MS) {
+        refreshReportMaps();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [mode, dataHasMaps, refreshReportMaps]);
+  // Once per page load: if the map image cannot load (an already-expired link,
+  // e.g. a restored tab), fetch fresh links a single time.
+  const mapProbeUrl = data?.treatmentMap?.satellite?.live?.url || data?.stationMap?.image?.url || null;
+  useEffect(() => {
+    if (mode !== 'live' || !mapProbeUrl || typeof Image === 'undefined') return undefined;
+    let done = false;
+    const probe = new Image();
+    probe.onerror = () => {
+      if (done || mapErrorRefetched.current) return;
+      mapErrorRefetched.current = true; // a single retry per page load, never a loop
+      refreshReportMaps();
+    };
+    probe.src = resolveApiAssetUrl(mapProbeUrl);
+    return () => { done = true; probe.onerror = null; };
+    // Only the URL identity matters: a refreshed URL re-probes exactly once.
+  }, [mode, mapProbeUrl]);
 
   // The browser resolves the URL fragment against the loading skeleton —
   // anchor targets (e.g. #visit-recap from recap SMS links) don't exist

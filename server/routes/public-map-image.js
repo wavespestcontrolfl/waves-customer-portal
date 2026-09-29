@@ -13,6 +13,15 @@
  * so it cannot be steered into an open proxy or an SSRF. Every refusal (bad
  * shape, bad signature, expired, no key configured, upstream failure) answers
  * the same generic 404. Nothing here logs a URL or token.
+ *
+ * Router-level coverage: this router is mounted BEFORE the global limiter, so
+ * anything under /api/public/map-image that did not match `GET /:token` (empty
+ * token, `//x`, extra segments, POST, PUT, ...) would otherwise fall through to
+ * the global limiter (an unstamped 429) or the app notFound (a different 404).
+ * So the privacy headers and this route's limiter run for EVERY request that
+ * reaches the router (any method, any subpath; Express matches the mount
+ * case-insensitively and ignores a trailing slash), and a terminal catch-all
+ * answers the same generic 404 for anything that is not a valid GET/HEAD /:token.
  */
 
 const express = require('express');
@@ -54,9 +63,17 @@ const mapImageLimiter = rateLimit({
   },
 });
 
-router.get('/:token', mapImageLimiter, async (req, res, next) => {
+router.use((req, res, next) => {
+  stampHeaders(res);
+  next();
+});
+router.use(mapImageLimiter);
+
+router.get('/:token', async (req, res, next) => {
   try {
     stampHeaders(res);
+    // A doubled slash is never a canonical link (Express would still match it).
+    if (String(req.originalUrl || '').split('?')[0].includes('//')) return notFound(res);
     // Ignore any query string: only the signed path token is honoured.
     const params = verifyMapImageToken(req.params.token);
     if (!params) return notFound(res);
@@ -76,5 +93,9 @@ router.get('/:token', mapImageLimiter, async (req, res, next) => {
       .send(image.buffer);
   } catch (err) { next(err); }
 });
+
+// Terminal catch-all: any other method or subpath gets the same generic 404
+// (with the headers stamped above), never the app-level notFound.
+router.use((req, res) => notFound(res));
 
 module.exports = router;

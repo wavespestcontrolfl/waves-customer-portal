@@ -2077,7 +2077,7 @@ carries a maps.googleapis.com URL or a key any more; staff-only surfaces such
 as admin dispatch keep direct URLs). The token is
 `v1.<base64url(lat|lng|zoom|WxH|scale|maptype|exp)>.<base64url(HMAC-SHA256)>`,
 keyed on `REPORT_PIN_SECRET` (falls back to `JWT_SECRET`) through a
-purpose-derived key, 2 h expiry (never more than 24 h), constant-time compare,
+purpose-derived key, 2 h expiry for report/portal links (24 h for the lead-form lookup, whose marketing-site form cannot re-request; never more than 24 h), constant-time compare,
 fail-closed when no secret is configured (the map is omitted, never sent
 keyed). The route reads NOTHING but the path token — no query param — and
 rebuilds a keyless Static Maps URL only from the signed, range-checked values
@@ -2086,7 +2086,12 @@ satellite|hybrid), appends the key inside the fetch (8 s timeout, image/*
 content-type, 4 MB cap; a dedicated `GOOGLE_STATIC_MAPS_API_KEY` is preferred,
 matching the basemap provider), and streams the bytes, so it cannot become an
 open proxy or SSRF vector. Every refusal (malformed/forged/expired token, no
-key, upstream failure) is ONE generic 404 body; every response including the
+key, upstream failure) is ONE generic 404 body — including the empty token,
+`//x`, extra path segments and every non-GET/HEAD method, which a terminal
+catch-all in the router answers with the same 404 (the header stamp and the
+route limiter run router-wide, ahead of the route, so no request under the
+mount falls through to the global limiter or the app notFound; the mount is
+case-insensitive and ignores a trailing slash); every response including the
 404 and the 429 carries `Cache-Control: no-store` (success: `private,
 max-age=900`), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
 nosniff`, `X-Robots-Tag: noindex` and `Cross-Origin-Resource-Policy:

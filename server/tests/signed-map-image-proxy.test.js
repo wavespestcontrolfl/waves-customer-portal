@@ -48,6 +48,9 @@ async function withServer(fn, { trustProxy = false } = {}) {
   const app = express();
   if (trustProxy) app.set('trust proxy', true);
   app.use('/api/public/map-image', mapImageRouter);
+  // Anything the router lets fall through would land here (stands in for the
+  // global limiter / app notFound that follow it in server/index.js).
+  app.use((req, res) => res.status(418).send('fell through'));
   const server = app.listen(0);
   try { await fn(`http://127.0.0.1:${server.address().port}`); } finally { server.close(); }
 }
@@ -124,6 +127,14 @@ describe('signedMapImagePathFromStaticUrl (lookup URLs)', () => {
     expect(abs).not.toMatch(/AIza|key=|markers|maps\.googleapis|test-maps-key/);
     const params = signed.verifyMapImageToken(abs.split('/').pop());
     expect(params).toEqual({ lat: '27.3000000', lng: '-82.5000000', zoom: 19, width: 640, height: 640, scale: 1, maptype: 'satellite' });
+  });
+
+  test('report/portal links default to a 2 h lifetime', () => {
+    const token = signed.signedMapImagePath(PARAMS).split('/').pop();
+    const exp = Number(Buffer.from(token.split('.')[1], 'base64url').toString().split('|')[6]);
+    const remaining = exp - Math.floor(Date.now() / 1000);
+    expect(remaining).toBeGreaterThan(2 * 3600 - 60);
+    expect(remaining).toBeLessThanOrEqual(2 * 3600);
   });
 
   test('relative by default; non-Static-Maps or address-centred URLs sign to null', () => {
@@ -265,6 +276,72 @@ describe('GET /api/public/map-image/:token', () => {
   });
 });
 
+describe('router-level coverage: nothing under the mount falls through', () => {
+  const genericBody = JSON.stringify({ error: 'Not found' });
+
+  test('empty token, doubled slash, extra segments, uppercase mount, non-GET methods -> stamped generic 404', async () => {
+    const good = signed.signMapImageToken(PARAMS);
+    await withServer(async (baseUrl) => {
+      const cases = [
+        ['GET', '/api/public/map-image'],
+        ['GET', '/api/public/map-image/'],
+        ['GET', '/api/public/map-image//x'],
+        ['GET', `/api/public/map-image//${good}`],
+        ['GET', `/api/public/map-image/${good}/extra`],
+        ['GET', `/api/public/map-image/${good}/extra/more`],
+        ['POST', `/api/public/map-image/${good}`],
+        ['PUT', `/api/public/map-image/${good}`],
+        ['DELETE', '/api/public/map-image/'],
+        ['OPTIONS', '/api/public/map-image/x'],
+      ];
+      for (const [method, p] of cases) {
+        const res = await fetch(`${baseUrl}${p}`, { method });
+        const label = `${method} ${p}`;
+        expect([label, res.status]).toEqual([label, 404]);
+        expect([label, res.headers.get('cache-control')]).toEqual([label, 'no-store']);
+        expect([label, res.headers.get('cross-origin-resource-policy')]).toEqual([label, 'cross-origin']);
+        expect([label, res.headers.get('referrer-policy')]).toEqual([label, 'no-referrer']);
+        expect([label, await res.text()]).toEqual([label, genericBody]);
+      }
+      expect(upstreamCalls).toHaveLength(0);
+    });
+  });
+
+  test('HEAD, uppercase mount path and a trailing slash on a valid token behave like GET', async () => {
+    const path = signed.signedMapImagePath(PARAMS);
+    await withServer(async (baseUrl) => {
+      const head = await fetch(`${baseUrl}${path}`, { method: 'HEAD' });
+      expect(head.status).toBe(200);
+      expect(head.headers.get('cross-origin-resource-policy')).toBe('cross-origin');
+      const upper = await fetch(`${baseUrl}${path.replace('/api/public/map-image', '/API/PUBLIC/MAP-IMAGE')}`);
+      expect(upper.status).toBe(200);
+      await upper.arrayBuffer();
+      const slash = await fetch(`${baseUrl}${path}/`);
+      expect(slash.status).toBe(200);
+      await slash.arrayBuffer();
+    });
+  });
+
+  test('over the limit, non-token subpaths and other methods get a stamped 429, never a fall-through', async () => {
+    await withServer(async (baseUrl) => {
+      const hit = (p, method = 'GET') => fetch(`${baseUrl}${p}`, { method, headers: { 'X-Forwarded-For': '2001:db8:aa:bb::1' } });
+      for (let i = 0; i < 60; i += 1) {
+        const res = await hit('/api/public/map-image/');
+        expect(res.status).toBe(404);
+        await res.text();
+      }
+      for (const [p, method] of [['/api/public/map-image/', 'GET'], ['/API/PUBLIC/MAP-IMAGE//x', 'GET'], ['/api/public/map-image/a/b', 'POST'], ['/api/public/map-image/whatever', 'GET']]) {
+        const res = await hit(p, method);
+        expect([p, method, res.status]).toEqual([p, method, 429]);
+        expect(res.headers.get('cache-control')).toBe('no-store');
+        expect(res.headers.get('cross-origin-resource-policy')).toBe('cross-origin');
+        expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+        await res.text();
+      }
+    }, { trustProxy: true });
+  });
+});
+
 describe('public lead-form lookup payload', () => {
   test('satellite URLs are absolute signed proxy URLs, never keyed Google URLs', () => {
     const out = lookupTest.publicSatellitePayload({
@@ -279,6 +356,11 @@ describe('public lead-form lookup payload', () => {
     for (const field of ['closeUrl', 'microCloseUrl', 'wideUrl']) {
       expect(out[field]).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/api\/public\/map-image\/v1\./);
     }
+    // 24 h (the cap): the marketing quote form cannot re-request the lookup.
+    const exp = (url) => Number(Buffer.from(url.split('/').pop().split('.')[1], 'base64url').toString().split('|')[6]);
+    const remaining = exp(out.closeUrl) - Math.floor(Date.now() / 1000);
+    expect(remaining).toBeGreaterThan(24 * 3600 - 60);
+    expect(remaining).toBeLessThanOrEqual(24 * 3600);
     expect(signed.verifyMapImageToken(out.microCloseUrl.split('/').pop()).zoom).toBe(22);
     expect(signed.verifyMapImageToken(out.wideUrl.split('/').pop()).zoom).toBe(18);
     expect(out.inServiceArea).toBe(true);

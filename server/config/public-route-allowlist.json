@@ -55,9 +55,12 @@
     {
       "router": "server/routes/public-map-image.js",
       "mount": "/api/public/map-image",
-      "reason": "Signed satellite image proxy: the lead-form lookup, customer service report and portal station map carry short-lived HMAC-signed paths (services/signed-map-image.js, key derived from REPORT_PIN_SECRET||JWT_SECRET, 2 h expiry) instead of Google Static Maps URLs that embedded the server Maps key. The route reads ONLY the signed token in the path — never a query param — rebuilds the keyless Static Maps URL from the signed, range-checked lat/lng/zoom/size/scale/maptype, appends the key inside the fetch and streams the bytes, so it cannot become an open proxy or SSRF. Every refusal (bad shape/signature, expired, no key, upstream failure) answers one generic 404 with no-store/no-referrer/CORP cross-origin; its own 60 req/min per-IP (IPv6 /64) limiter (429 stamped with the same headers) is mounted before the global limiter; no server-side image cache. See docs/public-route-contracts.md.",
+      "reason": "Signed satellite image proxy: the lead-form lookup, customer service report and portal station map carry short-lived HMAC-signed paths (services/signed-map-image.js, key derived from REPORT_PIN_SECRET||JWT_SECRET, 2 h expiry; 24 h for the lead-form lookup) instead of Google Static Maps URLs that embedded the server Maps key. The route reads ONLY the signed token in the path — never a query param — rebuilds the keyless Static Maps URL from the signed, range-checked lat/lng/zoom/size/scale/maptype, appends the key inside the fetch and streams the bytes, so it cannot become an open proxy or SSRF. Every refusal (bad shape/signature, expired, no key, upstream failure) answers one generic 404 with no-store/no-referrer/CORP cross-origin; its own 60 req/min per-IP (IPv6 /64) limiter (429 stamped with the same headers) is mounted before the global limiter; no server-side image cache. The router stamps the privacy headers and applies the limiter to EVERY request under the mount (any method/subpath, case-insensitive, trailing slash) and ends in a terminal catch-all that answers the same generic 404 for anything but a valid GET/HEAD /:token (the two inline USE entries and the limiter USE entry). See docs/public-route-contracts.md.",
       "routes": [
-        "GET /api/public/map-image/:token"
+        "GET /api/public/map-image/:token",
+        "USE /api/public/map-image (express-rate-limit({ handler#94fc883d }))",
+        "USE /api/public/map-image (inline function#0946a58f)",
+        "USE /api/public/map-image (inline function#322aaeb5)"
       ]
     },
     {
