@@ -913,14 +913,17 @@ describe('pre-push audit P1: the amount-free receipt guard fires only on AFFIRMA
   test('regression: the amount-bearing clause-loop path (settledOnly) is unaffected', () => {
     // Codex r4/r5/r6 coverage, re-affirmed: a paid line backs an
     // acknowledgement only when settledOnly excludes non-paid history.
+    // Independent-review P1 (round 3, PR #5331, finding 2): a receipt
+    // confirmation must also NAME the date the row was paid — see the
+    // describe block below for full date-binding coverage.
     expect(replyQuotesUngroundedAmount(
-      'We received your $120.00 payment — thank you!',
-      { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid' }] } },
+      'We received your $120.00 payment from Sep 12 — thank you!',
+      { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid', payment_date: '2026-09-12' }] } },
       { byMeaning: true },
     )).toBe(false);
     expect(replyQuotesUngroundedAmount(
-      'We received your $120.00 payment — thank you!',
-      { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'pending' }] } },
+      'We received your $120.00 payment from Sep 12 — thank you!',
+      { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'pending', payment_date: '2026-09-12' }] } },
       { byMeaning: true },
     )).toBe(true);
     expect(replyQuotesUngroundedAmount(
@@ -928,6 +931,51 @@ describe('pre-push audit P1: the amount-free receipt guard fires only on AFFIRMA
       { billing: { outstandingBalance: 95, recentPayments: [] } },
       { byMeaning: true },
     )).toBe(false);
+  });
+});
+
+describe('independent-review P1 (round 3, PR #5331, finding 2): a receipt confirmation must bind to the SAME row by DATE too, not amount (+tender) alone', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const ctxWith = (payments) => ({ billing: { outstandingBalance: 0, recentPayments: payments } });
+
+  test('no date stated at all is rejected, even with a genuinely settled row at that amount', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment — thank you!', ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('a stated date matching no paid row at that amount is rejected', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-05' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from Sep 12.', ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('a REFUNDED row at the same amount and date never binds — settledOnly excludes it, and a DIFFERENT $120 row on another date must not confirm either', () => {
+    const ctx = ctxWith([
+      { amount: 120, status: 'refunded', payment_date: '2026-09-12' },
+      { amount: 120, status: 'paid', payment_date: '2026-01-05' },
+    ]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from Sep 12.', ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('numeric M/D and full month-name dates both bind, with or without a year', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from 9/12.', ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from September 12.', ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from 9/12/2026.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a stated year that does not match the row\'s year is rejected', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2025-09-12' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from 9/12/2026.', ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('two rows with the same amount on different dates each bind to their OWN date, never to the other', () => {
+    const ctx = ctxWith([
+      { amount: 120, status: 'paid', payment_date: '2026-09-12' },
+      { amount: 120, status: 'paid', payment_date: '2026-08-01' },
+    ]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from Sep 12.', ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from Aug 1.', ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from Aug 2.', ctx, { byMeaning: true })).toBe(true);
   });
 });
 

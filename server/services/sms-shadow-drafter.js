@@ -1052,6 +1052,7 @@ function hasAffirmativePaymentAck(text) {
   const clauses = String(text || '').split(CLAUSE_SPLIT_RE);
   return clauses.some((clause) => PAYMENT_ACK_RE.test(clause) && !PAYMENT_NEGATION_RE.test(clause));
 }
+
 // The billing figures a reply may quote, in cents — one definition for this
 // draft-time guard and the send-time recheck (sms-amount-recheck): what is
 // OWED (balance, open invoice, published monthly dues) and what was PAID.
@@ -1074,22 +1075,42 @@ function billingAmountCents(context, { settledOnly = false } = {}) {
   };
 }
 
-// Independent-review P1 (round 2, PR #5331): the tender a REPLY claims
-// ("I Zelled you", "paid by check"), canonicalized to the SAME labels
-// paymentTenderLabel (below) derives from a payment row's own columns, so
-// the two can only ever agree or disagree — never fuzzy-matched. Bare
-// "bank"/"ACH"/"bank transfer"/"bank account" all read as paymentTenderLabel's
-// 'bank/ACH'. null when the clause names no tender at all.
-const REPLY_TENDER_RE = /\b(zelle|card|check|cash|ach|bank transfer|bank account)\b/i;
+// Independent-review P1 (round 3, PR #5331): ONE shared tender vocabulary,
+// so replyClaimedTender (what a REPLY claims — "I Zelled you", "paid by
+// Venmo") and paymentTenderLabel (below, what a PAID ROW's own columns show)
+// can only ever agree or disagree — never drift apart the way two
+// independently-maintained word lists did (replyClaimedTender's regex never
+// recognized Venmo/PayPal, so a reply claiming a genuinely paid Venmo/PayPal
+// row could never be matched back to it). `manual: true` entries are the
+// off-gateway tenders invoice-manual-payment.js's VALID_PAYMENT_METHODS can
+// record in a manual row's description (zelle/venmo/paypal/check/cash —
+// never "other", which carries no label); the rest are Stripe-derived
+// (card/bank-ACH), read from payment_method_type/card_brand/card_last_four
+// rather than the description text.
+const TENDER_VOCABULARY = [
+  { word: 'zelle', label: 'Zelle', manual: true },
+  { word: 'venmo', label: 'Venmo', manual: true },
+  { word: 'paypal', label: 'PayPal', manual: true },
+  { word: 'check', label: 'Check', manual: true },
+  { word: 'cash', label: 'Cash', manual: true },
+  { word: 'card', label: 'card', manual: false },
+  { word: 'ach', label: 'bank/ACH', manual: false },
+  { word: 'bank transfer', label: 'bank/ACH', manual: false },
+  { word: 'bank account', label: 'bank/ACH', manual: false },
+];
+const tenderLabelForWord = (word) => (
+  TENDER_VOCABULARY.find((t) => t.word === String(word || '').toLowerCase())?.label || null
+);
+const tenderVocabPattern = (filter) => TENDER_VOCABULARY.filter(filter).map((t) => t.word).join('|');
+
+// The tender a REPLY claims, canonicalized through the SAME vocabulary
+// paymentTenderLabel (below) derives labels from. Bare "bank"/"ACH"/"bank
+// transfer"/"bank account" all read as 'bank/ACH'. null when the clause
+// names no tender at all.
+const REPLY_TENDER_RE = new RegExp(`\\b(${tenderVocabPattern(() => true)})\\b`, 'i');
 function replyClaimedTender(clauseText) {
   const m = REPLY_TENDER_RE.exec(String(clauseText || ''));
-  if (!m) return null;
-  const word = m[1].toLowerCase();
-  if (word === 'zelle') return 'Zelle';
-  if (word === 'card') return 'card';
-  if (word === 'check') return 'Check';
-  if (word === 'cash') return 'Cash';
-  return 'bank/ACH';
+  return m ? tenderLabelForWord(m[1]) : null;
 }
 
 // The SETTLED ('paid') Recent payments rows backing one specific amount —
@@ -1102,6 +1123,82 @@ function paidRowsForCents(context, cents) {
     p && String(p?.status || '').toLowerCase() === 'paid'
       && Number.isFinite(Number(p?.amount)) && Math.round(Number(p.amount) * 100) === cents
   ));
+}
+
+// Independent-review P1 (round 3, PR #5331, finding 2): a receipt claim must
+// bind to the SAME row the amount and tender bind to by DATE too — the prior
+// binding picked a settled row by cents alone, so "We received your $120.00
+// payment from Sep 12" would still pass against a $120 row from a totally
+// different date (or, after a refund, a DIFFERENT $120 row that happens to
+// share the amount). Recognizes the same date forms the drafter's own facts
+// block and prompt copy use ("Sep 12", "September 12", "9/12"). Year is
+// optional (most confirmations are same-year); when the reply states one, it
+// must match too.
+const MONTH_NUMBER_BY_NAME = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
+  may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
+};
+const MONTH_NAME_DATE_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\b/i;
+const NUMERIC_DATE_RE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/;
+function parseClaimedPaymentDate(text) {
+  const str = String(text || '');
+  const nameMatch = MONTH_NAME_DATE_RE.exec(str);
+  if (nameMatch) {
+    const month = MONTH_NUMBER_BY_NAME[nameMatch[1].toLowerCase()];
+    const day = Number(nameMatch[2]);
+    if (month && day >= 1 && day <= 31) {
+      return { month, day, year: nameMatch[3] ? Number(nameMatch[3]) : null };
+    }
+  }
+  const numMatch = NUMERIC_DATE_RE.exec(str);
+  if (numMatch) {
+    const month = Number(numMatch[1]);
+    const day = Number(numMatch[2]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      let year = numMatch[3] ? Number(numMatch[3]) : null;
+      if (year != null && year < 100) year += 2000;
+      return { month, day, year };
+    }
+  }
+  return null;
+}
+// A payment row's own calendar day, in the same date-only-anchored style as
+// formatEtDate above (pg hands DATE columns over as local-midnight Date
+// objects; reparsing as an instant would read a day early in ET).
+function paymentRowDateParts(p) {
+  const value = p?.payment_date || p?.date;
+  if (!value) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  const dayString = value instanceof Date
+    ? `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`
+    : String(value);
+  const dateOnly = dayString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (dateOnly) return { year: Number(dateOnly[1]), month: Number(dateOnly[2]), day: Number(dateOnly[3]) };
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return { year: parsed.getFullYear(), month: parsed.getMonth() + 1, day: parsed.getDate() };
+}
+function paymentDateMatchesClaim(p, claimed) {
+  if (!claimed) return false;
+  const parts = paymentRowDateParts(p);
+  if (!parts) return false;
+  if (parts.month !== claimed.month || parts.day !== claimed.day) return false;
+  return claimed.year == null || parts.year === claimed.year;
+}
+// ONE shared binder for draft time (replyQuotesUngroundedAmount) AND the
+// send-time recheck (sms-amount-recheck.js's outgoingAmountsStale, which
+// re-runs replyQuotesUngroundedAmount against FRESHLY fetched context on
+// every send — so a row a refund voided since drafting no longer binds, even
+// when another paid row shares the same amount and date). Requires the reply
+// to state a date; requires that date, the amount, and (when claimed) the
+// tender to all point at the SAME settled row. Returns the bound row or null.
+function bindPaidPaymentRow({ text, amountCents, context, claimedTender = null }) {
+  const claimed = parseClaimedPaymentDate(text);
+  if (!claimed) return null;
+  const candidates = paidRowsForCents(context, amountCents).filter((p) => paymentDateMatchesClaim(p, claimed));
+  const matched = claimedTender ? candidates.filter((p) => paymentTenderLabel(p) === claimedTender) : candidates;
+  return matched[0] || null;
 }
 
 // `opts.byMeaning` pins the strict clause/status-aware rule regardless of
@@ -1151,11 +1248,17 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // payment that's actually new, pending, or not on file at all): the model
   // has to say "we received your $120.00 payment from Sep 12", never a bare
   // "you're all set"/"we got your payment". An amount IN the clause is what
-  // lets the allowed-cents check below prove it's a genuine PAID row. And
-  // when the clause also names a tender ("I Zelled you", "paid by check"),
-  // the paid row bound to that clause's amount must carry that SAME "via
-  // <tender>" tag — otherwise an old card payment could "confirm" a Zelle
-  // the customer is still waiting on, or vice versa.
+  // lets the allowed-cents check below prove it's a genuine PAID row.
+  //
+  // Independent-review P1 (round 3, PR #5331, finding 2): an amount alone is
+  // not enough to bind to ONE row — a refunded $120 and a genuinely paid,
+  // different-day $120 are indistinguishable by cents alone. The clause must
+  // ALSO state the date that row was paid (bindPaidPaymentRow above), and,
+  // when it also names a tender ("I Zelled you", "paid by check"), that SAME
+  // row must carry that "via <tender>" tag — otherwise an old card payment
+  // could "confirm" a Zelle the customer is still waiting on, or vice versa.
+  // No stated date, or a date/amount/tender combination matching no
+  // currently-settled row, is a fabricated confirmation.
   const clauses = text.split(CLAUSE_SPLIT_RE);
   for (const clause of clauses) {
     const text = String(clause || '');
@@ -1182,8 +1285,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     if (amounts.some((a) => !allowed.has(a))) return true;
     if (ack) {
       const claimedTender = replyClaimedTender(text);
-      if (claimedTender && !amounts.every((a) => paidRowsForCents(context, a)
-        .some((p) => paymentTenderLabel(p) === claimedTender))) return true;
+      if (amounts.some((a) => !bindPaidPaymentRow({ text, amountCents: a, context, claimedTender }))) return true;
     }
   }
   return false;
@@ -1477,17 +1579,16 @@ function monthlyChargeNote(dues) {
 // "Invoice INV-1 — zelle", per invoice-manual-payment.js's VALID_PAYMENT_
 // METHODS). NEVER the raw description or any reference/memo text (PII) —
 // only ONE of the fixed tender words below, or null when it can't be
-// reliably told apart.
-const MANUAL_TENDER_RE = /\b(zelle|venmo|paypal|check|cash)\b/i;
+// reliably told apart. Drawn from the SAME shared TENDER_VOCABULARY as
+// replyClaimedTender above (independent-review P1, round 3, PR #5331).
+const MANUAL_TENDER_RE = new RegExp(`\\b(${tenderVocabPattern((t) => t.manual)})\\b`, 'i');
 function paymentTenderLabel(p) {
   if (!p) return null;
   const type = String(p.payment_method_type || '').toLowerCase();
   if (type.includes('bank') || type === 'us_bank_account' || type === 'ach') return 'bank/ACH';
   if (type === 'card' || p.card_brand || p.card_last_four) return 'card';
   const m = MANUAL_TENDER_RE.exec(String(p.description || ''));
-  if (!m) return null;
-  const word = m[1].toLowerCase();
-  return word === 'paypal' ? 'PayPal' : word[0].toUpperCase() + word.slice(1);
+  return m ? tenderLabelForWord(m[1]) : null;
 }
 
 /**
@@ -2277,7 +2378,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
           model: verifier.VERIFIER_MODEL,
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
           effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
-          system: verifier.buildVerifierSystemPrompt(),
+          system: verifier.buildVerifierSystemPrompt({ realAnswers: realAnswersApplied }),
           messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply, parsed.offered_times) }],
         });
         // createDeepMessage can transparently cross providers. Preserve the
@@ -2793,6 +2894,10 @@ module.exports = {
   billingAmountCents,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
+  replyClaimedTender,
+  bindPaidPaymentRow,
+  parseClaimedPaymentDate,
+  TENDER_VOCABULARY,
   replyBindsDeclaredDays,
   liveServiceType,
   serviceIdentityFor,

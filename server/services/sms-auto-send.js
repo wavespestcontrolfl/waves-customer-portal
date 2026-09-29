@@ -833,21 +833,23 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
         }
       }
     }
-    // Zelle send-time recheck (pre-push audit P1, finding 2): autoSendReadiness's
-    // hasPriceQuote check (3.7) refuses any reply with a dollar figure before
-    // the claim, but a "You can Zelle to X" reply carries no dollar amount at
-    // all and would otherwise reach the provider with no recheck. Checked
-    // ONLY when the reply actually mentions a Zelle contact (zelleBodyContacts
-    // is a cheap regex, independent of the amount-grounding machinery below
-    // it in sms-amount-recheck.js) — recipient staleness first (outgoingZelleStale,
-    // shared with the other two send seams), then the SAME invoice-eligibility
+    // Zelle send-time recheck (pre-push audit P1, finding 2; widened round 3,
+    // finding 1): autoSendReadiness's hasPriceQuote check (3.7) refuses any
+    // reply with a dollar figure before the claim, but a "You can Zelle to X"
+    // — or even a contact-free "Yes, you can use Zelle" — reply carries no
+    // dollar amount at all and would otherwise reach the provider with no
+    // recheck. Checked for any AFFIRMATIVE Zelle mention (hasAffirmativeZelleMention
+    // — a cheap regex, independent of the amount-grounding machinery below it
+    // in sms-amount-recheck.js; negative copy like "we don't take Zelle"
+    // never trips it) — recipient staleness first (outgoingZelleStale, shared
+    // with the other two send seams), then the SAME invoice-eligibility
     // recheck fetchZelleEligibility ran at draft time (zelleInvoiceStillEligible):
     // re-runs isZelleTransferEligible against claim.zelleInvoiceId's CURRENT
     // state. Fails closed on a paid-off invoice, a started saved-card charge/PI,
     // a missing snapshot, or any error. Same supersede-via-failClaim mechanism
     // as the OPEN TIMES recheck.
-    const { outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible } = require('./sms-amount-recheck');
-    if (zelleBodyContacts(reply).length) {
+    const { outgoingZelleStale, hasAffirmativeZelleMention, zelleInvoiceStillEligible } = require('./sms-amount-recheck');
+    if (hasAffirmativeZelleMention(reply)) {
       const zelleContact = outgoingZelleStale(reply);
       const zelleEligibility = zelleContact.stale
         ? { eligible: false, reason: zelleContact.reason }

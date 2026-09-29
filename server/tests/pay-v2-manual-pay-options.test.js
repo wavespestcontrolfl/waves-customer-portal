@@ -175,6 +175,23 @@ describe('GET /pay/:token manualPayOptions', () => {
     expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
   });
 
+  // Independent-review P1 (round 3, PR #5331): with ZELLE_RECIPIENT unset the
+  // route must never even reach isZelleTransferEligible's async probes — an
+  // unrelated reconciliation-check failure must not 500 this public,
+  // unauthenticated pay page just because Zelle isn't configured at all.
+  test('env unset ⇒ the page still succeeds even when the reconciliation check would throw — eligibility probes never run without a configured recipient', async () => {
+    const StripeService = require('../services/stripe');
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockClear();
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(new Error('db down'));
+    const { body, status } = await getPayPage(invoiceData({ status: 'overdue' }));
+    expect(status).toBe(200);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).not.toHaveBeenCalled();
+    // The queued rejection must not leak into a later test either.
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockReset();
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+  });
+
   test('env set ⇒ block rides on a collectible invoice', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const { body } = await getPayPage(invoiceData({ status: 'overdue' }));

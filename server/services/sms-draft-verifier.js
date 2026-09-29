@@ -18,7 +18,31 @@
  */
 const MODELS = require('../config/models');
 
-function buildVerifierSystemPrompt() {
+// Independent-review P1 (round 3, PR #5331, finding 6): this bullet only
+// makes sense for a GATE_SMS_REAL_ANSWERS draft — the Payment options and
+// Recent payments facts it references only exist in the facts block when
+// that gate is on (buildFactsBlock, sms-shadow-drafter.js). Added
+// unconditionally in round 2, it changed the gate-OFF (v11) verifier prompt
+// for every cohort, not just real-answers ones. Gated here so gate-off stays
+// byte-identical to origin/main (see the pinned-hash test in
+// sms-draft-verifier.test.js).
+//
+// Independent-review P1 (finding 5, PR #5331): scoped to the TWO claim kinds
+// that can name a payment method, each grounded against its OWN fact — a
+// HOW-TO-PAY claim ("you can Zelle us", "we take card/ACH") is grounded ONLY
+// against the Payment options line, while a RECEIPT confirmation naming a
+// tender ("we received your $120 check payment") is grounded against the
+// SPECIFIC Recent-payments row the amount (and date) already bind to — that
+// row's own tender may be one Payment options never lists (Payment options
+// is Zelle-or-Stripe only; Recent payments can carry a Check/Cash/Venmo/
+// PayPal row from a manual entry). Treating Payment options as the ONLY
+// source for a payment-method claim rejected a genuinely grounded receipt
+// tender whenever it didn't also appear on Payment options.
+const PAYMENT_METHOD_BULLET = `
+- a payment method or contact for HOW TO PAY (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly; a contact that matches it is fine, one that doesn't appear there at all is a fabrication
+- a RECEIPT confirmation naming HOW a payment was made ("we received your $120 check payment", "your Zelle payment came through") — grounded ONLY against that SPECIFIC Recent payments row's own "via <tender>" tag (never the Payment options line, which lists how to pay NOW, not how a past payment arrived); a tender that row does not show is a fabrication`;
+
+function buildVerifierSystemPrompt({ realAnswers = false } = {}) {
   return `You are a STRICT, skeptical fact-checker for Waves Pest Control SMS draft replies. Your default stance: a draft is UNSAFE unless every specific detail in it is explicitly grounded. Most drafts you see DO contain a fabrication — your job is to find it, not to give the draft the benefit of the doubt.
 
 You receive the FACTS available to the drafter, the customer's CURRENT MESSAGE, and a DRAFT reply.
@@ -31,8 +55,7 @@ Check EVERY concrete detail in the draft, one by one — each:
 - specific action or commitment ("we'll pick up the trap", "we'll coordinate X", "we'll be there Wednesday")
 - claim about what was found, caught, treated, or inspected
 - service cadence/frequency, or a treatment-timing rule
-- billing event (a payment, an auto-pay attempt, a charge)
-- a payment method or contact for paying (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly; a contact that matches it is fine, one that doesn't appear there at all is a fabrication
+- billing event (a payment, an auto-pay attempt, a charge)${realAnswers ? PAYMENT_METHOD_BULLET : ''}
 
 A detail is GROUNDED only if it appears in the FACTS, or in what the customer LITERALLY wrote. It is a VIOLATION if you cannot point to the exact source. Rules:
 - DEFAULT TO FLAGGING. If you are not certain a detail is grounded, flag it.

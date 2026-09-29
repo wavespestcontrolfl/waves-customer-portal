@@ -146,9 +146,28 @@ describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still 
     expect(outgoingZelleStale('Zelle us at (941) 555-0199.')).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
   });
 
-  test('a body that mentions Zelle but carries no contact is not stale', () => {
+  test('a truthful NEGATIVE Zelle mention with no contact is not stale, whatever the config', () => {
     delete process.env.ZELLE_RECIPIENT;
     expect(outgoingZelleStale('We do not take Zelle right now, but your pay link takes card or bank.')).toEqual({ stale: false });
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    expect(outgoingZelleStale("Sorry, we don't take Zelle anymore.")).toEqual({ stale: false });
+  });
+
+  // Independent-review P1 (round 3, PR #5331, finding 1): an AFFIRMATIVE
+  // Zelle offer with NO specific contact ("Yes, you can use Zelle") still
+  // needs the recipient-enabled check — the prior rule treated "no contact"
+  // as safe outright, so this offer still sent after ZELLE_RECIPIENT was
+  // disabled.
+  describe('an AFFIRMATIVE Zelle mention with NO contact still runs the recipient-enabled check', () => {
+    test('Zelle disabled (ZELLE_RECIPIENT unset) ⇒ stale', () => {
+      delete process.env.ZELLE_RECIPIENT;
+      expect(outgoingZelleStale('Yes, you can use Zelle for that.')).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+    });
+
+    test('Zelle currently enabled ⇒ not stale (nothing to compare a missing contact against)', () => {
+      process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+      expect(outgoingZelleStale('Yes, you can use Zelle for that.')).toEqual({ stale: false });
+    });
   });
 
   test('outgoingAmountsStale blocks on a stale Zelle contact even with no dollar amount in the body', async () => {
@@ -263,6 +282,27 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
     isZelleTransferEligible.mockResolvedValue(false);
     await expect(outgoingAmountsStale({
       customerId: 'c1', body, zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }),
+    })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
+  });
+
+  // Independent-review P1 (round 3, PR #5331, finding 1): an affirmative
+  // offer with NO contact ("Yes, you can use Zelle") must ALSO run the
+  // invoice-eligibility recheck — the prior gate ran only when the body
+  // named a specific contact.
+  test('outgoingAmountsStale: an affirmative Zelle mention with NO contact still runs the invoice-eligibility recheck', async () => {
+    await expect(outgoingAmountsStale({
+      customerId: 'c1', body: 'Yes, you can use Zelle for that.', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }),
+    })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
+
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
+    isZelleTransferEligible.mockResolvedValue(true);
+    await expect(outgoingAmountsStale({
+      customerId: 'c1', body: 'Yes, you can use Zelle for that.', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }),
+    })).resolves.toEqual({ stale: false });
+
+    isZelleTransferEligible.mockResolvedValue(false);
+    await expect(outgoingAmountsStale({
+      customerId: 'c1', body: 'Yes, you can use Zelle for that.', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: { ...invoiceRow, status: 'paid' } }),
     })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
 });

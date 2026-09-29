@@ -464,12 +464,25 @@ router.get('/:token', async (req, res, next) => {
     // (e.g. the SMS real-answers PAYMENT OPTIONS fact) asks the SAME
     // question this route answers, rather than re-deriving it and risking
     // disagreement (independent-review P1).
-    let manualPayOptions = (await isZelleTransferEligible(data, {
-      creditWillCoverAnchor,
-      hasPreviousBalance: !!previousBalance,
-      saveRequired: getSaveRequired,
-    }))
-      ? manualPayOptionsFromEnv()
+    //
+    // Independent-review P1 (round 3, PR #5331): read the config FIRST —
+    // manualPayOptionsFromEnv() is a synchronous env read with no I/O — and
+    // run isZelleTransferEligible's async probes (which include
+    // assertNoInvoiceChargeReconciliationPending, a DB/Stripe call that can
+    // throw) ONLY when Zelle is actually configured. Awaiting the
+    // eligibility probe unconditionally let an unrelated reconciliation-
+    // check failure 500 this PUBLIC, unauthenticated pay page even with
+    // ZELLE_RECIPIENT unset. This restores the pre-#5331 order: with Zelle
+    // unset, behavior here is byte-identical to before this lane.
+    const configuredManualPayOptions = manualPayOptionsFromEnv();
+    let manualPayOptions = configuredManualPayOptions
+      ? ((await isZelleTransferEligible(data, {
+          creditWillCoverAnchor,
+          hasPreviousBalance: !!previousBalance,
+          saveRequired: getSaveRequired,
+        }))
+        ? configuredManualPayOptions
+        : null)
       : null;
     if (manualPayOptions) {
       // Transfer amount = what the invoice owes RIGHT NOW (gross amount due).

@@ -49,20 +49,53 @@ function zelleBodyContacts(body) {
   ];
 }
 
+// Independent-review P1 (round 3, PR #5331, finding 1): distinguishes an
+// AFFIRMATIVE Zelle offer ("Yes, you can use Zelle") from truthful negative
+// copy ("we don't take Zelle anymore", "Zelle isn't available right now") —
+// in the drafter's own hasAffirmativePaymentAck style (split on clause
+// boundaries, test negation within the SAME clause as the mention, never the
+// whole reply). Self-contained here (rather than imported from the drafter)
+// so this send-time guard has no dependency on the drafter module beyond the
+// two constants it already shares (AMOUNT_MASK_RE/PAYMENT_ACK_RE above) —
+// several callers mock sms-shadow-drafter down to a bare stub. Any clause
+// that mentions Zelle without one of these negations is affirmative, WHETHER
+// OR NOT it also names a specific contact — the send-time guard used to
+// re-check a body only when it named a phone/email (zelleBodyContacts(...).length),
+// so "Yes, you can use Zelle" (no contact) sailed through unchecked even
+// after ZELLE_RECIPIENT was disabled or the invoice became ineligible.
+const ZELLE_NEGATION_RE = /\b(?:don't|do not|doesn't|does not|didn't|did not|isn't|is not|aren't|are not|can't|cannot|can not|won't|will not|couldn't|could not|wouldn't|would not|no longer|not able|unable|unavailable|not currently|not right now|stopped (?:taking|accepting))\b/i;
+// Same clause-boundary split as the drafter's own CLAUSE_SPLIT_RE (not
+// exported — kept as a parallel literal since both only ever need to agree
+// on how a reply is split into clauses, never on a shared regex object).
+const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/;
+function hasAffirmativeZelleMention(body) {
+  const clauses = String(body || '').split(CLAUSE_SPLIT_RE);
+  return clauses.some((clause) => ZELLE_WORD_RE.test(clause) && !ZELLE_NEGATION_RE.test(clause));
+}
+
 /**
- * Is every contact in a Zelle-mentioning body still the one Waves actually
- * accepts? { stale: false } when the body mentions no Zelle contact;
- * otherwise stale unless Zelle is currently enabled AND each contact equals
- * the CURRENT manualPayOptionsFromEnv recipient (email case-insensitive,
- * phone by digits). Fail CLOSED: a rotated or disabled recipient blocks the
- * send exactly like a stale dollar amount.
+ * Is a Zelle-mentioning body still safe to send? { stale: false } when the
+ * body carries no AFFIRMATIVE Zelle mention at all (negative copy — "we
+ * don't take Zelle" — never trips this, via hasAffirmativeZelleMention above).
+ *
+ * Independent-review P1 (round 3, PR #5331, finding 1): an affirmative
+ * mention with NO contact ("Yes, you can use Zelle") still needs the
+ * recipient-enabled check below — the prior gate only ran on
+ * zelleBodyContacts(...).length, so an affirmative offer naming no specific
+ * contact sailed through even after ZELLE_RECIPIENT was disabled. Only when
+ * the body ALSO names a specific contact is that contact checked against the
+ * CURRENT recipient (email case-insensitive, phone by digits). Fail CLOSED:
+ * a rotated or disabled recipient blocks the send exactly like a stale
+ * dollar amount.
  */
 function outgoingZelleStale(body) {
-  const contacts = zelleBodyContacts(body);
-  if (!contacts.length) return { stale: false };
+  const text = String(body || '');
+  if (!hasAffirmativeZelleMention(text)) return { stale: false };
   const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
   const current = manualPayOptionsFromEnv()?.zelle?.recipient || null;
   if (!current) return { stale: true, reason: 'zelle_recipient_stale' };
+  const contacts = zelleBodyContacts(text);
+  if (!contacts.length) return { stale: false };
   const currentEmail = String(current).toLowerCase();
   const currentPhone = phoneDigits(current);
   const ok = contacts.every((c) => (c.kind === 'email'
@@ -142,10 +175,13 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, ze
   // time recheck) already share.
   const zelle = outgoingZelleStale(text);
   if (zelle.stale) return zelle;
-  // Pre-push audit P1 (finding 2): checked right alongside the recipient
-  // check above, and only when the body actually mentions a Zelle contact —
-  // a body with no Zelle contact has nothing to recheck.
-  if (zelleBodyContacts(text).length) {
+  // Pre-push audit P1 (finding 2), widened round 3 (finding 1): checked
+  // right alongside the recipient check above, for any AFFIRMATIVE Zelle
+  // mention — contact or not. A body that offers Zelle with no contact
+  // ("Yes, you can use Zelle") still needs the SAME invoice-eligibility
+  // recheck; only a body with no affirmative Zelle mention at all has
+  // nothing to recheck.
+  if (hasAffirmativeZelleMention(text)) {
     const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh });
     if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
   }
@@ -184,4 +220,7 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, ze
   }
 }
 
-module.exports = { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible };
+module.exports = {
+  outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
+  hasAffirmativeZelleMention,
+};

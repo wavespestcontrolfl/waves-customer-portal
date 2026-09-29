@@ -1537,10 +1537,14 @@ describe('replyQuotesUngroundedAmount — payment-history amounts authorize only
     if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
     else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
   });
+  // Independent-review P1 (round 3, PR #5331, finding 2): a receipt
+  // confirmation must also NAME the date the row was paid — dates added to
+  // both the reply and the fixture rows below where the assertion expects a
+  // grounded (false) verdict.
   test('a FRACTIONAL amount inside the acknowledgement is still an acknowledgement ("$95.50 payment")', () => {
-    const ctx = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95.5 }] } };
-    expect(replyQuotesUngroundedAmount('We received your $95.50 payment — thank you!', ctx)).toBe(false);
-    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95.50.', ctx)).toBe(false);
+    const ctx = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95.5, status: 'paid', payment_date: '2026-09-12' }] } };
+    expect(replyQuotesUngroundedAmount('We received your $95.50 payment from Sep 12 — thank you!', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95.50 from Sep 12.', ctx)).toBe(false);
     expect(replyQuotesUngroundedAmount('Your balance is $95.50.', ctx)).toBe(true);
   });
   test('"your balance is $95" on a zero-balance account with a $95 payment → ungrounded', () => {
@@ -1548,8 +1552,9 @@ describe('replyQuotesUngroundedAmount — payment-history amounts authorize only
     expect(replyQuotesUngroundedAmount('Thanks for reaching out — your balance is $95.', context)).toBe(true);
   });
   test('a real acknowledgement of the $95 payment → grounded', () => {
-    expect(replyQuotesUngroundedAmount('We received your $95 payment — thank you!', context)).toBe(false);
-    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95.', context)).toBe(false);
+    const ctx = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'paid', payment_date: '2026-09-12' }] } };
+    expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12 — thank you!', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95 from Sep 12.', ctx)).toBe(false);
   });
   test('the current balance is authorized on its own terms, as before', () => {
     expect(replyQuotesUngroundedAmount('Your balance is $120.50.', { billing: { outstandingBalance: 120.5, recentPayments: [] } })).toBe(false);
@@ -1649,9 +1654,11 @@ describe('replyQuotesUngroundedAmount — amounts are authorized by MEANING (Cod
     expect(replyQuotesUngroundedAmount('You currently owe $95.', context)).toBe(false);
   });
   test('a reply that states both, each backed by its own fact → grounded', () => {
-    const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95 }] } };
-    expect(replyQuotesUngroundedAmount('We received your $95 payment; your remaining balance is $120.50.', context)).toBe(false);
-    expect(replyQuotesUngroundedAmount('We received your $95 payment and your remaining balance is $120.50.', context)).toBe(false);
+    // Independent-review P1 (round 3, PR #5331, finding 2): the receipt
+    // clause must also name the date its row was paid.
+    const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95, status: 'paid', payment_date: '2026-09-12' }] } };
+    expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12; your remaining balance is $120.50.', context)).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $95 payment from Sep 12 and your remaining balance is $120.50.', context)).toBe(false);
   });
   test('the SAME two figures with their claims SWAPPED → ungrounded (each amount binds to its own clause, Codex r6)', () => {
     const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95 }] } };
@@ -1780,12 +1787,14 @@ describe('round-7 deterministic guards (gate on)', () => {
   });
 
   test('replyQuotesUngroundedAmount: a FAILED or pending payment does not back "your payment went through"', () => {
-    const failed = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'failed' }] } };
-    const pending = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'pending' }] } };
-    const paid = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'paid' }] } };
+    const failed = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'failed', payment_date: '2026-09-12' }] } };
+    const pending = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'pending', payment_date: '2026-09-12' }] } };
+    const paid = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'paid', payment_date: '2026-09-12' }] } };
     expect(drafter.replyQuotesUngroundedAmount('Your $95 payment went through — thank you!', failed)).toBe(true);
     expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', pending)).toBe(true);
-    expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', paid)).toBe(false);
+    // Independent-review P1 (round 3, PR #5331, finding 2): the receipt
+    // clause must also name the date its row was paid.
+    expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment from Sep 12.', paid)).toBe(false);
   });
 });
 

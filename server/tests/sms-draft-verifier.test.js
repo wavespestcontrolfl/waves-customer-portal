@@ -9,6 +9,30 @@ const {
   buildReviseAddendum,
 } = require('../services/sms-draft-verifier');
 
+// Independent-review P1 (round 3, PR #5331, finding 6): the payment-method
+// checklist bullet only belongs on a GATE_SMS_REAL_ANSWERS (v12) draft — the
+// Payment options / Recent payments facts it references don't exist in a
+// gate-off facts block at all. A prior round added it UNCONDITIONALLY,
+// changing the gate-off (v11) verifier prompt for every cohort. This hash is
+// pinned from buildVerifierSystemPrompt() as it stands on origin/main@cb60d468ec2c
+// (pre-dating this lane's own change) — the same "pinned hash, not
+// gate-unset-vs-gate-false" contract sms-shadow-drafter.test.js already
+// enforces for the drafter's own prompt/facts block.
+const crypto = require('crypto');
+describe('gate-off contract: buildVerifierSystemPrompt() with no args (or {realAnswers:false}) is byte-identical to origin/main', () => {
+  test('matches the pinned pre-#5331-round-3 hash', () => {
+    const p = buildVerifierSystemPrompt();
+    expect(p.length).toBe(2897);
+    expect(crypto.createHash('sha256').update(p).digest('hex'))
+      .toBe('362e4cac5fd3f73afa1208eb6bfe550ae7de823281731cefb1bcf89c1a2384e8');
+    // {realAnswers: false} explicitly must be the SAME byte-identical text —
+    // the default parameter and an explicit false must never diverge.
+    expect(buildVerifierSystemPrompt({ realAnswers: false })).toBe(p);
+    expect(p).not.toMatch(/payment method or contact/i);
+    expect(p).not.toMatch(/RECEIPT confirmation/i);
+  });
+});
+
 describe('verifier — prompt contract', () => {
   test('system prompt enumerates the fabrication classes and pins JSON output', () => {
     const p = buildVerifierSystemPrompt();
@@ -46,11 +70,28 @@ describe('verifier — prompt contract', () => {
     expect(p).toMatch(/QUOTE the exact/i);
   });
 
-  test('v6 verifier checks a payment method/contact (Zelle phone/email) against PAYMENT OPTIONS', () => {
-    const p = buildVerifierSystemPrompt();
+  test('v6 verifier (real answers on) checks a payment method/contact (Zelle phone/email) against PAYMENT OPTIONS', () => {
+    const p = buildVerifierSystemPrompt({ realAnswers: true });
     expect(p).toMatch(/payment method or contact/i);
     expect(p).toMatch(/zelle/i);
     expect(p).toMatch(/Payment options line in BILLING/i);
+  });
+
+  // Independent-review P1 (finding 5, PR #5331): HOW-TO-PAY claims and
+  // RECEIPT confirmations ground on DIFFERENT facts — a receipt naming a
+  // tender only Recent payments shows (e.g. a manual Check entry) must not
+  // be rejected just because Payment options never lists it.
+  test('real answers on: a RECEIPT confirmation tender grounds on the bound Recent-payments row, never on Payment options alone', () => {
+    const p = buildVerifierSystemPrompt({ realAnswers: true });
+    expect(p).toMatch(/RECEIPT confirmation/i);
+    expect(p).toMatch(/"via <tender>" tag/i);
+    expect(p).toMatch(/never the Payment options line/i);
+  });
+
+  test('gate off (real answers not passed): neither payment-method bullet appears', () => {
+    const p = buildVerifierSystemPrompt();
+    expect(p).not.toMatch(/payment method or contact/i);
+    expect(p).not.toMatch(/RECEIPT confirmation/i);
   });
 
   test('user prompt carries facts, the customer message, and the draft under check', () => {
