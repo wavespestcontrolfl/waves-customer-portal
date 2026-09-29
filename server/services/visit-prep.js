@@ -638,7 +638,11 @@ function effectiveReadStatus(status, createdAt, now = Date.now()) {
 }
 
 function readFactsFromContract(status, contract) {
-  if (status !== 'done' || !contract) return { status };
+  // A 'done' row whose stored result is gone or unreadable (a purge, the
+  // FK's ON DELETE SET NULL) is shown as failed, never as an empty "done"
+  // the tech would read as "the AI looked and named nothing".
+  if (status === 'done' && !contract) return { status: 'failed' };
+  if (status !== 'done') return { status };
   const v2 = contract.v2 || {};
   return {
     status,

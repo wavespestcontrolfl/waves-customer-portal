@@ -205,6 +205,13 @@ describe('customerFlaggedFacts', () => {
   });
 });
 
+describe('readFactsFromContract', () => {
+  const { readFactsFromContract } = visitPrep._internal;
+  test('a done read with no stored contract reads as failed, never an empty result', () => {
+    expect(readFactsFromContract('done', null)).toEqual({ status: 'failed' });
+  });
+});
+
 describe('effectiveReadStatus (a read interrupted by a redeploy never sticks on pending)', () => {
   const { effectiveReadStatus } = visitPrep._internal;
   const created = new Date('2026-10-01T12:00:00Z');
