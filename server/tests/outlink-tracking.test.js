@@ -90,6 +90,7 @@ describe('render-time rewrite (page blocks)', () => {
 
   test('gate on: external links become /go/<code> with a signed context; every other link is untouched', async () => {
     on();
+    mockTables.scheduled_services.push({ id: SERVICE, prep_token: TOKEN, customer_id: CUSTOMER });
     const out = await run();
     const [p, l, d] = out.blocks;
     expect(goLinks(p.content)).toHaveLength(2);
@@ -104,10 +105,35 @@ describe('render-time rewrite (page blocks)', () => {
     expect(mockTables.outbound_links.map((r) => r.target_url).sort()).toEqual([AMAZON, CHEWY].sort());
     const u = new URL(goLinks(p.content)[0]);
     expect(u.searchParams.get('k')).toBe('prep.flea');
-    expect(u.searchParams.get('t')).toBe(TOKEN);
+    expect(u.searchParams.get('v')).toBe(SERVICE);
     expect(u.searchParams.get('c')).toBe(CUSTOMER);
     expect(u.searchParams.get('s')).toBe('page');
     expect(u.searchParams.get('g')).toBeTruthy();
+  });
+
+  test('the tracking URL never carries the bearer prep token (no 32-hex value, no t param)', async () => {
+    on();
+    mockTables.scheduled_services.push({ id: SERVICE, prep_token: TOKEN, customer_id: CUSTOMER });
+    const out = await run();
+    for (const link of goLinks(JSON.stringify(out.blocks))) {
+      expect(link).not.toContain(TOKEN);
+      expect(link).not.toMatch(/[a-f0-9]{32}/i);
+      expect(new URL(link).searchParams.has('t')).toBe(false);
+      // and the request-log redactor has nothing sensitive to hide in it
+      const { redactRequestUrl } = require('../utils/redact-request-url');
+      const path = link.replace('https://portal.wavespestcontrol.com', '');
+      expect(redactRequestUrl(path)).toBe(path);
+    }
+  });
+
+  test('an unresolvable prep token yields no visit linkage (and still no token in the URL)', async () => {
+    on();
+    const out = await run();
+    const u = new URL(goLinks(out.blocks[0].content)[0]);
+    expect(u.searchParams.has('v')).toBe(false);
+    expect(u.searchParams.has('p')).toBe(false);
+    expect(u.search).not.toContain(TOKEN);
+    expect(u.searchParams.get('c')).toBe(CUSTOMER);
   });
 
   test('registered destinations are the exact original URLs (no tag, no change)', async () => {
@@ -175,7 +201,7 @@ describe('render-time rewrite (email)', () => {
     expect(goLinks(out.text_body)).toHaveLength(1);
     expect(version.blocks[0].content).toContain(CHEWY);
     const u = new URL(goLinks(out.blocks[0].content)[0]);
-    expect(u.searchParams.get('t')).toBe(TOKEN); // token lifted from payload.prep_url
+    expect(u.search).not.toContain(TOKEN); // token lifted from payload.prep_url, resolved to ids, never emitted
     expect(u.searchParams.get('s')).toBe('email');
     expect(u.searchParams.get('c')).toBe(CUSTOMER);
   });
@@ -216,6 +242,11 @@ describe('GET /go/:code', () => {
     redirect: 'manual',
     headers: { 'user-agent': 'Mozilla/5.0 (iPhone) Safari', ...headers },
   });
+  const expectPrivacyHeaders = (res) => {
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
+    expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+  };
   const tick = () => new Promise((r) => setImmediate(r));
 
   async function registered() {
@@ -234,6 +265,8 @@ describe('GET /go/:code', () => {
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe(AMAZON);
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
+    expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
     await tick(); await tick();
     expect(mockTables.outbound_link_clicks).toHaveLength(1);
     const click = mockTables.outbound_link_clicks[0];
@@ -242,6 +275,16 @@ describe('GET /go/:code', () => {
     });
     expect(click.ip_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(click.user_agent).toContain('Safari');
+  });
+
+  test('a project-backed prep token attributes the click to the project', async () => {
+    const PROJECT = '55555555-5555-4555-8555-555555555555';
+    mockTables.projects.push({ id: PROJECT, prep_token: TOKEN, customer_id: CUSTOMER });
+    const u = await registered();
+    expect(u.searchParams.get('p')).toBe(PROJECT);
+    expect((await get(u.pathname + u.search)).status).toBe(302);
+    await tick(); await tick();
+    expect(mockTables.outbound_link_clicks[0]).toMatchObject({ project_id: PROJECT, scheduled_service_id: null, customer_id: CUSTOMER });
   });
 
   test('a tampered context still redirects but is not trusted for attribution', async () => {
@@ -258,8 +301,44 @@ describe('GET /go/:code', () => {
   test('unknown code: generic 404, no click row', async () => {
     const res = await get(`/go/${'0'.repeat(20)}`);
     expect(res.status).toBe(404);
+    expectPrivacyHeaders(res);
     await tick();
     expect(mockTables.outbound_link_clicks).toHaveLength(0);
+  });
+
+  test('every status carries the privacy headers: 302, 404, 429, 500', async () => {
+    const u = await registered();
+    const ok = await get(u.pathname + u.search);
+    expect(ok.status).toBe(302);
+    expectPrivacyHeaders(ok);
+    const missing = await get('/go/short');
+    expect(missing.status).toBe(404);
+    expectPrivacyHeaders(missing);
+    // 500: the lookup throws
+    const db = require('../models/db');
+    const impl = db.getMockImplementation();
+    db.mockImplementationOnce(() => { throw new Error('boom'); });
+    const failed = await get(`/go/${'2'.repeat(20)}`);
+    expect(failed.status).toBe(500);
+    expectPrivacyHeaders(failed);
+    db.mockImplementation(impl);
+  });
+
+  test('the 429 from the rate limiter carries the privacy headers too', async () => {
+    const limited = express();
+    jest.resetModules();
+    jest.doMock('express-rate-limit', () => (opts) => (req, res) => opts.handler(req, res));
+    limited.use('/go', require('../routes/outbound-redirect'));
+    jest.dontMock('express-rate-limit');
+    const s2 = await new Promise((r) => { const sv = limited.listen(0, () => r(sv)); });
+    try {
+      const res = await fetch(`http://127.0.0.1:${s2.address().port}/go/${'0'.repeat(20)}`, { redirect: 'manual' });
+      expect(res.status).toBe(429);
+      expectPrivacyHeaders(res);
+    } finally {
+      await new Promise((r) => s2.close(r));
+      jest.resetModules();
+    }
   });
 
   test('malformed code: 404', async () => {

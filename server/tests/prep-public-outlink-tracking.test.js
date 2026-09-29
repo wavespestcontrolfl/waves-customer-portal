@@ -6,7 +6,7 @@
 const mockLinks = [];
 jest.mock('../models/db', () => {
   const PROJECT = {
-    id: 'p1', customer_id: '11111111-1111-4111-8111-111111111111', prep_template_key: 'prep.flea',
+    id: '44444444-4444-4444-8444-444444444444', customer_id: '11111111-1111-4111-8111-111111111111', prep_template_key: 'prep.flea',
     project_type: 'other', project_date: '2026-08-01', prep_expires_at: null,
   };
   const fn = jest.fn((table) => {
@@ -85,7 +85,8 @@ describe('prep page payload', () => {
     expect(content).toContain(`(${OWN})`);
     expect(content).toContain('(tel:+19415550100)');
     expect(mockLinks.map((r) => r.target_url)).toEqual([AMAZON]);
-    expect(content).toContain(`t=${TOKEN}`);
+    expect(content).not.toContain(TOKEN); // bearer prep token never rides in the URL
+    expect(content).toContain('p=44444444-4444-4444-8444-444444444444');
     expect(content).toContain('s=page');
   });
 });

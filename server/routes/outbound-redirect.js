@@ -25,6 +25,17 @@ const logger = require('../services/logger');
 const { lookupDestination, recordClick, verifyContext, CODE_RE } = require('../services/outlink-tracking');
 const { isBotUserAgent } = require('../utils/bot-ua');
 
+// Every response — 302, 404, 429, 500 — carries the same privacy headers, so
+// they are set BEFORE the limiter (its 429 would otherwise skip them).
+router.use((req, res, next) => {
+  res.set({
+    'Cache-Control': 'private, no-store',
+    'X-Robots-Tag': 'noindex, nofollow',
+    'Referrer-Policy': 'no-referrer',
+  });
+  next();
+});
+
 // Same budget and key as /l: outside the global /api/ limiter, so it carries
 // its own. 120/min per key is far above any human click rate.
 const outboundLimiter = require('express-rate-limit')({
@@ -38,11 +49,6 @@ const outboundLimiter = require('express-rate-limit')({
 router.use(outboundLimiter);
 
 router.get('/:code', async (req, res) => {
-  res.set({
-    'Cache-Control': 'private, no-store',
-    'X-Robots-Tag': 'noindex, nofollow',
-    'Referrer-Policy': 'no-referrer',
-  });
   const code = String(req.params.code || '').toLowerCase();
   if (!CODE_RE.test(code)) return res.status(404).type('html').send(notFoundPage());
 
@@ -52,17 +58,17 @@ router.get('/:code', async (req, res) => {
 
     const ua = req.headers['user-agent'];
     if (!isBotUserAgent(ua)) {
-      recordClick({
+      void recordClick({
         link,
         context: verifyContext(req.query),
         ip: req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip,
         userAgent: ua,
-      }).catch((err) => logger.error(`[outbound-redirect] click log failed: ${err.message}`));
+      }).catch((err) => logger.error(`[outbound-redirect] click log failed: ${err.code || 'error'}`));
     }
 
     return res.redirect(302, link.target_url);
   } catch (err) {
-    logger.error(`[outbound-redirect] resolve failed for ${code}: ${err.message}`);
+    logger.error(`[outbound-redirect] resolve failed: ${err.code || 'error'}`);
     return res.status(500).type('html').send(genericErrorPage());
   }
 });

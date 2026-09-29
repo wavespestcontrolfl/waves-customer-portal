@@ -136,7 +136,8 @@
       "reason": "Prep-guide outside-link click logger + 302 — destinations are pre-registered outbound_links rows resolved by code only (no URL in the request, so not an open redirect); per-route limiter; see docs/public-route-contracts.md",
       "routes": [
         "GET /go/:code",
-        "USE /go (express-rate-limit({ handler#f2668dc4 }))"
+        "USE /go (express-rate-limit({ handler#f2668dc4 }))",
+        "USE /go (inline function#29df873e)"
       ]
     },
     {

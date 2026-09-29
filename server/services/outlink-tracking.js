@@ -4,7 +4,7 @@
  * Prep guides carry author-written markdown links to OUTSIDE sites (Amazon,
  * Chewy, Elanco, Bravecto, ...). At RENDER time — never by editing template
  * content — each external http(s) link is swapped for
- * `<portal>/go/<code>?k=…&t=…&s=…&g=…`. GET /go/:code (routes/outbound-redirect.js)
+ * `<portal>/go/<code>?k=…&c=…&v=…&p=…&s=…&g=…`. GET /go/:code (routes/outbound-redirect.js)
  * logs the click and 302s to the ORIGINAL url, so the customer lands exactly
  * where the template said. Nothing is appended to the destination (owner
  * ruling: no affiliate tags in email; never change the destination).
@@ -17,8 +17,11 @@
  *     code is never served;
  *   - only http(s) URLs are ever registered or served.
  *
- * Attribution rides in the query string as a small signed context
- * (template key, prep token, customer id, surface). It is HMAC-signed so a
+ * Attribution rides in the query string as a small signed context (template
+ * key, customer id, visit id OR project id, surface). The context carries row
+ * ids only, NEVER the prep token: the token is a bearer credential, and the
+ * request log (Morgan) would record it on every click. The prep token is
+ * resolved to the visit/project ids at render time, server-side. It is HMAC-signed so a
  * forged or edited context is ignored (the click still redirects, it just
  * carries no attribution). No JWT_SECRET → nothing is rewritten at all.
  *
@@ -39,7 +42,6 @@ const MD_LINK_RE = /\[([^\]\n]+)\]\((\S+?)\)/g;
 const CODE_LEN = 20; // hex chars of sha256 → 80 bits
 const CODE_RE = /^[a-f0-9]{20}$/;
 const PREP_TEMPLATE_KEY_RE = /^prep\.[a-z0-9_]{1,60}$/;
-const PREP_TOKEN_RE = /^[a-f0-9]{32}$/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SURFACES = new Set(['email', 'page']);
 const MAX_TARGET_LEN = 2000;
@@ -84,25 +86,27 @@ function signingKey() {
   return crypto.createHmac('sha256', secret).update('outlink-context-v1').digest();
 }
 
-function contextSignature({ k = '', t = '', c = '', s = '' }) {
+function contextSignature({ k = '', c = '', v = '', p = '', s = '' }) {
   const key = signingKey();
   if (!key) return null;
-  return crypto.createHmac('sha256', key).update([k, t, c, s].join('|')).digest('hex').slice(0, 24);
+  return crypto.createHmac('sha256', key).update([k, c, v, p, s].join('|')).digest('hex').slice(0, 24);
 }
 
 function cleanContext(ctx = {}) {
   const k = PREP_TEMPLATE_KEY_RE.test(String(ctx.templateKey || '')) ? ctx.templateKey : '';
-  const t = PREP_TOKEN_RE.test(String(ctx.prepToken || '')) ? String(ctx.prepToken).toLowerCase() : '';
-  const c = UUID_RE.test(String(ctx.customerId || '')) ? String(ctx.customerId).toLowerCase() : '';
+  const uuid = (val) => (UUID_RE.test(String(val || '')) ? String(val).toLowerCase() : '');
+  const c = uuid(ctx.customerId);
+  const v = uuid(ctx.scheduledServiceId);
+  const p = uuid(ctx.projectId);
   const s = SURFACES.has(ctx.surface) ? ctx.surface : '';
-  return { k, t, c, s };
+  return { k, c, v, p, s };
 }
 
 function goUrl(code, ctx) {
   const parts = cleanContext(ctx);
   const g = contextSignature(parts);
   const qs = new URLSearchParams();
-  for (const name of ['k', 't', 'c', 's']) if (parts[name]) qs.set(name, parts[name]);
+  for (const name of ['k', 'c', 'v', 'p', 's']) if (parts[name]) qs.set(name, parts[name]);
   if (g) qs.set('g', g);
   const query = qs.toString();
   return portalUrl(`/go/${code}${query ? `?${query}` : ''}`);
@@ -112,7 +116,7 @@ function goUrl(code, ctx) {
 // not verify yields null — the caller still redirects, without attribution.
 function verifyContext(query = {}) {
   const pick = (name) => (typeof query[name] === 'string' ? query[name] : '');
-  const parts = { k: pick('k'), t: pick('t'), c: pick('c'), s: pick('s') };
+  const parts = { k: pick('k'), c: pick('c'), v: pick('v'), p: pick('p'), s: pick('s') };
   const g = pick('g');
   const expected = contextSignature(parts);
   if (!expected || !g || g.length !== expected.length) return null;
@@ -122,12 +126,13 @@ function verifyContext(query = {}) {
     return null;
   }
   const clean = cleanContext({
-    templateKey: parts.k, prepToken: parts.t, customerId: parts.c, surface: parts.s,
+    templateKey: parts.k, customerId: parts.c, scheduledServiceId: parts.v, projectId: parts.p, surface: parts.s,
   });
   return {
     templateKey: clean.k || null,
-    prepToken: clean.t || null,
     customerId: clean.c || null,
+    scheduledServiceId: clean.v || null,
+    projectId: clean.p || null,
     surface: clean.s || null,
   };
 }
@@ -218,7 +223,16 @@ async function applyOutlinkTracking({
     const urlToCode = await registerOutboundUrls(urls);
     if (!urlToCode.size) return unchanged;
 
-    const ctx = { templateKey, prepToken, customerId, surface };
+    // The prep token is a bearer credential: resolve it to row ids here and
+    // put only the ids in the URL. An unresolvable token → no visit linkage.
+    const resolved = prepToken ? await resolvePrepToken(prepToken) : null;
+    const ctx = {
+      templateKey,
+      customerId: customerId || resolved?.customerId || null,
+      scheduledServiceId: resolved?.scheduledServiceId || null,
+      projectId: resolved?.projectId || null,
+      surface,
+    };
     const rewriteOne = (text) => rewriteText(text, urlToCode, ctx, domains);
     return {
       blocks: Array.isArray(blocks) ? blocks.map((b) => mapBlockStrings(b, rewriteOne)) : blocks,
@@ -285,17 +299,17 @@ async function lookupDestination(code) {
   return row;
 }
 
-// One click row. Callers fire-and-forget and skip bots before calling.
+// One click row. Callers fire-and-forget and skip bots before calling. The
+// context is already verified and carries row ids only.
 async function recordClick({ link, context, ip, userAgent }) {
-  const resolved = context?.prepToken ? await resolvePrepToken(context.prepToken) : null;
   await db('outbound_link_clicks').insert({
     outbound_link_id: link.id,
     clicked_at: new Date(),
     template_key: context?.templateKey || null,
     surface: context?.surface || null,
-    scheduled_service_id: resolved?.scheduledServiceId || null,
-    project_id: resolved?.projectId || null,
-    customer_id: context?.customerId || resolved?.customerId || null,
+    scheduled_service_id: context?.scheduledServiceId || null,
+    project_id: context?.projectId || null,
+    customer_id: context?.customerId || null,
     ip_hash: ip ? crypto.createHash('sha256').update(String(ip)).digest('hex') : null,
     user_agent: userAgent ? String(userAgent).slice(0, 500) : null,
   });
