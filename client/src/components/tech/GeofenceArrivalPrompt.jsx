@@ -44,6 +44,7 @@
  */
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { formatETDateOnly } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '';
 const POLL_MS = 10_000;
@@ -459,15 +460,9 @@ function VisitCard({ n, onDismiss }) {
 // visit is usually days out and the tech app only opens today's route, so
 // the card names the visit's DATE instead of a tap-through that would dead-
 // end (Codex #5303 r1 P1); the photos are in that stop's Visit Brief.
-function formatPhotoVisitDate(ymd) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
-  if (!m) return null;
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-}
 
 function PhotoCard({ n, onDismiss }) {
-  const visitDate = formatPhotoVisitDate(n.payload?.scheduled_date);
+  const visitDate = formatETDateOnly(n.payload?.scheduled_date, { weekday: 'short', month: 'short', day: 'numeric' }) || null;
   return (
     <div style={cardStyle(COLORS.teal)} data-testid="photo-notice">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📷 Photos from a customer</div>
