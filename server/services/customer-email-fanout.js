@@ -173,6 +173,11 @@ async function resolveOpenEmailReviewCards({ customerId, email, source = 'custom
  *    adopted just before): a row linked to ANOTHER customer must never inherit
  *    this history (it would show on their timeline and take this customer's
  *    bounce/unsubscribe events).
+ *  - SETTLED deliveries only. queued/failed/sending rows are still retryable
+ *    (newsletter-sender's Resume sends to the survivor's CURRENT address while
+ *    the SendGrid webhook matches events on the delivery's recipient snapshot),
+ *    so re-pointing them would mis-record the recipient and lose tracking; they
+ *    fall to SET NULL exactly as before.
  *  - UNIQUE (send_id, subscriber_id): an issue the survivor already has its own
  *    delivery for is skipped (re-pointing it would abort the whole edit); those
  *    rows fall to SET NULL as before.
@@ -181,6 +186,7 @@ async function resolveOpenEmailReviewCards({ customerId, email, source = 'custom
 async function repointNewsletterDeliveries(conn, { fromId, toId, customerId, now }) {
   return conn('newsletter_send_deliveries')
     .where({ subscriber_id: fromId })
+    .whereRaw("COALESCE(status, 'queued') NOT IN ('queued', 'failed', 'sending')")
     .whereExists(conn('newsletter_subscribers')
       .where({ id: toId, customer_id: customerId }).select(conn.raw('1')))
     .whereNotIn('send_id', conn('newsletter_send_deliveries')

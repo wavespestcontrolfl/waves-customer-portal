@@ -21,7 +21,7 @@ pg('repointNewsletterDeliveries on Postgres', () => {
     db = knex({ client: 'pg', connection: url, pool: { min: 1, max: 1 } });
     await db.raw(`
       CREATE TEMP TABLE newsletter_subscribers (id int PRIMARY KEY, customer_id uuid, email text);
-      CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), send_id int, subscriber_id int REFERENCES newsletter_subscribers(id) ON DELETE SET NULL, email text, updated_at timestamp, UNIQUE (send_id, subscriber_id));
+      CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), send_id int, status text, subscriber_id int REFERENCES newsletter_subscribers(id) ON DELETE SET NULL, email text, updated_at timestamp, UNIQUE (send_id, subscriber_id));
     `);
   });
   afterAll(async () => { if (db) await db.destroy(); });
@@ -37,7 +37,7 @@ pg('repointNewsletterDeliveries on Postgres', () => {
   test('history follows the merge: re-pointed before the delete, so it survives it', async () => {
     await seed({
       subs: [{ id: 739, customer_id: cust, email: 'typo@example.test' }, { id: 900, customer_id: cust, email: 'fixed@example.test' }],
-      deliveries: [{ send_id: 1, subscriber_id: 739, email: 'typo@example.test' }, { send_id: 2, subscriber_id: 739, email: 'typo@example.test' }],
+      deliveries: [{ send_id: 1, subscriber_id: 739, email: 'typo@example.test', status: 'delivered' }, { send_id: 2, subscriber_id: 739, email: 'typo@example.test', status: 'opened' }],
     });
     expect(await repointNewsletterDeliveries(db, { fromId: 739, toId: 900, customerId: cust, now })).toBe(2);
     await db('newsletter_subscribers').where({ id: 739 }).del();
@@ -73,5 +73,20 @@ pg('repointNewsletterDeliveries on Postgres', () => {
     expect(await repointNewsletterDeliveries(db, { fromId: 739, toId: 900, customerId: cust, now })).toBe(1);
     await db('newsletter_subscribers').where({ id: 739 }).del();
     expect(await owners()).toEqual(['1:900', '2:900', '2:null']);
+  });
+
+  test('retryable deliveries (queued / failed / sending) stay put: Resume mails the survivor\'s current address', async () => {
+    await seed({
+      subs: [{ id: 739, customer_id: cust, email: 'typo@example.test' }, { id: 900, customer_id: cust, email: 'fixed@example.test' }],
+      deliveries: [
+        { send_id: 1, subscriber_id: 739, email: 'typo@example.test', status: 'queued' },
+        { send_id: 2, subscriber_id: 739, email: 'typo@example.test', status: 'failed' },
+        { send_id: 3, subscriber_id: 739, email: 'typo@example.test', status: 'sending' },
+        { send_id: 4, subscriber_id: 739, email: 'typo@example.test', status: 'bounced' },
+        { send_id: 5, subscriber_id: 739, email: 'typo@example.test', status: 'sent' },
+      ],
+    });
+    expect(await repointNewsletterDeliveries(db, { fromId: 739, toId: 900, customerId: cust, now })).toBe(2);
+    expect(await owners()).toEqual(['1:739', '2:739', '3:739', '4:900', '5:900']);
   });
 });
