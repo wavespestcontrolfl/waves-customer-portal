@@ -53,6 +53,9 @@ jest.mock('../models/db', () => {
       if (text === 'link IS NOT DISTINCT FROM ?') conds.push((r) => (r.link ?? null) === (args[0] ?? null));
       if (text === 'metadata IS NOT DISTINCT FROM ?::jsonb') conds.push((r) => canon(meta(r)) === canon(args[0] == null ? null : JSON.parse(args[0])));
       if (text === "metadata->'retired'->>'at' = ?") conds.push((r) => meta(r)?.retired?.at === args[0]);
+      // The re-arm pass: this module's stamp, inside the window (ISO text order).
+      if (text === "metadata->'retired'->>'by' = ?") conds.push((r) => meta(r)?.retired?.by === args[0]);
+      if (text === "metadata->'retired'->>'at' > ?") conds.push((r) => meta(r)?.retired?.at != null && String(meta(r).retired.at) > args[0]);
       // The candidate query's bell-visible filter.
       if (text === "COALESCE(metadata->>'feed', '') <> 'activity'") conds.push((r) => meta(r)?.feed !== 'activity');
       return b;
@@ -73,7 +76,9 @@ jest.mock('../models/db', () => {
           const { metadata, ...rest } = patch;
           Object.assign(r, rest);
           if (metadata && metadata.__raw && /- 'retired'/.test(metadata.__raw)) {
-            const { retired: _dropped, ...kept } = parse(r.metadata);
+            // jsonb minus every key the expression names.
+            const dropped = [...metadata.__raw.matchAll(/- '(\w+)'/g)].map((m) => m[1]);
+            const kept = Object.fromEntries(Object.entries(parse(r.metadata)).filter(([k]) => !dropped.includes(k)));
             r.metadata = JSON.stringify({ ...kept, ...(metadata.bindings?.[0] ? JSON.parse(metadata.bindings[0]) : {}) });
           } else if (metadata && metadata.__raw) r.metadata = JSON.stringify({ ...parse(r.metadata), ...JSON.parse(metadata.bindings[0]) });
           else if (metadata !== undefined) r.metadata = metadata;
@@ -323,8 +328,23 @@ describe('class rules', () => {
     expect((await reasonFor(leadNote())).reason).toBeNull();
     // Lead id from the link alone.
     mockTables.leads = [lead({ status: 'won' })];
-    expect((await reasonFor(note({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}` }))).cls).toBe('new_lead');
-    expect(classify(note({ category: 'new_lead', link: '/admin/leads' }))).toBeNull();
+    expect((await reasonFor(note({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead' } }))).cls).toBe('new_lead');
+    expect(classify(note({ category: 'new_lead', link: '/admin/leads', metadata: { triggerKey: 'new_lead' } }))).toBeNull();
+  });
+
+  test('new lead: only the intake bell is judged — a repeat submission filed as a duplicate, or an email follow-up\'s new draft, is fresh work', async () => {
+    mockTables.leads = [lead({ status: 'duplicate' })];
+    const repeat = note({ category: 'new_lead', link: '/admin/leads', metadata: { leadId: LEAD, duplicateOfLeadId: uid(8) } });
+    const followUp = note({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { leadId: LEAD, estimateId: EST } });
+    for (const row of [repeat, followUp]) {
+      expect(classify(row)).toBeNull();
+      expect(ringTimeCheck(row)).toBeNull();
+    }
+    mockTables.notifications = [repeat, followUp];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 0 });
+    expect([repeat.read_at, followUp.read_at]).toEqual([null, null]);
+    // The intake bell for the same lead is judged.
+    expect((await reasonFor(leadNote())).reason).toBe('Lead is duplicate');
   });
 
   test('customer-contact bells and money-owed alerts are never in the table, whatever their metadata says', () => {
@@ -396,7 +416,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = [stale, leadRow, alreadyRead, stillOpen, contact];
 
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
-    expect(result).toEqual({ skipped: false, scanned: 4, retired: 2, byClass: { stale_visit: 1, new_lead: 1 } });
+    expect(result).toEqual({ skipped: false, scanned: 4, retired: 2, byClass: { stale_visit: 1, new_lead: 1 }, rearmed: 0 });
     expect(stale.read_at).toBeInstanceOf(Date);
     // Pure read + retired marker: every emitter-owned key survives as it was,
     // dedupe key included.
@@ -411,7 +431,8 @@ describe('runAdminAlertRelevanceSweep', () => {
   test('the candidate query is unread, admin and bell-visible, with no age cut-off (a refreshed bell keeps its first created_at)', async () => {
     mockTables.notifications = [];
     await runAdminAlertRelevanceSweep({ now: NOW });
-    const q = mockQueries.find((x) => x.table === 'notifications');
+    // The retire pass's query (the re-arm pass reads stamped rows first).
+    const q = mockQueries.find((x) => x.table === 'notifications' && x.calls.some(([m, col]) => m === 'whereNull' && col === 'read_at'));
     const flat = JSON.stringify(q.calls);
     expect(q.calls).toEqual(expect.arrayContaining([['where', { recipient_type: 'admin' }], ['whereNull', 'read_at']]));
     expect(flat).toContain("metadata->>'feed'");
@@ -442,6 +463,17 @@ describe('runAdminAlertRelevanceSweep', () => {
     const before = JSON.parse(row.metadata);
     mockTables.notifications = [row];
     onVisitRead((n) => { if (n === 3) mockTables['scheduled_services as ss'][0].status = 'on_site'; });
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
+    expect(row.read_at).toBeNull();
+    expect(JSON.parse(row.metadata)).toEqual(before);
+  });
+
+  test('a check after the write that fails is no verdict: the bell is put back exactly as it was', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(552));
+    const before = JSON.parse(row.metadata);
+    mockTables.notifications = [row];
+    onVisitRead((n) => { if (n === 3) throw new Error('connection reset'); });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
     expect(JSON.parse(row.metadata)).toEqual(before);
@@ -581,6 +613,86 @@ describe('runAdminAlertRelevanceSweep', () => {
   });
 });
 
+describe('re-arm: a retirement holds only while its rule does', () => {
+  const AT = '2026-09-27T16:00:00.000Z';
+  const READ_AT = new Date('2026-09-27T16:00:00.123Z');
+  const retiredStamp = (reason, at = AT) => ({ retired: { by: 'alert-relevance', reason, at } });
+  const swept = (row, reason, at) => {
+    row.read_at = READ_AT;
+    row.metadata = JSON.stringify({ ...JSON.parse(row.metadata), ...retiredStamp(reason, at) });
+    return row;
+  };
+
+  test('a retired bell whose subject is relevant again is unread again with the stamp gone; one still moved on stays retired', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' }), visit({ id: OPEN_VISIT, status: 'completed' })];
+    mockTables.leads = [lead({ status: 'new' })];
+    const reopened = swept(staleNote(uid(700)), 'Visit is no longer open');
+    const stillClosed = swept(staleNote(uid(701), { scheduled_service_id: OPEN_VISIT }), 'Visit is no longer open');
+    // A lead whose booking was cancelled: nothing raises a new-lead event again.
+    const bookingCancelled = swept(leadNote(), 'A visit was booked');
+    mockTables.notifications = [reopened, stillClosed, bookingCancelled];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 2, retired: 0 });
+    for (const back of [reopened, bookingCancelled]) {
+      expect(back.read_at).toBeNull();
+      expect(JSON.parse(back.metadata).retired).toBeUndefined();
+    }
+    expect(stillClosed.read_at).toBe(READ_AT);
+    expect(JSON.parse(stillClosed.metadata).retired).toMatchObject({ by: 'alert-relevance', at: AT });
+  });
+
+  test('a row quieted at ring time goes onto the bell when its lead is relevant again — unless someone read it in the Activity feed', async () => {
+    mockTables.leads = [lead({ status: 'new' })];
+    const quieted = leadNote({ quiet: true, feed: 'activity', ...retiredStamp('Lead is duplicate') });
+    const seen = { ...leadNote({ quiet: true, feed: 'activity', ...retiredStamp('Lead is duplicate') }), read_at: new Date('2026-09-27T18:00:00Z') };
+    mockTables.notifications = [quieted, seen];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
+    expect(quieted.read_at).toBeNull();
+    expect(JSON.parse(quieted.metadata)).toEqual({ triggerKey: 'new_lead', payload: { leadId: LEAD } });
+    expect(JSON.parse(seen.metadata)).toMatchObject({ feed: 'activity', retired: { by: 'alert-relevance' } });
+  });
+
+  test('a retirement older than the window is final; a human dismissal or another module\'s stamp is never re-armed', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
+    const final = swept(staleNote(uid(710)), 'Visit is no longer open', '2026-09-13T15:59:59.000Z');
+    const human = { ...staleNote(uid(711)), read_at: READ_AT };
+    const other = { ...staleNote(uid(712), { retired: { by: 'someone-else', at: AT } }), read_at: READ_AT };
+    mockTables.notifications = [final, human, other];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
+    for (const row of [final, human, other]) expect(row.read_at).toBe(READ_AT);
+  });
+
+  test('the put-back lands only on the version read: a row rewritten or read again meanwhile is left alone', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
+    const rewritten = swept(staleNote(uid(720)), 'Visit is no longer open');
+    const reread = swept(staleNote(uid(721)), 'Visit is no longer open');
+    mockTables.notifications = [rewritten, reread];
+    // New row versions land between the page read and the write (the page
+    // holds the versions it read, as Postgres would).
+    mockHooks['scheduled_services as ss'] = () => {
+      mockTables.notifications = mockTables.notifications.map((r) => {
+        if (r.id === rewritten.id) return { ...r, metadata: JSON.stringify({ ...JSON.parse(r.metadata), note: 'refreshed' }) };
+        if (r.id === reread.id) return { ...r, read_at: new Date('2026-09-28T15:00:00Z') };
+        return r;
+      });
+    };
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
+    const live = (id) => mockTables.notifications.find((r) => r.id === id);
+    expect(live(rewritten.id).read_at).toBe(READ_AT);
+    expect(live(reread.id).read_at).toEqual(new Date('2026-09-28T15:00:00Z'));
+  });
+
+  test('a retire whose put-back failed is judged again by the next run: kept while still moved on, put back once relevant', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = swept(staleNote(uid(730)), 'Visit is no longer open');
+    mockTables.notifications = [row];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
+    expect(row.read_at).toBe(READ_AT);
+    mockTables['scheduled_services as ss'][0].status = 'on_site';
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
+    expect(row.read_at).toBeNull();
+  });
+});
+
 describe('ring time, through the existing ringGate seam', () => {
   const raise = (opts = {}) => NotificationService.notifyAdmin('new_lead', 'New lead', 'body', {
     link: `/admin/leads?lead=${LEAD}`, ...opts, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } },
@@ -648,8 +760,8 @@ describe('ring time, through the existing ringGate seam', () => {
   test('ringTimeCheck is null when the switch is off or the row is not in the table', () => {
     expect(ringTimeCheck({ category: 'inbound_sms', metadata: {} })).toBeNull();
     expect(ringTimeCheck({ category: 'billing', metadata: { dedupeKey: 'first_application_sibling_divergence:x' } })).toBeNull();
-    expect(ringTimeCheck({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: {} })).not.toBeNull();
+    expect(ringTimeCheck({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead' } })).not.toBeNull();
     process.env.ADMIN_ALERT_RELEVANCE = '0';
-    expect(ringTimeCheck({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { payload: { leadId: LEAD } } })).toBeNull();
+    expect(ringTimeCheck({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } } })).toBeNull();
   });
 });

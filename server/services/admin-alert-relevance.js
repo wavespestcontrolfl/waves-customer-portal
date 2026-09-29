@@ -19,7 +19,12 @@
  *     age out of it (a refreshed bell keeps its first created_at). Each
  *     retirement is judged on a fresh read right before it is written, lands
  *     only on the version judged, and is judged once more after it; a change
- *     that landed in between puts the bell back. No row locks, ever: this
+ *     that landed in between, or a check after the write that could not
+ *     finish, puts the bell back. A retirement holds only while its rule
+ *     does: each run first judges again what this module retired or quieted
+ *     in the last REARM_DAYS and puts back any row whose subject is relevant
+ *     again (a booking cancelled, a visit reopened), since the emitters in
+ *     the table never raise it again. No row locks, ever: this
  *     sweep is advisory and must never block or fail a money path (invoice
  *     settlement takes the visit FOR UPDATE NOWAIT).
  *   - ringTimeCheck: the ringGate notifyAdmin's existing seam already runs
@@ -54,6 +59,8 @@ const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 const RETIRED_BY = 'alert-relevance';
 const PAGE_SIZE = 200;
 const MAX_PAGES = 50;
+// How long a retirement stays open to being put back: after this, final.
+const REARM_DAYS = 14;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -211,8 +218,11 @@ const CLASSES = [
   { // admin-dispatch.js applySeriesMoveEffects — one card per move
     key: 'series_move', categories: ['schedule_conflict'], match: (meta) => !!meta.seriesMoveId, rule: seriesMoveMovedOn,
   },
-  { // notification-triggers.js new_lead — one event per lead, no dedupe key
-    key: 'new_lead', categories: ['new_lead'], match: (meta, row) => !!refsFromRow(row).leadId, rule: newLeadMovedOn,
+  { // notification-triggers.js new_lead — the intake bell, one event per lead,
+    // no dedupe key. A direct notifyAdmin('new_lead') (a repeat submission
+    // filed as a duplicate, an email follow-up's new draft) is fresh work
+    // about a lead already on file, never judged.
+    key: 'new_lead', categories: ['new_lead'], match: (meta, row) => meta.triggerKey === 'new_lead' && !!refsFromRow(row).leadId, rule: newLeadMovedOn,
   },
 ];
 
@@ -271,8 +281,11 @@ function unretired(metadata) {
 // the bell as it stands then (a quiet refresh rewrites content without
 // touching read_at): a change that landed between the read and the write (a
 // visit reopened, a lead reopened) puts the bell back — unless a person has read it since (their read_at wins), or a
-// refresh rang it again (the emitter's). No row locks: see the module header.
-// A change after the final judgement is a new event its emitter raises.
+// refresh rang it again (the emitter's). A check after the write that fails
+// is no verdict, so it puts the bell back too; a put-back that fails is
+// judged again by the next run's re-arm pass (rearmRelevantAgain). No row
+// locks: see the module header. A change after the final judgement is the
+// re-arm pass's.
 async function retireIfStillMovedOn(row, cls, todayET, now) {
   const current = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
     .first('id', 'category', 'link', 'metadata');
@@ -289,12 +302,72 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
     .returning(['id']);
   if (!retired) return null;
   const stillOurs = (q) => q.where({ id: row.id, read_at: readAt }).whereRaw("metadata->'retired'->>'at' = ?", [stamp.at]);
-  const latest = await stillOurs(db('notifications')).first('id', 'category', 'link', 'metadata');
-  if (!latest) return null;
-  const judged = { ...latest, metadata: unretired(latest.metadata) };
-  if (cls.rule(subjectFor(judged, await loadSubjects([judged]), todayET))) return reason;
+  try {
+    const latest = await stillOurs(db('notifications')).first('id', 'category', 'link', 'metadata');
+    if (!latest) return null;
+    const judged = { ...latest, metadata: unretired(latest.metadata) };
+    if (cls.rule(subjectFor(judged, await loadSubjects([judged]), todayET))) return reason;
+  } catch (err) {
+    logger.warn(`[alert-relevance] notification ${row.id}: the check after retiring failed, putting it back: ${err.message}`);
+  }
   await stillOurs(db('notifications')).update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
   return null;
+}
+
+// Rows this module retired (read, stamped) or quieted at ring time
+// (activity-only, stamped) in the last REARM_DAYS, keyset-paged on id.
+function retiredQuery(cursor, since) {
+  return db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->'retired'->>'by' = ?", [RETIRED_BY])
+    .whereRaw("metadata->'retired'->>'at' > ?", [since])
+    .modify((q) => { if (cursor) q.where('id', '>', cursor); })
+    .orderBy('id', 'asc')
+    .limit(PAGE_SIZE)
+    .select('id', 'category', 'link', 'metadata', 'read_at');
+}
+
+// Puts back one retired row whose subject is relevant again, onto exactly the
+// version read (category, link, metadata, and the read_at this module wrote):
+// a row this sweep retired is unread again; a row quieted at ring time goes
+// onto the bell as it would have rung — unless someone read it in the
+// Activity feed. Nothing is pushed either way.
+function putBack(row) {
+  const q = sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row);
+  if (quietedAtRingTime(row)) {
+    return q.whereNull('read_at').update({ metadata: db.raw("metadata - 'retired' - 'feed' - 'quiet'") });
+  }
+  if (!row.read_at) return 0;
+  return q.where({ read_at: row.read_at }).update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
+}
+
+// The emitters in the table are one-shot: a booking cancelled or a visit or
+// lead reopened raises nothing. So each run judges again what this module
+// retired or quieted in the last REARM_DAYS, on the bell as it read before
+// the stamp, and puts back any row whose rule no longer holds. Also the
+// retry for a retire whose put-back failed. A retirement older than that is
+// final: a subject that comes back weeks later is a new event, not this bell.
+async function rearmRelevantAgain(now, todayET) {
+  const since = new Date(now.getTime() - REARM_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  let rearmed = 0;
+  let cursor = null;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const rows = await retiredQuery(cursor, since);
+    if (!rows.length) break;
+    cursor = rows[rows.length - 1].id;
+    const judged = rows.map((row) => ({ row, bell: { ...row, metadata: unretired(row.metadata) } }));
+    const data = await loadSubjects(judged.map((j) => j.bell));
+    for (const { row, bell } of judged) {
+      try {
+        const cls = classify(bell);
+        if (!cls || cls.rule(subjectFor(bell, data, todayET))) continue;
+        rearmed += await putBack(row);
+      } catch (err) {
+        logger.warn(`[alert-relevance] notification ${row.id} not re-armed: ${err.message}`);
+      }
+    }
+    if (rows.length < PAGE_SIZE) break;
+  }
+  return rearmed;
 }
 
 // A backlog bigger than one run (MAX_PAGES pages) is walked across runs: a
@@ -306,6 +379,8 @@ let resumeAfter = null;
 async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (!adminAlertRelevanceLive()) return { skipped: true, reason: 'switch_off' };
   const todayET = etDateString(now);
+  // First, so a row put back is judged again by the retire pass below.
+  const rearmed = await rearmRelevantAgain(now, todayET);
   const byClass = {};
   let scanned = 0;
   let cursor = resumeAfter;
@@ -332,7 +407,8 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   }
   const retired = Object.values(byClass).reduce((a, b) => a + b, 0);
   if (retired) logger.info(`[alert-relevance] retired ${retired} of ${scanned} unread alert(s): ${JSON.stringify(byClass)}`);
-  return { skipped: false, scanned, retired, byClass };
+  if (rearmed) logger.info(`[alert-relevance] put back ${rearmed} alert(s) whose subject is relevant again`);
+  return { skipped: false, scanned, retired, byClass, rearmed };
 }
 
 // Ring-time seam for notification-service.js createPlainAdmin: null when the
