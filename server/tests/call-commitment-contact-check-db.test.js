@@ -388,6 +388,17 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       expect((await row(w.commitment.id)).status).toBe('open');
     });
 
+    test('a call whose end moved while the model was thinking (a reprocess) closes nothing; the next run judges it again', async () => {
+      const w = await world();
+      const witness = await addSms(w);
+      say(w, () => db('call_log').where({ id: w.call.id }).update({ duration_seconds: 240 }).then(() => fulfilledBy(`sms:${witness}`, 'the warranty covers the retreatment')));
+      await run();
+      expect((await row(w.commitment.id)).status).toBe('open');
+      say(w, fulfilledBy(`sms:${witness}`, 'the warranty covers the retreatment'));
+      await run();
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+    });
+
     test('a witness that vanishes, or is relinked, while the model was thinking closes nothing', async () => {
       const gone = await world();
       const goneWitness = await addSms(gone);

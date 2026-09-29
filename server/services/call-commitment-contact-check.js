@@ -281,12 +281,14 @@ function cachedVerdict(commitment, evidenceHash, now) {
 
 // One transaction: the promise row, the call's customer and the witness are
 // locked (never waiting: a busy row fails the close and the next run judges it
-// again), the witnesses are read again and must hash exactly as they did when
-// the model saw them, the verdict must still ground, and only then is the
-// association written through refreshFulfillment's own guards (open, still
-// refreshable, the snapshot it was judged from, the call still has that
-// customer). A lost race writes nothing.
-async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { now, from, until }) {
+// again); the evidence window is taken again from the LOCKED call row, the
+// witnesses are read again and, with that call, must hash exactly as they did
+// when the model saw them (a reprocess that moved the call's end changes the
+// hash); the verdict must still ground; and only then is the association
+// written through refreshFulfillment's own guards (open, still refreshable,
+// the snapshot it was judged from, the call still has that customer). A lost
+// race writes nothing.
+async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { now }) {
   const table = { sms_log: 'sms_log', call_log: 'call_log' }[verdict.record_type];
   if (!table || !UUID_RE.test(String(verdict.record_id))) return false;
   return conn.transaction(async (trx) => {
@@ -295,10 +297,17 @@ async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { n
       .whereRaw("date_trunc('milliseconds', updated_at) = ?", [commitment.updated_at])
       .forUpdate().skipLocked().first('id');
     if (!locked) return false;
-    if (!await trx('call_log').where({ id: commitment.call_log_id, customer_id: call.customer_id }).forShare().first('id')) return false;
+    const lockedCall = await trx('call_log').where({ id: commitment.call_log_id, customer_id: call.customer_id }).forShare()
+      .first('id', 'created_at', 'bridged_at', 'duration_seconds', 'direction', 'customer_id');
+    if (!lockedCall) return false;
+    const after = callEndedAt(lockedCall);
+    if (!after) return false;
+    const until = windowEnd(after);
+    const from = associationFrom(commitment, after);
+    if (now.getTime() >= until.getTime() || from.getTime() >= until.getTime()) return false;
     if (!await trx(table).where({ id: verdict.record_id }).forShare().skipLocked().first('id')) return false;
     const evidence = await loadContactWitnesses(trx, { callId: commitment.call_log_id, customerId: call.customer_id, from, until, now });
-    if (fingerprint(commitment, call, evidence).evidenceHash !== evidenceHash) return false;
+    if (fingerprint(commitment, lockedCall, evidence).evidenceHash !== evidenceHash) return false;
     const grounded = groundVerdict({ verdict: 'fulfilled', record_ref: `${TABLE_BY_RECORD_TYPE[verdict.record_type]}:${verdict.record_id}`, quote: verdict.quote }, evidence);
     if (grounded.verdict !== 'fulfilled') return false;
     const proof = storedProof({ strength: 'association', kind: PERSON_CONTACT_KIND, basis: PERSON_CONTACT_BASIS,
@@ -394,11 +403,13 @@ async function checkOne(conn, row, { now, budget }) {
   }
   const model = !cached && !evidence.failures.length;
   if (verdict.verdict !== 'fulfilled') return { outcome: 'judged', model, providerFailed: model && verdict.reason === 'provider_failed' };
-  const closed = await closeOnWitness(conn, row, call, verdict, evidenceHash, { now, from, until });
+  const closed = await closeOnWitness(conn, row, call, verdict, evidenceHash, { now });
   return { outcome: closed ? 'closed' : 'lost', model };
 }
 
 const everyModelCallFailed = (tally) => tally.model_calls > 0 && tally.provider_failed === tally.model_calls;
+// The outcomes a run reports by count (each a tally key).
+const COUNTED_OUTCOMES = new Set(['closed', 'lost', 'deferred']);
 
 async function runPromiseContactCheck({ now = new Date(), conn = require('../models/db'), maxModelCalls = MAX_MODEL_CALLS } = {}) {
   if (!isEnabled('callCommitments') || !promiseEvidenceCloseLive() || !promiseContactCheckLive()) return { skipped: true, reason: 'gated_off' };
@@ -413,13 +424,13 @@ async function runPromiseContactCheck({ now = new Date(), conn = require('../mod
       try {
         const result = await checkOne(conn, row, { now, budget });
         if (result.model) tally.model_calls += 1;
-        if (result.outcome === 'closed') tally.closed += 1;
-        if (result.outcome === 'lost') tally.lost += 1;
-        if (result.outcome === 'deferred') tally.deferred += 1;
+        if (COUNTED_OUTCOMES.has(result.outcome)) tally[result.outcome] += 1;
         if (result.providerFailed) tally.provider_failed += 1;
       } catch (err) {
         tally.failed += 1;
-        logger.warn(`[call-contact-check] check failed for commitment ${row.id}: ${err.message}`);
+        // The code only: a query error's message can carry its bound values,
+        // and the cache write binds the model's quote (customer text).
+        logger.warn(`[call-contact-check] check failed for commitment ${row.id}: ${err.code || err.name || 'error'}`);
       }
     }
     if (rows.length < CANDIDATE_LIMIT) break;
