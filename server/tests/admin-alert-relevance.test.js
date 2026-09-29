@@ -11,6 +11,15 @@
 // suites skip locally). All identities are synthetic.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: () => false }));
+// The watchdog's annual-prepay validator: true/false, or an Error to throw.
+let mockAnnualCovered;
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
+  annualPrepayCoversVisit: jest.fn(async () => {
+    if (mockAnnualCovered instanceof Error) throw mockAnnualCovered;
+    return mockAnnualCovered === true;
+  }),
+}));
 
 let mockTables;
 let mockQueries;
@@ -130,6 +139,7 @@ beforeEach(() => {
   mockHooks = {};
   mockFailTable = null;
   mockTrxs = [];
+  mockAnnualCovered = false;
 });
 
 // The reason a row's class gives against the current fake mockTables (null = still relevant).
@@ -246,6 +256,26 @@ describe('class rules', () => {
     mockTables['scheduled_services as ss'] = [visit()];
     arrange();
     expect((await reasonFor(unpriced())).reason).toEqual(expect.stringContaining(text));
+  });
+
+  test('unpriced series: an annual-prepay stamp clears it only once the watchdog validator confirms the term (fail-closed)', async () => {
+    const stamped = visit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '98.01', annual_prepay_term_id: PARENT });
+    mockTables['scheduled_services as ss'] = [stamped];
+    mockAnnualCovered = true;
+    expect((await reasonFor(unpriced())).reason).toEqual(expect.stringContaining('paid annual prepay'));
+    mockTables['scheduled_services as ss'] = [{ ...stamped }];
+    mockAnnualCovered = false;
+    expect((await reasonFor(unpriced())).reason).toBeNull();
+    mockTables['scheduled_services as ss'] = [{ ...stamped }];
+    mockAnnualCovered = new Error('terms table unavailable');
+    expect((await reasonFor(unpriced())).reason).toBeNull();
+  });
+
+  test('unpriced series: a merged-away (soft-deleted) profile frozen in the alert is not "customer left" when the live visit now belongs to the survivor', async () => {
+    const merged = note({ category: 'alert', metadata: { dedupeKey: `unpriced-series:${PARENT}`, scheduled_service_id: VISIT, customer_id: CUST2, series_root_id: PARENT } });
+    mockTables.customers = [customer(), customer({ id: CUST2, deleted_at: new Date() })];
+    mockTables['scheduled_services as ss'] = [visit({ customer_id: CUST })];
+    expect((await reasonFor(merged)).reason).toBeNull();
   });
 
   test('unpriced series: a voided combined invoice does not cover the visit', async () => {

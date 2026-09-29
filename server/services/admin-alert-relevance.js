@@ -108,8 +108,11 @@ function resolveRefs(row, data) {
   const lead = refs.leadId ? data.leads.get(refs.leadId) : undefined;
   const estimateId = refs.estimateId || (lead?.estimate_id ? String(lead.estimate_id) : null);
   const estimate = estimateId ? data.estimates.get(estimateId) : undefined;
-  const customerId = refs.customerId || first(visit?.customer_id, invoices.find(Boolean)?.customer_id,
-    estimate?.customer_id, lead?.customer_id) || null;
+  // The LIVE record's customer wins over the id frozen in the alert: a merge
+  // repoints the visit / invoice / estimate / lead to the surviving profile and
+  // soft-deletes the old one, which must not read as "customer left".
+  const customerId = first(visit?.customer_id, invoices.find(Boolean)?.customer_id,
+    estimate?.customer_id, lead?.customer_id, refs.customerId) || null;
   return { refs, visit, invoices, lead, estimate, customerId: customerId ? String(customerId) : null };
 }
 
@@ -135,8 +138,18 @@ async function loadSubjects(rows, conn = db) {
       .whereIn('ss.id', visitIds)
       .select('ss.id', 'ss.customer_id', 'ss.status', 'ss.is_recurring', 'ss.recurring_parent_id',
         'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount', 'ss.prepaid_method',
+        'ss.annual_prepay_term_id', 'ss.prepaid_at', 'ss.service_type', 'ss.scheduled_date', 'ss.completed_at',
         'ss.first_application_invoice_id', 'fa_invoice.status as first_application_invoice_status',
         'parent.estimated_price as parent_estimated_price', 'parent.primary_line_price as parent_primary_line_price'));
+    // The watchdog's second, async coverage step: an annual-prepay stamp
+    // suppresses the unpriced page only once annualPrepayCoversVisit validates
+    // its term. Same validator, same fail-closed stance (an unverifiable stamp
+    // is not coverage, so the alert stays).
+    const { annualPrepayCoversVisit, ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
+    for (const visit of data.visits.values()) {
+      if (visit.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) continue;
+      visit.annual_prepay_covered = await annualPrepayCoversVisit(visit, conn).catch(() => false);
+    }
   }
   if (invoiceIds.length) {
     data.invoices = byId(await conn('invoices').whereIn('id', invoiceIds).select('id', 'status', 'customer_id'));
@@ -192,10 +205,12 @@ const visitClosed = (s) => (s.refs.visitId && (!s.visit || CLOSED_VISIT_STATUSES
 function unpricedSeriesMovedOn(s) {
   const left = customerLeft(s) || visitClosed(s);
   if (left || !s.visit || s.visit.status == null) return left;
-  // Same predicate the watchdog uses to raise the alert (price on the row or
-  // its parent, an out-of-band prepay stamp, a live first-application invoice).
+  // Same two steps the watchdog uses to raise the alert: the pure predicate
+  // (price on the row or its parent, an out-of-band prepay stamp, a live
+  // first-application invoice), then a validated annual-prepay term.
   const { isUnpricedSeriesVisit } = require('./schedule-integrity-watchdog');
-  return isUnpricedSeriesVisit(s.visit) ? null : 'Visit now carries a price or is covered';
+  if (!isUnpricedSeriesVisit(s.visit)) return 'Visit now carries a price or is covered';
+  return s.visit.annual_prepay_covered ? 'Visit is covered by a paid annual prepay' : null;
 }
 
 function seriesMoveMovedOn(s) {
