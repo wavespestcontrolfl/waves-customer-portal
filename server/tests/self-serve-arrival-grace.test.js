@@ -82,3 +82,19 @@ test('no date given: never crashes, treated as not-today', () => {
   expect(selfServeArrivalGraceMinutes({})).toBe(60);
   expect(selfServeArrivalGraceMinutes()).toBe(60);
 });
+
+// Codex pre-push fallback P1: a pg DATE column can deserialize as a JS Date
+// at UTC midnight (never a plain 'YYYY-MM-DD' string) — the same-day check
+// must still catch it via etCalendarDayOf, not a raw String()/etDateString
+// conversion that would garble or shift it.
+test('a same-day pick passed as a UTC-midnight Date object (pg DATE column shape) still gets 0', () => {
+  process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
+  const todayAsDate = new Date(`${TODAY}T00:00:00.000Z`);
+  expect(selfServeArrivalGraceMinutes({ date: todayAsDate })).toBe(0);
+});
+
+test('a future-day pick passed as a UTC-midnight Date object still reads the live grace', () => {
+  process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
+  const futureAsDate = new Date(`${FUTURE_DATE}T00:00:00.000Z`);
+  expect(selfServeArrivalGraceMinutes({ date: futureAsDate })).toBe(90);
+});

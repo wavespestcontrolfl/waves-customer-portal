@@ -1,7 +1,7 @@
 /** Owner-selected scheduling policy. The release gate is read per operation. */
 const { gateEnvValue } = require('../../config/feature-gates');
 const { CUSTOMER_DAY_END_MINUTES } = require('./customer-windows');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, etCalendarDayOf } = require('../../utils/datetime-et');
 
 // endMinutes reuses the one customer day-end constant (picker-windows PR 2,
 // owner ruling 2026-09-23) rather than a second 18:00 literal — it already
@@ -76,7 +76,17 @@ const MAX_ARRIVAL_GRACE_MINUTES = 120;
 
 function selfServeArrivalGraceMinutes({ date } = {}) {
   if (!capacityEnabled()) return DEFAULT_ARRIVAL_GRACE_MINUTES;
-  if (date != null && String(date).slice(0, 10) === etDateString(new Date())) return DEFAULT_ARRIVAL_GRACE_MINUTES;
+  // etCalendarDayOf (not a raw String()/etDateString conversion — Codex
+  // pre-push fallback P1): a pg DATE column can deserialize as a
+  // UTC-midnight JS Date, and reading that through etDateString or a bare
+  // String() shifts or garbles it. Every caller today already hands this a
+  // plain 'YYYY-MM-DD' string (find-time.js's slot.date, slot-reservation.js's
+  // parsed slotId date, and commitReservation's dateOnly()-normalized
+  // scheduledDate), but the same-day exclusion must stay correct even if a
+  // future caller passes the raw column value straight through — a silently
+  // skipped exclusion here is an offer/commit mismatch (a same-day slot
+  // offered at grace 0 that commit then reads a live grace for).
+  if (date != null && etCalendarDayOf(date) === etDateString(new Date())) return DEFAULT_ARRIVAL_GRACE_MINUTES;
   const configured = Number(process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES);
   if (!Number.isFinite(configured) || configured < 0) return DEFAULT_ARRIVAL_GRACE_MINUTES;
   return Math.min(Math.round(configured), MAX_ARRIVAL_GRACE_MINUTES);
