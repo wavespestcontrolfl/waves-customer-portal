@@ -46,6 +46,9 @@ const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 
 const TYPE = 'customer_visit_photos';
 
+// Statuses that take a visit off the route while it keeps technician_id.
+const OFF_ROUTE_STATUSES = [...TERMINAL_ROW_STATUSES, 'rescheduled'];
+
 // Exact copy (owner-approved, scope doc §5.4 item 4): one line, no
 // customer name/address/note — the same lock-screen discipline as every
 // PUSH_TITLE_BY_KIND line in tech-visit-notifications.js.
@@ -83,7 +86,7 @@ async function writeCard(scheduledServiceId) {
     // technician_id): no longer a visit on anyone's route (Codex #5303 r2).
     // 'rescheduled' also leaves the route (awaiting a new date) while
     // keeping technician_id (Codex #5303 r3 P1).
-    if (TERMINAL_ROW_STATUSES.includes(row.status) || row.status === 'rescheduled') return null;
+    if (OFF_ROUTE_STATUSES.includes(row.status)) return null;
     const technicianId = String(row.technician_id);
     // FOR SHARE: a Team edit that makes this tech office-only either lands
     // before this read or waits for the card (Codex #5303 r3 P2).
@@ -147,10 +150,45 @@ async function sendPhotoAlert(scheduledServiceId) {
   }
 }
 
+// Read-time reconcile for the tech feed (Codex #5303 r5 P1). A photo card
+// is a pointer at a live visit, not a snapshot: it is served only while its
+// scheduled_services row is still assigned to the card's technician and
+// still on the route. A reassignment, reschedule-out or cancellation after
+// the card was written hides it at once, with no per-transition hook to
+// keep in step. Applied inside the feed query, before its row limit.
+function scopePhotoCardsToLiveVisits(q, conn) {
+  return q.where(function livePhotoCards() {
+    this.whereNot({ type: TYPE }).orWhereExists(function liveVisit() {
+      this.select(conn.raw('1')).from('scheduled_services as s')
+        .whereRaw("s.id::text = tech_notifications.payload->>'scheduled_service_id'")
+        .whereRaw('s.technician_id = tech_notifications.technician_id')
+        .whereNotIn('s.status', OFF_ROUTE_STATUSES);
+    });
+  });
+}
+
+// The card's date comes from the visit as it is now (a same-tech move
+// keeps the card, with the new date). Mutates and returns the parsed rows.
+async function refreshPhotoCardDates(rows, conn) {
+  const cards = rows.filter((r) => r.type === TYPE && r.payload?.scheduled_service_id);
+  if (!cards.length) return rows;
+  const live = await conn('scheduled_services')
+    .whereIn('id', [...new Set(cards.map((r) => r.payload.scheduled_service_id))])
+    .select('id', 'scheduled_date', 'visit_id');
+  const byId = new Map(live.map((v) => [String(v.id), v]));
+  for (const r of cards) {
+    const v = byId.get(String(r.payload.scheduled_service_id));
+    if (v) r.payload = { ...r.payload, scheduled_date: isoDate(v.scheduled_date), visit_id: v.visit_id || null };
+  }
+  return rows;
+}
+
 module.exports = {
   TYPE,
   PUSH_TITLE,
   notifyTechVisitPrepPhotos,
+  scopePhotoCardsToLiveVisits,
+  refreshPhotoCardDates,
   isEnabled: enabled,
   _internal: { loadVisitLocked, writeCard },
 };

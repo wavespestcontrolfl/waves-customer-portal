@@ -206,3 +206,19 @@ describe('notifyTechVisitPrepPhotos', () => {
     });
   });
 });
+
+describe('refreshPhotoCardDates', () => {
+  test('a card shows its visit\'s CURRENT date and visit key', async () => {
+    const conn = jest.fn(() => ({
+      whereIn: jest.fn(function () { return this; }),
+      select: jest.fn(async () => [{ id: 'svc-1', scheduled_date: '2026-10-09', visit_id: null }]),
+    }));
+    const rows = [
+      { type: 'customer_visit_photos', payload: { scheduled_service_id: 'svc-1', visit_id: 'visit-9', scheduled_date: '2026-10-02' } },
+      { type: 'visit_assigned', payload: { x: 1 } },
+    ];
+    await notice.refreshPhotoCardDates(rows, conn);
+    expect(rows[0].payload).toEqual({ scheduled_service_id: 'svc-1', visit_id: null, scheduled_date: '2026-10-09' });
+    expect(rows[1].payload).toEqual({ x: 1 });
+  });
+});

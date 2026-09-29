@@ -42,8 +42,13 @@ router.get('/', async (req, res, next) => {
     // Photo cards point at the Visit Brief's customer photos, which 404
     // while either visit-prep gate is off: hide them at request time the
     // same way (Codex #5303 r2). Re-enabling brings undismissed ones back.
-    if (!require('../services/visit-prep-tech-alert').isEnabled()) {
+    const photoAlerts = require('../services/visit-prep-tech-alert');
+    if (!photoAlerts.isEnabled()) {
       q = q.whereNot({ type: 'customer_visit_photos' });
+    } else {
+      // A photo card shows only while its visit is still this tech's and
+      // still on the route (reassigned / rescheduled / cancelled → hidden).
+      q = photoAlerts.scopePhotoCardsToLiveVisits(q, db);
     }
     if (unreadOnly) q = q.where({ read: false });
     // FRESH non-storm rows outrank everything inside the 20-row window: a
@@ -88,7 +93,9 @@ router.get('/', async (req, res, next) => {
       .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN COALESCE((payload->>'stage')::int, 0) ELSE 0 END DESC")
       .orderBy('created_at', 'desc')
       .limit(20);
-    res.json({ notifications: rows.map(parseRow) });
+    const parsed = rows.map(parseRow);
+    if (photoAlerts.isEnabled()) await photoAlerts.refreshPhotoCardDates(parsed, db);
+    res.json({ notifications: parsed });
   } catch (err) { next(err); }
 });
 

@@ -22,7 +22,7 @@ function getHandler() {
 test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit notices AND stale rows on recency (3)', async () => {
   const calls = { orderByRaw: [], orderBy: [], limit: [] };
   const chain = {};
-  for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw']) {
+  for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'whereNotIn']) {
     chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
   }
   chain.orderByRaw = jest.fn((sql) => { calls.orderByRaw.push(sql); return chain; });
@@ -93,11 +93,12 @@ test('tracking notices are served only while GATE_NOSHOW_DETECTOR is on', async 
 describe('customer_visit_photos cards follow the visit-prep gates at request time', () => {
   function run() {
     const chain = {};
-    for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orderByRaw', 'orderBy', 'limit']) {
+    for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'whereNotIn', 'whereIn', 'orderByRaw', 'orderBy', 'limit']) {
       chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
     }
     chain.then = (res, rej) => Promise.resolve([]).then(res, rej);
     db.mockImplementation(() => chain);
+    db.raw = jest.fn((sql) => sql);
     const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
     // Wrapped: the chain is itself thenable, so returning it would resolve it.
     return getHandler()({ technicianId: 't-1', query: {} }, res, jest.fn()).then(() => ({ chain }));
@@ -109,14 +110,22 @@ describe('customer_visit_photos cards follow the visit-prep gates at request tim
     delete process.env.GATE_VISIT_PREP_PHOTOS;
   });
 
-  test('either gate off → photo cards are filtered out', async () => {
+  test('either gate off → photo cards are filtered out entirely', async () => {
     process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
-    expect(hidesPhotos(await run())).toBe(true);
+    const out = await run();
+    expect(hidesPhotos(out)).toBe(true);
+    expect(out.chain.orWhereExists).not.toHaveBeenCalled();
   });
 
-  test('both gates on → photo cards are served', async () => {
+  test('both gates on → photo cards are served, but only while their visit is live for this tech', async () => {
     process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
     process.env.GATE_VISIT_PREP_PHOTOS = 'true';
-    expect(hidesPhotos(await run())).toBe(false);
+    const { chain } = await run();
+    // Not blanket-hidden: "not a photo card OR its visit is live" — the
+    // whereNot below is the first half of that OR, next to the EXISTS.
+    // The live-visit EXISTS scope: same technician, not off the route.
+    expect(chain.orWhereExists).toHaveBeenCalled();
+    expect(chain.whereRaw).toHaveBeenCalledWith('s.technician_id = tech_notifications.technician_id');
+    expect(chain.whereNotIn).toHaveBeenCalledWith('s.status', expect.arrayContaining(['cancelled', 'completed', 'rescheduled']));
   });
 });
