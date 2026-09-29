@@ -81,18 +81,25 @@ async function readsToday(conn, now = new Date()) {
 // 'pending' write IS the claim: it is what readsToday counts.
 const CAP_LOCK_KEY = 'visit-prep-pest-read-cap';
 
-async function claimReadSlot(conn, submissionId, now = new Date()) {
+// Returns 'claimed', 'unsupported' (no longer a pest stop) or 'refused'
+// (cap reached, or not a today submission).
+async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
+    // Applicability re-proved INSIDE the claim, with the visit row share-
+    // locked so a reclassification or cancellation either lands before this
+    // check or waits for the claim (Codex #5305 r14 P2).
+    await trx('scheduled_services').where({ id: svc.id }).forShare().first('id');
+    if (!(await isPestStop(svc, trx))) return 'unsupported';
     // The count is by submission day, so only a TODAY (ET) submission may
     // claim: one committed just before midnight whose trigger runs after it
     // is not read, rather than spending the new day's cap uncounted
     // (Codex #5305 r4 P2). Its photos still reach the technician.
     const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
-    if (!own || new Date(own.created_at) < etDayStart(now)) return false;
-    if (await readsToday(trx, now) >= dailyCap()) return false;
+    if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
+    if (await readsToday(trx, now) >= dailyCap()) return 'refused';
     await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', read_ref: null });
-    return true;
+    return 'claimed';
   });
 }
 
@@ -177,13 +184,17 @@ async function triggerVisitPrepPestRead({
 
   let claimed;
   try {
-    claimed = await claimReadSlot(conn, submissionId);
+    claimed = await claimReadSlot(conn, submissionId, svc);
   } catch (err) {
     logger.error(`[visit-prep-pest-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'none');
     return;
   }
-  if (!claimed) {
+  if (claimed === 'unsupported') {
+    await setReadStatus(conn, submissionId, 'unsupported');
+    return;
+  }
+  if (claimed !== 'claimed') {
     logger.warn(`[visit-prep-pest-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
     // 'none', not 'failed': a cap rejection never claimed a slot, so it
     // must not hold the count up if the cap is raised the same day

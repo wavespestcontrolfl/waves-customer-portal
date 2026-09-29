@@ -187,6 +187,23 @@ describe('customerFlaggedFacts', () => {
     expect(facts[0].read).toEqual({ status: 'unsupported' });
   });
 
+  test('a failure loading the read keeps the note and photos (no read field)', async () => {
+    const base = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: 'Ants by the slider', read_status: 'done', read_ref: 'pi-1' },
+      ],
+      visit_prep_photos: [],
+    });
+    const conn = (table) => {
+      if (table === 'pest_identifications') throw new Error('db hiccup');
+      return base(table);
+    };
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].note).toBe('Ants by the slider');
+    expect(facts[0]).not.toHaveProperty('read');
+  });
+
   test('pest-read gate off: stored reads are not served at all (the kill switch hides them)', async () => {
     delete process.env.GATE_VISIT_PREP_PEST_READ;
     delete process.env.GATE_VISIT_FACTS;

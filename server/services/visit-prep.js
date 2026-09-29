@@ -734,26 +734,29 @@ async function customerFlaggedFacts(svc, conn = db) {
   // an otherwise-informative section. Fetched BEFORE the membership
   // recheck below, so every read this function does is covered by it
   // (Codex #5305 r7 P1).
-  const readsLive = require('../config/feature-gates').visitPrepPestReadLive();
-  const readRefs = readsLive
-    ? [...new Set(submissions.filter((s) => s.read_status === 'done' && s.read_ref).map((s) => s.read_ref))]
-    : [];
+  // The read line is optional enrichment: if it can't be loaded, the
+  // customer's note and photos are still served, just without a read
+  // (Codex #5305 r14 P2).
+  let readsLive = require('../config/feature-gates').visitPrepPestReadLive();
   const contractsByRef = new Map();
-  if (readRefs.length) {
-    const rows = await conn('pest_identifications').whereIn('id', readRefs).select('id', 'report_contract');
-    for (const row of rows) contractsByRef.set(row.id, parseJsonMaybe(row.report_contract));
+  let stillPest = true;
+  if (readsLive) {
+    try {
+      const readRefs = [...new Set(submissions.filter((s) => s.read_status === 'done' && s.read_ref).map((s) => s.read_ref))];
+      if (readRefs.length) {
+        const rows = await conn('pest_identifications').whereIn('id', readRefs).select('id', 'report_contract');
+        for (const row of rows) contractsByRef.set(row.id, parseJsonMaybe(row.report_contract));
+      }
+      // Checked for running reads too, so "Photo read pending" never
+      // outlives a reclassification (Codex #5305 r13). The lightweight
+      // applicability module never loads the vision engine here.
+      const hasReadToShow = submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
+      if (hasReadToShow) stillPest = await require('./visit-prep-pest-applicability').isPestStop(svc, conn);
+    } catch (err) {
+      logger.warn(`[visit-prep] read enrichment failed for ${svc.id}: ${err.message}`);
+      readsLive = false;
+    }
   }
-
-  // A read shows only while the stop is STILL a pest stop: an office
-  // reclassification (Pest → Lawn) after the upload hides an old pest read
-  // (Codex #5305 r8). Checked before the membership recheck below.
-  // Checked for running reads too, so "Photo read pending" never outlives a
-  // reclassification (Codex #5305 r13). The lightweight applicability module
-  // never loads the vision engine on this request path.
-  const hasReadToShow = submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
-  const stillPest = readsLive && hasReadToShow
-    ? await require('./visit-prep-pest-applicability').isPestStop(svc, conn)
-    : true;
 
   // The LAST await: members re-resolved after every read above.
   const current = await stillOnTechStop(svc, conn);

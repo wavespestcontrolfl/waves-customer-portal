@@ -67,6 +67,7 @@ function fakeConn(tables = {}) {
       return q;
     };
     q.whereIn = (col, vals) => { q._whereIn = { col, vals }; return q; };
+    q.forShare = () => q;
     const rowsMatching = () => (store[table] || []).filter((r) => {
       if (q._whereIn && !q._whereIn.vals.includes(r[q._whereIn.col])) return false;
       return Object.entries(q._where).every(([k, v]) => {
@@ -144,6 +145,9 @@ function okEngineResult(overrides = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Applicability is checked twice (pre-check and inside the claim).
+  mockTechStopMemberIds.mockReset();
+  mockTechStopMemberIds.mockImplementation(async (svc) => [svc.id]);
   mockGateOn = true;
   delete process.env.VISIT_PREP_READ_DAILY_CAP;
 });
@@ -191,7 +195,7 @@ describe('trigger rule', () => {
   });
 
   test('grouped stop: pest if ANY LIVE member is pest, even when the requested row itself is lawn', async () => {
-    mockTechStopMemberIds.mockResolvedValueOnce(['svc-1', 'svc-2']);
+    mockTechStopMemberIds.mockResolvedValue(['svc-1', 'svc-2']);
     const conn = fakeConn({
       scheduled_services: [
         { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
@@ -212,7 +216,7 @@ describe('trigger rule', () => {
   });
 
   test('grouped stop: a TERMINAL (cancelled) pest sibling does not count — unsupported', async () => {
-    mockTechStopMemberIds.mockResolvedValueOnce(['svc-1', 'svc-2']);
+    mockTechStopMemberIds.mockResolvedValue(['svc-1', 'svc-2']);
     const conn = fakeConn({
       scheduled_services: [
         { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
@@ -235,7 +239,7 @@ describe('trigger rule', () => {
 describe('trigger rule: moved siblings and topics', () => {
   test('a pest sibling that moved to another day or window (off the physical stop) does not count', async () => {
     // techStopMemberIds drops it even though it keeps the frozen visit_id.
-    mockTechStopMemberIds.mockResolvedValueOnce(['svc-1']);
+    mockTechStopMemberIds.mockResolvedValue(['svc-1']);
     const conn = fakeConn({
       scheduled_services: [
         { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
@@ -253,7 +257,7 @@ describe('trigger rule: moved siblings and topics', () => {
   });
 
   test('a RESCHEDULED pest sibling (awaiting a new date) does not count', async () => {
-    mockTechStopMemberIds.mockResolvedValueOnce(['svc-1', 'svc-2']);
+    mockTechStopMemberIds.mockResolvedValue(['svc-1', 'svc-2']);
     const conn = fakeConn({
       scheduled_services: [
         { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
@@ -297,6 +301,19 @@ describe('trigger rule: moved siblings and topics', () => {
     mockIdentifyPestV2.mockResolvedValue(okEngineResult());
     await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: serviceType }, photos: PHOTOS, conn });
     expect(mockIdentifyPestV2).toHaveBeenCalledTimes(reads ? 1 : 0);
+  });
+
+  test('reclassified to lawn between the pre-check and the claim: the locked claim refuses (unsupported, no engine call)', async () => {
+    const conn = fakeConn();
+    const realTx = conn.transaction;
+    // The visit becomes a lawn visit just before the claim transaction runs.
+    conn.transaction = async (fn) => {
+      conn._store.scheduled_services.forEach((r) => { if (r.id === 'svc-1') r.service_type = 'Lawn Weed & Feed'; });
+      return realTx(fn);
+    };
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
   });
 
   test('a topic on the submission is not an input: a lawn visit stays unsupported', async () => {
