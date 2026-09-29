@@ -451,16 +451,33 @@ function graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbou
   const grace = selfServeArrivalGraceMinutes({ date: slot.date });
   if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return false;
   if (slot.arrival_delay_minutes > grace) return false;
-  if (!travelGapConflicts(candidate, [neighbour]).every((c) => c.reason === 'travel_gap')) return false;
-  // Codex r2 P1 (#5314): the single chosen `row` above cleared, but it is
-  // only the nearest anchor capacityGapNeighbours picked — a DIFFERENT live
-  // hold on this same tech/date can still sit close enough to violate the
-  // buffer without ever being examined (see capacityGapNeighbours' own
-  // header). Grace never applies to a hold itself, so any such violation
-  // blocks the grant outright, even though it isn't the neighbour being
-  // waived.
-  // This technician's holds plus unassigned ones — another technician's
-  // hold is on a different route (Codex r3 P2 on #5314).
+  // Every live hold is checked separately, for EVERY graced slot, in
+  // withinArrivalGrace (Codex r5 P1 on #5314).
+  return travelGapConflicts(candidate, [neighbour]).every((c) => c.reason === 'travel_gap');
+}
+
+// The candidate entity travel-gap.js reads, from a capacity slot + caller.
+function capacityCandidateEntity(slot, caller) {
+  const startMin = timeToMinutes(slot.start_time);
+  const endMin = timeToMinutes(slot.end_time);
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return null;
+  const ownWindow = Number.isFinite(caller.durationMinutes) ? caller.durationMinutes : (endMin - startMin);
+  return {
+    startMin, endMin, lat: caller.lat ?? null, lng: caller.lng ?? null, windowMinutes: ownWindow,
+    expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
+  };
+}
+
+// No live hold on this technician's route (or unassigned) may sit inside the
+// strict buffer of a graced slot. capacityGapNeighbours keeps only the
+// nearest anchor per side, and an earlier-starting hold can end later than a
+// later-starting committed stop (Codex r2 P1), so every hold is checked —
+// and for EVERY graced slot, not just ones whose anchor needed a waiver:
+// reserveSlot re-checks rival holds for every graced offer, so the offer
+// must too or it dead-ends in a 409 (Codex r5 P1). Another technician's
+// hold is on a different route (Codex r3 P2).
+function liveHoldsClear(slot, candidate) {
+  if (!travelGapEnabled() || !candidate) return true;
   const holdRows = (slot._gap?.holdRows || []).filter((holdRow) => holdRow.technician_id == null || sameAssignedTech(holdRow, slot));
   return holdRows.every((holdRow) => {
     const holdNeighbour = capacityNeighbourEntity(holdRow);
@@ -474,11 +491,12 @@ function graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbou
 // buffer outright. Applied BEFORE a group picks its packed endpoint (Codex
 // r1 P2), not as a final pass after — a later, still-valid candidate on the
 // same side must not be lost because an earlier one failed only on grace.
-function withinArrivalGrace(arrivalGraceOptIn, slot) {
+function withinArrivalGrace(arrivalGraceOptIn, slot, caller) {
   if (!arrivalGraceOptIn) return true;
   const grace = selfServeArrivalGraceMinutes({ date: slot.date });
-  if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return true;
-  return slot.arrival_delay_minutes <= grace;
+  if (!(grace > 0)) return true;
+  if (Number.isFinite(slot.arrival_delay_minutes) && slot.arrival_delay_minutes > grace) return false;
+  return liveHoldsClear(slot, capacityCandidateEntity(slot, caller));
 }
 
 function packCapacityEnds(slots, caller = {}) {
@@ -493,14 +511,8 @@ function packCapacityEnds(slots, caller = {}) {
     if (!travelGapEnabled()) return true;
     const neighbour = capacityNeighbourEntity(row);
     if (!neighbour) return true;
-    const startMin = timeToMinutes(slot.start_time);
-    const endMin = timeToMinutes(slot.end_time);
-    if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return true;
-    const ownWindow = Number.isFinite(caller.durationMinutes) ? caller.durationMinutes : (endMin - startMin);
-    const candidate = {
-      startMin, endMin, lat: caller.lat ?? null, lng: caller.lng ?? null, windowMinutes: ownWindow,
-      expectedMinutes: Number.isFinite(caller.expectedMinutes) ? Math.min(caller.expectedMinutes, ownWindow) : ownWindow,
-    };
+    const candidate = capacityCandidateEntity(slot, caller);
+    if (!candidate) return true;
     if (!violatesTravelGap(candidate, [neighbour])) return true;
     return side === 'prev' && graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbour);
   };
@@ -509,18 +521,18 @@ function packCapacityEnds(slots, caller = {}) {
     const prevReal = group[0]._gap?.prevId != null;
     const nextReal = group[0]._gap?.nextId != null;
     if (!prevReal && !nextReal) {
-      for (const s of group) if (withinArrivalGrace(arrivalGraceOptIn, s)) keep.add(s);
+      for (const s of group) if (withinArrivalGrace(arrivalGraceOptIn, s, caller)) keep.add(s);
       continue;
     }
     const byStart = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
     if (prevReal) {
       const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.prevRow, 'prev')
-        && withinArrivalGrace(arrivalGraceOptIn, s));
+        && withinArrivalGrace(arrivalGraceOptIn, s, caller));
       if (survivors.length) keep.add(survivors[0]);
     }
     if (nextReal) {
       const survivors = byStart.filter((s) => clearsTravelGap(s, group[0]._gap.nextRow, 'next')
-        && withinArrivalGrace(arrivalGraceOptIn, s));
+        && withinArrivalGrace(arrivalGraceOptIn, s, caller));
       if (survivors.length) keep.add(survivors[survivors.length - 1]);
     }
   }

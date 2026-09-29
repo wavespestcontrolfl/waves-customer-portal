@@ -474,6 +474,22 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
     expect(packCapacityEnds([slot], GRACE_CALLER)).toEqual([]);
   });
 
+  test('a nearby same-tech hold drops a graced slot even when its chosen anchor clears the buffer outright (Codex r5)', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    // Anchor ends 08:00, so the 10:00 candidate clears it with no waiver needed.
+    const clearAnchor = { startMin: 420, endMin: 480, lat: 27.4, lng: -82.4, expectedMinutes: 60, technician_id: 't1' };
+    const hold = {
+      startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60,
+      reservation_expires_at: '2099-01-01T00:00:00Z', customer_id: null, technician_id: 't1',
+    };
+    const slot = { ...candidate(6, clearAnchor), _gap: { prevId: 's1', nextId: null, prevRow: clearAnchor, holdRows: [hold] } };
+    process.env[GRACE_ENV] = '90';
+    expect(packCapacityEnds([slot], GRACE_CALLER)).toEqual([]);
+    process.env[GRACE_ENV] = '0';
+    expect(packCapacityEnds([slot], GRACE_CALLER).map((s) => s.start_time)).toEqual(['10:00']);
+  });
+
   test('an unassigned previous stop never earns grace (the simulation does not route this tech through it)', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env[GRACE_ENV] = '90';
