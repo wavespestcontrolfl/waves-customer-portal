@@ -13,8 +13,22 @@
  *     ordered visits by weekday name.
  * Every row these tests insert is deleted afterwards.
  */
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
+
+// Dates relative to today (ET): the preview judges "upcoming" against the real
+// clock, so fixed literals would go stale (AGENTS.md near-today rule).
+const day = (offset) => etDateString(addETDays(new Date(), offset));
+// The first Monday at least three days out, and the Friday after it: as text
+// ("Fri …" < "Mon …") the Friday sorts first, by date the Monday does.
+function mondayThenFriday() {
+  for (let k = 3; k < 10; k += 1) {
+    if (new Date(`${day(k)}T12:00:00Z`).getUTCDay() === 1) return [day(k), day(k + 4)];
+  }
+  throw new Error('no Monday within a week');
+}
 
 maybeDescribe('Cancel plan prepay coverage (live Postgres, real renewals module)', () => {
   let db;
@@ -51,16 +65,17 @@ maybeDescribe('Cancel plan prepay coverage (live Postgres, real renewals module)
     customer_id: c.id, scheduled_date: scheduledDate, service_type: 'General Pest Control', status: 'pending', ...over,
   });
   // A paid annual prepay term sold as four General Pest Control visits for $400:
-  // one done in March, three still ahead.
+  // one done, three still ahead, the term ending in 90 days.
+  const TERM_END = day(90);
   const prepayCustomer = async () => {
     const c = await customer();
     n += 1;
     const invoice = await insert('invoices', { customer_id: c.id, token: `${RUN}-${n}`, invoice_number: `${RUN}-${n}`, status: 'paid', paid_at: new Date('2026-01-02T12:00:00Z'), total: 400 });
-    const term = await insert('annual_prepay_terms', { customer_id: c.id, term_start: '2026-01-01', term_end: '2026-12-31', status: 'active',
+    const term = await insert('annual_prepay_terms', { customer_id: c.id, term_start: day(-200), term_end: TERM_END, status: 'active',
       prepay_invoice_id: invoice.id, coverage_service_type: 'General Pest Control', coverage_visit_count: 4, prepay_amount: 400 });
-    const done = await visit(c, '2026-03-05', { status: 'completed', annual_prepay_term_id: term.id });
+    const done = await visit(c, day(-100), { status: 'completed', annual_prepay_term_id: term.id });
     const ahead = [];
-    for (const d of ['2026-10-05', '2026-11-05', '2026-12-05']) ahead.push(await visit(c, d, { annual_prepay_term_id: term.id }));
+    for (const d of [day(6), day(37), day(68)]) ahead.push(await visit(c, d, { annual_prepay_term_id: term.id }));
     return { c, term, done, ahead };
   };
 
@@ -73,27 +88,28 @@ maybeDescribe('Cancel plan prepay coverage (live Postgres, real renewals module)
 
   test('an "End of paid coverage" preview keeps the covered visits and pulls only the uncovered one, with ISO dates', async () => {
     const { c } = await prepayCustomer();
-    const lawn = await visit(c, '2026-10-20', { service_type: 'Lawn Care' }); // not the term's
+    const lawn = await visit(c, day(20), { service_type: 'Lawn Care' }); // not the term's
     const preview = await cancellation.previewCancelPlan({ customerId: c.id, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
-    expect(preview).toMatchObject({ effectiveDate: 'end_of_coverage', effectiveOn: '2026-12-31' });
-    expect(preview.impact.pulledVisitKeys).toEqual([`${lawn.id}:2026-10-20`]);
+    expect(preview).toMatchObject({ effectiveDate: 'end_of_coverage', effectiveOn: TERM_END });
+    expect(preview.impact.pulledVisitKeys).toEqual([`${lawn.id}:${day(20)}`]);
     expect(preview.impact.visitsCancelled).toBe(1);
-    expect(preview.impact.prepay).toMatchObject({ covered: true, endsAt: '2026-12-31' });
+    expect(preview.impact.prepay).toMatchObject({ covered: true, endsAt: TERM_END });
   });
 
   test('an effective-now preview names the next visit by date, not by weekday name', async () => {
     const c = await customer();
-    await visit(c, '2026-10-09'); // "Fri Oct 09" sorts before "Mon Oct 05" as text
-    await visit(c, '2026-10-05');
+    const [monday, friday] = mondayThenFriday();
+    await visit(c, friday);
+    await visit(c, monday);
     const preview = await cancellation.previewCancelPlan({ customerId: c.id });
     const pest = preview.impact.families.find((f) => f.key === 'pest_control');
-    expect(pest).toMatchObject({ upcomingVisits: 2, nextVisitDate: '2026-10-05' });
-    expect(preview.impact.pulledVisitKeys).toEqual(expect.arrayContaining([expect.stringMatching(/:2026-10-05$/), expect.stringMatching(/:2026-10-09$/)]));
+    expect(pest).toMatchObject({ upcomingVisits: 2, nextVisitDate: monday });
+    expect(preview.impact.pulledVisitKeys.map((k) => k.split(':')[1]).sort()).toEqual([monday, friday]);
   });
 
   test('a scoped cancel of another family reads the term\'s covered rows instead of refusing; one over the covered family still refuses', async () => {
     const { c } = await prepayCustomer();
-    await visit(c, '2026-10-20', { service_type: 'Lawn Care' });
+    await visit(c, day(20), { service_type: 'Lawn Care' });
     const lawnOnly = await cancellation.previewCancelPlan({ customerId: c.id, families: ['lawn_care'] });
     expect(lawnOnly.scopeError).not.toBe('scoped_covers_prepaid');
     const pestOnly = await cancellation.previewCancelPlan({ customerId: c.id, families: ['pest_control'] });
