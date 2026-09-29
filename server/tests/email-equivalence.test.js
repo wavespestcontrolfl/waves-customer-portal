@@ -41,8 +41,8 @@ describe('sameGmailInbox (built on the shared gmailCanonicalMailbox)', () => {
   ])('invalid dot placement is never "the same inbox" (codex #5323 r4): %s', (_l, bad) => {
     expect(sameGmailInbox([bad, 'jqsample1990@gmail.com'])).toBeNull();
   });
-  test('the arbiter re-exports the same shared function', () => {
-    expect(require('../services/contact-quarantine-arbiter').gmailCanonicalMailbox).toBe(gmailCanonicalMailbox);
+  test('the shared canonicalizer maps googlemail to gmail and keeps the tag', () => {
+    expect(gmailCanonicalMailbox('j.q+x@googlemail.com')).toBe('jq+x@gmail.com');
   });
 });
 
@@ -130,5 +130,14 @@ describe('first-touch release suppression check matches the Google mailbox under
   test('a matching active suppression row blocks the release', async () => {
     const { dbh } = fakeDb([{ email: 'j.q.sample1990@gmail.com', status: 'active', suppression_type: 'unsubscribe', group_key: null }]);
     await expect(emailSuppressedForNewLead('jqsample1990@gmail.com', dbh)).resolves.toBe(true);
+  });
+});
+
+// Codex #5323 r5: a pre-deploy card must refresh when its call is reprocessed.
+describe('email review card signature carries the same-inbox marker', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  test('emailCardSignature includes gmail_same_inbox', () => {
+    const fn = src.slice(src.indexOf('function emailCardSignature'), src.indexOf('\n}\n', src.indexOf('function emailCardSignature')));
+    expect(fn).toContain('payload?.gmail_same_inbox || null');
   });
 });

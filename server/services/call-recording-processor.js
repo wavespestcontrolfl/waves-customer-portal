@@ -1865,7 +1865,10 @@ function emailCardSignature(reasonCode, payload) {
     : [];
   const hasTarget = !!payload && Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
   const target = hasTarget ? (payload.email_release_target || null) : 'no-opinion';
-  return JSON.stringify([reasonCode || null, !!payload?.email_disagreement, candidates, target]);
+  // gmail_same_inbox (2026-09-29): a card minted before the same-inbox
+  // wording existed must refresh on reprocess rather than keep telling the
+  // office the two spellings are different emails (codex #5323 r5).
+  return JSON.stringify([reasonCode || null, !!payload?.email_disagreement, candidates, target, payload?.gmail_same_inbox || null]);
 }
 
 // The single address (or blank) a card's evidence supports holding a

@@ -61,7 +61,7 @@ const ADOPT_CONFIDENCE_FLOOR = 0.9;
 const STORE_CONFIDENCE_FLOOR = 0.6;
 
 // Google dot-insensitivity lives in utils/email-equivalence.js (shared with
-// the read-back card); re-exported below for existing callers.
+// the read-back card).
 const { gmailCanonicalMailbox } = require('../utils/email-equivalence');
 
 // Did the caller actually SAY a dot IN THE LOCAL PART? A dotted candidate is
@@ -466,7 +466,6 @@ module.exports = {
   gatherEmailDomainEvidence,
   buildArbiterPrompt,
   parseArbiterResponse,
-  gmailCanonicalMailbox,
   dotSpokenInDictation,
   ADOPT_CONFIDENCE_FLOOR,
   STORE_CONFIDENCE_FLOOR,

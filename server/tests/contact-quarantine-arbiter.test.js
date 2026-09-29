@@ -589,7 +589,8 @@ describe('same-mailbox short-circuit', () => {
 });
 
 describe('gmailCanonicalMailbox', () => {
-  const { gmailCanonicalMailbox, dotSpokenInDictation } = require('../services/contact-quarantine-arbiter');
+  const { dotSpokenInDictation } = require('../services/contact-quarantine-arbiter');
+  const { gmailCanonicalMailbox } = require('../utils/email-equivalence');
 
   test('collapses dots on gmail and googlemail only', () => {
     expect(gmailCanonicalMailbox('a.b.c@gmail.com')).toBe('abc@gmail.com');
