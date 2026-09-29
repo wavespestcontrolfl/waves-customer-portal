@@ -830,6 +830,99 @@ IS this window, replacing the flat 120-minute same-day lead). The old
 `max_self_books_per_day` cap is retired: its offer-time day filtering and
 commit-time re-checks run only while `GATE_SELF_BOOK_DAY_CAP` is set. Staff,
 admin and the voice agent's booking tools are unaffected.
+Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
+lenient than strict" — the Parrish live miss: a Tuesday 11:00 candidate hid
+because the strict travel-gap buffer measured a prior lawn stop's raw window
+rather than the whole-route simulation's actual ~6-minute arrival delay),
+`scheduling/policy.js`'s `selfServeArrivalGraceMinutes`,
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES`, default 0, capped at 120, capacity-mode
+only and never for a same-day pick: a self-serve (customer-picked) time
+names an ARRIVAL window, not a promised start, so a candidate the strict
+travel-gap buffer would reject is still offered — `find-time.js`'s
+`packCapacityEnds` — when the day's own route simulation already certifies
+the technician arrives within grace minutes of that slot's start (never for
+a live estimate hold neighbour, which may evaporate before it is ever
+committed, and never on the other side of that gap — the next customer's
+promised start is not this one's to spend; Codex r2 P1 on #5314: EVERY live
+hold on that tech/date is checked this way, not only the single nearest
+committed-or-unassigned anchor `capacityGapNeighbours` picks per side — a
+hold's stored window is a promise rather than a fixed slot, so an
+earlier-starting hold can still end later than a later-starting committed
+stop that the anchor scan chose instead, and grace must never overlook it),
+and still accepted at commit — `arrival-route.js`'s `verifyArrivalCapacity`
+— only while its certified delay stays within that same grace, tighter than
+but never wider than the existing 120-minute arrival promise every capacity
+booking already carries.
+**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314 — narrowed from an earlier
+draft that also covered `/book` and public reschedule): those two surfaces'
+commit paths (`createSelfBooking`, the rebooker's single-visit move) each
+run a STRICT pre-verify travel probe ahead of their capacity check, so a
+grace-kept slot there would already 409 SLOT_TAKEN before `verifyArrivalCapacity`
+ever ran it — the estimate picker's own commit (`slot-reservation.js`) has
+no such probe under capacity, which is what makes it safe to grant grace
+there in the first place. Concretely: `packCapacityEnds` only reads grace
+for a caller that explicitly passes `arrivalGrace: true` — `estimate-slot-
+availability.js`'s `getAvailableSlots`/`getSlotDebug` are the only two call
+sites (guard-tested), even though `/book`'s `buildBookingAvailability`
+shares the SAME `packEnds: true` admission and is otherwise byte-identical.
+**A hold is certified ONCE, at reserve** (Codex r2 P0 on #5314): grace is
+never re-applied at accept. `slot-reservation.js`'s `reserveSlot` is the
+ONLY `verifyArrivalCapacity` caller that passes `arrivalGraceMinutes`
+(guard-tested — `/book`'s `createSelfBooking`, the rebooker, and this same
+file's own `commitReservation` never do), and it reads the EXACT grace that
+justified the offer, not a fresh live env read: `arrivalGrace` rides as its
+own field in the estimate surface's signed slot offer
+(`utils/slot-offer-token.js`), carried in cleartext inside the slotId so
+`reserveSlot` can read it back and `verifySlotOffer` still catches any
+tamper. **Opt-in PER OFFER, not a blanket format bump** (Codex round 3,
+#5314 — the first cut bumped the canonical string and slotId shape for
+EVERY offer unconditionally, which broke every in-flight estimate offer at
+deploy even with grace dark, violating "default 0 = byte-identical to
+before this lane" for the wire format itself): an ungraced offer
+(`arrivalGrace` 0 or omitted — every `/book` offer, and every estimate
+offer while capacity/grace is off or the date is excluded) signs and
+appends the EXACT `<base>.<exp>.<sig>` v2 shape this module always
+produced, byte for byte identical to origin/main's minting for the same
+inputs — it verifies under both the old and new code, so an offer straddling
+this deploy never breaks. Only a genuinely graced offer (`arrivalGrace` > 0)
+takes the new `<base>.<exp>.<arrivalGrace>.<sig>` v3 shape, since only it
+needs somewhere for the extra field to ride; a graced offer in flight at
+the exact deploy instant fails once, the same accepted trade the file's
+original v1→v2 bump made for every offer — but that window is now only the
+rare graced case. `signCustomerFacingSlots` signs a non-zero grace only for a slot
+carrying `routeMode: 'arrival_windows'` (stamped by `classifySlot` from
+find-time's own `route_mode`, stripped before the slot ever reaches the
+client) — the one marker proving a slot actually passed through
+`packCapacityEnds`' grace-aware filter; anything else (today, nothing under
+capacity mode — `buildAsapCapacitySlots` self-guards to `[]` — but signing
+must not depend on staying correct by accident in a different function)
+signs 0, so a future non-route-mode generator's slot can never inherit a
+leniency it was never checked against. `commitReservation` keeps only the
+pre-existing 120-minute arrival
+promise as its bound, byte-identical to before this whole lane — a hold
+reserved at grace 90 with an 80-minute delay is accepted regardless of what
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES` reads by the time the customer taps
+Accept. A grace change between the OFFER and the RESERVE tap is likewise
+inert for that specific offer (its signed `arrivalGrace` is fixed at mint
+time); only a FRESH availability fetch picks up a changed env value.
+Redeeming a graced offer at RESERVE also re-checks the strict travel-gap
+buffer against every CURRENT live hold on the same technician's route or
+unassigned (excluding the estimate's own hold): a rival estimate may have
+taken a nearby hold during the offer's lifetime, and a live hold never
+receives the waiver, so any buffer violation refuses the reserve with the
+usual 409 SLOT_UNAVAILABLE (`refuseGracedOfferOnRivalHoldConflict`; grace 0
+never queries).
+`extendReservation` (the 15-minute hold countdown) never re-verifies
+whole-route capacity fitness at all under capacity mode — a pre-existing gap
+unrelated to grace (a live hold's certified route order is trusted as-is
+rather than re-simulating the whole day's route on every extend, which was
+judged not cheap enough to add for this lane) — so a hold's grace
+certification is fixed at reserve time and is not re-checked if grace or the
+route changes before a later extend. Staff, admin, voice and the assistant's
+booking tools never opt in and are unaffected. Default 0 is byte-identical
+to before this lane. A slotId minted before this v3 bump fails verification
+once (the same accepted trade the v1→v2 canonical-string bump already made)
+— the client's existing "pick another time" 409 recovery re-signs fresh.
 Catalog-sized estimate offers resolve the primary appointment allowance from
 `services.scheduling_duration_policy`; independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.

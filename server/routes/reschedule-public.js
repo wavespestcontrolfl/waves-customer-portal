@@ -887,6 +887,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             capacityPlacement: true,
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
+            // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
+            // Codex r1 P1 #5314): this page's own commit runs a STRICT
+            // pre-verify travel probe that a grace-kept slot would fail
+            // before reaching the rebooker's capacity check — grace is
+            // estimate-picker only.
           }
         );
     } catch (err) {
