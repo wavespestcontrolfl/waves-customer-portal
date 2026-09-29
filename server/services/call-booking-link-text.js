@@ -1099,6 +1099,10 @@ async function smsDeclinedOnEarlierCall(conn, phone, { originCallId, asOf } = {}
     .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q))
     .where((q) => q.whereRaw(nanpStoredPhoneClause('from_phone'), [phoneKey])
       .orWhereRaw(nanpStoredPhoneClause('to_phone'), [phoneKey])
+      // codex r5 P1: a decline can be about the number the caller SPOKE
+      // ("call me at B, don't text it") — the same caller.phone_e164 that
+      // consentedDestination uses for alternate destinations.
+      .orWhereRaw(nanpStoredPhoneClause("(ai_extraction_enriched->'caller'->>'phone_e164')"), [phoneKey])
       .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
     .where('v2_extraction_status', 'valid')
     .where('created_at', '<=', asOf)

@@ -287,7 +287,7 @@ CONSENT:
 - sms_consent_quote: Verbatim quote where consent was given. null if not given.
 - call_recording_disclosed: true if the greeting or agent mentioned recording/AI.
 - do_not_contact_request: true if caller explicitly asked not to be contacted.
-- sms_declined: true only if the caller explicitly declines text messages (says no when asked to be texted, or asks not to be texted / to be called instead of texted), even if calls are fine. false otherwise, including when texting never came up.
+- sms_declined: true only if the caller explicitly declines text messages (says no when asked to be texted, or asks not to be texted / to be called instead of texted), even if calls are fine. false otherwise, including when texting never came up. Always true or false — never null.
 
 VOICEMAIL & SPAM (definitions tightened 2026-07 after a 1,000-call audit — these
 exact mistakes lost real leads; apply them literally):

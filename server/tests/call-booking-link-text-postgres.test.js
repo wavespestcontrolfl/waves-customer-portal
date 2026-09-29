@@ -686,6 +686,25 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       void earlierCallId;
     });
 
+    // codex r5 P1: a decline about the number the caller SPOKE on an
+    // earlier call (from ANI A, "call me at B, don't text it") blocks a
+    // later send to B.
+    test('a decline about a spoken callback number on an earlier call blocks that number', async () => {
+      const ani = '+15555550311';
+      const spoken = '+15555550312';
+      await insertLead(mockPg, { phone: spoken });
+      await insertCall(mockPg, {
+        from_phone: ani,
+        ai_extraction_enriched: { ...eligibleExtraction(), caller: { ...eligibleExtraction().caller, phone_e164: spoken }, consent: { sms_declined: true } },
+        created_at: new Date('2027-01-05T12:00:00.000Z'), updated_at: new Date('2027-01-05T12:00:00.000Z'),
+      });
+
+      const result = await callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, spoken, { originCallId: null, asOf: NOW },
+      );
+      expect(result).toBe(true);
+    });
+
     test('a later explicit opt-in does NOT clear an earlier decline (owner ruling 2026-09-29)', async () => {
       const phone = '+15555550302';
       await insertLead(mockPg, { phone });

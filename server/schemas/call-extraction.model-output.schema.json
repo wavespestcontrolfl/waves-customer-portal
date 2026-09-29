@@ -387,7 +387,7 @@
             "boolean",
             "null"
           ],
-          "description": "Additive (schema 1.19.0) — optional, not required: true ONLY if the caller explicitly declines text messages (says no when asked to be texted, or asks not to be texted / to be called instead of texted), even if calls are fine. false otherwise, including when texting never came up. null (or the key absent) when not judged — a pre-1.19 extraction never has this field at all. Distinct from sms_consent_given=false, which merely means consent was never asked."
+          "description": "Additive (schema 1.19.0) — optional, not required: true ONLY if the caller explicitly declines text messages (says no when asked to be texted, or asks not to be texted / to be called instead of texted), even if calls are fine. false otherwise, including when texting never came up. ALWAYS output true or false — never null, even though the type allows it: null exists only so historical payloads validate (a pre-1.19 extraction never has this field at all). Distinct from sms_consent_given=false, which merely means consent was never asked."
         }
       }
     },
