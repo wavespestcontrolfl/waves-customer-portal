@@ -3,7 +3,8 @@ import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 // Communications → Owed: every open promise across calls, overdue first.
 // Endpoints:
 //   GET   /admin/call-recordings/commitments/open?party=…&hints=…
-//   PATCH /admin/call-recordings/commitments/:id   (fulfill | dismiss)
+//   GET   /admin/call-recordings/commitments/auto-closed?days=7
+//   PATCH /admin/call-recordings/commitments/:id   (fulfill | dismiss | reopen)
 // Reads and writes go through the shared admin fetch (429/401 handling).
 // V2 zinc system + components/ui; alert-fg is used for OVERDUE only.
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -27,6 +28,20 @@ const KIND_LABEL = {
   other: "Other",
 };
 
+// What the portal saw that closed a promise on its own, by proof kind.
+const KEPT_LABEL = {
+  estimate_sent: "estimate sent",
+  appointment_booked: "visit booked",
+  appointment_rescheduled: "visit moved",
+  visit_completed: "visit completed",
+  inbound_call: "customer called us",
+  outbound_call: "staff call",
+  sms_sent: "text sent",
+  email_sent: "email sent",
+  invoice_paid: "invoice paid",
+  inbound_media: "photos received",
+};
+
 function fmtWhen(value, withTime = true) {
   if (!value) return null;
   const d = new Date(value);
@@ -46,6 +61,7 @@ const CALLBACK_POLICY = { true: "after four staffed hours (office hours and blac
 const MORE_MARK = { true: "+", false: "" };
 const PAGE_SIZE = 200;
 const MAX_STABILITY_WALKS = 3;
+const AUTO_CLOSED_DAYS = 7;
 
 function humanize(value) {
   return value ? String(value).replace(/_/g, " ") : "";
@@ -93,6 +109,13 @@ function walksMatch(previous, current) {
   );
 }
 
+// The stored proof of an automatic close, in one phrase.
+export function proofLabel(row) {
+  const proof = row.fulfillment || {};
+  if (proof.kind === "customer_left") return `Customer left ${fmtWhen(proof.matched_at, false) || ""}`.trim();
+  return `Kept: ${KEPT_LABEL[proof.kind] || humanize(proof.kind) || "follow-up"}${proof.matched_at ? ` ${fmtWhen(proof.matched_at)}` : ""}`;
+}
+
 export function whoLabel(row) {
   const name = [row.customer_first_name, row.customer_last_name].filter(Boolean).join(" ");
   if (name) return name;
@@ -127,6 +150,30 @@ export function dueLabel(row, now = Date.now()) {
   return { text: "No due time", tone: "neutral" };
 }
 
+// What the portal closed on its own in the last week: who, what was promised,
+// the proof it stored, and a one-click Reopen.
+// Waves promises only, so the customer-party view has none.
+function AutoClosedList({ party, rows, canReopen, busyId, onReopen }) {
+  if (party === "customer" || !rows.length) return null;
+  return (
+    <section className="space-y-1.5" aria-label="Closed automatically">
+      <h3 className="text-13 md:text-12 text-ink-secondary">Closed automatically (last {AUTO_CLOSED_DAYS} days)</h3>
+      <ul className="space-y-1.5">
+        {rows.map((row) => (
+          <li key={row.id} className="border-hairline rounded-md bg-white p-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-13 md:text-12">
+            <span className="text-ink-primary">{whoLabel(row)}</span>
+            <span className="text-ink-tertiary">· {KIND_LABEL[row.kind] || humanize(row.kind)}</span>
+            <span className="text-ink-secondary">· {proofLabel(row)}</span>
+            {canReopen && (
+              <Button size="sm" variant="ghost" disabled={busyId === row.id} onClick={() => onReopen(row)} className="ml-auto">Reopen</Button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export default function OwedTabV2() {
   const [party, setParty] = useState("waves");
   const [showHints, setShowHints] = useState(true);
@@ -142,6 +189,21 @@ export default function OwedTabV2() {
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 60 * 1000); return () => clearInterval(t); }, []);
   const [busyId, setBusyId] = useState(null);
   const [actionError, setActionError] = useState(null);
+  // Promises the portal closed on its own in the last week, each with its
+  // proof and a Reopen. Secondary to the open list: a failed read leaves the
+  // last list on screen rather than raising an error over the real queue.
+  const [autoClosed, setAutoClosed] = useState([]);
+  const autoClosedSeq = useRef(0);
+  const loadAutoClosed = useCallback(async () => {
+    const seq = ++autoClosedSeq.current;
+    try {
+      const body = await adminFetch(`/admin/call-recordings/commitments/auto-closed?days=${AUTO_CLOSED_DAYS}`);
+      if (seq === autoClosedSeq.current) setAutoClosed(body.commitments || []);
+    } catch {
+      // Keep the list already on screen.
+    }
+  }, []);
+  useEffect(() => { loadAutoClosed(); }, [loadAutoClosed]);
   // Only the latest request may paint: a filter change while an earlier
   // load (or a post-action reload) is in flight would otherwise let the
   // older response overwrite the newer selection.
@@ -195,7 +257,7 @@ export default function OwedTabV2() {
   }, [party, showHints]);
 
   useEffect(() => { load(); return () => { requestSeq.current += 1; }; }, [load]);
-  useVisiblePageRefresh(() => load({ background: true, pageCount: state.loadedPages }), {
+  useVisiblePageRefresh(() => { loadAutoClosed(); return load({ background: true, pageCount: state.loadedPages }); }, {
     intervalMs: 60000, enabled: state.status !== "loading" && !busyId && !loadingMore,
   });
 
@@ -235,6 +297,7 @@ export default function OwedTabV2() {
     try {
       await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await loadRef.current();
+      await loadAutoClosed();
     } catch (err) {
       setActionError(err.message || "That change did not save.");
     } finally {
@@ -353,6 +416,7 @@ export default function OwedTabV2() {
           <Button size="sm" variant="ghost" onClick={loadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more"}</Button>
         </div>
       )}
+      <AutoClosedList party={party} rows={autoClosed} canReopen={state.enabled} busyId={busyId} onReopen={(row) => act(row, "reopen")} />
     </div>
   );
 }

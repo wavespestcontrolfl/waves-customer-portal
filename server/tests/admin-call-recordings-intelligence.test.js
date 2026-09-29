@@ -21,6 +21,7 @@ jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
   addHumanCommitment: jest.fn(),
   listOpenCommitments: jest.fn(),
+  listAutoClosedCommitments: jest.fn(),
   refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
   COMMITMENT_KINDS: ['callback', 'send_estimate', 'send_report'],
   OVERDUE_IMPLICIT_DAYS: 3,
@@ -102,6 +103,8 @@ describe('callback actions use the commitment PATCH endpoint', () => {
   test.each([
     { action: 'snooze', snooze: 'two_hours' },
     { action: 'edit', description: 'Call after lunch', due_at: null, note: 'Customer asked' },
+    // The Owed tab's Reopen on an automatically closed callback.
+    { action: 'reopen' },
   ])('forwards the complete $action payload and displayed version', async (payload) => {
     const cards = require('../services/callback-cards');
     cards.enabled.mockReturnValue(true);
@@ -331,7 +334,7 @@ describe('commitment writes are staff-wide but fail closed when the gate is off'
   });
 
   test('a technician receives the intelligence without billing outcomes (invoices, revenue) — admin-only everywhere else (codex gh-r11 P1)', async () => {
-    mockRole = 'technician';
+    mockRole = 'tech';
     require('../services/call-intelligence').loadCallIntelligence.mockImplementation(async () => ({ call_id: CALL_ID, outcomes: { lead: null, estimates: [], appointments: [], invoices: [{ id: 'inv-1', total: 250, status: 'paid', paid_at: 'T' }], revenue_cents: 25000, basis_note: '' } }));
     mockDb([]);
     await withServer(async (base) => {
@@ -399,6 +402,39 @@ describe('customer relink and recording adoption stay admin-only', () => {
     expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
     expect(commitments.addHumanCommitment).not.toHaveBeenCalled();
     expect(processor.processRecording).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /commitments/auto-closed — what the portal closed on its own', () => {
+  const get = (base, query = '') => fetch(`${base}/admin/call-recordings/commitments/auto-closed${query}`);
+
+  test('staff read the list over a 7-day default window, clamped to 1..30 days; the rows come back as the service listed them', async () => {
+    const closed = [{ id: 'k1', kind: 'send_estimate', status: 'fulfilled', fulfillment: { strength: 'association', kind: 'estimate_sent' }, updated_at: '2026-09-04T15:00:00.123Z' }];
+    commitments.listAutoClosedCommitments.mockResolvedValue(closed);
+    await withServer(async (base) => {
+      const res = await get(base);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ commitments: closed, days: 7 });
+      expect((await (await get(base, '?days=3')).json()).days).toBe(3);
+      expect((await (await get(base, '?days=400')).json()).days).toBe(30);
+      expect((await (await get(base, '?days=0')).json()).days).toBe(7);
+      expect((await (await get(base, '?days=abc')).json()).days).toBe(7);
+    });
+    expect(commitments.listAutoClosedCommitments.mock.calls.map(([, o]) => o.days)).toEqual([7, 3, 30, 7, 7]);
+  });
+
+  test('a technician reads it too (same staff-wide auth as the open feed), and a failed read is a 500, never an empty list', async () => {
+    mockRole = 'tech';
+    commitments.listAutoClosedCommitments.mockResolvedValueOnce([]);
+    try {
+      await withServer(async (base) => {
+        expect((await get(base)).status).toBe(200);
+        commitments.listAutoClosedCommitments.mockRejectedValueOnce(new Error('db down'));
+        expect((await get(base)).status).toBe(500);
+      });
+    } finally {
+      mockRole = 'admin';
+    }
   });
 });
 

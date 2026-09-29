@@ -21,6 +21,7 @@ run('callback reminder transitions on PostgreSQL', () => {
   });
   beforeEach(async () => {
     process.env.GATE_CALLBACK_CARD = 'true';
+    delete process.env.PROMISE_EVIDENCE_CLOSE;
     trx = await conn.transaction();
     db.mockImplementation((...args) => trx(...args));
     db.raw = trx.raw.bind(trx); db.transaction = trx.transaction.bind(trx);
@@ -285,6 +286,8 @@ run('callback reminder transitions on PostgreSQL', () => {
   });
 
   test.each([0, 5])('unchanged association hints preserve read reminders with %i companion callbacks', async (companions) => {
+    // A hint only exists while an association proof does not close the promise.
+    process.env.PROMISE_EVIDENCE_CLOSE = 'off';
     const row = await seed({ kind: 'send_appointment_confirmation', due_at: ago, callback_due_at: null });
     for (let i = 0; i < companions; i += 1) await seed();
     await trx('sms_log').insert({ direction: 'outbound', from_phone: '+15555550177', to_phone: '+15555550176',

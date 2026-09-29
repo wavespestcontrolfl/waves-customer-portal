@@ -391,6 +391,19 @@ router.get('/commitments/open', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /commitments/auto-closed — the Waves promises the portal closed on its
+// own in the last `days` days (default 7, max 30): kept on the proof it
+// stored, or dismissed because the customer left. The Owed tab lists them
+// with a one-click Reopen (the PATCH below). Same staff-wide auth as the
+// open feed; reads stay open whatever the switch says.
+router.get('/commitments/auto-closed', async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(30, Number.parseInt(req.query.days, 10) || 7));
+    const { listAutoClosedCommitments } = require('../services/call-commitments');
+    res.json({ commitments: await listAutoClosedCommitments(db, { days }), days });
+  } catch (err) { next(err); }
+});
+
 // POST /calls/:id/commitments — the office records a promise the AI missed.
 // Staff-wide (router-level requireTechOrAdmin), like tagging a disposition.
 router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res, next) => {
