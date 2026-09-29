@@ -15,6 +15,15 @@ export function isMlUnit(unit) {
   return base === "ml" || base === "cc" || /^millilit(er|re)s?$/.test(base);
 }
 
+/**
+ * Free text that states an amount in mL ("20 mL", "20ml", "5 cc",
+ * "2 milliliters"), such as the injection record's dose. Mirrors
+ * ML_AMOUNT_TEXT in server/services/tree-shrub-closeout.js.
+ */
+export function hasMlAmount(text) {
+  return /(?:^|[^a-z])(?:ml|mls|milliliters?|millilitres?|cc)(?![a-z])/i.test(String(text || ""));
+}
+
 /** An mL amount in fl oz, at the three decimals the record keeps. */
 export function mlToFlOz(amount) {
   const n = Number(amount);

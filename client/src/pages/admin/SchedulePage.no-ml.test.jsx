@@ -8,7 +8,7 @@
 // fl oz), and sends that as fl oz because the server's unit list has no tsp.
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CompletionPanel, catalogUnitOption } from './SchedulePage';
+import { CompletionPanel, catalogUnitOption, treeShrubCloseoutBlocksClient } from './SchedulePage';
 import { isMlUnit } from '../../lib/measure-units';
 
 vi.mock('../../hooks/useFeatureFlag', () => ({
@@ -31,6 +31,11 @@ const CONCENTRATE = {
   default_rate: '4-8', default_unit: 'fl_oz/100gal',
 };
 const GEL = { id: 'gel-bait', name: 'Fixture gel bait', category: 'bait', default_rate: '0.1-0.5', default_unit: 'g/spot' };
+// A dry granule: weighed, never spooned.
+const GRANULE = {
+  id: 'granule', name: 'Fixture granular insecticide', category: 'insecticide', formulation: 'granular',
+  default_rate: '1.5-2.3', default_unit: 'lb/1000 sq ft',
+};
 // A second product on the same tank (per gallon, in fl oz).
 const PARTNER = {
   id: 'tank-partner', name: 'Fixture tank partner', category: 'insecticide',
@@ -172,6 +177,19 @@ describe.each(LAYOUTS)('Complete Service form, %s layout', (_layout, width) => {
     expect(screen.getByPlaceholderText('Dose (tsp or fl oz)')).toBeTruthy();
   });
 
+  it('offers tsp only for a liquid, never a granule or gel bait', async () => {
+    setWidth(width);
+    await mount(PEST_VISIT, [SUPERTHRIVE, GEL, GRANULE]);
+    for (const product of [SUPERTHRIVE, GEL, GRANULE]) await pick(product);
+    await waitFor(() => expect(rows()).toHaveLength(3));
+    const [superthrive, gel, granule] = rows();
+    expect(optionValues(superthrive.amountUnit)).toContain('tsp');
+    expect(optionValues(gel.amountUnit)).not.toContain('tsp');
+    expect(optionValues(granule.amountUnit)).not.toContain('tsp');
+    // The dry rows keep their weights.
+    expect(optionValues(granule.amountUnit)).toEqual(expect.arrayContaining(['oz', 'g', 'lb']));
+  });
+
   it('sends a tsp amount as fl oz and every other amount as entered', async () => {
     setWidth(width);
     const onSubmit = await mount(PEST_VISIT, [SUPERTHRIVE, GEL]);
@@ -249,6 +267,30 @@ describe.each(LAYOUTS)('Complete Service form, %s layout', (_layout, width) => {
       productId: GEL.id, rate: 0.2, rateUnit: 'g/spot', totalAmount: 3, amountUnit: 'g',
     });
     expect(mlStrings(body)).toEqual([]);
+  });
+});
+
+// The injection record's dose is free text, so the closeout check refuses one
+// written in mL (the client mirror of tree-shrub-closeout.js on the server).
+describe('the Tree & Shrub injection dose', () => {
+  const doseBlocks = (dose) => treeShrubCloseoutBlocksClient({
+    closeout: {
+      injectionPerformed: true,
+      injectionRecord: {
+        plantSpecies: 'Sabal palm', sizeClassOrDbh: '12 in DBH', product: 'Palm-Jet Mg', dose,
+        numberOfPorts: 4, targetIssue: 'Magnesium deficiency', followUpDate: '2099-02-01',
+      },
+    },
+    productFlags: { missingActuals: [] },
+    servicePhotos: [], service: {}, customerRecap: '', notes: '', isIncompleteVisit: false,
+  }).filter((block) => block.field === 'injectionRecord.dose').map((block) => block.message);
+
+  it('is refused in mL and taken in tsp or fl oz', () => {
+    for (const dose of ['20 mL', '20ml', '5 cc', '2 milliliters']) {
+      expect(doseBlocks(dose)).toEqual(['Injection dose must be in tsp or fl oz, not mL.']);
+    }
+    for (const dose of ['½ fl oz', '4 tsp']) expect(doseBlocks(dose)).toEqual([]);
+    expect(doseBlocks('')).toEqual(['Injection record requires dose.']);
   });
 });
 

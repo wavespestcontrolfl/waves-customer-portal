@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TSP_PER_FL_OZ, isMlUnit, mlToFlOz, submittedAmount } from './measure-units';
+import { TSP_PER_FL_OZ, hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from './measure-units';
 
 // The truck measures every completion form shares (owner ruling 2026-09-27;
 // every service 2026-09-29): nothing a tech sees or enters is in mL.
@@ -66,3 +66,18 @@ describe('submittedAmount', () => {
     expect(submittedAmount('5.5', 'g')).toEqual({ totalAmount: 5.5, amountUnit: 'g' });
   });
 });
+
+describe('hasMlAmount', () => {
+  it('finds an amount written in mL in free text, such as an injection dose', () => {
+    for (const text of ['20 mL', '20ml', '20ML', '5 cc', '5cc', '2 milliliters', '1 millilitre', '10 mL per inch DBH', 'ml']) {
+      expect(hasMlAmount(text)).toBe(true);
+    }
+  });
+
+  it('leaves the truck measures and ordinary words alone', () => {
+    for (const text of ['½ fl oz', '4 tsp', '1.5 oz', '2 gal', 'accurate to the label', 'small', '', null, undefined]) {
+      expect(hasMlAmount(text)).toBe(false);
+    }
+  });
+});
+
