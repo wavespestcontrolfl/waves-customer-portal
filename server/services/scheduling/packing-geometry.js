@@ -96,37 +96,63 @@ async function loadPackingAnchors({ db, dateFrom, dateTo, excludeServiceIds = []
  * minutes to/from prev/next; `buffer` is the flat customer-facing turnaround
  * minutes (0 = no neighbour-buffer geometry, e.g. the gate off or a
  * staff/optimizer caller — both bounds degrade to the legacy drive-only
- * shape).
+ * shape). `prev` may additionally carry `arrivalMin` (A2's projected/graced
+ * actual arrival, never earlier than `rawStartMin`) and `hold` (a live
+ * estimate hold occupying `prev`'s slot) — both are plain pass-throughs to
+ * travel-gap.js's effectiveEndMinutes/paddingMinutesOf, so an anchor that
+ * never carries them behaves exactly as before.
  *
- * Returns { earliestStart, latestStart }, each null when that side has no
- * neighbour (nothing to bound against). Neither bound reflects the day's
- * open/close hours or "now" — a caller combines these with its own
- * dayOpen/dayClose/todayFloor as it already does.
+ * Returns { earliestStart, latestStart, arrivalFloor }, `earliestStart`/
+ * `latestStart` null when that side has no neighbour (nothing to bound
+ * against); `arrivalFloor` null only when `prev` is null. Neither bound
+ * reflects the day's open/close hours or "now" — a caller combines these
+ * with its own dayOpen/dayClose/todayFloor as it already does.
  *
- * earliestStart: prev's own credited effective end (+ drive + prev's own
+ * `arrivalFloor`: prev's own credited effective end (+ drive + prev's own
  * reduced buffer), floored at prev's RAW end — a candidate can never start
  * before prev's promised window truly closes, however much credit prev
- * carries (Codex r5 P1).
+ * carries (Codex r5 P1). This is today's (grace 0) `earliestStart`.
  *
- * latestStart: measured from the candidate's own credited effective end
+ * `earliestStart` (A5, `grace` > 0 only, owner ruling 2026-09-28): a
+ * self-serve caller may OFFER a grid start up to `grace` minutes BEFORE
+ * `arrivalFloor` — the tech may arrive up to that late relative to the
+ * offered start, which is exactly what the exact predicate (travelGapViolation,
+ * run downstream on every emitted hour) already accepts — floored at prev's
+ * RAW end (never overlapping prev's own promised window) and given NO grace
+ * at all when `prev` is a live hold (`prev.hold`, A6 — whoever holds a
+ * window first keeps the ordering strict). `grace` 0 makes this identical to
+ * `arrivalFloor`.
+ *
+ * `latestStart`: measured from the candidate's own credited effective end
  * against next's real, never-adjusted window start (+ drive + the
  * candidate's own reduced buffer), then capped at
  * next.rawStartMin - durationMinutes — the candidate's REAL (full-duration)
  * window can never reach next's raw start, however much credit the
- * candidate carries (Codex r4 P1).
+ * candidate carries (Codex r4 P1). When `grace` > 0 this is ADDITIONALLY
+ * sentinelled to -Infinity whenever the candidate's real (un-graced)
+ * arrival floor, run through its own full work and the drive/buffer to
+ * `next`, would already reach past next's raw start — a gap this genuinely
+ * tight can never hold the candidate's real timeline, however early an
+ * offer prints its start (A5); `grace` 0 never evaluates this sentinel.
  */
-function packedBounds({ prev, next, durationMinutes, expectedMinutes, driveIn = 0, driveOut = 0, buffer = 0 }) {
+function packedBounds({
+  prev, next, durationMinutes, expectedMinutes, driveIn = 0, driveOut = 0, buffer = 0, grace = 0,
+}) {
   const ownExpected = Number.isFinite(expectedMinutes) ? Math.min(expectedMinutes, durationMinutes) : durationMinutes;
 
   let earliestStart = null;
+  let arrivalFloor = null;
   if (prev) {
     const prevEntity = {
       startMin: prev.rawStartMin,
       endMin: prev.rawEndMin,
       expectedMinutes: prev.expectedEndMin - prev.rawStartMin,
+      arrivalMin: prev.arrivalMin,
     };
     const prevBuffer = Math.max(0, buffer - paddingMinutesOf(prevEntity));
-    earliestStart = Math.max(effectiveEndMinutes(prevEntity) + driveIn + prevBuffer, prev.rawEndMin);
+    arrivalFloor = Math.max(effectiveEndMinutes(prevEntity) + driveIn + prevBuffer, prev.rawEndMin);
+    const graceForPrev = prev.hold ? 0 : grace;
+    earliestStart = Math.max(arrivalFloor - graceForPrev, prev.rawEndMin);
   }
 
   let latestStart = null;
@@ -135,9 +161,12 @@ function packedBounds({ prev, next, durationMinutes, expectedMinutes, driveIn = 
     const nextBuffer = Math.max(0, buffer - paddingMinutesOf(candidateEntity));
     const latestEnd = next.rawStartMin - driveOut - nextBuffer;
     latestStart = Math.min(latestEnd - ownExpected, next.rawStartMin - durationMinutes);
+    if (grace > 0 && arrivalFloor != null && arrivalFloor + ownExpected + driveOut + nextBuffer > next.rawStartMin) {
+      latestStart = -Infinity;
+    }
   }
 
-  return { earliestStart, latestStart };
+  return { earliestStart, latestStart, arrivalFloor };
 }
 
 module.exports = { loadPackingAnchors, packedBounds };

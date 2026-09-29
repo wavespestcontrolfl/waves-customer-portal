@@ -64,9 +64,51 @@
  *     2026-08-25 (staff saves never block on conflicts), and the drive term
  *     there belongs to the route optimizer. `travel` is opt-in so every
  *     legacy probe stays byte-identical.
+ *
+ * Arrival grace (self-serve arrival-window lane, owner ruling 2026-09-28,
+ * dark until SELF_SERVE_ARRIVAL_GRACE_MINUTES is set): every customer
+ * surface still PROMISES the same 2-hour arrival window (ARRIVAL_WINDOW_
+ * MINUTES) it always has — a caller may now also accept a candidate the
+ * tech would arrive AT up to `candidate.graceMinutes` minutes late, instead
+ * of demanding it be free at the exact stored minute. Grace reaches this
+ * module ONLY as `candidate.graceMinutes` (selfServeArrivalGraceMinutes()
+ * below, read by the caller and stamped onto the candidate it builds) —
+ * this module never reads the env itself. `candidate.graceMinutes` falsy or
+ * 0 is BYTE-IDENTICAL to every check this file ran before this lane:
+ * effectiveEndMinutes/paddingMinutesOf only change when a stop carries an
+ * `arrivalMin` the caller set, and nothing sets one at grace 0
+ * (annotateProjectedArrivals is never even called by travelGapConflicts
+ * below). Rules, most restrictive first:
+ *   - A real overlap (raw window vs raw window) is NEVER graced (G3) — grace
+ *     only widens how much LATE ARRIVAL a non-overlapping neighbour tolerates,
+ *     never how much two promised windows may overlap.
+ *   - The EARLIER side of a pair (a candidate packed before a real stop, or a
+ *     stop before a graced candidate) stays STRICT — a self-serve booking
+ *     never makes another stop's arrival later than that stop's own promise
+ *     (owner decision 5; travelGapViolation's `candidateEarly` branch never
+ *     reads `graceMinutes`). Only the LATER side of a pair — the graced
+ *     candidate's own arrival, or a later candidate arriving after an
+ *     existing stop — may run up to `graceMinutes` late.
+ *   - A LIVE HOLD gets no grace on its own next-side check (A6/isHoldStop):
+ *     whichever customer reserved a window first always keeps it, because
+ *     the hold's own strict check against whoever comes after it is exactly
+ *     what the later, graced candidate must also clear — order decides who
+ *     gets an open slot, never who loses one they already hold.
+ *   - annotateProjectedArrivals projects that day's REAL stops (committed
+ *     rows + live holds) forward along the chain of required gaps — so a
+ *     second or third graced booking is measured from where the tech will
+ *     REALLY be (chained lateness), not from the first stop's stored,
+ *     never-adjusted end. travelGapConflicts only runs the projection when
+ *     `candidate.graceMinutes > 0`; its own before/after neighbour SELECTION
+ *     is unchanged (still latest-ending-before / earliest-starting-after /
+ *     tie / hold-shadow rules) — only how far along its route that
+ *     neighbour has actually gotten changes.
  */
 const { driveMin } = require('../auto-dispatch/geo');
 const { gateEnvValue } = require('../../config/feature-gates');
+const { ARRIVAL_WINDOW_MINUTES } = require('../../utils/sms-time-format');
+const { etDateString } = require('../../utils/datetime-et');
+const logger = require('../logger');
 
 const DEFAULT_TRAVEL_BUFFER_MINUTES = 15;
 
@@ -92,6 +134,33 @@ function customerFacingBufferMinutes() {
   return travelGapEnabled() ? travelBufferMinutes() : 0;
 }
 
+// SELF_SERVE_ARRIVAL_GRACE_MINUTES (A1, owner ruling 2026-09-28) — how many
+// minutes past a candidate's stored start a self-serve surface may accept
+// the tech actually arriving. Read AT CALL TIME by every caller, never
+// cached: blank/unset/garbage/negative -> 0 (dark — this lane's own kill
+// switch, no GATE_* needed); a value above ARRIVAL_WINDOW_MINUTES (120, the
+// promised arrival window every surface quotes) is clamped down to it with
+// one warning, since grace can never exceed the promise it rides inside.
+// `date` (an ET 'YYYY-MM-DD') forces 0 when it is TODAY (owner decision 2:
+// legacy mode has no live-route-state signal for same-day, so it never adds
+// slack on top of it) — one obvious switch point if that is ever revisited.
+// Callers with no single date (a multi-date find-time sweep) omit `date` and
+// zero out today's OWN candidates themselves (see find-time.js), so this
+// reader still returns the raw configured value for them.
+function selfServeArrivalGraceMinutes({ date } = {}) {
+  const raw = process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
+  if (raw == null || String(raw).trim() === '') return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  let minutes = Math.round(n);
+  if (minutes > ARRIVAL_WINDOW_MINUTES) {
+    logger.warn(`[travel-gap] SELF_SERVE_ARRIVAL_GRACE_MINUTES=${raw} exceeds the ${ARRIVAL_WINDOW_MINUTES}-minute arrival promise — clamped`);
+    minutes = ARRIVAL_WINDOW_MINUTES;
+  }
+  if (date && String(date).slice(0, 10) === etDateString()) return 0;
+  return minutes;
+}
+
 function coordsOf(point) {
   if (!point) return null;
   const lat = point.lat != null ? Number(point.lat) : NaN;
@@ -111,13 +180,23 @@ function windowMinutesOf(entity) {
 // Minutes of slack inside an entity's own window that its expected service
 // time doesn't use — this is what "absorbs" the travel buffer (owner ruling
 // 2026-09-23). No window/expected data -> 0 (no credit, legacy gap).
+// Arrival grace (A2): an entity carrying `arrivalMin` later than its own
+// `startMin` (a projected or graced late arrival) has already spent that
+// lateness out of its own window slack before any buffer credit — a stop
+// running late eats its OWN padding first, never manufactures extra buffer
+// credit for its neighbour. `arrivalMin` is only ever set by
+// annotateProjectedArrivals or a grace-aware caller; unset (every call site
+// at grace 0) makes this byte-identical to the formula above.
 function paddingMinutesOf(entity) {
   const windowMinutes = windowMinutesOf(entity);
   if (!Number.isFinite(windowMinutes)) return 0;
   const expected = Number.isFinite(entity?.expectedMinutes)
     ? Math.min(entity.expectedMinutes, windowMinutes)
     : windowMinutes;
-  return Math.max(0, windowMinutes - expected);
+  const lateness = Number.isFinite(entity?.arrivalMin) && Number.isFinite(entity?.startMin)
+    ? Math.max(0, entity.arrivalMin - entity.startMin)
+    : 0;
+  return Math.max(0, windowMinutes - expected - lateness);
 }
 
 // The entity whose window starts first — its own padding is what reduces
@@ -136,30 +215,49 @@ function requiredGapMinutes(a, b) {
   return driveMin(coordsOf(a), coordsOf(b)) + Math.max(0, travelBufferMinutes() - padding);
 }
 
-// A stop's effective end for the free-time measurement: window_start + its
-// (clamped) expected minutes. Real-overlap detection never uses this —
-// only the non-overlapping free-time gap.
+// A stop's effective end for the free-time measurement: its (arrival-aware)
+// start + its (clamped) expected minutes. Real-overlap detection never uses
+// this — only the non-overlapping free-time gap. Arrival grace (A2): when
+// the entity carries `arrivalMin` (a projected or graced actual arrival,
+// never earlier than `startMin`) the effective end is measured from THERE,
+// not from the stored `startMin` — a late-running stop's promised expected
+// minutes still apply, just starting from when the tech really got there.
+// `arrivalMin` unset (every call site at grace 0) is byte-identical to the
+// formula this file has always used.
 function effectiveEndMinutes(entity) {
   const windowMinutes = windowMinutesOf(entity);
   const expected = Number.isFinite(entity?.expectedMinutes) && Number.isFinite(windowMinutes)
     ? Math.min(entity.expectedMinutes, windowMinutes)
     : (windowMinutes ?? 0);
-  return entity.startMin + expected;
+  const base = Number.isFinite(entity?.arrivalMin) ? entity.arrivalMin : entity.startMin;
+  return base + expected;
 }
 
 /**
  * candidate / stop: { startMin, endMin, lat?, lng?, windowMinutes?,
- * expectedMinutes? } (minutes from midnight). Returns null when the pair is
- * fine, else { gapMin, requiredMin } — gapMin is the free time between the
- * two windows (negative on overlap). Gate-agnostic: callers decide via
- * travelGapEnabled()/violatesTravelGap.
+ * expectedMinutes?, graceMinutes?, arrivalMin? } (minutes from midnight).
+ * Returns null when the pair is fine, else { gapMin, requiredMin, lateMin? }
+ * — gapMin is the free time between the two windows (negative on overlap).
+ * Gate-agnostic: callers decide via travelGapEnabled()/violatesTravelGap.
+ *
+ * Arrival grace (A3, owner ruling 2026-09-28): `candidate.graceMinutes` (set
+ * by the caller from selfServeArrivalGraceMinutes(), never read here) only
+ * ever widens the LATER side of a non-overlapping pair — a candidate packed
+ * AFTER `stop` may accept arriving up to `graceMinutes` minutes past its own
+ * stored start, EXCEPT against a live hold (isHoldStop), which always gets
+ * the strict (0) allowance (A6 — the hold's own next-side check is already
+ * what the later candidate must clear, so ordering alone decides who keeps
+ * an open slot). The EARLIER side (decision 5: a self-serve booking never
+ * makes an existing stop's arrival later) and every real overlap (G3) never
+ * read `graceMinutes` at all. `graceMinutes` falsy/0 makes the "candidate
+ * later" branch byte-identical to the legacy gapMin < requiredMin check.
  */
 function travelGapViolation(candidate, stop) {
   if (!candidate || !stop) return null;
   if (![candidate.startMin, candidate.endMin, stop.startMin, stop.endMin].every(Number.isFinite)) return null;
   const requiredMin = requiredGapMinutes(candidate, stop);
-  // Real overlap (raw windows, never adjusted by expected minutes) — the
-  // exact legacy ternary, unconditionally a violation.
+  // Real overlap (raw windows, never adjusted by expected minutes or grace)
+  // — the exact legacy ternary, unconditionally a violation (G3).
   const realOverlap = candidate.startMin < stop.endMin && stop.startMin < candidate.endMin;
   if (realOverlap) {
     const gapMin = stop.startMin >= candidate.endMin
@@ -167,14 +265,27 @@ function travelGapViolation(candidate, stop) {
       : candidate.startMin - stop.endMin;
     return { gapMin, requiredMin };
   }
-  // No overlap: measure from the EARLIER side's effective (expected-minutes)
-  // end to the LATER side's real start — its window_start is a promise to
-  // whoever holds it and is never adjusted.
   const candidateEarly = candidate.endMin <= stop.startMin;
-  const early = candidateEarly ? candidate : stop;
-  const late = candidateEarly ? stop : candidate;
-  const gapMin = late.startMin - effectiveEndMinutes(early);
-  return gapMin < requiredMin ? { gapMin, requiredMin } : null;
+  if (candidateEarly) {
+    // Candidate packed BEFORE stop: stop's window_start is a promise to
+    // whoever holds it and is never adjusted by the candidate's grace
+    // (decision 5) — strict, measured from the candidate's own projected/
+    // graced arrival (effectiveEndMinutes reads candidate.arrivalMin when
+    // travelGapConflicts' pass 2 has set one; unset = candidate.startMin,
+    // byte-identical to before).
+    const gapMin = stop.startMin - effectiveEndMinutes(candidate);
+    return gapMin < requiredMin ? { gapMin, requiredMin } : null;
+  }
+  // Candidate packed AFTER stop: how late the candidate would really arrive
+  // (A) is measured from the stop's own effective — or, once annotated,
+  // PROJECTED — end, floored at the candidate's own stored start (never
+  // earlier than promised). `lateMin` is how much of that the candidate
+  // must absorb; a violation only when it exceeds what this pair allows.
+  const A = Math.max(candidate.startMin, effectiveEndMinutes(stop) + requiredMin);
+  const lateMin = A - candidate.startMin;
+  const gapMin = candidate.startMin - effectiveEndMinutes(stop);
+  const allowed = isHoldStop(stop) ? 0 : (candidate.graceMinutes || 0);
+  return lateMin > allowed ? { gapMin, requiredMin, lateMin } : null;
 }
 
 function windowsOverlap(a, b) {
@@ -195,6 +306,38 @@ function isHoldStop(stop) {
 }
 
 /**
+ * A2 — the cascade fix. Sorts `stops` (that day's real rows: committed
+ * visits AND live holds, whatever set the caller already has — never the
+ * candidate itself) by `startMin` and walks the chain forward:
+ *   arrivalMin_i = max(startMin_i, effectiveEndMinutes(stop_{i-1}) +
+ *     requiredGapMinutes(stop_{i-1}, stop_i))
+ * — the first stop is on time (no prior neighbour). Each returned copy
+ * carries `arrivalMin`, which effectiveEndMinutes/paddingMinutesOf above
+ * then read for THAT stop's own effective end and padding, so a second or
+ * third graced booking is measured from where the tech will REALLY be
+ * (chained lateness through the day), not from a stop's stored, never-
+ * adjusted end. The HQ start/end legs are never real stops and must not be
+ * passed in here (find-time.js's toPackingBoundAnchor never builds one for
+ * them). A coordless leg still gets a buffer-only required gap (driveMin's
+ * own fail-open), so it neither vanishes from nor short-circuits the chain.
+ * Callers that never see a graced candidate never call this at all
+ * (travelGapConflicts below gates it on `candidate.graceMinutes > 0`), so a
+ * stop's `arrivalMin` is never set at grace 0 — byte-identical.
+ */
+function annotateProjectedArrivals(stops) {
+  const sorted = [...stops].sort((a, b) => a.startMin - b.startMin);
+  let prev = null;
+  return sorted.map((stop) => {
+    const arrivalMin = prev
+      ? Math.max(stop.startMin, effectiveEndMinutes(prev) + requiredGapMinutes(prev, stop))
+      : stop.startMin;
+    const annotated = { ...stop, arrivalMin };
+    prev = annotated;
+    return annotated;
+  });
+}
+
+/**
  * The stops a candidate fails against, in the order given: every overlapping
  * stop (reason 'overlap'), plus — of the non-overlapping stops — ONLY the
  * immediate COMMITTED route neighbours (latest-ending before, earliest-
@@ -202,18 +345,37 @@ function isHoldStop(stop) {
  * closer than the required gap (reason 'travel_gap'). See isHoldStop.
  * Gate-agnostic like travelGapViolation; malformed stops are skipped.
  * Returns [{ stop, reason }].
+ *
+ * Arrival grace (A4): neighbour SELECTION above is unchanged — only how far
+ * along its route a "before" neighbour has actually gotten, and therefore
+ * how late the candidate's own real arrival lands, changes. When
+ * `candidate.graceMinutes > 0`: pass 1 projects the whole day (A2) and
+ * folds every before-side neighbour (committed + live hold) into the
+ * candidate's own projected arrival `A` — the worst (latest) one wins, since
+ * that is genuinely when the tech gets there; pass 2 checks every after-side
+ * neighbour against `{...candidate, arrivalMin: A}`, so a graced candidate
+ * can never itself push a later stop's arrival past ITS OWN strict promise
+ * (decision 5 — travelGapViolation's candidateEarly branch never reads
+ * grace). At `graceMinutes` 0 (or unset) neither pass runs: every neighbour
+ * is checked against the plain `candidate`, in the exact original
+ * before/after/hold order — byte-identical to the pre-grace code path.
  */
-function travelGapConflicts(candidate, stops) {
-  if (!candidate || ![candidate.startMin, candidate.endMin].every(Number.isFinite)) return [];
-  if (!Array.isArray(stops) || stops.length === 0) return [];
+// Classifies `stops` against `candidate` into the shapes travelGapConflicts
+// needs: every real overlap, every valid (finite-window) stop for the A2
+// projection, and the immediate committed neighbours (latest-ending before /
+// earliest-starting after, ties included) plus any live hold that could
+// become one (GH codex #3803 r4 P2 — a hold behind a committed stop is
+// never adjacent). Pulled out of travelGapConflicts to keep its own
+// branching to the grace-projection decision alone.
+function classifyStopsAroundCandidate(candidate, stops) {
   const overlaps = [];
   const holds = [];
-  // Every stop tied at the boundary is a neighbour (two legacy rows ending
-  // at the same minute: the farther one still sets the gap).
+  const validStops = [];
   let before = [];
   let after = [];
   for (const stop of stops) {
     if (!stop || ![stop.startMin, stop.endMin].every(Number.isFinite)) continue;
+    validStops.push(stop);
     if (windowsOverlap(candidate, stop)) {
       overlaps.push({ stop, reason: 'overlap' });
     } else if (isHoldStop(stop)) {
@@ -227,16 +389,56 @@ function travelGapConflicts(candidate, stops) {
       after.push(stop);
     }
   }
-  // A hold counts only where it COULD become the immediate neighbour: on a
-  // side with no committed stop, or sitting between the committed neighbour
-  // and the candidate. A hold behind a committed stop is never adjacent,
-  // expired or graduated (GH codex #3803 r4 P2).
   const liveNeighbourHolds = holds.filter((hold) => (hold.endMin <= candidate.startMin
     ? !before.length || hold.endMin > before[0].endMin
     : !after.length || hold.startMin < after[0].startMin));
+  return {
+    overlaps, validStops, before, after, liveNeighbourHolds,
+  };
+}
+
+// A2/A4 — the grace projection, isolated from travelGapConflicts' own
+// neighbour-selection branching. Returns `annotate` (a stop -> its
+// projected-arrival copy, identity when grace is 0) and
+// `candidateForAfterSide` (the candidate with its own real arrival folded
+// in from every before-side neighbour, unchanged when grace is 0 or there
+// is no before-side neighbour at all) — see travelGapConflicts' own header
+// for the full rule.
+function projectGraceForCandidate(candidate, { validStops, before, liveNeighbourHolds }) {
+  if (!(candidate.graceMinutes > 0)) return { annotate: (stop) => stop, candidateForAfterSide: candidate };
+  const projected = annotateProjectedArrivals(validStops);
+  // annotateProjectedArrivals sorts its own copy of validStops (same array,
+  // same comparator -> Array#sort's stability guarantees the same order
+  // both times), so index i of that sort is exactly stop i here.
+  const sortedOriginals = [...validStops].sort((a, b) => a.startMin - b.startMin);
+  const byOriginal = new Map(sortedOriginals.map((stop, i) => [stop, projected[i]]));
+  const annotate = (stop) => byOriginal.get(stop) || stop;
+  const beforeSide = [...before, ...liveNeighbourHolds.filter((hold) => hold.endMin <= candidate.startMin)];
+  if (!beforeSide.length) return { annotate, candidateForAfterSide: candidate };
+  const arrival = beforeSide.reduce((acc, stop) => {
+    const annotated = annotate(stop);
+    return Math.max(acc, effectiveEndMinutes(annotated) + requiredGapMinutes(annotated, candidate));
+  }, candidate.startMin);
+  return { annotate, candidateForAfterSide: { ...candidate, arrivalMin: arrival } };
+}
+
+function travelGapConflicts(candidate, stops) {
+  if (!candidate || ![candidate.startMin, candidate.endMin].every(Number.isFinite)) return [];
+  if (!Array.isArray(stops) || stops.length === 0) return [];
+  const {
+    overlaps, validStops, before, after, liveNeighbourHolds,
+  } = classifyStopsAroundCandidate(candidate, stops);
+  // A2/A4 — projected only for a candidate that can actually accept
+  // lateness; `annotate`/`candidateForAfterSide` stay identity/unchanged
+  // otherwise, so the loop below is the legacy single-pass check at grace 0.
+  const { annotate, candidateForAfterSide } = projectGraceForCandidate(
+    candidate, { validStops, before, liveNeighbourHolds },
+  );
   const neighbours = [];
   for (const stop of [...before, ...after, ...liveNeighbourHolds]) {
-    if (travelGapViolation(candidate, stop)) neighbours.push({ stop, reason: 'travel_gap' });
+    const isBeforeSide = stop.endMin <= candidate.startMin;
+    const evalCandidate = isBeforeSide ? candidate : candidateForAfterSide;
+    if (travelGapViolation(evalCandidate, annotate(stop))) neighbours.push({ stop, reason: 'travel_gap' });
   }
   return overlaps.concat(neighbours);
 }
@@ -301,9 +503,11 @@ module.exports = {
   travelGapEnabled,
   travelBufferMinutes,
   customerFacingBufferMinutes,
+  selfServeArrivalGraceMinutes,
   requiredGapMinutes,
   travelGapViolation,
   travelGapConflicts,
+  annotateProjectedArrivals,
   isHoldStop,
   violatesTravelGap,
   resolveStopCoords,

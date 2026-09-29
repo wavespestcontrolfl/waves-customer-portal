@@ -14,13 +14,18 @@ const { clearExpectedServiceMinutesCache } = require('../services/scheduling/exp
 const {
   DEFAULT_TRAVEL_BUFFER_MINUTES, travelBufferMinutes, requiredGapMinutes,
   travelGapViolation, travelGapConflicts, violatesTravelGap, resolveStopCoords,
+  selfServeArrivalGraceMinutes, annotateProjectedArrivals,
 } = travelGap;
 
 // Candidate (Palmetto) → neighbour (Bradenton): ~11.7 straight-line miles.
 const PALMETTO = { lat: 27.545, lng: -82.545 };
 const BRADENTON = { lat: 27.425, lng: -82.410 };
+// Real Adam route pair from the arrival-grace plan's golden table (verified
+// against the live driveMin model: lawn -> Canyon Creek = 11 modeled min).
+const LAWN = { lat: 27.552283, lng: -82.391734 };
+const CANYON_CREEK = { lat: 27.5901921, lng: -82.4392561 };
 
-const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
+const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION', 'SELF_SERVE_ARRIVAL_GRACE_MINUTES'];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 beforeEach(() => {
@@ -310,5 +315,210 @@ describe('resolveStopCoords', () => {
     db.mockImplementation(() => { throw new Error('boom'); });
     expect(await resolveStopCoords(db, 'svc-1')).toEqual({ lat: null, lng: null });
     expect(await resolveStopCoords(db, null)).toEqual({ lat: null, lng: null });
+  });
+});
+
+describe('selfServeArrivalGraceMinutes (SELF_SERVE_ARRIVAL_GRACE_MINUTES, A1)', () => {
+  const { etDateString } = require('../utils/datetime-et');
+
+  test('unset/blank/garbage/negative -> 0; a clean value passes through', () => {
+    expect(selfServeArrivalGraceMinutes()).toBe(0);
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '';
+    expect(selfServeArrivalGraceMinutes()).toBe(0);
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = 'abc';
+    expect(selfServeArrivalGraceMinutes()).toBe(0);
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '-5';
+    expect(selfServeArrivalGraceMinutes()).toBe(0);
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
+    expect(selfServeArrivalGraceMinutes()).toBe(90);
+  });
+
+  test('clamps above the 120-minute arrival promise, with one warning', () => {
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '200';
+    expect(selfServeArrivalGraceMinutes()).toBe(120);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  test('returns 0 for today (ET) regardless of the configured value; a future date passes through', () => {
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
+    expect(selfServeArrivalGraceMinutes({ date: etDateString() })).toBe(0);
+    expect(selfServeArrivalGraceMinutes({ date: '2099-01-01' })).toBe(90);
+  });
+
+  test('no date given (multi-date caller) returns the raw configured value — the caller zeros today itself', () => {
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
+    expect(selfServeArrivalGraceMinutes({})).toBe(90);
+    expect(selfServeArrivalGraceMinutes()).toBe(90);
+  });
+
+  test('read at call time, not cached', () => {
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '30';
+    expect(selfServeArrivalGraceMinutes()).toBe(30);
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '60';
+    expect(selfServeArrivalGraceMinutes()).toBe(60);
+    delete process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
+    expect(selfServeArrivalGraceMinutes()).toBe(0);
+  });
+});
+
+describe('annotateProjectedArrivals (A2 — the cascade fix)', () => {
+  test('an isolated stop is on time; a chain of back-to-back stops compounds lateness forward', () => {
+    // Three coordless (buffer-only) stops, default 15-min buffer, no padding
+    // on any of them (windowMinutes === expectedMinutes) — each leg's
+    // required gap is a clean 15.
+    const A = { id: 'A', startMin: 0, endMin: 50, windowMinutes: 50, expectedMinutes: 50 };
+    const B = { id: 'B', startMin: 60, endMin: 110, windowMinutes: 50, expectedMinutes: 50 };
+    const C = { id: 'C', startMin: 120, endMin: 170, windowMinutes: 50, expectedMinutes: 50 };
+    const out = annotateProjectedArrivals([A, B, C]).map((s) => ({ id: s.id, arrivalMin: s.arrivalMin }));
+    // A: no prior neighbour -> on time.
+    // B: A effectively ends at 50; +15 required = 65 > B's own 60 start -> 5 min late.
+    // C: B (late) effectively ends at 65+50=115; +15 required = 130 > C's own
+    //    120 start -> 10 min late — B's OWN 5 minutes of lateness compounds
+    //    into a full 10 for C, not the 5 a first-stop-only model would give.
+    expect(out).toEqual([{ id: 'A', arrivalMin: 0 }, { id: 'B', arrivalMin: 65 }, { id: 'C', arrivalMin: 130 }]);
+  });
+
+  test('input order does not matter — the chain always sorts by start first', () => {
+    const A = { id: 'A', startMin: 0, endMin: 50, windowMinutes: 50, expectedMinutes: 50 };
+    const B = { id: 'B', startMin: 60, endMin: 110, windowMinutes: 50, expectedMinutes: 50 };
+    const C = { id: 'C', startMin: 120, endMin: 170, windowMinutes: 50, expectedMinutes: 50 };
+    expect(annotateProjectedArrivals([C, A, B]).map((s) => s.arrivalMin)).toEqual([0, 65, 130]);
+  });
+
+  test('a coordless stop stays buffer-only (fail-open) inside the chain', () => {
+    const A = { id: 'A', startMin: 0, endMin: 50, windowMinutes: 50, expectedMinutes: 50, lat: null, lng: null };
+    const B = { id: 'B', startMin: 55, endMin: 100, windowMinutes: 45, expectedMinutes: 45, lat: null, lng: null };
+    // required(A,B) = 0 drive + 15 buffer = 15; A ends at 50, so B's real
+    // arrival floors at 65, 10 minutes past its own 55 start.
+    expect(annotateProjectedArrivals([A, B])[1].arrivalMin).toBe(65);
+  });
+});
+
+describe('arrival grace — travelGapViolation (A3/A6)', () => {
+  // The plan's own G1 "live miss": Adam's real lawn stop (10:00-11:00, 50
+  // expected minutes of a 60-min window) followed by a Canyon Creek estimate
+  // candidate (11:00-11:30) — required 16 (11 modeled drive + 5 of buffer
+  // left after lawn's own 10 minutes of padding), gap 10, so 6 minutes late.
+  const lawnStop = { startMin: 600, endMin: 660, windowMinutes: 60, expectedMinutes: 50, ...LAWN };
+  const ccCandidate = (graceMinutes) => ({
+    startMin: 660, endMin: 690, windowMinutes: 30, expectedMinutes: 30, ...CANYON_CREEK, graceMinutes,
+  });
+
+  test('G1 — hidden at grace 0, offered (6 min late) at grace 90', () => {
+    expect(requiredGapMinutes(lawnStop, ccCandidate(0))).toBe(16);
+    const refused = travelGapViolation(ccCandidate(0), lawnStop);
+    expect(refused).toEqual({ gapMin: 10, requiredMin: 16, lateMin: 6 });
+    expect(travelGapViolation(ccCandidate(90), lawnStop)).toBeNull();
+  });
+
+  test('boundary inclusive: late == grace passes, late == grace + 1 refuses', () => {
+    const prev = { startMin: 600, endMin: 660, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+    const cand = (grace) => ({ startMin: 660, endMin: 690, windowMinutes: 30, expectedMinutes: 30, lat: null, lng: null, graceMinutes: grace });
+    // required = 0 drive + 15 buffer (no padding either side); candidate
+    // starts exactly when prev ends -> lateMin === requiredMin === 15.
+    expect(travelGapViolation(cand(15), prev)).toBeNull();
+    expect(travelGapViolation(cand(14), prev)).toEqual({ gapMin: 0, requiredMin: 15, lateMin: 15 });
+  });
+
+  test('G3 — a real overlap is never graced, however large graceMinutes is', () => {
+    const overlapping = { startMin: 630, endMin: 660, windowMinutes: 30, expectedMinutes: 30, ...LAWN, graceMinutes: 999 };
+    const v = travelGapViolation(overlapping, lawnStop);
+    expect(v).not.toBeNull();
+    expect(v.gapMin).toBeLessThan(0);
+    expect(v.lateMin).toBeUndefined();
+  });
+
+  test('decision 5 — the EARLIER side never reads grace: a candidate packed before a stop stays strict', () => {
+    const stop = { startMin: 720, endMin: 780, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+    // Candidate ends exactly at requiredMin free time; graceMinutes on the
+    // candidate must not rescue a candidate that is genuinely too close to
+    // the stop AFTER it (the stop's own promise is not the candidate's to spend).
+    const tooClose = { startMin: 600, endMin: 706, windowMinutes: 106, expectedMinutes: 106, lat: null, lng: null, graceMinutes: 999 };
+    expect(travelGapViolation(tooClose, stop)).toEqual({ gapMin: 14, requiredMin: 15 });
+  });
+
+  test('A6 — a live hold gets no grace on its own next-side check', () => {
+    const hold = { startMin: 600, endMin: 660, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null, hold: true };
+    const late = { startMin: 660, endMin: 690, windowMinutes: 30, expectedMinutes: 30, lat: null, lng: null, graceMinutes: 90 };
+    // Candidate starts exactly when the hold ends -> 15 min "late" against
+    // the 15-min buffer-only required gap; grace 90 would normally clear it,
+    // but a hold always demands the strict (0) allowance.
+    expect(travelGapViolation(late, hold)).toEqual({ gapMin: 0, requiredMin: 15, lateMin: 15 });
+    // The identical committed (non-hold) stop is graced normally.
+    expect(travelGapViolation(late, { ...hold, hold: false })).toBeNull();
+  });
+});
+
+describe('arrival grace — travelGapConflicts (A4 — projection through the day)', () => {
+  const lawnStop = { id: 'lawn', startMin: 600, endMin: 660, windowMinutes: 60, expectedMinutes: 50, ...LAWN };
+  const ccCandidate = (graceMinutes) => ({
+    startMin: 660, endMin: 690, windowMinutes: 30, expectedMinutes: 30, ...CANYON_CREEK, graceMinutes,
+  });
+
+  beforeEach(() => { process.env.SLOT_TRAVEL_BUFFER_MINUTES = '25'; });
+
+  test('G1 via travelGapConflicts: hidden at grace 0, offered at grace 90', () => {
+    expect(travelGapConflicts(ccCandidate(0), [lawnStop]).map((c) => c.reason)).toEqual(['travel_gap']);
+    expect(travelGapConflicts(ccCandidate(90), [lawnStop])).toEqual([]);
+  });
+
+  test('G4/G5 — the AFTER side is measured from the candidate\'s own PROJECTED arrival, not its nominal window', () => {
+    // A naive (unprojected) check would measure the candidate's own window
+    // end (11:30) against `next` and wrongly pass a gap the tech's real
+    // (6-minutes-late) arrival cannot actually clear.
+    const nextTooSoon = { id: 'next', startMin: 720, endMin: 780, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null }; // 12:00-13:00
+    const conflicts = travelGapConflicts(ccCandidate(90), [lawnStop, nextTooSoon]);
+    expect(conflicts.map((c) => [c.stop.id, c.reason])).toEqual([['next', 'travel_gap']]);
+    // G5 — a next stop 30 minutes later clears even the projected arrival.
+    const nextFine = { ...nextTooSoon, id: 'next-fine', startMin: 750, endMin: 810 }; // 12:30-13:30
+    expect(travelGapConflicts(ccCandidate(90), [lawnStop, nextFine])).toEqual([]);
+  });
+
+  test('the before-neighbour selection itself is unchanged — only when it is done changes', () => {
+    // A far-earlier stop and lawn (the true immediate neighbour) both
+    // precede the candidate; only lawn is ever measured, exactly like the
+    // pre-grace neighbours-only rule.
+    const farEarlier = { id: 'far', startMin: 0, endMin: 60, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+    expect(travelGapConflicts(ccCandidate(90), [farEarlier, lawnStop]).map((c) => c.stop.id)).toEqual([]);
+  });
+});
+
+describe('arrival grace — cascade / ordering (G9-G12 shapes)', () => {
+  beforeEach(() => { process.env.SLOT_TRAVEL_BUFFER_MINUTES = '40'; });
+
+  test('G9/G10 — a live hold ahead of a graced /book candidate is measured strictly; ordering alone decides who keeps the slot', () => {
+    const holdX = { id: 'X', startMin: 660, endMin: 690, windowMinutes: 30, expectedMinutes: 30, lat: null, lng: null, hold: true }; // 11:00-11:30
+    const candidateY = { startMin: 720, endMin: 780, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null, graceMinutes: 90 }; // 12:00-13:00
+    // required(X,Y) = 40 (buffer-only); gap = 720-690 = 30 < 40 -> refused,
+    // even though Y's own grace is 90 — a live hold gets none (A6).
+    expect(travelGapConflicts(candidateY, [holdX]).map((c) => c.reason)).toEqual(['travel_gap']);
+
+    // Reverse the order: Y is now the COMMITTED stop; X (a fresh candidate,
+    // whatever its own grace) is measured on ITS next side, which is always
+    // strict (decision 5) — it is refused for not fitting before Y, exactly
+    // as before this lane existed.
+    const committedY = { id: 'Y', startMin: 720, endMin: 780, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+    const freshX = { startMin: 660, endMin: 690, windowMinutes: 30, expectedMinutes: 30, lat: null, lng: null, graceMinutes: 90 };
+    expect(travelGapConflicts(freshX, [committedY]).map((c) => c.reason)).toEqual(['travel_gap']);
+  });
+
+  test('G11/G12 shape — a chain of graced bookings is measured from where the tech will REALLY be, catching lateness a single-hop check would miss', () => {
+    const A = { id: 'A', startMin: 600, endMin: 650, windowMinutes: 50, expectedMinutes: 50, lat: null, lng: null }; // 10:00
+    const B = { id: 'B', startMin: 660, endMin: 710, windowMinutes: 50, expectedMinutes: 50, lat: null, lng: null }; // 11:00
+    const C = { id: 'C', startMin: 720, endMin: 770, windowMinutes: 50, expectedMinutes: 50, lat: null, lng: null }; // 12:00
+    // annotateProjectedArrivals: A on time; B's required gap from A is 40 ->
+    // 650+40=690 > B's own 660 start -> B arrives 30 late; C's required gap
+    // from (late) B is 40 -> (690+50)+40=780 > C's own 720 start -> C would
+    // arrive 60 late — the compounded lateness, not the 30 a fresh
+    // measurement against C's OWN stored (never-late) start would show.
+    const D = (grace) => ({ startMin: 780, endMin: 810, windowMinutes: 30, expectedMinutes: 30, lat: null, lng: null, graceMinutes: grace }); // 13:00, after C
+    // required(C,D) = 40; measured from C's real (projected, 60-late)
+    // effective end (720+60+50=830) the free time is 780-830 = -50 (already
+    // overlapping the promise), so D needs at least 50 + 40 = 90 minutes of
+    // grace headroom just to clear the chain, not the naive 40 - (780-770)=30.
+    expect(travelGapConflicts(D(89), [A, B, C]).map((c) => c.reason)).toEqual(['travel_gap']);
+    expect(travelGapConflicts(D(90), [A, B, C])).toEqual([]);
   });
 });

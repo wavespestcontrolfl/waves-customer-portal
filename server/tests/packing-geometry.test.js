@@ -133,10 +133,11 @@ describe('packedBounds', () => {
   test('prev/next null (HQ leg, day edge) returns null for that side only', () => {
     const next = anchor(720, 780, 720);
     const boundsNoNeighbours = packedBounds({ prev: null, next: null, durationMinutes: 60 });
-    expect(boundsNoNeighbours).toEqual({ earliestStart: null, latestStart: null });
+    expect(boundsNoNeighbours).toEqual({ earliestStart: null, latestStart: null, arrivalFloor: null });
     const boundsNextOnly = packedBounds({ prev: null, next, durationMinutes: 60 });
     expect(boundsNextOnly.earliestStart).toBeNull();
     expect(boundsNextOnly.latestStart).not.toBeNull();
+    expect(boundsNextOnly.arrivalFloor).toBeNull();
   });
 
   test('expectedMinutes greater than durationMinutes is clamped, never manufacturing negative padding', () => {
@@ -144,5 +145,67 @@ describe('packedBounds', () => {
     const { latestStart } = packedBounds({ next, prev: null, durationMinutes: 60, expectedMinutes: 999, buffer: 15 });
     // ownExpected clamped to 60 -> padding 0 -> nextBuffer 15.
     expect(latestStart).toBe(Math.min(720 - 15 - 60, 720 - 60));
+  });
+
+  describe('arrival grace (A5, owner ruling 2026-09-28)', () => {
+    // The plan's own G1 shape: prev = lawn (600-660, expected 50 -> 10 min
+    // padding), driveIn 11, buffer 15 -> prevBuffer 5 -> arrivalFloor 666.
+    const lawnPrev = anchor(600, 660, 650);
+
+    test('grace shifts earliestStart below arrivalFloor (666 -> 660), never past prev.rawEndMin', () => {
+      const { earliestStart, arrivalFloor } = packedBounds({
+        prev: lawnPrev, next: null, durationMinutes: 30, expectedMinutes: 30, driveIn: 11, buffer: 15, grace: 90,
+      });
+      expect(arrivalFloor).toBe(666);
+      expect(earliestStart).toBe(660); // max(666-90, 660) = max(576,660)=660
+    });
+
+    test('grace 0 reproduces arrivalFloor exactly — no behavior change', () => {
+      const bounds0 = packedBounds({ prev: lawnPrev, next: null, durationMinutes: 30, expectedMinutes: 30, driveIn: 11, buffer: 15 });
+      const boundsGraceZero = packedBounds({
+        prev: lawnPrev, next: null, durationMinutes: 30, expectedMinutes: 30, driveIn: 11, buffer: 15, grace: 0,
+      });
+      expect(bounds0).toEqual({ earliestStart: 666, latestStart: null, arrivalFloor: 666 });
+      expect(boundsGraceZero).toEqual(bounds0);
+    });
+
+    test('earliestStart never drops below prev.rawEndMin, however large grace is', () => {
+      const { earliestStart } = packedBounds({
+        prev: lawnPrev, next: null, durationMinutes: 30, expectedMinutes: 30, driveIn: 11, buffer: 15, grace: 999,
+      });
+      expect(earliestStart).toBe(660); // prev.rawEndMin
+    });
+
+    test('A6 — a live hold on prev gets NO grace at all', () => {
+      const heldPrev = { ...lawnPrev, hold: true };
+      const { earliestStart, arrivalFloor } = packedBounds({
+        prev: heldPrev, next: null, durationMinutes: 30, expectedMinutes: 30, driveIn: 11, buffer: 15, grace: 90,
+      });
+      expect(earliestStart).toBe(arrivalFloor); // no reduction — same as grace 0
+    });
+
+    test('an arrivalMin already on prev (chained projection) shifts arrivalFloor forward', () => {
+      // prev's OWN arrival was projected 20 minutes late (e.g. by
+      // annotateProjectedArrivals upstream) — its effective end and this
+      // gap's arrivalFloor both move with it.
+      const lateArrivalPrev = { ...lawnPrev, arrivalMin: lawnPrev.rawStartMin + 20 };
+      const { arrivalFloor } = packedBounds({
+        prev: lateArrivalPrev, next: null, durationMinutes: 30, expectedMinutes: 30, driveIn: 11, buffer: 15, grace: 90,
+      });
+      // effectiveEnd now 620+50=... base=arrivalMin(620)+expected(50)=670 (vs 650 unshifted) -> arrivalFloor = max(670+11+prevBuffer,660).
+      expect(arrivalFloor).toBeGreaterThan(666);
+    });
+
+    test('sentinel: latestStart goes to -Infinity ONLY when grace > 0 and the real (un-graced) timeline cannot clear next', () => {
+      // Candidate's real work (arrivalFloor + ownExpected + driveOut + nextBuffer)
+      // would land past next's raw start — genuinely no room in this gap.
+      const next = anchor(700, 760, 700); // next starts at 700 (11:40)
+      const tightArgs = {
+        prev: lawnPrev, next, durationMinutes: 30, expectedMinutes: 30, driveIn: 11, driveOut: 5, buffer: 15,
+      };
+      // arrivalFloor 666 + ownExpected 30 + driveOut 5 + nextBuffer(15) = 716 > 700 -> infeasible gap.
+      expect(packedBounds({ ...tightArgs, grace: 0 }).latestStart).not.toBe(-Infinity);
+      expect(packedBounds({ ...tightArgs, grace: 90 }).latestStart).toBe(-Infinity);
+    });
   });
 });
