@@ -260,7 +260,9 @@ separately rejects a written-estimate delivery promise tied to a weekday, week-r
 phrase or numeric/spelled Spanish calendar date; a date that modifies when the estimate
 was requested remains historical context. Estimate-readiness promises such as "estará listo
 mañana" also count as turnaround timing, while preparing an estimate without a deadline
-does not supply the separate required delivery commitment.
+does not supply the separate required delivery commitment. A readiness time counts only in
+the readiness clause itself ("estará listo, mañana le llamaremos" is not one), and only a
+negation directly before the readiness wording denies it.
 
 Three scenarios carry natural-language privacy prohibitions: eta-third-party,
 third-party-neighbor and eta-recognised-redacted. Their named deterministic checks

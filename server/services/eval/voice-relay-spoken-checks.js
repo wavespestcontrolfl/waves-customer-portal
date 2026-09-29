@@ -1396,17 +1396,20 @@ const ESTIMATE_READY_STATE_SOURCE = '(?:list[oa]s?|preparad[oa]s?|terminad[oa]s?
 const ESTIMATE_READINESS_ES_SOURCE = `(?:(?:(?:estar[aá](?:n)?|quedar[aá](?:n)?|va(?:n|mos)?\\s+a\\s+estar)\\s+${ESTIMATE_READY_STATE_SOURCE})|(?:(?:tendr[eé]|tendr[aá]s?|tendremos|tendr[aá]n)\\s+(?:[a-záéíóúñü]+\\s+){0,3}?${ESTIMATE_READY_STATE_SOURCE}))`;
 const ESTIMATE_TIMING_PREDICATE_SOURCE = `(?:${ESTIMATE_DELIVERY_ES_SOURCE}|${ESTIMATE_READINESS_ES_SOURCE})`;
 const ESTIMATE_DELIVERY_DATE_SOURCE = `(?:el\\s+pr[oó]ximo\\s+)?(?:${WEEKDAYS})|(?:esta|la\\s+pr[oó]xima)\\s+semana|la\\s+semana\\s+(?:que\\s+viene|entrante)|(?:el\\s+)?(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')})`;
-const ESTIMATE_READINESS_TIME_SOURCE = `(?:${ESTIMATE_DELIVERY_DATE_SOURCE}|hoy|mañana|pasado\\s+mañana|esta\\s+(?:mañana|tarde|noche)|(?:en|dentro\\s+de)\\s+(?:\\d+|${DAY_WORDS_ES})\\s+(?:minutos?|horas?|d[ií]as?|semanas?))`;
 const ESTIMATE_DELIVERY_CLOCK_SOURCE = '(?:(?:(?:a|para)\\s+la\\s+una|(?:a|para|antes\\s+de)\\s+las\\s+(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce))(?:\\s+de\\s+la\\s+(?:mañana|tarde|noche))?|(?:al|a(?:\\s+la)?|para(?:\\s+(?:el|la))?|antes\\s+(?:del|de(?:\\s+la)?))\\s+(?:mediodía|medianoche)|(?:por|durante)\\s+la\\s+(?:mañana|tarde|noche))';
-const ESTIMATE_DELIVERY_CLAIM_SOURCE = `(?:${ESTIMATE_TIMING_PREDICATE_SOURCE}[^.!?;]{0,100}${ESTIMATE_NOUN_ES_RE.source}|${ESTIMATE_NOUN_ES_RE.source}[^.!?;]{0,100}${ESTIMATE_TIMING_PREDICATE_SOURCE})`;
+// Readiness is judged only by the clause-bound pass below, so it carries every
+// time form the delivery passes know.
+const ESTIMATE_READINESS_TIME_SOURCE = `(?:${ESTIMATE_DELIVERY_DATE_SOURCE}|hoy|mañana|pasado\\s+mañana|esta\\s+(?:mañana|tarde|noche)|(?:en|dentro\\s+de)\\s+(?:\\d+|${DAY_WORDS_ES})\\s+(?:minutos?|horas?|d[ií]as?|semanas?)|${ESTIMATE_DELIVERY_CLOCK_SOURCE}|${SPANISH_QUALITATIVE_VISIT_TIME_RE.source})`;
+const ESTIMATE_DELIVERY_CLAIM_SOURCE = `(?:${ESTIMATE_DELIVERY_ES_SOURCE}[^.!?;]{0,100}${ESTIMATE_NOUN_ES_RE.source}|${ESTIMATE_NOUN_ES_RE.source}[^.!?;]{0,100}${ESTIMATE_DELIVERY_ES_SOURCE})`;
 const ESTIMATE_DELIVERY_CLAIM_RE = new RegExp(ESTIMATE_DELIVERY_CLAIM_SOURCE, 'i');
 const ESTIMATE_DELIVERY_DATE_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'i');
 const ESTIMATE_DELIVERY_CLOCK_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_CLOCK_SOURCE})\\b`, 'i');
 const ESTIMATE_REQUEST_DATE_RE = new RegExp(`\\b(?:que\\s+)?(?:solicit|pid)\\w*\\b(?:(?!\\b${ESTIMATE_TIMING_PREDICATE_SOURCE}\\b)[^.!?;]){0,40}?\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'gi');
-const ASSERTED_ESTIMATE_DELIVERY_DATE_RE = new RegExp(`(?=[\\s\\S]*${ESTIMATE_NOUN_ES_RE.source})(?=[\\s\\S]*${ESTIMATE_TIMING_PREDICATE_SOURCE})(?=[\\s\\S]*(?:${ESTIMATE_DELIVERY_DATE_SOURCE}))`, 'i');
+const ASSERTED_ESTIMATE_DELIVERY_DATE_RE = new RegExp(`(?=[\\s\\S]*${ESTIMATE_NOUN_ES_RE.source})(?=[\\s\\S]*${ESTIMATE_DELIVERY_ES_SOURCE})(?=[\\s\\S]*(?:${ESTIMATE_DELIVERY_DATE_SOURCE}))`, 'i');
 const ASSERTED_ESTIMATE_DELIVERY_CLOCK_RE = new RegExp(`(?:${ESTIMATE_DELIVERY_CLAIM_SOURCE}[^.!?;]{0,80}${ESTIMATE_DELIVERY_CLOCK_SOURCE}|${ESTIMATE_DELIVERY_CLOCK_SOURCE}[^.!?;]{0,80}${ESTIMATE_DELIVERY_CLAIM_SOURCE})`, 'i');
-// Readiness wording only: a delivery verb tied to a time is the date, clock
-// and qualitative passes' job, which strip a request date first.
+// Readiness wording only: a send verb tied to a time is the date, clock and
+// qualitative passes' job. Those read the whole sentence, so readiness stays
+// out of them.
 const ESTIMATE_READINESS_CLAIM_SOURCE = `(?:${ESTIMATE_READINESS_ES_SOURCE}[^.!?;]{0,100}${ESTIMATE_NOUN_ES_RE.source}|${ESTIMATE_NOUN_ES_RE.source}[^.!?;]{0,100}${ESTIMATE_READINESS_ES_SOURCE}|(?:tendr[eé]|tendr[aá]s?|tendremos|tendr[aá]n)\\s+(?:[a-záéíóúñü]+\\s+){0,2}?${ESTIMATE_NOUN_ES_RE.source}\\s+${ESTIMATE_READY_STATE_SOURCE})`;
 const ESTIMATE_READINESS_CLAIM_RE = new RegExp(ESTIMATE_READINESS_CLAIM_SOURCE, 'i');
 // The time must belong to the readiness predicate itself: nothing that opens
