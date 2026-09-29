@@ -174,6 +174,7 @@ function AutoClosedList({ party, rows, canReopen, busyId, onReopen, hasMore, loa
             <span className="text-ink-primary">{whoLabel(row)}</span>
             <span className="text-ink-tertiary">· {KIND_LABEL[row.kind] || humanize(row.kind)}</span>
             <span className="text-ink-secondary">· {proofLabel(row)}</span>
+            {row.description && <span className="basis-full text-ink-primary">{row.description}</span>}
             {canReopen && (
               <Button size="sm" variant="ghost" disabled={busyId === row.id} onClick={() => onReopen(row)} className="ml-auto">Reopen</Button>
             )}

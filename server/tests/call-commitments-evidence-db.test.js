@@ -25,7 +25,7 @@ describe('PROMISE_EVIDENCE_CLOSE switch', () => {
   test('off, the new evidence is never looked up: a kind-other promise resolves to nothing without touching the database', async () => {
     const cc = require('../services/call-commitments');
     const conn = () => { throw new Error('no query expected'); };
-    const call = { id: 'c1', created_at: new Date('2026-09-01T14:00:00Z'), duration_seconds: 30, direction: 'inbound', from_phone: '+15555550100', customer_id: null };
+    const call = { id: 'c1', created_at: new Date('2026-09-01T14:00:00Z'), duration_seconds: 30, direction: 'inbound', from_phone: '+15555550100', customer_id: '00000000-0000-4000-8000-000000000001' };
     const other = { id: 'p1', party: 'waves', kind: 'other', human_state: null };
     process.env.PROMISE_EVIDENCE_CLOSE = 'off';
     expect(await cc.resolveFulfillment(conn, other, call)).toBeNull();
@@ -151,13 +151,9 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   };
 
   const CASES = [
-    ['other', 'a connected staff call to the caller', (w) => outboundCall(w), 'staff_call_to_caller_within_14_days', 'outbound_call'],
-    ['other', 'a human-typed text to the caller', (w) => staffText(w), 'staff_text_to_caller_within_14_days', 'sms_sent'],
-    ['other', 'a completed inbound call from the caller', (w) => inbound(w), 'completed_inbound_call_from_caller_within_14_days', 'inbound_call'],
     ['other', 'a visit booked for the customer', (w) => visit(w), 'visit_booked_for_same_customer_within_14_days', 'appointment_booked'],
     ['other', 'a visit completed for the customer', (w) => visit(w, { status: 'completed', completed_at: later(), created_at: new Date(Date.now() - 20 * DAY) }), 'visit_completed_for_same_customer_within_14_days', 'visit_completed'],
     ['other', 'an estimate sent to the customer', (w) => estimate(w), 'estimate_sent_to_same_customer_within_14_days', 'estimate_sent'],
-    ['callback', 'a completed inbound call from the caller', (w) => inbound(w), 'completed_inbound_call_from_caller_within_14_days', 'inbound_call'],
     ['callback', 'a visit booked for the customer', (w) => visit(w), 'visit_booked_for_same_customer_within_14_days', 'appointment_booked'],
     ['callback', 'an estimate sent to the customer', (w) => estimate(w), 'estimate_sent_to_same_customer_within_14_days', 'estimate_sent'],
     ['send_estimate', 'a visit booked for the customer', (w) => visit(w), 'visit_booked_for_same_customer_within_14_days', 'appointment_booked'],
@@ -187,30 +183,21 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(new Date(closed.fulfilled_at).getTime()).toBe(new Date(closed.fulfillment.matched_at).getTime());
   });
 
-  test('near-misses do not close: a voicemail, short or AI-only inbound call, a cancelled or generated visit, an unsent, foreign, self-addressed or longer-address email, before the call, after the window', async () => {
+  test('near-misses do not close: a cancelled or generated visit, a visit before the call or after the window, an unsent or foreign report, a staff email', async () => {
     const stayOpen = async (kind, seed) => {
       const w = await world({ kind });
       await seed(w);
       expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
       expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     };
-    await stayOpen('callback', (w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) }));
-    await stayOpen('callback', (w) => inbound(w, { duration_seconds: 40 }));
-    await stayOpen('callback', (w) => inbound(w, { call_outcome: 'ai_handled' }));
-    await stayOpen('callback', (w) => inbound(w, { status: 'no-answer' }));
-    await stayOpen('callback', (w) => inbound(w, { created_at: new Date(Date.now() - 3 * DAY - 60 * 1000) }));
-    await stayOpen('callback', (w) => inbound(w, { created_at: new Date(Date.now() - 3 * DAY + 15 * DAY) }));
+    await stayOpen('callback', (w) => visit(w, { created_at: new Date(Date.now() - 3 * DAY - 60 * 1000) }));
+    await stayOpen('callback', (w) => visit(w, { created_at: new Date(Date.now() - 3 * DAY + 15 * DAY) }));
     await stayOpen('other', (w) => visit(w, { status: 'cancelled' }));
     await stayOpen('other', async (w) => {
       const [parent] = await db('scheduled_services').insert({ scheduled_date: '2026-09-01', service_type: 'General Pest Control', status: 'completed', customer_id: w.customerId, created_at: new Date(Date.now() - 20 * DAY) }).returning('id');
       made.visitIds.push(parent.id);
       await visit(w, { recurring_parent_id: parent.id });
     });
-    // An outbound call a person did not place (the collections voice agent), one
-    // that reached voicemail, or one with no reviewed recording keeps nothing.
-    await stayOpen('other', (w) => outboundCall(w, { source: 'collections_voice' }));
-    await stayOpen('other', (w) => outboundCall(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) }));
-    await stayOpen('other', (w) => outboundCall(w, { v2_extraction_status: null }));
     // A staff email is not closing evidence: the Gmail sync links no customer to outbound mail.
     await stayOpen('callback', (w) => db('emails').insert({ gmail_id: `g-${w.n}`, gmail_thread_id: `t-${w.n}`, from_address: 'office@wavespestcontrol.com',
       to_address: w.email, label_ids: JSON.stringify(['SENT']), received_at: later() }).returning('id').then(([r]) => { made.emailIds.push(r.id); }));
@@ -231,18 +218,12 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     // Off the books is no appointment.
     await stayOpen('other', (w) => visit(w, { status: 'rescheduled' }));
     await stayOpen('other', (w) => visit(w, { status: 'skipped' }));
-    // A linked call is answered only by a call linked to the same customer (shared household number).
-    await stayOpen('callback', async (w) => {
-      const [other] = await db('customers').insert({ first_name: `Household${w.n}`, phone: w.phone }).returning('id');
-      made.customerIds.push(other.id);
-      await inbound(w, { customer_id: other.id });
-    });
     await stayOpen('send_estimate', (w) => visit(w, { status: 'completed', completed_at: new Date(Date.now() - 4 * DAY), created_at: new Date(Date.now() - 20 * DAY) }));
   });
 
   test('a callback whose card already placed a call never takes the new evidence (the card attempt early-return is kept)', async () => {
     const w = await world({ kind: 'callback' });
-    await inbound(w);
+    await visit(w);
     await db('call_log').insert({
       twilio_call_sid: `CA${'3'.repeat(24)}${w.n}ca`, direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, status: 'no-answer', duration_seconds: 5,
       created_at: later(5), metadata: JSON.stringify({ relatedCommitmentId: w.commitment.id }),
@@ -287,7 +268,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
 
   test('the stored proof is the EARLIEST follow-up across evidence types, not the first type looked up', async () => {
     const w = await world({ kind: 'other' });
-    await outboundCall(w, { created_at: later(2 * 24 * 60) }); // a staff call two days on (looked up first)
+    await visit(w, { created_at: later(2 * 24 * 60) }); // a visit booked two days on (looked up first)
     const quote = await estimate(w); // the quote that went out 30 minutes after the call
     await cc.refreshFulfillment(db, w.call.id);
     expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'estimate_sent', record_id: quote.id });
@@ -405,18 +386,18 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(await row(est.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
 
     // Callback under the card policy stays refreshable after a reopen, so the
-    // boundary does the work: the old inbound call cannot close it again, a newer one can.
+    // reopened card is the office's: the old visit cannot close it again, only the card's own direct proof can.
     const { gates } = require('../config/feature-gates');
     const gateWas = gates.callCommitments;
     gates.callCommitments = true;
     process.env.GATE_CALLBACK_CARD = 'true';
     try {
       const cb = await world({ kind: 'callback' });
-      await inbound(cb);
+      await visit(cb);
       await cc.refreshFulfillment(db, cb.call.id);
       expect((await row(cb.commitment.id)).status).toBe('fulfilled');
       await cc.applyHumanUpdate(db, cb.commitment.id, { action: 'reopen' });
-      // The reopened card is still refreshable (checked: 1), and the old call is before the renewal.
+      // The reopened card is still refreshable (checked: 1), but a person owns it now.
       expect(await cc.refreshFulfillment(db, cb.call.id)).toMatchObject({ checked: 1, fulfilled: 0 });
       expect(await row(cb.commitment.id)).toMatchObject({ status: 'open', human_state: 'confirmed' });
       // A reopened card is the office's: a newer inbound call (an association)
@@ -504,21 +485,21 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const statedAt = new Date(Date.now() - 1 * DAY); // two days after the call
     const floored = await world({ kind: 'other' });
     await db('call_commitments').where({ id: floored.commitment.id }).update({ due_at: statedAt, due_type: 'floor' });
-    await staffText(floored); // half an hour after the call: before the stated time
+    await visit(floored); // booked half an hour after the call: before the stated time
     expect(await cc.refreshFulfillment(db, floored.call.id)).toMatchObject({ fulfilled: 0 });
     expect(await row(floored.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
-    const onTime = await staffText(floored, { created_at: new Date(statedAt.getTime() + 60 * 60 * 1000) });
+    const onTime = await visit(floored, { created_at: new Date(statedAt.getTime() + 60 * 60 * 1000) });
     expect(await cc.refreshFulfillment(db, floored.call.id)).toMatchObject({ fulfilled: 1 });
     expect((await row(floored.commitment.id)).fulfillment).toMatchObject({ record_id: onTime.id });
     // Untyped is a floor too.
     const untyped = await world({ kind: 'other' });
     await db('call_commitments').where({ id: untyped.commitment.id }).update({ due_at: statedAt });
-    await staffText(untyped);
+    await visit(untyped);
     expect(await cc.refreshFulfillment(db, untyped.call.id)).toMatchObject({ fulfilled: 0 });
     // A deadline is the latest moment, not the first.
     const deadline = await world({ kind: 'other' });
     await db('call_commitments').where({ id: deadline.commitment.id }).update({ due_at: statedAt, due_type: 'deadline' });
-    const early = await staffText(deadline);
+    const early = await visit(deadline);
     expect(await cc.refreshFulfillment(db, deadline.call.id)).toMatchObject({ fulfilled: 1 });
     expect((await row(deadline.commitment.id)).fulfillment).toMatchObject({ record_id: early.id });
     // Direct proof is not held to the stated time.
@@ -531,9 +512,9 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
 
   test('a relink the refresh never saw is found by the periodic scan whatever evidence closed the promise; a merge that moves the evidence with the call keeps it and stops listing it', async () => {
     const w = await world({ kind: 'other' });
-    await staffText(w);
+    await visit(w);
     await cc.refreshFulfillment(db, w.call.id);
-    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'sms_sent', judged_customer_id: w.customerId });
+    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'appointment_booked', judged_customer_id: w.customerId });
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
     const [other] = await db('customers').insert({ first_name: `Relink${w.n}`, phone: `+1555558${w.n}` }).returning('id');
     made.customerIds.push(other.id);
@@ -620,15 +601,13 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: { record_id: est.id, basis: 'estimate_sent_on_a_lead_reused_from_an_earlier_call', hint_only: true } });
   });
 
-  test('a staff text closes a promise only with a person\'s provenance: an automated send typed \'manual\' (the reschedule acknowledgement) is not a follow-up', async () => {
-    const automated = await world({ kind: 'other' });
-    await sms(automated, 'manual'); // no human_authored stamp, no sending admin
-    expect(await cc.refreshFulfillment(db, automated.call.id)).toMatchObject({ fulfilled: 0 });
-    expect(await row(automated.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
-    const typed = await world({ kind: 'other' });
-    const text = await staffText(typed);
-    expect(await cc.refreshFulfillment(db, typed.call.id)).toMatchObject({ fulfilled: 1 });
-    expect((await row(typed.commitment.id)).fulfillment).toMatchObject({ record_id: text.id, basis: 'staff_text_to_caller_within_14_days' });
+  test('contact records are not closing evidence: a staff call placed through the bridge, a person\'s text, the caller phoning back all leave the promise open with no hint', async () => {
+    for (const seed of [(w) => outboundCall(w), (w) => staffText(w), (w) => inbound(w)]) {
+      const w = await world({ kind: 'other' });
+      await seed(w);
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0, hinted: 0 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    }
   });
 
   test('a later stated time moves the start of the association window, never its end: 14 days from the call still closes it', async () => {
@@ -636,11 +615,11 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const late = await world({ kind: 'other' });
     await db('call_commitments').where({ id: late.commitment.id }).update({ due_at: new Date(callEnd(late).getTime() + 13 * DAY), due_type: 'floor' });
     // Day 20 after the call: past the original 14-day window, however late the stated time.
-    await staffText(late, { created_at: new Date(callEnd(late).getTime() + 20 * DAY) });
+    await visit(late, { created_at: new Date(callEnd(late).getTime() + 20 * DAY) });
     expect(await cc.refreshFulfillment(db, late.call.id)).toMatchObject({ fulfilled: 0 });
     expect(await row(late.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     // Day 13.5: after the stated time and inside the window, it closes.
-    const inside = await staffText(late, { created_at: new Date(callEnd(late).getTime() + 13.5 * DAY) });
+    const inside = await visit(late, { created_at: new Date(callEnd(late).getTime() + 13.5 * DAY) });
     expect(await cc.refreshFulfillment(db, late.call.id)).toMatchObject({ fulfilled: 1 });
     expect((await row(late.commitment.id)).fulfillment).toMatchObject({ record_id: inside.id });
   });
