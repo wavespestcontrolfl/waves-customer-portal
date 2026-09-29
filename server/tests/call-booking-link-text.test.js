@@ -1428,22 +1428,15 @@ describe('smsDeclinedOnEarlierCall', () => {
     await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(true);
   });
 
-  // A LATER explicit opt-in supersedes an EARLIER decline — the query's own
-  // ORDER BY created_at DESC (proven against real Postgres) means the row
-  // this function receives is always the MOST RECENT decisive one; this
-  // function's own job is trusting that row's opt-in over a decline it
-  // never even sees.
-  test('a later opt-in supersedes — the most recent decisive row is not a decline', async () => {
-    const conn = declineConn({ ai_extraction_enriched: { consent: { sms_declined: false, sms_consent_given: true } } });
-    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
-  });
-
-  // Both fields true on the SAME row (a garbled/contradictory extraction)
-  // fails CLOSED as a decline — the same posture the dedicated sms_declined
-  // check already takes on an absent field.
-  test('both fields true on the same row reads as a decline (fail closed)', async () => {
+  // OWNER RULING 2026-09-29: a later opt-in never clears an earlier decline.
+  // The query asks only for declines, never for opt-ins, so there is no
+  // "most recent decisive row" for an opt-in to win.
+  test('the query asks only for declines — a later opt-in cannot clear one', async () => {
     const conn = declineConn({ ai_extraction_enriched: { consent: { sms_declined: true, sms_consent_given: true } } });
     await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(true);
+    const sql = conn.raws.map((args) => String(args[0])).join(' ');
+    expect(sql).toContain("->>'sms_declined' = 'true'");
+    expect(sql).not.toContain('sms_consent_given');
   });
 
   test('no earlier decisive call at all does not block', async () => {
@@ -1765,14 +1758,6 @@ describe('neverSendRecheck', () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const conn = dbi({ earlierDeclineCall: { ai_extraction_enriched: { consent: { sms_declined: true } } } });
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'sms_declined_earlier_call' });
-  });
-
-  // A later explicit opt-in on that same earlier-call query supersedes —
-  // the recheck must not block a caller who has since said yes.
-  test('an earlier decline superseded by a later opt-in does not block the send at recheck time', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
-    const conn = dbi({ earlierDeclineCall: { ai_extraction_enriched: { consent: { sms_declined: false, sms_consent_given: true } } } });
-    await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
   });
 
   test('a link delivered in the last 14 days blocks the send', async () => {

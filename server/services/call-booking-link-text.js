@@ -1067,17 +1067,16 @@ async function bookedSinceCall(conn, customerId, since, leadPhone) {
 // call, then makes a LATER eligible call where texting is never discussed
 // again, extracts sms_declined: false ("never asked" on that one call) and
 // would read as clear — the cross-call hold in auto-text-holds.js only
-// searches do_not_contact_request, never sms_declined. Query the phone's
-// own call history for the MOST RECENT call whose extraction is DECISIVE
-// about SMS consent one way or the other (sms_declined or
-// sms_consent_given — whichever the caller last actually spoke to) at or
-// before `asOf`, and let a later explicit opt-in supersede an earlier
-// decline: an opt-in on a decisive row is real, spoken consent, never mere
-// silence, unlike a bare sms_consent_given: false (the reason that field
-// alone is deliberately excluded from STAGING_CHECKS — see its own
-// comment). Both fields true on the SAME row (a garbled or contradictory
-// extraction) reads as a decline — fail closed, the same posture the
-// dedicated sms_declined check already takes on an absent field.
+// searches do_not_contact_request, never sms_declined. So any call for this
+// phone, at or before `asOf`, whose extraction recorded an explicit decline
+// blocks this lane.
+//
+// OWNER RULING 2026-09-29: any past "no texts" blocks this text for good —
+// a later opt-in never clears it. Letting a later opt-in supersede drew a
+// fresh Codex P1 each round (the opt-in must be bound to the same number,
+// then to the same consent scope, ...); this lane sends ~1–3 texts a month,
+// so never re-texting a past decliner costs next to nothing and closes that
+// class outright.
 //
 // Only a VALID V2 extraction counts — auto-text-holds.js's own do-not-
 // contact probe deliberately also reads legacy/invalid rows for that flag,
@@ -1103,12 +1102,8 @@ async function smsDeclinedOnEarlierCall(conn, phone, { originCallId, asOf } = {}
       .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
     .where('v2_extraction_status', 'valid')
     .where('created_at', '<=', asOf)
-    .where((q) => q.whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
-      .orWhereRaw("ai_extraction_enriched->'consent'->>'sms_consent_given' = 'true'"))
-    .orderBy('created_at', 'desc')
-    .orderBy('id', 'desc')
+    .whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
     .first('ai_extraction_enriched');
-  if (!row) return false;
   return extractionOf(row)?.consent?.sms_declined === true;
 }
 
@@ -1286,8 +1281,8 @@ const DISPATCH_CHECKS = [
     const callStart = callStartedAt(call) || new Date(call.created_at);
     return (await bookedSinceCall(conn, lead.customer_id, callStart, lead.phone)) ? 'booked_since_call' : null;
   },
-  // codex P1 on #5292: a decline spoken on an EARLIER call for this same
-  // phone, with no later opt-in superseding it. See smsDeclinedOnEarlierCall's
+  // codex P1 on #5292: a decline spoken on ANY earlier call for this same
+  // phone (owner ruling 2026-09-29: never cleared). See smsDeclinedOnEarlierCall's
   // own doc comment.
   async ({ conn, call, lead, now }) => (
     (await smsDeclinedOnEarlierCall(conn, lead.phone, { originCallId: call.id, asOf: now })) ? 'sms_declined_earlier_call' : null),

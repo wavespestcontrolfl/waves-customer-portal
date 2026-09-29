@@ -686,7 +686,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       void earlierCallId;
     });
 
-    test('a later explicit opt-in supersedes an earlier decline', async () => {
+    test('a later explicit opt-in does NOT clear an earlier decline (owner ruling 2026-09-29)', async () => {
       const phone = '+15555550302';
       await insertLead(mockPg, { phone });
       await insertCall(mockPg, {
@@ -703,7 +703,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       const result = await callBookingLinkText._private.smsDeclinedOnEarlierCall(
         mockPg, phone, { originCallId: null, asOf: NOW },
       );
-      expect(result).toBe(false);
+      expect(result).toBe(true);
     });
 
     test('no earlier decisive call at all does not block', async () => {
