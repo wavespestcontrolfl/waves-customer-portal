@@ -289,7 +289,17 @@ function realAnswersHandoffBullets() {
   // ineligible routes to a normal PAID visit via OPEN TIMES instead of an
   // unconditional escalate, since staff replay showed these get booked, not
   // just acknowledged.
-  lines.push('- PEST REPORTS ("still seeing bugs/ants/etc", "they\'re back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don\'t hold this for a person. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they\'re seeing, say CONCRETELY that you\'re sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says not eligible, is absent, or doesn\'t list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
+  // The tie-break's OWN wording must track whether complaints are actually
+  // held right now (Codex round-1 review: the fixed-gates test "all four
+  // category gates on leaves nothing HELD" checks for the literal substring
+  // "HELD FOR A PERSON" anywhere in the prompt — with GATE_SMS_AGENT_COMPLAINTS
+  // on, a complaint is no longer held at all, it is answered per the
+  // COMPLAINTS rule above, so saying "held for a person" here would be both
+  // wrong and would falsely trip that invariant).
+  const pestComplaintTieBreak = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
+    ? 'follow the COMPLAINTS rule above instead of this one'
+    : 'it is HELD FOR A PERSON while that category is still held above';
+  lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — anger, property damage, a refund/credit demand, a dispute over what happened or over billing, or a threat to cancel over it — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
   lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
   return lines.join('\n');
 }
@@ -463,7 +473,7 @@ function eligibleReserviceLanes(factsBlock) {
   if (!line) return [];
   return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane}\\b`).test(line.slice(RESERVICE_FACT_LABEL.length).split('(')[0]));
 }
-function validateReserviceOffer({ reply, factsBlock }) {
+function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
   if (!FREE_RESERVICE_OFFER_RE.test(text)) return { ok: true, violations: [] };
@@ -477,6 +487,69 @@ function validateReserviceOffer({ reply, factsBlock }) {
   const wrong = named.filter((lane) => !lanes.includes(lane));
   if (wrong.length) {
     return { ok: false, violations: [`the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
+  }
+  if (!named.length) {
+    // Codex round-1 P2 (d): a GENERIC "we'll send your free re-service link"
+    // names no service line in the reply, so the named-lane check above has
+    // nothing to run against — a pest customer offered a lawn-only
+    // entitlement (or the reverse) would sail through. Resolve the REPORTED
+    // issue's own lane from the customer's inbound text, via the SAME
+    // PEST_KEYWORDS/LAWN_KEYWORDS regexClassify sms-service-intent.js uses
+    // for lead intake (no model call, no drift between the two), and
+    // require it to intersect what FREE RE-SERVICE actually lists. An
+    // unresolved report (neither/both/ambiguous, or no inbound text at all)
+    // has no lane to check, so the reply itself must name a covered one.
+    const { regexClassify } = require('./sms-service-intent');
+    const reported = regexClassify(inboundMessage)?.interest;
+    const reportedLane = reported === 'pest' || reported === 'lawn' ? reported : null;
+    if (reportedLane && !lanes.includes(reportedLane)) {
+      return { ok: false, violations: [`the reply offers a free re-service but the customer reported a ${reportedLane} issue and FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
+    }
+    if (!reportedLane) {
+      return { ok: false, violations: ['the reply offers a free re-service without naming which service line it covers, and the reported issue\'s service line could not be resolved from the customer\'s text — name the covered service line explicitly'] };
+    }
+  }
+  // Codex round-1 P2 (c): a free-re-service PROMISE with no
+  // {"type":"escalate","note":"send_reservice_link"} in intended_actions is
+  // a broken promise — the ONLY thing that actually gets a teammate to text
+  // the link is that action, and nothing else in this pipeline sends it.
+  const actions = Array.isArray(intendedActions) ? intendedActions : [];
+  const hasSendLinkAction = actions.some((a) => a?.type === 'escalate' && a?.note === 'send_reservice_link');
+  if (!hasSendLinkAction) {
+    return { ok: false, violations: ['the reply promises a free re-service but intended_actions is missing {"type":"escalate","note":"send_reservice_link"} — nothing would actually send the link'] };
+  }
+  return { ok: true, violations: [] };
+}
+
+// Complaints tie-break backstop (independent review P2, 2026-09-29): the
+// PEST REPORTS bullet's own precedence text (above) is prompt-only — with
+// GATE_SMS_AGENT_COMPLAINTS off (the prod default) nothing catches a model
+// that reads a genuine complaint ("Roaches everywhere again after your guy
+// came, third time, I want a refund") as a plain pest report and answers it
+// with a paid OPEN TIMES offer and no escalate. Deliberately narrow: a
+// plain "still seeing ants, can you come back?" must NOT trip this — only
+// signals the bullet itself calls out as an actual complaint (anger,
+// property damage, a refund/credit/money-back demand, a dispute over what
+// happened or over billing, a repeated-failure complaint, or a threat to
+// cancel over it).
+const COMPLAINT_MONEY_BACK_RE = /\b(?:refund\w*|reimburs\w*|money\s+back|charge\s?backs?|chargeback\w*|credit\s+(?:me|my|us|the)\b)/i;
+const COMPLAINT_DISPUTE_RE = /\b(?:dispute\w*|not\s+what\s+(?:i|we|you)\s+(?:paid|agreed|promised)\s+for|wrongly\s+charged|overcharged)\b/i;
+const COMPLAINT_DAMAGE_RE = /\b(?:damag(?:e|ed|ing)|ruin(?:ed|ing)?|destroy(?:ed|ing)?)\b/i;
+const COMPLAINT_REPEATED_FAILURE_RE = /\b(?:third|fourth|fifth|sixth|\d+(?:st|nd|rd|th))\s+time\b|\bagain\s+and\s+again\b|\bover\s+and\s+over\b|\bevery\s+(?:single\s+)?time\b|\bkeeps?\s+happening\b/i;
+const COMPLAINT_CANCEL_THREAT_RE = /\b(?:cancel(?:l?ing)?|end|stop|drop)\w*\b[^.!?\n]{0,40}\b(?:service|account|contract|plan|membership)\b/i;
+const COMPLAINT_SIGNAL_RES = [COMPLAINT_MONEY_BACK_RE, COMPLAINT_DISPUTE_RE, COMPLAINT_DAMAGE_RE, COMPLAINT_REPEATED_FAILURE_RE, COMPLAINT_CANCEL_THREAT_RE];
+function hasComplaintSignal(text) {
+  const t = String(text || '');
+  return COMPLAINT_SIGNAL_RES.some((re) => re.test(t));
+}
+function validateComplaintEscalation({ inboundMessage, intendedActions, offeredTimes }) {
+  if (gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return { ok: true, violations: [] }; // held by the prompt's own category rule
+  if (!hasComplaintSignal(inboundMessage)) return { ok: true, violations: [] };
+  const actions = Array.isArray(intendedActions) ? intendedActions : [];
+  const hasEscalate = actions.some((a) => a?.type === 'escalate');
+  const offersPaidVisit = actions.some((a) => a?.type === 'book_appointment') || (Array.isArray(offeredTimes) && offeredTimes.length > 0);
+  if (!hasEscalate || offersPaidVisit) {
+    return { ok: false, violations: ['the inbound reads as a complaint (anger, property damage, a refund/credit demand, a dispute, a repeated-failure complaint, or a threat to cancel over it) with GATE_SMS_AGENT_COMPLAINTS off — hold it for a person: add {"type":"escalate"} to intended_actions and never offer a paid visit via OPEN TIMES/book_appointment'] };
   }
   return { ok: true, violations: [] };
 }
@@ -1777,6 +1850,20 @@ const MAX_REVISIONS = (() => {
 const SAVE_SALE_INTENT_RE = /cancel|complaint|customer_issue/i;
 const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|still (?:seeing|have|having|getting|finding)|came back|come back|keep (?:seeing|coming)|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b/i;
 
+// Pest-report text signal for the OPEN TIMES availability fetch below
+// (Codex round-1 P2 (b)): mirrors the PEST REPORTS bullet's own examples
+// ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a
+// service). SAVE_SALE_TEXT_RE above already catches "still seeing X" and
+// "came/come back", but "they're back", "the ants are back", and "I saw
+// roaches again" match neither it nor a scheduling intent — needsOpenTimes
+// stayed false for that class, so an INELIGIBLE customer got a hand-off with
+// no times to offer instead of the normal paid visit the PEST REPORTS rule
+// promises. Kept separate from SAVE_SALE_TEXT_RE (used elsewhere for model
+// routing) rather than widened into it. Deliberately narrow to "back"/
+// "again" phrasing tied to a repeat sighting — "call me back" or "see you
+// again" do not trip it.
+const PEST_REPORT_TEXT_RE = /\b(?:it'?s|they'?re|there'?s|is|are)\s+back\b|\bback\s+again\b|\b(?:saw|seeing|noticed|found|spotted|got)\s+(?:\w+\s+){0,2}again\b/i;
+
 function draftRouteFor({ intentName, inboundMessage } = {}) {
   if (SAVE_SALE_INTENT_RE.test(String(intentName || ''))) return MODELS.ROUTES.smsDraftSaveSale;
   if (SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))) return MODELS.ROUTES.smsDraftSaveSale;
@@ -1897,7 +1984,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // instead of answering. Reuses the SAME cancel/complaint detection this
   // file's own save-the-sale routing already applies to intent + raw text
   // (SAVE_SALE_INTENT_RE / SAVE_SALE_TEXT_RE), so the two decisions can't
-  // drift apart.
+  // drift apart — PLUS PEST_REPORT_TEXT_RE (Codex round-1 P2 (b)): the PEST
+  // REPORTS rule's own "not eligible" branch routes to a normal paid visit
+  // via OPEN TIMES, so a pest-report phrasing that dodges both the save-the-
+  // sale signals and a scheduling intent ("they're back", "the ants are
+  // back") must still fetch times, or that branch has nothing to offer.
   // Which job the OPEN TIMES are sized for (Codex r3, follow-up #5, owner
   // 2026-09-28): serviceIdentityFor has the model pick the visit, open
   // estimate or catalog service the text is about. An estimate the message
@@ -1906,7 +1997,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // snapshot so the send-time recheck asks the same question.
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
-    || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
+    || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
+    || PEST_REPORT_TEXT_RE.test(String(inboundMessage || ''));
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
   // or with no city to look up (fetchOpenTimesData returns nothing then —
@@ -2016,10 +2108,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
     }
-    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock });
+    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage });
     if (!singlePassReservice.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassReservice.violations);
+    }
+    const singlePassComplaint = validateComplaintEscalation({ inboundMessage, intendedActions: parsed?.intended_actions, offeredTimes: parsed?.offered_times });
+    if (!singlePassComplaint.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassComplaint.violations);
     }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
@@ -2051,9 +2148,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
-    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
+    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
-    for (const check of [reserviceCheck, complianceCheck]) {
+    const complaintCheck = validateComplaintEscalation({ inboundMessage, intendedActions: parsed.intended_actions, offeredTimes: parsed.offered_times });
+    for (const check of [reserviceCheck, complianceCheck, complaintCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
         timesCheck.violations.push(...check.violations);
@@ -2163,7 +2261,21 @@ function parseShadowResponse(text) {
   // type isn't exactly 'none' — unknown types included — so applying it here,
   // pre-sanitize, is the honest signal. (Empty/absent = no action = safe.)
   const { autoSendActionsSafe } = require('./sms-auto-send');
-  const autoSendSafe = autoSendActionsSafe(parsed.intended_actions);
+  let autoSendSafe = autoSendActionsSafe(parsed.intended_actions);
+  // Codex round-1 P2 (c), defense in depth: a free-re-service PROMISE with
+  // no {"type":"escalate","note":"send_reservice_link"} in the RAW actions
+  // is never auto-send-safe — nobody would actually be told to send the
+  // link, so auto-sending it would leave a broken promise in the customer's
+  // hands. The revise/verify loop's own validateReserviceOffer already keeps
+  // a draft like this from converging (so maybeAutoSend never even sees it,
+  // since it requires converged:true), but this flag is read independently
+  // by other consumers (e.g. sms-gratitude-qualification.js), so it must
+  // read false on its own too, not only via the convergence gate.
+  if (autoSendSafe && FREE_RESERVICE_OFFER_RE.test(String(parsed.reply || ''))) {
+    const rawActions = Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [];
+    const hasSendLinkAction = rawActions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link');
+    if (!hasSendLinkAction) autoSendSafe = false;
+  }
 
   const intendedActions = Array.isArray(parsed.intended_actions)
     ? parsed.intended_actions
@@ -2581,4 +2693,7 @@ module.exports = {
   validateReserviceOffer,
   validateComplianceCopy,
   hasBannedCustomerCopy,
+  validateComplaintEscalation,
+  hasComplaintSignal,
+  PEST_REPORT_TEXT_RE,
 };

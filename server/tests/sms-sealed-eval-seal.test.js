@@ -262,11 +262,15 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   // Codex #5194 r5: after a category-gate rollback the retired items the
   // current contract matches come back; the anti-join never re-seals them.
   describe('reactivation of previously-retired items', () => {
-    test('the finding\'s scenario: a plain-v12 pool full of complaint items reactivates retired plain items instead of sourcing new drafts', async () => {
+    test('the finding\'s scenario: a plain-v12 pool full of items missing the (now base-contract) FREE RE-SERVICE marker reactivates retired plain items instead of sourcing new drafts', async () => {
       versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
-      // Every active item is a +c complaint item (compatibleCount: 0 under
-      // plain v12), and enough retired plain-v12 items exist to cover the
-      // whole shortfall (restorable: 100 === target - compatibleCount).
+      // FREE RE-SERVICE moved into V12_BASE_FACT_MARKERS 2026-09-29 (decoupled
+      // from the complaints tag — CATEGORY_FACT_MARKERS is now empty, so "+c"
+      // carries no fact-marker semantics of its own any more). Every active
+      // item here simply lacks that base marker (compatibleCount: 0 under
+      // plain v12) — frozen before it rendered unconditionally, not a "+c"
+      // item — and enough retired plain-v12 items exist to cover the whole
+      // shortfall (restorable: 100 === target - compatibleCount).
       const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [], restorable: 100 });
       const out = await sealEvalItems({ target: 100, dbi });
 

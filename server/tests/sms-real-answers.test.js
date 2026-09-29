@@ -1742,14 +1742,59 @@ describe('free re-service is an entitlement resolved through the existing mechan
     const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
     const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
     const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+    // A generic reply names no lane, so a real (converging) draft needs the
+    // reported issue resolvable from the inbound text, plus the send-link
+    // action — supplied here so this test isolates the ELIGIBILITY check
+    // alone (Codex round-1 P2 (c)/(d) get their own tests below).
+    const inboundMessage = 'still have ants, can you come back?';
+    const intendedActions = [{ type: 'escalate', note: 'send_reservice_link' }];
     for (const reply of ['We can come back for a free re-service.', 'We will re-treat at no charge.', 'A complimentary visit is on us.']) {
-      expect(validateReserviceOffer({ reply, factsBlock: notEligible }).ok).toBe(false);
-      expect(validateReserviceOffer({ reply, factsBlock: 'no such line' }).ok).toBe(false);
-      expect(validateReserviceOffer({ reply, factsBlock: eligible }).ok).toBe(true);
+      expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage, intendedActions }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply, factsBlock: 'no such line', inboundMessage, intendedActions }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage, intendedActions }).ok).toBe(true);
     }
     expect(validateReserviceOffer({ reply: 'I am sorry about that — a manager will reach out within the hour.', factsBlock: notEligible }).ok).toBe(true);
     delete process.env.GATE_SMS_REAL_ANSWERS; // gate off: the check does not run
     expect(validateReserviceOffer({ reply: 'We can come back for a free re-service.', factsBlock: notEligible }).ok).toBe(true);
+  });
+
+  // Codex round-1 P2 (c): the send-link action is what actually gets a
+  // teammate to text the re-service link — a promise with none of that is
+  // exactly as broken as an ineligible offer.
+  test('validateReserviceOffer: a free-visit promise without {"type":"escalate","note":"send_reservice_link"} in intended_actions is a violation', () => {
+    const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+    const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+    const reply = 'We will come back for a free pest re-service.'; // names the lane explicitly
+    expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'ants', intendedActions: [] }).ok).toBe(false);
+    expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'ants', intendedActions: [{ type: 'escalate' }] }).ok).toBe(false); // escalate with the WRONG/no note
+    expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'ants', intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(true);
+  });
+
+  // Codex round-1 P2 (d): a GENERIC offer (no lane named in the reply) must
+  // resolve the customer's REPORTED lane from their own inbound text and
+  // require it to match what FREE RE-SERVICE lists — a pest-only
+  // entitlement must not cover a reported lawn issue, and an unresolved
+  // report must not sail through on an unrelated lane's eligibility either.
+  describe('validateReserviceOffer: generic offer resolves the reported service line from the inbound text', () => {
+    const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+    const GENERIC_REPLY = "Good news — we'll send you the free re-service link now.";
+    test('reported lane (pest) intersects the eligible (pest) lane → ok', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply: GENERIC_REPLY, factsBlock: eligible, inboundMessage: 'the ants are back', intendedActions: sendLink }).ok).toBe(true);
+    });
+    test('reported lane (lawn) does NOT intersect the eligible (pest-only) lane → violation', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const out = validateReserviceOffer({ reply: GENERIC_REPLY, factsBlock: eligible, inboundMessage: 'the grass is looking bad again', intendedActions: sendLink });
+      expect(out.ok).toBe(false);
+      expect(out.violations[0]).toMatch(/reported a lawn issue/);
+    });
+    test('no resolvable lane in the inbound text and none named in the reply → violation', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply: GENERIC_REPLY, factsBlock: eligible, inboundMessage: 'can you come back out?', intendedActions: sendLink }).ok).toBe(false);
+    });
   });
 });
 
@@ -1780,6 +1825,17 @@ describe('PEST REPORTS rule — offers the free re-service directly, independent
     expect(prompt).toMatch(/HELD FOR A PERSON: complaints,/);
   });
 
+  // Codex round-1 P2 (a): the precedence between "PEST REPORTS are NOT a
+  // complaint" and "HELD FOR A PERSON: complaints" must live IN the rendered
+  // bullet the model actually sees, not only in a code comment.
+  test('the rendered bullet itself states the tie-break: an actual complaint stays held, pest activity never overrides it', () => {
+    const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain('ONLY when it is a plain report of pest activity');
+    expect(prompt).toContain('it is HELD FOR A PERSON while that category is still held above');
+    expect(prompt).toContain('pest activity never overrides an actual complaint');
+  });
+
   test('not eligible (or the fact is absent): routes to a normal visit via OPEN TIMES, never a free offer', () => {
     const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
     const prompt = buildSystemPrompt();
@@ -1801,6 +1857,84 @@ describe('PEST REPORTS rule — offers the free re-service directly, independent
   });
 });
 
+// Codex round-1 P2 (b): the availability-fetch predicate (needsOpenTimes)
+// must cover the FULL pest-report class the PEST REPORTS bullet names, not
+// just the subset SAVE_SALE_TEXT_RE already catches.
+describe('PEST_REPORT_TEXT_RE — the pest-report signal for the OPEN TIMES fetch (Codex round-1 P2 (b))', () => {
+  const { PEST_REPORT_TEXT_RE, SAVE_SALE_TEXT_RE } = require('../services/sms-shadow-drafter');
+
+  test('matches the class the finding named, which SAVE_SALE_TEXT_RE alone misses', () => {
+    for (const text of ["they're back", 'the ants are back', 'I saw roaches again', 'it is back again', 'found more ants again']) {
+      expect(PEST_REPORT_TEXT_RE.test(text)).toBe(true);
+    }
+    // Confirms these really are the GAP this regex closes — SAVE_SALE_TEXT_RE
+    // does not catch them on its own.
+    expect(SAVE_SALE_TEXT_RE.test("they're back")).toBe(false);
+    expect(SAVE_SALE_TEXT_RE.test('the ants are back')).toBe(false);
+    expect(SAVE_SALE_TEXT_RE.test('I saw roaches again')).toBe(false);
+  });
+
+  test('"still seeing spiders" is already covered by SAVE_SALE_TEXT_RE (regression check, not a PEST_REPORT_TEXT_RE match)', () => {
+    expect(SAVE_SALE_TEXT_RE.test('still seeing spiders')).toBe(true);
+  });
+
+  test('does not match unrelated "back"/"again" phrasing (false-positive control)', () => {
+    for (const text of ['call me back', 'see you again soon', "I'll be back tomorrow", 'talk to you again', 'text me back when you can']) {
+      expect(PEST_REPORT_TEXT_RE.test(text)).toBe(false);
+    }
+  });
+});
+
+// Independent-review P2: the tie-break in the prompt (above) is advisory —
+// with GATE_SMS_AGENT_COMPLAINTS off (prod default) this deterministic
+// backstop is the actual enforcement.
+describe('validateComplaintEscalation — deterministic backstop when GATE_SMS_AGENT_COMPLAINTS is off', () => {
+  const { validateComplaintEscalation, hasComplaintSignal } = require('../services/sms-shadow-drafter');
+  const prior = process.env.GATE_SMS_AGENT_COMPLAINTS;
+  afterEach(() => {
+    if (prior === undefined) delete process.env.GATE_SMS_AGENT_COMPLAINTS; else process.env.GATE_SMS_AGENT_COMPLAINTS = prior;
+  });
+
+  test('a genuine complaint (repeated failure + refund demand) is flagged, and no-escalate / paid-visit drafts are rejected', () => {
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+    const inboundMessage = 'Roaches everywhere again after your guy came, third time, I want a refund';
+    expect(hasComplaintSignal(inboundMessage)).toBe(true);
+    // No escalate at all.
+    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [], offeredTimes: [] }).ok).toBe(false);
+    // A paid visit offered instead of (or alongside) escalate — the exact
+    // finding: OPEN TIMES/book_appointment to someone demanding a refund.
+    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [{ date: 'Mon', window: '9-11am' }] }).ok).toBe(false);
+    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'escalate' }, { type: 'book_appointment' }], offeredTimes: [] }).ok).toBe(false);
+    // Escalate alone, no paid-visit offer: correct.
+    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'escalate' }], offeredTimes: [] }).ok).toBe(true);
+  });
+
+  test('other complaint signals: damage, dispute, and a cancel threat', () => {
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+    for (const inboundMessage of [
+      'your technician damaged my irrigation line',
+      "that's not what I agreed to, this is a dispute over the bill",
+      'if this happens again I am going to cancel my service',
+    ]) {
+      expect(hasComplaintSignal(inboundMessage)).toBe(true);
+      expect(validateComplaintEscalation({ inboundMessage, intendedActions: [], offeredTimes: [] }).ok).toBe(false);
+    }
+  });
+
+  test('false-positive control: a plain pest report never trips this, however it is drafted', () => {
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+    for (const inboundMessage of ['still seeing ants, can you come back?', "they're back", 'the ants are back', 'still have spiders']) {
+      expect(hasComplaintSignal(inboundMessage)).toBe(false);
+      expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [{ date: 'Mon', window: '9-11am' }] }).ok).toBe(true);
+    }
+  });
+
+  test('gate ON: the prompt\'s own COMPLAINTS category rule already holds it, so this backstop steps aside', () => {
+    process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
+    const inboundMessage = 'I want a refund, this is the third time';
+    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [] }).ok).toBe(true);
+  });
+});
 
 describe('round-7 deterministic guards (gate on)', () => {
   const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
@@ -1830,10 +1964,14 @@ describe('round-7 deterministic guards (gate on)', () => {
   test('validateReserviceOffer is per service line: a pest-only customer is not offered a free LAWN re-service', () => {
     const pestOnly = `X\n${drafter.reserviceFactLine(['pest'])}\nBILLING:`;
     const both = `X\n${drafter.reserviceFactLine(['pest', 'lawn'])}\nBILLING:`;
-    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free lawn re-service.', factsBlock: pestOnly }).ok).toBe(false);
-    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free pest re-service.', factsBlock: pestOnly }).ok).toBe(true);
-    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free re-service.', factsBlock: pestOnly }).ok).toBe(true); // no line named
-    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free lawn re-service.', factsBlock: both }).ok).toBe(true);
+    const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free lawn re-service.', factsBlock: pestOnly, intendedActions: sendLink }).ok).toBe(false);
+    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free pest re-service.', factsBlock: pestOnly, intendedActions: sendLink }).ok).toBe(true);
+    // No line named in the reply: the reported lane is resolved from the
+    // inbound text instead (Codex round-1 P2 (d)) — still passes when it
+    // resolves to the eligible lane.
+    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free re-service.', factsBlock: pestOnly, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(true);
+    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free lawn re-service.', factsBlock: both, intendedActions: sendLink }).ok).toBe(true);
   });
 
   test('replyQuotesUngroundedAmount: a FAILED or pending payment does not back "your payment went through"', () => {

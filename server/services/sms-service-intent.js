@@ -317,4 +317,11 @@ module.exports = {
   classifyServiceIntent,
   classifyPhotoDiagnosisIntent,
   TREE_SHRUB_TRIAGE_TYPE,
+  // The synchronous keyword-only fast path, exported for callers that need a
+  // no-model, no-await service-line guess (sms-shadow-drafter.js's
+  // validateReserviceOffer, Codex round-1 P2 (d)) — same PEST_KEYWORDS /
+  // LAWN_KEYWORDS lists the lead-intake classifier uses, so the two never
+  // drift on what counts as a pest vs. lawn mention. Returns null on an
+  // ambiguous (both/neither) or non-string body.
+  regexClassify,
 };

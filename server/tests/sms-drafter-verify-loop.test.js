@@ -533,13 +533,23 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
     for (const [k, v] of [['GATE_SMS_REAL_ANSWERS', prior.ra], ['GATE_SMS_AGENT_COMPLAINTS', prior.c]]) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
-    jest.dontMock('../services/reservice-scheduler'); jest.dontMock('../services/availability');
+    jest.dontMock('../services/reservice-scheduler'); jest.dontMock('../services/availability'); jest.dontMock('../models/db');
     jest.resetModules();
   });
   function setup(lanes) {
     jest.resetModules();
     jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => true, reserviceLanesForCustomer: jest.fn(async () => lanes) }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ days: [] })) }));
+    // models/db is the REAL knex instance outside a live DATABASE_URL suite,
+    // so a live lookup fails closed to [] regardless of what lanes the
+    // reservice-scheduler mock above returns — which happens to still read
+    // as "not eligible" for the lanes:[] case, but silently masks an
+    // ELIGIBLE case. Mock it explicitly so the mocked reserviceLanesForCustomer
+    // above is actually reached.
+    jest.doMock('../models/db', () => {
+      const db = jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
+      return db;
+    });
     const drafter = require('../services/sms-shadow-drafter');
     jest.spyOn(drafter, 'fetchReserviceLanes'); // observed only; the real one runs
     return drafter;
@@ -564,6 +574,114 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
     expect(r.passes).toBe(2);
     expect(client.calls).toHaveLength(3); // draft + revise + verify — the first failure never reached the verifier
     expect(r.parsed.reply).not.toMatch(/free/i);
+  });
+
+  // Codex round-1 P2 (c): a free-re-service PROMISE with no send_reservice_link
+  // action is exactly as broken as an ineligible offer — nobody actually
+  // sends the link.
+  test('ELIGIBLE but no send_reservice_link action: caught deterministically, a revision that adds the action converges', async () => {
+    const drafter = setup(['pest']);
+    const db = require('../models/db');
+    if (db.mockImplementation) db.mockImplementation(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
+    const client = makeClient([
+      { reply: 'So sorry — we will come back for a free pest re-service.', intended_actions: [], missing_info: null },
+      { reply: 'So sorry — we will come back for a free pest re-service.', intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.factsBlock).toContain('FREE RE-SERVICE: eligible for pest');
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(2);
+    expect(r.parsed.intended_actions).toEqual([{ type: 'escalate', note: 'send_reservice_link' }]);
+  });
+
+  // Codex round-1 P2 (d): a GENERIC offer with no lane named in the reply
+  // must resolve the reported lane from the inbound text — a lawn-only
+  // entitlement must not cover a customer who reported ants.
+  test('ELIGIBLE for lawn only, but the customer reported ants (pest): a generic offer is caught, a revision naming the right (ineligible) outcome converges', async () => {
+    const drafter = setup(['lawn']);
+    const db = require('../models/db');
+    if (db.mockImplementation) db.mockImplementation(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
+    const client = makeClient([
+      // Generic — no lane named — but the inbound reports ants (pest), and
+      // only lawn is eligible.
+      { reply: "Good news — we'll send your free re-service link now.", intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }], missing_info: null },
+      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.factsBlock).toContain('FREE RE-SERVICE: eligible for lawn');
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(2);
+    expect(r.parsed.reply).not.toMatch(/free/i);
+  });
+});
+
+// Codex round-1 P2 (b): needsOpenTimes must cover the FULL pest-report class
+// the PEST REPORTS bullet names, not just the SAVE_SALE_TEXT_RE subset — a
+// message like "they're back" must still fetch OPEN TIMES so the "not
+// eligible" branch has real times to offer instead of an empty hand-off.
+describe('generateGroundedDraft — pest-report phrasing fetches OPEN TIMES even with no scheduling intent (Codex round-1 P2 (b))', () => {
+  const prior = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  function setupAvailability() {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({
+      getAvailableSlots: jest.fn(async () => ({ days: [
+        { fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] },
+      ] })),
+    }));
+    return require('../services/sms-shadow-drafter');
+  }
+
+  test.each([
+    "they're back",
+    'the ants are back',
+    'I saw roaches again',
+  ])('%s → OPEN TIMES is fetched (present in the facts block) though SAVE_SALE_TEXT_RE and schedulingIntent both miss it', async (inboundMessage) => {
+    const drafter = setupAvailability();
+    const client = makeClient([
+      { reply: 'Sorry to hear that! Here is a time that works.', intended_actions: [], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft({
+      client, context: CTX, inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false, city: 'Venice',
+    });
+    expect(r.factsBlock).toContain('OPEN TIMES (real, bookable slots');
+  });
+});
+
+// Independent-review P2: with GATE_SMS_AGENT_COMPLAINTS off (prod default),
+// a genuine complaint disguised as a pest report must still be held for a
+// person — the deterministic backstop, not just the prompt's own tie-break.
+describe('generateGroundedDraft — a genuine complaint is held for a person even when GATE_SMS_AGENT_COMPLAINTS is off', () => {
+  const prior = { c: process.env.GATE_SMS_AGENT_COMPLAINTS, ra: process.env.GATE_SMS_REAL_ANSWERS };
+  beforeEach(() => { delete process.env.GATE_SMS_AGENT_COMPLAINTS; delete process.env.GATE_SMS_REAL_ANSWERS; });
+  afterEach(() => {
+    for (const [k, v] of [['GATE_SMS_AGENT_COMPLAINTS', prior.c], ['GATE_SMS_REAL_ANSWERS', prior.ra]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  test('a paid-visit draft (book_appointment, no escalate) is caught deterministically; a revision that escalates instead converges', async () => {
+    const client = makeClient([
+      { reply: 'Sorry about that! We have times open — want me to book one?', intended_actions: [{ type: 'book_appointment' }], missing_info: null },
+      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await generateGroundedDraft({
+      client, context: CTX, inboundMessage: 'Roaches everywhere again after your guy came, third time, I want a refund',
+      intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+    });
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(2);
+    expect(r.parsed.intended_actions).toEqual([{ type: 'escalate' }]);
   });
 });
 
