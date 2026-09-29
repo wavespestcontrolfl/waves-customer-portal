@@ -835,14 +835,19 @@ function resolveGoverningInvoice(stampedInvoice, liveAnchorInvoices) {
 // evidence is required (Codex r18 P1, see resolveGoverningInvoice) — locked
 // FOR UPDATE right alongside it. resolveGoverningInvoice picks among them (oldest collectible,
 // else newest settled — Codex round 14 P1), so created_at is selected too.
-async function loadGoverningInvoice(conn, freshInvoice) {
+// `noWait` (the re-price guard, which already holds a visit row): lock the
+// candidates NOWAIT so contention fails fast (55P03) instead of waiting in
+// the reverse of the charge path's invoice → visit order.
+async function loadGoverningInvoice(conn, freshInvoice, { noWait = false } = {}) {
   if (!InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(freshInvoice.status)) return freshInvoice;
-  const liveAnchorInvoices = await conn('invoices')
+  const candidates = conn('invoices')
     .where('scheduled_service_id', freshInvoice.scheduled_service_id)
     .whereNot('id', freshInvoice.id)
     .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .orderBy('created_at', 'desc')
-    .forUpdate()
+    .forUpdate();
+  if (noWait) candidates.noWait();
+  const liveAnchorInvoices = await candidates
     .select('id', 'status', 'invoice_number', 'total', 'scheduled_service_id', 'created_at', 'line_items');
   return resolveGoverningInvoice(freshInvoice, liveAnchorInvoices);
 }

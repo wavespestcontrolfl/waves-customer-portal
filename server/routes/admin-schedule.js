@@ -17633,11 +17633,15 @@ async function findEstimateScopedCommitment(conn, estimateId) {
 // (Codex r2 P1 on #5301): the stamp on scheduled_services.first_application_
 // invoice_id, unless that invoice was voided/refunded and reissued on the
 // anchor — then the live replacement that bills the base application, via
-// the same loadGoverningInvoice the sibling split uses (it locks the
-// anchor's candidate invoices FOR UPDATE; every liveInvoice caller runs in
-// a transaction). Resolved once per distinct stamp. A governing invoice that
-// is itself terminal holds nothing and is dropped. Returns rows in the
-// shape findBillingCoveredVisits classifies.
+// the same loadGoverningInvoice the sibling split uses. Resolved once per
+// distinct stamp; a governing invoice that is itself terminal holds nothing
+// and is dropped. Returns rows in the shape findBillingCoveredVisits
+// classifies.
+// Locks (Codex r3 on #5301): the stamped invoices first — the sibling
+// split's own order — so an unvoid can't revive one mid-decision, then the
+// replacement candidates. Every liveInvoice caller already holds a visit
+// row, and the saved-card charge path locks invoice → visit, so both are
+// NOWAIT: contention is a VISIT_BUSY_RETRY, never a deadlock.
 async function governingFirstApplicationRows(conn, ids) {
   const { loadGoverningInvoice } = require('../services/first-application-sibling-split');
   const stamped = await conn('scheduled_services as ss')
@@ -17647,9 +17651,20 @@ async function governingFirstApplicationRows(conn, ids) {
       'ss.id as member_id', 'inv.id', 'inv.status', 'inv.scheduled_service_id',
       'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
     );
+  if (stamped.length === 0) return [];
   const governingById = new Map();
-  for (const row of stamped) {
-    if (!governingById.has(row.id)) governingById.set(row.id, await loadGoverningInvoice(conn, row));
+  try {
+    const stampIds = [...new Set(stamped.map((row) => String(row.id)))].sort();
+    await conn('invoices').whereIn('id', stampIds).orderBy('id').forUpdate().noWait().select('id');
+    for (const row of stamped) {
+      if (!governingById.has(row.id)) governingById.set(row.id, await loadGoverningInvoice(conn, row, { noWait: true }));
+    }
+  } catch (err) {
+    if (err?.code !== '55P03') throw err;
+    throw Object.assign(
+      new Error('An invoice for this visit is being updated or charged right now — try the price change again in a moment.'),
+      { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+    );
   }
   const terminal = new Set(require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES);
   return stamped
@@ -17815,12 +17830,14 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
         // counts (Codex r1 P1 on #5301): once paid, the term stamps
         // annual_prepay_term_id on the covered visits and the canonical term
         // read above owns it — a paid request link would otherwise block the
-        // series forever, past the term it covered.
+        // series forever. Only visits inside the term window count (Codex r3
+        // P2); the sold visit count is not bounded here, so a pending term
+        // can over-block the tail of its own window until staff void it.
         const prepayLinked = await conn('appointment_card_requests as acr')
           .join('invoices as inv', 'inv.id', 'acr.prepay_invoice_id')
           .join('annual_prepay_terms as apt', 'apt.id', 'acr.annual_prepay_term_id')
           .join('scheduled_services as rs', 'rs.id', 'acr.scheduled_service_id')
-          .joinRaw('JOIN scheduled_services AS tv ON COALESCE(tv.recurring_parent_id, tv.id) = COALESCE(rs.recurring_parent_id, rs.id)')
+          .joinRaw('JOIN scheduled_services AS tv ON COALESCE(tv.recurring_parent_id, tv.id) = COALESCE(rs.recurring_parent_id, rs.id) AND tv.scheduled_date BETWEEN apt.term_start AND apt.term_end')
           .whereIn('tv.id', ids)
           .where('apt.status', 'payment_pending')
           .whereNotIn('inv.status', [...NO_MONEY_HELD])

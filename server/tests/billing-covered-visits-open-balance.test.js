@@ -41,7 +41,7 @@ const { findBillingCoveredVisits } = require('../routes/admin-schedule');
 // resolve straight from `rows`.
 function fakeQuery(rows) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'joinRaw', 'orderBy', 'forUpdate', 'select']) {
+  for (const m of ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'joinRaw', 'orderBy', 'forUpdate', 'noWait', 'select']) {
     q[m] = jest.fn(() => q);
   }
   q.first = jest.fn(async () => rows[0] || null);
@@ -323,7 +323,7 @@ describe('liveInvoice reaches the /secure annual-prepay invoice link', () => {
   // builder can't evaluate a join), so they're pinned against the source.
   test('the prepay read matches the whole series in SQL and only a payment_pending term (Codex r1 P1 on #5301)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
-    expect(src).toContain("JOIN scheduled_services AS tv ON COALESCE(tv.recurring_parent_id, tv.id) = COALESCE(rs.recurring_parent_id, rs.id)");
+    expect(src).toContain("JOIN scheduled_services AS tv ON COALESCE(tv.recurring_parent_id, tv.id) = COALESCE(rs.recurring_parent_id, rs.id) AND tv.scheduled_date BETWEEN apt.term_start AND apt.term_end");
     expect(src).toMatch(/\.join\('annual_prepay_terms as apt', 'apt\.id', 'acr\.annual_prepay_term_id'\)/);
     expect(src).toMatch(/\.where\('apt\.status', 'payment_pending'\)/);
   });
@@ -373,6 +373,19 @@ describe('liveInvoice reaches the combined first-application invoice link', () =
   test('a void stamp REISSUED on the anchor blocks through the live replacement', async () => {
     const covered = await findBillingCoveredVisits(fixture([stamp('void')], [replacement]), [{ id: 'v2' }], { liveInvoice: true });
     expect(covered.get('v2')).toMatch(/combined first-application invoice/);
+  });
+
+  test('a locked stamped invoice (55P03) maps to VISIT_BUSY_RETRY, never a raw lock error', async () => {
+    const conn = fixture([stamp('draft')]);
+    const base = conn;
+    const wrapped = (table) => {
+      const q = base(table);
+      if (table === 'invoices') q.noWait = jest.fn(() => { const e = new Error('lock'); e.code = '55P03'; q.then = (res, rej) => Promise.reject(e).then(res, rej); return q; });
+      return q;
+    };
+    wrapped.schema = base.schema;
+    await expect(findBillingCoveredVisits(wrapped, [{ id: 'v2' }], { liveInvoice: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
   });
 
   test('without liveInvoice the combined first-application link is not read', async () => {
