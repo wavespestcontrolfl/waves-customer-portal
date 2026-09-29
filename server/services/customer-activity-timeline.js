@@ -184,6 +184,13 @@ const maskEmail = (email) => {
 };
 const normEmail = (email) => String(email || '').trim().toLowerCase();
 
+// SQL twin of the `send row's email is the customer's` rule (normEmail against
+// ctx.emailNorm in the automation source's toEvents): trimmed, case-insensitive,
+// and never true for a blank address. Reads the owning customer's row rather
+// than a binding so it can sit inside the ranking expressions too.
+const AUTOMATION_OWN_SEND = `(LOWER(BTRIM(COALESCE(s.email, ''))) <> ''
+  AND LOWER(BTRIM(COALESCE(s.email, ''))) = (SELECT LOWER(BTRIM(COALESCE(cu_own.email, ''))) FROM customers cu_own WHERE cu_own.id = e.customer_id))`;
+
 const SOURCES = [
   {
     name: 'texts',
@@ -304,14 +311,21 @@ const SOURCES = [
       's.updated_at', 's.email', 't.name as template_name', 'e.template_key'],
     // The webhook stamps a bounce/complaint only as status + updated_at (the
     // table has no bounced_at/complained_at), so updated_at dates all three.
-    ts: ['s.sent_at', 's.delivered_at', 's.opened_at', 's.clicked_at',
-      "CASE WHEN s.status IN ('failed', 'bounced', 'complained') THEN s.updated_at END"],
+    // The ranking times must be exactly the times toEvents turns into events, or
+    // the bounded per-source merge drops a newer event: a send to a billing
+    // contact shows only its sent event, so only that time (or the delivery time
+    // when sent_at is missing) may rank the row.
+    ts: [`CASE WHEN ${AUTOMATION_OWN_SEND} THEN s.sent_at ELSE COALESCE(s.sent_at, s.delivered_at) END`,
+      `CASE WHEN ${AUTOMATION_OWN_SEND} THEN s.delivered_at END`,
+      `CASE WHEN ${AUTOMATION_OWN_SEND} THEN s.opened_at END`,
+      `CASE WHEN ${AUTOMATION_OWN_SEND} THEN s.clicked_at END`,
+      `CASE WHEN ${AUTOMATION_OWN_SEND} AND s.status IN ('failed', 'bounced', 'complained') THEN s.updated_at END`],
     // A payment-failed enrollment redirected to a billing contact
     // (automation-runner.js) sends to someone else's inbox, so its clicks and
     // opens are that person's, not the customer's: only a send row addressed to
     // the customer's own email counts toward the summary.
-    engaged: { expr: 's.clicked_at', where: (q, ctx) => customerOwnSend(q, ctx) },
-    open: { expr: 's.opened_at', where: (q, ctx) => customerOwnSend(q, ctx) },
+    engaged: { expr: 's.clicked_at', where: (q) => q.whereRaw(AUTOMATION_OWN_SEND) },
+    open: { expr: 's.opened_at', where: (q) => q.whereRaw(AUTOMATION_OWN_SEND) },
     toEvents: (r, ctx = {}) => (String(r.email || '') && normEmail(r.email) === ctx.emailNorm ? emailEvents('automation', r,
       `${r.template_name || r.template_key || 'Automation'} (step ${Number(r.step_order) + 1 || 1})`, {
         sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, clicked: r.clicked_at,
@@ -486,13 +500,6 @@ const SOURCES = [
     },
   },
 ];
-
-// SQL twin of the `email matches the customer's` rule in the automation source.
-function customerOwnSend(q, ctx) {
-  return ctx.emailNorm
-    ? q.whereRaw("LOWER(BTRIM(COALESCE(s.email, ''))) = ?", [ctx.emailNorm])
-    : q.whereRaw('FALSE');
-}
 
 // The one thing shown for a send that went to someone other than the customer:
 // that it went out, to whom (masked). No delivery / open / click / failure

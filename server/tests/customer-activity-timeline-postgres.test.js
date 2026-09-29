@@ -272,6 +272,29 @@ pg('getCustomerActivity on Postgres', () => {
     expect(r.events.some((e) => e.source === 'automation' && e.kind === 'opened' && e.at === T(32).toISOString())).toBe(true);
   });
 
+  test('billing-contact sends rank by their one visible sent event, so they cannot crowd out a newer own send', async () => {
+    const solo = randomUUID(); const en = randomUUID();
+    await db('customers').insert({ id: solo, email: 'ranker@example.test' });
+    await db('automation_enrollments').insert({ id: en, template_key: 'welcome', customer_id: solo });
+    await db('automation_step_sends').insert([
+      { id: randomUUID(), enrollment_id: en, step_order: 0, status: 'clicked', email: 'ap@example.test', sent_at: T(1), clicked_at: T(50) },
+      { id: randomUUID(), enrollment_id: en, step_order: 1, status: 'clicked', email: 'ap@example.test', sent_at: T(2), clicked_at: T(51) },
+      { id: randomUUID(), enrollment_id: en, step_order: 2, status: 'sent', email: 'Ranker@example.test', sent_at: T(20) },
+    ]);
+    const first = await timeline.getCustomerActivity(solo, { limit: 1 }, db);
+    expect(first.events.map((e) => e.at)).toEqual([T(20).toISOString()]);
+    expect(first.events[0].title).toBe('Email sent');
+    const seen = [];
+    let cursor = null;
+    for (let i = 0; i < 6; i += 1) {
+      const page = await timeline.getCustomerActivity(solo, { limit: 1, before: cursor }, db);
+      seen.push(...page.events.map((e) => e.at));
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+    expect(seen).toEqual([T(20).toISOString(), T(2).toISOString(), T(1).toISOString()]);
+  });
+
   test('an archived customer is not found', async () => {
     const gone = randomUUID();
     await db('customers').insert({ id: gone, email: 'gone@example.test', deleted_at: T(1) });

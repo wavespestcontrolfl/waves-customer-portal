@@ -159,13 +159,16 @@ describe('engagement rule', () => {
     expect(source('automation emails').toEvents({ ...row, email: null }, ctx)).toHaveLength(1);
   });
 
-  test('automation emails: the summary MAX queries only count sends addressed to the customer', async () => {
-    const dbh = fakeDb({ customer: { id: 'c1', email: ' Owner@Example.test ' } });
+  test('automation emails: ranking times and summary MAX queries carry the customer-own-send rule', async () => {
+    const src = source('automation emails');
+    // every ranking expression except sent_at's fallback is gated on the rule
+    expect(src.ts.filter((t) => /cu_own\.email/.test(t))).toHaveLength(src.ts.length);
+    expect(src.ts[0]).toMatch(/ELSE COALESCE\(s\.sent_at, s\.delivered_at\) END/);
+    const dbh = fakeDb();
     await getCustomerActivity('c1', {}, dbh);
-    const scoped = dbh.calls.chain.filter(([t, m, a]) => t === 'automation_step_sends as s' && m === 'whereRaw' && /LOWER\(BTRIM\(COALESCE\(s\.email/.test(a[0]));
+    const scoped = dbh.calls.chain.filter(([t, m, a]) => t === 'automation_step_sends as s' && m === 'whereRaw' && /cu_own\.email/.test(a[0]) && !/CASE/.test(a[0]));
     // engaged MAX + open MAX
     expect(scoped).toHaveLength(2);
-    expect(scoped.every(([, , a]) => a[1][0] === 'owner@example.test')).toBe(true);
   });
 
   test('portal page views ride the portal channel; token pages ride the page channel', () => {
