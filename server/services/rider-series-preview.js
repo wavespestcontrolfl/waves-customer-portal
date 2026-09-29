@@ -284,20 +284,19 @@ async function attributeReasonMap(conn, rowIds) {
   const ids = (rowIds || []).filter(Boolean);
   const map = new Map();
   if (!ids.length) return map;
-  const [
-    invoiced, cardHeld, cardRequested, packeted, completionClaims, messagedRows, promisedRows,
-  ] = await Promise.all([
-    conn('invoices').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id'),
-    conn('estimate_card_holds').whereIn('scheduled_service_id', ids)
-      .whereNotIn('status', DEAD_CARD_STATUSES).pluck('scheduled_service_id'),
-    conn('appointment_card_requests').whereIn('scheduled_service_id', ids)
-      .whereNotIn('status', DEAD_CARD_STATUSES).pluck('scheduled_service_id'),
-    conn('visit_completion_packet_items').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id'),
-    conn('service_completion_attempts').whereIn('service_id', ids)
-      .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES).pluck('service_id'),
-    messagedRowIds(conn, ids),
-    deliveredPromiseRowIds(conn, ids),
-  ]);
+  // Sequential, not Promise.all: every read runs on the caller's one
+  // transaction connection, and pg rejects concurrent queries on one client
+  // (deprecated now, an error in pg 9).
+  const invoiced = await conn('invoices').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id');
+  const cardHeld = await conn('estimate_card_holds').whereIn('scheduled_service_id', ids)
+    .whereNotIn('status', DEAD_CARD_STATUSES).pluck('scheduled_service_id');
+  const cardRequested = await conn('appointment_card_requests').whereIn('scheduled_service_id', ids)
+    .whereNotIn('status', DEAD_CARD_STATUSES).pluck('scheduled_service_id');
+  const packeted = await conn('visit_completion_packet_items').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id');
+  const completionClaims = await conn('service_completion_attempts').whereIn('service_id', ids)
+    .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES).pluck('service_id');
+  const messagedRows = await messagedRowIds(conn, ids);
+  const promisedRows = await deliveredPromiseRowIds(conn, ids);
   // Priority order only matters for which SINGLE `why` a row reports when
   // more than one applies — every category still independently pins the
   // row either way. promisedRows and messagedRows share the SAME `why`
@@ -444,11 +443,8 @@ async function evaluatePairGates(conn, ctx) {
   const sameCustomer = String(riderParent.customer_id) === String(hostParent.customer_id);
   let hostScope = null;
   if (cols.property_id && sameCustomer) {
-    const [riderScope, resolvedHostScope] = await Promise.all([
-      resolveSeriesPropertyScope(conn, riderParent),
-      resolveSeriesPropertyScope(conn, hostParent),
-    ]);
-    hostScope = resolvedHostScope;
+    const riderScope = await resolveSeriesPropertyScope(conn, riderParent);
+    hostScope = await resolveSeriesPropertyScope(conn, hostParent);
     const verdict = seriesPropertyVerdict(riderScope, hostScope);
     if (verdict === 'unresolved') reasons.push('property_unresolved');
     else if (verdict === 'different') reasons.push('different_property');
@@ -580,8 +576,12 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
   // anchor — previewRiderPair reports `no_anchor` alongside
   // `rider_reschedule_pending` rather than planning off a date that was
   // never really kept.
-  const parentIsReschedulePending = riderParent.is_recurring === true && riderParent.status === 'rescheduled';
-  if (!lastRiderDate && !parentIsReschedulePending) lastRiderDate = dateOnly(riderParent.scheduled_date);
+  // The parent's own date is the fallback anchor only for a brand-new
+  // series whose first visit is still live. A skipped, no-show, cancelled or
+  // rescheduled parent never happened on that date, so it never anchors
+  // (completed already anchored above).
+  const parentAnchorable = !JOIN_INELIGIBLE_STATUSES.includes(riderParent.status);
+  if (!lastRiderDate && parentAnchorable) lastRiderDate = dateOnly(riderParent.scheduled_date);
   return {
     riderRows, classifications, lastRiderDate, reschedulePending,
   };
@@ -615,6 +615,7 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
  * @returns {Promise<{eligible: boolean, reasons: string[], anchor: ?string,
  *   planFloor: ?string, horizon: ?string, plan: string[], keep: Array,
  *   move: Array, insert: string[], cancel: Array,
+ *   retained: Array<{id: string, date: string}>,
  *   pinned: Array<{id: string, date: ?string, why: string}>}>}
  */
 async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
@@ -629,6 +630,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     move: [],
     insert: [],
     cancel: [],
+    retained: [],
     pinned: [],
   });
 
@@ -649,12 +651,17 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     if (reschedulePending) reasons.push('rider_reschedule_pending');
     if (!lastRiderDate) { reasons.push('no_anchor'); return empty(reasons); }
 
-    const movableRows = riderRows.filter((r) => {
+    const futureMovable = riderRows.filter((r) => {
       const c = classifications.get(r.id);
-      return c && c.movable === true
-        && dateOnly(r.scheduled_date) >= todayStr
-        && dateOnly(r.scheduled_date) > lastRiderDate;
+      return c && c.movable === true && dateOnly(r.scheduled_date) >= todayStr;
     });
+    const movableRows = futureMovable.filter((r) => dateOnly(r.scheduled_date) > lastRiderDate);
+    // Movable visits dated on or before the anchor (a later visit is pinned)
+    // are left where they are. Report them so every future visit appears in
+    // exactly one list.
+    const retained = futureMovable
+      .filter((r) => dateOnly(r.scheduled_date) <= lastRiderDate)
+      .map((r) => ({ id: r.id, date: dateOnly(r.scheduled_date) }));
 
     const nearTermCutoff = addDaysStr(todayStr, NEAR_TERM_DAYS);
     const planFloor = addDaysStr(nearTermCutoff, 1);
@@ -703,6 +710,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       move: diff.move,
       insert: diff.insert,
       cancel: diff.cancel,
+      retained,
       pinned,
     };
   } catch (err) {
@@ -717,6 +725,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       move: [],
       insert: [],
       cancel: [],
+      retained: [],
       pinned: [],
       error: err.message,
     };

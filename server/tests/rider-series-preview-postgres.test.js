@@ -74,6 +74,10 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
   afterAll(async () => { await database?.destroy(); });
 
   // --- fixture helpers ------------------------------------------------------
+  function dateOnlyStr(d) {
+    return d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10);
+  }
+
   async function row(overrides = {}) {
     const [r] = await trx('scheduled_services').insert({
       id: randomUUID(),
@@ -783,5 +787,29 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       expect(preview.plan).toEqual([]);
       expect(preview.eligible).toBe(false);
     });
+  });
+
+  test('a movable visit dated before a later pinned visit is reported as retained, never dropped from every list', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const children = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc');
+    const [earlier, later] = children;
+    await trx('invoices').insert({
+      id: randomUUID(), token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      customer_id: customerId, scheduled_service_id: later.id,
+    });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.anchor).toBe(dateOnlyStr(later.scheduled_date));
+    expect(preview.retained).toEqual([{ id: earlier.id, date: dateOnlyStr(earlier.scheduled_date) }]);
+    const listed = [...preview.keep, ...preview.move, ...preview.cancel].map((r) => r.id);
+    expect(listed).not.toContain(earlier.id);
+  });
+
+  test.each(['skipped', 'no_show'])('a %s rider parent with nothing else to anchor gives no_anchor, never its missed date', async (status) => {
+    const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ status });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.reasons).toContain('no_anchor');
+    expect(preview.anchor).toBeNull();
+    expect(preview.plan).toEqual([]);
   });
 });

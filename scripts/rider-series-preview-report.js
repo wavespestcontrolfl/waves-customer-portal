@@ -59,9 +59,13 @@ function classifyCandidate(row, serviceMap) {
   const overlaid = overlayRecurringTemplateOverrides(row, { recurring_template_overrides: true });
   let serviceKey = row.service_key;
   let serviceName = row.service_name;
-  if (overlaid.service_id != null && String(overlaid.service_id) !== String(row.service_id)) {
-    const svc = serviceMap.get(String(overlaid.service_id));
-    if (svc) { serviceKey = svc.service_key; serviceName = svc.name; }
+  // Any change of effective service_id (including to null, a static
+  // fallback service) drops the historical join's catalog identity, so
+  // familyOfServiceRow can't classify the series under its old family.
+  if (String(overlaid.service_id ?? '') !== String(row.service_id ?? '')) {
+    const svc = overlaid.service_id != null ? serviceMap.get(String(overlaid.service_id)) : null;
+    serviceKey = svc ? svc.service_key : null;
+    serviceName = svc ? svc.name : null;
   }
   const family = familyOfServiceRow({ ...overlaid, service_key: serviceKey, service_name: serviceName });
   return family;
@@ -113,7 +117,10 @@ function classifyAndGroupByCustomer(rows, serviceMap) {
 // customer's one shared unresolved bucket (conservative — never guessed
 // into, or out of, a resolved bucket). Order is deterministic (root id).
 async function clusterIntoPropertyBuckets(trx, group) {
-  const scoped = await Promise.all(group.map(async (c) => ({ ...c, scope: await resolveSeriesPropertyScope(trx, c.row) })));
+  // Sequential: every read shares one transaction connection, and pg
+  // rejects concurrent queries on one client (deprecated now, an error in pg 9).
+  const scoped = [];
+  for (const c of group) scoped.push({ ...c, scope: await resolveSeriesPropertyScope(trx, c.row) });
   const ordered = scoped.sort((a, b) => String(a.row.id).localeCompare(String(b.row.id)));
   const buckets = [];
   let unresolvedBucket = null;
@@ -123,8 +130,13 @@ async function clusterIntoPropertyBuckets(trx, group) {
       if (!unresolvedBucket) { unresolvedBucket = { unresolved: true, lawn: [], pest: [] }; buckets.push(unresolvedBucket); }
       bucket = unresolvedBucket;
     } else {
-      bucket = buckets.find((b) => !b.unresolved && seriesPropertyVerdict(b.scope, c.scope) === 'same');
-      if (!bucket) { bucket = { scope: c.scope, lawn: [], pest: [] }; buckets.push(bucket); }
+      // A root joins a bucket only when it matches EVERY member's scope, not
+      // just the first one's: a street-only scope treats a missing city/ZIP
+      // as a wildcard, so matching the first member alone could merge roots
+      // from two explicitly different cities, depending on id order.
+      bucket = buckets.find((b) => !b.unresolved && b.scopes.every((sc) => seriesPropertyVerdict(sc, c.scope) === 'same'));
+      if (!bucket) { bucket = { scope: c.scope, scopes: [], lawn: [], pest: [] }; buckets.push(bucket); }
+      bucket.scopes.push(c.scope);
     }
     bucket[c.family === 'lawn_care' ? 'lawn' : 'pest'].push(c.row);
   }
@@ -142,7 +154,7 @@ function pairsFromBucket(bucket, customerId) {
   if (bucket.unresolved) extraReasons.push('property_unresolved');
   if (bucket.lawn.length > 1) extraReasons.push('host_ambiguous');
   if (bucket.pest.length > 1) extraReasons.push('rider_ambiguous');
-  const propertyId = bucket.unresolved ? null : (bucket.scope.propertyId || null);
+  const propertyId = bucket.unresolved ? null : (bucket.scopes.find((sc) => sc.propertyId)?.propertyId || null);
   const pairs = [];
   for (const lawn of sortById(bucket.lawn)) {
     for (const pest of sortById(bucket.pest)) {
@@ -165,7 +177,9 @@ async function findCandidatePairs(trx) {
     // cancelled root's recurring_ongoing flag can still read true (nothing
     // clears it on cancel), so without this a cancelled series still
     // surfaced as a candidate pair.
-    .whereNotIn('s.status', NON_CANCELLED_ROOT_STATUSES)
+    // Null-safe: a legacy root with a NULL status is live, and a bare
+    // NOT IN would drop it.
+    .where((q) => { q.whereNull('s.status').orWhereNotIn('s.status', NON_CANCELLED_ROOT_STATUSES); })
     .whereIn('s.recurring_pattern', [LAWN_PATTERN, PEST_PATTERN])
     .select(
       's.id', 's.customer_id', 's.property_id', 's.recurring_pattern', 's.service_type', 's.service_id',
@@ -206,6 +220,7 @@ function printHuman(pair, preview) {
     if (preview.move.length) process.stdout.write(`  move (${preview.move.length}): ${preview.move.map((r) => `${r.id} ${r.from} -> ${r.to}`).join(', ')}\n`);
     if (preview.insert.length) process.stdout.write(`  insert (${preview.insert.length}): ${preview.insert.join(', ')}\n`);
     if (preview.cancel.length) process.stdout.write(`  cancel (${preview.cancel.length}): ${preview.cancel.map((r) => `${r.id}@${r.date}`).join(', ')}\n`);
+    if (preview.retained && preview.retained.length) process.stdout.write(`  retained (${preview.retained.length}): ${preview.retained.map((r) => `${r.id}@${r.date}`).join(', ')}\n`);
     if (preview.pinned.length) process.stdout.write(`  pinned (${preview.pinned.length}): ${preview.pinned.map((r) => `${r.id}@${r.date || '?'} (${r.why})`).join(', ')}\n`);
   }
 }
@@ -236,7 +251,7 @@ async function main() {
         });
       } catch (err) {
         preview = err.preview || {
-          eligible: false, reasons: ['error'], error: err.message, anchor: null, plan: [], keep: [], move: [], insert: [], cancel: [], pinned: [],
+          eligible: false, reasons: ['error'], error: err.message, anchor: null, plan: [], keep: [], move: [], insert: [], cancel: [], retained: [], pinned: [],
         };
       }
       // Bucket-level reasons this script's OWN candidate-finding decided
