@@ -124,12 +124,26 @@ function fakeConn(seed = {}) {
     // Mirrors the real query: an aliased select, never pluck() on a Raw
     // (Knex 3's pluck needs a string column; Codex #5319 r1).
     q.pluck = () => { throw new Error('pluck() must not be used here'); };
-    q.select = async () => store.activityLog
+    q.groupByRaw = () => { q._grouped = true; return q; };
+    q.select = async () => (q._grouped ? lastCheckedRows : (rows) => rows)(store.activityLog
       .filter((r) => r.action === q._action)
       .filter((r) => !q._since || !r.created_at || new Date(r.created_at) >= q._since)
       .filter((r) => !q._caseValue || metaOf(r).case === q._caseValue)
       .filter((r) => !q._idsFilter || q._idsFilter.includes(String(metaOf(r).submissionId)))
-      .map((r) => ({ submission_id: String(metaOf(r).submissionId), attempts: metaOf(r).attempts == null ? null : String(metaOf(r).attempts) }));
+      .map((r) => ({
+        submission_id: String(metaOf(r).submissionId),
+        attempts: metaOf(r).attempts == null ? null : String(metaOf(r).attempts),
+        created_at: r.created_at,
+      })));
+    // MAX(created_at) per submission, as the grouped query returns.
+    const lastCheckedRows = (rows) => {
+      const last = new Map();
+      for (const r of rows) {
+        const prev = last.get(r.submission_id);
+        if (!prev || new Date(r.created_at) > new Date(prev)) last.set(r.submission_id, r.created_at);
+      }
+      return [...last].map(([submission_id, last_checked]) => ({ submission_id, last_checked }));
+    };
     q.insert = async (row) => { store.activityLog.push({ created_at: new Date(), ...row }); return [{ id: `gen-${store.activityLog.length}` }]; };
     return q;
   }
@@ -577,5 +591,39 @@ describe('case (d) covers failed reads and is one retry per settled attempt (Cod
     await sweepVisitPrepPestReads(conn, NOW);
     const retry = conn._store.activityLog.find((r) => r.action === 'visit_prep_read_sweep_attempt');
     expect(metaOf(retry)).toMatchObject({ case: SWEEP_CASE.STALE_READ, attempts: 3 });
+  });
+});
+
+describe('the widened window (Codex #5348 r1)', () => {
+  test('the 14-day cutoff is 14 ET calendar days, even across the spring DST change', async () => {
+    // 00:30 ET on Sat Mar 20 2027 (EDT since Mar 14): 14 x 24 h back is
+    // 23:30 EST on Mar 5, but the window starts at Mar 6 00:00 ET.
+    const now = new Date('2027-03-20T04:30:00Z');
+    const conn = fakeConn({
+      submissions: [
+        submission({ id: 'sub-old', read_status: 'none', created_at: new Date('2027-03-05T23:45:00-05:00') }),
+        submission({ id: 'sub-in', read_status: 'none', created_at: new Date('2027-03-06T00:15:00-05:00') }),
+      ],
+      services: [svc({ scheduled_date: '2027-03-20' })],
+    });
+    expect((await selectCandidates(conn, now)).map((c) => c.submission_id)).toEqual(['sub-in']);
+  });
+
+  test('rows are checked least-recently-checked first, so newer rows are reached once old ones cool down', async () => {
+    const conn = fakeConn({
+      submissions: [
+        submission({ id: 'sub-old', read_status: 'unsupported', created_at: new Date(NOW.getTime() - 3 * 3600 * 1000) }),
+        submission({ id: 'sub-new', read_status: 'unsupported', created_at: new Date(NOW.getTime() - 1 * 3600 * 1000) }),
+      ],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      // The older row was checked 2 h ago (past the cooldown); the newer one never.
+      activityLog: [{ action: 'visit_prep_read_sweep_check', created_at: new Date(NOW.getTime() - 2 * 3600 * 1000), metadata: { submissionId: 'sub-old' } }],
+    });
+    await selectCandidates(conn, NOW);
+    const order = mockIsPestStop.mock.calls.map(([svcArg]) => svcArg.id);
+    expect(order).toHaveLength(2);
+    // Both rows share svc-1, so read the order off the check markers written.
+    const checks = conn._store.activityLog.filter((r) => r.action === 'visit_prep_read_sweep_check').slice(1).map((r) => metaOf(r).submissionId);
+    expect(checks).toEqual(['sub-new', 'sub-old']);
   });
 });

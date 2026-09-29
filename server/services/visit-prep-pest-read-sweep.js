@@ -64,7 +64,7 @@ const { dispatchVisitPrepRead, _internal: { currentReadKey, storedReadKey } } = 
 const { etDayStart, withLockedStop } = require('./visit-prep-read-claim');
 const { visitPrepReadSweepLive, visitPrepPestReadLive, visitPrepPlantReadLive } = require('../config/feature-gates');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const SWEEP_ACTION = 'visit_prep_read_sweep_attempt';
 // How far back a submission is still worth reading: its visit must also be
@@ -98,7 +98,9 @@ async function candidateRows(conn, now) {
   return conn('visit_prep_submissions as vps')
     .join('scheduled_services as ss', 'ss.id', 'vps.scheduled_service_id')
     .whereIn('vps.read_status', ['none', 'unsupported', 'done', 'failed'])
-    .where('vps.created_at', '>=', etDayStart(new Date(now.getTime() - RECOVERY_WINDOW_DAYS * 24 * 60 * 60 * 1000)))
+    // ET calendar days (addETDays lands on the target ET date), never a
+    // fixed 24-hour multiple that a DST change would shift (Codex #5348 r1).
+    .where('vps.created_at', '>=', etDayStart(addETDays(now, -RECOVERY_WINDOW_DAYS)))
     .where('ss.scheduled_date', '>=', etDateString(now))
     .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
     .select(
@@ -130,16 +132,25 @@ async function dropAlreadyAttempted(conn, rows, caseLabel) {
 const CHECK_ACTION = 'visit_prep_read_sweep_check';
 const CHECK_COOLDOWN_MS = 60 * 60 * 1000;
 
-async function dropRecentlyChecked(conn, rows, now) {
+// Drops rows checked within CHECK_COOLDOWN_MS, then orders the rest by
+// when they were last checked (never-checked first, then oldest check,
+// then oldest submission), so each tick advances through the whole
+// recovery window instead of re-checking the same oldest rows once their
+// cooldown lapses (Codex #5319 r2, #5348 r1).
+async function orderByLastCheck(conn, rows, now) {
   if (!rows.length) return rows;
   const ids = rows.map((r) => String(r.submission_id));
   const checked = await conn('activity_log')
     .where({ action: CHECK_ACTION })
-    .where('created_at', '>=', new Date(now.getTime() - CHECK_COOLDOWN_MS))
     .whereIn(conn.raw("metadata->>'submissionId'"), ids)
-    .select(conn.raw("metadata->>'submissionId' as submission_id"));
-  const seen = new Set(checked.map((r) => String(r.submission_id)));
-  return rows.filter((r) => !seen.has(String(r.submission_id)));
+    .groupByRaw("metadata->>'submissionId'")
+    .select(conn.raw("metadata->>'submissionId' as submission_id"), conn.raw('MAX(created_at) as last_checked'));
+  const lastChecked = new Map(checked.map((r) => [String(r.submission_id), new Date(r.last_checked).getTime()]));
+  const cutoff = now.getTime() - CHECK_COOLDOWN_MS;
+  const at = (r) => lastChecked.get(String(r.submission_id)) ?? -Infinity;
+  return rows
+    .filter((r) => at(r) < cutoff)
+    .sort((a, b) => (at(a) - at(b)) || (new Date(a.created_at) - new Date(b.created_at)));
 }
 
 async function recordCheck(conn, row) {
@@ -180,15 +191,13 @@ async function selectCandidates(conn, now) {
   // Cases (c) and (d) only when the stop's read RIGHT NOW differs from what
   // the row holds — never re-derived from the submission's stale snapshot;
   // the engine re-checks it under the stop lock. The per-row check runs only
-  // for the batch's remaining room (Codex #5319 r1 P2), and a row checked
-  // and found still fine is skipped for CHECK_COOLDOWN_MS, so each tick
-  // advances through the cohort instead of re-checking the same oldest rows
-  // (Codex #5319 r2 P2).
+  // for the batch's remaining room (Codex #5319 r1 P2), least recently
+  // checked first (orderByLastCheck), so each tick advances through the
+  // whole window (Codex #5319 r2, #5348 r1).
   const room = Math.max(0, SWEEP_BATCH_LIMIT - noneOk.length);
-  const unchecked = await dropRecentlyChecked(conn, [...unsupportedOk, ...settledOk], now);
+  const toCheck = await orderByLastCheck(conn, [...unsupportedOk, ...settledOk], now);
   const changed = [];
-  const oldestFirst = [...unchecked].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  for (const row of oldestFirst.slice(0, room * 2)) {
+  for (const row of toCheck.slice(0, room * 2)) {
     if (changed.length >= room) break;
     if (await needsReadNow(conn, row, live)) {
       changed.push(row);
