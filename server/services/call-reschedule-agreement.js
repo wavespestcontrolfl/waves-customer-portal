@@ -186,6 +186,7 @@ function plainlySaid(turn, quote, { askingFails = false, movedDate = false, move
   const screened = movedDate && movedWords ? stripAvailability(text, movedWords) : text;
   return Boolean(text) && !turnHasNegationOrHedge(screened) && !hasQualifiedAgreement(screened, evidenceWords, quote)
     && !hasUnresolvedAgreementCondition(screened)
+    && (movedDate || slotScopeIsPlain(around, evidenceWords))
     && !(askingFails && around.some((x) => x.question));
 }
 
@@ -557,35 +558,19 @@ function hourExactIn(text, words, callerTurn = false) {
   return exact && toks.every((t, k) => explained.has(k) || !(/^\d+$/.test(t) || hourNumber(t) != null || t === 'noon' || t === 'midnight'));
 }
 
-// A relative qualifier attached to the appointment day has to be part of
-// the recorded day words. Requiring the date itself inside the matched
-// phrase keeps unrelated timing in the same sentence ("the plan renews a
-// week from now, and we will see you Thursday") from invalidating the slot.
+// The caller's moved-appointment words: a qualifier beside ANY mention of the
+// day that the recorded words do not carry ("Thursday next month", "next
+// week's Thursday", "Thursday eight days away") could point the move at the
+// nearer weekday, so it fails. Every occurrence of the day counts, not one
+// picked by proximity; a conjunction or sentence end ends a neighbourhood.
+// (The agreed slot is judged by the closed vocabulary below instead.)
 function regexpEscape(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
-function phraseRanges(text, phrase) {
-  const words = normalize(phrase);
-  if (!words) return [];
-  const re = new RegExp(String.raw`\b${regexpEscape(words).replace(/\s+/g, String.raw`\s+`)}\b`, 'g');
-  return [...normalize(text).matchAll(re)].map((match) => [match.index, match.index + match[0].length]);
-}
-function rangeDistance([a, b], [c, d]) {
-  if (b < c) return c - b;
-  if (d < a) return a - d;
-  return 0;
-}
-// Sentence text arrives one sentence per line: a qualifier in one sentence
-// never attaches to a day named in another.
-function hasUnrecordedRelativeDate(text, day, anchor, ownedAnchorRanges = null) {
-  return String(text).split('\n').some((part) => sentenceHasUnrecordedRelativeDate(part, day, anchor, ownedAnchorRanges));
-}
-// Words that shift a day to another week, month or year when they sit
-// within a few words of it. Enumerated shapes ("a week from now", "the
-// Thursday after next") miss others ("next month", "next week's Thursday"),
-// so any of these next to the appointment day is a qualifier the recorded
-// day words must carry; a conjunction ends the neighbourhood.
-const RELATIVE_QUALIFIER_WORDS = new Set(['next', 'following', 'week', 'weeks', 'month', 'months', 'year', 'years']);
+const RELATIVE_QUALIFIER_WORDS = new Set([
+  'next', 'following', 'after', 'before', 'later', 'hence', 'ago', 'away',
+  'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
+]);
 const CLAUSE_CONJUNCTIONS = new Set(['and', 'but', 'so', 'because', 'while', 'since', 'then']);
 const QUALIFIER_NEIGHBOURHOOD = 5;
 function hasQualifierNextTo(normalized, [from, to]) {
@@ -596,66 +581,21 @@ function hasQualifierNextTo(normalized, [from, to]) {
   const near = [...before.slice(lastBreak + 1), ...(firstBreak < 0 ? after : after.slice(0, firstBreak))];
   return near.some((t) => RELATIVE_QUALIFIER_WORDS.has(t)) || / from (?:now|today) /.test(` ${near.join(' ')} `);
 }
-function sentenceHasUnrecordedRelativeDate(text, day, anchor, ownedAnchorRanges = null) {
+function movedAppointmentHasUnrecordedRelativeDate(text, day) {
   if (typeof day !== 'string') return false;
   const coreDay = normalize(day).replace(NEAREST_LEAD, '').replace(/^the\s+/, '');
   if (!coreDay) return false;
-  const target = String.raw`(?:the\s+)?${regexpEscape(coreDay).replace(/\s+/g, String.raw`\s+`)}`;
-  const count = String.raw`(?:[a-z]+|\d+)`;
-  const units = String.raw`(?:full\s+)?(?:days?|weeks?)`;
-  // A qualifier can trail the time as well as the day ("Thursday at two PM
-  // next week"): a few plain words may sit between them, never a
-  // conjunction that starts another clause. Normalized text has no commas.
-  const gap = String.raw`(?:(?!(?:and|but|so|because|while|since|then)\b)[a-z0-9]+\s+){0,5}?`;
-  const relative = new RegExp(String.raw`\b(?:`
-    + String.raw`(?:next|following)\s+(?:coming\s+)?${target}`
-    + String.raw`|(?:next|following)\s+weeks?\s+(?:on\s+)?${target}`
-    + String.raw`|${target}\s+${gap}(?:after|before)\s+(?:next|this(?:\s+one)?)`
-    + String.raw`|${target}\s+${gap}(?:of\s+(?:the\s+)?)?(?:next|following)\s+weeks?`
-    + String.raw`|${target}\s+${gap}(?:the\s+)?weeks?\s+(?:after|before)\s+next`
-    + String.raw`|${target}\s+${gap}${count}\s+${units}\s+(?:from\s+(?:now|today)|later|hence)`
-    + String.raw`|${target}\s+${gap}(?:in|within|after)\s+(?:${count}\s+){1,3}${units}`
-    + String.raw`|${count}\s+${units}\s+from\s+${target}`
-    + String.raw`|(?:in|within|after)\s+(?:${count}\s+){1,3}${units}\s+(?:on\s+)?${target}`
-    + String.raw`)\b`, 'g');
-  const normalized = normalize(text);
-  const relativeRanges = [...normalized.matchAll(relative)].map((match) => [match.index, match.index + match[0].length]);
-  const dayRanges = phraseRanges(normalized, coreDay);
-  const anchorRanges = ownedAnchorRanges || phraseRanges(normalized, anchor);
-  if (!dayRanges.length) return relativeRanges.length > 0;
-  // With the anchor (the hour, or the move words) in another sentence, every
-  // mention of the day counts: fail closed.
-  const distance = (range) => Math.min(...anchorRanges.map((other) => rangeDistance(range, other)));
-  const nearest = anchorRanges.length ? Math.min(...dayRanges.map(distance)) : 0;
-  const appointmentDays = anchorRanges.length ? dayRanges.filter((range) => distance(range) === nearest) : dayRanges;
-  return appointmentDays.some((range) => hasQualifierNextTo(normalized, range))
-    || relativeRanges.some(([from, to]) => appointmentDays.some(([dayFrom, dayTo]) => dayFrom < to && dayTo > from));
-}
-
-// A moved-date quote can contain unrelated dates too. Anchor its recorded
-// date to the nearest words that identify the appointment being moved,
-// rather than to the quote's total range (which may cover both dates). The
-// full holding sentence is still checked, so a fragment cannot omit a
-// qualifier attached to the selected appointment.
-const MOVE_ACTION_RE = /\b(?:mov(?:e|ed|ing)|reschedul(?:e|ed|ing)|chang(?:e|ed|ing)|shift(?:ed|ing)?)\b/g;
-const APPOINTMENT_NOUN_RE = /\b(?:appointments?|bookings?|services?|visits?)\b/g;
-function movedAppointmentHasUnrecordedRelativeDate(text, day) {
-  return String(text).split('\n').some((part) => movedSentenceHasUnrecordedRelativeDate(part, day));
-}
-function movedSentenceHasUnrecordedRelativeDate(text, day) {
-  const normalized = normalize(text);
-  const ranges = (re) => [...normalized.matchAll(re)]
-    .map((match) => [match.index, match.index + match[0].length]);
-  // An explicit move action is the strongest owner. Fall back to the visit
-  // noun for terse turns such as "my Thursday appointment, please."
-  const actions = ranges(MOVE_ACTION_RE);
-  const owners = actions.length ? actions : ranges(APPOINTMENT_NOUN_RE);
-  return hasUnrecordedRelativeDate(normalized, day, day, owners.length ? owners : null);
+  const re = new RegExp(String.raw`\b${regexpEscape(coreDay).replace(/\s+/g, String.raw`\s+`)}\b`, 'g');
+  // One sentence per line: a qualifier in one sentence never attaches to a
+  // day named in another.
+  return String(text).split('\n').some((part) => {
+    const normalized = normalize(part);
+    return [...normalized.matchAll(re)].some((m) => hasQualifierNextTo(normalized, [m.index, m.index + m[0].length]));
+  });
 }
 
 function statesSlotWords(quote, words, turns, agreementQuotes = []) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
-    && !hasUnrecordedRelativeDate(sentencesHolding(turns, quote, '\n'), words.day, words.hour)
     && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
@@ -695,7 +635,6 @@ function commitsToSlot(quote, words, hour24, turns) {
   const around = sentencesHolding(turns, quote);
   const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
-    && !hasUnrecordedRelativeDate(sentencesHolding(turns, quote, '\n'), words.day, words.hour)
     // Offering alternatives is not committing ("No, we'll see you Thursday
     // at two or Friday at three"), and a trailing "right" asks ("see you
     // at 9, right."); "right now" mid-sentence does not.
@@ -733,6 +672,46 @@ const PLAIN_COMMIT_WORDS = new Set([
   'so', 'and', 'all', 'set', 've', 'got', 'your', 'appointment', 'visit', 'just', 's', 'over',
   'o', 'clock', 'oclock', '00', 'thank', 'thanks', 'awesome', 'alright',
 ]);
+// The agreed slot's scope is a CLOSED vocabulary. From the sentence's clause
+// start (a sentence start, or after "and"/"but") through the last word of
+// the recorded slot (day, hour), plus whatever trails it up to the clause
+// end, every word must be slot vocabulary: day/month names, numbers and
+// ordinals, clock and part-of-day words, and the plain words of a booking
+// ("we will see you ... at ... exactly"). Anything else inside that scope --
+// "upon clearance", "eight days away", "once cleared", "after the rain",
+// "next", "pending", "if" -- is a condition or a different date the
+// extraction may have dropped, so the promise is not grounded and the call
+// goes to the office. Every mention of the day or hour in the sentence
+// widens the scope, never just the one nearest the hour. Another clause
+// ("The plan renews a week from now, and we will see you Thursday at two")
+// is outside the scope unless it names the slot too.
+const SLOT_SCOPE_WORDS = new Set([
+  ...PLAIN_COMMIT_WORDS, ...AFTER_HOUR_WORDS, ...CALLER_AFTER_HOUR_WORDS, ...EXACT_LEADS,
+  ...[...EXACT_TAILS].filter((w) => w !== 'next'), ...HOUR_LEAD_DAYS, ...DAY_WORDS, ...Object.keys(HOUR_WORDS),
+  ...Object.keys(PERIOD_PHRASES).flatMap((p) => p.split(' ')), 'night', 'exactly', 'can', 'could', 'do', 'does', 'would',
+  'work', 'fine', 'free', 'available', 'my', 'me', 'am', 'is', 'are', 'please', 'this', 'of', 'in', 'an', 'hi', 'hello', 'seeing', 'by', 'no', 'call', 'really', 'moving', 'following', 'request', 'definitely', 'absolutely', 'certainly',
+  // Clock minutes, so the minute checks below still give their own verdict.
+  'm', 'oh', 'quarter', 'half', 'past', 'minute', 'minutes', 'before', 'till', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
+  'seventeen', 'eighteen', 'nineteen', 'twenty', 'thirty', 'forty', 'fifty', 'sixty',
+]);
+const SLOT_SCOPE_BREAKS = new Set(['and', 'but']);
+function slotScopeIsPlain(sentences, words) {
+  if (!words || typeof words !== 'object') return true;
+  const slotTokens = new Set([words.day, words.hour].filter((w) => typeof w === 'string').flatMap((w) => normalize(w).split(' ')));
+  const recorded = new Set(slotPhrases(words).flatMap((w) => normalize(w).split(' ')));
+  const allowed = (t) => SLOT_SCOPE_WORDS.has(t) || recorded.has(t) || /^\d+(?:st|nd|rd|th)?$/.test(t);
+  return sentences.every(({ ns }) => {
+    const toks = ns.split(' ');
+    const at = toks.flatMap((t, i) => (slotTokens.has(t) ? [i] : []));
+    if (!at.length) return true;
+    let from = at[0];
+    while (from > 0 && !SLOT_SCOPE_BREAKS.has(toks[from - 1])) from -= 1;
+    let to = at[at.length - 1] + 1;
+    while (to < toks.length && !SLOT_SCOPE_BREAKS.has(toks[to])) to += 1;
+    // "Following your request, ..." is courtesy; "following Thursday" is a date.
+    return toks.slice(from, to).every((t, i, run) => allowed(t) && !(t === 'following' && slotTokens.has(run[i + 1])));
+  });
+}
 function plainCommitment(text, words) {
   const allowed = new Set([...normalize(words.hour).split(' '), ...normalize(words.period || '').split(' ').filter(Boolean)]);
   return normalize(text).split(' ').every((t) => PLAIN_COMMIT_WORDS.has(t) || allowed.has(t));

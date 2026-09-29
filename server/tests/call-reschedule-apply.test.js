@@ -305,10 +305,11 @@ describe('planRescheduleFromCall', () => {
     // A dropped relative-date qualifier must not select the nearer Thursday.
     expect(plan('2026-10-01T12:00:00-04:00', '2026-09-24', 'my Thursday a week from now appointment', { movedWords: 'Thursday' }))
       .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'moved_appointment_ungrounded' });
+    // A qualified Thursday anywhere in the sentence could be the one meant.
     const fullMovedQuote = 'My plan renews Thursday eight days from now, and please move my Thursday appointment.';
     expect(plan('2026-10-01T12:00:00-04:00', '2026-09-24', fullMovedQuote, {
       movedWords: 'Thursday', callerLine: fullMovedQuote,
-    })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    })).toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'moved_appointment_ungrounded' });
     // December 24 is 7 days from December 17, inside the span; one moved to
     // October 1 is 84 days away, outside it.
     expect(plan('2026-10-01T12:00:00-04:00', '2026-12-24', 'my December 24th visit').reason).toBe('no_visit_on_books');
