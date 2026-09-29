@@ -772,6 +772,20 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     expect(opts.ringOnRefresh()).toBe(false);
   });
 
+  test('under episodes an authoritative $0 stamp is a price, upcoming or overdue; killed, the pre-episode paging stands', async () => {
+    const ROOT = '00000010-0000-4000-8000-000000000000';
+    const KEY = `unpriced-series:${ROOT}`;
+    const bellRows = [{ dedupe_key: KEY, created_at: '2026-07-20T12:00:00Z' }];
+    makeDbMock({ coverageRows: [unpricedChild({ estimated_price: 0 })] });
+    expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 0 });
+    makeDbMock({ coverageRows: [unpricedChild({ service_date: '2026-07-30', recurring_parent_id: ROOT, estimated_price: 0 })], bellRows });
+    await runInner({ now: NOW });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    alertEpisodesLive.mockReturnValue(false);
+    makeDbMock({ coverageRows: [unpricedChild({ estimated_price: 0 })] });
+    expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 1 });
+  });
+
   test('a held series never starts a bell: an overdue unpriced visit with no bell for its series raises nothing', async () => {
     makeDbMock({ coverageRows: [unpricedChild({ service_date: '2026-07-30', recurring_parent_id: '0000000d-0000-4000-8000-000000000000' })] });
     await runInner({ now: NOW });

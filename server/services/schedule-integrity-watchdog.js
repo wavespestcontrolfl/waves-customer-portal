@@ -385,6 +385,10 @@ async function runInner({ now = new Date() } = {}) {
     for (const issue of issues) prepayGaps.push({ row, issue });
     if (!isUnpricedSeriesVisit(row)) continue;
     if (annualCovered) continue;
+    // Under episodes an authoritative $0 (billing-lane's
+    // hasAuthoritativeZeroPrice, GATE_STAMPED_ZERO_FREE) is a price here too,
+    // upcoming or overdue: the same rule the completed-visit watch applies.
+    if (episodes && require('./billing-lane').hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) continue;
     // Only under episodes: the suppression is safe because a void of that
     // invoice makes the series live again and it re-rings. Killed = the
     // pre-episode paging, with no coverage lookup at all.
