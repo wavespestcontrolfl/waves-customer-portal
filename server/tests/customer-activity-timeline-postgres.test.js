@@ -16,7 +16,8 @@ const pg = url ? describe : describe.skip;
 const TEMP_TABLES = `
   CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, deleted_at timestamp);
   CREATE TEMP TABLE leads (id uuid PRIMARY KEY, customer_id uuid);
-  CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp, from_phone text, metadata jsonb);
+  CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp, from_phone text, metadata jsonb, twilio_sid text);
+  CREATE TEMP TABLE messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), twilio_sid text, delivery_status text, updated_at timestamp);
   CREATE TEMP TABLE short_codes (id uuid PRIMARY KEY, customer_id uuid, lead_id uuid, kind text, channel text, purpose text, entity_type text, entity_id uuid);
   CREATE TEMP TABLE invoices (id uuid PRIMARY KEY, payer_id int);
   CREATE TEMP TABLE short_code_clicks (id uuid PRIMARY KEY, short_code_id uuid, clicked_at timestamp, is_bot boolean NOT NULL DEFAULT false);
@@ -469,7 +470,7 @@ pg('getCustomerActivity on Postgres', () => {
     expect(subjects.sort()).toEqual(['Lower snapshot', 'Upper snapshot']);
   });
 
-  test('a payer\'s click on a code minted under the homeowner is "Link clicked by payer" and never engaged', async () => {
+  test('a payer\'s click on a code minted under the homeowner is "Link clicked by invoice recipient" and never engaged', async () => {
     const c = await fresh('payer.home@example.test');
     const payerInvoice = randomUUID(); const ownInvoice = randomUUID();
     await db('invoices').insert([{ id: payerInvoice, payer_id: 12 }, { id: ownInvoice, payer_id: null }]);
@@ -490,8 +491,8 @@ pg('getCustomerActivity on Postgres', () => {
     const r = await activity(c);
     const clicks = r.events.filter((e) => e.source === 'link');
     expect(clicks.map((e) => [e.title, e.kind, e.engaged])).toEqual([
-      ['Link clicked by payer', 'payer_clicked', false],
-      ['Link clicked by payer', 'payer_clicked', false],
+      ['Link clicked by invoice recipient', 'payer_clicked', false],
+      ['Link clicked by invoice recipient', 'payer_clicked', false],
       ['Clicked the invoice link', 'clicked', true],
     ]);
     // the summary credits only the homeowner's own click, not the newer payer clicks
@@ -501,7 +502,7 @@ pg('getCustomerActivity on Postgres', () => {
     await db('short_codes').insert({ id: code, customer_id: onlyPayer, kind: 'invoice', channel: 'email', purpose: 'payer_invoice' });
     await db('short_code_clicks').insert({ id: randomUUID(), short_code_id: code, clicked_at: T(20) });
     const none = await activity(onlyPayer);
-    expect(none.events.map((e) => e.title)).toEqual(['Link clicked by payer']);
+    expect(none.events.map((e) => e.title)).toEqual(['Link clicked by invoice recipient']);
     expect(none.summary.lastEngagedAt).toBeNull();
   });
 
@@ -513,7 +514,7 @@ pg('getCustomerActivity on Postgres', () => {
     await db('email_messages').insert({ id: randomUUID(), recipient_type: 'customer', recipient_id: c, recipient_email_snapshot: 'payer.near@example.test', status: 'clicked', subject_snapshot: 'Own mail', sent_at: T(29), clicked_at: T(30) });
     const titles = (await activity(c)).events.map((e) => e.title);
     expect(titles).toContain('Link clicked (reported by email provider — may be a scanner)');
-    expect(titles).toContain('Link clicked by payer');
+    expect(titles).toContain('Link clicked by invoice recipient');
   });
 
   test('a short code with no (or an unknown) channel is a neutral link, not a text', async () => {
@@ -566,6 +567,44 @@ pg('getCustomerActivity on Postgres', () => {
       cursor = page.nextCursor;
     } while (cursor);
     expect(seen.map((e) => e.detail).sort()).toEqual(['failed provider', 'kept parent', 'lonely parent', 'provider text', 'push provider']);
+  });
+
+  test('a terminal text status is dated when the status callback landed, not when the text was sent; paging stays exact', async () => {
+    const c = await fresh('status-time@example.test');
+    const [delivered, failed, stale, noInbox, inflight] = [1, 2, 3, 4, 5].map(() => randomUUID());
+    const sid = (n) => `SM-status-${n}-${delivered.slice(0, 8)}`;
+    await db('sms_log').insert([
+      { id: delivered, customer_id: c, direction: 'outbound', status: 'delivered', message_type: 'reminder', message_body: 'delivered text', created_at: T(1), twilio_sid: sid(1) },
+      { id: failed, customer_id: c, direction: 'outbound', status: 'failed', message_type: 'billing', message_body: 'failed text', created_at: T(2), twilio_sid: sid(2) },
+      // inbox row still reports an older status (a non-status touch): keeps created_at
+      { id: stale, customer_id: c, direction: 'outbound', status: 'read', message_type: null, message_body: 'stale text', created_at: T(3), twilio_sid: sid(3) },
+      // no inbox row: keeps created_at
+      { id: noInbox, customer_id: c, direction: 'outbound', status: 'delivered', message_type: null, message_body: 'no inbox row', created_at: T(4), twilio_sid: sid(4) },
+      // in-flight status: the 'sent' event stays at created_at even if the inbox row moved
+      { id: inflight, customer_id: c, direction: 'outbound', status: 'sent', message_type: null, message_body: 'in flight', created_at: T(5), twilio_sid: sid(5) },
+    ]);
+    await db('messages').insert([
+      { twilio_sid: sid(1), delivery_status: 'delivered', updated_at: T(30) },
+      { twilio_sid: sid(2), delivery_status: 'failed', updated_at: T(20) },
+      { twilio_sid: sid(3), delivery_status: 'delivered', updated_at: T(40) },
+      { twilio_sid: sid(5), delivery_status: 'sent', updated_at: T(50) },
+    ]);
+    const at = Object.fromEntries((await activity(c)).events.map((e) => [e.detail, e.at]));
+    expect(at).toEqual({
+      'delivered text': T(30).toISOString(),
+      'failed text': T(20).toISOString(),
+      'stale text': T(3).toISOString(),
+      'no inbox row': T(4).toISOString(),
+      'in flight': T(5).toISOString(),
+    });
+    // the ranking key is the event time: a one-row walk yields the same order
+    const seen = []; let cursor = null;
+    do {
+      const page = await timeline.getCustomerActivity(c, { limit: 1, before: cursor }, db);
+      seen.push(...page.events.map((e) => e.detail));
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen).toEqual(['delivered text', 'failed text', 'in flight', 'no inbox row', 'stale text']);
   });
 
   test('a source whose table cannot be read is reported unavailable and the rest still returns', async () => {

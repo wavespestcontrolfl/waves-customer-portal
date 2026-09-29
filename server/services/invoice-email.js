@@ -101,11 +101,22 @@ function appendPayUrlParams(url, params = null) {
   }
 }
 
-// A payer-billed invoice's pay/receipt links go to the payer's AP inbox but are
-// minted under the homeowner's customerId. Marking the code lets the customer
-// activity timeline tell a payer's click from the homeowner's engagement. Payer
-// invoices only: every other mint is byte-for-byte unchanged.
-const payerCodeMarker = (invoice) => (invoice && invoice.payer_id ? { channel: 'email', purpose: 'payer_invoice' } : {});
+// A pay/receipt link delivered to a third party is minted under the homeowner's
+// customerId: a payer-billed invoice goes to the payer's AP inbox, and an
+// operator's recipientOverride sends it to a one-off AP/bookkeeper inbox even
+// when the invoice has no payer. Marking the code lets the customer activity
+// timeline tell that recipient's click from the homeowner's engagement. The
+// marker follows the RESOLVED recipient: payer invoices, or a recipient that is
+// neither the customer's own email nor the customer's own billing contact.
+// Every other mint is byte-for-byte unchanged (the purpose stays
+// 'payer_invoice'; the timeline reads it as "invoice recipient").
+const payerCodeMarker = (invoice, recipient = null, ownEmails = []) => {
+  const marked = { channel: 'email', purpose: 'payer_invoice' };
+  if (invoice && invoice.payer_id) return marked;
+  const to = cleanEmail(recipient && recipient.email);
+  if (!to) return {};
+  return ownEmails.map(cleanEmail).filter(Boolean).includes(to) ? {} : marked;
+};
 
 function invoiceRecipientFor(customer, prefs, recipientOverride) {
   const overrideEmail = cleanEmail(recipientOverride?.email);
@@ -255,7 +266,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     entityId: invoice.id,
     customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(invoice),
-    ...payerCodeMarker(invoice),
+    ...payerCodeMarker(invoice, recipient, [customer.email, getInvoiceEmailRecipients(customer, prefs || {})[0]?.email]),
   });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   invoiceForPdf.annual_prepay = await loadInvoiceAnnualPrepay(invoiceForPdf);
@@ -732,6 +743,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     entityId: invoice.id,
     customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(invoice),
+    // A receipt has no recipient override: a non-payer receipt always goes to
+    // the customer's own (routed or default) billing contact, so only a
+    // payer-billed receipt is a third party's.
     ...payerCodeMarker(invoice),
   });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };

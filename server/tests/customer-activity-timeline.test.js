@@ -77,12 +77,25 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
     const t = new Date('2026-09-01T12:00:00Z');
     const links = source('link clicks');
     expect(links.toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'email', by_payer: true })[0])
-      .toMatchObject({ kind: 'payer_clicked', engaged: false, title: 'Link clicked by payer', channel: 'email' });
+      .toMatchObject({ kind: 'payer_clicked', engaged: false, title: 'Link clicked by invoice recipient', channel: 'email' });
     expect(isEngagedKind('payer_clicked')).toBe(false);
     expect(links.engaged.where).toBeTruthy(); // the summary MAX excludes payer clicks
     expect(links.toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: null })[0]).toMatchObject({ channel: 'link', engaged: true });
     expect(links.toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'push' })[0].channel).toBe('link');
     expect(links.toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'sms' })[0].channel).toBe('sms');
+  });
+
+  test('texts: an outcome event uses the status time (event_at) and falls back to created_at', () => {
+    const sent = new Date('2026-09-01T12:00:00Z');
+    const landed = new Date('2026-09-01T12:05:00Z');
+    const texts = source('texts');
+    expect(texts.toEvents({ id: 'x', direction: 'outbound', status: 'delivered', created_at: sent, event_at: landed })[0])
+      .toMatchObject({ kind: 'delivered', at: landed.toISOString() });
+    expect(texts.toEvents({ id: 'x', direction: 'outbound', status: 'failed', created_at: sent, event_at: landed })[0])
+      .toMatchObject({ kind: 'failed', at: landed.toISOString() });
+    expect(texts.toEvents({ id: 'x', direction: 'outbound', status: 'sent', created_at: sent, event_at: sent })[0])
+      .toMatchObject({ kind: 'sent', at: sent.toISOString() });
+    expect(texts.toEvents({ id: 'x', direction: 'outbound', status: 'delivered', created_at: sent })[0].at).toBe(sent.toISOString());
   });
 
   test('each engaged source produces engaged events', () => {

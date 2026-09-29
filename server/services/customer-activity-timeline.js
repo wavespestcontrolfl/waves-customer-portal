@@ -30,8 +30,9 @@
  * produced both a provider click and a short-link click shows once, as the
  * short-link click. Portal-visit and outside-link sources join in a follow-up
  * PR once the PRs that create them have merged. A click on a link delivered to a
- * third party (a bill-to payer's AP inbox; the code is minted under the
- * homeowner's customer_id) reads "Link clicked by payer" and is never engaged.
+ * third party (a bill-to payer's AP inbox or an operator-named one-off
+ * invoice recipient; the code is minted under the homeowner's customer_id)
+ * reads "Link clicked by invoice recipient" and is never engaged.
  * A scheduled text's queue parent is hidden when its provider row is listed.
  *
  * RECIPIENTS. Every email event names the address the send row itself recorded
@@ -134,6 +135,25 @@ function pageViewTitle(page) {
 // states; 'read' is a delivered text the recipient's device confirmed.
 const OUTBOUND_LEFT = ['', 'sent', 'queued', 'accepted', 'delivered', 'read', 'failed', 'undelivered'];
 
+// The time of an outbound text's terminal outcome. sms_log carries no status
+// timestamp: twilio-webhook.js /status only rewrites sms_log.status, and
+// sms_log.updated_at is also written by non-status writers (reservation
+// confirm, cancel, from_phone repair), so it is not a status time. The same
+// callback DOES stamp the inbox row (messages.delivery_status + updated_at, keyed
+// by twilio_sid), so a terminal status (delivered / read / failed / undelivered)
+// takes the inbox row's updated_at when that row still reports the same status and
+// was touched after the send. Anything else (an in-flight status, an inbound
+// text, a push proof or a text with no inbox row) keeps created_at. In SQL so the
+// ranking key is exactly the time that becomes the event.
+const SMS_OUTCOME_STATUSES = ['delivered', 'read', 'failed', 'undelivered'];
+const SMS_EVENT_AT_SQL = `(CASE WHEN sl.direction = 'outbound' AND sl.twilio_sid IS NOT NULL
+    AND LOWER(COALESCE(sl.status, '')) IN (${SMS_OUTCOME_STATUSES.map((x) => `'${x}'`).join(', ')})
+  THEN COALESCE((SELECT MAX(sm.updated_at) FROM messages sm
+      WHERE sm.twilio_sid = sl.twilio_sid
+        AND LOWER(COALESCE(sm.delivery_status, '')) = LOWER(sl.status)
+        AND sm.updated_at > sl.created_at), sl.created_at)
+  ELSE sl.created_at END)`;
+
 function isPushProof(row) {
   if (String(row.from_phone || '').toLowerCase() === 'push') return true;
   let meta = row.metadata;
@@ -146,8 +166,9 @@ const maskEmail = (email) => {
   return local && domain ? `${local.slice(0, 1)}***@${domain}`.toLowerCase() : null;
 };
 
-// A short code delivered to a third party (a payer's AP inbox) is minted under
-// the homeowner's customer_id (invoice-email.js), so a click on it is the payer's,
+// A short code delivered to a third party (a payer's AP inbox, or a one-off
+// invoice recipient an operator named) is minted under
+// the homeowner's customer_id (invoice-email.js), so a click on it is theirs,
 // never the homeowner's engagement. Two signals: the code's own purpose marker
 // ('payer_invoice', stamped at the producer going forward) and, for codes minted
 // before the marker existed, the invoice the code points at carrying a payer
@@ -218,8 +239,9 @@ const SOURCES = [
       }),
     'sl.message_type'), 'sl'),
     select: ['sl.id', 'sl.direction', 'sl.status', 'sl.message_type', 'sl.message_body', 'sl.created_at',
-      'sl.from_phone', 'sl.metadata'],
-    ts: ['sl.created_at'],
+      'sl.from_phone', 'sl.metadata',
+      (dbh) => dbh.raw(`${SMS_EVENT_AT_SQL} AS event_at`)],
+    ts: [SMS_EVENT_AT_SQL],
     engaged: { expr: 'sl.created_at', where: (q) => q.where('sl.direction', 'inbound') },
     toEvents: (r) => {
       const ref = { type: 'sms_log', id: r.id };
@@ -237,7 +259,7 @@ const SOURCES = [
       if (isPushProof(r)) {
         const failed = ['failed', 'undelivered'].includes(status);
         return compact([mk('sms', r.id, ref, {
-          at: r.created_at, channel: 'push', kind: failed ? 'failed' : 'delivered',
+          at: r.event_at || r.created_at, channel: 'push', kind: failed ? 'failed' : 'delivered',
           title: `${failed ? 'App notification failed' : 'App notification delivered'}${type}`,
           detail: preview(r.message_body),
         })]);
@@ -247,7 +269,7 @@ const SOURCES = [
       const title = status === 'read' ? 'Text delivered (read receipt)'
         : { delivered: 'Text delivered', failed: 'Text failed', sent: 'Text sent' }[kind];
       return compact([mk('sms', r.id, ref, {
-        at: r.created_at, channel: 'sms', kind, title: `${title}${type}`, detail: preview(r.message_body),
+        at: r.event_at || r.created_at, channel: 'sms', kind, title: `${title}${type}`, detail: preview(r.message_body),
       })]);
     },
   },
@@ -272,8 +294,8 @@ const SOURCES = [
       const channel = r.channel === 'email' ? 'email' : r.channel === 'sms' ? 'sms' : 'link';
       if (r.by_payer) {
         return compact([mk('link', r.id, { type: 'short_code_click', id: r.id }, {
-          at: r.clicked_at, channel, kind: 'payer_clicked', title: 'Link clicked by payer',
-          detail: `Sent to the bill-to payer, not the customer${label === 'a' ? '' : ` · ${label} link`}`,
+          at: r.clicked_at, channel, kind: 'payer_clicked', title: 'Link clicked by invoice recipient',
+          detail: `Sent to a third-party invoice recipient, not the customer${label === 'a' ? '' : ` · ${label} link`}`,
         })]);
       }
       return compact([mk('link', r.id, { type: 'short_code_click', id: r.id }, {
