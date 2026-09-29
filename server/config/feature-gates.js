@@ -3406,6 +3406,7 @@ const gates = {
   // This entry is for logGateStatus only: plant-engine.js's runReferee()
   // reads GATE_PLANT_ID_REFEREE at call time via plantIdRefereeLive().
   plantIdReferee: process.env.GATE_PLANT_ID_REFEREE === 'true',
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
