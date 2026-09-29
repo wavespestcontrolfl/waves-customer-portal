@@ -39,11 +39,18 @@ const { findBillingCoveredVisits } = require('../routes/admin-schedule');
 // filter/join method returns itself so any call shape findBillingCoveredVisits
 // issues (whereIn/whereNotIn/select/join) is accepted, and `first`/`pluck`
 // resolve straight from `rows`.
-function fakeQuery(rows) {
+function fakeQuery(allRows) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'joinRaw', 'orderBy', 'forUpdate', 'noWait', 'select']) {
+  let rows = allRows;
+  for (const m of ['where', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'joinRaw', 'orderBy', 'forUpdate', 'noWait', 'select']) {
     q[m] = jest.fn(() => q);
   }
+  // Only an `id` filter is honored (the first-application rail's locked
+  // re-read of its stamped invoices); every other filter stays a no-op.
+  q.whereIn = jest.fn((col, vals) => {
+    if (col === 'id') rows = allRows.filter((r) => vals.map(String).includes(String(r.id)));
+    return q;
+  });
   q.first = jest.fn(async () => rows[0] || null);
   q.pluck = jest.fn(async (col) => rows.map((r) => r[col]));
   q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
@@ -60,8 +67,10 @@ function fakeQuery(rows) {
 // `hasColumns` keys are `table.column` — default present (matches
 // `hasTables`' default-true shape) so existing fixtures that never mention
 // the new prepay/first-application columns keep reading them as available.
-function makeConn({ hasTables = {}, hasColumns = {}, byTable = {} } = {}) {
+function makeConn({ hasTables = {}, hasColumns = {}, byTable = {}, tryLockAcquired = true } = {}) {
   const conn = (table) => fakeQuery(byTable[table] || []);
+  // pg_try_advisory_xact_lock (the anchor mint try-lock).
+  conn.raw = jest.fn(async () => ({ rows: [{ acquired: tryLockAcquired }] }));
   conn.schema = {
     hasTable: jest.fn(async (name) => hasTables[name] !== false),
     hasColumn: jest.fn(async (table, column) => hasColumns[`${table}.${column}`] !== false),
@@ -333,12 +342,19 @@ describe('liveInvoice reaches the combined first-application invoice link', () =
   // `anchorInvoices` feeds the plain 'invoices' key, which loadGoverningInvoice
   // reads for a replacement when the stamp is terminal (the direct
   // scheduled_service_id read sees them too, but on the ANCHOR's id).
-  const fixture = (rows, anchorInvoices = []) => makeConn({
+  // The stamped invoice's LOCKED row comes from 'invoices' (by id), so each
+  // fixture carries it there as well; `lockedStatus` lets it differ from the
+  // unlocked join (an unvoid landing in between — Codex r4 P1).
+  const fixture = (rows, anchorInvoices = [], { lockedStatus, tryLockAcquired = true } = {}) => makeConn({
     hasTables: ALL_TABLES_PRESENT,
+    tryLockAcquired,
     byTable: {
       estimate_card_holds: [],
       appointment_card_requests: [],
-      invoices: anchorInvoices,
+      invoices: [
+        ...rows.map((r) => ({ id: r.id, status: lockedStatus || r.status, scheduled_service_id: r.scheduled_service_id, credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: r.total })),
+        ...anchorInvoices,
+      ],
       'invoices as inv': [],
       'visit_completion_packet_items as p': [],
       'appointment_card_requests as acr': [],
@@ -384,7 +400,18 @@ describe('liveInvoice reaches the combined first-application invoice link', () =
       return q;
     };
     wrapped.schema = base.schema;
+    wrapped.raw = base.raw;
     await expect(findBillingCoveredVisits(wrapped, [{ id: 'v2' }], { liveInvoice: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
+  });
+
+  test('an unvoid landing between the join and the lock is seen: the LOCKED row decides (Codex r4 P1)', async () => {
+    const covered = await findBillingCoveredVisits(fixture([stamp('void')], [], { lockedStatus: 'draft' }), [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
+  });
+
+  test("the anchor's mint lock held elsewhere maps to VISIT_BUSY_RETRY (Codex r4 P1)", async () => {
+    await expect(findBillingCoveredVisits(fixture([stamp('void')], [], { tryLockAcquired: false }), [{ id: 'v2' }], { liveInvoice: true }))
       .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
   });
 

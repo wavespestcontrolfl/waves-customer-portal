@@ -17652,23 +17652,40 @@ async function governingFirstApplicationRows(conn, ids) {
       'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
     );
   if (stamped.length === 0) return [];
+  const busy = () => Object.assign(
+    new Error('An invoice for this visit is being updated or charged right now — try the price change again in a moment.'),
+    { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+  );
   const governingById = new Map();
   try {
+    // The anchor's mint lock first (Codex r4 P1): invoice creation on the
+    // anchor serializes on it, so "no replacement exists" stays true
+    // through this save's price write. TRIED, never waited on — this save
+    // already holds a visit row and its own mint lock.
+    const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+    const anchorIds = [...new Set(stamped.map((row) => String(row.scheduled_service_id)).filter((id) => id && id !== 'null'))].sort();
+    for (const anchorId of anchorIds) {
+      if (!(await tryAcquireScheduledInvoiceMintLock(conn, anchorId))) throw busy();
+    }
+    // Lock AND read the stamped invoices in one statement (Codex r4 P1): an
+    // unvoid committed between the join above and this lock must be seen.
     const stampIds = [...new Set(stamped.map((row) => String(row.id)))].sort();
-    await conn('invoices').whereIn('id', stampIds).orderBy('id').forUpdate().noWait().select('id');
+    const fresh = await conn('invoices').whereIn('id', stampIds).orderBy('id').forUpdate().noWait()
+      .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+    const freshById = new Map(fresh.map((inv) => [String(inv.id), inv]));
     for (const row of stamped) {
-      if (!governingById.has(row.id)) governingById.set(row.id, await loadGoverningInvoice(conn, row, { noWait: true }));
+      const key = String(row.id);
+      if (governingById.has(key)) continue;
+      const lockedStamp = freshById.get(key);
+      governingById.set(key, lockedStamp ? await loadGoverningInvoice(conn, lockedStamp, { noWait: true }) : null);
     }
   } catch (err) {
     if (err?.code !== '55P03') throw err;
-    throw Object.assign(
-      new Error('An invoice for this visit is being updated or charged right now — try the price change again in a moment.'),
-      { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
-    );
+    throw busy();
   }
   const terminal = new Set(require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES);
   return stamped
-    .map((row) => ({ member: row.member_id, inv: governingById.get(row.id) }))
+    .map((row) => ({ member: row.member_id, inv: governingById.get(String(row.id)) }))
     .filter(({ inv }) => inv && !terminal.has(inv.status))
     .map(({ member, inv }) => ({
       scheduled_service_id: member,
