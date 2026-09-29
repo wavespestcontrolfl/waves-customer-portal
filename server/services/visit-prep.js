@@ -878,12 +878,12 @@ async function customerFlaggedFacts(svc, conn = db) {
   // too). Checked for running reads too, so "Photo read pending" never
   // outlives a reclassification (r13). The applicability modules never
   // load a vision engine here.
-  // Applicability is resolved for a fresh 'none' row too, so a submission
-  // whose read hasn't been claimed yet stays 'none' (and keeps the client
-  // polling) instead of reading 'unsupported' (Codex #5320 r2 P2).
-  const hasReadState = submissions.some((s) => ['done', 'pending', 'none'].includes(s.read_status || 'none'));
-  const needPest = readsLive && hasReadState;
-  const needPlant = plantReadsLive && hasReadState;
+  // Applicability is resolved for every row whenever an engine is live, so
+  // an unclaimed row ('none', or 'unsupported' written by the engine that
+  // doesn't apply) on a stop a live engine suits stays pollable instead of
+  // reading 'unsupported' (Codex #5320 r2/r3 P2).
+  const needPest = readsLive;
+  const needPlant = plantReadsLive;
   let snapshot;
   try {
     snapshot = await finalStopSnapshot(svc, conn, needPest, needPlant);
@@ -924,10 +924,15 @@ async function customerFlaggedFacts(svc, conn = db) {
     const origin = readOrigin(s.read_status, plantResult);
     const showPest = readsLive && stillPest && origin !== 'plant';
     const showPlant = plantReadsLive && plantSubject && origin !== 'pest';
+    // An unclaimed row on a stop a live engine suits hasn't been read YET:
+    // the other engine may have marked it 'unsupported' before the right
+    // one claimed it, so it's served as 'none' and the panel keeps polling
+    // (Codex #5320 r3 P2).
+    const shownStatus = !origin && status === 'unsupported' ? 'none' : status;
     if (showPest) {
-      entry.read = readFactsFromContract(status, s.read_ref ? contractsByRef.get(s.read_ref) : null);
+      entry.read = readFactsFromContract(shownStatus, s.read_ref ? contractsByRef.get(s.read_ref) : null);
     } else if (showPlant) {
-      entry.read = plantReadFactsFromResult(status, plantResult);
+      entry.read = plantReadFactsFromResult(shownStatus, plantResult);
     } else if (readsLive || plantReadsLive) {
       entry.read = { status: 'unsupported' };
     }
