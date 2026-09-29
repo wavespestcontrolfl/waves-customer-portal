@@ -933,12 +933,7 @@ class BacklinkMonitor {
       newGapsSince7d,
       newHighValueGapsSince7d,
       llmStats: llmDashboard.summary,
-      citationStats: {
-        total: citations.length,
-        active: citations.filter(c => c.status === 'active').length,
-        inconsistent: citations.filter(c => c.status === 'inconsistent').length,
-        unchecked: citations.filter(c => c.status === 'unchecked').length,
-      },
+      citationStats: { total: citations.length, ...require('./citation-auditor').statusCounts(citations) },
     };
   }
 }

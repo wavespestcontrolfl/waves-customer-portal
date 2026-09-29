@@ -825,6 +825,16 @@ router.put('/citations/:id', requireAdmin, async (req, res, next) => {
   try {
     await CitationAuditor.updateCitation(req.params.id, req.body);
     res.json({ success: true });
+  } catch (err) {
+    if (err.code === 'INVALID_CITATION_UPDATE') return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+// Read-only audit of every recorded listing URL (same call the weekly cron makes).
+router.post('/citations/audit', requireAdmin, async (req, res, next) => {
+  try {
+    res.json(await CitationAuditor.audit());
   } catch (err) { next(err); }
 });
 

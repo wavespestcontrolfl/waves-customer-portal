@@ -112,7 +112,7 @@ async function seed() {
   for (const cit of CITATIONS) {
     const exists = await db('seo_citations').where('directory_name', cit.directory_name).first();
     if (!exists) {
-      await db('seo_citations').insert({ ...cit, status: 'unchecked' });
+      await db('seo_citations').insert({ ...cit, status: 'unverified' });
       citSeeded++;
     }
   }
