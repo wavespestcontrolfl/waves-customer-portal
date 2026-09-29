@@ -94,7 +94,7 @@ postgres('combined booking capacity on PostgreSQL', () => {
     });
     await mockPg.schema.createTable('scheduled_services', (t) => {
       t.uuid('id').primary().defaultTo(mockPg.raw('gen_random_uuid()'));
-      for (const c of ['customer_id', 'technician_id', 'service_id', 'recurring_parent_id']) t.uuid(c);
+      for (const c of ['customer_id', 'technician_id', 'service_id', 'recurring_parent_id', 'visit_id']) t.uuid(c);
       t.uuid('source_estimate_id'); t.date('scheduled_date'); t.time('window_start'); t.time('window_end');
       for (const c of ['service_type', 'status', 'notes', 'zone', 'service_key_snapshot', 'payment_method_preference']) t.text(c);
       t.integer('estimated_duration_minutes'); t.decimal('estimated_price', 12, 2);

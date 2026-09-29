@@ -456,9 +456,19 @@ function projectDayChain(stops) {
   const combinedByStop = new Map();
   for (const group of groups) {
     const lead = combinedStopEntity(group.members, group.isVisitGroup);
-    const arrivalMin = prev
+    // A PRE-SET arrivalMin on `lead` (Codex r7 P1 on #5310) wins over this
+    // chain's own formula — find-time.js's packCapacityEnds hands this
+    // function a neighbour that already carries its REAL simulated arrival
+    // (route_arrivals, the traffic-aware per-candidate simulation
+    // evaluateArrivalPlacement already ran), which is more accurate than the
+    // haversine-based formula below and must survive a chain of just that
+    // one neighbour, not be recomputed and discarded. Neither buildDayStops
+    // nor buildTravelGapStops (this module's other two callers) ever set
+    // arrivalMin before calling this — `lead.arrivalMin` is always undefined
+    // for them, so this is byte-identical for every pre-existing caller.
+    const arrivalMin = Number.isFinite(lead.arrivalMin) ? lead.arrivalMin : (prev
       ? Math.max(lead.startMin, effectiveEndMinutes(prev) + requiredGapMinutes(prev, lead))
-      : Math.max(lead.startMin, SHIFT.startMinutes + driveMin(HQ, coordsOf(lead)));
+      : Math.max(lead.startMin, SHIFT.startMinutes + driveMin(HQ, coordsOf(lead))));
     const combined = { ...lead, arrivalMin, hold: group.members.some((member) => isHoldStop(member)) };
     for (const member of group.members) {
       arrivalByStop.set(member, arrivalMin);
@@ -717,4 +727,14 @@ module.exports = {
   // instead of a local copy (owner ruling 2026-09-23).
   paddingMinutesOf,
   effectiveEndMinutes,
+  // Exported for find-time.js's capacity-mode packed-ends filter (Codex r7
+  // P1 on #5310): packCapacityEnds' own before/after grace split and
+  // capacityGapNeighbours' own group-combination used to be second,
+  // independently incomplete copies of this module's own chain-walk and
+  // grace projection. Both now route through these SAME functions instead —
+  // see find-time.js's capacityGapNeighbours and packCapacityEnds' own
+  // clearsTravelGap for how.
+  projectDayChain,
+  classifyStopsAroundCandidate,
+  projectGraceForCandidate,
 };

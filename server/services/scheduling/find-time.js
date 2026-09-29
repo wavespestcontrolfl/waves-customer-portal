@@ -25,7 +25,7 @@ const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes } =
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 const {
   travelGapEnabled, violatesTravelGap, travelGapViolation, annotateProjectedArrivals,
-  effectiveEndMinutes, requiredGapMinutes, paddingMinutesOf,
+  paddingMinutesOf, projectDayChain, classifyStopsAroundCandidate, projectGraceForCandidate,
 } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows, allocationKey } = require('./visit-capacity');
@@ -326,18 +326,33 @@ async function findCapacitySlots(opts) {
 // occupied — no offer at all, though 11:00 was genuinely valid.
 function capacityGapNeighbours(context, fit, startMin) {
   const creditResolver = stopCreditResolver(context.rows);
-  const expanded = occupiedRows(context.rows).map((row) => ({
-    ...row, expectedMinutes: creditResolver(row, row.endMin - row.startMin),
+  const rowsById = new Map(context.rows.map((row) => [row.id, row]));
+  // This candidate's own route population — fit.routeOrder's tech (minus the
+  // candidate itself) plus the day's unassigned fixed blockers — NEVER
+  // another technician's rows: projectDayChain below walks ONE sequential
+  // day, so mixing in a different tech's stops would chain HQ-seed/gap math
+  // across two unrelated routes.
+  const scopedIds = new Set([
+    ...fit.routeOrder.filter((id) => id !== context.target.id),
+    ...context.rows.filter((row) => row.technician_id == null && row.status !== 'completed').map((row) => row.id),
+  ]);
+  // Stamped allocationKey/visit_id from the RAW row (Codex r7 P1) — the SAME
+  // shape buildDayStops/buildTravelGapStops use, so projectDayChain below
+  // coalesces a visit_id group into its true combined {startMin,endMin,
+  // expectedMinutes} span exactly like the commit-side probe does.
+  // occupiedRows already expands a v2 allocation's own members to their
+  // shared span (Codex r8 P1) before this runs.
+  const scoped = occupiedRows([...scopedIds].map((id) => rowsById.get(id)).filter(Boolean)).map((row) => ({
+    ...row,
+    expectedMinutes: creditResolver(row, row.endMin - row.startMin),
+    allocationKey: allocationKey(row),
+    visit_id: row.visit_id ?? null,
   }));
-  const expandedById = new Map(expanded.map((row) => [row.id, row]));
-  const anchors = [
-    ...fit.routeOrder
-      .filter((id) => id !== context.target.id)
-      .map((id) => ({ id, startMin: expandedById.get(id)?.startMin })),
-    ...expanded
-      .filter((row) => row.technician_id == null && row.status !== 'completed')
-      .map((row) => ({ id: row.id, startMin: row.startMin })),
-  ].filter((a) => Number.isFinite(a.startMin)).sort((a, b) => a.startMin - b.startMin);
+  const { combinedByStop } = projectDayChain(scoped);
+  const anchors = scoped
+    .map((row) => ({ id: row.id, startMin: row.startMin }))
+    .filter((a) => Number.isFinite(a.startMin))
+    .sort((a, b) => a.startMin - b.startMin);
   let prevId = null;
   let nextId = null;
   for (const anchor of anchors) {
@@ -347,13 +362,16 @@ function capacityGapNeighbours(context, fit, startMin) {
   // Row references too (Codex r7 P1) — packCapacityEnds needs each
   // neighbour's own coords/window/service identity to run the customer-
   // facing travel-gap predicate before picking a group's packed endpoint.
-  // Resolved from the SAME expanded map as the anchors above (Codex r8 P1)
-  // — never the raw context.rows member.
-  return {
-    prevId, nextId,
-    prevRow: prevId != null ? expandedById.get(prevId) : null,
-    nextRow: nextId != null ? expandedById.get(nextId) : null,
+  // Resolved to the GROUP's own combined entity (Codex r7 P1, second pass):
+  // a visit_id neighbour used to read back as ONE member's own un-combined
+  // window/credit (occupiedRows only expands allocationKey groups) — now the
+  // SAME projectDayChain/combinedStopEntity the commit-side probe uses.
+  const scopedById = new Map(scoped.map((row) => [row.id, row]));
+  const combinedOf = (id) => {
+    const row = id != null ? scopedById.get(id) : null;
+    return row ? (combinedByStop.get(row) || row) : null;
   };
+  return { prevId, nextId, prevRow: combinedOf(prevId), nextRow: combinedOf(nextId) };
 }
 
 // A capacityGapNeighbours neighbour (occupiedRows' allocation-expanded
@@ -377,7 +395,13 @@ function capacityNeighbourEntity(row) {
     startMin: row.startMin, endMin: row.endMin,
     lat: row.lat ?? null, lng: row.lng ?? null, windowMinutes,
     expectedMinutes: Number.isFinite(row.expectedMinutes) ? row.expectedMinutes : windowMinutes,
-    hold: row.reservation_expires_at != null && row.customer_id == null,
+    // A combined visit_id group entity (capacityGapNeighbours, Codex r7 P1)
+    // already carries its own authoritative `hold` (true if ANY member is a
+    // live hold — projectDayChain) and no `reservation_expires_at`/
+    // `customer_id` of its own to fall back to; a plain row (every other
+    // caller) has no `hold` field at all, so the fallback below runs exactly
+    // as before. Same precedence travel-gap.js's own isHoldStop uses.
+    hold: row.hold != null ? row.hold === true : (row.reservation_expires_at != null && row.customer_id == null),
   };
 }
 
@@ -461,29 +485,30 @@ function packCapacityEnds(slots, caller = {}) {
       graceMinutes: grace,
     };
     if (grace <= 0) return !violatesTravelGap(candidate, neighbours);
-    // A7, grace > 0: neighbours already carry their REAL simulated arrival
-    // (route_arrivals — the traffic-aware per-candidate simulation), which
-    // is more accurate than travel-gap.js's own haversine-based chain
-    // projection — so this does NOT hand both neighbours to
-    // violatesTravelGap/travelGapConflicts as a raw stops array (its own
-    // annotateProjectedArrivals would recompute — and discard — each
-    // neighbour's pre-set arrivalMin from a fresh chain of just these two
-    // rows). Instead it reproduces A4's before/after split directly: every
-    // before-side neighbour is checked against the plain candidate first
-    // (never graced past `grace`), then folded into the candidate's own
-    // real arrival for the always-strict after-side check (decision 5).
-    const before = neighbours.filter((n) => n.endMin <= candidate.startMin);
-    const after = neighbours.filter((n) => n.endMin > candidate.startMin);
-    for (const n of before) {
-      if (travelGapViolation(candidate, n)) return false;
-    }
-    const arrival = before.reduce(
-      (acc, n) => Math.max(acc, effectiveEndMinutes(n) + requiredGapMinutes(n, candidate)),
-      candidate.startMin,
+    // A7, grace > 0 (Codex r7 P1 — was a second, independently incomplete
+    // before/after reimplementation missing finding #1's HQ-seed for a
+    // first-of-day candidate): routed through the SAME classify + grace-
+    // projection functions the commit-side predicate uses
+    // (classifyStopsAroundCandidate / projectGraceForCandidate), which
+    // already fold in the HQ-seed fallback when there is no before-
+    // neighbour at all. Each neighbour still carries its OWN REAL simulated
+    // arrival (route_arrivals, set by neighbourEntity above) as `arrivalMin`
+    // — projectDayChain (inside projectGraceForCandidate) now respects a
+    // pre-set arrivalMin instead of recomputing it from a fresh chain of
+    // just these rows, so that accuracy survives unchanged (see its own
+    // comment). `hold` (A6) is unaffected: classifyStopsAroundCandidate's
+    // own live-hold handling already covers it, so there is no duplicate
+    // left to keep.
+    const { validStops, before, after, liveNeighbourHolds, overlaps } = classifyStopsAroundCandidate(candidate, neighbours);
+    if (overlaps.length) return false;
+    const { annotate, candidateForAfterSide } = projectGraceForCandidate(
+      candidate, { validStops, before, liveNeighbourHolds },
     );
-    const candidateForAfter = { ...candidate, arrivalMin: arrival };
-    for (const n of after) {
-      if (travelGapViolation(candidateForAfter, n)) return false;
+    for (const n of [...before, ...liveNeighbourHolds.filter((h) => h.endMin <= candidate.startMin)]) {
+      if (travelGapViolation(candidate, annotate(n))) return false;
+    }
+    for (const n of [...after, ...liveNeighbourHolds.filter((h) => h.startMin > candidate.startMin)]) {
+      if (travelGapViolation(candidateForAfterSide, annotate(n))) return false;
     }
     return true;
   };
@@ -628,11 +653,24 @@ function buildDayStops(services, {
 // never passed through this (see evaluateGap): a zero-width "stop" would
 // otherwise read as having zero window padding and wrongly pick up a full
 // buffer credit HQ legs must never carry.
-function toPackingBoundAnchor(stop) {
-  const windowMinutes = stop.endMin - stop.startMin;
-  const expected = Number.isFinite(stop.expectedMinutes) ? Math.min(stop.expectedMinutes, windowMinutes) : windowMinutes;
+//
+// `combinedByStop` (Codex r7 P1, `candidatesForDay`'s own projectDayChain
+// pass over that date's dayStops, grace > 0 only): a visit_id member's OWN
+// startMin/endMin/expectedMinutes understate its real, promised span exactly
+// the way an un-grouped commit-side chain once did (rounds 4-5) — this reads
+// the group's TRUE combined window/credit for the geometry fields only,
+// never for `arrivalMin`/`hold` (already the group's own shared value via
+// buildDayStops' annotateProjectedArrivals overlay, per stop). An allocation
+// member's combined entity is byte-identical to its own row (occupiedRows/
+// stopCreditResolver already pre-expand every member to the same shared
+// span), and no `combinedByStop` at all (every caller before this lane, and
+// every date at grace 0) falls back to the stop itself — byte-identical.
+function toPackingBoundAnchor(stop, combinedByStop) {
+  const source = (combinedByStop && combinedByStop.get(stop)) || stop;
+  const windowMinutes = source.endMin - source.startMin;
+  const expected = Number.isFinite(source.expectedMinutes) ? Math.min(source.expectedMinutes, windowMinutes) : windowMinutes;
   return {
-    rawStartMin: stop.startMin, rawEndMin: stop.endMin, expectedEndMin: stop.startMin + expected,
+    rawStartMin: source.startMin, rawEndMin: source.endMin, expectedEndMin: source.startMin + expected,
     arrivalMin: stop.arrivalMin, hold: stop.hold === true,
   };
 }
@@ -647,7 +685,7 @@ function toPackingBoundAnchor(stop) {
 // { newStop, dateFrom, stopBuffer, candidateExpectedMinutes, durationMinutes,
 //   dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
 //   arrivalGraceMinutes }.
-function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
+function evaluateGap(prev, next, { date, tech, dayStops, geo, combinedByStop }) {
   const {
     newStop, dateFrom, stopBuffer, candidateExpectedMinutes,
     durationMinutes, dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
@@ -680,8 +718,8 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
   // sentinel an infeasible packed-before-next gap to -Infinity; 0 is
   // byte-identical to before this lane.
   const { earliestStart: earliestFromPrevStop, latestStart: latestFromNextStop, arrivalFloor: prevArrivalFloor } = packedBounds({
-    prev: prevIsStop ? toPackingBoundAnchor(prev) : null,
-    next: nextIsStop ? toPackingBoundAnchor(next) : null,
+    prev: prevIsStop ? toPackingBoundAnchor(prev, combinedByStop) : null,
+    next: nextIsStop ? toPackingBoundAnchor(next, combinedByStop) : null,
     durationMinutes, expectedMinutes: candidateExpectedMinutes,
     driveIn, driveOut, buffer: stopBuffer, grace,
   });
@@ -889,6 +927,15 @@ function candidatesForDay(date, tech, params) {
   const dayStops = buildDayStops(services, {
     tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, arrivalGraceMinutes: dateGrace,
   });
+  // A visit_id member's own dayStops entry keeps its individual identity
+  // (round 6's own design — buildDayStops' return is read field-by-field far
+  // beyond grace math), so evaluateGap's packedBounds geometry needs the
+  // group's TRUE combined window/credit resolved separately (Codex r7 P1):
+  // one extra projectDayChain pass over this date's own (already-built)
+  // dayStops, grace > 0 only — cheap (one tech/date's own stops) and
+  // byte-identical at grace 0 (no combinedByStop at all, every
+  // toPackingBoundAnchor call falls back to the stop itself).
+  const combinedByStop = dateGrace > 0 ? projectDayChain(dayStops).combinedByStop : null;
   // Build virtual stop list: HQ ... stops ... HQ
   // "Stops" include timing. For gaps we evaluate between consecutive anchors.
   const anchors = [
@@ -901,7 +948,7 @@ function candidatesForDay(date, tech, params) {
   // Evaluate each gap between anchor[i] and anchor[i+1]
   for (let i = 0; i < anchors.length - 1; i++) {
     evaluatedGaps++;
-    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo });
+    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo, combinedByStop });
 
     if (wantsPackedEnds && dayStops.length > 0) {
       for (const startMin of packedEndsStarts(gap, durationMinutes, dayClose)) {
@@ -1252,6 +1299,9 @@ module.exports = {
     enumerateDates,
     packCapacityEnds,
     capacityGapNeighbours,
+    capacityNeighbourEntity,
     buildDayStops,
+    evaluateGap,
+    toPackingBoundAnchor,
   },
 };
