@@ -292,8 +292,13 @@ const ALLOWLIST = [
   },
   {
     file: 'services/call-commitments.js',
-    snippet: 'const text = await conn("sms_log as os")',
-    reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+    snippet: 'const row = await conn("sms_log as os")',
+    reason: 'humanTextTo: status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+  },
+  {
+    file: 'services/call-commitments.js',
+    snippet: 'const row = await conn("sms_log")',
+    reason: 'reportTextTo: status filtered to sent/delivered (provider-accepted) and message_type to service_report*, so an unresolved \'sending\' reservation cannot match.',
   },
   {
     file: 'services/call-recording-processor.js',
