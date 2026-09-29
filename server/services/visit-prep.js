@@ -739,7 +739,6 @@ async function customerFlaggedFacts(svc, conn = db) {
   // (Codex #5305 r14 P2).
   let readsLive = require('../config/feature-gates').visitPrepPestReadLive();
   const contractsByRef = new Map();
-  let stillPest = true;
   if (readsLive) {
     try {
       const readRefs = [...new Set(submissions.filter((s) => s.read_status === 'done' && s.read_ref).map((s) => s.read_ref))];
@@ -747,21 +746,30 @@ async function customerFlaggedFacts(svc, conn = db) {
         const rows = await conn('pest_identifications').whereIn('id', readRefs).select('id', 'report_contract');
         for (const row of rows) contractsByRef.set(row.id, parseJsonMaybe(row.report_contract));
       }
-      // Checked for running reads too, so "Photo read pending" never
-      // outlives a reclassification (Codex #5305 r13). The lightweight
-      // applicability module never loads the vision engine here.
-      const hasReadToShow = submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
-      if (hasReadToShow) stillPest = await require('./visit-prep-pest-applicability').isPestStop(svc, conn);
     } catch (err) {
       logger.warn(`[visit-prep] read enrichment failed for ${svc.id}: ${err.message}`);
       readsLive = false;
     }
   }
 
-  // The LAST await: members re-resolved after every read above.
+  // Members re-resolved after every read above.
   const current = await stillOnTechStop(svc, conn);
   const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
   if (kept.length === 0) return null;
+
+  // Pest-ness of the SAME final member set that decides what is served
+  // (Codex #5305 r16 P1), checked for running reads too so "Photo read
+  // pending" never outlives a reclassification (r13). The lightweight
+  // applicability module never loads the vision engine here.
+  let stillPest = true;
+  if (readsLive && kept.some((s) => s.read_status === 'done' || s.read_status === 'pending')) {
+    try {
+      stillPest = await require('./visit-prep-pest-applicability').membersArePest([...current], conn);
+    } catch (err) {
+      logger.warn(`[visit-prep] read applicability failed for ${svc.id}: ${err.message}`);
+      readsLive = false;
+    }
+  }
 
   return kept.map((s) => ({
     id: s.id,

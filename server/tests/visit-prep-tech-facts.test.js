@@ -432,6 +432,39 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
     }
   });
 
+  test('a pest sibling that leaves the stop during the final recheck: the lawn anchor\'s read is not served as pest (Codex #5305 r16)', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+    try {
+      const before = [
+        { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', service_type: 'Lawn Weed & Feed' },
+        { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', service_type: 'Quarterly Pest Control' },
+      ];
+      const after = [before[0], { ...before[1], technician_id: 'tech-2' }];
+      const base = fakeConn({
+        visit_prep_submissions: [
+          { id: 'sub-A', scheduled_service_id: 'svc-A', created_at: new Date(), topic: null, location_on_property: null, note: 'lawn spot', read_status: 'done', read_ref: 'pi-A' },
+        ],
+        visit_prep_photos: [],
+        pest_identifications: [{ id: 'pi-A', report_contract: JSON.stringify({ v2: { entry: { common_name: 'German cockroach' } } }) }],
+      });
+      let memberReads = 0;
+      const conn = (table) => {
+        if (table !== 'scheduled_services') return base(table);
+        memberReads += 1;
+        return fakeConn({ scheduled_services: memberReads <= 2 ? before : after })(table);
+      };
+      const facts = await customerFlaggedFacts({ id: 'svc-A', visit_id: 'visit-9' }, conn);
+      expect(facts.map((f) => f.id)).toEqual(['sub-A']);
+      expect(facts[0].read).toEqual({ status: 'unsupported' });
+    } finally {
+      delete process.env.GATE_VISIT_PREP_PHOTOS;
+      delete process.env.GATE_VISIT_PREP_PEST_READ;
+      delete process.env.GATE_VISIT_FACTS;
+    }
+  });
+
   test('stopPhotoViewUrls drops a sibling reassigned while URLs were signed, and never returns the internal row id', async () => {
     const photos = await stopPhotoViewUrls({ id: 'svc-A', visit_id: 'visit-9' }, reassignedMidRead());
     expect(photos.map((p) => p.id)).toEqual(['photo-A']);

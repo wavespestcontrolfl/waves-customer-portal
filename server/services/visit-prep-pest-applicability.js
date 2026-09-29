@@ -41,4 +41,14 @@ async function isPestStop(svc, conn = db) {
   return types.some((t) => isPestOnlyServiceType(t));
 }
 
-module.exports = { isPestStop, liveStopServiceTypes };
+// Pest-ness of an ALREADY-RESOLVED member set (e.g. the tech facts read's
+// final membership snapshot), so the answer can never describe a different
+// set of rows than the caller is about to serve.
+async function membersArePest(memberIds, conn = db) {
+  const ids = [...new Set((memberIds || []).map(String))];
+  if (!ids.length) return false;
+  const rows = await conn('scheduled_services').whereIn('id', ids).select('service_type', 'status');
+  return rows.some((r) => !JOIN_INELIGIBLE_STATUSES.includes(r.status) && isPestOnlyServiceType(r.service_type));
+}
+
+module.exports = { isPestStop, liveStopServiceTypes, membersArePest };
