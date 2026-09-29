@@ -421,7 +421,7 @@
             "boolean",
             "null"
           ],
-          "description": "1.18.0, additive/optional in both schemas (AGENTS.md: extraction schema changes never add to `required`) — a pre-1.19 persisted row (which never has it) still validates. true ONLY on an explicit decline of text messages; false otherwise, including when texting never came up; null when not judged."
+          "description": "1.19.0, additive/optional in both schemas (AGENTS.md: extraction schema changes never add to `required`) — a pre-1.19 persisted row (which never has it) still validates. true ONLY on an explicit decline of text messages; false otherwise, including when texting never came up; null when not judged."
         }
       }
     },
