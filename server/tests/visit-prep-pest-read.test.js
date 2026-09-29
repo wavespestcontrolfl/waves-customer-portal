@@ -31,7 +31,17 @@ jest.mock('../config/feature-gates', () => ({
   visitPrepPestReadLive: () => mockGateOn,
 }));
 
-const { triggerVisitPrepPestRead, dailyCap, _internal } = require('../services/visit-prep-pest-read');
+const { triggerVisitPrepPestRead: realTrigger, dailyCap, _internal } = require('../services/visit-prep-pest-read');
+
+// The trigger re-reads the visit row from the DB; seed the fake with the svc
+// a test passes unless the test already put that row there.
+function triggerVisitPrepPestRead(args = {}) {
+  const store = args.conn?._store;
+  if (store && args.svc?.id && !store.scheduled_services.some((r) => r.id === args.svc.id)) {
+    store.scheduled_services.push({ status: 'confirmed', visit_id: null, ...args.svc });
+  }
+  return realTrigger(args);
+}
 
 // A minimal chainable knex-ish stub, table-scoped, matching exactly the
 // calls the module makes: where/whereIn (predicate accumulation) + select,
@@ -259,6 +269,22 @@ describe('trigger rule: moved siblings and topics', () => {
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
   });
 
+  test('the visit was reclassified to lawn after the upload: the fresh row wins, no engine call', async () => {
+    const conn = fakeConn({ scheduled_services: [{ id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: null }] });
+    await triggerVisitPrepPestRead({
+      submissionId: 'sub-1', svc: { ...BASE_SVC, id: 'svc-1', service_type: 'Quarterly Pest Control' }, photos: PHOTOS, conn,
+    });
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+  });
+
+  test('the visit was cancelled after the upload: no engine call', async () => {
+    const conn = fakeConn({ scheduled_services: [{ id: 'svc-1', service_type: 'Quarterly Pest Control', status: 'cancelled', visit_id: null }] });
+    await triggerVisitPrepPestRead({
+      submissionId: 'sub-1', svc: { ...BASE_SVC, id: 'svc-1', service_type: 'Quarterly Pest Control' }, photos: PHOTOS, conn,
+    });
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+  });
+
   test('a topic on the submission is not an input: a lawn visit stays unsupported', async () => {
     const conn = fakeConn();
     await triggerVisitPrepPestRead({
@@ -400,9 +426,11 @@ describe('a successful read', () => {
 
 describe('_internal.isPestStop', () => {
   test('classifies via the shared service-line classifier', async () => {
-    const conn = fakeConn();
-    expect(await _internal.isPestStop({ ...BASE_SVC, service_type: 'Quarterly Pest Control' }, conn)).toBe(true);
-    expect(await _internal.isPestStop({ ...BASE_SVC, service_type: 'Lawn Weed & Feed' }, conn)).toBe(false);
+    // The row is read from the database, not taken from the caller.
+    const pest = fakeConn({ scheduled_services: [{ ...BASE_SVC, service_type: 'Quarterly Pest Control', status: 'confirmed' }] });
+    expect(await _internal.isPestStop(BASE_SVC, pest)).toBe(true);
+    const lawn = fakeConn({ scheduled_services: [{ ...BASE_SVC, service_type: 'Lawn Weed & Feed', status: 'confirmed' }] });
+    expect(await _internal.isPestStop(BASE_SVC, lawn)).toBe(false);
   });
 });
 

@@ -57,15 +57,18 @@ function dailyCap() {
 // technician), so a sibling moved to another day or window but still
 // carrying the frozen visit_id never counts (Codex #5305 r1 P1).
 async function liveStopServiceTypes(svc, conn) {
-  // svc is the row this submission just committed against (rechecked
-  // under the stop lock), so it always counts for itself.
-  // Callers that pass a partial row (the facts read) get its type from the DB.
-  const ownType = svc?.service_type !== undefined ? svc.service_type
-    : (svc?.id ? (await conn('scheduled_services').where({ id: svc.id }).first('service_type'))?.service_type : null);
-  const own = ownType ? [ownType] : [];
-  if (!svc?.visit_id) return own;
+  // The anchor row is always re-read: the deferred trigger's snapshot can be
+  // stale (reclassified Pest -> Lawn, rescheduled or cancelled since the
+  // upload), and a stale pest type must not spend a paid read (Codex #5305
+  // r9). A join-ineligible anchor contributes nothing.
+  const anchor = svc?.id
+    ? await conn('scheduled_services').where({ id: svc.id }).first('service_type', 'status', 'visit_id')
+    : null;
+  const own = anchor && anchor.service_type && !JOIN_INELIGIBLE_STATUSES.includes(anchor.status)
+    ? [anchor.service_type] : [];
+  if (!anchor?.visit_id) return own;
   const { techStopMemberIds } = require('./visit-prep');
-  const others = (await techStopMemberIds(svc, conn)).filter((id) => String(id) !== String(svc.id));
+  const others = (await techStopMemberIds({ ...svc, visit_id: anchor.visit_id }, conn)).filter((id) => String(id) !== String(svc.id));
   if (!others.length) return own;
   const rows = await conn('scheduled_services').whereIn('id', others).select('service_type', 'status');
   // Join-ineligible = terminal + 'rescheduled' (a row awaiting a new date
