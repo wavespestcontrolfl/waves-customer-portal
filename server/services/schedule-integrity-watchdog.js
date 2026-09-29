@@ -727,7 +727,9 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
     // or was just refreshed) is not a NEW alert for this run's count. Under
     // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
     // or a refresh that rang) — never a silent dedupe onto a standing row.
-    if (episodes ? !created.rang : created.deduped) return false;
+    // A suppressed alert (an internal test customer) made no bell in either
+    // mode, so it never takes a cap slot from a real one.
+    if (created.suppressed || (episodes ? !created.rang : created.deduped)) return false;
     alerted += 1;
     return true;
   };

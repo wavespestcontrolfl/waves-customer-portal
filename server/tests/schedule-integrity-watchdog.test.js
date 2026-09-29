@@ -1266,6 +1266,16 @@ describe('raiseAdminAlertWithReopen: a suppressed result never rings', () => {
     const result = await runInner({ now: NOW });
     expect(result).toMatchObject({ churnedLiveWork: 1, alerted: 0 });
   });
+
+  test('kill switch off too: plain notifyAdmin\'s suppressed result never takes a cap slot', async () => {
+    alertEpisodesLive.mockReturnValue(false);
+    makeDbMock({ churnedRows: [{ id: 'cust-demo', live_visits: 1 }] });
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: null, suppressed: true, deduped: false }));
+    const result = await runInner({ now: NOW });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ churnedLiveWork: 1, alerted: 0 });
+  });
 });
 
 describe('raiseAdminAlertWithReopen row lock', () => {
