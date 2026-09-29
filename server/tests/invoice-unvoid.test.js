@@ -42,6 +42,8 @@ function chain({ first, returning, select } = {}) {
   q.whereIn = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
   q.whereNull = jest.fn(() => q);
+  q.whereNotIn = jest.fn(() => q);
+  q.whereNot = jest.fn(() => q);
   q.forUpdate = jest.fn(() => q);
   q.forShare = jest.fn(() => q);
   q.join = jest.fn(() => q);
@@ -467,6 +469,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
       .mockReturnValueOnce(noRow()) // term pre-guard
       .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'confirmed' } })) // fast-fail pass: visit live
+      .mockReturnValueOnce(noRow()) // fast-fail pass: no other upcoming visit on a combined invoice
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft', scheduled_service_id: 'svc-1' })] }))
       .mockReturnValueOnce(noRow()) // TOCTOU term re-check
       .mockReturnValueOnce(noRow()) // money guard
@@ -660,13 +663,46 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
 
   test('on: a combined invoice with no $0 member proceeds to the owner-visit checks normally', async () => {
     process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    let svcReads = 0;
     const conn = jest.fn((table) => {
       if (String(table).startsWith('visit_completion_packet_items')) return noRow(); // no member matched
-      if (String(table).startsWith('scheduled_services')) return chain({ first: { id: 'svc-owner', status: 'confirmed', is_callback: false, estimated_price: 129 } });
+      if (String(table).startsWith('scheduled_services')) {
+        svcReads += 1;
+        // 1st: the owner visit; 2nd: no other upcoming visit on a combined invoice.
+        return svcReads === 1 ? chain({ first: { id: 'svc-owner', status: 'confirmed', is_callback: false, estimated_price: 129 } }) : noRow();
+      }
       throw new Error(`unexpected table ${table}`);
     });
     await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: 'svc-owner', visit_completion_packet_id: 'packet-1' }))
       .resolves.toBeUndefined();
+  });
+
+  // Codex r6 P1 on #5301: a combined first-application invoice also bills
+  // its NON-anchor members; one may have been re-priced while it was void.
+  test('a combined first-application invoice still covering another upcoming visit refuses the restore', async () => {
+    let svcReads = 0;
+    const conn = jest.fn((table) => {
+      if (String(table).startsWith('scheduled_services')) {
+        svcReads += 1;
+        return svcReads === 1 ? chain({ first: { id: 'anchor', status: 'confirmed', is_callback: false, estimated_price: 129 } }) : chain({ first: { id: 'member-2' } });
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: 'anchor' }))
+      .rejects.toThrow(/also covers other upcoming visits/);
+  });
+
+  test('the covered-member read failing closed refuses the restore', async () => {
+    let svcReads = 0;
+    const conn = jest.fn((table) => {
+      svcReads += 1;
+      if (svcReads === 1) return chain({ first: { id: 'anchor', status: 'confirmed', is_callback: false, estimated_price: 129 } });
+      const q = chain();
+      q.first = jest.fn(async () => { throw new Error('boom'); });
+      return q;
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: 'anchor' }))
+      .rejects.toThrow(/Could not verify the visits this combined invoice covers/);
   });
 
   test('on: the packet-member read failing closed refuses to unvoid', async () => {

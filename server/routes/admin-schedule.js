@@ -17676,9 +17676,23 @@ async function governingFirstApplicationRows(conn, ids) {
     throw busy();
   }
   const terminal = new Set(require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES);
+  // A REPLACEMENT (not the stamp itself) covers a member only when it bills
+  // that member (Codex r6 P2 on #5301): an itemized invoice names each
+  // visit it bills (client_id scheduled_<id>_primary — every service mint
+  // writes one), so an ordinary anchor-only invoice doesn't cover the other
+  // members; a non-itemized aggregate replacement covers every stamped member.
+  const billsMember = (inv, memberId) => {
+    let items = inv?.line_items;
+    if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
+    const ids = (Array.isArray(items) ? items : [])
+      .map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ''))?.[1])
+      .filter(Boolean);
+    return ids.length === 0 || ids.includes(String(memberId));
+  };
   return stamped
-    .map((row) => ({ member: row.member_id, inv: governingById.get(String(row.id)) }))
+    .map((row) => ({ member: row.member_id, stampId: String(row.id), inv: governingById.get(String(row.id)) }))
     .filter(({ inv }) => inv && !terminal.has(inv.status))
+    .filter(({ inv, stampId, member }) => String(inv.id) === stampId || billsMember(inv, member))
     .map(({ member, inv }) => ({
       scheduled_service_id: member,
       status: inv.status,

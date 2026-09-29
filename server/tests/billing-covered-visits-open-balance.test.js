@@ -357,6 +357,21 @@ describe('liveInvoice reaches the combined first-application invoice link', () =
       .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
   });
 
+  test("a void stamp replaced by an ANCHOR-ONLY invoice doesn't block the member (Codex r6 P2)", async () => {
+    const anchorOnly = { ...replacement, line_items: JSON.stringify([{ client_id: 'scheduled_anchor_primary', description: 'Pest Control', quantity: 1, unit_price: 200, amount: 200 }]) };
+    const covered = await findBillingCoveredVisits(fixture([stamp('void')], [anchorOnly]), [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.has('v2')).toBe(false);
+  });
+
+  test("a void stamp replaced by an itemized invoice with the MEMBER's own line blocks it", async () => {
+    const itemized = { ...replacement, line_items: JSON.stringify([
+      { client_id: 'scheduled_anchor_primary', description: 'Pest Control', quantity: 1, unit_price: 200, amount: 200 },
+      { client_id: 'scheduled_v2_primary', description: 'Lawn Care', quantity: 1, unit_price: 200, amount: 200 },
+    ]) };
+    const covered = await findBillingCoveredVisits(fixture([stamp('void')], [itemized]), [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
+  });
+
   test('an unvoid landing between the join and the lock is seen: the LOCKED row decides (Codex r4 P1)', async () => {
     const covered = await findBillingCoveredVisits(fixture([stamp('void')], [], { lockedStatus: 'draft' }), [{ id: 'v2' }], { liveInvoice: true });
     expect(covered.get('v2')).toMatch(/combined first-application invoice/);

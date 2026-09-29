@@ -575,6 +575,33 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
       "Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead",
     );
   }
+  // A combined first-application invoice also bills every NON-anchor
+  // member stamped with its id (scheduled_services.first_application_
+  // invoice_id); the anchor-only checks above never see them. A member can
+  // be re-priced while this invoice is void (the re-price guard only sees
+  // live invoices — Codex r6 P1 on #5301), and the invoice's member lines
+  // are gross accepted amounts that can't be compared with the new price,
+  // so restoring one while it still covers another upcoming visit is
+  // refused outright; staff create a new invoice instead. Fail closed.
+  if (invoiceRow.id) {
+    let coveredMember = null;
+    try {
+      let q = conn("scheduled_services")
+        .where("first_application_invoice_id", invoiceRow.id)
+        .whereNotIn("status", ["cancelled", "canceled", "completed", "no_show", "skipped", "rescheduled"]);
+      q = q.whereNot("id", invoiceRow.scheduled_service_id);
+      coveredMember = await q.first("id");
+    } catch (err) {
+      if (!/first_application_invoice_id/.test(String(err.message))) {
+        throw new Error(`Could not verify the visits this combined invoice covers — refusing to unvoid (${err.message})`);
+      }
+    }
+    if (coveredMember) {
+      throw new Error(
+        "Cannot unvoid — this combined first-application invoice also covers other upcoming visits whose prices may have changed since it was voided; create a new invoice instead",
+      );
+    }
+  }
 }
 
 function appendPayUrlParams(url, params = null) {
