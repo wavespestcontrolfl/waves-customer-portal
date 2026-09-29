@@ -221,68 +221,42 @@ describe('createSelfBooking — customers-only gate', () => {
       id: 'pe-victim', source: 'quote_wizard', status: 'draft', customer_id: CUST_ID, customer_phone: '941-555-0101',
     });
 
-    test('no portal session → refused with the sign-in path; nothing is written', async () => {
+    test('the gate itself does not classify the matched contact: established and pre-customer rows behave identically up to address bind + slot validation', async () => {
+      // The established-customer refusal lives INSIDE the booking transaction
+      // (assertContactLinkedHandoffProvisional, unit-tested in
+      // booking-wizard-established-handoff.test.js) — after the address bind
+      // and signed-slot validation — so it is never an early oracle for "is
+      // this contact a customer" (Codex r1 P2). Here both classes flow on to
+      // the same next check…
       firstResults.estimates = linkedDraft();
-      firstResults.customers = { ...BEARER_ROW(), pipeline_stage: 'active_customer' };
-      const db = require('../models/db');
-      db.mockClear();
-      const result = await createSelfBooking({
-        ...strangerBody(), // street + zip match the victim's on-file address
-        customersOnly: true,
-        pricing_estimate_id: 'pe-victim',
-        estimate_token: mintEstimateHandoffToken('pe-victim'),
-      });
-      expect(result).toEqual({
-        ok: false,
-        status: 409,
-        error: expect.stringMatching(/sign in to your customer portal/i),
-      });
-      // Refused at the gate, before any write: only read-side lookups ran
-      // (the mock has no insert/transaction — reaching one would throw), so
-      // no appointment or customer rows were created.
-      const touched = new Set(db.mock.calls.map((c) => c[0]));
-      expect([...touched].filter((t) => !['booking_config', 'estimates', 'customers', 'scheduled_services as ss', 'system_settings', 'schedule_blackout_dates'].includes(t))).toEqual([]);
-    });
-
-    test('an identical retry of an already-committed booking (lead promoted to won) still reaches the replay path', async () => {
-      // The first wizard booking promotes its lead to won; a lost-response
-      // retry must not eat the established-customer refusal (pre-push P1).
-      firstResults.estimates = linkedDraft();
-      firstResults.customers = { ...BEARER_ROW(), phone: '941-555-0101', pipeline_stage: 'won' };
-      firstResults['scheduled_services as ss'] = { id: 'ss-committed' };
-      try {
-        const result = await createSelfBooking({
+      for (const stage of ['active_customer', 'new_lead', undefined]) {
+        firstResults.customers = { ...BEARER_ROW(), pipeline_stage: stage };
+        expect(await createSelfBooking({
           ...strangerBody(),
           customersOnly: true,
           pricing_estimate_id: 'pe-victim',
           estimate_token: mintEstimateHandoffToken('pe-victim'),
-        });
-        expect(result).toEqual(BEYOND_WINDOW);
-        // Bound to the customer's own contact: a different typed phone on the
-        // same consumed draft is refused.
-        const other = strangerBody();
-        other.new_customer.phone = '941-555-0199';
-        expect(await createSelfBooking({
-          ...other,
+        })).toEqual(BEYOND_WINDOW);
+      }
+      // …and a wrong street returns exactly today's address fix-it for both.
+      const wrongStreet = strangerBody();
+      wrongStreet.new_customer.address_line1 = '999 Other Rd';
+      const responses = [];
+      for (const stage of ['active_customer', 'new_lead']) {
+        firstResults.customers = { ...BEARER_ROW(), pipeline_stage: stage };
+        responses.push(await createSelfBooking({
+          ...wrongStreet,
           customersOnly: true,
           pricing_estimate_id: 'pe-victim',
           estimate_token: mintEstimateHandoffToken('pe-victim'),
-        })).toEqual(expect.objectContaining({ ok: false, status: 409 }));
-      } finally {
-        delete firstResults['scheduled_services as ss'];
+        }));
       }
-    });
-
-    test('a legacy null-stage customer row is treated as established (fail closed on identity)', async () => {
-      firstResults.estimates = linkedDraft();
-      firstResults.customers = BEARER_ROW(); // no pipeline_stage
-      const result = await createSelfBooking({
-        ...strangerBody(),
-        customersOnly: true,
-        pricing_estimate_id: 'pe-victim',
-        estimate_token: mintEstimateHandoffToken('pe-victim'),
+      expect(responses[0]).toEqual({
+        ok: false,
+        status: 400,
+        error: expect.stringMatching(/doesn't match what we have on file/i),
       });
-      expect(result).toEqual(expect.objectContaining({ ok: false, status: 409 }));
+      expect(responses[1]).toEqual(responses[0]);
     });
 
     test('the same draft books when the caller holds the verified portal session', async () => {

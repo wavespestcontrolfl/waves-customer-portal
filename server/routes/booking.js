@@ -1172,6 +1172,82 @@ const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
   'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating', 'lost',
 ]);
 
+// Contact-linked quote-wizard handoff → established customer (B11).
+//
+// public-quote links a draft to any existing customer matching the
+// UNVERIFIED contact the anonymous quoter typed and returns the handoff token
+// to that same caller, so under the customers-only gate the token must not
+// turn a typed phone + street into "I am that customer". The gate tags such a
+// binding (contactLinkedHandoff); THIS runs inside the booking transaction,
+// with the bound customer row already share-locked (an UPDATE promoting a
+// lead to an established stage cannot land between this read and the
+// commit), after the address bind and the signed-slot validation — so the
+// refusal is neither a stale gate-time read nor an early oracle for "is this
+// contact a customer". The one exception is a lost-response retry of a
+// booking that ALREADY committed: the first wizard booking promotes its own
+// lead to 'won' in its transaction, so an identical retry must still reach
+// the idempotent replay. That retry is recognized only when a live booking
+// already consumed THIS draft for the SAME slot tuple under the bound
+// customer AND the submitted contact is that customer's — by phone, or by
+// email when the draft itself was linked by that email (a new/different
+// typed phone must not strand the retry).
+const ESTABLISHED_HANDOFF_REFUSAL_MESSAGE = 'This contact is already on file with Waves. To book as an existing customer, please sign in to your customer portal with the code we text you, then book from the Book page — or call (941) 297-5749 and we will get you scheduled.';
+
+async function assertContactLinkedHandoffProvisional(trx, {
+  handoff, pricingEstimateId, slotDate, slotStart, newCustomer,
+}) {
+  if (!handoff?.rootId || !handoff?.boundId) return;
+  const ids = [...new Set([String(handoff.rootId), String(handoff.boundId)])];
+  const rows = await trx('customers').whereIn('id', ids).forShare().select('id', 'pipeline_stage', 'phone', 'email');
+  const established = (Array.isArray(rows) ? rows : []).filter(
+    (r) => !PRE_CUSTOMER_PIPELINE_STAGES.has(String(r.pipeline_stage || '')),
+  );
+  if (!established.length) return;
+  const last10 = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; };
+  const lcEmail = (v) => String(v || '').trim().toLowerCase();
+  const bound = established.find((r) => String(r.id) === String(handoff.boundId)) || established[0];
+  const consumed = await trx('scheduled_services as ss')
+    .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
+    .where('ss.source_estimate_id', pricingEstimateId)
+    .where('ss.customer_id', handoff.boundId)
+    .where('sba.date', slotDate)
+    .where('sba.start_time', slotStart)
+    .whereNot('sba.status', 'cancelled')
+    .first('ss.id');
+  if (consumed) {
+    const typed10 = last10(newCustomer?.phone);
+    const typedEmail = lcEmail(newCustomer?.email);
+    const draft = await trx('estimates').where({ id: pricingEstimateId }).first('customer_email');
+    const phoneMatches = !!typed10 && typed10 === last10(bound.phone);
+    const emailMatches = !!typedEmail && typedEmail === lcEmail(bound.email)
+      && lcEmail(draft?.customer_email) === lcEmail(bound.email);
+    if (phoneMatches || emailMatches) return;
+  }
+  throw Object.assign(new Error(ESTABLISHED_HANDOFF_REFUSAL_MESSAGE), {
+    statusCode: 409,
+    isOperational: true,
+    code: 'ESTABLISHED_CUSTOMER_SIGN_IN',
+  });
+}
+
+// A refused (or never-eligible) contact-linked handoff must leave NO open
+// abandoned-booking recovery intent behind: the recovery cron texts/emails
+// the intent's phone/email (the real customer's, when an attacker quoted with
+// their contact). booking_intents.suppressed is the cron's kill flag — every
+// recovery selection filters `suppressed = false`.
+async function suppressRecoveryIntents(conn, { pricingEstimateId, phone, email }) {
+  const ten = String(phone || '').replace(/\D/g, '').slice(-10);
+  const lc = String(email || '').trim().toLowerCase();
+  await conn('booking_intents')
+    .whereNull('converted_at')
+    .where((q) => {
+      if (pricingEstimateId) q.orWhere('pricing_estimate_id', String(pricingEstimateId));
+      if (ten.length === 10) q.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+      if (lc) q.orWhereRaw('LOWER(email) = ?', [lc]);
+    })
+    .update({ suppressed: true, updated_at: conn.fn.now() });
+}
+
 const BOOKING_FUNNEL_SERVICE_DURATIONS = {
   pest_control: 60,
   lawn_care: 60,
@@ -2438,6 +2514,7 @@ async function createSelfBooking(payload = {}) {
     // legitimately creates the customer it prices for). The refusal carries
     // the quote-wizard URL so the client renders a forward action, never a
     // dead end.
+    let contactLinkedHandoff = null;
     if (customersOnly && !custId) {
       const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
       // Two token-proven entries can pass: the quote-wizard pricing handoff
@@ -2468,16 +2545,19 @@ async function createSelfBooking(payload = {}) {
       // and whose handoff token is returned to that same anonymous caller.
       // Possession of that token proves the quoter reached the draft, NOT
       // that they are the matched customer — so a draft linked to an
-      // ESTABLISHED customer must not act as that customer's identity here
-      // (anyone knowing a customer's phone + street could otherwise book AS
-      // them, bypassing this gate's whole purpose). It refuses with a
-      // sign-in path instead; the customer proves identity with the portal
-      // OTP (bearer, resolved above) like every other entry. A draft linked
-      // to a row still in a pre-customer stage is the quoter's OWN freshly
-      // minted lead (public-quote upserts new prospects as new_lead), which
-      // this gate never protected — it keeps binding as before. Staff/system
-      // issued links (the accept token) are NOT contact-linked: their token
-      // goes to the estimate's own contact, so they stay identity.
+      // ESTABLISHED customer must not act as that customer's identity (anyone
+      // knowing a customer's phone + street could otherwise book AS them,
+      // bypassing this gate's whole purpose). The binding is tagged here and
+      // the refusal is enforced later, inside the booking transaction under
+      // the customer lock (assertContactLinkedHandoffProvisional): after the
+      // address bind and signed-slot validation, so the 409 is never an
+      // early oracle for "is this contact a customer", and against the
+      // customer's CURRENT stage rather than a stale gate-time read. A draft
+      // linked to a row still in a pre-customer stage is the quoter's OWN
+      // freshly minted lead (public-quote upserts new prospects as new_lead),
+      // which this gate never protected — it keeps binding as before.
+      // Staff/system issued links (the accept token) are NOT contact-linked:
+      // their token goes to the estimate's own contact, so they stay identity.
       const bindGateEstimate = async (estimateId, { contactLinked = false } = {}) => {
         const gateEstimate = await db('estimates')
           .where('id', estimateId)
@@ -2491,46 +2571,14 @@ async function createSelfBooking(payload = {}) {
             .first()
             .catch(() => null);
           if (!estCustomer) return { valid: false };
-          // Committed-booking retry exception: the first wizard booking
-          // promotes its own lead to 'won' in the booking transaction, so an
-          // identical retry after a lost response would otherwise trip the
-          // established-customer refusal before reaching the consumed-draft
-          // replay below. A retry is recognized only when a live (non-
-          // cancelled) booking already consumed THIS draft for the SAME slot
-          // tuple under THIS customer AND the submitted contact is that
-          // customer's — the same binding the replay recovery applies. It
-          // creates no booking (the replay returns the committed one); a
-          // fresh booking for an established customer still refuses.
-          let committedRetry = false;
-          if (contactLinked && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(estCustomer.pipeline_stage || ''))) {
-            const consumed = await db('scheduled_services as ss')
-              .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
-              .where('ss.source_estimate_id', estimateId)
-              .where('ss.customer_id', estCustomer.id)
-              .where('sba.date', slot_date)
-              .where('sba.start_time', slot_start)
-              .whereNot('sba.status', 'cancelled')
-              .first('ss.id')
-              .catch(() => null);
-            const typed10 = last10(new_customer?.phone);
-            const typedEmail = String(new_customer?.email || '').trim().toLowerCase();
-            committedRetry = !!consumed && (typed10
-              ? typed10 === last10(estCustomer.phone)
-              : (!!typedEmail && typedEmail === String(estCustomer.email || '').trim().toLowerCase()));
-          }
-          if (contactLinked && !committedRetry && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(estCustomer.pipeline_stage || ''))) {
-            return {
-              valid: true,
-              error: {
-                ok: false,
-                status: 409,
-                error: 'This contact is already on file with Waves. To book as an existing customer, please sign in to your customer portal with the code we text you, then book from the Book page — or call (941) 297-5749 and we will get you scheduled.',
-              },
-            };
-          }
           const bound = await bindCustomerRowByAddress(estCustomer);
           if (bound.error) return { valid: true, error: bound.error };
-          return { valid: true, custId: bound.custId };
+          // contactLinkedRootId marks the binding as contact-derived: the
+          // established-customer refusal is applied INSIDE the booking
+          // transaction (assertContactLinkedHandoffProvisional), after the
+          // address bind and signed-slot validation above, under the
+          // customer row lock — never here.
+          return { valid: true, custId: bound.custId, contactLinkedRootId: contactLinked ? estCustomer.id : null };
         }
         if (gateEstimate.customer_phone) {
           const typed = last10(new_customer?.phone);
@@ -2594,6 +2642,9 @@ async function createSelfBooking(payload = {}) {
       }
       if (gatePass.valid && gatePass.error) return gatePass.error;
       if (gatePass.valid && gatePass.custId) custId = gatePass.custId;
+      if (gatePass.valid && gatePass.custId && gatePass.contactLinkedRootId) {
+        contactLinkedHandoff = { rootId: gatePass.contactLinkedRootId, boundId: gatePass.custId };
+      }
       if (!gatePass.valid) {
         const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
         return {
@@ -3507,6 +3558,15 @@ async function createSelfBooking(payload = {}) {
             code: 'CUSTOMER_CHANGED_RETRY',
           });
         }
+        if (contactLinkedHandoff) {
+          await assertContactLinkedHandoffProvisional(trx, {
+            handoff: contactLinkedHandoff,
+            pricingEstimateId: pricing_estimate_id,
+            slotDate: slot_date,
+            slotStart: slot_start,
+            newCustomer: new_customer,
+          });
+        }
         let freshPin = storedBookingPin(freshBookingCustomer);
         const missingPinUnchanged = ['latitude', 'longitude'].every(
           column => (freshBookingCustomer[column] ?? null) === (preFenceCustomer[column] ?? null),
@@ -4255,7 +4315,18 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
+        if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
+          // No message may follow this refusal: retire the recovery intent the
+          // wizard's capture-intent staged for this contact.
+          await suppressRecoveryIntents(db, {
+            pricingEstimateId: pricing_estimate_id,
+            phone: new_customer?.phone,
+            email: new_customer?.email,
+          }).catch((supErr) => {
+            logger.warn(`[booking:confirm] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
+          });
+        }
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -6392,6 +6463,28 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     const handoffId = str(b.pricing_estimate_id, 80);
     const handoffToken = str(b.estimate_token, 200);
     const handoffVerified = !!(handoffId && handoffToken && verifyHandoff(handoffId, handoffToken));
+    // A wizard handoff whose draft was contact-linked to an ESTABLISHED customer
+    // can never book without the portal OTP (see assertContactLinkedHandoff
+    // Provisional), so it must never stage a send-eligible recovery row: the
+    // recovery cron would text/email the real customer for a booking an
+    // anonymous quoter started with their contact. Retire any intent already
+    // staged for this draft and skip. Lookup errors fail closed (no row).
+    if (handoffVerified) {
+      try {
+        const linkedDraft = await db('estimates').where({ id: handoffId }).first('customer_id');
+        if (linkedDraft?.customer_id) {
+          const linkedCustomer = await db('customers').where({ id: linkedDraft.customer_id })
+            .whereNull('deleted_at').first('pipeline_stage');
+          if (linkedCustomer && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(linkedCustomer.pipeline_stage || ''))) {
+            await suppressRecoveryIntents(db, { pricingEstimateId: handoffId, phone: phoneDigits, email: nc.email });
+            return res.json({ ok: true, skipped: 'contact_linked_established' });
+          }
+        }
+      } catch (linkErr) {
+        logger.warn(`[booking:capture-intent] contact-link check failed — skipping capture: ${linkErr.message}`);
+        return res.json({ ok: false, skipped: 'lookup_failed' });
+      }
+    }
     const row = {
       pricing_estimate_id: handoffVerified ? handoffId : null,
       pricing_estimate_token: handoffVerified ? handoffToken : null,
@@ -6677,6 +6770,9 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 
 module.exports = router;
 module.exports._internals = {
+  assertContactLinkedHandoffProvisional,
+  suppressRecoveryIntents,
+  captureIpKey,
   isOneTimeBookingSource,
   // Codex round 2 P1 on PR #5231: the canonical reader reservice-public.js
   // and inspection-public.js pass through to buildBookingAvailability

@@ -804,14 +804,27 @@ on): the wizard links its draft estimate to any existing customer matching
 the unverified phone/email the anonymous quoter typed, and hands the token
 back to that same caller, so a token-verified pricing handoff (`pricing_
 estimate_id` + `estimate_token`) whose draft is linked to an ESTABLISHED
-customer is not identity and the confirm is refused with 409 telling the
-customer to sign in with the portal code — a typed phone plus a street match
-never books on someone else's account. Preserved: a verified portal bearer
-still books (identity from the token, address-bound to the account); the
+customer is not identity. The gate binds it exactly as before (same address
+fix-it when the street matches no account property), and the refusal — 409
+telling the customer to sign in with the portal code — is applied inside the
+booking transaction under the customer row lock, after the address bind and
+signed-slot validation and against the customer's CURRENT stage (a lead
+promoted meanwhile is caught), so it is not an early "is this contact a
+customer" probe and a typed phone plus a street match never books on someone
+else's account. Residual: a caller who already holds the phone, the street
+and a valid signed slot can still see the 409 for an established customer
+versus the normal flow for a lead. Preserved: a verified portal bearer still
+books (identity from the token, address-bound to the account); the
 staff/system accept link (`source_estimate_id` + namespaced `accept_token`)
 still books as the estimate's customer; a draft linked to a row still in a
 pre-customer pipeline stage (the quoter's own freshly minted lead) or to no
-customer keeps the quoter's own booking. No message is sent on the refusal.
+customer keeps the quoter's own booking; an identical retry of a booking that
+already committed (same draft, slot and customer, and the typed phone — or the
+email that linked the draft — is the customer's) still reaches the idempotent
+replay. No message is sent on the refusal: the refusal retires the open
+abandoned-booking recovery intent for that draft, phone and email, and
+`/api/booking/capture-intent` stages no recovery row for a handoff whose draft
+is linked to an established customer (`skipped: contact_linked_established`).
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
