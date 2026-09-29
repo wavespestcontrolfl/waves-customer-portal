@@ -241,7 +241,7 @@ describe('createSelfBooking — customers-only gate', () => {
       // (the mock has no insert/transaction — reaching one would throw), so
       // no appointment or customer rows were created.
       const touched = new Set(db.mock.calls.map((c) => c[0]));
-      expect([...touched].filter((t) => !['booking_config', 'estimates', 'customers', 'scheduled_services as ss'].includes(t))).toEqual([]);
+      expect([...touched].filter((t) => !['booking_config', 'estimates', 'customers', 'scheduled_services as ss', 'system_settings', 'schedule_blackout_dates'].includes(t))).toEqual([]);
     });
 
     test('an identical retry of an already-committed booking (lead promoted to won) still reaches the replay path', async () => {
