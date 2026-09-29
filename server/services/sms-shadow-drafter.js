@@ -543,20 +543,37 @@ const COMPLAINT_REPEATED_FAILURE_RE = /\b(?:third|fourth|fifth|sixth|\d+(?:st|nd
 // agent answers cancellations itself (real options only), so cancel wording
 // never trips this hold on its own.
 const COMPLAINT_FAILURE_CONTEXT_RE = /\b(?:still\s+(?:seeing|have|having|got|getting|there|finding)|came\s+back|come\s+back|coming\s+back|(?:are|is|they'?re|it'?s)\s+back|back\s+again|didn'?t\s+work|doesn'?t\s+work|not\s+work(?:ing|ed)?|isn'?t\s+working|never\s+(?:went|go)\s+away|won'?t\s+go\s+away|no\s+better|worse)\b/i;
-const COMPLAINT_SIGNAL_RES = [COMPLAINT_MONEY_BACK_RE, COMPLAINT_DISPUTE_RE, COMPLAINT_DAMAGE_RE];
-function hasComplaintSignal(text) {
+// Two held categories, each with its own gate (audit P1): a SERVICE
+// complaint (damage, a repeated failure, money back over a failed service)
+// is held while GATE_SMS_AGENT_COMPLAINTS is off; a BILLING dispute
+// (overcharged, disputing a charge, a refund/credit with no service-failure
+// context) is held while GATE_SMS_AGENT_BILLING_DISPUTES is off. With a
+// category's gate on, its own prompt rule governs and this backstop steps
+// aside for that category.
+function complaintSignals(text) {
   const t = String(text || '');
-  return COMPLAINT_SIGNAL_RES.some((re) => re.test(t))
-    || (COMPLAINT_REPEATED_FAILURE_RE.test(t) && COMPLAINT_FAILURE_CONTEXT_RE.test(t));
+  const failure = COMPLAINT_FAILURE_CONTEXT_RE.test(t);
+  const damage = COMPLAINT_DAMAGE_RE.test(t);
+  const moneyBack = COMPLAINT_MONEY_BACK_RE.test(t);
+  return {
+    service: damage || (COMPLAINT_REPEATED_FAILURE_RE.test(t) && failure) || (moneyBack && (failure || damage)),
+    billing: COMPLAINT_DISPUTE_RE.test(t) || (moneyBack && !failure && !damage),
+  };
+}
+function hasComplaintSignal(text) {
+  const { service, billing } = complaintSignals(text);
+  return service || billing;
 }
 function validateComplaintEscalation({ inboundMessage, intendedActions, offeredTimes }) {
-  if (gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return { ok: true, violations: [] }; // held by the prompt's own category rule
-  if (!hasComplaintSignal(inboundMessage)) return { ok: true, violations: [] };
+  const { service, billing } = complaintSignals(inboundMessage);
+  const held = (service && !gateEnvValue('GATE_SMS_AGENT_COMPLAINTS'))
+    || (billing && !gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES'));
+  if (!held) return { ok: true, violations: [] };
   const actions = Array.isArray(intendedActions) ? intendedActions : [];
   const hasEscalate = actions.some((a) => a?.type === 'escalate');
   const offersPaidVisit = actions.some((a) => a?.type === 'book_appointment') || (Array.isArray(offeredTimes) && offeredTimes.length > 0);
   if (!hasEscalate || offersPaidVisit) {
-    return { ok: false, violations: ['the inbound reads as a complaint (anger, property damage, a refund/credit demand, a dispute, a repeated-failure complaint, or a threat to cancel over it) with GATE_SMS_AGENT_COMPLAINTS off — hold it for a person: add {"type":"escalate"} to intended_actions and never offer a paid visit via OPEN TIMES/book_appointment'] };
+    return { ok: false, violations: ['the inbound reads as a complaint (anger, property damage, a refund/credit demand, a dispute, a repeated-failure complaint, or a threat to cancel over it) while that category is held — hold it for a person: add {"type":"escalate"} to intended_actions and never offer a paid visit via OPEN TIMES/book_appointment'] };
   }
   return { ok: true, violations: [] };
 }

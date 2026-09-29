@@ -1944,10 +1944,27 @@ describe('validateComplaintEscalation — deterministic backstop when GATE_SMS_A
     }
   });
 
-  test('gate ON: the prompt\'s own COMPLAINTS category rule already holds it, so this backstop steps aside', () => {
+  test('gate ON: the prompt\'s own COMPLAINTS category rule already holds a service complaint, so this backstop steps aside', () => {
     process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
-    const inboundMessage = 'I want a refund, this is the third time';
+    const inboundMessage = 'the roaches came back for the third time, I want a refund';
     expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [] }).ok).toBe(true);
+  });
+
+  test('mixed gates (audit P1): billing disputes follow GATE_SMS_AGENT_BILLING_DISPUTES, service complaints follow GATE_SMS_AGENT_COMPLAINTS', () => {
+    const priorBilling = process.env.GATE_SMS_AGENT_BILLING_DISPUTES;
+    try {
+      delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+      process.env.GATE_SMS_AGENT_BILLING_DISPUTES = 'true';
+      // Billing dispute with its gate ON: a factual answer, no escalate, is allowed.
+      expect(validateComplaintEscalation({ inboundMessage: 'I think I was overcharged. What was the invoice total?', intendedActions: [], offeredTimes: [] }).ok).toBe(true);
+      // Service complaint with its gate OFF: still held.
+      expect(validateComplaintEscalation({ inboundMessage: 'your tech damaged my fence', intendedActions: [], offeredTimes: [] }).ok).toBe(false);
+      delete process.env.GATE_SMS_AGENT_BILLING_DISPUTES;
+      // Billing dispute with its gate OFF: held.
+      expect(validateComplaintEscalation({ inboundMessage: 'I think I was overcharged. What was the invoice total?', intendedActions: [], offeredTimes: [] }).ok).toBe(false);
+    } finally {
+      if (priorBilling === undefined) delete process.env.GATE_SMS_AGENT_BILLING_DISPUTES; else process.env.GATE_SMS_AGENT_BILLING_DISPUTES = priorBilling;
+    }
   });
 });
 
