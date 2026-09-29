@@ -101,10 +101,16 @@ async function readsToday(conn, now = new Date()) {
 // 'pending' write IS the claim: it is what readsToday counts.
 const CAP_LOCK_KEY = 'visit-prep-pest-read-cap';
 
-async function claimReadSlot(conn, submissionId) {
+async function claimReadSlot(conn, submissionId, now = new Date()) {
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
-    if (await readsToday(trx) >= dailyCap()) return false;
+    // The count is by submission day, so only a TODAY (ET) submission may
+    // claim: one committed just before midnight whose trigger runs after it
+    // is not read, rather than spending the new day's cap uncounted
+    // (Codex #5305 r4 P2). Its photos still reach the technician.
+    const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
+    if (!own || new Date(own.created_at) < etDayStart(now)) return false;
+    if (await readsToday(trx, now) >= dailyCap()) return false;
     await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', read_ref: null });
     return true;
   });

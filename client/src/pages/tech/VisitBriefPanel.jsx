@@ -226,6 +226,7 @@ function formatVisitPrepReadLine(read) {
   const wordingLabel = VISIT_PREP_READ_WORDING_LABELS[read.wordingTier] || 'AI read';
   if (read.commonName) parts.push(`${wordingLabel}: ${read.commonName}.`);
   else if (read.groupLabel) parts.push(`Looks like: ${read.groupLabel}.`);
+  else if (read.groupHeadline) parts.push(`${read.groupHeadline}.`);
   else parts.push('No species named from these photos.');
   if (read.matches?.length) parts.push(`Matches: ${read.matches.join('; ')}.`);
   if (read.stillNeed?.length) parts.push(`Still need: ${read.stillNeed.join('; ')}.`);

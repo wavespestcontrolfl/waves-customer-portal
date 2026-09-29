@@ -225,6 +225,11 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     }
   });
 
+  it('a category-level read shows the engine headline', () => {
+    renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', wordingTier: 'group_only', commonName: null, groupLabel: null, groupHeadline: 'Looks like a beetle' } }] });
+    expect(screen.getByText('Photo read (AI suggestion, not confirmed): Looks like a beetle.')).toBeInTheDocument();
+  });
+
   it('a done read with no named species says so plainly', () => {
     renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', wordingTier: 'unknown', commonName: null } }] });
     expect(screen.getByText('Photo read (AI suggestion, not confirmed): No species named from these photos.')).toBeInTheDocument();

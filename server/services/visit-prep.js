@@ -657,6 +657,11 @@ function readFactsFromContract(status, contract) {
     // A group-only answer (no species) names its approved catalog group
     // (pest-engine.js groupBlockFor: catalog label, never model text).
     groupLabel: v2.entry ? null : (v2.group?.label || null),
+    // A category-level answer has no group block; its headline is the
+    // engine's fixed template over the catalog node's generic name
+    // ("Looks like <generic>", pest-engine.js climbedOrDisagreedAnswer).
+    groupHeadline: (!v2.entry && !v2.group?.label && v2.answer?.wording === 'group_only')
+      ? (v2.answer?.headline || null) : null,
     // v2.evidence is picked from the approved catalog entry's own traits
     // (pest-engine.js evidenceFor), never model prose.
     matches: Array.isArray(v2.evidence?.matches) ? v2.evidence.matches : [],

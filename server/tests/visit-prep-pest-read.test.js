@@ -41,6 +41,11 @@ const { triggerVisitPrepPestRead, dailyCap, _internal } = require('../services/v
 // module's cap query only needs a truthy value to chain on, not real SQL.
 function fakeConn(tables = {}) {
   const store = { pest_identifications: [], scheduled_services: [], visit_prep_submissions: [], ...tables };
+  // The submission under test exists and was sent today (claimReadSlot
+  // only lets a same-ET-day submission claim).
+  if (!store.visit_prep_submissions.some((r) => r.id === 'sub-1')) {
+    store.visit_prep_submissions = [...store.visit_prep_submissions, { id: 'sub-1', created_at: new Date() }];
+  }
   const writes = [];
   let nextId = 1;
 
@@ -393,5 +398,14 @@ describe('_internal.etDayStart (cap day = America/New_York calendar day)', () =>
   test('winter (EST) offset', () => {
     const start = _internal.etDayStart(new Date('2026-12-15T15:00:00Z'));
     expect(start.toISOString()).toBe('2026-12-15T05:00:00.000Z');
+  });
+});
+
+describe('claim day', () => {
+  test('a submission from before today\'s ET midnight never claims a slot (photos still delivered)', async () => {
+    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000) }] });
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_ref: null }]);
   });
 });

@@ -217,6 +217,7 @@ describe('customerFlaggedFacts', () => {
       wordingTier: 'likely',
       commonName: 'German cockroach',
       groupLabel: null,
+      groupHeadline: null,
       matches: ['Two dark stripes behind the head'],
       stillNeed: ['A clear top-down photo'],
       referralKind: null,
@@ -239,6 +240,14 @@ describe('readFactsFromContract', () => {
     expect(facts.commonName).toBeNull();
     expect(facts.groupLabel).toBe('Ants');
   });
+  test('a category-level answer (no group block) carries the engine\'s fixed headline', () => {
+    const facts = readFactsFromContract('done', {
+      v2: { answer: { wording: 'group_only', headline: 'Looks like a beetle' }, entry: null, group: null, evidence: { matches: [], still_need: [] } },
+    });
+    expect(facts.groupLabel).toBeNull();
+    expect(facts.groupHeadline).toBe('Looks like a beetle');
+  });
+
   test('a done read with no stored contract reads as failed, never an empty result', () => {
     expect(readFactsFromContract('done', null)).toEqual({ status: 'failed' });
   });
