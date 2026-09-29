@@ -1898,6 +1898,27 @@ async function previewInspectionCreditReversalForBooking(scheduledServiceId, { v
 }
 
 /**
+ * ANY inspection-credit offer tied to this visit at all — as the inspection
+ * that promised one (source_scheduled_service_id) or the booking that
+ * redeemed one (redeemed_scheduled_service_id) — in ANY status (offered,
+ * redeemed, expired, void). Owner ruling 2026-09-28 ("bare visits only"):
+ * unlike previewInspectionCreditReversalForBooking above (which only cares
+ * about a REDEEMED offer THIS cancel would reverse), the Intelligence Bar
+ * cancel card refuses a visit tied to an offer either way — an open,
+ * unredeemed offer this inspection visit promised is a live obligation the
+ * card does not disclose or account for. Accepts `conn` (db or a trx) so
+ * the commit-time recheck (tools.js cancelAppointment) can run this same
+ * query under the row lock it already holds. Returns a query builder.
+ */
+function anyInspectionCreditOfferForVisit(conn, scheduledServiceId) {
+  return conn('inspection_credit_offers')
+    .where(function matchingOffer() {
+      this.where({ source_scheduled_service_id: scheduledServiceId })
+        .orWhere({ redeemed_scheduled_service_id: scheduledServiceId });
+    });
+}
+
+/**
  * Resend the paid receipt so it carries the frozen credit memo — for
  * inspections that settled BEFORE the offer existed: prepaid at booking
  * (closeout path) or the offer insert failed and recovery created it later
@@ -2207,6 +2228,7 @@ module.exports = {
   recordInspectionCreditOffer,
   reverseInspectionCreditForBooking,
   previewInspectionCreditReversalForBooking,
+  anyInspectionCreditOfferForVisit,
   sweepInspectionCreditRedemptions,
   configuredCreditAmount,
   configuredCreditAmountForServiceKey,

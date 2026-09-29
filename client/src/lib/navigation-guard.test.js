@@ -21,14 +21,13 @@ describe('navigation-guard', () => {
     expect(confirmLeaveIfGuarded()).toBe(false);
   });
 
-  it('asks every registered guard, blocking if any one declines', () => {
-    const first = vi.fn(() => true);
-    const second = vi.fn(() => false);
-    unregisterAll.push(registerLeaveGuard(first));
-    unregisterAll.push(registerLeaveGuard(second));
+  it('keeps a newer guard when an older one unregisters late', () => {
+    const newer = vi.fn(() => false);
+    const unregisterOlder = registerLeaveGuard(() => true);
+    unregisterAll.push(registerLeaveGuard(newer));
+    unregisterOlder();
     expect(confirmLeaveIfGuarded()).toBe(false);
-    expect(first).toHaveBeenCalled();
-    expect(second).toHaveBeenCalled();
+    expect(newer).toHaveBeenCalled();
   });
 
   it('stops unregistering from being asked again', () => {
