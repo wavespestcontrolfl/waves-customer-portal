@@ -64,8 +64,8 @@ const {
   seriesRootId,
   MAX_ALERTS_PER_RUN,
   manualSeriesStampIssue,
-  _private: episodeHelpers,
 } = require('../services/schedule-integrity-watchdog');
+const episodeHelpers = require('../services/admin-alert-episodes');
 
 // The three episode helpers' SQL runs against Postgres in alert-episodes-db.test.js;
 // here they are stood in at the module's own seam. The reopen wrapper delegates
