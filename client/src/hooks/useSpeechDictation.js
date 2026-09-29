@@ -44,9 +44,10 @@ const IDLE_STOP_MS = 60000;
  * hook asks `/tech/services/:id/dictation/availability`; when the server says
  * yes, the mic records with MediaRecorder and the clip is POSTed for server
  * transcription — one transcript per tap-to-stop, appended through the same
- * `onTranscript`. `mode` is "speech" | "upload" | null; `uploading` is true
- * while a clip is in flight. Browsers with SpeechRecognition never change
- * behavior.
+ * `onTranscript`. `mode` is "speech" | "upload" | null; `starting` is true
+ * from the tap until the microphone opens or is refused (a permission prompt
+ * can hold it open); `uploading` is true while a clip is in flight. Browsers
+ * with SpeechRecognition never change behavior.
  */
 export default function useSpeechDictation(onTranscript, options = {}) {
   const uploadServiceId = options.uploadServiceId ?? null;
@@ -56,8 +57,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
   // True from the first tap until getUserMedia settles: a second tap in that
-  // window must not open a second stream nobody can stop.
+  // window must not open a second stream nobody can stop. The ref answers
+  // that tap synchronously; `starting` shows the same window to the caller.
   const startingRef = useRef(false);
+  const [starting, setStarting] = useState(false);
   // Current dictation target; a transcript that arrives for a previous
   // target is dropped (the panel can move to another visit mid-upload).
   const serviceIdRef = useRef(uploadServiceId);
@@ -169,18 +172,23 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     }
     if (uploading || startingRef.current) return;
     startingRef.current = true;
+    setStarting(true);
+    const doneStarting = () => {
+      startingRef.current = false;
+      if (mountedRef.current) setStarting(false);
+    };
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
-      startingRef.current = false;
+      doneStarting();
       alert(`Microphone unavailable: ${e?.message || e}`);
       return;
     }
     if (!mountedRef.current) {
       // Unmounted while the permission prompt was open — release the mic.
       stream.getTracks().forEach((t) => t.stop());
-      startingRef.current = false;
+      doneStarting();
       return;
     }
     const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
@@ -194,7 +202,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       // Recorder construction can throw (unsupported options, device gone):
       // release the live mic and let the tech type.
       stream.getTracks().forEach((t) => t.stop());
-      startingRef.current = false;
+      doneStarting();
       alert(`Dictation error: ${e?.message || "recorder unavailable"}`);
       return;
     }
@@ -227,12 +235,14 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       // start() can throw synchronously (state / device errors): release the
       // mic and reset so the next tap starts clean.
       stream.getTracks().forEach((t) => t.stop());
-      startingRef.current = false;
+      doneStarting();
       alert(`Dictation error: ${e?.message || "could not start recording"}`);
       return;
     }
     recorderRef.current = rec;
-    startingRef.current = false;
+    // Both updates land in one render, so a caller watching
+    // `starting || listening` never sees a gap between them.
+    doneStarting();
     setListening(true);
   }, [uploadClip, uploading]);
 
@@ -474,5 +484,5 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     }
   }, []);
 
-  return { listening, supported, toggle, cancel, mode, uploading };
+  return { listening, supported, toggle, cancel, mode, starting, uploading };
 }

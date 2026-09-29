@@ -48,12 +48,35 @@ function reviewHelp(review) {
   return REVIEW_REASON_HELP[review?.reason] || STATUS_HELP[review?.status] || "Review the primary service address and location.";
 }
 
+// A confirmed discard here can still be followed, in the same synchronous
+// click, by a REAL document navigation this module cannot see directly — a
+// same-tab plain <a href> whose capture-phase click guard called this
+// function and, once confirmed, lets the click become a normal browser
+// navigation. That navigation fires its own native 'beforeunload' prompt a
+// moment later (the effect below) unless it knows the discard was already
+// approved. Record that approval for one tick only: a setTimeout(0) always
+// clears it shortly after, so a confirm that did NOT lead to a real
+// navigation (a same-page link, a declined-then-reverted history pop, an
+// "All customers"/tab-switch click that just unmounts in place) never
+// leaves the unload guard silently off for the rest of the draft's life;
+// useGeocodeReview's own effect clears it again on every draft change for
+// the same reason. A plain module-level flag, not React state — nothing
+// here renders, and it must be readable synchronously from a native browser
+// event.
+let discardApproved = false;
+function approveDiscard() {
+  discardApproved = true;
+  setTimeout(() => { discardApproved = false; }, 0);
+}
+
 // Shared by every control that would discard an open address-review draft —
 // the queue's own customer links here, and the profile/workspace navigation
 // guard in Customer360ProfileV2 (tab switches, All customers, customer
 // switching, closing the profile) — so the wording never drifts between them.
 export function confirmDiscardDraft() {
-  return window.confirm("This will discard the unsaved address review draft. Continue?");
+  const confirmed = window.confirm("This will discard the unsaved address review draft. Continue?");
+  if (confirmed) approveDiscard();
+  return confirmed;
 }
 
 function customerName(customer) {
@@ -210,10 +233,18 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
 
   // A closed tab/window loses an open draft just as silently as an in-app
   // navigation would — warn the same way the codebase's other unsaved-draft
-  // surfaces do (e.g. TechServicePhotosModal, useServiceRecapDraft).
+  // surfaces do (e.g. TechServicePhotosModal, useServiceRecapDraft). Skip the
+  // native prompt when confirmDiscardDraft() already approved THIS
+  // navigation (a same-tab plain link guarded above it) — one browser
+  // confirm is enough. A fresh or changed draft always re-arms the guard.
   useEffect(() => {
     if (!activeId) return undefined;
-    const warn = (event) => { event.preventDefault(); event.returnValue = ""; };
+    discardApproved = false;
+    const warn = (event) => {
+      if (discardApproved) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [activeId]);

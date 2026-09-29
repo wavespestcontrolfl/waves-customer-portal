@@ -163,6 +163,9 @@ const { stripThinkingBlocks } = require('./llm/deep');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 const HTTP_TIMEOUT_MS = 15000;
+// Per-request ceiling for the Claude extraction call — see
+// extractEventsWithClaude.
+const EXTRACTION_TIMEOUT_MS = 180000;
 const MAX_ITEMS_PER_FEED = 200;
 const FORWARD_WINDOW_DAYS = 90;
 
@@ -691,7 +694,15 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents, requi
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
   }
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  // Bounded so one hung request cannot hold the sequential run for the
+  // SDK default (600s x 3 attempts). Generous on purpose: real extraction
+  // calls reach ~50s at ~6.6k output tokens (prod 2026-09-28), so a tight
+  // cap would cut off the biggest, best pages.
+  const anthropic = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    timeout: EXTRACTION_TIMEOUT_MS,
+    maxRetries: 1,
+  });
   // Anchor "today" in America/New_York, not UTC. The cron runs at 4am ET
   // which is in the UTC-day-overlap region; without ET anchoring the
   // prompt could tell Claude the wrong day and a same-evening event
@@ -1411,11 +1422,21 @@ async function ingestSource(source) {
  * and serial keeps log lines coherent + avoids hammering any single
  * shared CDN if multiple feeds happen to be on the same provider.
  */
-async function ingestAllEnabledSources() {
-  const sources = await db('event_sources')
+function enabledSourcesInPullOrder(conn = db) {
+  return conn('event_sources')
     .where({ enabled: true })
+    // Sources the last run never reached go first. The run is in-process
+    // and sequential, so a deploy restart mid-pull (2026-09-28 ~08:03Z,
+    // Mote / Sarasota Magazine / Wellen Park) used to starve the same
+    // tail of the tier/name order every time. Within one ET day, tier/name
+    // order is unchanged.
+    .orderByRaw("date_trunc('day', last_pulled_at AT TIME ZONE 'America/New_York') ASC NULLS FIRST")
     .orderBy('priority_tier', 'asc')
     .orderBy('name', 'asc');
+}
+
+async function ingestAllEnabledSources() {
+  const sources = await enabledSourcesInPullOrder();
 
   if (!sources.length) {
     logger.info('[event-ingestion] No enabled sources — nothing to do');
@@ -1449,6 +1470,7 @@ module.exports = {
   ingestSource, // exported for ad-hoc admin-triggered pulls
   revivalResetFields, // exported for unit testing the past→future revival SQL
   resolveProxyConfig, // exported for unit testing the proxy opt-in contract
+  enabledSourcesInPullOrder, // exported for the pull-order Postgres test
   // Exported for unit tests — pure pieces of the shared extraction path.
   buildArticleBundle,
   buildExtractionSystemPrompt,
