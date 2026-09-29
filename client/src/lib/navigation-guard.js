@@ -6,22 +6,22 @@
 // own tab/close guard, …), since those only see popstate and <a href>
 // clicks that stay inside the app.
 //
-// A page registers a callback while it has something at stake and
-// unregisters it on unmount; a control that navigates away from everything
-// (never just this page) asks confirmLeaveIfGuarded() first. Each callback
-// returns true when it's fine to proceed (nothing open, or the person just
-// confirmed discarding it) and false to block the whole leave — the same
-// shape as this page's own guardNavigateAway().
-const guards = new Set();
+// The page with something at stake (today only CustomersPageV2) sets the one
+// guard while mounted and clears it on unmount; a control that navigates
+// away from everything (never just this page) asks confirmLeaveIfGuarded()
+// first. The guard returns true when it's fine to proceed (nothing open, or
+// the person just confirmed discarding it) and false to block the leave.
+let activeGuard = null;
 
 export function registerLeaveGuard(confirmLeave) {
-  guards.add(confirmLeave);
-  return () => guards.delete(confirmLeave);
+  activeGuard = confirmLeave;
+  // Only clear our own guard: a remount can set the next one before the
+  // previous instance's cleanup runs.
+  return () => {
+    if (activeGuard === confirmLeave) activeGuard = null;
+  };
 }
 
 export function confirmLeaveIfGuarded() {
-  for (const confirmLeave of guards) {
-    if (!confirmLeave()) return false;
-  }
-  return true;
+  return !activeGuard || activeGuard();
 }
