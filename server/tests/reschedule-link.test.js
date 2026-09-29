@@ -154,6 +154,20 @@ describe('buildRescheduleLink dead-link guard (C3/C6)', () => {
     expect(url).toMatch(/\/l\/x{10}$/);
   });
 
+  test("assumeConfirmed skips the guard entirely (round-2 P1, claude fallback): rain-out's pre-move measurement reads the OLD, about-to-be-superseded slot, so checking it against the move window would refuse a link the customer's NEW slot may not deserve", async () => {
+    // The row's CURRENT scheduled_date/window_start is deep inside the
+    // move-notice window — exactly what a visit being rain-out-moved off a
+    // too-soon slot looks like before the move commits.
+    mockSvc(svcRow({
+      source_action: 'ai_call_pipeline_followup', status: 'pending', customer_confirmed: false,
+      scheduled_date: '2026-05-06', window_start: '10:00:00',
+    }));
+    mockExistingShortUrlFor.mockResolvedValueOnce('https://portal.test/l/existing');
+    await expect(buildRescheduleLink('svc-1', { reuseExisting: true, assumeConfirmed: true })).resolves.toEqual({
+      url: 'https://portal.test/l/existing', line: 'Reschedule here: https://portal.test/l/existing\n\n',
+    });
+  });
+
   test('reuseExisting and a fresh mint are both refused for the same in-window visit — the dead-link check runs before either', async () => {
     mockSvc(svcRow({ scheduled_date: '2026-05-06', window_start: '10:00:00' }));
     mockExistingShortUrlFor.mockResolvedValueOnce('https://portal.test/l/existing');

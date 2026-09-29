@@ -41,7 +41,11 @@
  * caller is about to move it through the rebooker, which confirms it, so
  * the dispatch-owned-pending refusal does not apply (the link would be
  * minted moments later by the post-move send anyway). Grouped / frozen
- * refusals still apply. For the Quick Move pre-move measurement only.
+ * refusals still apply. For the Quick Move pre-move measurement only. Also
+ * skips the dead-link guard below: this reads the row's OLD (pre-move)
+ * scheduled_date/window_start, and that slot is about to be superseded, so
+ * checking it against the move window would refuse a link for a visit
+ * whose NEW slot may be perfectly fine to reschedule again later.
  * opts.pinnedUrl: the URL a pre-move check measured — after the same
  * eligibility checks, return THIS url (no lookup, no mint) or null when
  * the visit is no longer eligible, so a post-move send can only shrink
@@ -63,7 +67,8 @@
  * call.\n\n' } — never the bare empty line, so the confirmation/reminder
  * still tells the customer how to reach someone. A MISSED visit (picking a
  * new time after the window passed) is exempt: it is not "too soon to
- * move", it is being rebooked. Skipped when previewOnly (see above).
+ * move", it is being rebooked. Skipped when previewOnly or assumeConfirmed
+ * (see both above).
  */
 
 // What a fresh mint looks like, length-wise (short-url createShortCode:
@@ -129,8 +134,16 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
     // Dead-link guard (C3/C6, see header) — same chokepoint every other
     // refusal above runs through, so every caller (reminders, rain-out,
     // the legacy Twilio reminder, admin quick-send) inherits it alike.
-    // Skipped for previewOnly (see its own doc comment above).
-    if (!previewOnly) {
+    // Skipped for previewOnly (see its own doc comment above) AND for
+    // assumeConfirmed (pre-push audit round 2, claude fallback P1): that
+    // flag's only callers are rain-out's pre-move measurement/reuse, which
+    // read this row BEFORE the rebooker moves it — checking the move window
+    // against the OLD, about-to-be-superseded slot would refuse a link for
+    // a visit whose NEW slot is perfectly fine to reschedule again later.
+    // assumeConfirmed already means "trust the caller, this row's real-
+    // world state is about to differ from what's stored" for the dispatch-
+    // pending refusal above; the same reasoning applies here.
+    if (!previewOnly && !assumeConfirmed) {
       const now = new Date();
       const verdict = eligibility(svc, now);
       if (require('./reschedule-link-promises').tooSoonToSelfServeMove(svc, verdict, now)) {
