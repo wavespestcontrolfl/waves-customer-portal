@@ -741,8 +741,20 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     // Raised through the reopen wrapper: an open bell is a silent keep, an auto-cleared one rings again.
     const [, title, , opts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls[0];
     expect(opts.dedupeKey).toBe(OVERDUE_KEY);
-    expect(title).toMatch(/^Recurring .+ has no price — the 2026-07-30 visit is past due$/);
-    expect(opts.metadata).toMatchObject({ held: 'overdue_unpriced', episode_started_at: NOW.toISOString() });
+    expect(title).toMatch(/^Recurring .+ has no price — 2026-07-30 visit past due$/);
+    // The bell's own start is written back, never this run's time.
+    expect(opts.metadata).toMatchObject({ held: 'overdue_unpriced', episode_started_at: '2026-07-20T12:00:00.000Z' });
+  });
+
+  test('a raise onto an existing bell writes the bell\'s earliest start back, never this run\'s time: a reopen can never move the watch forward', async () => {
+    const ROOT = '0000000e-0000-4000-8000-000000000000';
+    const KEY = `unpriced-series:${ROOT}`;
+    // First raised by a run whose scan (07-20 10:00) preceded the insert (07-20 12:00).
+    makeDbMock({ coverageRows: [unpricedChild({ recurring_parent_id: ROOT })],
+      bellRows: [{ dedupe_key: KEY, created_at: '2026-07-20T12:00:00Z', episode_started_at: '2026-07-20T10:00:00Z' }] });
+    await runInner({ now: NOW });
+    const opts = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.find(([, , , o]) => o.dedupeKey === KEY)[3];
+    expect(opts.metadata.episode_started_at).toBe('2026-07-20T10:00:00.000Z');
   });
 
   test('a held series never starts a bell: an overdue unpriced visit with no bell for its series raises nothing', async () => {
@@ -979,7 +991,7 @@ describe('unpriced series held by a visit that completed unpriced since its bell
     openKeys();
     await runInner({ now: NOW });
     const [, title, , opts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.find(([, , , o]) => o.dedupeKey === KEY);
-    expect(title).toMatch(/^Recurring .+ has no price — the 2026-08-03 visit completed without one$/);
+    expect(title).toMatch(/^Recurring .+ has no price — 2026-08-03 visit completed$/);
     expect(opts.metadata).toMatchObject({ held: 'completed_unpriced', scheduled_service_id: CHILD, series_root_id: ROOT });
     // Priced again: not live, so nothing is raised for it.
     episodeHelpers.raiseAdminAlertWithReopen.mockClear();

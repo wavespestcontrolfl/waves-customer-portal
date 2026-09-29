@@ -268,6 +268,26 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     expect(await held(rerung)).toEqual([rerung.root.id]);
   });
 
+  test('full cycle: a visit that completed between the first scan and the insert still holds after the bell is cleared and REOPENED (the reopen keeps the start)', async () => {
+    // Scan at 14:00, visit completed 15:00, bell inserted 16:00.
+    const s = await series({ completedAt: '2026-09-28T15:00:00Z', bellCreatedAt: '2026-09-28T16:00:00Z', episodeStartedAt: '2026-09-28T14:00:00Z' });
+    expect(await held(s)).toEqual([s.root.id]);
+    // Cleared (priced, then unpriced again), then reopened through the real wrapper with the watchdog's own raise.
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [s.key])
+      .update({ read_at: NOW, metadata: db.raw("metadata || ?::jsonb", [JSON.stringify({ autoCleared: true, autoClearedAt: NOW.toISOString() })]) });
+    const since = new Map([...await watchdog._unpricedSeriesBells()].filter(([root]) => root === String(s.root.id)));
+    const [raise] = await watchdog._heldUnpricedAlerts({ unpricedByRoot: new Map(), overdueUnpricedByRoot: new Map(), sinceByRoot: since });
+    const [dedupeKey, title, body, metadata] = raise;
+    const result = await watchdog._private.raiseAdminAlertWithReopen('alert', title, body, { dedupeKey, bell: true, metadata: { dedupeKey, ...metadata } });
+    expect(result.rang).toBe(true);
+    const bell = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [s.key]).orderBy('created_at', 'desc').first('metadata', 'read_at');
+    const meta = typeof bell.metadata === 'string' ? JSON.parse(bell.metadata) : bell.metadata;
+    expect(meta.episode_started_at).toBe('2026-09-28T14:00:00.000Z');
+    expect(bell.read_at).toBeNull();
+    // The next run still holds it: the reopen did not move the watch past the visit.
+    expect(await held(s)).toEqual([s.root.id]);
+  });
+
   test('an AUTO-CLEARED bell still counts: a completed visit priced, then unpriced again, holds its series live (it reopens)', async () => {
     const s = await series();
     await db('scheduled_services').where({ id: s.child.id }).update({ estimated_price: 99 });

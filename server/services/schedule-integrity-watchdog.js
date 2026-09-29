@@ -400,6 +400,13 @@ async function runInner({ now = new Date() } = {}) {
     if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
   }
 
+  // Every unpriced-series bell's start (episodes only): a raise onto one
+  // writes that start back, never a later time, so the completed-visit watch
+  // never moves forward (a reopen would otherwise drop a visit that completed
+  // between the first scan and the first insert).
+  const bellSince = episodes ? await unpricedSeriesBells() : new Map();
+  const watchSince = (root) => new Date(Math.min(bellSince.get(String(root)) ?? Infinity, now.getTime())).toISOString();
+
   // Unpriced series ring FIRST: they are same-day money loss (a visit can
   // complete and invoice at $0 today).
   const alerts = Array.from(unpricedByRoot, ([root, v]) => {
@@ -410,17 +417,17 @@ async function runInner({ now = new Date() } = {}) {
       `The recurring ${v.service_type || 'service'} series has no price on any row (parent or child). ` +
       `Its next visit is ${d}; it will complete and invoice at $0 unless the series is priced first.`,
       { scheduled_service_id: v.id, series_root_id: root, customer_id: v.customer_id || null, next_visit_date: d,
-        // The episode's observation time, taken BEFORE the scan read: a visit
-        // that completes after the scan but before this bell lands has
-        // completed_at >= this, so the close pass still holds the bell for it.
-        // A standing row is a silent dedupe (keeps its stored value); a new
-        // row or a reopen writes this run's. Under episodes only.
-        ...(episodes ? { episode_started_at: now.toISOString() } : {}) },
+        // The watch's start, taken BEFORE the scan read: a visit that
+        // completes after the scan but before this bell lands has
+        // completed_at >= this, so the series stays held for it. A new row
+        // writes this run's time; a reopen writes the bell's earliest start
+        // again; a standing row is a silent dedupe. Under episodes only.
+        ...(episodes ? { episode_started_at: watchSince(root) } : {}) },
     ];
   });
   // Held series (episodes only): live, so the close pass keeps their bell and
   // a bell auto-cleared meanwhile reopens and rings.
-  if (episodes) alerts.push(...await heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, now }));
+  if (episodes) alerts.push(...await heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, sinceByRoot: bellSince }));
 
   // Class 2 — recurring-lawn customers invisible to the Monday irrigation
   // email (owner directive 2026-08-05: check daily). The email's audience is
@@ -623,10 +630,11 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
 }
 
 // Every unpriced-series bell, open or auto-cleared: series root -> the start
-// of the bell's life, the earliest of its created_at and the run that first
-// raised it (episode_started_at is that run's pre-scan time, so a completion
-// racing the first insert still counts). A reopen moves episode_started_at
-// forward but never created_at, so the start never moves forward.
+// of the bell's watch, the earliest of its created_at and its
+// episode_started_at (the pre-scan time of the run that first raised it, so a
+// completion racing the first insert still counts). Every raise onto an
+// existing bell writes this start back (watchSince), so it never moves
+// forward.
 async function unpricedSeriesBells() {
   const bells = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [UNPRICED_PREFIX])
@@ -677,8 +685,7 @@ async function completedUnpricedSince(sinceByRoot) {
 // close pass keeps the bell, and a bell auto-cleared meanwhile (priced, then
 // the price removed) reopens and rings. A held series only keeps or reopens a
 // bell it already has; it never starts one, so nothing new rings on deploy.
-async function heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, now }) {
-  const sinceByRoot = await unpricedSeriesBells();
+async function heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, sinceByRoot }) {
   const paged = new Set([...unpricedByRoot.keys()].map(String));
   const held = new Map();
   for (const [root, row] of overdueUnpricedByRoot) {
@@ -692,13 +699,11 @@ async function heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, now }
     const d = row.service_date;
     return [
       `${UNPRICED_PREFIX}${root}`,
-      completed ? `Recurring ${type} has no price — the ${d} visit completed without one`
-        : `Recurring ${type} has no price — the ${d} visit is past due`,
-      `The recurring ${type} series has no price on any row (parent or child), and its ${d} visit ` +
-        (completed ? 'completed without one. Price the series, or bill that visit by hand.'
-          : 'is past due. Price the series before it completes at $0.'),
+      `Recurring ${type} has no price — ${d} visit ${completed ? 'completed' : 'past due'}`,
+      completed ? `The ${d} visit completed with no price on it or its series. Price the series or bill that visit by hand.`
+        : `The ${d} visit is past due with no price on it or its series. Price the series before it closes at $0.`,
       { scheduled_service_id: row.id, series_root_id: root, customer_id: row.customer_id || null, visit_date: d,
-        held: completed ? 'completed_unpriced' : 'overdue_unpriced', episode_started_at: now.toISOString() },
+        held: completed ? 'completed_unpriced' : 'overdue_unpriced', episode_started_at: new Date(sinceByRoot.get(root)).toISOString() },
     ];
   });
 }
@@ -911,6 +916,7 @@ module.exports = {
   seriesRootId,
   _unpricedSeriesBells: unpricedSeriesBells,
   _completedUnpricedSince: completedUnpricedSince,
+  _heldUnpricedAlerts: heldUnpricedAlerts,
   _closeResolvedAlerts: closeResolvedAlerts,
   _private: episodeHelpers,
   UPCOMING_WINDOW_DAYS,
