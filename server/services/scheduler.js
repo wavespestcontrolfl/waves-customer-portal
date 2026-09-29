@@ -1748,6 +1748,28 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Visit prep pest read recovery sweep (GATE_VISIT_PREP_READ_SWEEP, dark):
+  // retries a stuck read (stale pending, a never-attempted 'none', or a
+  // stop reclassified to pest since an 'unsupported' verdict) every 15
+  // minutes. The service gates itself at call time; runExclusive so a
+  // deploy overlap can't double-spend the daily read cap on the same
+  // backlog.
+  cron.schedule('0 */15 * * * *', async () => {
+    try {
+      const result = await runExclusive('visit-prep-read-sweep', () => require('./visit-prep-pest-read-sweep').sweepVisitPrepPestReads());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Visit-prep read sweep tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('visit-prep-read-sweep').catch(() => {});
+        await recordJobEnd('visit-prep-read-sweep', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[visit-prep-read-sweep] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // The same watchdog and persisted identities own reminders before and
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
