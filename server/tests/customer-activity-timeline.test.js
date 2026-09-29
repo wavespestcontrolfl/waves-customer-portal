@@ -14,17 +14,23 @@ const source = (name) => SOURCES.find((s) => s.name === name);
 
 // A permissive stand-in for a knex builder: every chain call returns itself,
 // awaiting it yields the table's rows, and .first() yields the customer / a null MAX.
-function fakeDb({ customer = { id: 'c1', email: 'A@Example.test' }, rows = {}, present = true, failTable = null } = {}) {
-  const calls = { limit: [], raw: [] };
+function fakeDb({ customer = { id: 'c1', email: 'A@Example.test' }, rows = {}, present = true, failTable = null, failMax = [], maxes = {} } = {}) {
+  const calls = { limit: [], raw: [], chain: [] };
   const dbh = (name) => {
     const b = new Proxy(function builder() {}, {
       get(_t, prop) {
         if (prop === 'then') {
           return (resolve, reject) => (failTable === name ? reject(new Error('boom')) : resolve(rows[name] || []));
         }
-        if (prop === 'first') return async () => (name === 'customers' ? customer : { m: null });
+        if (prop === 'first') {
+          return async () => {
+            if (name === 'customers') return customer;
+            if (failMax === 'all' || failMax.includes(name)) throw new Error('max boom');
+            return { m: maxes[name] || null };
+          };
+        }
         if (prop === 'limit') return (n) => { calls.limit.push(n); return b; };
-        return () => b;
+        return (...args) => { calls.chain.push([name, String(prop), args]); return b; };
       },
     });
     return b;
@@ -59,6 +65,30 @@ describe('engagement rule', () => {
     expect(by.clicked.engaged).toBe(true);
     expect(by.sent.engaged).toBe(false);
     expect(events.every((e) => e.channel === 'email' && e.detail === 'Your estimate')).toBe(true);
+  });
+
+  test('automation emails: bounced and complained statuses each produce their event, dated updated_at', () => {
+    const at = (m) => new Date(Date.UTC(2026, 8, 1, 12, m));
+    const map = (status) => source('automation emails').toEvents({
+      id: 'a1', status, step_order: 0, template_key: 'k', sent_at: at(0), updated_at: at(7),
+    });
+    const bounced = map('bounced');
+    expect(bounced.map((e) => e.kind).sort()).toEqual(['bounced', 'sent']);
+    expect(bounced.find((e) => e.kind === 'bounced').at).toBe(at(7).toISOString());
+    expect(map('complained').map((e) => e.kind).sort()).toEqual(['complained', 'sent']);
+    expect(map('failed').map((e) => e.kind).sort()).toEqual(['failed', 'sent']);
+    expect(map('delivered').map((e) => e.kind)).toEqual(['sent']);
+    expect(source('automation emails').ts.join(' ')).toMatch(/'bounced'/);
+    expect(source('automation emails').ts.join(' ')).toMatch(/'complained'/);
+  });
+
+  test('a failed email is dated at the failure transition (updated_at), after its queue time', () => {
+    const at = (m) => new Date(Date.UTC(2026, 8, 1, 12, m));
+    const [failed] = source('emails').toEvents({ id: 'e2', status: 'failed', subject_snapshot: 'x', queued_at: at(0), updated_at: at(9) });
+    expect(failed).toMatchObject({ kind: 'failed', at: at(9).toISOString() });
+    expect(source('emails').ts.join(' ')).toMatch(/COALESCE\(em\.updated_at, em\.queued_at\)/);
+    // Legacy row with no updated_at falls back to the queue time.
+    expect(source('emails').toEvents({ id: 'e3', status: 'failed', queued_at: at(0) })[0].at).toBe(at(0).toISOString());
   });
 
   test('summary sources: opens feed lastEmailOpenAt only, never the engaged list', () => {
@@ -174,15 +204,54 @@ describe('getCustomerActivity guards', () => {
 
   test('limit is clamped to 1..200 and defaults to 100', async () => {
     const run = async (limit) => { const d = fakeDb(); await getCustomerActivity('c1', { limit }, d); return new Set(d.calls.limit); };
-    expect([...(await run(9999))]).toEqual([200]);
-    expect([...(await run(undefined))]).toEqual([100]);
-    expect([...(await run(-3))]).toEqual([100]);
-    expect([...(await run('7'))]).toEqual([7]);
+    // Each source fetches limit + 1 (the extra row says "more exists").
+    expect([...(await run(9999))]).toEqual([201]);
+    expect([...(await run(undefined))]).toEqual([101]);
+    expect([...(await run(-3))]).toEqual([101]);
+    expect([...(await run('7'))]).toEqual([8]);
+  });
+
+  test('an archived customer is not found (deleted_at IS NULL is part of the lookup)', async () => {
+    const dbh = fakeDb();
+    await getCustomerActivity('c1', {}, dbh);
+    expect(dbh.calls.chain).toContainEqual(['customers', 'whereNull', ['deleted_at']]);
+  });
+
+  test('a source with exactly `limit` rows does not advertise more; one extra row does', async () => {
+    const row = (i) => ({ id: `s${i}`, direction: 'outbound', status: 'sent', message_body: 'hi', created_at: new Date(Date.UTC(2026, 8, 10, 12, i)) });
+    const exact = await getCustomerActivity('c1', { limit: 2 }, fakeDb({ rows: { 'sms_log as sl': [row(2), row(1)] } }));
+    expect(exact.events).toHaveLength(2);
+    expect(exact.hasMore).toBe(false);
+    expect(exact.nextCursor).toBeNull();
+    timeline.resetGuardCacheForTests();
+    const more = await getCustomerActivity('c1', { limit: 2 }, fakeDb({ rows: { 'sms_log as sl': [row(3), row(2), row(1)] } }));
+    expect(more.events).toHaveLength(2);
+    expect(more.hasMore).toBe(true);
+    expect(more.nextCursor).toBe(more.events[1].at);
   });
 
   test('summary is computed on the first page only', async () => {
     expect((await getCustomerActivity('c1', {}, fakeDb())).summary).not.toBeNull();
     expect((await getCustomerActivity('c1', { before: '2026-09-01T00:00:00Z' }, fakeDb())).summary).toBeNull();
+  });
+
+  test('summary settles per source: one failing MAX drops that source, the rest still summarise', async () => {
+    const dbh = fakeDb({
+      failMax: ['newsletter_send_deliveries as d'],
+      maxes: { 'sms_log as sl': new Date('2026-09-09T10:00:00Z'), 'email_messages as em': new Date('2026-09-08T10:00:00Z') },
+    });
+    const r = await getCustomerActivity('c1', {}, dbh);
+    expect(r.summary).toMatchObject({ lastEngagedAt: '2026-09-09T10:00:00.000Z', lastEngagedFrom: 'texts' });
+    expect(r.unavailableSources).toEqual(['newsletters']);
+    const logged = mockWarn.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/summary \(newsletters\) failed for customer c1/);
+    expect(logged).not.toMatch(/max boom|example\.test/);
+  });
+
+  test('summary is null only when every MAX query failed', async () => {
+    const r = await getCustomerActivity('c1', {}, fakeDb({ failMax: 'all' }));
+    expect(r.summary).toBeNull();
+    expect(r.unavailableSources).toEqual(expect.arrayContaining(['texts', 'emails', 'newsletters']));
   });
 
   test('relation guards are cached and use to_regclass / pg_attribute', async () => {

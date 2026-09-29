@@ -30,6 +30,9 @@ function fmtWhen(value) {
 export default function CustomerEngagementTimeline({ customerId, adminOnly = true }) {
   const [state, setState] = useState({ scope: null, enabled: false, events: [], summary: null, hasMore: false, nextCursor: null, absent: [], unavailable: [] });
   const [error, setError] = useState(null);
+  // A failed "Load older" must not blank the events already on screen (that is
+  // what `error` does for a failed first load), so it has its own state.
+  const [pageError, setPageError] = useState(null);
   const [loading, setLoading] = useState(false);
   const requestRef = useRef({ scope: null, number: 0 });
   const scope = adminOnly ? String(customerId || "") : "";
@@ -41,11 +44,13 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
     requestRef.current = { scope, number };
     const current = () => requestRef.current.scope === scope && requestRef.current.number === number;
     setLoading(true);
+    if (cursor) setPageError(null);
     try {
       const qs = cursor ? `?before=${encodeURIComponent(cursor)}` : "";
       const body = await adminFetch(`/admin/customers/${encodeURIComponent(scope)}/activity${qs}`);
       if (!current()) return;
       setError(null);
+      setPageError(null);
       setState((prev) => {
         if (body.enabled !== true) return { ...prev, scope, enabled: false, events: [] };
         const older = cursor && prev.scope === scope ? prev.events : [];
@@ -64,7 +69,8 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
       });
     } catch (err) {
       if (!current()) return;
-      setError(err.message || "Could not load activity.");
+      if (cursor) setPageError(err.message || "Could not load older activity.");
+      else setError(err.message || "Could not load activity.");
     } finally {
       if (current()) setLoading(false);
     }
@@ -72,6 +78,7 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
 
   useEffect(() => {
     setError(null);
+    setPageError(null);
     load();
   }, [load]);
 
@@ -132,9 +139,12 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
           )}
         </ul>
         {state.hasMore && (
-          <div className="border-t border-zinc-200 p-3">
+          <div className="flex flex-wrap items-center gap-3 border-t border-zinc-200 p-3">
+            {pageError && (
+              <span className="text-14 text-ink-secondary" role="alert">Could not load older events.</span>
+            )}
             <Button variant="secondary" onClick={() => load(state.nextCursor)} disabled={loading}>
-              {loading ? "Loading…" : "Load older"}
+              {loading ? "Loading…" : pageError ? "Retry" : "Load older"}
             </Button>
           </div>
         )}

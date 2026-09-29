@@ -27,10 +27,12 @@
  * `lastEmailOpenAt`, labelled unreliable. Calls are shown but, per the brief,
  * are not counted in lastEngagedAt either.
  *
- * PAGINATION. One query per source, each capped at `limit` rows ordered by the
- * newest event the row has BEFORE the cursor; rows are exploded into events
- * (an email row is up to five) and merged in JS. Any event in the overall top
- * `limit` sits in a row inside its own source's top `limit`, so the merge is
+ * PAGINATION. One query per source, each capped at `limit` rows (fetched as
+ * limit+1 so a source with exactly `limit` rows is not reported as having
+ * more) ordered by the newest event the row has BEFORE the cursor; rows are
+ * exploded into events (an email row is up to five) and merged in JS. Any
+ * event in the overall top `limit` sits in a row inside its own source's top
+ * `limit`, so the merge is
  * exact. The cursor is the last event's ISO time (strictly-before), so two
  * events sharing the same millisecond across a page boundary can drop one:
  * an accepted, cosmetic edge for a read-only feed.
@@ -214,23 +216,32 @@ const SOURCES = [
       .whereRaw("COALESCE(em.recipient_type, '') NOT IN ('admin', 'test')")
       .where((w) => {
         w.where((k) => k.where('em.recipient_type', 'customer').where('em.recipient_id', String(ctx.customerId)));
-        // Address match only for mail NOT explicitly owned by a customer row:
-        // two customers sharing one address must not inherit each other's mail.
+        // Address match only for mail that is genuinely unowned or owned by a
+        // customer PRECURSOR: recipient_type NULL/'' (nobody claimed it) or
+        // 'lead' (a prospect who may be this customer; email-bounce-recovery
+        // treats lead rows the same way). Mail owned by a customer row (two
+        // customers sharing one address must not inherit each other's mail) or
+        // by another kind of recipient ('job_application' recruiting mail,
+        // 'payer', 'referral_promoter', 'admin', 'test') never rides an address
+        // match. This is an allowlist: a new owned type stays out by default.
         if (ctx.emails.length) {
           w.orWhere((k) => k.whereIn('em.recipient_email_snapshot', ctx.emails)
-            .whereRaw("COALESCE(em.recipient_type, '') <> 'customer'"));
+            .whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')"));
         }
       }),
-    select: ['em.id', 'em.status', 'em.template_key', 'em.subject_snapshot', 'em.queued_at', 'em.sent_at',
+    select: ['em.id', 'em.status', 'em.template_key', 'em.subject_snapshot', 'em.queued_at', 'em.updated_at', 'em.sent_at',
       'em.delivered_at', 'em.opened_at', 'em.clicked_at', 'em.bounced_at', 'em.complained_at'],
+    // A failure has no column of its own: the row flips to 'failed' on the
+    // update that stamps updated_at, so that is the failure time (queued_at is
+    // when it was created, which would sort a failure BEFORE its own send).
     ts: ['em.sent_at', 'em.delivered_at', 'em.opened_at', 'em.clicked_at', 'em.bounced_at', 'em.complained_at',
-      "CASE WHEN em.status = 'failed' THEN em.queued_at END"],
+      "CASE WHEN em.status = 'failed' THEN COALESCE(em.updated_at, em.queued_at) END"],
     engaged: { expr: 'em.clicked_at' },
     open: { expr: 'em.opened_at' },
     toEvents: (r) => emailEvents('email', r, r.subject_snapshot || r.template_key, {
       sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, clicked: r.clicked_at,
       bounced: r.bounced_at, complained: r.complained_at,
-      failed: String(r.status || '') === 'failed' ? r.queued_at : null,
+      failed: String(r.status || '') === 'failed' ? (r.updated_at || r.queued_at) : null,
     }, 'email_messages'),
   },
   {
@@ -242,13 +253,18 @@ const SOURCES = [
       .where('e.customer_id', ctx.customerId),
     select: ['s.id', 's.status', 's.step_order', 's.sent_at', 's.delivered_at', 's.opened_at', 's.clicked_at',
       's.updated_at', 't.name as template_name', 'e.template_key'],
-    ts: ['s.sent_at', 's.delivered_at', 's.opened_at', 's.clicked_at', "CASE WHEN s.status = 'failed' THEN s.updated_at END"],
+    // The webhook stamps a bounce/complaint only as status + updated_at (the
+    // table has no bounced_at/complained_at), so updated_at dates all three.
+    ts: ['s.sent_at', 's.delivered_at', 's.opened_at', 's.clicked_at',
+      "CASE WHEN s.status IN ('failed', 'bounced', 'complained') THEN s.updated_at END"],
     engaged: { expr: 's.clicked_at' },
     open: { expr: 's.opened_at' },
     toEvents: (r) => emailEvents('automation', r,
       `${r.template_name || r.template_key || 'Automation'} (step ${Number(r.step_order) + 1 || 1})`, {
         sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, clicked: r.clicked_at,
         failed: String(r.status || '') === 'failed' ? r.updated_at : null,
+        bounced: String(r.status || '') === 'bounced' ? r.updated_at : null,
+        complained: String(r.status || '') === 'complained' ? r.updated_at : null,
       }, 'automation_step_sends'),
   },
   {
@@ -443,11 +459,12 @@ async function runSource(src, ctx) {
     .select(dbh.raw(`${key.sql} AS _key`, key.bindings))
     .whereRaw(`${key.sql} IS NOT NULL`, key.bindings)
     .orderBy('_key', 'desc')
-    .limit(limit);
+    // One extra row tells "exactly `limit` rows" (nothing older) from "more".
+    .limit(limit + 1);
   const rows = await q;
   const before = new Date(beforeIso).getTime();
   const events = rows.flatMap((r) => src.toEvents(r)).filter((e) => new Date(e.at).getTime() < before);
-  return { events, saturated: rows.length >= limit };
+  return { events, saturated: rows.length > limit };
 }
 
 async function maxOf(dbh, src, ctx, spec) {
@@ -459,19 +476,39 @@ async function maxOf(dbh, src, ctx, spec) {
 
 const latest = (values) => values.filter(Boolean).sort().pop() || null;
 
+/**
+ * Per-source MAX() queries settle independently: one failing source drops out
+ * of the summary (and is named in `failed`) instead of blanking it for all.
+ * Returns { summary, failed }; summary is null only when every query failed.
+ */
 async function computeSummary(sources, ctx) {
-  const engagedSources = sources.filter((s) => s.engaged);
-  const openSources = sources.filter((s) => s.open);
-  const [engaged, opens] = await Promise.all([
-    Promise.all(engagedSources.map((s) => maxOf(ctx.dbh, s, ctx, s.engaged).then((at) => ({ s, at })))),
-    Promise.all(openSources.map((s) => maxOf(ctx.dbh, s, ctx, s.open))),
-  ]);
+  const tasks = [];
+  for (const s of sources) {
+    if (s.engaged) tasks.push({ s, kind: 'engaged', run: maxOf(ctx.dbh, s, ctx, s.engaged) });
+    if (s.open) tasks.push({ s, kind: 'open', run: maxOf(ctx.dbh, s, ctx, s.open) });
+  }
+  const results = await Promise.allSettled(tasks.map((t) => t.run));
+  const failed = [];
+  const engaged = [];
+  const opens = [];
+  results.forEach((r, i) => {
+    const { s, kind } = tasks[i];
+    if (r.status === 'rejected') {
+      logFailure(`summary (${s.name})`, ctx.customerId, r.reason);
+      if (!failed.includes(s.name)) failed.push(s.name);
+    } else if (kind === 'engaged') engaged.push({ s, at: r.value });
+    else opens.push(r.value);
+  });
+  if (tasks.length && failed.length === new Set(tasks.map((t) => t.s.name)).size) return { summary: null, failed };
   const newest = engaged.filter((e) => e.at).sort((a, b) => (a.at < b.at ? 1 : -1))[0] || null;
   return {
-    lastEngagedAt: newest?.at || null,
-    lastEngagedFrom: newest?.s.name || null,
-    lastEmailOpenAt: latest(opens),
-    lastEmailOpenNote: 'Email opens are unreliable (Apple Mail pre-loads them), so they are not counted as engagement.',
+    summary: {
+      lastEngagedAt: newest?.at || null,
+      lastEngagedFrom: newest?.s.name || null,
+      lastEmailOpenAt: latest(opens),
+      lastEmailOpenNote: 'Email opens are unreliable (Apple Mail pre-loads them), so they are not counted as engagement.',
+    },
+    failed,
   };
 }
 
@@ -512,7 +549,7 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
     if (!beforeIso) throw Object.assign(new Error('before must be a valid date'), { status: 400 });
   }
 
-  const customer = await dbh('customers').where({ id: customerId }).first('id', 'email');
+  const customer = await dbh('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'email');
   if (!customer) return null;
   const emails = [...new Set([customer.email, String(customer.email || '').toLowerCase()]
     .map((e) => String(e || '').trim()).filter(Boolean))];
@@ -544,7 +581,9 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
   let summary = null;
   if (!beforeIso) {
     try {
-      summary = await computeSummary(live.filter((s) => !unavailableSources.includes(s.name)), ctx);
+      const out = await computeSummary(live.filter((s) => !unavailableSources.includes(s.name)), ctx);
+      summary = out.summary;
+      for (const name of out.failed) if (!unavailableSources.includes(name)) unavailableSources.push(name);
     } catch (err) {
       logFailure('summary', customer.id, err);
       unavailableSources.push('summary');

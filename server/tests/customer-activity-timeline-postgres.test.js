@@ -14,12 +14,12 @@ const url = process.env.ACTIVITY_TIMELINE_TEST_DATABASE_URL || process.env.DATAB
 const pg = url ? describe : describe.skip;
 
 const TEMP_TABLES = `
-  CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, last_seen_at timestamp);
+  CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, last_seen_at timestamp, deleted_at timestamp);
   CREATE TEMP TABLE leads (id uuid PRIMARY KEY, customer_id uuid);
   CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp);
   CREATE TEMP TABLE short_codes (id uuid PRIMARY KEY, customer_id uuid, lead_id uuid, kind text, channel text, purpose text);
   CREATE TEMP TABLE short_code_clicks (id uuid PRIMARY KEY, short_code_id uuid, clicked_at timestamp, is_bot boolean NOT NULL DEFAULT false);
-  CREATE TEMP TABLE email_messages (id uuid PRIMARY KEY, recipient_type text, recipient_id text, recipient_email_snapshot text, status text, template_key text, subject_snapshot text, queued_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
+  CREATE TEMP TABLE email_messages (id uuid PRIMARY KEY, recipient_type text, recipient_id text, recipient_email_snapshot text, status text, template_key text, subject_snapshot text, queued_at timestamp, updated_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
   CREATE TEMP TABLE automation_templates (key text PRIMARY KEY, name text);
   CREATE TEMP TABLE automation_enrollments (id uuid PRIMARY KEY, template_key text, customer_id uuid);
   CREATE TEMP TABLE automation_step_sends (id uuid PRIMARY KEY, enrollment_id uuid, step_order int, status text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, updated_at timestamp);
@@ -89,13 +89,25 @@ pg('getCustomerActivity on Postgres', () => {
       { id: randomUUID(), recipient_type: 'customer', recipient_id: other, recipient_email_snapshot: 'other@example.test', status: 'sent', subject_snapshot: 'not mine', sent_at: T(98) },
       // shared address, but explicitly owned by another customer row
       { id: randomUUID(), recipient_type: 'customer', recipient_id: other, recipient_email_snapshot: 'synthetic.person@example.test', status: 'sent', subject_snapshot: 'shared address, other owner', sent_at: T(99) },
+      // owned by a non-customer kind of recipient: an address match must NOT pull these in
+      { id: randomUUID(), recipient_type: 'job_application', recipient_id: randomUUID(), recipient_email_snapshot: 'synthetic.person@example.test', status: 'clicked', subject_snapshot: 'recruiting mail', sent_at: T(92), clicked_at: T(93) },
+      { id: randomUUID(), recipient_type: 'payer', recipient_id: randomUUID(), recipient_email_snapshot: 'synthetic.person@example.test', status: 'sent', subject_snapshot: 'payer statement', sent_at: T(94) },
+      { id: randomUUID(), recipient_type: 'referral_promoter', recipient_id: randomUUID(), recipient_email_snapshot: 'synthetic.person@example.test', status: 'sent', subject_snapshot: 'promoter mail', sent_at: T(89) },
+      // customer precursor (a lead with the same address) rides the address match
+      { id: randomUUID(), recipient_type: 'lead', recipient_id: lead, recipient_email_snapshot: 'synthetic.person@example.test', status: 'sent', subject_snapshot: 'lead-era quote', sent_at: T(5) },
+      // failed: dated at the failure transition (updated_at), after its queue time
+      { id: randomUUID(), recipient_type: 'customer', recipient_id: cust, recipient_email_snapshot: 'synthetic.person@example.test', status: 'failed', subject_snapshot: 'Failed send', queued_at: T(26), updated_at: T(28) },
     ]);
 
     // automation + newsletter (opens only, later than every engaged event)
     const enr = randomUUID();
     await db('automation_templates').insert({ key: 'welcome', name: 'Welcome series' });
     await db('automation_enrollments').insert({ id: enr, template_key: 'welcome', customer_id: cust });
-    await db('automation_step_sends').insert({ id: randomUUID(), enrollment_id: enr, step_order: 0, status: 'sent', sent_at: T(30), delivered_at: T(31), opened_at: T(32) });
+    await db('automation_step_sends').insert([
+      { id: randomUUID(), enrollment_id: enr, step_order: 0, status: 'sent', sent_at: T(30), delivered_at: T(31), opened_at: T(32) },
+      { id: randomUUID(), enrollment_id: enr, step_order: 1, status: 'bounced', sent_at: T(35), updated_at: T(36) },
+      { id: randomUUID(), enrollment_id: enr, step_order: 2, status: 'complained', sent_at: T(37), updated_at: T(38) },
+    ]);
     const send = randomUUID();
     await db('newsletter_sends').insert({ id: send, subject: 'September news' });
     await db('newsletter_subscribers').insert({ id: 7, customer_id: cust });
@@ -141,7 +153,7 @@ pg('getCustomerActivity on Postgres', () => {
       'Opened their service report', 'Opened their inspection report', 'Opened a contract',
       'Opened the price-change notice', 'Clicked an outside link in the prep guide', 'Called us', 'Last seen in the portal',
     ]));
-    expect(r.events.some((e) => /not mine|admin copy|test send|other owner/.test(`${e.title} ${e.detail}`))).toBe(false);
+    expect(r.events.some((e) => /not mine|admin copy|test send|other owner|recruiting|payer statement|promoter mail/.test(`${e.title} ${e.detail}`))).toBe(false);
     // 2 clicks only: the bot click is filtered
     expect(r.events.filter((e) => e.source === 'link')).toHaveLength(2);
     // the lead-linked click carries the email channel
@@ -153,6 +165,44 @@ pg('getCustomerActivity on Postgres', () => {
     expect(failed.detail.length).toBeLessThanOrEqual(140);
     expect(r.events.find((e) => e.title === 'Text delivered (reminder)').detail).toBe('Reminder for your visit');
     expect(r.unavailableSources).toEqual([]);
+  });
+
+  test('address fallback: unowned and lead mail is included; job_application, payer and promoter mail is not', async () => {
+    const r = await run({ limit: 200 });
+    const subjects = r.events.filter((e) => e.source === 'email').map((e) => e.detail);
+    expect(subjects).toEqual(expect.arrayContaining(['By address only', 'lead-era quote', 'Your estimate']));
+    expect(subjects).not.toContain('recruiting mail');
+    // and the recruiting click never became engagement
+    expect(r.events.some((e) => e.detail === 'recruiting mail')).toBe(false);
+    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
+  });
+
+  test('a failed email is dated at its failure time, after the queue time; automation bounces and complaints show', async () => {
+    const r = await run({ limit: 200 });
+    const failed = r.events.find((e) => e.source === 'email' && e.kind === 'failed');
+    expect(failed.at).toBe(T(28).toISOString());
+    expect(r.events.find((e) => e.source === 'automation' && e.kind === 'bounced').at).toBe(T(36).toISOString());
+    expect(r.events.find((e) => e.source === 'automation' && e.kind === 'complained').at).toBe(T(38).toISOString());
+    expect(r.events.filter((e) => e.source === 'automation' && ['bounced', 'complained'].includes(e.kind)).every((e) => e.engaged === false)).toBe(true);
+  });
+
+  test('an archived customer is not found', async () => {
+    const gone = randomUUID();
+    await db('customers').insert({ id: gone, email: 'gone@example.test', deleted_at: T(1) });
+    expect(await timeline.getCustomerActivity(gone, {}, db)).toBeNull();
+  });
+
+  test('exactly `limit` events in the only source does not advertise a next page', async () => {
+    const solo = randomUUID();
+    await db('customers').insert({ id: solo, email: 'solo@example.test' });
+    await db('sms_log').insert([1, 2, 3].map((i) => ({ id: randomUUID(), customer_id: solo, direction: 'outbound', status: 'sent', message_type: null, message_body: `t${i}`, created_at: T(i) })));
+    const exact = await timeline.getCustomerActivity(solo, { limit: 3 }, db);
+    expect(exact.events).toHaveLength(3);
+    expect(exact.hasMore).toBe(false);
+    expect(exact.nextCursor).toBeNull();
+    const short = await timeline.getCustomerActivity(solo, { limit: 2 }, db);
+    expect(short.hasMore).toBe(true);
+    expect(short.nextCursor).toBe(short.events[1].at);
   });
 
   test('engagement: clicks, views, replies and portal visits count; opens and calls do not', async () => {

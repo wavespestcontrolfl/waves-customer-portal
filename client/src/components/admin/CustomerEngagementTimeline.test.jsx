@@ -103,4 +103,25 @@ describe("CustomerEngagementTimeline", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
     await screen.findByText("Nothing recorded for this customer yet.");
   });
+
+  it("a failed Load older keeps the loaded events, says so, and retries the same cursor", async () => {
+    const cursor = "2026-09-20T15:00:00.000Z";
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(respond({ enabled: true, events: [ev("a", "sent", "Text sent")], hasMore: true, nextCursor: cursor, summary: { lastEngagedAt: null, lastEmailOpenAt: null } }))
+      .mockResolvedValueOnce(respond({ error: "boom" }, 500))
+      .mockResolvedValueOnce(respond({ enabled: true, events: [ev("z", "sent", "Older text")], hasMore: false, nextCursor: null }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<CustomerEngagementTimeline customerId="c1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older" }));
+    expect(await screen.findByText("Could not load older events.")).toBeInTheDocument();
+    // loaded events and the summary stay visible; the first-load error box is not used
+    expect(screen.getByText("Text sent")).toBeInTheDocument();
+    expect(screen.getByTestId("engagement-summary")).toBeInTheDocument();
+    expect(screen.queryByText("Could not load engagement activity.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("Older text");
+    expect(String(fetchMock.mock.calls[2][0])).toContain("before=2026-09-20T15%3A00%3A00.000Z");
+    expect(screen.queryByText("Could not load older events.")).not.toBeInTheDocument();
+    expect(screen.getByText("Text sent")).toBeInTheDocument();
+  });
 });
