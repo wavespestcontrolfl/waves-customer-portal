@@ -34,6 +34,7 @@ jest.mock('../services/intelligence-bar/seo-tools', () => ({
     { name: 'get_seo_rankings', input_schema: { type: 'object', properties: {} } },
     { name: 'run_seo_pipeline', input_schema: { type: 'object', properties: {} } },
     { name: 'approve_seo_action', input_schema: { type: 'object', properties: {} } },
+    { name: 'submit_gsc_sitemap', input_schema: { type: 'object', properties: {} } },
   ],
   executeSeoTool: jest.fn(),
 }));
@@ -81,6 +82,16 @@ describe('Intelligence Bar tool offering — full access (owner ruling 2026-09-2
     expect(offered).toContain('get_seo_rankings');
     expect(offered).toContain('run_seo_pipeline');
     expect(offered).toContain('approve_seo_action');
+  });
+
+  // Codex r4 on #5275: the global infra prompt advertises the sitemap submit
+  // with the other outside-service writes, so it must be offered everywhere
+  // they are — and never twice on the seo page (duplicate names are rejected).
+  test('the full-access login is offered submit_gsc_sitemap on non-SEO pages, exactly once on the seo page', () => {
+    expect(names(getToolsForContext('customers', true, true))).toContain('submit_gsc_sitemap');
+    const seo = names(getToolsForContext('seo', true, true));
+    expect(seo.filter((n) => n === 'submit_gsc_sitemap')).toHaveLength(1);
+    expect(new Set(seo).size).toBe(seo.length);
   });
 
   test('an ordinary admin (full access = false) never sees red-tier banking tools', () => {
@@ -156,12 +167,9 @@ describe('Intelligence Bar tool offering — outside-service writes (owner rulin
     for (const writeName of OUTSIDE_WRITE_NAMES) expect(offered).not.toContain(writeName);
   });
 
-  test('submit_gsc_sitemap (mocked SEO_TOOLS above) follows the same rule as the other outside writes', () => {
-    // SEO_TOOLS is mocked in this file without submit_gsc_sitemap, so this
-    // only pins the filter's behavior on a name it WOULD apply to — the
-    // real module is covered by intelligence-bar-write-gate-contract.test.js
-    // and the seo-tools unit coverage.
-    const { FULL_ACCESS_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
-    expect(FULL_ACCESS_TWO_STEP_TOOL_NAMES.has('submit_gsc_sitemap')).toBe(true);
+  test('submit_gsc_sitemap follows the same full-access rule as the other outside writes, on every page', () => {
+    expect(names(getToolsForContext('customers', true, false))).not.toContain('submit_gsc_sitemap');
+    expect(names(getToolsForContext('seo', true, false))).not.toContain('submit_gsc_sitemap');
+    expect(names(getToolsForContext('tech', false, true))).not.toContain('submit_gsc_sitemap');
   });
 });

@@ -28,8 +28,11 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { completionInvoiceAmount } = require('./billing-lane');
+const { completionInvoiceAmount, hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
 
 async function resolveAppointmentCardLane({
   svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, annualPrepayBilling, explicitMembershipLane,
@@ -153,9 +156,20 @@ async function resolveExtendedLane({
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
     });
+    // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 anchors
+    // at NOTHING here — never the dues/rate fallback above (which was
+    // computed with estimatedPrice forced to null, so it never itself
+    // reads the stamp) — so the invoice is over cap and falls to office
+    // review; only an independently authorized setup-fee allowance
+    // (resolveCompletionChargeCap below) can still clear it. Guarded
+    // explicitly by the live gate (not just the predicate's own internal
+    // check) because this anchor calculation never consulted the predicate
+    // at all before, so it must stay byte-identical while the gate is off.
+    const stampedZero = stampedZeroFreeLive()
+      && hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
     const anchor = svc.estimated_price != null && Number(svc.estimated_price) > 0
       ? Number(svc.estimated_price)
-      : (Number(duesAnchor) > 0 ? Number(duesAnchor) : null);
+      : (stampedZero ? null : (Number(duesAnchor) > 0 ? Number(duesAnchor) : null));
     extendedLaneAnchor = anchor;
     const preCreditSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
     const preCreditNet = Math.round((preCreditSubtotal - Math.max(0, Number(invoice.discount_amount) || 0)) * 100) / 100;
@@ -194,12 +208,26 @@ async function resolveCompletionChargeCap({
   // review, exactly the uncapped posture below; the charge service
   // re-asserts the anchor under its own locks
   // (requireExtendedCompletionAnchor).
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 per-
+  // visit anchors at a ZERO base in every lane — never the
+  // per_application_fee or the dues anchor — so the cap is exactly the
+  // independent setupFeeAllowance below: an authorized setup-only invoice
+  // stays auto-chargeable (a null base would send it to office review while
+  // attachedInvoiceAutoChargeLikely promises the charge — Codex r3 P1 on
+  // #5256), and anything above the allowance is above_cap. Guarded explicitly
+  // by the live gate (not just the predicate's own internal check) because
+  // this cap calculation never consulted the predicate at all before, so
+  // it must stay byte-identical while the gate is off.
+  const perVisitStampedZero = stampedZeroFreeLive()
+    && hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
   const acceptedPerVisit = apptCardOneTimeCharge
     ? apptCardAcceptedAmount
     : (svc.estimated_price != null && Number(svc.estimated_price) > 0
       ? Number(svc.estimated_price)
-      : (perApplicationBilling && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
-        ? Number(svc.cust_per_application_fee) : extendedLaneAnchor));
+      : (perVisitStampedZero ? 0
+        : (perApplicationBilling
+          && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
+          ? Number(svc.cust_per_application_fee) : extendedLaneAnchor)));
   const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
   // Manual-discount accepts gross the service line up and bring it back
   // with a negative discount line — invoices.subtotal is the PRE-discount

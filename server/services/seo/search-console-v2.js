@@ -181,7 +181,9 @@ class SearchConsoleService {
     const domainProp = domainPropertyUrl(domain);
     let sites;
     try {
-      const res = await this.webmasters.sites.list();
+      // Bounded like every other request here (GSC_REQUEST_TIMEOUT_MS) —
+      // this lookup runs synchronously inside a bar preview.
+      const res = await this.webmasters.sites.list({}, gscRequestOptions());
       sites = res?.data?.siteEntry || [];
     } catch (err) {
       return { error: `Could not list Search Console properties: ${err.message}` };

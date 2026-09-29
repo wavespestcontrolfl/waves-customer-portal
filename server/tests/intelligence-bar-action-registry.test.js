@@ -328,13 +328,16 @@ const SCOPE_SNAPSHOT = {
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
     'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_estimate_detail',
     'get_open_commitments', 'get_service_history',
-    'get_stop_details', 'query_revenue', 'search_messages',
+    'get_stop_details', 'query_revenue', 'search_messages', 'list_queued_messages',
     // writes: specific customer records proven by validateRecordTarget
     // block_sender carries no record id; validateSenderBlock binds it to the task customer's own address.
     // merge_customers' winner/loser ids are mapped to the customer collection by validateRecordTarget
     // (CUSTOMER_PAIR_SELECTORS), so both halves must belong to the task's customers.
     // repair_closeout's service_id is mapped to the appointment (APPOINTMENT_SELECTORS).
-    'repair_closeout',
+    // cancel_queued_message carries customer_id directly (its message_id is
+    // not a mapped selector — the executor's own read binds the message to
+    // that customer and refuses a mismatch before ever reaching a card).
+    'repair_closeout', 'cancel_queued_message',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',

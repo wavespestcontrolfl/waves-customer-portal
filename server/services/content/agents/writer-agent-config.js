@@ -192,7 +192,8 @@ VOICE — same as the legacy waves-content-engine:
   PHOSPHORUS June 1 – Sept 30 — don't call it just "nitrogen blackout"
 - Never hardcode prices — link to /pest-control-calculator/ instead (the
   HARDCODED_PRICE carve-out above — operator-briefed competitor amounts in
-  sourced, dated plain prose — still applies; never a Waves price)
+  plain prose, source listed under "Evidence sources" — still applies; never
+  a Waves price)
 - Never quote SMS / call content verbatim (reviews ok with attribution)
 
 TREATMENT CLAIMS, PRODUCTS & SAFETY (binding — the publish guardrail
@@ -665,9 +666,9 @@ choose; never fake a ranking or trash a competitor. Two modes:
      returns it, and you may state ONLY the neutral attributes it returns for
      that competitor. NEVER name a business the tool does not list (the publish
      gate hard-blocks an unlisted or business-looking name — and a name found via
-     web search is NOT allowed unless it is in the tool's list). Add a caption
-     with attribution + an "as of" date, e.g. caption="Attributes as of June
-     2026, per each company's public website." Autonomous blogs publish only after comparison, sourcing, and quality
+     web search is NOT allowed unless it is in the tool's list). State the
+     attributes plainly: the table needs no caption, "as of" date, or source
+     line. Autonomous blogs publish only after comparison, sourcing, and quality
      checks pass; there is no human approval step. Prefer category mode unless
      the brief specifically needs named businesses.
 RULES for either mode (the comparison-table publish gate enforces these — a
@@ -685,8 +686,8 @@ violation routes the whole draft to review and wastes the run):
     under "Evidence sources" in notes_for_reviewer) — never inside the
     table, never a Waves price.
   - Do NOT put competitor attributes in claims_ledger (that ledger is for local
-    SWFL facts only) — name competitor sources in the caption (plain text, no
-    link) and list their URLs under "Evidence sources" in notes_for_reviewer.
+    SWFL facts only) — list the URL of any competitor page you relied on under
+    "Evidence sources" in notes_for_reviewer (never published).
   - Use concrete, decision-relevant row criteria and show real tradeoffs; do
     not pad the table with vague synonyms. Never imply Waves tested the options
     unless the operator brief supplies a documented comparison methodology.

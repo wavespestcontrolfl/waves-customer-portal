@@ -637,20 +637,99 @@ are both live (`bookInsertionOffersLive()`, routes/booking.js) — the same
 condition the estimate routes' own insertion already required (owner
 2026-09-28). That commit (`createSelfBooking`) re-verifies with live traffic
 and saves the certified route order, so an inserted offer it confirms is
-exactly what gets persisted. Public reschedule and the voice agent keep
-append-only offers because their own commits do not save a route order:
-public reschedule (`SmartRebooker.reschedule`/`rescheduleSeries`) clears
-`route_order` on any day or technician move, and the voice agent inserts the
-new row with no `route_order` at all — either way an inserted offer would
-commit as an unnumbered stop sorted after the route, not at the position it
-was offered at. `/book` offers minted with mid-route insertion carry a
-signed policy tag (`BOOK_INSERTION_OFFER_POLICY`, `utils/slot-offer-token.js`)
-inside their `slot_sig`, so an offer can't be confirmed under a different
+exactly what gets persisted. The voice agent keeps append-only offers
+because its own commit does not save a route order: it inserts the new row
+with no `route_order` at all, so an inserted offer would commit as an
+unnumbered stop sorted after the route, not at the position it was offered
+at. `/book` offers minted with mid-route insertion carry a signed policy tag
+(`BOOK_INSERTION_OFFER_POLICY`, `utils/slot-offer-token.js`) inside their
+`slot_sig`, so an offer can't be confirmed under a different
 `GATE_BOOK_CAPACITY_COMMIT`/`GATE_SCHEDULING_CAPACITY` state than the one it
 was minted under (a rollback or a mixed rolling deploy inside the 45-minute
 offer window) — the customer gets the standard "pick your time again" 409
 instead of a silently mis-ordered commit. The staff save probe
-(`checkArrivalPlacement`) stays append-only too. Detour
+(`checkArrivalPlacement`) stays append-only too.
+
+Public self-serve reschedule (`/api/public/reschedule/:token`,
+`routes/reschedule-public.js`) joined the certified-order group for its
+SINGLE-VISIT commit only (owner 2026-09-28; Codex round 1 fixes on PR #5267,
+same day). Its one picker (`buildAvailabilityForService`, behind the GET
+summary, the AI find-slots search, and the commit route's own anti-forgery
+re-check) passes `capacityPlacement: bookInsertionOffersLive() &&
+!pickerMayReanchor(svc, rangeFrom, rangeTo)` — the same reader /book's
+self-booking offers use, ANDed with a check that this build's date range
+can't need a series re-anchor (see the re-anchor paragraph below). Its
+single-visit commit (`SmartRebooker.reschedule` → `rescheduleOnce`,
+`services/rebooker.js`) opts in by passing `capacityPlacement: true`, which
+is what scopes this to reschedule-public.js alone — every other
+`SmartRebooker.reschedule` caller (admin dispatch, auto-dispatch, rain-out,
+SMS reply) omits it and is byte-identical, even with the gate live.
+`rescheduleOnce` re-reads `bookInsertionOffersLive()` itself rather than
+trusting that flag or anything client-supplied — this surface verifies no
+`slot_sig` at all, so there is no signed-policy-tag mechanism to replicate;
+the anti-forgery re-check that guards it instead is a fresh
+`buildAvailabilityForService` rebuild in the SAME request as the commit, a
+few lines before `SmartRebooker.reschedule` is called, so that rebuild's
+`capacityPlacement` and the commit's own gate read are microseconds apart
+rather than spanning a stored offer's lifetime.
+
+When a day, technician, OR WINDOW move would otherwise leave the stored
+`route_order` wrong — a day/tech change nulls it (the existing append-only
+rule); a same-day, same-tech window-only move used to silently KEEP the old
+number even though the stop's place in the route had changed (Codex round 1
+P1) — and the row has a technician, is ungrouped (`visit_id` null), and the
+gate is live, `rescheduleOnce` runs the SAME `prepareArrivalCapacity`
+(before any lock, using the row's OWN current stored state — it already
+handles a row staying on its own route, nothing extra needed for a
+window-only move) → `lockTechDays` (already taken at the same rung the
+plain occupancy checks use) → a `SELECT ... FOR UPDATE` on the moving row
+itself, immediately before verify (Codex round 1 P1: `verifyArrivalCapacity`
+only locks the DESTINATION day/tech, never the row's own OLD date, and the
+CAS predicate never pins duration/address/service_type — without this lock
+a concurrent edit to any of those could commit a route order certified
+against data that was already stale) → `verifyArrivalCapacity` (under that
+lock, now reading the row fresh) → `persistArrivalOrder` (after the row's
+own CAS write lands) sequence `createSelfBooking` runs. A changed route
+fingerprint or an infeasible live fit refuses with the standard
+`capacityError` 409 (`SLOT_UNAVAILABLE`) and writes nothing; success
+persists the certified order instead of nulling it. A GROUPED visit's move
+never attempts this — `moveVisitAsUnit` forwards its caller's options,
+`capacityPlacement` included, unchanged into its own per-member
+`rebooker.reschedule()` calls (each tagged `visitPolicy: 'single'`), and
+`evaluateArrivalPlacement` refuses any row still sharing a `visit_id` with
+another live stop, which would fail the whole unit move on its first
+member — so this lane checks `!service.visit_id` before attempting it, a
+deliberate skip rather than an oversight. The picker mirrors that skip: any
+row carrying a `visit_id` (a singleton group included) is offered append-only
+slots only, so it is never shown a position its commit won't certify (Codex
+round 2 P1).
+
+**Series re-anchor never offers or commits an insertion** (Codex round 1
+P1, corrects the original design's assumption): a big-pull-forward re-anchor
+commits through `SmartRebooker.rescheduleSeries`, which always clears
+`route_order` on a move and never reads `capacityPlacement` — it does NOT
+"refuse and re-validate" an inserted offer the way the commit's capacity
+verify does, it would silently commit append-only under a route order that
+was never certified for that position. So the offer must never be minted in
+the first place: `pickerMayReanchor(svc, rangeFrom, rangeTo)` mirrors
+`shouldReanchor`'s own predicate — for a SINGLE-day range (the commit's own
+anti-forgery rebuild always uses one) it is the EXACT same check
+`shouldReanchor` runs for that date, so the two can never disagree; for a
+multi-day range (the GET picker, the find-slots search) it conservatively
+disables `capacityPlacement` for the WHOLE build whenever the range's
+EARLIEST candidate (the one with the largest pull-forward, under
+`GATE_COLLECTIVE_SERIES_ANCHOR` effectively any date but the visit's own
+current one) falls inside the re-anchor zone — under-offering insertion for
+a same-build date that wouldn't individually re-anchor, never over-offering
+one the commit would have to silently mis-order.
+
+A capacity verify failure's `SLOT_UNAVAILABLE` code (Codex round 1 P2) is
+rewritten into the SAME `SLOT_TAKEN` 409 response shape (message +
+refreshed availability) the anti-forgery slot-miss already returns before
+reaching this deep — the client (`ScheduleFlowPage.jsx`) only clears the
+stale selection and refreshes the calendar on `code === 'SLOT_TAKEN'`; any
+other code falls through to a bare error line with the stale slot still
+selected. Detour
 cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
@@ -3951,8 +4030,32 @@ this test (`metadata.feed` is already `'activity'` unconditionally for
 those rows). Every ring also stamps `metadata.rungAt` (an ISO timestamp) —
 the 7-day comparison window is measured from a row's own last ring, not
 its `created_at`. `count`, `newCount`, `rungAt`, `itemKeys`, and
-`itemSetHash` (in-process item identity; this route never accepts them)
-join the reserved metadata keys above.
+`itemSetHash` join the reserved metadata keys above.
+Date-only key follow-up (2026-09-28, codex r8 P1): the date-stripped-key
+comparison above only counts as proof of "the same set" when that key
+still carries something BEYOND the alert class itself — a check whose key
+is shaped exactly `<check-id>:<finding>-<date>`, nothing else variable
+(e22's "N overlapping visits" is the production example), collapses to the
+alert class once its date is stripped and proves nothing about which items
+the finding names. Such a key's identity is UNKNOWN: the ring decision
+falls back to `count`/`newCount` (an equal or absent count with no item
+evidence on either side still RINGS — the pre-admin-alerts-ring behavior
+for these checks — rather than silently reading a different day's finding
+as the same one). A check that wants a quiet re-run for a genuinely
+repeated finding despite a date-only key sends the new `itemIds` field
+instead: an array of strings, at most 2000 entries, each 1-200 chars after
+trim (any other shape, or an explicit `null`, → 400; omitted leaves any
+previously stored identity alone, same convention as `count`/`newCount`).
+It carries the finding's own item identity — deduped, sorted, and capped
+at 500 for the stored `metadata.itemKeys` list exactly like an in-process
+sender's own `itemKeys` above; the full-set SHA-256 (`metadata.itemSetHash`)
+is kept regardless of size, so a set past the cap still proves a swap at an
+equal count. It feeds the SAME ring test as `metadata.itemKeys`, on both
+the fresh-insert and the refresh path — a current id absent from the prior
+list rings even at an equal or smaller `count`; the same set at an equal
+count stays quiet. `itemIds` itself is never stored; only its derived
+`metadata.itemKeys`/`metadata.itemSetHash` are (already reserved keys,
+above).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports

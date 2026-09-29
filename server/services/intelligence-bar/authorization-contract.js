@@ -75,6 +75,9 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // withdraw call. Pulling in the whole set (rather than hand-copying it)
   // means a future outside-write tool inherits this by construction.
   ...OUTSIDE_WRITE_TOOL_NAMES,
+  // No un-cancel tool exists — once cancelled, that queued attempt is gone
+  // for good (the original sender would need to queue a fresh one).
+  'cancel_queued_message',
 ]);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
@@ -164,6 +167,7 @@ const ACTION_LABELS = {
   request_instant_payout: 'Request an INSTANT payout',
   request_standard_payout: 'Request a standard payout',
   cancel_pending_payout: 'Cancel a pending payout',
+  cancel_queued_message: 'Cancel a queued message',
   run_seo_pipeline: 'Run the SEO pipeline',
   approve_seo_action: 'Approve an SEO action',
   resolve_sentry_issue: 'Resolve a Sentry issue',

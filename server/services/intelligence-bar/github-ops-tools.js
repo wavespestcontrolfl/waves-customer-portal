@@ -373,7 +373,9 @@ async function executeGithubOpsTool(toolName, input = {}) {
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
-    logger.error(`[intelligence-bar:github-ops] Tool ${toolName} failed:`, err);
+    // The operator sees the detailed message; the log never does — a
+    // rejected label or PR title can carry customer text (Codex r4 on #5275).
+    logger.error(`[intelligence-bar:github-ops] Tool ${toolName} failed (status=${err.status || 'n/a'})`);
     return { error: err.message };
   }
 }

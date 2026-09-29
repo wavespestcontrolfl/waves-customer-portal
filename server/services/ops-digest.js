@@ -314,6 +314,20 @@ async function findPriorRungRow(conn, { alertClass, source, key }) {
   return q.orderBy(conn.raw(`${RUNG_AT_EXPR} DESC`)).first('metadata');
 }
 
+// A date-only ops-cron key's set identity (follow-up to #5269, codex r8 P1):
+// setKeyFor strips only run dates, so a key shaped `<check-id>:<finding>-
+// <date>` — nothing else variable — collapses to exactly the alert class
+// once the date is gone (alertClassFor already strips that same date via
+// trimVariableTail). Comparing such a setKeyFor to itself day over day
+// proves nothing about which items the finding actually names — e22's
+// "N overlapping visits" is the real example (the fixture's key carries no
+// hash, only a date). Only when the date-stripped key still carries
+// something BEYOND the class does the comparison mean anything — d15/d19's
+// own hash or id suffix, or c32's embedded gate name.
+function keySetProvesIdentity(opsKey, alertClass) {
+  return setKeyFor(opsKey) !== alertClass;
+}
+
 // Ring decision for a row about to be INSERTED fresh (no standing dedupe row
 // to refresh) — the comparison point is the most recent matching row found
 // above, not the specific row a dedupeKey would find (there may be none).
@@ -321,15 +335,27 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
   const prior = await findPriorRungRow(conn, { alertClass, source, key });
   if (!prior) return true;
   const priorMeta = parseMeta(prior.metadata);
-  // Ops-crons: same items only when the date-stripped keys match. In-process
-  // senders pass no opsKey — one class is one list.
-  // A prior row with no stored key (not a real ops-crons shape) can't prove a
-  // different set, so it falls back to the counts alone.
-  // A mapped check with a stable class (data-hygiene) embeds its run
-  // counters in the key, so its keys never describe an item set — its
-  // parsed counts are the whole comparison.
-  const sameSet = !opsKey || !priorMeta.opsKey || Boolean(stableRouteFor(opsKey))
-    || setKeyFor(opsKey) === setKeyFor(priorMeta.opsKey);
+  // Ops-crons: same items only when the date-stripped keys match AND that
+  // date-stripped key actually carries identity (see keySetProvesIdentity
+  // above) — a date-only key proves nothing either way, so it is UNKNOWN
+  // rather than "same": sameSet then reflects item evidence alone (both
+  // sides' itemSetHash present), which ringDecision's own hash-diff check
+  // resolves; with no item evidence at all this is `false` (not same),
+  // which — via ringDecision's equal/no-count fallback — rings exactly like
+  // these checks did before the admin-alerts-ring scope (owner ruling).
+  // In-process senders pass no opsKey — one class is one list. A prior row
+  // with no stored key (not a real ops-crons shape) can't prove a different
+  // set, so it falls back to the counts alone. A mapped check with a stable
+  // class (data-hygiene) embeds its run counters in the key, so its keys
+  // never describe an item set — its parsed counts are the whole comparison.
+  let sameSet;
+  if (!opsKey || !priorMeta.opsKey || Boolean(stableRouteFor(opsKey))) {
+    sameSet = true;
+  } else if (!keySetProvesIdentity(opsKey, alertClass)) {
+    sameSet = Boolean(itemSetHash) && Boolean(priorMeta.itemSetHash);
+  } else {
+    sameSet = setKeyFor(opsKey) === setKeyFor(priorMeta.opsKey);
+  }
   return ringDecision({
     newCount, count, priorCount: metaCount(priorMeta), sameSet,
     itemKeys, priorItemKeys: Array.isArray(priorMeta.itemKeys) ? priorMeta.itemKeys : undefined,
@@ -341,9 +367,19 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
 // EXISTING standing row a dedupeKey found, so a refresh only re-bells on
 // genuine new news — a resolved standing row (should not normally happen:
 // resolveOpsDigest drops the dedupeKey on resolve) also rings, for safety.
-function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) {
+//
+// ringOnFirstIdentity (opt-in, per sender): a standing row written before
+// its sender reported item identity has no list or hash to compare, so a
+// same-count swap would stay quiet. With this flag the first refresh that
+// brings identity to such a row rings once; later refreshes compare
+// normally. Opt-in so other senders' pre-identity rows don't all re-ring
+// together on the first run after deploy.
+function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity = false }) {
   return (existingRow, existingMeta) => {
     if (existingMeta?.resolved === true) return true;
+    // (A shrinking list still never rings, even on first identity.)
+    if (ringOnFirstIdentity && itemSetHash && !existingMeta?.itemSetHash && !Array.isArray(existingMeta?.itemKeys)
+      && !(metaCount(existingMeta) !== null && Number(count) < metaCount(existingMeta))) return true;
     return ringDecision({
       newCount, count, priorCount: metaCount(existingMeta),
       itemKeys, priorItemKeys: Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : undefined,
@@ -362,7 +398,7 @@ function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) {
 // sender whose kind flips between runs (gbp-sync-health FIX<->ACT) is always
 // gated by the CURRENT emission's audience, never a cached one. Pulled out
 // to keep deliverOpsDigest's own complexity down.
-function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount, itemKeys, itemSetHash }) {
+function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity }) {
   const ownerAudience = resolvedAudience === 'owner';
   // A FRESH insert — keyed or not — is compared with the prior ring of its
   // class: a sender that rotates its dedupeKey (agent-gap-digest, by ET
@@ -377,7 +413,7 @@ function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAu
       ...(dedupeWindowMs ? { dedupeWindowMs } : {}),
       ...(refreshOnDedupe ? {
         refreshOnDedupe: true,
-        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) } : {}),
+        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity }) } : {}),
       } : {}),
     };
   }
@@ -491,7 +527,7 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, ringOnFirstIdentity = false, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
@@ -537,7 +573,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       // Optional dedupe (2026-09-11 email shutoff): a daily digest that
       // reports the same standing list must hold ONE row, refreshed when
       // the list changes, not one unread row per morning.
-      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount, itemKeys: normalizedItemKeys, itemSetHash }),
+      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount, itemKeys: normalizedItemKeys, itemSetHash, ringOnFirstIdentity }),
       metadata: {
         opsKey: key,
         subject,
@@ -695,5 +731,5 @@ module.exports = {
   deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom, setKeyFor,
-  normalizeItemKeys, hasNewItemKeys, fullSetItemKeys, itemSetHashFor,
+  normalizeItemKeys, hasNewItemKeys, fullSetItemKeys, itemSetHashFor, itemKeysMetaFor,
 };

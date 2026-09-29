@@ -1548,7 +1548,13 @@ async function submitGscSitemap(input) {
     // verified form, never a synthesized guess — is what a future commit
     // path must submit against.
     const siteUrl = resolved.siteUrl;
-    const sitemapUrl = `https://${canonicalDomain}${sitemapPath.startsWith('/') ? '' : '/'}${sitemapPath}`;
+    // A URL-prefix property only accepts sitemaps under its own origin
+    // (e.g. https://www.wavespestcontrol.com/), so build the feed URL from
+    // it; an sc-domain: property covers every host, so keep the canonical one.
+    const sitemapOrigin = siteUrl.startsWith('sc-domain:')
+      ? `https://${canonicalDomain}`
+      : new URL(siteUrl).origin;
+    const sitemapUrl = `${sitemapOrigin}${sitemapPath.startsWith('/') ? '' : '/'}${sitemapPath}`;
     return {
       preview: true,
       tool: 'submit_gsc_sitemap',

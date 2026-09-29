@@ -103,6 +103,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "cancel_queued_message": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "canonical_conflicts": {
     "module": "seo-tools.js",
     "domain": "seo",
@@ -1398,6 +1406,14 @@
     "role": "admin",
     "approval": null,
     "scope": "none"
+  },
+  "list_queued_messages": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
   },
   "lookup_property": {
     "module": "estimate-tools.js",

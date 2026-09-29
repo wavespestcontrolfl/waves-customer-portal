@@ -53,19 +53,10 @@ issuing one), so a declined request records every search it made, each
 noting whether a related tool ran. Broken tools are not gap reports: every
 tool call's outcome is already in `tool_health_events` (Tool Health). The platform
 prompt asks the model to search with a short, general description before
-declining, so that search becomes the gap's summary. That model-written text
-is cleaned in several passes:
-- the shared `redactText`, with the request's resolved customer names and
-  addresses;
-- any customer or lead first or last name stored in the database, in any
-  case (so "josé" is caught even when the request never resolved it);
-- street addresses in any case (a house number with a street type);
-- a fixed rule that replaces every other capitalized word except acronyms, a
-  short keep list (vendor names, plan tiers, days and months) and a leading
-  verb;
-- UUIDs and record numbers.
+declining, so that search becomes the gap's summary. It is stored as written
+(owner 2026-09-28: no name or contact scrubbing), trimmed to 300 characters.
 
-If the stored-name lookup fails, nothing is written. The Monday email carries
+The Monday email carries
 gap numbers, areas and counts only; the descriptions stay in the bar. Rows dedupe by a
 fingerprint of source, kind and the summary's word set. A recurrence bumps
 the lifetime `occurrences`, reopens a `fixed` gap as `new`, and fills in a

@@ -67,6 +67,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'merge_customers',
   'repair_closeout',
   ...OUTSIDE_WRITE_TOOL_NAMES,
+  'cancel_queued_message',
 ]);
 
 // Legacy writes with no structural gate — their executors mutate on call, so

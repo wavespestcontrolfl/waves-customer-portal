@@ -165,6 +165,7 @@ const WRITE_TWO_STEP = [
   'add_github_pr_label',
   'request_codex_review',
   'submit_gsc_sitemap',
+  'cancel_queued_message',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -267,7 +268,7 @@ const READ_ONLY = [
   'search_reviews', 'get_review_trends', 'get_velocity_pipeline',
   'get_unanswered_threads', 'get_conversation_thread', 'search_messages', 'get_sms_stats',
   'get_call_log', 'draft_sms_reply', 'get_csr_overview', 'get_todays_activity',
-  'list_call_partners', 'get_partner_call_history', 'get_open_commitments',
+  'list_call_partners', 'get_partner_call_history', 'get_open_commitments', 'list_queued_messages',
   'get_tax_dashboard', 'get_expenses', 'get_equipment_depreciation', 'get_filing_deadlines',
   'get_quarterly_estimate', 'get_pnl', 'get_advisor_alerts', 'get_mileage_summary', 'get_ar_aging',
   'get_lead_overview', 'query_leads', 'get_stale_leads', 'get_lead_funnel',
@@ -618,6 +619,24 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['github-ops-tools', 'executeGithubOpsTool', 'request_codex_review', { pr_number: 5230 }],
     ['seo-tools', 'executeSeoTool', 'submit_gsc_sitemap', { domain: 'bradentonflpestcontrol.com' }, {
       fleet_sites: [{ domain: 'bradentonflpestcontrol.com', name: 'Bradenton Pest Control', area: 'Bradenton' }],
+    }],
+    // cancel_queued_message's preview reads the pinned sms_log row directly
+    // (no confirmed gate needed to find it) and reaches the confirmation
+    // gate once the row is still 'scheduled' and belongs to the named
+    // customer.
+    ['comms-tools', 'executeCommsTool', 'cancel_queued_message', {
+      message_id: '00000000-0000-0000-0000-00000000e001',
+      customer_id: '00000000-0000-0000-0000-00000000e002',
+      channel: 'sms',
+    }, {
+      sms_log: [{
+        id: '00000000-0000-0000-0000-00000000e001', customer_id: '00000000-0000-0000-0000-00000000e002',
+        direction: 'outbound', to_phone: '9415550100', message_type: 'manual', status: 'scheduled',
+        // Staff-scheduled from the inbox — the only kind the bar may cancel.
+        admin_user_id: '44444444-4444-4444-8444-444444444444',
+        scheduled_for: new Date('2099-01-01T12:00:00Z'),
+      }],
+      customers: [{ id: '00000000-0000-0000-0000-00000000e002', first_name: 'Contract', last_name: 'Fixture' }],
     }],
   ];
 

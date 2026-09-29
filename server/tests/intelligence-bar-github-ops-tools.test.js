@@ -368,3 +368,18 @@ describe('intelligence bar GitHub write tools (preview only)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });
+
+// Codex r4 on #5275: a rejected label (model-supplied text that may carry a
+// customer name) reaches the operator but never the module logger.
+test('a rejected label name never reaches the error log', async () => {
+  const logger = require('../services/logger');
+  process.env.GITHUB_TOKEN = process.env.GITHUB_TOKEN || 'gh-token';
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ number: 5230, title: 'Synthetic PR', head: { sha: 'abc' }, labels: [] }) })
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ([{ name: 'needs-review' }]) });
+  const { executeGithubOpsTool } = require('../services/intelligence-bar/github-ops-tools');
+  const out = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'Synthia Tester' });
+  expect(out.error).toMatch(/Synthia Tester/);
+  expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/Synthia Tester/);
+});
+

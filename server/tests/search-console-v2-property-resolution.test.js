@@ -117,4 +117,12 @@ describe('resolveAccessibleProperty', () => {
     const result = await svc.resolveAccessibleProperty('wavespestcontrol.com');
     expect(result.siteUrl).toBe('https://www.wavespestcontrol.com/');
   });
+
+  test('the property lookup is bounded by the configured GSC request timeout (Codex r4 on #5275)', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    const list = jest.fn().mockResolvedValue({ data: { siteEntry: [] } });
+    const svc = loadWithSitesList(list);
+    await svc.resolveAccessibleProperty('bradentonflpestcontrol.com');
+    expect(list).toHaveBeenCalledWith({}, expect.objectContaining({ timeout: expect.any(Number) }));
+  });
 });

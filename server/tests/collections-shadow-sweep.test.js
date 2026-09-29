@@ -240,7 +240,7 @@ describe('case + card creation', () => {
     expect(body).toContain('WPC-2026-1100');
     expect(body).toContain('21 days past due');
     expect(body).toContain('inbound_sms');
-    expect(body).toContain('Waves Pest Control');
+    expect(body).toContain("it's Waves");
     expect(body).toContain('open balance');
     expect(body).toContain('no call will be placed');
     // Language rules: never "collections"/"delinquent", no emojis.
@@ -357,11 +357,12 @@ describe('resilience', () => {
 });
 
 describe('script text', () => {
-  test('the predicted opening uses billing-follow-up language and the exact company name', () => {
+  test('the predicted opening uses billing-follow-up language and just "Waves" (owner ruling 2026-09-28)', () => {
     const script = ShadowSweep.predictedOpeningScript({
       firstName: 'Sandy', amountDollars: '128.00', invoiceTitle: 'Quarterly Pest Control',
     });
-    expect(script).toContain('Waves Pest Control');
+    expect(script).toContain("it's Waves");
+    expect(script).not.toMatch(/Waves Pest Control/);
     expect(script).toContain('billing follow-up');
     expect(script).toContain('open balance of $128.00');
     expect(script).not.toMatch(/collection|delinquen/i);

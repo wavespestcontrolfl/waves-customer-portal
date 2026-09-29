@@ -21,10 +21,12 @@
  * no named business ("store-bought sprays are useless", consumer-protection
  * prose like "avoid pest control scams") deliberately does NOT trip it.
  *
- * NAMED competitors are doubly guarded: the gate enforces allowlist + per-table
- * sourced attribution + only-curated-facts + no-disparagement/ranking, AND a
- * draft that names any competitor sets requiresHumanReview so the runner routes
- * it to the (approvable) human-review queue instead of auto-publishing.
+ * NAMED competitors are doubly guarded: the gate enforces allowlist +
+ * only-curated-facts + no-disparagement/ranking, AND a draft that names any
+ * competitor sets requiresHumanReview so the runner routes it to the
+ * (approvable) human-review queue instead of auto-publishing. A table that
+ * names a competitor needs no caption, "as of" date or source line (owner
+ * ruling 2026-09-28: competitor facts are stated plainly).
  *
  *   P0 COMPARISON_DISPARAGEMENT          — derogatory language about a provider
  *   P0 COMPARISON_UNKNOWN_COMPETITOR     — recognized competitor not on allowlist
@@ -32,8 +34,6 @@
  *   P1 COMPARISON_RIGGED_RANKING         — self-declared "winner" / superlative
  *   P1 COMPARISON_NEGATIVE_RELIABILITY   — negative service claim about a provider
  *   P1 COMPARISON_NAMED_COMPETITOR_DISABLED   — names a competitor while gated off
- *   P1 COMPARISON_COMPETITOR_UNSOURCED        — named competitor without its own
- *                                          attributed ("as of"+source) table caption
  *   P1 COMPARISON_UNSUPPORTED_COMPETITOR_FACT — a named competitor's row states a
  *                                          fact that is not a curated attribute
  *
@@ -1160,11 +1160,6 @@ function quotedStrings(fragment) {
   return out;
 }
 
-function extractCaption(block) {
-  const m = String(block || '').match(new RegExp(`caption\\s*=\\s*\\{?\\s*${QUOTED_STR}`, 'i'));
-  return m ? unescapeStr(m[2]) : '';
-}
-
 function extractColumns(block) {
   const m = String(block || '').match(/columns\s*=\s*\{?\s*\[([\s\S]*?)\]/i);
   return m ? quotedStrings(m[1]) : [];
@@ -1185,16 +1180,6 @@ function extractRows(block) {
     rows.push({ label: labelM ? unescapeStr(labelM[2]) : '', values: valsM ? quotedStrings(valsM[1]) : [] });
   }
   return rows;
-}
-
-function hasAttribution(caption) {
-  const c = String(caption || '');
-  if (!c) return false;
-  const hasAsOf = /\bas of\b|\b(?:current|accurate|verified|updated)\s+as of\b|\bas published\b/i.test(c);
-  const hasDate = /\b20\d{2}\b/.test(c)
-    || /\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/i.test(c);
-  const hasSource = /\b(source|per |according to|website|public(?:ly)?|state license|sunbiz|bbb|\.com\b|\.org\b|\.gov\b)\b/i.test(c);
-  return hasAsOf && hasDate && hasSource;
 }
 
 function classifyOption(header) {
@@ -1577,13 +1562,13 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
     }
     if (DISPARAGEMENT_RE.test(lk.context)) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with disparaging language — remove the disparagement; competitor claims live only in a sourced comparison table.`));
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with disparaging language — remove the disparagement; competitor claims live only in a comparison table.`));
     } else if (PROVIDER_NEGATIVE_RE.test(lk.context)) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
         `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with a negative service-reliability claim. Routed to human review — state neutral, verifiable attributes only.`));
     } else if (LINKED_NEG_ADJ_RE.test(lk.context)) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with an evaluative negative — remove it; competitor claims live only in a sourced comparison table.`));
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with an evaluative negative — remove it; competitor claims live only in a comparison table.`));
     }
   }
   if (linkedDisabledNames.size) {
@@ -1800,8 +1785,6 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   const known = new Set();
   const unknown = new Set();
   const unclassified = new Set();
-  const unsourcedKnown = new Set();
-  const blockNamedKnown = new Set();
   const unsupportedFacts = new Set();
   const negativeReliability = new Set();
 
@@ -2211,10 +2194,8 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
 
   // ── Per-table checks ──
   for (const block of blocks) {
-    const attributed = hasAttribution(extractCaption(block));
     const options = extractColumns(block).slice(1);
     const rows = extractRows(block);
-    const blockKnown = new Set();
 
     options.forEach((opt, j) => {
       const cls = classifyOption(opt);
@@ -2225,13 +2206,12 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         // names multiple allowlisted competitors ("Orkin / Massey Services"),
         // only one would ever be validated — fail closed and route to review.
         if (distinctNames.length > 1) {
-          distinctNames.forEach((n) => { known.add(n); blockKnown.add(n); });
+          distinctNames.forEach((n) => known.add(n));
           unsupportedFacts.add(`${distinctNames.join(' / ')} — one comparison column names multiple competitors; give each its own column so every cell is validated against that competitor's curated facts`);
           return;
         }
         const name = distinctNames[0] || opt.trim();
         known.add(name);
-        blockKnown.add(name);
         const attrVals = competitorFacts.attributeValues(name);
         // Fail closed: a comparison table that names a competitor must have
         // parseable rows to validate; if we got none, its cells could claim
@@ -2272,14 +2252,6 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     for (const m of competitorFacts.findBusinessMentions(cellText)) {
       if (m.inAllowlist) unsupportedFacts.add(`${m.name} — named in a table cell/row (only the column header may name a competitor)`);
     }
-    // Known competitors named in the block text (not just headers).
-    for (const m of competitorFacts.findBusinessMentions(block)) {
-      if (m.inAllowlist) blockKnown.add(m.name);
-    }
-    blockKnown.forEach((n) => {
-      blockNamedKnown.add(n);
-      if (!attributed) unsourcedKnown.add(n); // per-occurrence: any unsourced naming flags
-    });
 
     // The bare disparagement vocabulary blocks INSIDE a table block
     // (options are providers/categories by construction) — the prose scan
@@ -2318,13 +2290,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // but tone checks read the anchor + preceding clause, and an allowlisted
   // linked competitor still routes to named-competitor review (Codex r4 —
   // "[this dishonest company](https://competitor.com/…)" must not pass).
-  const linkedKnown = new Set();
   for (const lk of linkedCompetitorMentions(scanText)) {
     if (lk.inAllowlist) {
       // Feeds `known` so the feature-gate branch and review routing below
-      // treat a link-only competitor as named-competitor usage (r5/r6);
-      // linkedKnown keeps it OUT of the unsourced-caption fill (r2).
-      if (!known.has(lk.name)) linkedKnown.add(lk.name);
+      // treat a link-only competitor as named-competitor usage (r5/r6).
       known.add(lk.name);
     } else {
       // Recognized but uncurated target — the same fail-closed
@@ -2333,30 +2302,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     }
     if (DISPARAGEMENT_RE.test(lk.context)) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with disparaging language — remove the disparagement; competitor claims live only in the sourced comparison table.`));
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with disparaging language — remove the disparagement; competitor claims live only in the comparison table.`));
     } else if (PROVIDER_NEGATIVE_RE.test(lk.context)) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
         `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with a negative service-reliability claim. Routed to human review — state neutral, verifiable attributes only.`));
     } else if (LINKED_NEG_ADJ_RE.test(lk.context)) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with an evaluative negative — remove it; competitor claims live only in the sourced comparison table.`));
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with an evaluative negative — remove it; competitor claims live only in the comparison table.`));
     }
-  }
-
-  // Known competitors named only in prose (never in a table) have no caption → unsourced.
-  // Known ONLY through a link destination (never named in the text or a
-  // table block): no caption requirement — the r2 citation contract — but
-  // still counted in `known`, so the feature gate and review routing below
-  // see it (Codex r5).
-  // Operator-authorized names that never appear in a table block are exempt
-  // from the caption requirement: the caption sources TABLE claims, and an
-  // authorized prose-only mention has no table claims — its validation is
-  // the human review the authorization forces (same contract as the
-  // table-less path). A table block that DOES name the competitor still
-  // requires the sourced caption regardless of authorization.
-  const operatorAuthorized = buildOperatorAuthorized(operatorBriefText);
-  for (const n of known) {
-    if (!blockNamedKnown.has(n) && !linkedKnown.has(n) && !operatorAuthorized(n)) unsourcedKnown.add(n);
   }
 
   // A competitor may be named ONLY inside the comparison table, where every cell
@@ -2381,14 +2334,13 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   }
 
   // ── Resolve findings ──
-  // Operator authorization (built above for the caption fill) covers
-  // PROSE-ONLY occurrences on this path too, mirroring evaluateProse: a
-  // detection-only competitor the operator's binding brief names (e.g. the
-  // Aptive cancellation brief + mandated table) routes to human review
-  // instead of hard-blocking — but ONLY when the name never appears inside
-  // a comparison block. Any table occurrence keeps the full fail-closed
-  // treatment: operator provenance answers "who wrote it", never "is this
-  // claim verifiable" (standing rule).
+  // Operator authorization covers PROSE-ONLY occurrences on this path too,
+  // mirroring evaluateProse: a detection-only competitor the operator's
+  // binding brief names (e.g. the Aptive cancellation brief + mandated table)
+  // routes to human review instead of hard-blocking — but ONLY when the name
+  // never appears inside a comparison block. Any table occurrence keeps the
+  // full fail-closed treatment: operator provenance answers "who wrote it",
+  // never "is this claim verifiable" (standing rule).
   // Block membership must see ALIASES, not just the canonical spelling: a
   // "Massey" column canonicalizes to "Massey Services" in `known`, and a raw
   // canonical-name regex would miss it — exempting a fully-tabled competitor
@@ -2410,6 +2362,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     const re = new RegExp(escapeForNameRe(nm), 'i');
     return blocks.some((b) => re.test(blockVisibleText(b)));
   };
+  const operatorAuthorized = buildOperatorAuthorized(operatorBriefText);
   let operatorAuthorizedProse = false;
   for (const nm of unknown) {
     if (operatorAuthorized(nm) && !nameInAnyBlock(nm)) { operatorAuthorizedProse = true; continue; }
@@ -2450,9 +2403,6 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   if (flagKnown.length && !namedCompetitorEnabled) {
     findings.push(finding('P1', 'COMPARISON_NAMED_COMPETITOR_DISABLED',
       `Names a competitor (${flagKnown.join(', ')}) but named-competitor comparisons are disabled (GATE_NAMED_COMPETITOR_COMPARISON). Use a category comparison, or enable the flag.`));
-  } else if (known.size && unsourcedKnown.size) {
-    findings.push(finding('P1', 'COMPARISON_COMPETITOR_UNSOURCED',
-      `Names a competitor (${[...unsourcedKnown].join(', ')}) without an "as of <date>" + source caption on the table that names it. Add e.g. caption="Attributes as of June 2026, per each company's public website."`));
   }
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -2460,7 +2410,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // runner uses namedCompetitorAutopublishEligible to process clean drafts
   // automatically while retaining the comparison and sourcing checks.
   const requiresHumanReview = pass
-    && ((namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0)) || operatorAuthorizedProse);
+    && ((namedCompetitorEnabled && known.size > 0) || operatorAuthorizedProse);
   return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown) };
 }
 
@@ -2524,12 +2474,10 @@ module.exports = {
   namedCompetitorAutopublishEligible,
   namedCompetitorListVerdict,
   extractComparisonBlocks,
-  extractCaption,
   extractColumns,
   extractRows,
   classifyOption,
   claimSupported,
-  hasAttribution,
   DISPARAGEMENT_RE,
   TABLE_DISPARAGEMENT_RE,
   RANKING_RE,

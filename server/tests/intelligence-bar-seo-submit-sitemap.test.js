@@ -116,6 +116,19 @@ describe('submit_gsc_sitemap (preview only)', () => {
     expect(dbMock).not.toHaveBeenCalled();
   });
 
+  // Codex r4 on #5275: a URL-prefix property only accepts sitemaps under its
+  // own origin — when the hub resolves to its www property the feed URL must
+  // be built from it, not from the bare canonical domain.
+  test('a www URL-prefix property builds the sitemap URL on its own origin', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    load([]);
+    mockResolveAccessibleProperty.mockResolvedValueOnce({ siteUrl: 'https://www.wavespestcontrol.com/', permissionLevel: 'siteOwner' });
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com' });
+    expect(result.error).toBeUndefined();
+    expect(result.property).toBe('https://www.wavespestcontrol.com/');
+    expect(result.sitemap_url).toBe('https://www.wavespestcontrol.com/sitemap-index.xml');
+  });
+
   test('the other hub domain also resolves with no fleet_sites row', async () => {
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
     load([]);
