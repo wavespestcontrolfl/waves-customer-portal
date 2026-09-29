@@ -400,11 +400,17 @@ async function preserveResubmittedFields(trx, current, duplicate, { topic, locat
 // shared directly: that route requires this service, so importing its
 // helper back would form a require cycle — this is a deliberately minimal
 // local copy of just the retry loop, not the route's other logic.
-async function withStopLock(svcId, fn) {
+// Customer row BEFORE the stop lock: createOrJoinVisit takes the customer
+// (FOR NO KEY UPDATE) and then the stop advisory lock, so taking them the
+// other way round here could deadlock a booking against an upload (Codex
+// #5306 r2 P2). FOR SHARE keeps a deactivation or delete waiting until the
+// submission commits; the caller's recheck re-reads the row under it.
+async function withStopLock(svcId, fn, { customerId = null } = {}) {
   const { lockStopForRow } = require('./visit-groups');
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await db.transaction(async (trx) => {
+        if (customerId) await trx('customers').where({ id: customerId }).forShare().first('id');
         const locked = await lockStopForRow(trx, svcId);
         if (locked === null) throw prepError('Not found', 404, 'PREP_NOT_FOUND');
         return fn(trx);
@@ -458,7 +464,9 @@ async function createVisitPrepSubmission({
 
   let result;
   try {
-    result = await withStopLock(svc.id, (trx) => persistLocked(trx, { uploaded, recheck, ...fields, entry }));
+    result = await withStopLock(svc.id, (trx) => persistLocked(trx, { uploaded, recheck, ...fields, entry }), {
+      customerId: svc.customer_id || null,
+    });
   } catch (err) {
     await Promise.all(uploaded.map((u) => deleteUploadedObject(u.s3Key)));
     throw err;

@@ -612,8 +612,10 @@ describe('POST /api/public/appointment/:token/photos', () => {
       });
       expect(res.status).toBe(201);
       expect(dbState.lockReads).toBeGreaterThanOrEqual(1);
-      // Customer row before the visit rows (Codex r3 P1).
-      expect(dbState.lockOrder.slice(0, 2)).toEqual(['customers', 'scheduled_services']);
+      // Customer row before the visit rows (Codex r3 P1), and taken before
+      // the stop lock too (Codex #5306 r2 P2: createOrJoinVisit's order).
+      expect(dbState.lockOrder[0]).toBe('customers');
+      expect(dbState.lockOrder.indexOf('customers')).toBeLessThan(dbState.lockOrder.indexOf('scheduled_services'));
       const body = await res.json();
       expect(body).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5, photosAdded: 1 } });
       expect(JSON.stringify(body)).not.toMatch(/1234|friendly|s3_key|visitprep/i);
