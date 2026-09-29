@@ -325,6 +325,39 @@ describe('satisfaction note failures', () => {
     expect(screen.queryByText(/your note could not be sent/i)).not.toBeInTheDocument();
   });
 
+  // Neutral review asks (owner ruling 2026-09-29): every score sees the same
+  // Google link; a score below 8 also keeps the private note form.
+  it.each([
+    [3, 'followup'],
+    [6, 'followup'],
+  ])('rating %i shows the private note form AND the same Google link', async (n, action) => {
+    api.getPendingSatisfaction.mockResolvedValue({
+      pending: [{ id: 'svc-9', serviceType: 'Pest Control', date: futureDate }],
+    });
+    api.submitSatisfaction.mockResolvedValueOnce({ success: true, action, reviewLink: 'https://portal.test/l/abc123', officeName: 'Bradenton' });
+
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: String(n) }));
+    expect(await screen.findByPlaceholderText(/anything we could do better/i)).toBeInTheDocument();
+    expect(screen.getByText(/a quick google review helps neighbors find the bradenton team/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open Google' })).toHaveAttribute('href', 'https://portal.test/l/abc123');
+  });
+
+  it('rating 9 keeps the same Open Google link (review phase)', async () => {
+    api.getPendingSatisfaction.mockResolvedValue({
+      pending: [{ id: 'svc-9', serviceType: 'Pest Control', date: futureDate }],
+    });
+    api.submitSatisfaction.mockResolvedValueOnce({ success: true, action: 'review', reviewLink: 'https://portal.test/l/abc123', officeName: 'Bradenton' });
+
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '9' }));
+    expect(await screen.findByText(/a quick google review helps neighbors find the bradenton team/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open Google' })).toHaveAttribute('href', 'https://portal.test/l/abc123');
+    expect(screen.queryByPlaceholderText(/anything we could do better/i)).not.toBeInTheDocument();
+  });
+
   it('skips the POST entirely for an empty note', async () => {
     api.getPendingSatisfaction.mockResolvedValue({
       pending: [{ id: 'svc-9', serviceType: 'Pest Control', date: futureDate }],

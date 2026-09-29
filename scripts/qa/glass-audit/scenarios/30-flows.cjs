@@ -152,8 +152,6 @@ const RATE_PAYLOAD = {
   firstName: 'Jordan',
   techName: 'Alex Morgan',
   techPhotoUrl: null,
-  serviceType: 'Pest Control',
-  hasServiceType: true,
   serviceDate: '2026-09-08',
   locationName: 'Waves Pest Control – Venice',
   googleReviewUrl: 'https://example.invalid/google-review',

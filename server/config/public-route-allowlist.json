@@ -691,7 +691,6 @@
       "routes": [
         "GET /api/rate/:token",
         "GET /api/rate/:token/go",
-        "POST /api/rate/:token/generate-review",
         "POST /api/rate/:token/score",
         "POST /api/rate/:token/submit"
       ]

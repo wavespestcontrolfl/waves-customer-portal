@@ -2893,13 +2893,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
         serviceRecordId: pendingSatisfaction.id,
         rating,
       });
-      if (result.action === 'review') {
-        setSatReviewLink(result.reviewLink);
-        setSatOfficeName(result.officeName);
-        setSatPhase('review');
-      } else {
-        setSatPhase('feedback');
-      }
+      // Every score gets the same Google link (owner ruling 2026-09-29); a
+      // score below 8 also opens the private note form.
+      setSatReviewLink(result.reviewLink);
+      setSatOfficeName(result.officeName);
+      setSatPhase(result.action === 'review' ? 'review' : 'feedback');
     } catch (err) {
       // The write failed — an optimistically lit rating with no phase change
       // read as "recorded" while nothing was saved. Clear it and say so.
@@ -2950,6 +2948,20 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // card; inert without the glass theme mounted (no offsets, no stacking context).
   const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
   const muted = PORTAL_SHELL.muted;
+  // The one Google review prompt, identical for every score (rendered in the
+  // review, feedback and thanks phases).
+  const satReviewCopy = satReviewLink
+    ? <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.</>
+    // No link means the review ask is queued to text later — a
+    // bare Google link here couldn't be attributed and the
+    // queued text would still send afterward.
+    : <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team — keep an eye on your texts for our review link.</>;
+  const satOpenGoogle = satReviewLink ? (
+    <a data-glass-accent="" href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
+      ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
+      boxShadow: 'none', borderRadius: 8,
+    }}>Open Google</a>
+  ) : null;
   // Whisper-white like every other tab — the warm PORTAL_SHELL.page wash
   // read as the old theme on the glass scene (portal is glass-only).
   const subtle = GLASS_SUBTLE;
@@ -3347,20 +3359,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy }}>Thanks for the {satRating}/10.</div>
               <div style={{ marginTop: 6, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                {satReviewLink
-                  ? <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.</>
-                  // No link means the review ask is queued to text later — a
-                  // bare Google link here couldn't be attributed and the
-                  // queued text would still send afterward.
-                  : <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team — keep an eye on your texts for our review link.</>}
+                {satReviewCopy}
               </div>
               <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
-                {satReviewLink ? (
-                  <a data-glass-accent="" href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
-                    ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
-                    boxShadow: 'none', borderRadius: 8,
-                  }}>Open Google</a>
-                ) : null}
+                {satOpenGoogle}
                 <button data-glass-accent="" type="button" onClick={() => setSatDismissed(true)} style={{
                   ...PORTAL_BUTTON_BASE, background: '#fff', color: B.glassNavy, padding: '10px 18px',
                   boxShadow: 'none', border: '1px solid #E7E2D7', borderRadius: 8,
@@ -3391,11 +3393,17 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                 ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.glassNavy,
                 color: '#fff', boxShadow: 'none', borderRadius: 8,
               }}>{satSubmitting ? 'Sending...' : 'Send feedback'}</button>
+              <div style={{ marginTop: 14, textAlign: 'center' }}>
+                <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>{satReviewCopy}</div>
+                {satOpenGoogle && <div style={{ marginTop: 10 }}>{satOpenGoogle}</div>}
+              </div>
             </div>
           )}
           {satPhase === 'thanks' && (
-            <div style={{ textAlign: 'center', color: B.glassNavy, fontWeight: 700 }}>
-              Thank you. We appreciate the note.
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ color: B.glassNavy, fontWeight: 700 }}>Thank you. We appreciate the note.</div>
+              <div style={{ marginTop: 10, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>{satReviewCopy}</div>
+              {satOpenGoogle && <div style={{ marginTop: 10 }}>{satOpenGoogle}</div>}
             </div>
           )}
         </section>

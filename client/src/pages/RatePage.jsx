@@ -36,12 +36,6 @@ const primaryActionStyle = {
   letterSpacing: 0,
 };
 
-const disabledActionStyle = {
-  ...primaryActionStyle,
-  background: '#9CA3AF',
-  cursor: 'default',
-};
-
 const inputBaseStyle = {
   width: '100%',
   padding: '12px 14px',
@@ -53,30 +47,7 @@ const inputBaseStyle = {
   boxSizing: 'border-box',
 };
 
-const HIGHLIGHTS = [
-  'On Time', 'Thorough', 'Professional', 'Friendly', 'Knowledgeable',
-  'Great Communication', 'Clean Work', 'Fast Service', 'Fair Price', 'Above & Beyond',
-];
-
-const SERVICE_OPTIONS = [
-  'Pest Control',
-  'Lawn Care',
-  'Mosquito',
-  'Tree & Shrub',
-];
-
-const STANDOUT_OPTIONS = [
-  'On time', 'Professional', 'Thorough', 'Friendly', 'Great results', 'Fair price',
-];
-
 const QUICK_STANDOUT_OPTIONS = ['On time', 'Professional', 'Thorough', 'Friendly'];
-
-function getServiceSelection(serviceType) {
-  const clean = String(serviceType || '').trim();
-  if (!clean) return [];
-  const match = SERVICE_OPTIONS.find((service) => clean.toLowerCase().includes(service.toLowerCase()));
-  return [match || clean];
-}
 
 export default function RatePage() {
   const { token } = useParams();
@@ -87,31 +58,25 @@ export default function RatePage() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [score, setScore] = useState(null);
   const [scoreHover, setScoreHover] = useState(0);
-  const [screen, setScreen] = useState('rating'); // rating, highlights, ai-review, feedback, success, redirect
-  const [highlights, setHighlights] = useState([]);
+  const [screen, setScreen] = useState('rating'); // rating, feedback, success
+  const [selectedStandouts, setSelectedStandouts] = useState([]);
+  // Set from a successful /submit; the success screen offers the same Google
+  // button only for a submission made in this session (an already-submitted
+  // link never re-solicits).
+  const [submittedGoogleUrl, setSubmittedGoogleUrl] = useState('');
   const [feedback, setFeedback] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
-
-  // AI Review Writer state
-  const [selectedServices, setSelectedServices] = useState([]);
-  const [selectedStandouts, setSelectedStandouts] = useState([]);
-  const [personalNote, setPersonalNote] = useState('');
-  const [generatedReview, setGeneratedReview] = useState('');
-  const [reviewError, setReviewError] = useState('');
-  const [generating, setGenerating] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [postHint, setPostHint] = useState('');
 
   // Score taps are saved separately from final feedback submission so quick
   // bounces are still captured without locking the token before corrections.
   const scoreSavePromiseRef = useRef(Promise.resolve());
   const submitPromiseRef = useRef(null);
-  // Synchronous single-flight latch for handleSubmit/handleHighlightsNext —
-  // `submitting` is React state, so a double-tap in the same frame reads the
+  // Synchronous single-flight latch for handleSubmit — `submitting` is React state, so a double-tap in the same frame reads the
   // stale false twice and double-POSTs /submit. Same live-ref reasoning as
   // submitPromiseRef above; flips before any await.
   const submittingRef = useRef(false);
+  const [openingGoogle, setOpeningGoogle] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -129,10 +94,6 @@ export default function RatePage() {
       })
       .catch(e => { setError(e.notFound ? 'notfound' : 'temporary'); setLoading(false); });
   }, [token, loadAttempt]);
-
-  const getKnownServices = () => (
-    data?.hasServiceType ? getServiceSelection(data.serviceType) : []
-  );
 
   const saveScoreDraft = (nextScore, nextHighlights = selectedStandouts) => {
     const savePromise = scoreSavePromiseRef.current
@@ -153,29 +114,13 @@ export default function RatePage() {
 
   const handleScore = (s) => {
     setScore(s);
-    setPostHint('');
-    setReviewError('');
-    setGeneratedReview('');
     saveScoreDraft(s, s >= 8 ? selectedStandouts : []);
-    // 8–10 stays on the rating screen, reveals the quick standout chips, and
-    // waits to submit until the customer commits to the Google-review path.
-    if (s >= 8) {
-      setScreen('rating');
-      const knownServices = getKnownServices();
-      if (knownServices.length) setSelectedServices(knownServices);
-      submitPromiseRef.current = null;
-    } else {
-      submitPromiseRef.current = null;
-      setScreen('feedback');
-    }
-  };
-
-  const toggleHighlight = (h) => {
-    setHighlights(prev => prev.includes(h) ? prev.filter(x => x !== h) : [...prev, h]);
-  };
-
-  const toggleService = (s) => {
-    setSelectedServices(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
+    submitPromiseRef.current = null;
+    // 8–10 stays on the rating screen and shows the quick standout chips;
+    // 1–7 goes to the private feedback form. Every score is offered the same
+    // Google review button (owner ruling 2026-09-29: neutral asks, no
+    // filtering by satisfaction) — going to Google is always the customer's tap.
+    setScreen(s >= 8 ? 'rating' : 'feedback');
   };
 
   const toggleStandout = (s) => {
@@ -198,7 +143,7 @@ export default function RatePage() {
       await scoreSavePromiseRef.current;
       const r = await fetch(`${API_BASE}/rate/${token}/submit`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ score, feedback, highlights }),
+        body: JSON.stringify({ score, feedback, highlights: [] }),
       });
       // 409 = the server already has this feedback (first POST committed but
       // the response was lost, or a second tab submitted). Retrying forever
@@ -209,12 +154,8 @@ export default function RatePage() {
       }
       if (!r.ok) throw new Error(`Submit failed (${r.status})`);
       const result = await r.json();
-      if (result.redirect) {
-        setScreen('redirect');
-        setTimeout(() => { window.location.href = result.redirect; }, 2000);
-      } else {
-        setScreen('success');
-      }
+      setSubmittedGoogleUrl(result.googleReviewUrl || '');
+      setScreen('success');
     } catch {
       // Keep the feedback on screen — a false "Thank you!" here silently
       // discarded a detractor's complaint with no retry.
@@ -225,29 +166,10 @@ export default function RatePage() {
     }
   };
 
-  // Submit score, then go to AI review step
-  const handleHighlightsNext = async () => {
-    if (submittingRef.current) return;
-    submittingRef.current = true;
-    setSubmitting(true);
-    try {
-      await scoreSavePromiseRef.current;
-      await fetch(`${API_BASE}/rate/${token}/submit`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ score, feedback: '', highlights }),
-      });
-    } catch { /* proceed anyway */ }
-    submittingRef.current = false;
-    setSubmitting(false);
-    // Pre-select service type from data if available
-    const knownServices = getKnownServices();
-    if (knownServices.length && !knownServices.every((service) => selectedServices.includes(service))) {
-      setSelectedServices(knownServices);
-    }
-    setScreen('ai-review');
-  };
-
-  const ensureHighScoreSubmitted = async (standouts = selectedStandouts) => {
+  // Commits the score (and any typed note) once, whichever button gets there
+  // first. The server treats the submit as final and runs the same office
+  // alerts for a low score whether or not the customer goes on to Google.
+  const ensureSubmitted = async () => {
     await scoreSavePromiseRef.current;
 
     if (submitPromiseRef.current) {
@@ -257,10 +179,9 @@ export default function RatePage() {
 
     const submitPromise = fetch(`${API_BASE}/rate/${token}/submit`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ score, feedback: '', highlights: standouts }),
+      body: JSON.stringify({ score, feedback, highlights: score >= 8 ? selectedStandouts : [] }),
     }).then((r) => {
-      // If the score was already persisted in this session, the draft endpoint
-      // can still proceed because it only needs request.score >= 8.
+      // 409 = already committed (this session or another tab): proceed.
       if (!r.ok && r.status !== 409) throw new Error('Unable to save rating');
       return r.json().catch(() => ({}));
     });
@@ -276,74 +197,41 @@ export default function RatePage() {
     }
   };
 
-  const handleGenerateReview = async ({ services = selectedServices, standouts = selectedStandouts, note = personalNote } = {}) => {
-    setGenerating(true);
-    setGeneratedReview('');
-    setReviewError('');
-    setPostHint('');
+  // The one Google review button, the same for every score. Opens in the same
+  // tab: new tabs get orphaned on mobile Safari, which is the main browser
+  // these review links open on.
+  const handleOpenGoogle = async () => {
+    const url = submittedGoogleUrl || data?.googleReviewUrl;
+    if (!url || openingGoogle) return;
+    setOpeningGoogle(true);
     try {
-      await ensureHighScoreSubmitted(standouts);
-      const r = await fetch(`${API_BASE}/rate/${token}/generate-review`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          services,
-          highlights: standouts,
-          personalNote: note,
-        }),
-      });
-      const result = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(result.error || 'Unable to write review');
-      if (!result.review) throw new Error('Review writer returned no draft');
-      setGeneratedReview(result.review);
-    } catch (err) {
-      setReviewError("We couldn't write this automatically. You can still write your own on Google.");
-    }
-    setGenerating(false);
-  };
-
-  const handleHappyReviewStart = async () => {
-    const services = selectedServices.length ? selectedServices : getKnownServices();
-    if (services.length) setSelectedServices(services);
-    setScreen('ai-review');
-    if (!services.length) return;
-    await handleGenerateReview({ services, standouts: selectedStandouts });
-  };
-
-  const handleCopyReview = () => {
-    navigator.clipboard.writeText(generatedReview).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    }).catch(() => {});
-  };
-
-  // Single-action "Post on Google" — copy the draft and immediately redirect
-  // to the closest GBP review URL in the same tab. New tabs get orphaned on
-  // mobile Safari, which is the main browser these review links open on.
-  const handlePostOnGoogle = async () => {
-    if (!data?.googleReviewUrl) return;
-    try {
-      if (generatedReview) await navigator.clipboard.writeText(generatedReview);
-    } catch { /* clipboard API can fail on iOS in-app browsers; still redirect */ }
-    setPostHint('Review copied. Paste it into Google.');
-    setTimeout(() => { window.location.href = data.googleReviewUrl; }, 900);
-  };
-
-  const handleSkipToGoogle = async () => {
-    if (score >= 8) {
-      try { await ensureHighScoreSubmitted(selectedStandouts); } catch { await saveScoreDraft(score, selectedStandouts); }
-    }
-    if (data?.googleReviewUrl) {
-      window.location.href = data.googleReviewUrl;
-    } else {
-      setScreen('success');
+      if (!submittedGoogleUrl) {
+        try { await ensureSubmitted(); } catch { await saveScoreDraft(score, score >= 8 ? selectedStandouts : []); }
+      }
+      window.location.href = url;
+    } finally {
+      setOpeningGoogle(false);
     }
   };
 
   const firstName = data?.firstName || 'there';
   const techName = data?.techName || 'your technician';
   const techPhotoUrl = data?.techPhotoUrl || null;
-  const knownServiceSelection = getKnownServices();
-  const hasKnownService = knownServiceSelection.length > 0;
+  const googleReviewAction = (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontSize: 14, lineHeight: 1.45, color: MUTED, textAlign: 'center' }}>
+        Public Google reviews help local neighbors choose a provider.
+      </div>
+      <button onClick={handleOpenGoogle} disabled={openingGoogle} data-glass-accent="" style={{
+        ...primaryActionStyle,
+        width: '100%', marginTop: 12,
+        opacity: openingGoogle ? 0.6 : 1,
+        cursor: openingGoogle ? 'default' : 'pointer',
+      }}>
+        Open Google
+      </button>
+    </div>
+  );
 
   if (loading) return (
     <Page>
@@ -452,208 +340,11 @@ export default function RatePage() {
                   );
                 })}
               </div>
-              <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.45, color: MUTED, textAlign: 'center' }}>
-                Public Google reviews help local neighbors choose a provider.
-              </div>
-              <button onClick={handleHappyReviewStart} disabled={generating} data-glass-accent="" style={{
-                ...(generating ? disabledActionStyle : primaryActionStyle),
-                width: '100%', marginTop: 12,
-              }}>
-                {generating ? 'Writing your review...' : 'Help Me Write It'}
-              </button>
+              {data?.googleReviewUrl && googleReviewAction}
             </div>
           ) : (
             <div style={{ textAlign: 'center', marginTop: 10, fontSize: 14, color: MUTED, fontWeight: 600 }}>Tap a number to rate</div>
           )}
-        </div>
-      )}
-
-      {/* Highlights Screen (8-10) */}
-      {screen === 'highlights' && (
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: COLORS.greenLight, color: COLORS.green, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Icon name="party" size={30} strokeWidth={2} />
-          </div>
-          <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>Awesome, thank you!</div>
-          <div style={{ fontSize: 16, color: BODY, lineHeight: 1.55, marginBottom: 16 }}>What stood out about your experience?</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
-            {HIGHLIGHTS.map(h => (
-              <button key={h} onClick={() => toggleHighlight(h)} style={{
-                padding: '10px 16px', minHeight: 44, border: `1px solid ${highlights.includes(h) ? COLORS.glassNavy : CARD_BORDER}`,
-                borderRadius: 8, background: highlights.includes(h) ? COLORS.glassNavy : COLORS.white,
-                color: highlights.includes(h) ? COLORS.white : BODY, fontSize: 14, fontWeight: 700, cursor: 'pointer',
-              }}>{h}</button>
-            ))}
-          </div>
-          <Button
-            variant="primary"
-            onClick={handleHighlightsNext}
-            disabled={submitting}
-            data-glass-accent=""
-            style={{ ...primaryActionStyle, fontSize: 16 }}
-            icon={<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#FFFFFF"/></svg>}
-            iconPosition="left"
-          >
-            {submitting ? 'Sending...' : 'Leave a Google Review'}
-          </Button>
-          <button onClick={() => { setScreen('success'); handleSubmit(); }} style={{ display: 'block', margin: '14px auto 0', fontSize: 14, color: MUTED, background: 'none', border: 'none', cursor: 'pointer' }}>Skip for now</button>
-        </div>
-      )}
-
-      {/* AI Review Writer Screen */}
-      {screen === 'ai-review' && (
-        <div>
-          <div style={{ textAlign: 'center', marginBottom: 20 }}>
-            <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 6 }}>
-              We'll write it for you!
-            </div>
-            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5 }}>
-              Public Google reviews help local neighbors choose a provider.
-            </div>
-          </div>
-
-          {!generatedReview && !generating && (
-            <>
-              {/* Service selection */}
-              {!hasKnownService && (
-                <div style={{ marginBottom: 18 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: TEXT, marginBottom: 8 }}>What service did you receive?</div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {SERVICE_OPTIONS.map(s => (
-                      <button key={s} onClick={() => toggleService(s)} style={{
-                        padding: '9px 16px', border: `1px solid ${selectedServices.includes(s) ? COLORS.glassNavy : CARD_BORDER}`,
-                        borderRadius: 8, background: selectedServices.includes(s) ? COLORS.glassNavy : COLORS.white,
-                        color: selectedServices.includes(s) ? COLORS.white : BODY, fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                      }}>{s}</button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Standout selection */}
-              <div style={{ marginBottom: 18 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: TEXT, marginBottom: 4 }}>What stood out?</div>
-                <div style={{ fontSize: 14, color: MUTED, marginBottom: 8 }}>Pick up to 3</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {STANDOUT_OPTIONS.map(s => (
-                    <button key={s} onClick={() => toggleStandout(s)} style={{
-                      padding: '9px 16px', border: `1px solid ${selectedStandouts.includes(s) ? COLORS.green : CARD_BORDER}`,
-                      borderRadius: 8, background: selectedStandouts.includes(s) ? COLORS.green : COLORS.white,
-                      color: selectedStandouts.includes(s) ? COLORS.white : BODY, fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                      opacity: (!selectedStandouts.includes(s) && selectedStandouts.length >= 3) ? 0.4 : 1,
-                    }}>{s}</button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Personal note */}
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: TEXT, marginBottom: 8 }}>Anything specific you loved? <span style={{ fontWeight: 400, color: MUTED }}>(optional)</span></div>
-                <input
-                  value={personalNote}
-                  onChange={e => setPersonalNote(e.target.value)}
-                  placeholder="e.g. No more ants in the kitchen!"
-                  maxLength={150}
-                  aria-label="Anything specific you loved?"
-                  className="waves-focus-ring"
-                  style={inputBaseStyle}
-                />
-              </div>
-
-              {/* Generate button */}
-              <button onClick={() => handleGenerateReview()} disabled={selectedServices.length === 0} data-glass-accent="" style={{
-                ...(selectedServices.length === 0 ? disabledActionStyle : primaryActionStyle),
-                width: '100%', padding: 14, fontSize: 16,
-                opacity: selectedServices.length === 0 ? 0.5 : 1,
-                transition: 'all 0.2s',
-              }}>
-                Help Me Write It
-              </button>
-            </>
-          )}
-
-          {generating && (
-            <div style={{ textAlign: 'center', padding: '20px 0 8px', color: BODY, fontSize: 16, fontWeight: 700 }}>
-              Writing your review...
-            </div>
-          )}
-
-          {reviewError && !generating && !generatedReview && (
-            <div role="alert" style={{
-              background: '#FFF8E8', border: '1px solid #F0DCA9', borderRadius: 8,
-              padding: 14, color: TEXT, fontSize: 14, lineHeight: 1.5, fontWeight: 700,
-            }}>
-              {reviewError}
-              <button onClick={handleSkipToGoogle} data-glass-accent="" style={{
-                ...primaryActionStyle,
-                display: 'block', width: '100%', marginTop: 12, padding: 12,
-              }}>
-                Open Google
-              </button>
-            </div>
-          )}
-
-          {/* Generated review — editable textarea so the customer can tweak
-              before one-tap post. Single action: copies + redirects. */}
-          {generatedReview && (
-            <div style={{ marginTop: 4 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: TEXT, textTransform: 'uppercase', letterSpacing: 0 }}>
-                  Your Review <span style={{ fontWeight: 400, color: MUTED, textTransform: 'none', letterSpacing: 0 }}>— edit if you want</span>
-                </div>
-              </div>
-              <textarea
-                value={generatedReview}
-                onChange={(e) => setGeneratedReview(e.target.value)}
-                rows={5}
-                aria-label="Your review"
-                className="waves-focus-ring"
-                style={{
-                  ...inputBaseStyle,
-                  minHeight: 150, fontSize: 16, lineHeight: 1.6, marginBottom: 12,
-                  fontFamily: FONTS.body, resize: 'vertical', boxSizing: 'border-box',
-                }}
-              />
-
-              <Button
-                variant="primary"
-                onClick={handlePostOnGoogle}
-                data-glass-accent=""
-                style={{ ...primaryActionStyle, width: '100%', fontSize: 16 }}
-              >
-                Copy & Open Google
-              </Button>
-              {postHint && (
-                <div style={{ marginTop: 8, textAlign: 'center', fontSize: 14, color: COLORS.green, fontWeight: 700 }}>
-                  {postHint}
-                </div>
-              )}
-
-              <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 12 }}>
-                <button onClick={handleGenerateReview} disabled={generating} style={{
-                  fontSize: 14, color: COLORS.glassNavy, background: 'none', border: 'none',
-                  cursor: 'pointer', fontWeight: 600,
-                }}>
-                  {generating ? 'Rewriting…' : 'Regenerate'}
-                </button>
-                <span style={{ fontSize: 14, color: CARD_BORDER }}>·</span>
-                <button onClick={handleCopyReview} style={{
-                  fontSize: 14, color: copied ? COLORS.green : MUTED, background: 'none',
-                  border: 'none', cursor: 'pointer', fontWeight: 600,
-                }}>
-                  {copied ? 'Copied' : 'Copy only'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Skip link */}
-          <button onClick={handleSkipToGoogle} style={{
-            display: 'block', margin: '16px auto 0', fontSize: 14, color: MUTED, background: 'none',
-            border: 'none', cursor: 'pointer', textDecoration: 'underline',
-          }}>
-            Skip -- Write my own on Google
-          </button>
         </div>
       )}
 
@@ -691,17 +382,7 @@ export default function RatePage() {
           >
             {submitting ? 'Sending...' : 'Send Feedback'}
           </Button>
-        </div>
-      )}
-
-      {/* Redirect Screen (going to Google) */}
-      {screen === 'redirect' && (
-        <div style={{ textAlign: 'center', padding: '20px 0' }}>
-          <div style={{ width: 64, height: 64, borderRadius: '50%', background: COLORS.greenLight, color: COLORS.green, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Icon name="party" size={30} strokeWidth={2} />
-          </div>
-          <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>Taking you to Google...</div>
-          <div style={{ fontSize: 16, color: BODY }}>Your review means the world to our small team!</div>
+          {data?.googleReviewUrl && googleReviewAction}
         </div>
       )}
 
@@ -713,6 +394,7 @@ export default function RatePage() {
           </div>
           <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>Thank you!</div>
           <div style={{ fontSize: 16, color: BODY, lineHeight: 1.55 }}>Your feedback helps us serve you better.</div>
+          {submittedGoogleUrl && googleReviewAction}
         </div>
       )}
     </Page>

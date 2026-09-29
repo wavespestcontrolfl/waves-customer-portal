@@ -3681,9 +3681,13 @@ headers (`no-store`, `noindex`, `no-referrer`) on every response. The GET
 stamps open state and returns customer name data, so those guards are the
 whole defense.)
 `/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
-`/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
-rating flow from a review-request link — high → the nearest GBP
-write-a-review URL, low → private feedback capture. Router-wide url-safe
+`/:token/go`) (review-gate; token-scoped customer
+rating flow from a review-request link — every score is offered the same
+nearest-GBP write-a-review URL (`googleReviewUrl` on the page GET and on every
+`/submit` response; never an auto-redirect, going to Google is the customer's
+own click; owner ruling 2026-09-29), and a low score also gets the private
+feedback form plus the unchanged office alert. There is no AI review writer
+(`/:token/generate-review` was removed 2026-09-29). Router-wide url-safe
 32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
 the /rate page per its every-failure-lands-somewhere contract); the page
 GET and score/submit writes carry a 30/min limiter. `/:token/go` is the

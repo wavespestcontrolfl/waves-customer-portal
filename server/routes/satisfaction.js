@@ -151,6 +151,8 @@ router.post('/', async (req, res, next) => {
     const isPromoter = rating >= 8;
     const isDetractor = rating <= 3;
 
+    // directed_to_review stays the rating-based flag (badges.js reads it as
+    // the high-score marker); every score is offered the link either way.
     // Insert the response. office_location now stores the canonical location id
     // ('bradenton') rather than this file's private 'lakewood_ranch' key —
     // review-request.js already wrote canonical ids into the same column, and
@@ -165,132 +167,131 @@ router.post('/', async (req, res, next) => {
       office_location: office.id,
     });
 
-    // Handle routing based on score
-    if (isPromoter) {
-      // 8-10: ask for the Google review through the SAME gated path as every
-      // other unscheduled ask. This used to text a BARE g.page link with no
-      // review_requests row, so the ask was invisible to the 3-ask cap, the
-      // 30-day cooldown, the already-reviewed flag, and the outreach funnel —
-      // and the click could never be attributed. sendGatedAsk mints the token,
-      // applies the gates, and records the row.
-      // 'error' (NOT 'send_failed'): a THROW here means nothing was
-      // persisted — sendGatedAsk's own send_failed outcome implies a row was
-      // queued for cron retry, but a fail-closed gate error leaves no row, so
-      // classifying it as queued would tell the customer to wait for a text
-      // that never comes (codex #3285 r5). 'error' falls through to the
-      // in-app fallback chain instead.
-      let asked = { outcome: 'error' };
+    // Below 8: flag for follow-up and alert the office. The alert comes
+    // first and is unchanged; every score then goes on to the same review path
+    // below (owner ruling 2026-09-29: review asks are neutral — no filtering by
+    // satisfaction).
+    if (!isPromoter) {
+      const urgency = isDetractor ? '🚨 URGENT' : '⚠️';
       try {
-        // #3288's {reservice_line} contract holds through the fold: the
-        // gated path renders via ReviewService.sendSMS, whose render site
-        // supplies reservice_line (review-request.js) — this route no longer
-        // renders the template itself.
-        asked = await ReviewService.sendGatedAsk({
-          customerId: customer.id,
-          customer,
-          channel: 'sms',
-          // CANONICAL template mode: renders the 'review_request'
-          // sms_template — the same body (incl. the {reservice_line} clause
-          // #3288 wired) the pre-fold path sent. 'friendly_ask' silently
-          // dropped that clause, and a bare null templateId defaults back to
-          // friendly_ask (codex #3285 r5b).
-          templateId: null,
-          canonicalTemplate: true,
-          serviceRecordId,
-          triggeredBy: 'portal_satisfaction',
-          manageRetryVia: 'cron',
-          // This path had no Day-3 follow-up before the fold, and adding one
-          // would be a new customer touch nobody asked for. Drop this flag to
-          // opt the portal ask into the same follow-up admin one-offs get.
-          skipLegacyFollowup: true,
-        });
+        await TwilioService.sendSMS(
+          ADMIN_ALERT_PHONE,
+          `${urgency} Satisfaction Alert\n\n` +
+          `${customer.first_name} ${customer.last_name} rated their ` +
+          `${service.service_type} (${service.service_date}) a ${rating}/10.\n` +
+          `Tech: ${service.technician_name || 'Unknown'}\n` +
+          (feedbackText ? `Feedback: "${feedbackText}"\n` : '') +
+          `Phone: ${customer.phone}\n\n` +
+          (isDetractor ? 'Follow up ASAP — detractor score.' : 'Follow up within 24 hours.'),
+          { messageType: 'internal_alert', link: '/admin/reviews' }
+        );
       } catch (smsErr) {
-        // Never fail the rating write because the ask could not go out.
-        logger.error(`[satisfaction] Gated review ask threw (customerId=${customer.id} errType=${smsErr?.name || 'Error'})`);
+        logger.error(`Failed to send office alert SMS: ${smsErr.message}`);
       }
-      if (asked.outcome !== 'sent') {
-        logger.info(`[satisfaction] Review ask not sent (customerId=${customer.id} outcome=${asked.outcome})`);
-      }
-
-      // The in-app button points at the SAME tokenized link the text carries,
-      // so a customer who taps here instead of in their messages is still
-      // attributed. When the ask was gated (at cap, in cooldown, already in a
-      // cadence) there is no fresh token — reuse the customer's most recent
-      // live DELIVERED one, and only fall back to the bare profile URL if
-      // there is none. Exception: while an ask is QUEUED (deferred /
-      // already_queued / transient-retry / concurrent in-flight) there is a
-      // pending row processScheduled will send later — a bare link now could
-      // not consume it, so the customer would review AND still get the SMS
-      // (codex #3285 r3). No actionable fallback in that window; the queued
-      // text carries the link.
-      const askQueued = ['deferred', 'already_queued', 'send_failed'].includes(asked.outcome);
-      // A review-history/spacing refusal also withholds both link fallbacks.
-      const askHeld = asked.outcome === 'blocked'
-        && (String(asked.code || '').startsWith('REVIEW_') || asked.code === 'SMS_DELIVERY_UNCERTAIN');
-      let reviewLink = asked.reviewUrl || null;
-      if (!reviewLink && !askQueued && !askHeld && asked.outcome !== 'already_reviewed') {
-        // BOTH fallbacks skip the queued window (codex #3285 r4): an older
-        // delivered token is just as actionable as the bare URL — the click
-        // couldn't consume the pending row and processScheduled would still
-        // send the queued ask afterward. already_reviewed gets NO link at all
-        // (finality). in_cadence may reuse a live DELIVERED token — that is
-        // the cadence's own link, and clicking it stamps + STOPS the cadence
-        // via /go — but never the bare URL, which stops nothing and would let
-        // the cadence chase a customer who already reviewed (pre-push audit
-        // r4).
-        reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
-        if (!reviewLink) {
-          let bareOk = asked.outcome !== 'in_cadence';
-          if (asked.outcome === 'concurrent') {
-            // Lock contention proves neither direction (codex #3285 r9 ×2):
-            // the competing holder may be a no-link check-in or fail without
-            // a retry (suppressing would promise a text that never comes),
-            // OR it may deliver an ask moments after we respond (a bare URL
-            // now = untracked review + another ask later). Settle the race:
-            // wait briefly for the in-flight send to land, then prefer its
-            // tokenized URL; a durably queued ask suppresses; only a window
-            // with NEITHER falls back to the bare link.
-            for (let attempt = 0; attempt < 3 && bareOk && !reviewLink; attempt++) {
-              await new Promise((r) => setTimeout(r, 700));
-              reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
-              if (reviewLink) break;
-              const gate = await ReviewService.checkUnscheduledAskGates(customer.id).catch(() => null);
-              if (gate && gate.outcome === 'already_queued') bareOk = false;
-            }
-          }
-          if (bareOk && !reviewLink) reviewLink = office.googleReviewUrl;
-        }
-      }
-
-      return res.json({
-        success: true,
-        action: 'review',
-        reviewLink,
-        officeName: office.name,
-      });
     }
 
-    // Below 8: Flag for follow-up, alert the office
-    const urgency = isDetractor ? '🚨 URGENT' : '⚠️';
+    // Every score: ask for the Google review through the SAME gated path as every
+    // other unscheduled ask. This used to text a BARE g.page link with no
+    // review_requests row, so the ask was invisible to the 3-ask cap, the
+    // 30-day cooldown, the already-reviewed flag, and the outreach funnel —
+    // and the click could never be attributed. sendGatedAsk mints the token,
+    // applies the gates, and records the row.
+    // 'error' (NOT 'send_failed'): a THROW here means nothing was
+    // persisted — sendGatedAsk's own send_failed outcome implies a row was
+    // queued for cron retry, but a fail-closed gate error leaves no row, so
+    // classifying it as queued would tell the customer to wait for a text
+    // that never comes (codex #3285 r5). 'error' falls through to the
+    // in-app fallback chain instead.
+    let asked = { outcome: 'error' };
     try {
-      await TwilioService.sendSMS(
-        ADMIN_ALERT_PHONE,
-        `${urgency} Satisfaction Alert\n\n` +
-        `${customer.first_name} ${customer.last_name} rated their ` +
-        `${service.service_type} (${service.service_date}) a ${rating}/10.\n` +
-        `Tech: ${service.technician_name || 'Unknown'}\n` +
-        (feedbackText ? `Feedback: "${feedbackText}"\n` : '') +
-        `Phone: ${customer.phone}\n\n` +
-        (isDetractor ? 'Follow up ASAP — detractor score.' : 'Follow up within 24 hours.'),
-        { messageType: 'internal_alert', link: '/admin/reviews' }
-      );
+      // #3288's {reservice_line} contract holds through the fold: the
+      // gated path renders via ReviewService.sendSMS, whose render site
+      // supplies reservice_line (review-request.js) — this route no longer
+      // renders the template itself.
+      asked = await ReviewService.sendGatedAsk({
+        customerId: customer.id,
+        customer,
+        channel: 'sms',
+        // CANONICAL template mode: renders the 'review_request'
+        // sms_template — the same body (incl. the {reservice_line} clause
+        // #3288 wired) the pre-fold path sent. 'friendly_ask' silently
+        // dropped that clause, and a bare null templateId defaults back to
+        // friendly_ask (codex #3285 r5b).
+        templateId: null,
+        canonicalTemplate: true,
+        serviceRecordId,
+        triggeredBy: 'portal_satisfaction',
+        manageRetryVia: 'cron',
+        // This path had no Day-3 follow-up before the fold, and adding one
+        // would be a new customer touch nobody asked for. Drop this flag to
+        // opt the portal ask into the same follow-up admin one-offs get.
+        skipLegacyFollowup: true,
+      });
     } catch (smsErr) {
-      logger.error(`Failed to send office alert SMS: ${smsErr.message}`);
+      // Never fail the rating write because the ask could not go out.
+      logger.error(`[satisfaction] Gated review ask threw (customerId=${customer.id} errType=${smsErr?.name || 'Error'})`);
+    }
+    if (asked.outcome !== 'sent') {
+      logger.info(`[satisfaction] Review ask not sent (customerId=${customer.id} outcome=${asked.outcome})`);
     }
 
+    // The in-app button points at the SAME tokenized link the text carries,
+    // so a customer who taps here instead of in their messages is still
+    // attributed. When the ask was gated (at cap, in cooldown, already in a
+    // cadence) there is no fresh token — reuse the customer's most recent
+    // live DELIVERED one, and only fall back to the bare profile URL if
+    // there is none. Exception: while an ask is QUEUED (deferred /
+    // already_queued / transient-retry / concurrent in-flight) there is a
+    // pending row processScheduled will send later — a bare link now could
+    // not consume it, so the customer would review AND still get the SMS
+    // (codex #3285 r3). No actionable fallback in that window; the queued
+    // text carries the link.
+    const askQueued = ['deferred', 'already_queued', 'send_failed'].includes(asked.outcome);
+    // A review-history/spacing refusal also withholds both link fallbacks.
+    const askHeld = asked.outcome === 'blocked'
+      && (String(asked.code || '').startsWith('REVIEW_') || asked.code === 'SMS_DELIVERY_UNCERTAIN');
+    let reviewLink = asked.reviewUrl || null;
+    if (!reviewLink && !askQueued && !askHeld && asked.outcome !== 'already_reviewed') {
+      // BOTH fallbacks skip the queued window (codex #3285 r4): an older
+      // delivered token is just as actionable as the bare URL — the click
+      // couldn't consume the pending row and processScheduled would still
+      // send the queued ask afterward. already_reviewed gets NO link at all
+      // (finality). in_cadence may reuse a live DELIVERED token — that is
+      // the cadence's own link, and clicking it stamps + STOPS the cadence
+      // via /go — but never the bare URL, which stops nothing and would let
+      // the cadence chase a customer who already reviewed (pre-push audit
+      // r4).
+      reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
+      if (!reviewLink) {
+        let bareOk = asked.outcome !== 'in_cadence';
+        if (asked.outcome === 'concurrent') {
+          // Lock contention proves neither direction (codex #3285 r9 ×2):
+          // the competing holder may be a no-link check-in or fail without
+          // a retry (suppressing would promise a text that never comes),
+          // OR it may deliver an ask moments after we respond (a bare URL
+          // now = untracked review + another ask later). Settle the race:
+          // wait briefly for the in-flight send to land, then prefer its
+          // tokenized URL; a durably queued ask suppresses; only a window
+          // with NEITHER falls back to the bare link.
+          for (let attempt = 0; attempt < 3 && bareOk && !reviewLink; attempt++) {
+            await new Promise((r) => setTimeout(r, 700));
+            reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
+            if (reviewLink) break;
+            const gate = await ReviewService.checkUnscheduledAskGates(customer.id).catch(() => null);
+            if (gate && gate.outcome === 'already_queued') bareOk = false;
+          }
+        }
+        if (bareOk && !reviewLink) reviewLink = office.googleReviewUrl;
+      }
+    }
+
+    // Every score carries the link; `action` only tells the card whether the
+    // office was alerted and the note form should also show (below 8).
     return res.json({
       success: true,
-      action: 'followup',
+      action: isPromoter ? 'review' : 'followup',
+      reviewLink,
+      officeName: office.name,
     });
   } catch (err) {
     next(err);

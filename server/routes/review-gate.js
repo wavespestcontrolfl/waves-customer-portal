@@ -12,8 +12,6 @@ const {
   WAVES_LOCATIONS,
   resolveReviewLocation: resolveReviewLocationCanonical,
 } = require('../config/locations');
-const MODELS = require('../config/models');
-const { dispatchWithFallback } = require('../services/llm/call');
 
 // The GBP profile this ask points at. Delegates to the ONE review-routing
 // resolver in config/locations.js (city → zip → nearest office → the id stored
@@ -362,8 +360,6 @@ router.get('/:token', reviewPageLimiter, async (req, res, next) => {
       firstName: contact.name || customer?.first_name || 'there',
       techName: request.tech_name || 'your technician',
       techPhotoUrl,
-      serviceType: request.service_type || 'pest control service',
-      hasServiceType: Boolean(request.service_type),
       serviceDate: request.service_date,
       locationName: loc.name,
       googleReviewUrl: loc.googleReviewUrl,
@@ -513,9 +509,15 @@ router.post('/:token/submit', reviewPageLimiter, async (req, res, next) => {
       }
     }
 
+    // Every category carries the same googleReviewUrl (owner ruling 2026-09-29:
+    // review asks are neutral — no filtering by satisfaction). Going to Google
+    // is always the customer's own click on the rate page; the server never
+    // sends a redirect for one category only.
+    const googleReviewUrl = loc.googleReviewUrl;
+
     // Handle by category
     if (category === 'promoter') {
-      // Score 8-10: redirect to Google review
+      // Score 8-10
 
       // Fire-and-forget: trigger referral nudge workflow
       try {
@@ -543,8 +545,8 @@ router.post('/:token/submit', reviewPageLimiter, async (req, res, next) => {
 
       return res.json({
         category: 'promoter',
-        redirect: loc.googleReviewUrl,
-        message: 'Thank you! We\'d love if you could share that on Google too.',
+        googleReviewUrl,
+        message: 'Thank you for your feedback!',
       });
     }
 
@@ -552,6 +554,7 @@ router.post('/:token/submit', reviewPageLimiter, async (req, res, next) => {
       // Score 4-7: thank them, save feedback
       return res.json({
         category: 'passive',
+        googleReviewUrl,
         message: 'Thank you for your feedback! We\'re always working to improve.',
       });
     }
@@ -601,163 +604,9 @@ router.post('/:token/submit', reviewPageLimiter, async (req, res, next) => {
 
     return res.json({
       category: 'detractor',
+      googleReviewUrl,
       message: 'Thank you for letting us know. A manager will reach out to make things right.',
     });
-  } catch (err) { next(err); }
-});
-
-// POST /api/rate/:token/generate-review — AI-powered review writer
-// Caps for AI prompt inputs — prevent prompt-injection / runaway prompt size.
-const MAX_LIST_ITEMS = 12;
-const MAX_LIST_ITEM_CHARS = 60;
-const MAX_PERSONAL_NOTE_CHARS = 500;
-
-const sanitizeList = (arr) => {
-  if (!Array.isArray(arr)) return [];
-  return arr
-    .filter((v) => typeof v === 'string')
-    .slice(0, MAX_LIST_ITEMS)
-    .map((v) => v.trim().slice(0, MAX_LIST_ITEM_CHARS))
-    .filter(Boolean);
-};
-
-// Review generation is a paid model call with no other spend control — a
-// promoter legitimately regenerates a handful of times, not dozens.
-const generateReviewLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many drafts — give it a minute and try again.' },
-});
-const generateReviewDailyLimiter = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many drafts today — please try again tomorrow.' },
-});
-
-router.post('/:token/generate-review', generateReviewLimiter, generateReviewDailyLimiter, async (req, res, next) => {
-  try {
-    const { services, highlights, personalNote } = req.body;
-
-    const request = await db('review_requests')
-      .where({ token: req.params.token })
-      .first();
-
-    if (!request) {
-      return res.status(404).json({ error: 'Review link not found' });
-    }
-
-    if (request.expires_at && new Date(request.expires_at) < new Date()) {
-      return res.status(410).json({ error: 'This review link has expired' });
-    }
-
-    // Review writer is the promoter branch only — the client submits the NPS
-    // score first and only then calls this endpoint, so a missing score means
-    // the request is hitting us out of the intended order.
-    if (request.score == null) {
-      return res.status(400).json({ error: 'Submit your rating before generating a review' });
-    }
-    if (request.score < 8) {
-      return res.status(403).json({ error: 'Review writer is available for high-rating responses only' });
-    }
-
-    const customer = await db('customers').where({ id: request.customer_id }).first();
-    const firstName = customer?.first_name || 'there';
-
-    const safeServices = sanitizeList(services);
-    const safeHighlights = sanitizeList(highlights);
-    const safePersonalNote = (typeof personalNote === 'string' ? personalNote : '')
-      .trim()
-      .slice(0, MAX_PERSONAL_NOTE_CHARS);
-
-    // Build the prompt
-    const serviceList = safeServices.length > 0
-      ? safeServices.join(', ')
-      : (request.service_type || 'pest control');
-
-    const highlightList = safeHighlights.length > 0
-      ? safeHighlights.join(', ')
-      : '';
-
-    const personalDetail = safePersonalNote;
-
-    // Vary opening style so Google's dup-detection doesn't flag a pattern
-    // of "Adam was…" across every generated review. One is sampled per call.
-    const OPENING_STYLES = [
-      'start mid-thought, as if the customer is finishing a conversation',
-      'lead with the specific result they got',
-      'lead with the technician\'s behavior',
-      'lead with a short reaction word (e.g. "Really happy", "Super impressed", "Honestly great")',
-      'lead with how the experience compared to expectations',
-      'lead with the service type',
-    ];
-    const style = OPENING_STYLES[Math.floor(Math.random() * OPENING_STYLES.length)];
-
-    const prompt = `Write a genuine Google review for Waves Pest Control (Southwest Florida) from the customer's perspective. Sound like a real SWFL homeowner wrote it on their phone — casual, short, specific.
-
-Context:
-- Customer first name: ${firstName}
-- Services received: ${serviceList}
-${highlightList ? `- What stood out: ${highlightList}` : ''}
-${personalDetail ? `- Customer's own words: "${personalDetail}"` : ''}
-${request.tech_name ? `- Technician: ${request.tech_name}` : ''}
-
-Opening style for this review: ${style}
-
-Rules:
-- 2 to 4 sentences. Vary the length between reviews — sometimes tight, sometimes chattier.
-- No emojis, no hashtags, no star ratings.
-- Do NOT start with "I", "My", "We", or the technician's name.
-- At most one exclamation mark in the whole review; preferably zero.
-- Weave in at least one specific trait or detail; avoid generic filler like "great service" or "highly recommend".
-- Don't say "Waves Pest Control" more than once; never use "WPC" or other abbreviations.
-- No marketing phrases like "5 stars" or "best company ever".
-
-Return ONLY the review body. No quotes, no preamble, no sign-off.`;
-
-    // VOICE-tier customer-voice copy — a warm natural voice beats raw
-    // reasoning for a real Google review — with cross-provider failover;
-    // deterministic template last.
-    let reviewText = '';
-    try {
-      const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
-        laneId: 'review_gate_text',
-        text: prompt,
-        jsonMode: false,
-        maxTokens: 256,
-      });
-      if (!result.ok) throw new Error('both AI providers unavailable');
-      reviewText = result.text?.trim() || '';
-      // Strip accidental quotes or "Review:" preambles
-      reviewText = reviewText.replace(/^["']+|["']+$/g, '').replace(/^(Review|My review):\s*/i, '').trim();
-    } catch (aiErr) {
-      logger.error(`[review-gate] AI review generation failed: ${aiErr.message}`);
-      // Fallback: generate a simple template
-      const parts = [];
-      if (highlightList) parts.push(`They were ${highlightList.toLowerCase()}`);
-      if (request.tech_name) parts.push(`${request.tech_name} did a great job`);
-      parts.push(`Really happy with the ${serviceList.toLowerCase()} service from Waves Pest Control`);
-      if (personalDetail) parts.push(personalDetail);
-      parts.push('Would definitely recommend them to anyone in Southwest Florida.');
-      reviewText = parts.join('. ') + (parts[parts.length - 1].endsWith('.') ? '' : '.');
-    }
-
-    // Persist so we can audit variation + iterate the prompt. Soft-fail:
-    // if the column isn't present yet (pre-migration env) the API still
-    // returns the draft.
-    try {
-      await db('review_requests').where({ id: request.id }).update({
-        generated_review_text: reviewText.slice(0, 2000),
-        generated_at: db.fn.now(),
-      });
-    } catch (persistErr) {
-      logger.warn(`[review-gate] generated_review_text persist skipped: ${persistErr.message}`);
-    }
-
-    res.json({ review: reviewText });
   } catch (err) { next(err); }
 });
 
