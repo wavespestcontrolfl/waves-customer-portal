@@ -9,7 +9,11 @@
 //
 // Two populations, both landing in call_commitments via email_id:
 //  - ASKS: inbound emails already classified customer_request / complaint /
-//    scheduling, customer-linked by the Gmail sync itself (email-sync.js).
+//    scheduling / lead_inquiry, customer-linked by the Gmail sync itself
+//    (email-sync.js). lead_inquiry is usually a brand-new lead (customer_id
+//    NULL — excluded here by the customer_id gate, never a genuine ask), but
+//    an EXISTING customer replying on an old estimate/lead thread often
+//    classifies the same way (owner diagnostic, 2026-09-29).
 //  - STAFF PROMISES: a person's Gmail SENT row (never automated — see
 //    email-customer-link.js) resolved to a customer.
 //
@@ -33,7 +37,15 @@ const NotificationService = require('./notification-service');
 
 const VERSION = `${EXTRACTOR_VERSION}:email`;
 const enabled = () => gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
-const CLASSIFICATIONS = ['customer_request', 'complaint', 'scheduling'];
+// lead_inquiry included (owner diagnostic, 2026-09-29): the classifier's
+// lead_inquiry label is written for a NEW lead by default, but an EXISTING
+// customer replying on an old estimate/lead thread ("does your lawn care
+// include tree and shrub?", "is this spray dog friendly?") classifies the
+// same way — 6 of 9 real asks in one production week were exactly this. A
+// genuine new lead is customer_id NULL and is excluded regardless, by the
+// customer_id gates already on both call sites below (whereNotNull /
+// eligibleAskEmail) — never a separate check on this list.
+const CLASSIFICATIONS = ['customer_request', 'complaint', 'scheduling', 'lead_inquiry'];
 const PAGE_INTAKE = 30;
 const PAGE_REFRESH = 25;
 // Shared source_type for the receipt store (coordinator correction #2,

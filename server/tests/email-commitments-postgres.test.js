@@ -111,6 +111,33 @@ postgres('Email commitments on PostgreSQL', () => {
     expect((await mockPg('emails').where({ id: email.id }).first()).operational_analysis).toMatchObject({ dropped: 0 });
   });
 
+  // Owner diagnostic, 2026-09-29: 6 of 9 real asks in one production week
+  // were classified lead_inquiry on an EXISTING customer's reply thread —
+  // included here only because customer_id is set; a genuine new lead
+  // (customer_id NULL) stays excluded by the same gate, never a separate
+  // classification check.
+  test('intake: an inbound lead_inquiry email on an EXISTING customer becomes an ask too', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'lead_inquiry',
+      body_text: 'Does your lawn care include shrub and tree care?', subject: 'Re: Your Waves estimate is ready' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'other',
+      description: 'lawn care include shrub and tree care', quote: 'Does your lawn care include shrub and tree care?',
+      basis: 'request', property_id: null, due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }],
+      facts: [], additional_properties: [] } });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ processed: 1, failed: 0 });
+    const row = await mockPg('call_commitments').where({ email_id: email.id }).first();
+    expect(row).toMatchObject({ party: 'waves', channel: 'email' });
+  });
+
+  test('intake: a lead_inquiry email with NO customer_id (a genuine new lead) is never tracked as an ask', async () => {
+    const email = await insertEmail({ customer_id: null, classification: 'lead_inquiry',
+      body_text: 'I would like a quote please. 123 Test Ave, Sarasota FL', subject: 'New inquiry' });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ processed: 0, failed: 0 });
+    expect(await mockPg('call_commitments').where({ email_id: email.id })).toHaveLength(0);
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('intake: a person-sent Gmail SENT reply, threaded to a customer-linked inbound email, becomes a staff promise', async () => {
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request' });
     const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
@@ -217,6 +244,51 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(evidence.records.some((r) => r.type === 'email_reply' && r.id === reply.id)).toBe(true);
     const fulfillment = replyFulfillment(evidence, commitment);
     expect(fulfillment).toMatchObject({ verdict: 'fulfilled', record_type: 'email_reply', record_id: reply.id, basis: 'person_reply' });
+  });
+
+  // Coordinator correction #3, 2026-09-29 (BUG): to_address is the raw
+  // header value ("Name <addr>", or a comma-separated list), never a bare
+  // address — a plain `=` comparison never matched it, so 23 real SENT
+  // rows to gmail.com resolved to no customer in production. These prove
+  // the fix in BOTH resolveEmailCustomerLink directly and the evidence
+  // loader's own SQL prefilter (which shares the same underlying bug).
+  test('D1 via to_address resolution (no thread partner): a "Name <addr>" SENT reply still resolves and closes an SMS ask', async () => {
+    const sourceAt = new Date();
+    const [smsRow] = await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'inbound',
+      message_body: 'Did you come to my house today?', from_phone: '+12025550101', to_phone: '+19418889999',
+      created_at: sourceAt, status: 'received' }).returning('*');
+    const [commitment] = await mockPg('call_commitments').insert({ sms_log_id: smsRow.id, commitment_key: 'waves:other:ask-toaddr1',
+      party: 'waves', kind: 'other', description: 'Did you come to my house today?', channel: 'sms',
+      due_at: null, due_basis: null, source: 'ai', extractor_version: 'sms-ops-v22',
+      evidence: JSON.stringify([{ quote: 'Did you come to my house today?', sms_log_id: smsRow.id, matched: true, speaker: 'caller' }]),
+      sms_context: { basis: 'request', due_text: null, property_id: null, customer_id: customerId, source_at: sourceAt.toISOString() } })
+      .returning('*');
+    // No thread partner at all — resolution must come from to_address
+    // alone, in the raw "Name <addr>" shape Gmail actually stores.
+    const reply = await insertEmail({ gmail_thread_id: randomUUID(), to_address: 'Dryrun Fixture <customer@example.invalid>',
+      from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null,
+      body_text: 'Yes, all done — thanks!', label_ids: JSON.stringify(['SENT']),
+      received_at: new Date(sourceAt.getTime() + 60000) });
+    const { loadSmsFulfillmentEvidence, replyFulfillment } = require('../services/sms-commitment-fulfillment');
+    const message = { id: smsRow.id, customer_id: customerId, direction: 'inbound', from_phone: '+12025550101', to_phone: '+19418889999', created_at: sourceAt };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(reply.received_at.getTime() + 2000));
+    expect(evidence.records.some((r) => r.type === 'email_reply' && r.id === reply.id)).toBe(true);
+    expect(replyFulfillment(evidence, commitment)).toMatchObject({ verdict: 'fulfilled', record_type: 'email_reply', record_id: reply.id });
+  });
+
+  test('resolveEmailCustomerLink: a two-recipient to_address resolves when exactly one is an active customer', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'someone.else@nowhere.invalid, customer@example.invalid' };
+    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
+  });
+
+  test('resolveEmailCustomerLink: two recipients matching two different customers resolves to nobody (never guesses)', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const otherId = randomUUID();
+    await mockPg('customers').insert({ id: otherId, first_name: 'Other', last_name: 'Fixture',
+      phone: '+12025559999', email: 'other.customer@example.invalid', address_line1: '2 Fixture Way', city: 'Sarasota', zip: '34236' });
+    const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'other.customer@example.invalid, customer@example.invalid' };
+    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
   });
 
   test('D1 reverse: an SMS reply closes an email-sourced general ask (through refreshEmailCommitments end-to-end)', async () => {

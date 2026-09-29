@@ -299,9 +299,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     // 2026-09-29). Distinct from `email` (inbound customer mail) and
     // `email_delivery` (automated SendGrid sends, e.g. invoices/reminders —
     // never "a person replied" and left untouched here). The candidate
-    // query is a cheap pre-filter (thread join, or to_address matching
-    // THIS customer's own email); resolveEmailCustomerLink is still the
-    // authoritative check below, so an ambiguous thread never counts.
+    // query is a cheap pre-filter (thread join, or to_address containing
+    // THIS customer's own email as a substring — to_address is a raw
+    // header value, never a bare address); resolveEmailCustomerLink is
+    // still the authoritative check below, so an ambiguous thread, or a
+    // substring hit that does not truly resolve, never counts.
     email_reply: (async () => {
       const candidates = await conn('emails as er')
         .whereRaw(personSentFilter('er'))
@@ -309,8 +311,15 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         .where((q) => q.whereExists(function threadLink() {
           this.select(1).from('emails as inbound').whereRaw('inbound.gmail_thread_id = er.gmail_thread_id')
             .where('inbound.customer_id', customerId);
+        // to_address is the raw header value ("Name <addr>", or a
+        // comma-separated list for multiple recipients — coordinator
+        // correction #3, 2026-09-29), never a bare address; a plain `=`
+        // comparison never matches it. This is a pre-filter only (a
+        // substring LIKE, wide on purpose) — resolveEmailCustomerLink
+        // below is the authoritative parse-and-match, so a coincidental
+        // substring hit here that does not truly resolve is dropped there.
         }).orWhereRaw(
-          `LOWER(TRIM(er.to_address)) = (SELECT LOWER(TRIM(email)) FROM customers WHERE id = ? AND deleted_at IS NULL AND email IS NOT NULL)`,
+          `LOWER(er.to_address) LIKE '%' || (SELECT LOWER(TRIM(email)) FROM customers WHERE id = ? AND deleted_at IS NULL AND email IS NOT NULL) || '%'`,
           [customerId],
         ))
         .orderBy('er.received_at', 'desc').limit(LIMIT + 1)

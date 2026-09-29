@@ -7,9 +7,6 @@
 // ceiling, laneId and promptVersion.
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 
-const fs = require('fs');
-const path = require('path');
-const { execFileSync } = require('child_process');
 const { buildPrompt, extractSmsOperations, VERSION } = require('../services/sms-operational-extractor');
 const { dispatchWithFallback } = require('../services/llm/call');
 
@@ -100,46 +97,12 @@ describe('sms-operational-extractor channel param', () => {
   });
 });
 
-// Coordinator correction #7 security-fix follow-up (2026-09-29): buildPrompt
-// with channel omitted must be byte-for-byte identical to HEAD's version of
-// this file from BEFORE the channel param existed — not just "close" or
-// "passes the same assertions". HEAD predates every edit this session made
-// (nothing has been committed), so it is exactly the pre-channel-param
-// source. The original file is checked out to a SIBLING path (so its own
-// relative requires — ./llm/call, ../config/models, etc. — still resolve)
-// and deleted again in afterAll; it is never left behind or committed.
-describe('SMS prompt byte-identity vs the pre-channel-param original (git HEAD)', () => {
-  const repoRoot = path.join(__dirname, '..', '..');
-  const originalPath = path.join(__dirname, '..', 'services', 'sms-operational-extractor.original-head.js');
-  let originalBuildPrompt;
-
-  beforeAll(() => {
-    const original = execFileSync('git', ['show', 'HEAD:server/services/sms-operational-extractor.js'], { cwd: repoRoot, encoding: 'utf8' });
-    // Sanity: HEAD really is the pre-channel-param source (hardcodes "CURRENT
-    // SMS" literally; never introduces the channelLabel variable this
-    // session's channel param added).
-    expect(original).toContain('CURRENT SMS for Waves Pest Control');
-    expect(original).not.toContain('channelLabel');
-    fs.writeFileSync(originalPath, original);
-    originalBuildPrompt = require(originalPath).buildPrompt;
-  });
-
-  afterAll(() => {
-    fs.unlinkSync(originalPath);
-  });
-
-  test('buildPrompt(channel omitted) is byte-for-byte identical to the pre-channel-param original', () => {
-    const message = baseMessage('Please send the estimate');
-    const expected = originalBuildPrompt({ message, properties: [] });
-    const actual = buildPrompt({ message, properties: [] });
-    expect(actual).toBe(expected);
-  });
-
-  test('same identity holds with history, a property, and captureAdditionalProperties on', () => {
-    const history = [baseMessage('Earlier message', { created_at: '2040-03-10T14:00:00Z' })];
-    const message = baseMessage('Please send the estimate for my second property');
-    const properties = [{ id: '00000000-0000-4000-8000-000000000301' }, { id: '00000000-0000-4000-8000-000000000302' }];
-    const args = { message, history, properties, captureCommitments: true, captureAdditionalProperties: true };
-    expect(buildPrompt(args)).toBe(originalBuildPrompt(args));
-  });
-});
+// The one-time byte-identity proof against `git show HEAD` (coordinator
+// correction #7, 2026-09-29) lived here while the channel param was still
+// uncommitted working-tree state; the round it proved is now committed as
+// 5369f27f97, so HEAD itself carries the channel param and the comparison
+// would only ever assert the file equals itself. Removed rather than kept
+// as a permanently-vacuous (and, once any future PR touches this file for
+// an unrelated reason, spuriously failing) test — the exact-string checks
+// above ("SMS prompt (channel omitted) is byte-identical...") remain the
+// live regression proof for the SMS path's wording.

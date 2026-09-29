@@ -37,6 +37,19 @@ function personSentFilter(alias) {
   return `jsonb_exists(${alias}.label_ids::jsonb, 'SENT') AND NOT jsonb_exists(${alias}.label_ids::jsonb, 'INBOX')`;
 }
 
+// Gmail's own to_address column is the raw header VALUE, never a bare
+// address — "Jamie Fixture <jamie@example.invalid>", or a comma-separated
+// list for multiple recipients (owner diagnostic, 2026-09-29: 23 SENT rows
+// to gmail.com resolved to no one because of this — the raw value was
+// compared directly against customers.email). Pull every email-shaped
+// substring out, regardless of a display name or how many recipients —
+// this also naturally ignores a display name that happens to contain a
+// comma ("Fixture, Jamie <jamie@example.invalid>").
+function extractEmailAddresses(raw) {
+  const matches = String(raw || '').match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g) || [];
+  return [...new Set(matches.map((a) => a.toLowerCase()))];
+}
+
 async function resolveEmailCustomerLink(conn, row) {
   if (!row?.gmail_thread_id && !row?.to_address) return null;
   if (row.gmail_thread_id) {
@@ -48,11 +61,15 @@ async function resolveEmailCustomerLink(conn, row) {
     if (threadCustomers.length === 1) return threadCustomers[0];
     if (threadCustomers.length > 1) return null; // a mixed thread never guesses
   }
-  const toAddress = String(row.to_address || '').trim().toLowerCase();
-  if (!toAddress) return null;
+  const toAddresses = extractEmailAddresses(row.to_address);
+  if (!toAddresses.length) return null;
+  // Multiple recipients: resolve only when the addresses collectively name
+  // exactly one distinct active customer — never "the first one," and
+  // never guess between two different customers on the same send.
   const matches = await conn('customers').whereNull('deleted_at').whereNotNull('email')
-    .whereRaw('LOWER(TRIM(email)) = ?', [toAddress]).pluck('id');
-  return matches.length === 1 ? matches[0] : null;
+    .whereIn(conn.raw('LOWER(TRIM(email))'), toAddresses).pluck('id');
+  const distinct = [...new Set(matches)];
+  return distinct.length === 1 ? distinct[0] : null;
 }
 
-module.exports = { personSentFilter, resolveEmailCustomerLink };
+module.exports = { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses };
