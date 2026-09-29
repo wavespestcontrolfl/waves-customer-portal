@@ -71,7 +71,24 @@ const callContactSelects = (conn, table = 'call_log') => [
   conn.raw(`${table}.metadata->'customer_leg'->>'duration_seconds' as customer_leg_seconds`),
 ];
 
+// The same three predicates as SQL conditions over a table alias, for a scan
+// that must ask "does this row STILL count" of many rows at once (the lapse
+// scan, call-commitments.js). Each mirrors its JS twin above exactly; the
+// tests hold the two together on a matrix of rows. Null-safe callers compare
+// with IS NOT TRUE. No bare question mark in any of them: a knex raw would
+// read it as a binding.
+const operatorReplySql = (table = 'sms_log') => `(${operatorSentSql(table)} OR ${table}.message_type IN (${STAFF_APPROVED_SMS_TYPES.map((t) => `'${t}'`).join(', ')}))`;
+const smsDeliveredSql = (table = 'sms_log') => `(${table}.status = 'delivered' OR (${table}.status = 'sent' AND COALESCE(${table}.metadata->>'providerAccepted', '') = 'true'
+  AND (${table}.from_phone = 'push' OR COALESCE(${table}.metadata->>'channel', '') = 'push')))`;
+const personCallBackSql = (table = 'call_log') => `(${table}.source IN (${STAFF_CALL_SOURCES.map((s) => `'${s}'`).join(', ')})
+  AND ${table}.v2_extraction_status = 'valid' AND ${table}.ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'
+  AND (${table}.metadata->'customer_leg'->>'status' IS NULL
+    OR (${table}.metadata->'customer_leg'->>'status' = 'completed'
+      AND CASE WHEN ${table}.metadata->'customer_leg'->>'duration_seconds' ~ '^\\s*[0-9]+(\\.[0-9]+){0,1}\\s*$'
+        THEN (${table}.metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END)))`;
+
 module.exports = {
   STAFF_APPROVED_SMS_TYPES, STAFF_CALL_SOURCES, operatorReply, personCallBack, smsDelivered,
   operatorSentSql, smsContactSelects, callContactSelects,
+  operatorReplySql, smsDeliveredSql, personCallBackSql,
 };
