@@ -421,17 +421,53 @@ suite('email division against real Postgres', () => {
   });
 
   // Legacy rows (written before the client_pest_rating_defaulted column
-  // existed, 2026-09-29) carry NULL and cannot be told apart from a chosen
-  // rating except by shape: a first visit rated exactly 5. Only a legacy row
-  // dated at/after the default's 2026-09-24T10:21:12Z ship instant could be
-  // the default, so only that one is excluded on suspicion.
-  test('getActivityRatingAverages: a legacy NULL-flag first-visit rating of 5 dated AFTER the default shipped is excluded on suspicion', async () => {
-    const customerId = await makeCustomer();
-    await makeTechRatedVisits(customerId, 25, {
-      visit_number: 1, service_line: 'mosquito', client_pest_rating: 5, client_pest_rating_at: '2026-09-25T12:00:00Z',
-    });
+  // existed, 2026-09-29) carry NULL. One could be the untouched default only
+  // if it is a customer's FIRST PERFORMED visit on the line (the default's
+  // own history rule — not visit_number, which also counts inspection-only,
+  // declined, incomplete and internal closeouts; codex round 1 on #5330),
+  // rated exactly 5 and dated at/after the default's 2026-09-24T10:21:12Z
+  // ship instant. Only such a row is excluded on suspicion. Each fixture
+  // customer gets explicit created_at values: inside one test transaction
+  // now() is constant, and "prior" means a record that existed first.
+  async function legacyCohort(count, { line, ratingAt, prior = null, visit }) {
+    for (let i = 0; i < count; i++) {
+      const customerId = await makeCustomer();
+      if (prior) {
+        await makeVisit(customerId, { service_line: line, created_at: '2026-09-20T12:00:00Z', ...prior });
+      }
+      await makeTechRatedVisits(customerId, 1, {
+        service_line: line, client_pest_rating: 5, client_pest_rating_at: ratingAt, created_at: ratingAt, ...visit,
+      });
+    }
+  }
+
+  test('getActivityRatingAverages: a legacy NULL-flag 5 on a customer\'s first performed visit, dated AFTER the default shipped, is excluded on suspicion', async () => {
+    await legacyCohort(25, { line: 'mosquito', ratingAt: '2026-09-25T12:00:00Z', visit: { visit_number: 1 } });
     const { byVisit } = await getActivityRatingAverages({ conn: trx });
     expect(byVisit.mosquito?.[1]).toBeUndefined();
+  });
+
+  test('getActivityRatingAverages: the first PERFORMED visit is judged by the default\'s history rule, not visit_number — a 5 on visit 2 after an inspection-only closeout is excluded', async () => {
+    await legacyCohort(25, {
+      line: 'mosquito',
+      ratingAt: '2026-09-25T12:00:00Z',
+      prior: { visit_number: 1, structured_notes: { visitOutcome: 'inspection_only' } },
+      visit: { visit_number: 2 },
+    });
+    const { byVisit } = await getActivityRatingAverages({ conn: trx });
+    expect(byVisit.mosquito?.[2]).toBeUndefined();
+  });
+
+  test('getActivityRatingAverages: a legacy NULL-flag 5 on a LATER performed visit (a performed visit came first) is kept — the default never applies there', async () => {
+    await legacyCohort(25, {
+      line: 'mosquito',
+      ratingAt: '2026-09-25T12:00:00Z',
+      prior: { visit_number: 1, client_pest_rating: 2, client_pest_rating_source: 'technician', service_date: '2026-09-15' },
+      visit: { visit_number: 2 },
+    });
+    const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
+    expect(byVisit.mosquito[2]).toBe(5);
+    expect(counts.mosquito[2]).toBe(25);
   });
 
   test('getActivityRatingAverages: a legacy NULL-flag first-visit rating of 5 dated BEFORE the default shipped is kept — no default existed yet', async () => {
@@ -444,16 +480,6 @@ suite('email division against real Postgres', () => {
     const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
     expect(byVisit.rodent[1]).toBe(5);
     expect(counts.rodent[1]).toBe(25);
-  });
-
-  test('getActivityRatingAverages: a legacy NULL-flag rating of 5 on a visit OTHER than the first is kept — the default only ever applies to visit_number 1', async () => {
-    const customerId = await makeCustomer();
-    await makeTechRatedVisits(customerId, 25, {
-      visit_number: 2, service_line: 'mosquito', client_pest_rating: 5, client_pest_rating_at: '2026-09-25T12:00:00Z',
-    });
-    const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
-    expect(byVisit.mosquito[2]).toBe(5);
-    expect(counts.mosquito[2]).toBe(25);
   });
 
   // Four cities, one recompute: Ellenton (4 visits, below the 5-visit floor

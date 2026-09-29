@@ -24,7 +24,7 @@ const db = require('../../models/db');
 const { etDateString } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
-const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
+const { NON_PERFORMED_VISIT_OUTCOMES, applyPerformedVisitHistoryFilter } = require('../pest-pressure/first-visit');
 const { applicationAreaValues, uniqueStrings, normalizeAdvisoryForTreatmentScope, resolveTracedExteriorZone } = require('../service-report/report-data');
 
 // Every label entry cites a fact in the email-division fact register
@@ -527,7 +527,9 @@ const FIRST_VISIT_DEFAULT_SHIPPED_AT = '2026-09-24T10:21:12Z';
  *      confirmed it was the untouched default.
  *   2. A row where the flag IS NULL (written before this column existed)
  *      cannot be told apart from a chosen rating by any stored field except
- *      shape: a first visit (visit_number = 1) rated exactly 5, timestamped
+ *      shape: the customer's first PERFORMED visit on the line (judged by
+ *      the default's own history rule, applyPerformedVisitHistoryFilter —
+ *      not visit_number) rated exactly 5, timestamped
  *      (client_pest_rating_at, falling back to the service date when that
  *      column is null) at or after the default's ship instant
  *      (FIRST_VISIT_DEFAULT_SHIPPED_AT), is excluded on suspicion — it
@@ -540,11 +542,26 @@ async function getActivityRatingAverages({ conn = db } = {}) {
     .whereNotNull('client_pest_rating').whereNotNull('visit_number').whereNotNull('service_line')
     .whereRaw("LOWER(COALESCE(client_pest_rating_source, '')) = 'technician'")
     .where((qb) => qb.whereNull('client_pest_rating_defaulted').orWhere('client_pest_rating_defaulted', false))
+    // A legacy (NULL-flag) 5 from after the default shipped is the default
+    // when it was the customer's FIRST PERFORMED visit on the line — judged
+    // by the default's own history rule (applyPerformedVisitHistoryFilter,
+    // shared with customerHasPriorVisitOnLine), not by visit_number, which
+    // also counts inspection-only / declined / incomplete / internal
+    // closeouts (codex round 1 on #5330). "Prior" = a record that existed
+    // before this one (created_at), as at completion time. A record with no
+    // customer never received the default and is kept.
     .whereNot((qb) => qb
-      .whereNull('client_pest_rating_defaulted')
-      .where('visit_number', 1)
-      .where('client_pest_rating', 5)
-      .whereRaw('COALESCE(client_pest_rating_at, service_date) >= ?::timestamptz', [FIRST_VISIT_DEFAULT_SHIPPED_AT]));
+      .whereNull('service_records.client_pest_rating_defaulted')
+      .whereNotNull('service_records.customer_id')
+      .where('service_records.client_pest_rating', 5)
+      .whereRaw('COALESCE(service_records.client_pest_rating_at, service_records.service_date) >= ?::timestamptz', [FIRST_VISIT_DEFAULT_SHIPPED_AT])
+      .whereNotExists(function priorPerformedVisit() {
+        this.select(conn.raw('1')).from('service_records as prior')
+          .whereColumn('prior.customer_id', 'service_records.customer_id')
+          .whereColumn('prior.id', '<>', 'service_records.id')
+          .whereColumn('prior.created_at', '<', 'service_records.created_at');
+        applyPerformedVisitHistoryFilter(this, { alias: 'prior', serviceLineColumn: 'service_records.service_line' });
+      }));
   applyCustomerVisibleServiceRecordFilter(query);
   query.whereRaw(
     `COALESCE(service_records.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,

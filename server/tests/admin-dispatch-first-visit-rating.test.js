@@ -30,15 +30,16 @@ describe('tech-rating-allowed firstVisit (owner ruling 2026-09-24)', () => {
     expect(calls.table).toBe('service_records');
     expect(calls.where).toEqual(expect.arrayContaining([
       ['customer_id', 'c1'],
-      ['status', 'completed'],
-      ['service_line', 'pest'],
+      // table-qualified by the shared history filter (applyPerformedVisitHistoryFilter)
+      ['service_records.status', 'completed'],
+      ['service_records.service_line', 'pest'],
     ]));
     expect(calls.whereRaw.join(' ')).toMatch(/typedReportDelivery/);
     // Non-performed visits (inspection only, declined, incomplete) never
     // count as a prior visit (codex r5 P2).
     expect(calls.whereRaw.join(' ')).toMatch(/visitOutcome/);
     // Legacy null-line rows count as prior visits (codex r1 P2).
-    expect(calls.orWhereNull).toBe('service_line');
+    expect(calls.orWhereNull).toBe('service_records.service_line');
   });
 
   test('a prior completed record on the line → not a first visit', async () => {
