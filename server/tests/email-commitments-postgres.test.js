@@ -174,6 +174,45 @@ postgres('Email commitments on PostgreSQL', () => {
     expect((await mockPg('call_commitments').first())).toMatchObject({ status: 'fulfilled' });
   });
 
+  test('a new lead asks for a quote before any property exists; the one property created later scopes the check', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'lead_inquiry',
+      body_text: 'Yes I would like a quote please', subject: 'Re: thanks for reaching out' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+      description: 'would like a quote', quote: 'Yes I would like a quote please', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date(email.received_at.getTime() + 1000) });
+    const commitment = await mockPg('call_commitments').first();
+    expect(commitment.sms_context.property_id ?? null).toBeNull();
+    // Accepting the estimate creates the property after the email arrived.
+    const [property] = await mockPg('customer_properties').insert({ customer_id: customerId,
+      address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true }).returning('*');
+    const deliveredAt = new Date(email.received_at.getTime() + 10 * 60000);
+    const [estimate] = await mockPg('estimates').insert({ customer_id: customerId, property_id: property.id,
+      status: 'accepted', service_interest: 'Pest Control', estimate_data: { deliveryState: { lastDeliveredAt: deliveredAt.toISOString() } } }).returning('id');
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'fulfilled', record_ref: `estimate:${estimate.id}`, quote: 'Pest Control' } });
+    const refresh = await refreshEmailCommitments({ conn: mockPg, now: new Date(commitment.due_at.getTime() + 60000) });
+    expect(refresh).toMatchObject({ scanned: 1, fulfilled: 1 });
+    const closed = await mockPg('call_commitments').first();
+    expect(closed).toMatchObject({ status: 'fulfilled' });
+    expect(closed.sms_context).toMatchObject({ property_id: property.id, property_adopted: true });
+  });
+
+  test('an unscoped ask is never given a property when the customer now has two', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'lead_inquiry', body_text: 'Yes I would like a quote please' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+      description: 'would like a quote', quote: 'Yes I would like a quote please', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date(email.received_at.getTime() + 1000) });
+    const commitment = await mockPg('call_commitments').first();
+    await mockPg('customer_properties').insert([
+      { customer_id: customerId, address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true },
+      { customer_id: customerId, address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true }]);
+    await refreshEmailCommitments({ conn: mockPg, now: new Date(commitment.due_at.getTime() + 60000) });
+    const row = await mockPg('call_commitments').first();
+    expect(row.status).toBe('open');
+    expect(row.sms_context.property_id ?? null).toBeNull();
+  });
+
   // Same rule as SMS's own belt-and-suspenders check (sms-operational-actions.js
   // ~L569): a property is stamped only when it is the customer's SOLE active
   // property AND the model actually named that exact id — never guessed

@@ -279,6 +279,16 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
 // falling back to the row's snapshot) and must still agree, or a merge
 // raced this tick and the row is left for the next one (mirrors
 // sms-operational-actions.js's lockLiveCommitment sameSource check).
+// A new lead's first email usually arrives before they have a property (it
+// is created when they accept an estimate), so intake could not scope the
+// ask. When the ask still names no property and the customer now has exactly
+// one, check against that one; with several, never guess.
+async function soleProperty(conn, row, customerId) {
+  if (row.sms_context?.property_id) return {};
+  const properties = await conn('customer_properties').where({ customer_id: customerId, active: true }).limit(2).pluck('id');
+  return properties.length === 1 ? { property_id: properties[0], property_adopted: true } : {};
+}
+
 async function lockLiveEmailCommitment(trx, row, expectedCustomerId) {
   const customer = expectedCustomerId && await trx('customers').where({ id: expectedCustomerId }).whereNull('deleted_at').forUpdate().first('id');
   const source = customer && await trx('emails').where({ id: row.email_id }).forUpdate().first('id', 'customer_id');
@@ -305,7 +315,7 @@ async function refreshEmailCommitment(conn, row, now, verify) {
   // Stamp the resolved id back into sms_context (the same shape the SMS
   // loop's `current` patch takes) so a merge that moved the customer is
   // reflected the next time this row is read, not just used in-memory here.
-  const current = { ...row, sms_context: { ...row.sms_context, customer_id: customerId } };
+  const current = { ...row, sms_context: { ...row.sms_context, customer_id: customerId, ...await soleProperty(conn, row, customerId) } };
   const sourceAt = row.sms_context?.source_at;
   // sms/call evidence matches on the CUSTOMER'S OWN phone (loadSmsFulfillmentEvidence
   // derives its "peer" from message.direction/from_phone/to_phone); an
@@ -323,8 +333,12 @@ async function refreshEmailCommitment(conn, row, now, verify) {
   const verdict = await verify(current, evidence, { now });
   let closed = false;
   await conn.transaction(async (trx) => {
-    const live = await lockLiveEmailCommitment(trx, row, customerId);
-    if (!live) return;
+    const locked = await lockLiveEmailCommitment(trx, row, customerId);
+    if (!locked) return;
+    // Revalidate against the same property scope the verdict was reached under.
+    const { customer_id: scopedCustomer, property_id: scopedProperty, property_adopted: adopted } = current.sms_context;
+    const live = { ...locked, sms_context: { ...locked.sms_context, customer_id: scopedCustomer,
+      ...(scopedProperty ? { property_id: scopedProperty } : {}), ...(adopted ? { property_adopted: true } : {}) } };
     if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, live, message, verdict, now)) return;
     // Cache the verdict (evidence_hash, and any provider retry_after) so an
     // unchanged next tick reuses it instead of paying for another model
