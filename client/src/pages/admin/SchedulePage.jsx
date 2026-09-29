@@ -316,6 +316,22 @@ export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, 
 const MARKER_LINE_RX = new RegExp(completionMarkerGrammar.lineSource);
 const ENTRY_WHITESPACE_RX = new RegExp(completionMarkerGrammar.whitespaceSource, "g");
 const ENTRY_MAX_LENGTH = completionMarkerGrammar.maxLength;
+const ENTRY_MAX_COUNT = completionMarkerGrammar.maxEntries;
+// Problems a submit would otherwise hide: the server keeps at most
+// ENTRY_MAX_COUNT entries per list and cuts each to ENTRY_MAX_LENGTH, so the
+// client rejects instead of losing text silently. Each row is
+// [label, everyEntryThatPersists, linesToLengthCheck], both already through
+// normalizedEntries.
+export function entryLimitProblems(rows) {
+  return rows.flatMap(([label, entries, lines]) => [
+    ...(entries.length > ENTRY_MAX_COUNT
+      ? [`${label}: at most ${ENTRY_MAX_COUNT} entries total (${entries.length} entered)`]
+      : []),
+    ...(lines.some((line) => line.length > ENTRY_MAX_LENGTH)
+      ? [`${label}: keep each line under ${ENTRY_MAX_LENGTH} characters`]
+      : []),
+  ]);
+}
 // The entries a submit will actually persist, per the server's
 // normalizeCompletionTextArray (same shared constants): trim, collapse
 // whitespace, drop empties, dedupe case-insensitively on the persisted
@@ -17137,39 +17153,25 @@ export function CompletionPanel({
     // (codex r8: the typed recommendation is appended last and vanished
     // first).
     {
-      const freeTextProblems = [];
-      const mergedCounts = [
-        [
-          "Completed actions",
-          completedActions.length,
-          completedActions,
-        ],
-        [
-          "Observations",
-          activeSelectedLabels(selectedObservationLabels).length +
-            observationFreeText().length,
-          observationFreeText(),
-        ],
-        [
-          "Recommendations",
-          activeSelectedLabels(selectedRecommendationLabels).length +
-            recommendationFreeText().length +
-            (isTypedFindings && typedRecommendations.trim() ? 1 : 0),
-          recommendationFreeText(),
-        ],
-      ];
-      for (const [label, mergedCount, lines] of mergedCounts) {
-        if (mergedCount > 20) {
-          freeTextProblems.push(
-            `${label}: at most 20 entries total (${mergedCount} entered)`,
-          );
-        }
-        // the merged lines ([Found]/[Next] and parked ones included) are what
-        // persist — a long tagged line would otherwise be sliced at 240
-        if (lines.some((line) => line.length > ENTRY_MAX_LENGTH)) {
-          freeTextProblems.push(`${label}: keep each line under 240 characters`);
-        }
-      }
+      // Counted on the entries the server will persist (trim, whitespace
+      // collapse, case-insensitive dedupe — normalizedEntries), so a
+      // whitespace-variant duplicate of a chip label never counts twice. The
+      // typed recommendation is intentionally packed to one 240-char entry
+      // at submit, so it counts but is not length-rejected.
+      const observationEntries = normalizedEntries([
+        ...activeSelectedLabels(selectedObservationLabels),
+        ...observationFreeText(),
+      ]);
+      const recommendationEntries = normalizedEntries([
+        ...activeSelectedLabels(selectedRecommendationLabels),
+        ...recommendationFreeText(),
+        ...(isTypedFindings && typedRecommendations.trim() ? [typedRecommendations] : []),
+      ]);
+      const freeTextProblems = entryLimitProblems([
+        ["Completed actions", completedActions, completedActions],
+        ["Observations", observationEntries, normalizedEntries(observationFreeText())],
+        ["Recommendations", recommendationEntries, normalizedEntries(recommendationFreeText())],
+      ]);
       if (freeTextProblems.length) {
         alert(`Shorten these before submitting — ${freeTextProblems.join("; ")}.`);
         return;

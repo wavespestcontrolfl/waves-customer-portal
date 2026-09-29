@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   completionAreasForTypedFindings,
   labelsPresentInMarkerNotes,
+  entryLimitProblems,
   normalizedEntries,
   reconcileProtocolActions,
   withoutProtocolMarkerLines,
@@ -269,6 +270,28 @@ describe("submit reconciliation of protocol action markers", () => {
 
   it("normalizes entries the way the server does", () => {
     expect(normalizedEntries(["  a   b ", "A B", "", "   ", "c"])).toEqual(["a b", "c"]);
+  });
+
+  it("counts observations and recommendations on the entries the server persists", () => {
+    const labels = Array.from({ length: 19 }, (_, i) => `Finding ${i}`);
+    // A whitespace/case variant of a chip label and of a free line is the same
+    // persisted entry: 19 labels + 1 unique free line = 20, not blocked.
+    const entries = normalizedEntries([...labels, "  finding   3 ", "Extra   sighting", "extra sighting"]);
+    expect(entries).toHaveLength(20);
+    expect(entryLimitProblems([["Observations", entries, entries]])).toEqual([]);
+    const over = normalizedEntries([...entries, "One more"]);
+    expect(entryLimitProblems([["Observations", over, over]])).toEqual([
+      "Observations: at most 20 entries total (21 entered)",
+    ]);
+  });
+
+  it("length-checks after whitespace collapse and rejects a genuinely long line", () => {
+    const spaced = normalizedEntries([`Saw ${" ".repeat(300)}ants`]);
+    expect(entryLimitProblems([["Recommendations", spaced, spaced]])).toEqual([]);
+    const long = normalizedEntries(["y".repeat(241)]);
+    expect(entryLimitProblems([["Recommendations", long, long]])).toEqual([
+      "Recommendations: keep each line under 240 characters",
+    ]);
   });
 
   it("limits specialty lanes to their own actions", () => {

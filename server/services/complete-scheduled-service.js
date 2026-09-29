@@ -1666,7 +1666,7 @@ function parseJsonObject(value) {
   return {};
 }
 
-function normalizeCompletionTextArray(value, limit = 20) {
+function normalizeCompletionTextArray(value, limit = COMPLETION_TEXT_MAX_ENTRIES) {
   if (!Array.isArray(value)) return [];
   const seen = new Set();
   const out = [];
@@ -1715,6 +1715,7 @@ const COMPLETION_MARKER_GRAMMAR = require('../../shared/completion-marker-gramma
 const COMPLETION_MARKER_LINE = new RegExp(COMPLETION_MARKER_GRAMMAR.lineSource);
 const COMPLETION_WHITESPACE = new RegExp(COMPLETION_MARKER_GRAMMAR.whitespaceSource, 'g');
 const COMPLETION_TEXT_MAX_LENGTH = COMPLETION_MARKER_GRAMMAR.maxLength;
+const COMPLETION_TEXT_MAX_ENTRIES = COMPLETION_MARKER_GRAMMAR.maxEntries;
 
 function taggedCompletionNoteLines(notes, tags) {
   const tagSet = new Set(tags.map((tag) => tag.toLowerCase()));
