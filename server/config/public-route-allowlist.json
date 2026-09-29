@@ -131,6 +131,16 @@
       ]
     },
     {
+      "router": "server/routes/outbound-redirect.js",
+      "mount": "/go",
+      "reason": "Prep-guide outside-link click logger + 302 — destinations are pre-registered outbound_links rows resolved by code only (no URL in the request, so not an open redirect); per-route limiter; see docs/public-route-contracts.md",
+      "routes": [
+        "GET /go/:code",
+        "USE /go (express-rate-limit({ handler#f2668dc4 }))",
+        "USE /go (inline function#29df873e)"
+      ]
+    },
+    {
       "router": "server/routes/og-preview.js",
       "mount": "/og",
       "reason": "Link-preview images for iMessage/SMS/email crawlers (no login possible; owner sign-off 2026-09-28). Only /og/report/:token.jpg reads its token: 32-hex gate, typedReportDelivery suppression, no-store/noindex/no-referrer, per-IP limiter; unknown links get the byte-identical default card. /og/<kind>.jpg are fixed brand images with no token and no lookup.",
