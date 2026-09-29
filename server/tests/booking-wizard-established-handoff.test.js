@@ -130,6 +130,19 @@ describe('assertContactLinkedHandoffProvisional (runs under the customer lock, i
     expect(sibQuery.some((c) => c[1] === 'forShare')).toBe(true);
   });
 
+  test('no sibling cap: an established row far down a large account still blocks (r3 P1 follow-up)', async () => {
+    const leads = Array.from({ length: 40 }, (_, i) => customer({ id: `lead-${i}`, pipeline_stage: 'new_lead', account_id: 'acct-1' }));
+    const trx = fakeTrx({ customers: [
+      customer({ id: ROOT, pipeline_stage: 'new_lead', account_id: 'acct-1' }),
+      ...leads,
+      customer({ id: 'cust-established-41st', pipeline_stage: 'active_customer', account_id: 'acct-1' }),
+    ] });
+    await expect(run(trx, { phone: '941-555-0101' })).rejects.toEqual(REFUSED);
+    expect(trx.calls.some((c) => c[0] === 'customers' && c[1] === 'limit')).toBe(false);
+    const loader = fs.readFileSync(path.join(__dirname, '../services/booking-contact-linked-handoff.js'), 'utf8');
+    expect(loader).not.toMatch(/\.limit\(/);
+  });
+
   test('account with only lead rows → allowed', async () => {
     const trx = fakeTrx({ customers: [
       customer({ id: ROOT, pipeline_stage: 'new_lead', account_id: 'acct-1' }),

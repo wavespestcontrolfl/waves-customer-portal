@@ -24,7 +24,8 @@ const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
 // account resolution routes/booking.js findAccountPropertyByAddress uses to
 // bind a submitted address to a property row. Confirmation, capture-intent
 // and the recovery worker all classify through THIS list so they can never
-// diverge: a handoff is blocked when ANY of these rows is an established
+// diverge — and the sibling read is deliberately UNCAPPED (a limit could drop
+// the account's only established row): a handoff is blocked when ANY of these rows is an established
 // customer, even if the draft-linked row itself is still a lead (the address
 // bind can land the booking on an established sibling). opts.forShare
 // share-locks the rows (confirmation, inside its transaction). Returns
@@ -44,8 +45,7 @@ async function loadContactLinkedAccountRows(conn, customerId, { forShare = false
     .andWhere(function () {
       this.whereNull('active').orWhere('active', true);
     })
-    .orderBy('id')
-    .limit(25);
+    .orderBy('id');
   if (forShare) siblingQ.forShare();
   const siblings = await siblingQ.select(...columns);
   return { root, rows: [root, ...(Array.isArray(siblings) ? siblings : [])] };
