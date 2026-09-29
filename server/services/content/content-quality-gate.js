@@ -676,15 +676,26 @@ function checkLocalBusinessServiceSchema(draft) {
 // &#160;…). A {…} expression is parsed as JavaScript (acorn — comments,
 // escapes and string concatenation as the renderer sees them); anything but
 // a static string reads as empty. Unicode spaces collapse to a plain space.
-function boxProp(tag, name) {
+// boxPropInfo → { text, opaque }: opaque when the prop is an expression
+// that is not a static string (a conditional, a variable…) — the renderer
+// shows SOMETHING the checks cannot read, so callers fail closed (Codex r8
+// on #5272).
+function boxPropInfo(tag, name) {
   const { eachJsxAttr } = require('./content-guardrails')._internals;
   const attrs = String(tag).replace(/^<BottomLineBox\b/, '').replace(/\/?>\s*$/, '');
   const attr = eachJsxAttr(attrs).find((a) => a.name === name);
-  if (!attr) return '';
+  if (!attr) return { text: '', opaque: false };
   let text = '';
   if (attr.literal !== null && attr.literal !== undefined) text = require('entities').decodeHTML(String(attr.literal));
-  else if (attr.expr) text = staticExpressionString(attr.expr) ?? '';
-  return text.replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ');
+  else if (attr.expr) {
+    const value = staticExpressionString(attr.expr);
+    if (value === null) return { text: '', opaque: true };
+    text = value;
+  }
+  return { text: text.replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' '), opaque: false };
+}
+function boxProp(tag, name) {
+  return boxPropInfo(tag, name).text;
 }
 function staticExpressionString(expr) {
   const inner = String(expr).replace(/^\{/, '').replace(/\}$/, '');
@@ -1380,7 +1391,10 @@ function checkCtaAfterVerdictBox(draft, brief, context) {
   // is a pitch before the answer just like a link (Codex r8 on #5216).
   // Same sales-copy detectors the blog meta gate uses; "call a licensed
   // pro" style advice is not sales copy.
-  const boxText = `${boxProp(boxMatch[0], 'verdict')} ${boxProp(boxMatch[0], 'recommendation')}`;
+  const verdictProp = boxPropInfo(boxMatch[0], 'verdict');
+  const recommendationProp = boxPropInfo(boxMatch[0], 'recommendation');
+  if (verdictProp.opaque || recommendationProp.opaque) return { ok: false, reason: 'verdict_box_prop_not_static' };
+  const boxText = `${verdictProp.text} ${recommendationProp.text}`;
   if (SALESY_META_RE.test(boxText) || metaHasSalesCopy(boxText) || PHONE_TOKEN_RE.test(boxText) || CITY_PHONE_TOKEN_RE.test(boxText) || BOX_PHONE_RE.test(boxText) || BARE_PHONE_DIGITS_RE.test(boxText)) {
     return { ok: false, reason: 'sales_pitch_inside_verdict_box' };
   }

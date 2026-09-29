@@ -879,3 +879,10 @@ test.each([
     .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
 });
 
+// Codex r8 on #5272 ("Fail closed on unevaluable verdict-box expressions").
+test('#5272 r8: a verdict-box prop that is not a static string fails closed', () => {
+  const body = '<BottomLineBox verdict="Yes, they sting." recommendation={true ? "Call today." : "Wait."} />\n\nMore.';
+  expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+    .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
+});
+

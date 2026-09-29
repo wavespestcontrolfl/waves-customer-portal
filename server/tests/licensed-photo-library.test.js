@@ -194,7 +194,9 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
   test('a standalone connector word with no pest on both sides is not comparison-shaped', () => {
     expect(matchSpecies('where do fire ants come from')).toBe('fire ant');
     expect(matchSpecies('fire ant signs and identification')).toBe('fire ant');
-    expect(matchSpecies('is it a fire ant or not')).toBe('fire ant');
+    // "not" is an unconditional exclusion marker again (Codex r8 on #5272):
+    // the slot goes to a human rather than risk an excluded species' photo.
+    expect(matchSpecies('is it a fire ant or not')).toBeNull();
   });
 
   test('a connector naming a pest on BOTH sides still reads as a comparison', () => {
@@ -364,5 +366,14 @@ describe('"other" plus a broad organism class is a second subject', () => {
   ])('%s -> %s', (topic, expected) => {
     expect(matchSpecies(topic)).toBe(expected);
   });
+});
+
+// Codex r8 on #5272 ("Reject negated species topics before assigning photos").
+test.each([
+  ['this is not a fire ant'],
+  ['how to know it is not a fire ant'],
+])('%s names no species to photograph', (topic) => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  expect(matchSpecies(topic)).toBeNull();
 });
 
