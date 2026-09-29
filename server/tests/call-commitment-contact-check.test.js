@@ -59,6 +59,22 @@ describe('the tick is inert unless every gate is live', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
+  test('a run in which every candidate check threw is a failed run for job health', async () => {
+    delete process.env.PROMISE_CONTACT_CHECK; delete process.env.PROMISE_EVIDENCE_CLOSE; gates.callCommitments = true;
+    // Candidates read fine; every later read fails (a malformed row, a broken query).
+    const candidate = (id) => ({ id, call_log_id: `call-${id}`, party: 'waves', kind: 'other', description: 'Check the warranty', evidence: [],
+      due_at: null, due_type: null, updated_at: new Date(), call_customer_id: 'cust-1', call_created_at: new Date(Date.now() - 86400000),
+      call_duration_seconds: 60, call_direction: 'inbound', call_metadata: {}, cursor_at: new Date().toISOString() });
+    const broken = (table) => {
+      const chain = new Proxy({}, { get: (_t, prop) => (prop === 'then'
+        ? (res, rej) => (table === 'call_commitments as cc' ? Promise.resolve([candidate('a'), candidate('b')]) : Promise.reject(new Error('boom'))).then(res, rej)
+        : () => chain) });
+      return chain;
+    };
+    broken.raw = (sql) => sql;
+    await expect(check.runPromiseContactCheck({ conn: broken })).rejects.toThrow('all 2 candidate check(s) failed');
+  });
+
   test('all three live: the tick starts reading', async () => {
     delete process.env.PROMISE_CONTACT_CHECK; delete process.env.PROMISE_EVIDENCE_CLOSE; gates.callCommitments = true;
     expect(promiseEvidenceCloseLive()).toBe(true);

@@ -66,7 +66,7 @@ const { STAFF_CALL_SOURCES, operatorReply, personCallBack, smsDelivered, smsCont
   operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const commitments = require('./call-commitments');
 
-const { callEndedAt, associationFrom, evidenceBoundary, windowEnd, storedProof, refreshableVerdictSql, staleAiRowSql,
+const { associationFrom, evidenceBoundary, windowEnd, storedProof, refreshableVerdictSql, staleAiRowSql, speakerTurns, normalizeForMatch,
   withoutProactiveDraft, PERSON_CONTACT_KIND, PERSON_CONTACT_BASIS, ASSOCIATION_WINDOW_DAYS } = commitments;
 
 // Bump on any change to the prompt, the schema or what counts as a witness:
@@ -95,6 +95,22 @@ const validate = new Ajv({ strict: false }).compile(SCHEMA);
 const normalized = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TABLE_BY_RECORD_TYPE = { sms_log: 'sms', call_log: 'call' };
+// When a call really ended: the booking lane's exact reading
+// (call-booking-link-text.js callEndFor) — a bridge's signed customer-leg end,
+// a recovered row's backed-out start plus its length, a plain outbound call's
+// start plus its length — never the ledger's callEndedAt, which reads a plain
+// outbound call as ending when it started (so a text sent during the promise
+// call would count as later) and a recovered inbound row as ending late.
+// It reads the call's metadata and recording length too.
+const callEnd = (call) => require('./call-booking-link-text').callEndFor(call);
+const CALL_TIMING = ['created_at', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'direction', 'metadata'];
+// The promise's evidence floor: the promise call's exact end, or a later
+// renewal of the obligation (evidenceBoundary) — the same boundary at the
+// check, at the close and at every re-judge.
+const promiseBoundary = (conn, commitment, call) => evidenceBoundary(conn, commitment, call, { endOf: callEnd });
+// A call witness's time is when its customer conversation ended (callEnd);
+// a text's is when it was sent.
+const witnessAt = (type, row) => (type === 'call' ? callEnd(row) : new Date(row.created_at));
 
 // ── Witness queries ─────────────────────────────────────────────────────────
 // The rows a person's delivered text / call back could be, narrowed in SQL by
@@ -124,10 +140,12 @@ function callWitnessQuery(conn, { customerId, callId, from, to, id = null }) {
     .whereIn('cl.source', STAFF_CALL_SOURCES)
     .whereNot('cl.id', callId)
     .whereRaw(personCallBackSql('cl'))
-    .where('cl.created_at', '>', from)
+    // A prefilter only: a call that started before the floor can end after
+    // it, and never ends before it started; witnessAt decides exactly.
+    .where('cl.created_at', '>', new Date(from.getTime() - DAY_MS))
     .where('cl.created_at', '<=', to)
     .modify((b) => { if (id) b.where('cl.id', id); })
-    .select('cl.id', 'cl.created_at', 'cl.transcription', ...callContactSelects(conn, 'cl'));
+    .select('cl.id', 'cl.transcription', ...CALL_TIMING.map((c) => `cl.${c}`), ...callContactSelects(conn, 'cl'));
 }
 
 const ordered = (query, table) => query.orderBy([{ column: `${table}.created_at`, order: 'asc' }, { column: `${table}.id`, order: 'asc' }]);
@@ -186,9 +204,10 @@ async function loadContactWitnesses(conn, { callId, customerId, from, until, now
     for (const row of result.value.slice(0, WITNESS_LIMIT)) {
       const person = type === 'sms' ? operatorReply(row) && smsDelivered(row) : personCallBack(row);
       const text = rawText(type, row);
-      if (!person || !text.trim()) continue;
+      const at = witnessAt(type, row);
+      if (!person || !text.trim() || !at || !(at.getTime() > from.getTime() && at.getTime() <= to.getTime())) continue;
       if (text.length > BODY_LIMIT) failures.push(`${type}_body_truncated`);
-      records.push({ ref: `${type}:${row.id}`, type, id: row.id, at: iso(row.created_at), text: text.slice(0, BODY_LIMIT), text_md5: textMd5(text) });
+      records.push({ ref: `${type}:${row.id}`, type, id: row.id, at: iso(at), text: text.slice(0, BODY_LIMIT), text_md5: textMd5(text) });
     }
   });
   scrubRecords(records, failures);
@@ -208,7 +227,7 @@ function promiseOf(commitment) {
 
 // What the model is told: the promise, and when the call it was made on ended.
 function obligationOf(commitment, call) {
-  return { ...promiseOf(commitment), made_on_call_ending_at: (callEndedAt(call) || new Date(call.created_at)).toISOString() };
+  return { ...promiseOf(commitment), made_on_call_ending_at: (callEnd(call) || new Date(call.created_at)).toISOString() };
 }
 
 // A close rests on the promise the model judged: a reprocess that rewrites
@@ -235,6 +254,14 @@ function groundVerdict(parsed, evidence) {
   if (!witness) return { verdict: 'uncertain', reason: 'invalid_witness' };
   const quote = normalized(parsed.quote);
   if (quote.length < 3 || !normalized(witness.text).includes(quote)) return { verdict: 'uncertain', reason: 'ungrounded_witness' };
+  // On a call only Waves' words can deliver the promise: the quote must sit
+  // in an Agent turn (the transcript's own labels), never the customer's; a
+  // transcript with no Agent/Caller labels cannot ground a close.
+  if (witness.type === 'call') {
+    const turns = speakerTurns(witness.text);
+    const said = normalizeForMatch(parsed.quote);
+    if (!turns || !said || !turns.agent.some((turn) => turn.includes(said))) return { verdict: 'uncertain', reason: 'not_waves_words' };
+  }
   return { verdict: 'fulfilled', record_type: witness.type === 'sms' ? 'sms_log' : 'call_log', record_id: witness.id,
     matched_at: witness.at, quote: parsed.quote, witness_md5: witness.text_md5 };
 }
@@ -298,9 +325,9 @@ async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { n
       .forUpdate().skipLocked().first('id');
     if (!locked) return false;
     const lockedCall = await trx('call_log').where({ id: commitment.call_log_id, customer_id: call.customer_id }).forShare()
-      .first('id', 'created_at', 'bridged_at', 'duration_seconds', 'direction', 'customer_id');
+      .first('id', 'customer_id', ...CALL_TIMING);
     if (!lockedCall) return false;
-    const after = callEndedAt(lockedCall);
+    const after = await promiseBoundary(trx, commitment, lockedCall);
     if (!after) return false;
     const until = windowEnd(after);
     const from = associationFrom(commitment, after);
@@ -342,21 +369,24 @@ const WITNESS_BY_RECORD_TYPE = {
 // Anything else and the caller reopens it like any close the facts no longer
 // support; the next tick judges the promise and the words as they are now.
 async function contactCloseStands(conn, commitment, call, prior) {
-  if (prior?.basis !== PERSON_CONTACT_BASIS || prior.kind !== PERSON_CONTACT_KIND) return false;
+  // The basis implies the kind (person_contact), and the caller reads it first.
+  if (prior?.basis !== PERSON_CONTACT_BASIS) return false;
   if (commitment.party !== 'waves' || commitment.kind !== 'other' || commitment.human_state) return false;
-  if (typeof prior.promise_md5 !== 'string' || prior.promise_md5 !== promiseMd5(commitment)) return false;
-  const customerId = call?.customer_id;
-  if (!customerId || prior.judged_customer_id !== customerId || !UUID_RE.test(String(prior.record_id))) return false;
-  const after = await evidenceBoundary(conn, commitment, call);
-  if (!after) return false;
+  // A missing stamp never equals the md5 computed now.
+  if (prior.promise_md5 !== promiseMd5(commitment) || prior.judged_customer_id !== call?.customer_id) return false;
+  const witness = WITNESS_BY_RECORD_TYPE[prior.record_type];
+  if (!witness || !UUID_RE.test(String(prior.record_id))) return false;
+  // The promise call's exact timing, read here (the caller's row may not carry it).
+  const callRow = await conn('call_log').where({ id: commitment.call_log_id, customer_id: prior.judged_customer_id })
+    .first('id', 'customer_id', ...CALL_TIMING);
+  if (!callRow) return false;
+  const after = await promiseBoundary(conn, commitment, callRow);
   const from = associationFrom(commitment, after);
   const until = windowEnd(after);
-  const bounds = { customerId, callId: commitment.call_log_id, from, to: until, id: prior.record_id };
-  const witness = WITNESS_BY_RECORD_TYPE[prior.record_type];
-  if (!witness) return false;
-  const row = await witness.query(conn, bounds).first();
-  return Boolean(row && witness.counts(row) && typeof prior.witness_md5 === 'string'
-    && textMd5(rawText(witness.type, row)) === prior.witness_md5);
+  const row = await witness.query(conn, { customerId: callRow.customer_id, callId: commitment.call_log_id, from, to: until, id: prior.record_id }).first();
+  if (!row || !witness.counts(row)) return false;
+  const at = witnessAt(witness.type, row);
+  return at > from && at <= until && textMd5(rawText(witness.type, row)) === prior.witness_md5;
 }
 
 // ── The periodic job ────────────────────────────────────────────────────────
@@ -377,14 +407,13 @@ async function listCandidates(conn, now, cursor = null) {
     .modify((b) => { if (cursor) b.whereRaw('(cl.created_at, cc.id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]); })
     .orderBy([{ column: 'cl.created_at', order: 'asc' }, { column: 'cc.id', order: 'asc' }])
     .limit(CANDIDATE_LIMIT)
-    .select('cc.*', 'cl.created_at as call_created_at', 'cl.bridged_at as call_bridged_at', 'cl.duration_seconds as call_duration_seconds',
-      'cl.direction as call_direction', 'cl.customer_id as call_customer_id', conn.raw('cl.created_at::text as cursor_at'));
+    .select('cc.*', 'cl.customer_id as call_customer_id', ...CALL_TIMING.map((c) => `cl.${c} as call_${c}`), conn.raw('cl.created_at::text as cursor_at'));
 }
 
 async function checkOne(conn, row, { now, budget }) {
-  const call = { id: row.call_log_id, created_at: row.call_created_at, bridged_at: row.call_bridged_at,
-    duration_seconds: row.call_duration_seconds, direction: row.call_direction, customer_id: row.call_customer_id };
-  const after = callEndedAt(call);
+  const call = { id: row.call_log_id, customer_id: row.call_customer_id,
+    ...Object.fromEntries(CALL_TIMING.map((c) => [c, row[`call_${c}`]])) };
+  const after = await promiseBoundary(conn, row, call);
   if (!after) return { outcome: 'skipped' };
   const until = windowEnd(after);
   const from = associationFrom(row, after);
@@ -430,14 +459,16 @@ async function runPromiseContactCheck({ now = new Date(), conn = require('../mod
         tally.failed += 1;
         // The code only: a query error's message can carry its bound values,
         // and the cache write binds the model's quote (customer text).
-        logger.warn(`[call-contact-check] check failed for commitment ${row.id}: ${err.code || err.name || 'error'}`);
+        logger.warn(`[call-contact-check] check failed for commitment ${row.id}: ${err.code || err.name}`);
       }
     }
     if (rows.length < CANDIDATE_LIMIT) break;
     const last = rows[rows.length - 1];
     cursor = { at: last.cursor_at, id: last.id };
   }
-  if (tally.closed) logger.info(`[call-contact-check] closed ${tally.closed} of ${tally.candidates} open promise(s)`);
+  logger.info(`[call-contact-check] run: ${JSON.stringify(tally)}`);
+  // A run in which every candidate check threw checked nothing: job health says so.
+  if (tally.candidates > 0 && tally.failed === tally.candidates) throw new Error(`call contact check: all ${tally.failed} candidate check(s) failed`);
   // A provider that answered nothing all run is a run that failed: job health says so.
   if (everyModelCallFailed(tally)) throw new Error('call contact check: every model call failed');
   return tally;

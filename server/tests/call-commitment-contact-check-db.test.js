@@ -362,6 +362,50 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
     });
   });
 
+  describe('whose words, and when (round 2)', () => {
+    test('a call quote must be Waves\' own words: a customer\'s line, or an unlabeled transcript, never closes', async () => {
+      const w = await world();
+      const call = await addCall(w, { transcription: 'Agent: Just checking in on the yard.\nCustomer: The warranty covers the retreatment, thanks.' });
+      say(w, fulfilledBy(`call:${call}`, 'the warranty covers the retreatment'));
+      await run();
+      const after = await row(w.commitment.id);
+      expect(after.status).toBe('open');
+      expect(after.contact_check).toMatchObject({ verdict: 'uncertain', reason: 'not_waves_words' });
+      const flat = await world();
+      const flatCall = await addCall(flat, { transcription: 'Speaker 1: I checked on the warranty, it covers the retreatment.\nSpeaker 2: Great.' });
+      say(flat, fulfilledBy(`call:${flatCall}`, 'it covers the retreatment'));
+      await run();
+      expect((await row(flat.commitment.id)).status).toBe('open');
+    });
+
+    test('a text sent DURING an outbound promise call is not later evidence: the call ends at its start plus its length', async () => {
+      // Waves called the customer (no bridge) and talked for 10 minutes.
+      const w = await world({ callExtra: { direction: 'outbound', from_phone: OUR_NUMBER, duration_seconds: 600 } });
+      const start = new Date(w.call.created_at);
+      await addSms(w, { created_at: new Date(start.getTime() + 5 * 60 * 1000) });
+      await run();
+      expect(asked(w)).toHaveLength(0);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('a bridged call back is dated by its customer leg: one placed before a stated floor but that reached the customer after it counts, and closes at that time', async () => {
+      const callEnd = new Date(Date.now() - 3 * DAY + 90 * 1000);
+      const floor = new Date(callEnd.getTime() + 60 * 60 * 1000);
+      const w = await world({ commitmentExtra: { due_at: floor, due_type: 'floor' } });
+      const legEnded = new Date(floor.getTime() + 5 * 60 * 1000);
+      const call = await addCall(w, { created_at: new Date(floor.getTime() - 5 * 60 * 1000),
+        metadata: JSON.stringify({ customer_leg: { status: 'completed', duration_seconds: 300, ended_at: legEnded.toISOString() } }) });
+      say(w, fulfilledBy(`call:${call}`, 'it covers the retreatment'));
+      await run();
+      const after = await row(w.commitment.id);
+      expect(after.status).toBe('fulfilled');
+      expect(new Date(after.fulfilled_at).toISOString()).toBe(legEnded.toISOString());
+      expect(after.fulfillment.matched_at).toBe(legEnded.toISOString());
+      // And the panel's re-judge agrees with the close.
+      expect((await cc.refreshFulfillment(db, w.call.id)).reopened).toBe(0);
+    });
+  });
+
   describe('the close is guarded', () => {
     test('a promise touched while the model was thinking is not closed; the next run closes it without asking again', async () => {
       const w = await world();

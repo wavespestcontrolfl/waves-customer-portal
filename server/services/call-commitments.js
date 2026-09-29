@@ -1855,8 +1855,11 @@ async function associationProof(ctx, tries) {
 // before is not proof it was kept again. Claiming, snoozing or confirming
 // does not move the boundary, so a call returned before that action still
 // counts.
-async function evidenceBoundary(conn, commitment, call) {
-  const ended = callEndedAt(call);
+// `endOf` picks how the call's end is read (default callEndedAt, the
+// ledger's own); the model-judged contact check passes the booking lane's
+// exact end (call-booking-link-text.js callEndFor).
+async function evidenceBoundary(conn, commitment, call, { endOf = callEndedAt } = {}) {
+  const ended = endOf(call);
   const renewed = ended ? await obligationRenewedAt(conn, commitment) : null;
   return renewed && renewed.getTime() > ended.getTime() ? renewed : ended;
 }
