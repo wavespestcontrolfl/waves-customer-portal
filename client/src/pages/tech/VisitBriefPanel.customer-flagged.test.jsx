@@ -197,6 +197,34 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     }
   });
 
+  it('a new pending read gets a fresh refresh budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      const panel = (entries) => (
+        <VisitBriefPanel
+          stop={stopOf(BASE_SERVICE)}
+          detail={detailFor({ 'svc-1': { estimate: null, brief: { brief: null, facts: { access: null, last_visit: null, customerFlagged: entries } } } })}
+          request={vi.fn(async () => ({ photos: [] }))}
+          onRetry={onRetry} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+        />
+      );
+      const { rerender } = render(panel([{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }]));
+      for (let i = 0; i < 31; i += 1) {
+        await act(async () => { vi.advanceTimersByTime(30 * 1000); });
+        rerender(panel([{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }]));
+      }
+      const spent = onRetry.mock.calls.length;
+      expect(spent).toBe(30);
+      // Another submission's read starts pending: polling resumes.
+      rerender(panel([{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', commonName: 'German cockroach' } }, { ...CUSTOMER_FLAGGED[0], id: 'sub-2', read: { status: 'pending' } }]));
+      await act(async () => { vi.advanceTimersByTime(30 * 1000); });
+      expect(onRetry.mock.calls.length).toBe(spent + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a done read with no named species says so plainly', () => {
     renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', wordingTier: 'unknown', commonName: null } }] });
     expect(screen.getByText('Photo read (AI suggestion, not confirmed): No species named from these photos.')).toBeInTheDocument();

@@ -324,11 +324,16 @@ const READ_PENDING_POLL_MS = 30 * 1000;
 const READ_PENDING_MAX_POLLS = 30;
 
 function useRefreshWhileReadPending(customerFlagged, onRefresh) {
-  const pending = (customerFlagged || []).some((entry) => entry.read?.status === 'pending');
-  const polls = useRef(0);
+  // The budget belongs to the set of reads being waited on: a new pending
+  // read (another submission, another visit) starts a fresh 30 polls.
+  const pendingKey = (customerFlagged || []).filter((entry) => entry.read?.status === 'pending')
+    .map((entry) => entry.id).join(',');
+  const pending = pendingKey !== '';
+  const polls = useRef({ key: '', count: 0 });
+  if (polls.current.key !== pendingKey) polls.current = { key: pendingKey, count: 0 };
   useEffect(() => {
-    if (!pending || typeof onRefresh !== 'function' || polls.current >= READ_PENDING_MAX_POLLS) return undefined;
-    const timer = setTimeout(() => { polls.current += 1; onRefresh(); }, READ_PENDING_POLL_MS);
+    if (!pending || typeof onRefresh !== 'function' || polls.current.count >= READ_PENDING_MAX_POLLS) return undefined;
+    const timer = setTimeout(() => { polls.current.count += 1; onRefresh(); }, READ_PENDING_POLL_MS);
     return () => clearTimeout(timer);
   }, [pending, onRefresh, customerFlagged]);
 }

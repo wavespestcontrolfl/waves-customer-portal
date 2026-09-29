@@ -492,19 +492,20 @@ async function createVisitPrepSubmission({
   // nothing new to read. A lazy require keeps the pest v2 engine (and the
   // species catalog it loads) out of every caller of this module that
   // never actually creates a submission.
-  if (result.created) {
-    // The upload is already committed: a failure to even load or start the
-    // read (e.g. a module load error) is logged, never a 500 to the customer.
-    try {
-      const { triggerVisitPrepPestRead } = require('./visit-prep-pest-read');
-      void triggerVisitPrepPestRead({
-        submissionId: result.submissionId,
-        svc: result.current,
-        photos: result.photos,
-      }).catch((err) => logger.error(`[visit-prep] pest read trigger failed for submission ${result.submissionId}: ${err.message}`));
-    } catch (err) {
-      logger.error(`[visit-prep] pest read could not start for submission ${result.submissionId}: ${err.message}`);
-    }
+  // Gate first, and the engine module (catalog + validators, built at load)
+  // is required only on the next tick, never on this response path
+  // (Codex #5305 r3 P2). The upload is already committed: a failure to load
+  // or start the read is logged, never a 500 to the customer.
+  if (result.created && require('../config/feature-gates').visitPrepPestReadLive()) {
+    const readArgs = { submissionId: result.submissionId, svc: result.current, photos: result.photos };
+    setImmediate(() => {
+      try {
+        require('./visit-prep-pest-read').triggerVisitPrepPestRead(readArgs)
+          .catch((err) => logger.error(`[visit-prep] pest read trigger failed for submission ${readArgs.submissionId}: ${err.message}`));
+      } catch (err) {
+        logger.error(`[visit-prep] pest read could not start for submission ${readArgs.submissionId}: ${err.message}`);
+      }
+    });
   }
 
   return { created: result.created, stored: result.stored, summary: result.summary, svc: result.current };

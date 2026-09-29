@@ -12,6 +12,10 @@ const mockUploadFunnelPhotoToS3 = jest.fn();
 const mockConvertHeicToJpeg = jest.fn();
 const mockDeletePhoto = jest.fn().mockResolvedValue(undefined);
 const mockLockStopForRow = jest.fn(async (trx, id) => id);
+const mockTriggerPestRead = jest.fn(async () => {});
+jest.mock('../services/visit-prep-pest-read', () => ({
+  triggerVisitPrepPestRead: (...args) => mockTriggerPestRead(...args),
+}));
 
 jest.mock('../utils/funnel-photos', () => ({
   uploadFunnelPhotoToS3: (...args) => mockUploadFunnelPhotoToS3(...args),
@@ -372,5 +376,40 @@ describe('createVisitPrepSubmission', () => {
     await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() }))
       .rejects.toMatchObject({ statusCode: 404, code: 'PREP_NOT_FOUND', message: 'Not found' });
     expect(mockLockStopForRow).toHaveBeenCalledTimes(3); // initial + 2 retries
+  });
+});
+
+describe('pest read hook (PR 5)', () => {
+  const { createVisitPrepSubmission } = require('../services/visit-prep');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb.mockImplementation((table) => chain(table));
+    mockLockStopForRow.mockImplementation(async (trx, id) => id);
+    mockUploadFunnelPhotoToS3.mockResolvedValue('visitprep/svc-1/photo_0.jpg');
+  });
+  afterEach(() => {
+    delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+  });
+  const flushImmediate = () => new Promise((resolve) => setImmediate(resolve));
+
+  test('gate off: the read is never started (the engine module is not even loaded)', async () => {
+    mockTriggerPestRead.mockClear();
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
+    await flushImmediate();
+    expect(mockTriggerPestRead).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the read starts on the next tick, after the submission returns', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    mockTriggerPestRead.mockClear();
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });
+    expect(mockTriggerPestRead).not.toHaveBeenCalled();
+    await flushImmediate();
+    expect(mockTriggerPestRead).toHaveBeenCalledTimes(1);
+    expect(mockTriggerPestRead.mock.calls[0][0]).toMatchObject({ svc: expect.objectContaining({ id: 'svc-1' }) });
   });
 });
