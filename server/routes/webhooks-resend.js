@@ -169,9 +169,16 @@ async function handleEvent(ev) {
           // Per-mailbox fence (codex #5165 P1, :393): the SAME lock
           // subscribeOrResubscribe and the reconcile take, taken before
           // this status write. delivery.email is the recipient snapshot on
-          // the delivery row itself — no extra lookup needed.
+          // the delivery row itself — no extra lookup needed. Best-effort:
+          // lockCustomerEmail throws on a blank address, and a complaint
+          // must never fail (and retry forever) over a fencing lock it
+          // couldn't take (codex round-2 P1).
           await db.transaction(async (trx) => {
-            await lockCustomerEmail(trx, delivery.email);
+            if (delivery.email && delivery.email.trim()) {
+              await lockCustomerEmail(trx, delivery.email);
+            } else {
+              logger.warn(`[resend-webhook] newsletter subscriber id=${delivery.subscriber_id} unsubscribe has no address to lock on — proceeding unlocked`);
+            }
             await trx('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
               status: 'unsubscribed', unsubscribed_at: now, updated_at: now,
             });

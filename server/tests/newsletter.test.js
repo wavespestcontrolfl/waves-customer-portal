@@ -1437,6 +1437,31 @@ describe('sendgrid newsletter suppression ledger writes', () => {
     expect(lockOrder).toBeLessThan(updateOrder);
   });
 
+  // Codex round-2 P1: lockCustomerEmail throws on a blank address, and an
+  // unsubscribe/complaint must never fail (and have SendGrid retry it
+  // forever) over a fencing lock it couldn't take — a NOT NULL column
+  // doesn't rule out a legacy empty string. A blank delivery.email skips
+  // the lock and the status write still lands.
+  test('newsletter dropped Group Unsubscribe with a blank delivery email skips the lock but still writes the status', async () => {
+    const { client, calls } = fakeClient();
+
+    await handleNewsletterEvent({
+      event: 'dropped',
+      reason: 'Group Unsubscribe',
+      email: '',
+    }, {
+      id: 'delivery-2b',
+      send_id: 'send-2b',
+      subscriber_id: 13,
+      email: '',
+    }, client);
+
+    const lockCall = client.raw.mock.calls.find(([sql]) => String(sql).includes('pg_advisory_xact_lock'));
+    expect(lockCall).toBeUndefined(); // never attempted — would have thrown
+    const subscriberUpdate = calls.newsletter_subscribers[0].update.mock.calls[0][0];
+    expect(subscriberUpdate).toEqual(expect.objectContaining({ status: 'unsubscribed' }));
+  });
+
   test('newsletter dropped Unsubscribed Address writes a global unsubscribe suppression', async () => {
     const { client, calls } = fakeClient();
 

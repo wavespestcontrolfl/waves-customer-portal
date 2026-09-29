@@ -6,6 +6,7 @@
  */
 
 const db = require('../models/db');
+const logger = require('./logger');
 const { REENGAGEMENT_TAG } = require('./newsletter-sunset');
 // The SAME per-mailbox fence the reconcile's decideAddress takes (codex
 // #5165 P1, :393): every writer below that changes a subscriber row's
@@ -396,7 +397,15 @@ async function confirmByToken(token) {
     // lookupByToken above is read-only classification for the caller's
     // page copy — the address is only known once it returns, so the lock
     // is taken here, immediately before the actual write below.
-    await lockCustomerEmail(trx, initial.subscriber.email);
+    // Best-effort: lockCustomerEmail throws on a blank address, and a
+    // confirm must never fail over a fencing lock it couldn't take (codex
+    // round-2 P1) — every known writer of this row validates the email
+    // before insert, but the column has no CHECK against an empty string.
+    if (initial.subscriber.email && initial.subscriber.email.trim()) {
+      await lockCustomerEmail(trx, initial.subscriber.email);
+    } else {
+      logger.warn(`[newsletter] confirm subscriber id=${initial.subscriber.id} has no address to lock on — proceeding unlocked`);
+    }
     // status === 'pending' — flip to active. The flip is an atomic CAS on
     // the token AND the pending status (Codex #3084 r41): an email
     // correction can rotate this row's tokens between the lookup and this

@@ -345,7 +345,14 @@ router.delete('/subscribers/:subscriberId', async (req, res, next) => {
     const existing = await db('newsletter_subscribers').where({ id: subscriberId }).first('email');
     if (existing) {
       await db.transaction(async (trx) => {
-        await lockCustomerEmail(trx, existing.email);
+        // Best-effort: lockCustomerEmail throws on a blank address, and an
+        // admin unsubscribe must never fail over a fencing lock it
+        // couldn't take (codex round-2 P1).
+        if (existing.email && existing.email.trim()) {
+          await lockCustomerEmail(trx, existing.email);
+        } else {
+          logger.warn(`[admin-newsletter] subscriber id=${subscriberId} unsubscribe has no address to lock on — proceeding unlocked`);
+        }
         await trx('newsletter_subscribers').where({ id: subscriberId }).update({
           status: 'unsubscribed',
           unsubscribed_at: new Date(),

@@ -115,7 +115,15 @@ router.post('/unsubscribe/:token', async (req, res) => {
       const byToken = await db('newsletter_subscribers').where({ unsubscribe_token: req.params.token }).first();
       if (byToken) {
         unsubRows = await db.transaction(async (trx) => {
-          await lockCustomerEmail(trx, byToken.email);
+          // Best-effort: lockCustomerEmail throws on a blank address, and
+          // this one-click unsubscribe must always return 200 quickly —
+          // never fail (or have mail clients retry it) over a fencing
+          // lock it couldn't take (codex round-2 P1).
+          if (byToken.email && byToken.email.trim()) {
+            await lockCustomerEmail(trx, byToken.email);
+          } else {
+            logger.warn(`[newsletter] unsubscribe subscriber id=${byToken.id} has no address to lock on — proceeding unlocked`);
+          }
           return trx('newsletter_subscribers')
             .where({ unsubscribe_token: req.params.token })
             .whereNot({ status: 'unsubscribed' })
