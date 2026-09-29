@@ -100,7 +100,7 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('id', 'customer_id', 'reschedule_token', 'source_action', 'status', 'customer_confirmed',
-        'visit_id', 'scheduled_date', 'window_start');
+        'visit_id', 'scheduled_date', 'window_start', 'window_end');
     if (!svc?.reschedule_token) return { url: null, line: '' };
     // GROUPED / FROZEN visits self-serve-reschedule as a whole (or not at
     // all) — /reschedule/:token deterministically refuses their rows, so

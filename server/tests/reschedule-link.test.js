@@ -56,10 +56,17 @@ function svcRow(overrides = {}) {
   };
 }
 
+// A real knex `.first('a', 'b')` returns ONLY the requested columns — a
+// fixture-wide mockResolvedValue(row) would silently hand back fields the
+// builder never actually selected, hiding exactly the bug the Claude
+// fallback auditor caught in round 1 (window_end missing from the select
+// list). This filters to the columns the call site actually asks for.
 function mockSvc(row) {
   mockDb.mockImplementation(() => ({
     where: jest.fn().mockReturnThis(),
-    first: jest.fn().mockResolvedValue(row),
+    first: jest.fn((...cols) => Promise.resolve(
+      cols.length ? Object.fromEntries(cols.filter((c) => c in row).map((c) => [c, row[c]])) : row,
+    )),
   }));
 }
 
@@ -97,6 +104,20 @@ describe('buildRescheduleLink dead-link guard (C3/C6)', () => {
       url: 'https://portal.test/l/fresh12345',
       line: 'Reschedule here: https://portal.test/l/fresh12345\n\n',
     });
+  });
+
+  test('a same-day visit past window_start+2h but still inside its OWN window_end is not missed — window_end must be selected or this reads as missed and wrongly mints a link (claude fallback r1 P1)', async () => {
+    // NOW = 09:00 ET. window_start 06:00 + 120min = 08:00 (already passed),
+    // but window_end 10:00 is still ahead of now — eligibility()'s same-day
+    // rule takes max(window_end, window_start+120), so this visit is NOT
+    // missed. It is also trivially inside the move-notice window (its own
+    // start is in the past), so it must get the reply/call clause, never a
+    // URL — reschedule-public.js's own full-row read would refuse the move.
+    mockSvc(svcRow({ scheduled_date: '2026-05-06', window_start: '06:00:00', window_end: '10:00:00' }));
+    await expect(buildRescheduleLink('svc-1')).resolves.toEqual({
+      url: null, line: 'Need a change? Reply here or call.\n\n',
+    });
+    expect(mockShortenOrPassthrough).not.toHaveBeenCalled();
   });
 
   test('a shorter configured move window re-admits the 1-hour-out visit', async () => {
