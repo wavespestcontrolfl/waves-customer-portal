@@ -148,6 +148,11 @@ describe('normalizeSpanishSpokenText — cents merge into one amount', () => {
     // Codex r10: no currency word, no price verb — still one amount.
     ['El mejorado es ciento diecinueve con noventa y nueve por aplicación.', 'El mejorado es 119.99 por aplicación.'],
     ['Ciento diecinueve con noventa y nueve dólares por aplicación.', '119.99 dólares por aplicación.'],
+    ['Ciento diecinueve coma noventa y nueve por aplicación.', '119.99 por aplicación.'],
+    ['Ciento diecinueve punto nueve nueve por aplicación.', '119.99 por aplicación.'],
+    ['Ciento diecinueve coma cinco por aplicación.', '119.5 por aplicación.'],
+    ['Ciento diecinueve coma cero cinco por aplicación.', '119.05 por aplicación.'],
+    ['Ciento diecinueve con cinco centavos por aplicación.', '119.05 por aplicación.'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });

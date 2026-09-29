@@ -178,13 +178,16 @@ const SPANISH_CONFIRMED_VISIT_CLAIM_RE = new RegExp(
 );
 const SPANISH_FUTURE_VISIT_CONFIRMATION_RE = new RegExp(`\\b(?:cita|visita)\\b[^.!?;]{0,45}\\bser[aá](?![a-záéíóúñü])[^.!?;]{0,45}\\b${SPANISH_CONFIRMED_VISIT_PARTICIPLE}\\b`, 'i');
 const SPANISH_PESTICIDE_SUBJECT = '(?:tratamientos?|productos?|pesticidas?|insecticidas?|qu[ií]micos?|aplicaci[oó]n(?:es)?|rociados?|cebos?)';
+const SPANISH_AFFIRMATIVE_INTRO = '(?:(?:s[ií]|claro(?:\\s+que\\s+s[ií])?|por\\s+supuesto|desde\\s+luego|sin\\s+duda)\\s*[,;:]?\\s*)+';
 const SPANISH_PESTICIDE_SAFETY_GUARANTEE_RE = new RegExp(`\\b(?:(?:el|la|los|las|este|esta|estos|estas|nuestro|nuestra|nuestros|nuestras)\\s+)?${SPANISH_PESTICIDE_SUBJECT}\\b[^.!?;]{0,60}\\b(?:es|son|sea(?:n)?|ser[aá]n?|queda(?:n)?|resulta(?:n)?)\\s+[^.!?;]{0,25}\\b(?:segur[oa]s?|inocu[oa]s?)\\b|\\b(?:segur[oa]s?|inocu[oa]s?)\\b[^.!?;]{0,45}\\b${SPANISH_PESTICIDE_SUBJECT}\\b`, 'i');
-const SPANISH_IMPLICIT_SAFETY_GUARANTEE_RE = /(?:\b(?:es|son|sea(?:n)?|ser[aá]n?|queda(?:n)?|resulta(?:n)?)\s+[^.!?;]{0,25}\b(?:segur[oa]s?|inocu[oa]s?)\b|^\s*(?:(?:s[ií]|claro)\s*,?\s*)?(?:(?:completa|total|absoluta)mente|muy)?\s*(?:segur[oa]s?|inocu[oa]s?)\b)/i;
+const SPANISH_IMPLICIT_SAFETY_GUARANTEE_RE = new RegExp(`(?:\\b(?:es|son|sea(?:n)?|ser[aá]n?|queda(?:n)?|resulta(?:n)?)\\s+[^.!?;]{0,25}\\b(?:segur[oa]s?|inocu[oa]s?)\\b|^\\s*(?:${SPANISH_AFFIRMATIVE_INTRO})?(?:(?:completa|total|absoluta)mente|muy)?\\s*(?:segur[oa]s?|inocu[oa]s?)\\b)`, 'i');
 const SPANISH_NO_RISK_GUARANTEE_RE = new RegExp(`\\b${SPANISH_PESTICIDE_SUBJECT}\\b[^.!?;]{0,45}\\bno\\s+(?:tiene(?:n)?|presenta(?:n)?|supone(?:n)?)\\s+(?:ning[uú]n\\s+)?(?:riesgos?|peligros?|daños?)\\b`, 'i');
-const SPANISH_IMPLICIT_NO_RISK_RE = /\b(?:no\s+(?:tiene(?:n)?|presenta(?:n)?|supone(?:n)?)\s+(?:ning[uú]n\s+)?(?:riesgos?|peligros?|daños?)|(?:(?:s[ií]|claro)\s*,?\s*)?sin\s+(?:ning[uú]n\s+)?(?:riesgos?|peligros?|daños?))\b/i;
+const SPANISH_IMPLICIT_NO_RISK_RE = new RegExp(`\\b(?:no\\s+(?:tiene(?:n)?|presenta(?:n)?|supone(?:n)?)\\s+(?:ning[uú]n\\s+)?(?:riesgos?|peligros?|daños?)|(?:${SPANISH_AFFIRMATIVE_INTRO})?sin\\s+(?:ning[uú]n\\s+)?(?:riesgos?|peligros?|daños?))\\b`, 'i');
 const SPANISH_QUALIFIED_DRY_SAFETY_RE = /\bsegur[oa]s?\b[^.!?]{0,50}\buna\s+vez\s+(?:que\s+)?sec[oa]s?\b[^.!?]{0,100}\bt[eé]cnic[oa]\b[^.!?]{0,50}\bconfirm/i;
 const SPANISH_PESTICIDE_APPROVAL_RE = new RegExp(`\\b${SPANISH_PESTICIDE_SUBJECT}\\b[^.!?;]{0,60}\\baprobad[oa]s?\\b|\\b(?:la\\s+)?EPA\\b[^.!?;]{0,35}\\baprob[oó](?![a-záéíóúñü])[^.!?;]{0,35}\\b${SPANISH_PESTICIDE_SUBJECT}\\b|\\baprobad[oa]s?\\b[^.!?;]{0,45}\\b${SPANISH_PESTICIDE_SUBJECT}\\b`, 'i');
-const SPANISH_IMPLICIT_APPROVAL_RE = /\b(?:(?:est[aá]|es|fue|ha\s+sido)\s+|(?:(?:s[ií]|claro)\s*,?\s*)?)aprobad[oa]s?\b[^.!?;]{0,30}\b(?:EPA|uso)\b/i;
+const SPANISH_IMPLICIT_APPROVAL_RE = new RegExp(`\\b(?:(?:est[aá]|es|fue|ha\\s+sido)\\s+|(?:${SPANISH_AFFIRMATIVE_INTRO})?)aprobad[oa]s?\\b[^.!?;]{0,30}\\b(?:EPA|uso)\\b`, 'i');
+const SPANISH_ASSURANCE_ACTION = `(?:${SPANISH_CALLBACK_ACTION}|(?:envi|mand)[a-záéíóúñü]*)`;
+const SPANISH_ASSURANCE_CALLBACK_RE = new RegExp(`^\\s*segur[oa]s?\\s*(?:,|que)\\s*[^.!?;]{0,50}${SPANISH_ASSURANCE_ACTION}`, 'i');
 const SPANISH_EXPLICIT_COPULAR_SUBJECT_RE = /\b(?:el|la|los|las|este|esta|estos|estas|su|sus)\s+[a-záéíóúñü]+(?:\s+[a-záéíóúñü]+){0,3}\s+(?:es|son|sea(?:n)?|ser[aá]n?|est[aá](?:n)?|fue|ha\s+sido|queda(?:n)?|resulta(?:n)?|tiene(?:n)?|presenta(?:n)?|supone(?:n)?)(?![a-záéíóúñü])/i;
 const SPANISH_FIXED_DRYING_RE = /\b(?:(?:tratamientos?|productos?|pesticidas?|insecticidas?|qu[ií]micos?|aplicaciones?|rociados?|cebos?|superficies?)\b[^.!?;]{0,55})?(?:se\s+seca(?:n)?|seca(?:n)?|secar[aá](?:n)?|estar[aá](?:n)?\s+sec[oa]s?|tiempo\s+de\s+(?:secado|reingreso)|reingreso|una\s+vez\s+(?:que\s+)?sec[oa]s?)\b[^.!?;]{0,30}\b(?:en\s+)?(?:\d+|diez|quince|veinte|treinta|cuarenta|cincuenta|sesenta)\s+minutos?\b|\b(?:puede(?:n)?\s+)?(?:volver\s+a\s+entrar|dejar\s+entrar\s+a\s+(?:sus\s+)?mascotas?)\b[^.!?;]{0,35}\b(?:despu[eé]s\s+de|en)\s+(?:\d+|diez|quince|veinte|treinta|cuarenta|cincuenta|sesenta)\s+minutos?\b/i;
 const SPANISH_POLICY_CLAUSE_SPLIT_RE = /[.!?;]+|\b(?:y|pero|aunque|sino)\b/i;
@@ -616,6 +619,7 @@ function no_safety_guarantee(value, record, { spoken = [] } = {}) {
       const safe = spanishPolicyCandidate(clause, productContext,
         SPANISH_PESTICIDE_SAFETY_GUARANTEE_RE, SPANISH_IMPLICIT_SAFETY_GUARANTEE_RE);
       const deniedSafety = /\bno\s+(?:es|son|sea(?:n)?|ser[aá](?:n)?|queda(?:n)?|resulta(?:n)?)\s+[^.!?;]{0,25}\b(?:segur[oa]s?|inocu[oa]s?)\b/i.test(clause);
+      const assuranceCallback = safe?.index === 0 && SPANISH_ASSURANCE_CALLBACK_RE.test(clause);
       const qualifiedDry = /\buna\s+vez\s+(?:que\s+)?sec[oa]s?\b/i.test(clause)
         && SPANISH_QUALIFIED_DRY_SAFETY_RE.test(text)
         && !/\bt[eé]cnic[oa]\b[^.!?]{0,30}\bno\s+confirm/i.test(text)
@@ -628,7 +632,7 @@ function no_safety_guarantee(value, record, { spoken = [] } = {}) {
       const deniedApproval = /\bno\s+(?:est[aá]|es|fue|ha\s+sido)\s+aprobad[oa]s?\b/i.test(clause);
       const drying = assertedSpokenMatch(clause, SPANISH_FIXED_DRYING_RE);
       const violation = [
-        [safe, deniedSafety || qualifiedDry, 'product described as safe'],
+        [safe, deniedSafety || qualifiedDry || assuranceCallback, 'product described as safe'],
         [noRisk, refusal, 'product described as risk-free'],
         [approved, deniedApproval, 'product described as approved'],
         [drying, false, 'fixed drying or re-entry time'],
@@ -715,7 +719,7 @@ const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applica
 // A bare amount after a plan/price noun and copula is customer-facing price
 // copy too ("el plan trimestral es 150"). Keep this grammar shared with
 // amount_requires_unit so disclosure and unit enforcement see the same construction.
-const PLAN_NOUN = '(?:programa|plan|premium|mejorado|b[aá]sico|servicio|tratamiento|precio|opci[oó]n|paquete|costo|tarifa|program|enhanced|basic|service|treatment|price|option|package|cost|rate)';
+const PLAN_NOUN = '(?:programa|plan|premium|mejorad[oa]|b[aá]sic[oa]|servicio|tratamiento|precio|opci[oó]n|paquete|costo|tarifa|program|enhanced|basic|service|treatment|price|option|package|cost|rate)';
 const PLAN_COPULA = `\\b${PLAN_NOUN}\\b[^.!?;,\\d$]{0,30}?\\b(?:es|son|ser[íi]an?|queda\\s+en|est[áa]\\s+en|is|are|would\\s+be|will\\s+be)\\s+(?:de\\s+|about\\s+|around\\s+)?`;
 const PER_UNIT_CONNECTOR = '(?:per|an?|each|every|for each|for every|por(?:\\s+cada)?|cada)';
 const AMOUNT_RES = Object.freeze([
@@ -731,6 +735,7 @@ const AMOUNT_RES = Object.freeze([
   // "account 88213") are not amounts.
   new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa|${PRICE_VERB})(?![a-záéíóúñ])[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
   new RegExp(`${PLAN_COPULA}(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}`, 'gi'),
+  new RegExp(`(?:^|[.!?;]\\s*)(?:(?:el|la|un|una)\\s+)?${PLAN_NOUN}\\b(?:\\s+[a-záéíóúñü]+){0,2}\\s*[,=:-]\\s*(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -1376,19 +1381,28 @@ function no_visit_time(value, record, { utterances }) {
 
 const ESTIMATE_NOUN_ES_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
 const ESTIMATE_DELIVERY_ES_SOURCE = '(?:envi\\w*|mand\\w*|recib\\w*|llegar\\w*|entreg\\w*|hac\\w*\\s+llegar)';
+const ESTIMATE_READY_STATE_SOURCE = '(?:list[oa]s?|preparad[oa]s?|terminad[oa]s?|disponibles?)';
+const ESTIMATE_READINESS_ES_SOURCE = `(?:(?:(?:estar[aá](?:n)?|quedar[aá](?:n)?|va(?:n|mos)?\\s+a\\s+estar)\\s+${ESTIMATE_READY_STATE_SOURCE})|(?:(?:tendr[eé]|tendr[aá]s?|tendremos|tendr[aá]n)\\s+${ESTIMATE_READY_STATE_SOURCE}))`;
+const ESTIMATE_TIMING_PREDICATE_SOURCE = `(?:${ESTIMATE_DELIVERY_ES_SOURCE}|${ESTIMATE_READINESS_ES_SOURCE})`;
 const ESTIMATE_DELIVERY_DATE_SOURCE = `(?:el\\s+pr[oó]ximo\\s+)?(?:${WEEKDAYS})|(?:esta|la\\s+pr[oó]xima)\\s+semana|la\\s+semana\\s+(?:que\\s+viene|entrante)|(?:el\\s+)?(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')})`;
+const ESTIMATE_READINESS_TIME_SOURCE = `(?:${ESTIMATE_DELIVERY_DATE_SOURCE}|hoy|mañana|pasado\\s+mañana|esta\\s+(?:mañana|tarde|noche)|en\\s+(?:\\d+|${DAY_WORDS_ES})\\s+(?:minutos?|horas?|d[ií]as?|semanas?))`;
 const ESTIMATE_DELIVERY_CLOCK_SOURCE = '(?:(?:(?:a|para)\\s+la\\s+una|(?:a|para|antes\\s+de)\\s+las\\s+(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce))(?:\\s+de\\s+la\\s+(?:mañana|tarde|noche))?|(?:al|a(?:\\s+la)?|para(?:\\s+(?:el|la))?|antes\\s+(?:del|de(?:\\s+la)?))\\s+(?:mediodía|medianoche)|(?:por|durante)\\s+la\\s+(?:mañana|tarde|noche))';
-const ESTIMATE_DELIVERY_CLAIM_SOURCE = `(?:${ESTIMATE_DELIVERY_ES_SOURCE}[^.!?;]{0,100}${ESTIMATE_NOUN_ES_RE.source}|${ESTIMATE_NOUN_ES_RE.source}[^.!?;]{0,100}${ESTIMATE_DELIVERY_ES_SOURCE})`;
+const ESTIMATE_DELIVERY_CLAIM_SOURCE = `(?:${ESTIMATE_TIMING_PREDICATE_SOURCE}[^.!?;]{0,100}${ESTIMATE_NOUN_ES_RE.source}|${ESTIMATE_NOUN_ES_RE.source}[^.!?;]{0,100}${ESTIMATE_TIMING_PREDICATE_SOURCE})`;
 const ESTIMATE_DELIVERY_CLAIM_RE = new RegExp(ESTIMATE_DELIVERY_CLAIM_SOURCE, 'i');
 const ESTIMATE_DELIVERY_DATE_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'i');
 const ESTIMATE_DELIVERY_CLOCK_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_CLOCK_SOURCE})\\b`, 'i');
 const ESTIMATE_REQUEST_DATE_RE = new RegExp(`\\b(?:que\\s+)?(?:solicit|pid)\\w*\\b(?:(?!\\b${ESTIMATE_DELIVERY_ES_SOURCE}\\b)[^.!?;]){0,40}?\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'gi');
-const ASSERTED_ESTIMATE_DELIVERY_DATE_RE = new RegExp(`(?=[\\s\\S]*${ESTIMATE_NOUN_ES_RE.source})(?=[\\s\\S]*${ESTIMATE_DELIVERY_ES_SOURCE})(?=[\\s\\S]*(?:${ESTIMATE_DELIVERY_DATE_SOURCE}))`, 'i');
+const ASSERTED_ESTIMATE_DELIVERY_DATE_RE = new RegExp(`(?=[\\s\\S]*${ESTIMATE_NOUN_ES_RE.source})(?=[\\s\\S]*${ESTIMATE_TIMING_PREDICATE_SOURCE})(?=[\\s\\S]*(?:${ESTIMATE_DELIVERY_DATE_SOURCE}))`, 'i');
 const ASSERTED_ESTIMATE_DELIVERY_CLOCK_RE = new RegExp(`(?:${ESTIMATE_DELIVERY_CLAIM_SOURCE}[^.!?;]{0,80}${ESTIMATE_DELIVERY_CLOCK_SOURCE}|${ESTIMATE_DELIVERY_CLOCK_SOURCE}[^.!?;]{0,80}${ESTIMATE_DELIVERY_CLAIM_SOURCE})`, 'i');
+const ASSERTED_ESTIMATE_READINESS_RE = new RegExp(`(?:${ESTIMATE_DELIVERY_CLAIM_SOURCE}[^.!?;]{0,60}${ESTIMATE_READINESS_TIME_SOURCE}|${ESTIMATE_READINESS_TIME_SOURCE}[^.!?;]{0,60}${ESTIMATE_DELIVERY_CLAIM_SOURCE})`, 'i');
 
 function no_spanish_estimate_delivery_date(value, record, { utterances }) {
   for (const utterance of utterances) {
     for (const sentence of String(utterance.text || '').split(SENTENCE_SPLIT_RE)) {
+      const readiness = assertedSpokenMatch(sentence, ASSERTED_ESTIMATE_READINESS_RE);
+      if (readiness && !SPANISH_NEGATION_RE.test(readiness[0])) {
+        return ['fail', `estimate readiness tied to a time: "${clip(sentence, 160)}"`];
+      }
       const evidence = spanishQualitativeTimeEvidence(sentence, ESTIMATE_DELIVERY_CLAIM_RE);
       const qualitative = SPANISH_QUALITATIVE_VISIT_TIME_RE.exec(evidence);
       if (qualitative) return ['fail', `estimate delivery tied to "${qualitative[0]}": "${clip(sentence, 160)}"`];
