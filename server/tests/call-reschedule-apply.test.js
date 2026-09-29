@@ -128,6 +128,35 @@ const visit = (overrides = {}) => {
 };
 
 describe('planRescheduleFromCall', () => {
+  test('relative dates resolve against the call\'s start (callStartedAt), not the row\'s created_at', () => {
+    // The call began 11:50 PM ET Sep 23; its post-call row was written at
+    // 12:10 AM ET Sep 24. "In two days" is Sep 25 from the start date.
+    const said = 'We will see you in two days at two PM.';
+    const extraction = v2({
+      scheduling: {
+        confirmed_start_at: '2026-09-25T14:00:00-04:00', relative_date_used: true,
+        agreed_slot_words: { day: 'in two days', hour: 'two', period: 'PM' },
+      },
+      evidence: [
+        { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: said },
+        { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: said },
+        { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
+        { field_path: '/scheduling/relative_date_used', speaker: 'agent', quote: said },
+      ],
+    });
+    const args = {
+      v2: extraction, customer: customer(), candidates: [visit()], now: new Date('2026-09-24T04:30:00Z'),
+      call: call({
+        created_at: new Date('2026-09-24T04:10:00Z'), duration_seconds: 1200, metadata: { source: 'status_callback' },
+        transcription: `Agent: ${said}\nCaller: ${ACCEPT}`,
+      }),
+    };
+    expect(planRescheduleFromCall(args)).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    // The same row read as a call that started at created_at lands on Sep 26.
+    expect(planRescheduleFromCall({ ...args, call: { ...args.call, metadata: {} } }))
+      .toMatchObject({ reason: 'reschedule_not_agreed', agreementReason: 'agreed_slot_words_mismatch' });
+  });
+
   test('the extraction\'s language judgements gate the automatic apply (schema 1.20.0)', () => {
     const args = { call: call(), customer: customer(), candidates: [visit()], now: NOW };
     expect(planRescheduleFromCall({ ...args, v2: v2() })).toMatchObject({ action: 'apply', visitId: VISIT_ID });

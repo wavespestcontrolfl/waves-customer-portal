@@ -324,20 +324,33 @@ const RELATIVE_DATE_HORIZON_DAYS = 60;
 // now/today (N digits, "a"/"one", or a number word two to eight). Anything else
 // ("sometime next month", "a few days") stays manual.
 const OFFSET_NUMBER_WORDS = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };
-// "half a day from now" is not a whole day.
-const OFFSET_NUMBER = String.raw`(?<!half )(\d{1,2}|${Object.keys(OFFSET_NUMBER_WORDS).join('|')})`;
-const OFFSET_FORMS = [
-  new RegExp(String.raw`\bin ${OFFSET_NUMBER} (days?|weeks?)\b`, 'g'),
-  new RegExp(String.raw`\b${OFFSET_NUMBER} (days?|weeks?) from (?:now|today)\b`, 'g'),
+const OFFSET_N = String.raw`(\d{1,2}|${Object.keys(OFFSET_NUMBER_WORDS).join('|')})`;
+const countedDays = ([, n, unit]) => (OFFSET_NUMBER_WORDS[n] ?? Number(n)) * (unit.startsWith('week') ? 7 : 1);
+const OFFSET_PATTERNS = [
+  { src: String.raw`(?:the )?day after tomorrow`, days: () => 2 },
+  { src: 'tomorrow', days: () => 1 },
+  { src: String.raw`in ${OFFSET_N} (days?|weeks?)`, days: countedDays },
+  { src: String.raw`${OFFSET_N} (days?|weeks?) from (?:now|today)`, days: countedDays },
 ];
+// The days an ENTIRE recorded phrase names: it must be exactly one form, so
+// "at least two days from now", "half of a day from now", "within two days"
+// or "by the day after tomorrow" name none.
+function phraseOffsetDays(phrase) {
+  const text = normalize(phrase);
+  for (const { src, days } of OFFSET_PATTERNS) {
+    const m = text.match(new RegExp(`^${src}$`));
+    if (m) return days(m);
+  }
+  return null;
+}
+// Every offset form the quote states (one number when they all agree, else
+// null): a second, different form anywhere in the quote is ambiguity.
 function quoteOffsetDays(quote) {
   const offsets = [];
-  const text = normalize(quote).replace(/\b(?:the )?day after tomorrow\b/g, () => { offsets.push(2); return ' '; })
-    .replace(/\btomorrow\b/g, () => { offsets.push(1); return ' '; });
-  OFFSET_FORMS.forEach((re) => [...text.matchAll(re)].forEach(([, n, unit]) => {
-    const count = OFFSET_NUMBER_WORDS[n] ?? Number(n);
-    offsets.push(count * (unit.startsWith('week') ? 7 : 1));
-  }));
+  let text = normalize(quote);
+  for (const { src, days } of OFFSET_PATTERNS) {
+    text = text.replace(new RegExp(String.raw`(?<!half )\b${src}\b`, 'g'), (...m) => { offsets.push(days(m)); return ' '; });
+  }
   return offsets.length && offsets.every((o) => o === offsets[0]) ? offsets[0] : null;
 }
 function namesRelativeDate(words, date, started, relativeQuotes = []) {
@@ -345,12 +358,12 @@ function namesRelativeDate(words, date, started, relativeQuotes = []) {
   const today = etDateString(started);
   const withinHorizon = date > today && date <= etDateString(addETDays(started, RELATIVE_DATE_HORIZON_DAYS));
   if (said?.weekday === undefined) {
-    // Weekday-less: the code computes the date itself and it must equal the
-    // extraction's resolved date.
-    return withinHorizon && relativeQuotes.some((q) => {
-      const days = quoteOffsetDays(q);
-      return days !== null && etDateString(addETDays(started, days)) === date;
-    });
+    // Weekday-less: the whole recorded phrase must be one closed form, the
+    // pinned quote must hold it verbatim and state no other offset, and the
+    // date the code computes must equal the extraction's resolved date.
+    const days = phraseOffsetDays(words);
+    return withinHorizon && days !== null && etDateString(addETDays(started, days)) === date
+      && relativeQuotes.some((q) => holds(q, words) && quoteOffsetDays(q) === days);
   }
   if (said.month !== undefined || said.day !== undefined || said.year !== undefined) return false;
   if (new Date(`${date}T12:00:00Z`).getUTCDay() !== said.weekday) return false;

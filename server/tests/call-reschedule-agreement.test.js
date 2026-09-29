@@ -643,11 +643,24 @@ describe('groundRescheduleAgreement', () => {
       // Past today, and beyond the 60-day horizon, fail even when they equal the computed date.
       expect(judged({ said: 'We will see you in 8 weeks at two PM.', slot: at('2026-11-18'), words: { day: 'in 8 weeks', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok).toBe(true);
       expect(judged({ said: 'We will see you in 9 weeks at two PM.', slot: at('2026-11-25'), words: { day: 'in 9 weeks', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok).toBe(false);
+      // The recorded phrase must sit verbatim in the quote, and the quote must state
+      // no other offset form.
+      expect(judged({ said: 'We will see you at least two days from now at two PM.', slot: at('2026-09-25'), words: { day: 'two days from now', hour: 'two', period: 'PM' },
+        flags: relativeTrue, relativeQuote: 'We will see you in two days at two PM.' }).ok).toBe(false);
+      expect(judged({ said: 'We will see you in two days at two PM, not tomorrow.', slot: at('2026-09-25'), words: { day: 'in two days', hour: 'two', period: 'PM' },
+        flags: relativeTrue }).ok).toBe(false);
       // Everything else weekday-less stays manual.
       for (const [said, day] of [
         ['We will see you sometime next month at two PM.', 'sometime next month'],
         ['We will see you in a few days at two PM.', 'in a few days'],
         ['We will see you in a couple of weeks at two PM.', 'in a couple of weeks'],
+        ['We will see you at least two days from now at two PM.', 'at least two days from now'],
+        ['We will see you half of a day from now at two PM.', 'half of a day from now'],
+        ['We will see you more than a week from now at two PM.', 'more than a week from now'],
+        ['We will see you within two days at two PM.', 'within two days'],
+        ['We will see you by the day after tomorrow at two PM.', 'by the day after tomorrow'],
+        ['We will see you about eight days from now at two PM.', 'about eight days from now'],
+        ['We will see you up to two weeks from now at two PM.', 'up to two weeks from now'],
         ['We will see you half a day from now at two PM.', 'half a day from now'],
         ['We will see you in a week or two at two PM.', 'in a week or two'],
         ['We will see you in nine days at two PM.', 'in nine days'],
