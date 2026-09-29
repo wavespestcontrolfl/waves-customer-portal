@@ -4225,8 +4225,9 @@ async function loadExistingPageBody(targetUrlOrPath, { strictRegistryErrors = fa
   // frontmatter rides along (additive): local blog slugs embed their city
   // without the -fl marker URL inference needs, but service_areas_tag
   // carries it authoritatively — the family miner derives refresh cities
-  // from it (Codex #3255 r29).
-  return { body, word_count, frontmatter: parsed.data || {} };
+  // from it (Codex #3255 r29). source_file (additive) lets the citability
+  // backfill re-scan the live page with its real extension (.md vs .mdx).
+  return { body, word_count, frontmatter: parsed.data || {}, source_file: resolved.path };
 }
 
 function canPublishRefresh(draft, brief = {}) {
