@@ -133,11 +133,21 @@ describe('first-touch release suppression check matches the Google mailbox under
   });
 });
 
-// Codex #5323 r5: a pre-deploy card must refresh when its call is reprocessed.
-describe('email review card signature carries the same-inbox marker', () => {
-  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-  test('emailCardSignature includes gmail_same_inbox', () => {
-    const fn = src.slice(src.indexOf('function emailCardSignature'), src.indexOf('\n}\n', src.indexOf('function emailCardSignature')));
-    expect(fn).toContain('payload?.gmail_same_inbox || null');
+// Codex #5323 r5: a pre-deploy OPEN card refreshes on reprocess; a card a
+// human already CONFIRMED stays satisfied (wording is not evidence).
+describe('email review card signature: same-inbox marker counts for open cards only', () => {
+  const { emailCardSignature } = require('../services/call-recording-processor')._test;
+  const before = { email_disagreement: { v1: 'a', v2: 'b' }, email_candidates: [{ value: 'j.q.sample1990@gmail.com' }, { value: 'jqsample1990@gmail.com' }] };
+  const after = { ...before, gmail_same_inbox: 'jqsample1990@gmail.com' };
+  test('open-card comparison sees the new wording', () => {
+    expect(emailCardSignature('email_unverified', before, { wording: true }))
+      .not.toBe(emailCardSignature('email_unverified', after, { wording: true }));
+  });
+  test('confirmed-card comparison ignores it', () => {
+    expect(emailCardSignature('email_unverified', before)).toBe(emailCardSignature('email_unverified', after));
+  });
+  test('only the live-card comparison opts into wording', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src.match(/\{ wording: true \}/g)).toHaveLength(2);
   });
 });
