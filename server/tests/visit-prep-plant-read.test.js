@@ -454,3 +454,35 @@ describe('engine hand-off when the stop changes lines (Codex #5320 r7)', () => {
     expect(mockPestTrigger).not.toHaveBeenCalled();
   });
 });
+
+describe('the stop changes while the engine runs (Codex #5320 r8)', () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const retype = (conn, type) => conn._store.scheduled_services.forEach((r) => { if (r.id === 'svc-1') r.service_type = type; });
+
+  test('lawn → tree & shrub mid-read: the lawn result is not stored; the claim is released and the stop re-read as tree & shrub', async () => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    mockIdentifyPlantV2
+      .mockImplementationOnce(async () => { retype(conn, 'Tree & Shrub Care'); return okEngineResult(); })
+      .mockResolvedValueOnce(okEngineResult());
+    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
+    const row = () => conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1');
+    expect(row().read_status).toBe('none');
+    expect(row().read_result).toBeNull();
+    await tick(); await tick();
+    expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(2);
+    expect(mockIdentifyPlantV2.mock.calls[1][0].subject).toBe('tree_shrub');
+    expect(row().read_status).toBe('done');
+    expect(JSON.parse(row().read_result).subject_type).toBe('tree_shrub');
+  });
+
+  test('a re-read that sees the stop change again leaves the row at none (the recovery sweep\'s case), never a third read', async () => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    mockIdentifyPlantV2.mockImplementation(async () => { retype(conn, 'Tree & Shrub Care'); return okEngineResult(); });
+    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn, rechecked: true });
+    await tick(); await tick();
+    expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(1);
+    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('none');
+  });
+});

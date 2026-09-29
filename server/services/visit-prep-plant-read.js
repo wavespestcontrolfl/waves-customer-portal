@@ -48,7 +48,7 @@ const { plantSubjectForStop } = require('./visit-prep-plant-applicability');
 // The daily cap and the locked claim are the SAME ones the pest read uses
 // (visit-prep-read-claim.js): one cap across both engines.
 const {
-  claimReadSlot: claimSharedReadSlot, handOff, markUnclaimed, markUnsupported, dailyCap, etDayStart,
+  claimReadSlot: claimSharedReadSlot, handOff, settleClaimedRead, markUnclaimed, markUnsupported, dailyCap, etDayStart,
 } = require('./visit-prep-read-claim');
 
 // 'lawn' | 'tree_shrub' | 'unsupported'.
@@ -81,6 +81,15 @@ async function setReadStatus(conn, submissionId, status, readResult = JSON.strin
   } catch (err) {
     logger.error(`[visit-prep-plant-read] failed to write read_status=${status} submission=${submissionId}: ${err.message}`);
   }
+}
+
+// The stop changed while the engine ran: read it again as it is now (the
+// pre-check hands it to the pest read if it is a pest stop now). Once only —
+// a second change leaves the row at 'none' for the recovery sweep.
+function rereadAfterChange(args) {
+  if (args.rechecked) return;
+  logger.warn(`[visit-prep-plant-read] stop changed during the read — re-reading submission=${args.submissionId}`);
+  handOff('./visit-prep-plant-read', 'triggerVisitPrepPlantRead', { ...args, rechecked: true, handedOff: false }, logger);
 }
 
 /**
@@ -121,7 +130,7 @@ async function claimOrSettle(conn, submissionId, svc, settleUnsupported) {
 }
 
 async function triggerVisitPrepPlantRead({
-  submissionId, svc, photos, conn = db, handedOff = false,
+  submissionId, svc, photos, conn = db, handedOff = false, rechecked = false,
 } = {}) {
   if (!submissionId || !svc?.id) return;
   if (!visitPrepPlantReadLive()) return; // gate off — leave read_status at its 'none' default
@@ -131,7 +140,7 @@ async function triggerVisitPrepPlantRead({
   // (Codex #5320 r7 P2). The target re-checks its own gate and applicability.
   const settleUnsupported = async () => {
     await markUnsupported(conn, submissionId, logger);
-    if (!handedOff) handOff('./visit-prep-pest-read', 'triggerVisitPrepPestRead', { submissionId, svc, photos, conn }, logger);
+    if (!handedOff) handOff('./visit-prep-pest-read', 'triggerVisitPrepPestRead', { submissionId, svc, photos, conn, rechecked }, logger);
   };
 
   let applicability;
@@ -179,14 +188,19 @@ async function triggerVisitPrepPlantRead({
     return;
   }
 
-  // A single UPDATE on the submission's own row is already atomic — unlike
-  // the pest read, there is no second table to keep in step (see the
-  // module header).
+  // Stored only if the stop is still a `subject` stop now that the engine
+  // is back; otherwise the claim is released and the stop re-read as it is
+  // now, once (Codex #5320 r8 P2).
   try {
-    await conn('visit_prep_submissions').where({ id: submissionId }).update({
-      read_status: 'done',
-      read_result: JSON.stringify({ ...PLANT_MARKER, v2: result.v2, internal: result.internal, subject_type: subject }),
+    const settled = await settleClaimedRead(conn, submissionId, svc, {
+      applicable: (stop, trx) => plantSubjectForStop(stop, trx),
+      matches: (now) => now === subject,
+      store: (trx) => trx('visit_prep_submissions').where({ id: submissionId }).update({
+        read_status: 'done',
+        read_result: JSON.stringify({ ...PLANT_MARKER, v2: result.v2, internal: result.internal, subject_type: subject }),
+      }),
     });
+    if (settled === 'changed') rereadAfterChange({ submissionId, svc, photos, conn, rechecked });
   } catch (err) {
     logger.error(`[visit-prep-plant-read] storing the read failed submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');

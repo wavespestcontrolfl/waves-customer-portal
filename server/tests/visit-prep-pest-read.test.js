@@ -580,3 +580,23 @@ describe('engine hand-off when the stop changes lines (Codex #5320 r7)', () => {
     expect(mockPlantTrigger).not.toHaveBeenCalled();
   });
 });
+
+describe('the stop changes while the engine runs (Codex #5320 r8)', () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  beforeEach(async () => { await tick(); mockPlantTrigger.mockClear(); });
+
+  test('pest → lawn mid-read: nothing stored, the claim released, and the re-read hands the photos to the plant read', async () => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'b64', mimeType: 'image/jpeg' });
+    mockIdentifyPestV2.mockImplementationOnce(async () => {
+      conn._store.scheduled_services.forEach((r) => { if (r.id === 'svc-1') r.service_type = 'Lawn Weed & Feed'; });
+      return okEngineResult();
+    });
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
+    expect(conn._store.pest_identifications).toHaveLength(0);
+    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('none');
+    await tick(); await tick(); // the re-read, then its hand-off
+    expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
+    expect(mockPlantTrigger).toHaveBeenCalledWith(expect.objectContaining({ submissionId: 'sub-1', handedOff: true, rechecked: true }));
+  });
+});

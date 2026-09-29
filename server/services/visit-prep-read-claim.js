@@ -92,6 +92,42 @@ async function claimReadSlot(conn, submissionId, svc, {
   }
 }
 
+/**
+ * Stores a finished read only if the stop still wants THIS read: the engine
+ * call runs outside any transaction, and the stop can change lines (or
+ * subject) while it runs. Under the same stop lock + share locks as the
+ * claim, re-proves applicability; a match runs `store(trx)`, anything else
+ * releases the claim back to 'none' (uncounted) and returns 'changed' so the
+ * caller re-dispatches for the stop as it is now (Codex #5320 r8 P2).
+ *
+ * @param {object} opts
+ * @param {(svc: object, trx: object) => Promise<any>} opts.applicable
+ * @param {(value: any) => boolean} opts.matches  does the current value still fit the read made
+ * @param {(trx: object) => Promise<void>} opts.store
+ * @returns {Promise<'stored' | 'changed'>}
+ */
+async function settleClaimedRead(conn, submissionId, svc, { applicable, matches, store }) {
+  const { lockStopForRow } = require('./visit-groups');
+  const release = (trx) => trx('visit_prep_submissions').where({ id: submissionId, read_status: 'pending' })
+    .update({ read_status: 'none', read_ref: null, read_result: null });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await conn.transaction(async (trx) => {
+        if ((await lockStopForRow(trx, svc.id)) === null) { await release(trx); return 'changed'; }
+        const { techStopMemberIds } = require('./visit-prep');
+        const members = await techStopMemberIds(svc, trx);
+        await trx('scheduled_services').whereIn('id', [...new Set([svc.id, ...members])]).forShare().select('id');
+        if (!matches(await applicable(svc, trx))) { await release(trx); return 'changed'; }
+        await store(trx);
+        return 'stored';
+      });
+    } catch (err) {
+      if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
+      throw err;
+    }
+  }
+}
+
 // Every write an engine makes BEFORE holding a claim ('unsupported' = this
 // engine doesn't apply; 'none' = not read: cap refused, photos failed to
 // load, claim error) lands only while no engine has claimed the row. Each
@@ -117,7 +153,7 @@ const markUnsupported = (conn, submissionId, logger) => markUnclaimed(conn, subm
 function handOff(toModule, triggerName, args, logger) {
   setImmediate(() => {
     try {
-      Promise.resolve(require(toModule)[triggerName]({ ...args, handedOff: true }))
+      Promise.resolve(require(toModule)[triggerName]({ handedOff: true, ...args }))
         .catch((err) => logger?.error?.(`[visit-prep-read] hand-off failed submission=${args.submissionId}: ${err.message}`));
     } catch (err) {
       logger?.error?.(`[visit-prep-read] hand-off could not start submission=${args.submissionId}: ${err.message}`);
@@ -125,4 +161,4 @@ function handOff(toModule, triggerName, args, logger) {
   });
 }
 
-module.exports = { handOff, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };
+module.exports = { handOff, settleClaimedRead, UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };

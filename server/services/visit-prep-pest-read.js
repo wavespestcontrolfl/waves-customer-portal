@@ -45,7 +45,7 @@ const { visitPrepPestReadLive } = require('../config/feature-gates');
 // The daily cap and the locked claim are shared with every visit-prep read
 // engine (visit-prep-read-claim.js).
 const {
-  claimReadSlot: claimSharedReadSlot, handOff, markUnclaimed, markUnsupported, dailyCap, etDayStart,
+  claimReadSlot: claimSharedReadSlot, handOff, settleClaimedRead, markUnclaimed, markUnsupported, dailyCap, etDayStart,
 } = require('./visit-prep-read-claim');
 const { isPestStop, liveStopServiceTypes } = require('./visit-prep-pest-applicability');
 
@@ -111,6 +111,16 @@ async function storeIdentification(conn, { svc, submissionId, result }) {
   return row[0]?.id || row[0];
 }
 
+// The stop changed while the engine ran: read it again as it is now (the
+// pre-check hands it to the plant read if it is a lawn / tree & shrub stop
+// now). Once only — a second change leaves the row at 'none' for the
+// recovery sweep.
+function rereadAfterChange(args) {
+  if (args.rechecked) return;
+  logger.warn(`[visit-prep-pest-read] stop changed during the read — re-reading submission=${args.submissionId}`);
+  handOff('./visit-prep-pest-read', 'triggerVisitPrepPestRead', { ...args, rechecked: true, handedOff: false }, logger);
+}
+
 /**
  * @param {object} opts
  * @param {string} opts.submissionId        the just-committed visit_prep_submissions row id
@@ -127,7 +137,7 @@ async function storeIdentification(conn, { svc, submissionId, result }) {
  *          read_status='failed' so the row never sticks on 'pending'.
  */
 async function triggerVisitPrepPestRead({
-  submissionId, svc, photos, conn = db, handedOff = false,
+  submissionId, svc, photos, conn = db, handedOff = false, rechecked = false,
 } = {}) {
   if (!submissionId || !svc?.id) return;
   if (!visitPrepPestReadLive()) return; // gate off — leave read_status at its 'none' default
@@ -137,7 +147,7 @@ async function triggerVisitPrepPestRead({
   // (Codex #5320 r7 P2). The target re-checks its own gate and applicability.
   const settleUnsupported = async () => {
     await markUnsupported(conn, submissionId, logger);
-    if (!handedOff) handOff('./visit-prep-plant-read', 'triggerVisitPrepPlantRead', { submissionId, svc, photos, conn }, logger);
+    if (!handedOff) handOff('./visit-prep-plant-read', 'triggerVisitPrepPlantRead', { submissionId, svc, photos, conn, rechecked }, logger);
   };
 
   let applicability;
@@ -205,13 +215,25 @@ async function triggerVisitPrepPestRead({
     return;
   }
 
-  // The identification and the submission's done/read_ref commit together
-  // (Codex #5305 r5): never an orphaned paid read with the row left pending.
+  await storeOrReread({ submissionId, svc, photos, conn, rechecked }, result);
+}
+
+// The identification and the submission's done/read_ref commit together
+// (Codex #5305 r5): never an orphaned paid read with the row left pending.
+// Stored only if the stop is still a pest stop now that the engine is back;
+// otherwise the claim is released and the stop re-read (Codex #5320 r8).
+async function storeOrReread(args, result) {
+  const { submissionId, svc, conn } = args;
   try {
-    await conn.transaction(async (trx) => {
-      const readRef = await storeIdentification(trx, { svc, submissionId, result });
-      await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'done', read_ref: readRef });
+    const settled = await settleClaimedRead(conn, submissionId, svc, {
+      applicable: (stop, trx) => isPestStop(stop, trx),
+      matches: Boolean,
+      store: async (trx) => {
+        const readRef = await storeIdentification(trx, { svc, submissionId, result });
+        await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'done', read_ref: readRef });
+      },
     });
+    if (settled === 'changed') rereadAfterChange(args);
   } catch (err) {
     logger.error(`[visit-prep-pest-read] storing the read failed submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');
