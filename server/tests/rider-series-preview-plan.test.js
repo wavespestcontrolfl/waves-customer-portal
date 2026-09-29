@@ -238,4 +238,19 @@ describe('rider-series planRiderDates', () => {
     const horizon = computeRiderHorizon(anchor, [], 'quarterly');
     expect(horizon).toBe(addDays(anchor, 3 * TARGET_GAP_DAYS));
   });
+
+  test('diffPlan pairs same-date movable rows by id, whatever order they arrive in', () => {
+    const { diffPlan } = require('../services/rider-series-preview')._internals;
+    const rows = [
+      { id: 'b', scheduled_date: '2098-02-01' },
+      { id: 'a', scheduled_date: '2098-02-01' },
+      { id: 'c', scheduled_date: '2098-02-01' },
+    ];
+    const plan = ['2098-03-01', '2098-06-01'];
+    const forward = diffPlan(plan, rows);
+    const reversed = diffPlan(plan, [...rows].reverse());
+    expect(forward).toEqual(reversed);
+    expect(forward.move.map((m) => m.id)).toEqual(['a', 'b']);
+    expect(forward.cancel.map((c) => c.id)).toEqual(['c']);
+  });
 });

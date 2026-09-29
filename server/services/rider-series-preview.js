@@ -389,7 +389,10 @@ function diffPlan(plan, movableRows) {
   }
   const unmatchedMovable = movableRows
     .filter((r) => !claimedIds.has(r.id))
-    .sort((a, b) => dateOnly(a.scheduled_date).localeCompare(dateOnly(b.scheduled_date)));
+    // Id tie-break: same-date rows must pair the same way on every run, not
+    // in PostgreSQL's physical row order.
+    .sort((a, b) => dateOnly(a.scheduled_date).localeCompare(dateOnly(b.scheduled_date))
+      || String(a.id).localeCompare(String(b.id)));
 
   const pairCount = Math.min(unmatchedMovable.length, unmatchedPlanned.length);
   const move = [];

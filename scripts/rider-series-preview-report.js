@@ -143,6 +143,20 @@ async function clusterIntoPropertyBuckets(trx, group) {
       bucket.scopes.push(c.scope);
     }
     bucket[c.family === 'lawn_care' ? 'lawn' : 'pest'].push(c.row);
+    c.bucket = bucket;
+  }
+  // A street-only scope treats a missing city/ZIP as a wildcard, so one root
+  // can match two buckets that explicitly differ. Never pick one: flag every
+  // bucket such a root could belong to as property_ambiguous.
+  for (const c of ordered) {
+    if (!c.scope.resolved) continue;
+    for (const other of buckets) {
+      if (other === c.bucket || other.unresolved) continue;
+      if (other.scopes.every((sc) => seriesPropertyVerdict(sc, c.scope) === 'same')) {
+        other.ambiguous = true;
+        c.bucket.ambiguous = true;
+      }
+    }
   }
   return buckets;
 }
@@ -156,6 +170,7 @@ function pairsFromBucket(bucket, customerId) {
   if (!bucket.lawn.length || !bucket.pest.length) return [];
   const extraReasons = [];
   if (bucket.unresolved) extraReasons.push('property_unresolved');
+  if (bucket.ambiguous) extraReasons.push('property_ambiguous');
   if (bucket.lawn.length > 1) extraReasons.push('host_ambiguous');
   if (bucket.pest.length > 1) extraReasons.push('rider_ambiguous');
   const propertyId = bucket.unresolved ? null : (bucket.scopes.find((sc) => sc.propertyId)?.propertyId || null);
@@ -228,8 +243,10 @@ function printHuman(pair, preview) {
     if (preview.insert.length) process.stdout.write(`  insert (${preview.insert.length}): ${preview.insert.join(', ')}\n`);
     if (preview.cancel.length) process.stdout.write(`  cancel (${preview.cancel.length}): ${preview.cancel.map((r) => `${r.id}@${r.date}`).join(', ')}\n`);
     if (preview.retained && preview.retained.length) process.stdout.write(`  retained (${preview.retained.length}): ${preview.retained.map((r) => `${r.id}@${r.date}`).join(', ')}\n`);
-    if (preview.pinned.length) process.stdout.write(`  pinned (${preview.pinned.length}): ${preview.pinned.map((r) => `${r.id}@${r.date || '?'} (${r.why})`).join(', ')}\n`);
   }
+  // Outside the anchor branch: a no_anchor preview can still carry live
+  // pinned work (e.g. a rescheduled_pending parent).
+  if (preview.pinned.length) process.stdout.write(`  pinned (${preview.pinned.length}): ${preview.pinned.map((r) => `${r.id}@${r.date || '?'} (${r.why})`).join(', ')}\n`);
 }
 
 async function main() {
