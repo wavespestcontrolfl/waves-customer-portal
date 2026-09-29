@@ -28256,7 +28256,12 @@ function overlayGateOpen(req, res, next) {
   return next();
 }
 
-const MAP_IMAGE_PATH_RE = /^\/[^/]+\/map\/(satellite|overlay)\/?$/;
+// Matches exactly what Express routes to the two map handlers below: the
+// router is case-insensitive and non-strict (optional trailing slash), `:token`
+// is one non-slash segment, and GET handlers also answer HEAD. Matching is
+// against the raw path (path-to-regexp does not decode or collapse slashes), so
+// encoded or doubled-slash variants never reach these handlers either.
+const MAP_IMAGE_PATH_RE = /^\/[^/]+\/map\/(satellite|overlay)\/?$/i;
 
 // Mounted in server/index.js on /api/estimates BEFORE the global /api/
 // limiter (which runs ahead of this router). It stamps the privacy headers
@@ -28266,10 +28271,10 @@ const MAP_IMAGE_PATH_RE = /^\/[^/]+\/map\/(satellite|overlay)\/?$/;
 // 404 before the global limiter can turn it into a 429.
 function mapImagePreGuard(req, res, next) {
   const match = MAP_IMAGE_PATH_RE.exec(req.path || '');
-  if (!match || req.method !== 'GET') return next();
+  if (!match || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
   stampMapImageHeaders(res);
   res.set('Cache-Control', 'no-store');
-  if (match[1] === 'overlay') return overlayGateOpen(req, res, next);
+  if (match[1].toLowerCase() === 'overlay') return overlayGateOpen(req, res, next);
   return next();
 }
 

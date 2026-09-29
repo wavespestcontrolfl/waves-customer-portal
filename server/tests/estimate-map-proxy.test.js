@@ -450,6 +450,61 @@ describe('map proxy pre-guard (mounted before the global /api limiter)', () => {
     });
   });
 
+  test('HEAD, uppercase path and trailing slash all take the same guarded path (dark overlay, over budget)', async () => {
+    getCachedLookup.mockResolvedValue(cacheRowFixture());
+    dbRows = { estimates: estimateRow() };
+    const variants = [
+      ['HEAD', `/${TOKEN}/map/overlay`],
+      ['GET', `/${TOKEN}/MAP/OVERLAY`],
+      ['GET', `/${TOKEN}/Map/Overlay/`],
+      ['GET', `/${TOKEN}/map/overlay/`],
+      ['HEAD', `/${TOKEN}/MAP/overlay/`],
+    ];
+    await withGuardedApp(1, async (base) => {
+      for (let i = 0; i < 3; i += 1) {
+        for (const [method, path] of variants) {
+          const res = await fetch(`${base}${path}`, { method });
+          expect(res.status).toBe(404);
+          expectPrivacyHeaders(res);
+          await res.arrayBuffer();
+        }
+      }
+    });
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test('HEAD and uppercase satellite 429s carry the headers', async () => {
+    dbRows = { estimates: estimateRow({ satellite_url: STORED_KEYED }) };
+    await withGuardedApp(1, async (base) => {
+      const first = await fetch(`${base}/${TOKEN}/map/satellite`);
+      expect(first.status).toBe(200);
+      await first.arrayBuffer();
+      for (const [method, path] of [['HEAD', `/${TOKEN}/map/satellite`], ['GET', `/${TOKEN}/MAP/SATELLITE/`]]) {
+        const res = await fetch(`${base}${path}`, { method });
+        expect(res.status).toBe(429);
+        expectPrivacyHeaders(res);
+        await res.arrayBuffer();
+      }
+    });
+  });
+
+  test('non-map routes and methods are untouched by the guard', async () => {
+    dbRows = { estimates: estimateRow() };
+    await withGuardedApp(100, async (base) => {
+      for (const [method, path] of [
+        ['GET', `/${TOKEN}/data`],
+        ['HEAD', `/${TOKEN}/data`],
+        ['GET', `/${TOKEN}/map`],
+        ['GET', `/${TOKEN}/map/other`],
+        ['POST', `/${TOKEN}/map/overlay`],
+      ]) {
+        const res = await fetch(`${base}${path}`, { method });
+        expect(res.headers.get('cross-origin-resource-policy')).toBeNull();
+        await res.arrayBuffer();
+      }
+    });
+  });
+
   test('a successful image overwrites Cache-Control with the private max-age', async () => {
     dbRows = { estimates: estimateRow({ satellite_url: STORED_KEYED }) };
     await withGuardedApp(100, async (base) => {

@@ -1754,7 +1754,8 @@ also run a last-line scrub that strips any maps.googleapis.com `key=` and
 blanks the literal key, and stored `estimates.satellite_url` rows that already
 hold a keyed URL are redacted on output — no migration). A small guard (`mapImagePreGuard`) is mounted in
 `server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter,
-scoped to these two GET paths: it stamps `Cache-Control: no-store`,
+scoped to exactly what Express routes to these two handlers (GET and HEAD,
+case-insensitive path, optional trailing slash): it stamps `Cache-Control: no-store`,
 `Referrer-Policy: no-referrer` and `Cross-Origin-Resource-Policy:
 cross-origin` first — so the router.param malformed-token 404 and the global
 and route limiters' 429s inherit them, and a successful image overwrites
