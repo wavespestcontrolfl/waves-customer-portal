@@ -260,7 +260,7 @@ async function refreshHasMultiHome(customerId, database = db) {
  * visits, refresh has_multi_home. Runs POST-COMMIT on the global pool.
  * Returns { propertyId, hasMultiHome } or null. Never throws.
  */
-async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db, onlyServiceIds = null }) {
+async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db, onlyServiceIds = null, isolateGrouping = false }) {
   try {
     if (!estimateId || !customerId) return null;
     // Optional id scope (codex #3504 r10 hook P0): quote-wizard drafts are
@@ -633,7 +633,10 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
       // Every linked row, in id order — a cap left rows beyond it with no
       // later regroup pass (codex #3590 r13 P2).
       for (const r of await regroup.orderBy('id', 'asc')) {
-        await maybeGroupRow(r.id, { database, createdBy: 'converter' });
+        // isolateGrouping (accept-time first-day set only): partners are the
+        // covered ids themselves and the set forms its own visit, so a
+        // bystander row at the same stop is never pulled into it.
+        await maybeGroupRow(r.id, { database, createdBy: 'converter', ...(isolateGrouping ? { only: onlyServiceIds } : {}) });
       }
     } catch (vgErr) {
       logger.warn(`[estimate-property-linkage] visit-group regroup skipped for estimate ${estimateId}: ${vgErr.message}`);
@@ -679,7 +682,7 @@ async function linkFirstDayRowsBeforeFirstInvoice({ estimateId, customerId, data
   await database.raw('SAVEPOINT accept_first_day_linkage');
   try {
     const result = await linkAcceptedEstimateProperty({
-      estimateId, customerId, database, onlyServiceIds: ids,
+      estimateId, customerId, database, onlyServiceIds: ids, isolateGrouping: true,
     });
     await database.raw('RELEASE SAVEPOINT accept_first_day_linkage');
     return result;

@@ -441,8 +441,12 @@ async function syncFirstApplicationInvoiceDate(trx, serviceId, { follower = fals
   if (!row || !row.visit_id || !row.first_application_invoice_id) return 0;
   let invoice;
   try {
-    invoice = await trx('invoices').where({ id: row.first_application_invoice_id })
-      .forUpdate().noWait().first('id', 'scheduled_service_id', 'service_date');
+    // NOWAIT failure aborts the surrounding PostgreSQL transaction (25P02 for
+    // every later statement of the caller's move), so the attempt runs in its
+    // own SAVEPOINT (knex nested transaction) that rolls back before the busy
+    // verdict is swallowed or rethrown.
+    invoice = await trx.transaction((sp) => sp('invoices').where({ id: row.first_application_invoice_id })
+      .forUpdate().noWait().first('id', 'scheduled_service_id', 'service_date'));
   } catch (err) {
     if (err && err.code === '55P03') {
       // A follower of a unit move never fails: the stop must finish moving
@@ -513,7 +517,11 @@ async function visitActivity(visitId, trx = db) {
   let exemptInvoiceIds = new Set();
   if (invoices && invoices.length) {
     try {
-      exemptInvoiceIds = new Set(await unsentFirstApplicationInvoiceIds(trx, childIds));
+      // In the caller's transaction a failed statement would abort it for
+      // every later read, so the lookup gets its own savepoint.
+      exemptInvoiceIds = new Set(trx.isTransaction
+        ? await trx.transaction((sp) => unsentFirstApplicationInvoiceIds(sp, childIds))
+        : await unsentFirstApplicationInvoiceIds(trx, childIds));
     } catch (err) {
       require('./logger').warn(`[visit-groups] first-application invoice exemption unreadable for visit ${visitId} — treated as a freezing invoice: ${err.message}`);
     }
@@ -593,7 +601,7 @@ const baseKeyFor = (r) => stopBaseKey({
   scheduledDate: r.scheduled_date,
 });
 
-async function createOrJoinVisit({ rows, createdBy, trx = null }) {
+async function createOrJoinVisit({ rows, createdBy, trx = null, isolate = false }) {
   if (!Array.isArray(rows) || rows.length < 2) throw new Error('createOrJoinVisit needs >= 2 rows');
   const ids = rows.map((r) => (r && r.id) || r).filter(Boolean);
   if (ids.length !== rows.length) throw new Error('createOrJoinVisit rows need ids');
@@ -766,6 +774,9 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
         .whereIn('status', OPEN_STATUSES)
         .orderBy('stop_seq', 'asc');
       for (const v of openVisits) {
+        // isolate (the accept-time first-day set): never absorbed into a
+        // stop that already exists here — the covered set forms its own.
+        if (isolate) break;
         if (Number(v.behavior_version) !== behaviorVersion) continue;
         if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
         const vAnchor = { ...v, window_start: null, window_end: null };
@@ -1362,7 +1373,10 @@ async function customerExcludedByAutopay(customerId, database = db) {
   }
 }
 
-async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
+// `only` (optional array of scheduled_services ids): the accept-time first-day
+// call restricts the partner set to exactly that covered set and forms its
+// own visit (never joins one). Normal callers pass nothing.
+async function maybeGroupRow(rowId, { createdBy, database = db, only = null } = {}) {
   const { gates } = require('../config/feature-gates');
   if (!gates.visitGroups) return null;
   try {
@@ -1376,9 +1390,9 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
       // savepoint (codex #3590 r4; widened from createOrJoinVisit alone
       // to the pre-reads + autopay check by the r5 pre-push audit: a
       // failed SELECT there aborted the caller just the same).
-      return await database.transaction((sp) => groupRowOn(sp, rowId, createdBy));
+      return await database.transaction((sp) => groupRowOn(sp, rowId, createdBy, only));
     }
-    return await groupRowOn(database, rowId, createdBy);
+    return await groupRowOn(database, rowId, createdBy, only);
   } catch (err) {
     const logger = require('./logger');
     logger.warn(`[visit-groups] maybeGroupRow(${rowId}) skipped: ${err.message}`);
@@ -1389,7 +1403,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
 // maybeGroupRow's body on one connection: `database` is either the plain
 // pool (createOrJoinVisit opens its own transaction) or the caller's
 // savepoint (everything, createOrJoinVisit included, runs on it).
-async function groupRowOn(database, rowId, createdBy) {
+async function groupRowOn(database, rowId, createdBy, only = null) {
   const row = await database('scheduled_services as ss')
     .leftJoin('services as svc', 'ss.service_id', 'svc.id')
     .where('ss.id', rowId)
@@ -1440,6 +1454,7 @@ async function groupRowOn(database, rowId, createdBy) {
     .select('ss.id', 'ss.visit_id');
   if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
   else partnersQ.whereNull('ss.property_id');
+  if (Array.isArray(only)) partnersQ.whereIn('ss.id', only.map(String));
   partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
     'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
     'ss.source_action', 'ss.customer_confirmed',
@@ -1478,9 +1493,9 @@ async function groupRowOn(database, rowId, createdBy) {
   }
   const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
   if (database && database.isTransaction) {
-    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database });
+    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database, isolate: Array.isArray(only) });
   }
-  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch' });
+  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', isolate: Array.isArray(only) });
 }
 
 // ---- Live transitions: one tap moves the whole stop (doc §3) ---------------

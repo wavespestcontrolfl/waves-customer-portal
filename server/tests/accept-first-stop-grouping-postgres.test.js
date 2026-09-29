@@ -468,6 +468,38 @@ postgres('a combined first stop with its accept invoice stays movable until real
     expect(ymd(invoice.service_date)).toBe(ymd(ctx.invoice.service_date));
   });
 
+  test('a sender holding the invoice while a follower moves: every member still moves, the date is left old, no aborted transaction', async () => {
+    const lawn = ctx.rows.find((row) => row.id !== ctx.holdId);
+    const target = nextWeek(ctx.rows[0]);
+    let call = 0;
+    let holder = null;
+    try {
+      const result = await rebooker().reschedule(lawn.id, target, windowOf(lawn), 'test move', 'admin', {
+        overlapAdvisory: true,
+        seriesPolicy: 'single',
+        // Call 1 is the tapped member (verifies the invoice under its own
+        // lock and commits); a sender takes the invoice before the follower.
+        beforeMove: async () => {
+          call += 1;
+          if (call === 2) {
+            holder = await mockPg.transaction();
+            await holder('invoices').where({ id: ctx.invoice.id }).forUpdate().first('id');
+          }
+        },
+      });
+      expect(call).toBe(2);
+      expect(result.visitMove.failed).toEqual([]);
+    } finally {
+      if (holder) await holder.rollback();
+    }
+    const rows = await mockPg('scheduled_services').whereIn('id', ctx.rows.map((r) => r.id));
+    expect(rows.every((r) => ymd(r.scheduled_date) === target)).toBe(true);
+    expect(ymd((await mockPg('invoices').where({ id: ctx.invoice.id }).first()).service_date)).toBe(ymd(ctx.invoice.service_date));
+    // The follower's own bookkeeping (reschedule log) committed with its move.
+    expect(await mockPg('reschedule_log').where({ scheduled_service_id: ctx.holdId }).count('id as n').first())
+      .toMatchObject({ n: expect.not.stringMatching(/^0$/) });
+  });
+
   test('an invoice locked by a sender makes the move retryable (VISIT_BUSY) with nothing written', async () => {
     const holder = await mockPg.transaction();
     try {
@@ -596,6 +628,71 @@ postgres('createOrJoinVisit still refuses rows carrying a real completion artifa
     }
     return { customerId, propertyId, rows };
   }
+
+  describe('accept-time first-day linkage groups ONLY the covered set', () => {
+    async function fixtureWithBystander({ bystanderInVisit }) {
+      const customerId = randomUUID();
+      const technicianId = await seedTechnician();
+      const propertyId = randomUUID();
+      await mockPg('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Bystander',
+        email: `${customerId}@example.invalid`, phone: '+19415550177', active: true, property_type: 'residential',
+        address_line1: '400 Example Court', city: 'Parrish', state: 'FL', zip: '34219', pipeline_stage: 'active_customer' });
+      await mockPg('customer_properties').insert({ id: propertyId, customer_id: customerId, is_primary: true,
+        active: true, address_line1: '400 Example Court', city: 'Parrish', state: 'FL', zip: '34219', source: 'backfill' });
+      const estimateId = randomUUID();
+      await mockPg('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted', token: hex() + hex(),
+        category: 'RESIDENTIAL', address: '400 Example Court, Parrish, FL 34219', monthly_total: 100, annual_total: 1200,
+        estimate_data: JSON.stringify({ result: { recurring: { services: [] } } }) });
+      const catalogs = await mockPg('services').whereIn('service_key', ['pest_general_quarterly', 'lawn_care_recurring']);
+      const date = ymd(new Date(Date.now() + 20 * 86400000));
+      const base = { customer_id: customerId, technician_id: technicianId, scheduled_date: date,
+        window_start: '09:00', window_end: '11:00', status: 'pending', estimated_duration_minutes: 60 };
+      const covered = [];
+      for (const catalog of catalogs) {
+        const [row] = await mockPg('scheduled_services').insert({ ...base, property_id: null, service_id: catalog.id,
+          service_type: catalog.name, source_estimate_id: estimateId }).returning('*');
+        covered.push(row);
+      }
+      const pest = catalogs.find((c) => c.service_key === 'pest_general_quarterly');
+      const [bystander] = await mockPg('scheduled_services').insert({ ...base, property_id: propertyId, service_id: pest.id,
+        service_type: 'Synthetic bystander pest' }).returning('*');
+      let bystanderVisit = null;
+      if (bystanderInVisit) {
+        const lawn = catalogs.find((c) => c.service_key === 'lawn_care_recurring');
+        const [partner] = await mockPg('scheduled_services').insert({ ...base, property_id: propertyId, service_id: lawn.id,
+          service_type: 'Synthetic bystander lawn' }).returning('*');
+        bystanderVisit = await require('../services/visit-groups').createOrJoinVisit({ rows: [bystander, partner], createdBy: 'test' });
+      }
+      return { customerId, estimateId, covered, bystander, bystanderVisit };
+    }
+    const link = (f) => mockPg.transaction((trx) => require('../services/estimate-property-linkage')
+      .linkFirstDayRowsBeforeFirstInvoice({ estimateId: f.estimateId, customerId: f.customerId, database: trx,
+        serviceIds: f.covered.map((r) => r.id) }));
+
+    test('an unattached bystander at the same stop stays out of the covered visit', async () => {
+      const f = await fixtureWithBystander({ bystanderInVisit: false });
+      await link(f);
+      const covered = await mockPg('scheduled_services').whereIn('id', f.covered.map((r) => r.id));
+      const visitIds = [...new Set(covered.map((r) => r.visit_id))];
+      expect(visitIds).toHaveLength(1);
+      expect(visitIds[0]).toBeTruthy();
+      expect(covered.every((r) => r.property_id)).toBe(true);
+      expect(await mockPg('scheduled_services').where({ visit_id: visitIds[0] })).toHaveLength(2);
+      expect((await mockPg('scheduled_services').where({ id: f.bystander.id }).first()).visit_id).toBeNull();
+    });
+
+    test('a bystander already in an open visit at the same stop keeps that visit; the covered set forms its own', async () => {
+      const f = await fixtureWithBystander({ bystanderInVisit: true });
+      await link(f);
+      const covered = await mockPg('scheduled_services').whereIn('id', f.covered.map((r) => r.id));
+      const visitIds = [...new Set(covered.map((r) => r.visit_id))];
+      expect(visitIds).toHaveLength(1);
+      expect(visitIds[0]).toBeTruthy();
+      expect(visitIds[0]).not.toBe(f.bystanderVisit.id);
+      expect(await mockPg('scheduled_services').where({ visit_id: visitIds[0] })).toHaveLength(2);
+      expect(await mockPg('scheduled_services').where({ visit_id: f.bystanderVisit.id })).toHaveLength(2);
+    });
+  });
 
   test('control: two clean rows group', async () => {
     const { rows } = await pair();
