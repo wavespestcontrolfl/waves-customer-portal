@@ -516,7 +516,7 @@ each with a source/date comment) floored to a multiple of 25
 city via `COALESCE(ss.service_address_city, customers.city)`, i.e. the
 property serviced, falling back to the customer's own city), normalized for
 display (`normalizeReportCity`: trimmed, internal whitespace collapsed, and
-title-cased ONLY when the raw value is entirely upper-case — never invented)
+title-cased when the raw value is entirely upper-case or entirely lower-case; mixed case is kept as entered — never invented)
 before it is composed into the sentence (`buildAlsoLabeledForText`); a
 blank/unusable city (or none at all) drops to the no-city wording rather
 than blocking the rest of the copy. `also_labeled_for` is OMITTED (never a

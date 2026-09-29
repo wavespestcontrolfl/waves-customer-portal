@@ -215,6 +215,14 @@ describe('reportProductCopyFor — public shape', () => {
 });
 
 describe('reportProductCopyForApplicationProduct — report-data.js shape', () => {
+  it('a city name that looks like a claim word ("Safety Harbor") keeps all three lines (codex r1 on #5352)', () => {
+    const copy = reportProductCopyForApplicationProduct({ product_name: 'Taurus SC', epa_reg_number: '53883-279' }, 'Safety Harbor');
+    expect(copy).not.toBeNull();
+    expect(copy.also_labeled_for).toBe('Labeled for 25+ Safety Harbor pests');
+    expect(copy.how_it_works).toBeTruthy();
+    expect(copy.pets_kids).toBeTruthy();
+  });
+
   it('reads epa_reg_number and product_name off the enriched service_products row', () => {
     const copy = reportProductCopyForApplicationProduct({ product_name: 'Demand CS', epa_reg_number: '100-1066' });
     expect(copy).not.toBeNull();
