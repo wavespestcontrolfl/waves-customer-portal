@@ -31,6 +31,9 @@ const {
 } = require('../services/sms-shadow-drafter');
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
+// The service identity lane's answer for a text that names no job: the
+// visit ladder decides, as it did before the model picked the job.
+const IDENTITY_NONE = { ok: true, json: { about: 'none', visit: null, service: null } };
 const CATEGORY_GATES = REAL_ANSWERS_HANDOFF_CATEGORIES.map((c) => c.gate);
 const ALL_GATES = [GATE, ...CATEGORY_GATES];
 
@@ -268,8 +271,9 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
   test('generateGroundedDraft stamps the SAME category-aware identity currentPromptVersion() would compute', async () => {
     process.env.GATE_SMS_AGENT_LEGAL = 'true';
     jest.resetModules();
+    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
     jest.doMock('../services/llm/call', () => ({
-      dispatchWithFallback: jest.fn(async () => ({
+      dispatchWithFallback: jest.fn(async (policy, payload) => (payload?.laneId === 'sms_service_identity' ? IDENTITY_NONE : {
         ok: true, text: JSON.stringify({ reply: 'ok', intended_actions: [], missing_info: null }), model: 'fixture',
       })),
     }));
@@ -283,7 +287,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     expect(result.promptVersion).toBe(drafter.currentPromptVersion());
     expect(result.promptVersion).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+l`);
     delete process.env.SHADOW_DRAFT_VERIFY;
-    jest.dontMock('../services/llm/call');
+    jest.dontMock('../services/llm/call'); jest.dontMock('../services/call-booking-catalog');
     jest.dontMock('@anthropic-ai/sdk');
     jest.resetModules();
   });
@@ -827,7 +831,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
     else process.env.SHADOW_FEWSHOT = priorFewshot;
     jest.dontMock('../services/availability');
-    jest.dontMock('../services/llm/call');
+    jest.dontMock('../services/llm/call'); jest.dontMock('../services/call-booking-catalog');
     jest.dontMock('@anthropic-ai/sdk');
     jest.resetModules();
     clearGates();
@@ -835,8 +839,9 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
 
   function mockDraftDeps({ getAvailableSlots }) {
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
     jest.doMock('../services/llm/call', () => ({
-      dispatchWithFallback: jest.fn(async () => ({
+      dispatchWithFallback: jest.fn(async (policy, payload) => (payload?.laneId === 'sms_service_identity' ? IDENTITY_NONE : {
         ok: true,
         text: JSON.stringify({ reply: 'Here are a couple of times.', intended_actions: [], missing_info: null }),
         model: 'fixture-model',
@@ -1052,8 +1057,9 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     jest.doMock('../services/voice-profile-distiller', () => ({
       getApprovedVoiceProfile: jest.fn(async () => null),
     }));
+    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
     jest.doMock('../services/llm/call', () => ({
-      dispatchWithFallback: jest.fn(async () => ({
+      dispatchWithFallback: jest.fn(async (policy, payload) => (payload?.laneId === 'sms_service_identity' ? IDENTITY_NONE : {
         ok: true,
         text: JSON.stringify({ reply: 'Here are some times.', intended_actions: [], missing_info: null }),
         model: 'fixture-model',
@@ -1100,7 +1106,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     jest.dontMock('../services/availability');
     jest.dontMock('../services/context-aggregator');
     jest.dontMock('../services/voice-profile-distiller');
-    jest.dontMock('../services/llm/call');
+    jest.dontMock('../services/llm/call'); jest.dontMock('../services/call-booking-catalog');
     jest.dontMock('@anthropic-ai/sdk');
     jest.dontMock('../services/sms-auto-send');
     jest.dontMock('../services/sms-suggest-mode');
@@ -1780,5 +1786,313 @@ describe('round-7 deterministic guards (gate on)', () => {
     expect(drafter.replyQuotesUngroundedAmount('Your $95 payment went through — thank you!', failed)).toBe(true);
     expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', pending)).toBe(true);
     expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', paid)).toBe(false);
+  });
+});
+
+
+describe('follow-up #1: an edited follow-up promise with unrecognized timing is unsendable', () => {
+  const { followupPromiseEdited, followupPromiseBlockReason } = require('../services/sms-followup-sla');
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+  const DAY = new Date('2026-09-29T14:00:00Z'); // 10:00 ET
+  const NIGHT = new Date('2026-09-30T01:00:00Z'); // 21:00 ET
+  const original = 'Sorry about that — someone will follow up within the hour.';
+
+  test('the drafted phrase edited into "within 60 minutes" → edited (the promise stayed, the timing left the phrase list)', () => {
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: 'Sorry about that — someone will follow up within 60 minutes.' })).toBe(true);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: 'Sorry about that — someone will follow up within 60 minutes.', now: DAY })).toBe('sla_phrase_edited');
+  });
+  test('kept verbatim → not edited; unrelated wording edits → not edited; stale beats edited', () => {
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: original })).toBe(false);
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: 'So sorry about that — someone will follow up within the hour. Thank you!' })).toBe(false);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: original, now: DAY })).toBeNull();
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: original, now: NIGHT })).toBe('sla_phrase_stale');
+  });
+  test('no recorded promise, or no original body known → never edited', () => {
+    expect(followupPromiseEdited({ inputSnapshot: { intended_actions: [] }, originalBody: original, body: 'within 60 minutes' })).toBe(false);
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: null, body: 'within 60 minutes' })).toBe(false);
+  });
+});
+
+describe('service identity: the model picks the job the OPEN TIMES are sized for (owner 2026-09-28)', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  const CATALOG = [
+    { service_key: 'termite_bait', name: 'Termite Bait Station System Service' },
+    { service_key: 'termite_liquid', name: 'Termite Liquid Treatment Service' },
+    { service_key: 'flea_tick', name: 'Flea Control Service' },
+  ];
+  let dispatch;
+  let getAvailableSlots;
+  beforeEach(() => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    jest.resetModules();
+    dispatch = jest.fn();
+    getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: jest.fn(async () => CATALOG) }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    // only the identity lane is stubbed; any other dispatch keeps its real path
+    jest.doMock('../services/llm/call', () => {
+      const actual = jest.requireActual('../services/llm/call');
+      return { ...actual, dispatchWithFallback: (policy, payload, options) => (payload?.laneId === 'sms_service_identity' ? dispatch(policy, payload, options) : actual.dispatchWithFallback(policy, payload, options)) };
+    });
+  });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/call-booking-catalog'); jest.dontMock('../services/availability'); jest.dontMock('../services/llm/call'); jest.dontMock('../services/call-booking-catalog');
+    jest.resetModules();
+  });
+  const answer = (json) => dispatch.mockResolvedValueOnce({ ok: true, json });
+  const none = () => answer({ about: 'none', visit: null, service: null });
+  const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Let me check and get right back to you.', intended_actions: [], missing_info: null }) }] }) } };
+  const draft = (drafter, inboundMessage, context, extra = {}) => drafter.generateGroundedDraft({
+    client, context: { summary: 'x', customer: { id: 'c1' }, ...context }, inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice', ...extra,
+  });
+  const bait = { upcomingServices: [{ type: 'Termite Bait Station System Service', date: '2026-10-01' }] };
+  const lastLookup = () => getAvailableSlots.mock.calls[getAvailableSlots.mock.calls.length - 1];
+
+  test('the model is offered only the customer\'s visits, their open estimate and the bookable catalog, on the fastStructured policy', async () => {
+    answer({ about: 'unclear', visit: null, service: null });
+    const drafter = require('../services/sms-shadow-drafter');
+    const MODELS = require('../config/models');
+    await draft(drafter, 'Can you add liquid termite treatment Tuesday?', { ...bait, serviceHistory: [{ type: 'Quarterly Pest Control Service', date: '2026-09-01' }] }, { openEstimate: { id: 'est-9', service: 'Mosquito Control' } });
+    const [policy, payload] = dispatch.mock.calls[0];
+    expect(policy).toBe(MODELS.TEXT_POLICIES.fastStructured);
+    expect(payload).toMatchObject({ laneId: 'sms_service_identity', jsonMode: true });
+    expect(payload.text).toContain('V1: Termite Bait Station System Service (scheduled');
+    expect(payload.text).toContain('C1: Quarterly Pest Control Service (completed');
+    expect(payload.text).toContain('Their open estimate: Mosquito Control');
+    expect(payload.text).toContain('termite_liquid: Termite Liquid Treatment Service');
+    expect(payload.jsonSchema.properties.visit.enum).toEqual(['V1', 'C1', null]);
+    expect(payload.jsonSchema.properties.service.enum).toEqual(['termite_bait', 'termite_liquid', 'flea_tick', null]);
+    expect(payload.jsonSchema.properties.about.enum).toEqual(['visit', 'estimate', 'new_service', 'none', 'unclear']);
+    // no open estimate → "estimate" is not an answer the provider can give
+    answer({ about: 'unclear', visit: null, service: null });
+    await draft(drafter, 'Can you add liquid termite treatment Tuesday?', bait);
+    expect(dispatch.mock.calls[1][1].jsonSchema.properties.about.enum).toEqual(['visit', 'new_service', 'none', 'unclear']);
+    // a brand-new customer with a catalog that failed open: nothing to pick,
+    // so neither option property is sent (no bare null-typed property)
+    CATALOG.length = 0;
+    try {
+      none();
+      await draft(drafter, 'Can you come Tuesday?', { upcomingServices: [], serviceHistory: [] });
+      const schema = dispatch.mock.calls[2][1].jsonSchema;
+      expect(schema.required).toEqual(['about']);
+      expect(Object.keys(schema.properties)).toEqual(['about']);
+      expect(schema.properties.about.enum).toEqual(['none', 'unclear']);
+      expect(lastLookup()[2].serviceType).toBeUndefined(); // "none" → the engine default, times offered
+    } finally {
+      CATALOG.push({ service_key: 'termite_bait', name: 'Termite Bait Station System Service' }, { service_key: 'termite_liquid', name: 'Termite Liquid Treatment Service' }, { service_key: 'flea_tick', name: 'Flea Control Service' });
+    }
+  });
+
+  test('a picked visit or catalog service prices the lookup; a named treatment beside a same-family visit is new work', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    answer({ about: 'new_service', visit: null, service: 'termite_liquid' });
+    await draft(drafter, 'Can you add liquid termite treatment Tuesday?', bait);
+    expect(lastLookup()).toEqual(['Venice', null, expect.objectContaining({ serviceType: 'Termite Liquid Treatment Service' })]);
+    answer({ about: 'visit', visit: 'V1', service: null });
+    await draft(drafter, 'Can we move my termite visit to Friday?', bait);
+    expect(lastLookup()).toEqual(['Venice', null, expect.objectContaining({ serviceType: 'Termite Bait Station System Service' })]);
+  });
+
+  test('unclear, an option it was never offered, a failed call or a thrown error all WITHHOLD OPEN TIMES', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    answer({ about: 'unclear', visit: null, service: null });
+    answer({ about: 'visit', visit: 'V7', service: null }); // no V7 was offered
+    answer({ about: 'new_service', visit: null, service: 'palm_injection' }); // not in the bookable catalog
+    dispatch.mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' });
+    dispatch.mockRejectedValueOnce(new Error('boom'));
+    for (let i = 0; i < 5; i += 1) {
+      const r = await draft(drafter, 'The mosquitoes came back, but can you add lawn service Tuesday?', bait);
+      expect(r.factsBlock).not.toContain('OPEN TIMES (real');
+    }
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('"none" keeps the rule from before: the one upcoming visit, several withheld, the last completed visit, then the engine default', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    none(); await draft(drafter, 'When can you come?', bait);
+    expect(lastLookup()).toEqual(['Venice', null, expect.objectContaining({ serviceType: 'Termite Bait Station System Service' })]);
+    getAvailableSlots.mockClear();
+    none(); await draft(drafter, 'When can you come?', { upcomingServices: [...bait.upcomingServices, { type: 'Flea Control Service', date: '2026-10-02' }] });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    none(); await draft(drafter, 'When can you come back?', { upcomingServices: [], serviceHistory: [{ type: 'Quarterly Pest Control Service', date: '2026-09-01' }] });
+    expect(lastLookup()).toEqual(['Venice', null, expect.objectContaining({ serviceType: 'Quarterly Pest Control Service' })]);
+    none(); await draft(drafter, 'When can you come?', { upcomingServices: [], serviceHistory: [] });
+    expect(lastLookup()[2].serviceType).toBeUndefined();
+  });
+
+  test('an open estimate prices the lookup when the model picks it, or when nothing is named and no visit is upcoming; a named service never falls to it', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const openEstimate = { id: 'est-9', service: 'Mosquito Control' };
+    answer({ about: 'estimate', visit: null, service: null });
+    await draft(drafter, 'Sounds good, can we do Tuesday?', bait, { openEstimate });
+    expect(lastLookup()[1]).toBe('est-9');
+    none(); await draft(drafter, 'Tuesday works', { upcomingServices: [] }, { openEstimate });
+    expect(lastLookup()[1]).toBe('est-9');
+    none(); await draft(drafter, 'Tuesday works', bait, { openEstimate }); // an upcoming visit is the job, not the estimate
+    expect(lastLookup()).toEqual(['Venice', null, expect.objectContaining({ serviceType: 'Termite Bait Station System Service' })]);
+    answer({ about: 'new_service', visit: null, service: 'flea_tick' });
+    await draft(drafter, 'Can you add flea treatment Tuesday?', { upcomingServices: [] }, { openEstimate });
+    expect(lastLookup()).toEqual(['Venice', null, expect.objectContaining({ serviceType: 'Flea Control Service' })]);
+  });
+
+  test('no model call with the gate off, on a frozen replay, with no city to look up, or when the message is linked to an estimate', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    await draft(drafter, 'Can you come Tuesday?', bait, { estimateId: 'est-1' });
+    expect(lastLookup()[1]).toBe('est-1');
+    await draft(drafter, 'Can you come Tuesday?', bait, { factsBlock: 'FROZEN\nFOLLOW-UP SLA RIGHT NOW: within the hour\n' });
+    await draft(drafter, 'Can you come Tuesday?', bait, { city: null }); // the backfill lane passes no city
+    process.env.GATE_SMS_REAL_ANSWERS = 'false';
+    await draft(drafter, 'Can you come Tuesday?', bait);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('follow-up #7: the promised deadline is pinned by phrase + draft time, not just the window', () => {
+  const { followupDeadline, followupDeadlinePassed, followupPromiseBlockReason } = require('../services/sms-followup-sla');
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+  const MON_NIGHT = new Date('2026-09-29T01:30:00Z'); // Mon Sep 28 21:30 ET
+  const TUE_NIGHT = new Date('2026-09-30T01:30:00Z'); // Tue Sep 29 21:30 ET
+  const TUE_8AM = new Date('2026-09-29T12:00:00Z');  // Tue 08:00 ET
+  const MON_10AM = new Date('2026-09-28T14:00:00Z'); // Mon 10:00 ET
+
+  test('deadlines: within the hour → +60 min; by 9 AM tomorrow → next ET 9:00; by 9 AM this morning → same ET 9:00', () => {
+    expect(followupDeadline('within the hour', MON_10AM).toISOString()).toBe('2026-09-28T15:00:00.000Z');
+    expect(followupDeadline('by 9 AM tomorrow morning', MON_NIGHT).toISOString()).toBe('2026-09-29T13:00:00.000Z'); // Tue 09:00 EDT
+    expect(followupDeadline('by 9 AM this morning', new Date('2026-09-29T10:00:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+    expect(followupDeadline('anything else', MON_10AM)).toBeNull();
+    expect(followupDeadline('within the hour', 'not a date')).toBeNull();
+  });
+
+  test('"by 9 AM tomorrow morning" drafted Monday night, sent Tuesday night → deadline passed (the window alone would call it current)', () => {
+    const body = 'A manager will reach out by 9 AM tomorrow morning.';
+    expect(followupDeadlinePassed({ body, draftedAt: MON_NIGHT, now: TUE_NIGHT })).toBe(true);
+    expect(followupDeadlinePassed({ body, draftedAt: MON_NIGHT, now: TUE_8AM })).toBe(false);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: TUE_NIGHT })).toBe('sla_deadline_passed');
+    // before the deadline the window rule still speaks: at 8 AM "tomorrow morning" is no longer the current phrase
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: TUE_8AM })).toBe('sla_phrase_stale');
+    // same night it was drafted, inside its window → sendable
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: new Date('2026-09-29T02:00:00Z') })).toBeNull();
+  });
+
+  test('"within the hour" drafted at 10 AM and sent two hours later → passed; no draft time known → the window rule alone applies', () => {
+    const body = 'Someone will follow up within the hour.';
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_10AM, now: new Date('2026-09-28T16:30:00Z') })).toBe('sla_deadline_passed');
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_10AM, now: new Date('2026-09-28T14:30:00Z') })).toBeNull();
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: null, now: new Date('2026-09-28T16:30:00Z') })).toBeNull();
+  });
+});
+
+
+// Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
+// phrase a draft carries is rendered off the instant the facts block was
+// built, not the agent_decisions row's created_at (which lands after the
+// whole draft→verify→revise loop). slaDraftedAt is the one shared helper
+// both send seams (agent-decision-send-checks.js, scheduler.js) call to
+// resolve which instant anchors the deadline.
+describe('slaDraftedAt: anchors the SLA deadline to facts_generated_at, falling back to created_at', () => {
+  const { slaDraftedAt, followupPromiseBlockReason } = require('../services/sms-followup-sla');
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+
+  test('a facts timestamp before the 8 PM boundary, with created_at drifted past the SAME boundary a day later, anchors on the facts time', () => {
+    // Facts built Monday 8:01 PM ET (hour 20) — the drafter renders "by 9 AM
+    // tomorrow morning" (Tuesday 9 AM) from THIS instant. An abnormally slow
+    // verify/revise loop (retries, provider latency) doesn't finish until
+    // Tuesday 8:30 PM ET — past the SAME 8 PM boundary a full day later.
+    const factsGeneratedAt = '2026-09-29T00:01:00.000Z'; // Mon 2026-09-28 20:01 ET
+    const createdAt = new Date('2026-09-30T00:30:00.000Z'); // Tue 2026-09-29 20:30 ET
+    const decision = { input_snapshot: JSON.stringify({ facts_generated_at: factsGeneratedAt }), created_at: createdAt };
+
+    expect(slaDraftedAt(decision).toISOString()).toBe(new Date(factsGeneratedAt).toISOString());
+
+    const body = 'A manager will reach out by 9 AM tomorrow morning.';
+    // Checked 5 minutes after the row was finally written: Tuesday 8:35 PM
+    // ET. The window rule alone reads this as CURRENT (it's evening again,
+    // so "tomorrow morning" is once more the live phrase) — only the pinned
+    // deadline can catch that the ORIGINAL Tuesday 9 AM promise is now over
+    // 11 hours late.
+    const now = new Date('2026-09-30T00:35:00.000Z'); // Tue 2026-09-29 20:35 ET
+    expect(followupPromiseBlockReason({
+      inputSnapshot: promised, body, draftedAt: slaDraftedAt(decision), now,
+    })).toBe('sla_deadline_passed');
+    // The BUG this fixes: anchoring on the stale created_at instead re-reads
+    // the boundary check a day later, rolling "tomorrow morning" out to
+    // WEDNESDAY 9 AM — not yet passed — and the window-only check also
+    // reads the phrase as current, so the very same send-check would
+    // wrongly wave the day-late promise through.
+    expect(followupPromiseBlockReason({
+      inputSnapshot: promised, body, draftedAt: createdAt, now,
+    })).toBeNull();
+  });
+
+  test('a legacy row with no facts_generated_at falls back to created_at', () => {
+    const createdAt = new Date('2026-09-28T14:00:00.000Z');
+    expect(slaDraftedAt({ input_snapshot: JSON.stringify({ sms: { body: 'hi' } }), created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ input_snapshot: null, created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ created_at: createdAt })).toBe(createdAt);
+  });
+
+  test('an invalid or garbage facts_generated_at falls back to created_at', () => {
+    const createdAt = new Date('2026-09-28T14:00:00.000Z');
+    expect(slaDraftedAt({ input_snapshot: JSON.stringify({ facts_generated_at: 'not-a-date' }), created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ input_snapshot: JSON.stringify({ facts_generated_at: 12345 }), created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ input_snapshot: JSON.stringify({ facts_generated_at: '' }), created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ input_snapshot: '{not json', created_at: createdAt })).toBe(createdAt);
+  });
+
+  test('input_snapshot may already be a parsed object (not every caller stores JSON text)', () => {
+    const createdAt = new Date('2026-09-28T14:00:00.000Z');
+    const factsGeneratedAt = '2026-09-28T13:00:00.000Z';
+    expect(slaDraftedAt({ input_snapshot: { facts_generated_at: factsGeneratedAt }, created_at: createdAt }).toISOString())
+      .toBe(new Date(factsGeneratedAt).toISOString());
+  });
+});
+
+
+describe('#5194 review rounds', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.resetModules();
+  });
+
+  test('the deadline for "by 9 AM tomorrow morning" on a row inserted after midnight is that row\'s own 9 AM, not a day later', () => {
+    const { followupDeadline } = require('../services/sms-followup-sla');
+    // drafted 23:58 ET Monday, row inserted 00:02 ET Tuesday (= 04:02Z) → Tuesday 9 AM
+    expect(followupDeadline('by 9 AM tomorrow morning', new Date('2026-09-29T04:02:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+    // drafted and inserted 21:30 ET Monday → Tuesday 9 AM (unchanged)
+    expect(followupDeadline('by 9 AM tomorrow morning', new Date('2026-09-29T01:30:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+  });
+
+  test('amount guard: an unparseable priced clause cannot ride along with a grounded figure ("balance is $95, and the fee is fifty dollars")', () => {
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    const context = { billing: { outstandingBalance: 95, recentPayments: [] } };
+    expect(replyQuotesUngroundedAmount('Your balance is $95, and the fee is fifty dollars.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(false);
+    // r8 P1: the same clause — a readable figure cannot carry an unreadable one
+    expect(replyQuotesUngroundedAmount('Your balance is $95 plus a fee of fifty dollars.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your balance is $95 and the fee is 45.', context)).toBe(true);
+  });
+
+  test('SLA edit: the deadline follows the ORIGINAL promise — "tomorrow morning" edited to the now-current "this morning" before 9 AM still sends', () => {
+    const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
+    const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+    const original = 'A manager will reach out by 9 AM tomorrow morning.';
+    const edited = 'A manager will reach out by 9 AM this morning.';
+    const MON_NIGHT = new Date('2026-09-29T01:30:00Z');
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: edited, draftedAt: MON_NIGHT, now: new Date('2026-09-29T11:30:00Z') })).toBeNull(); // Tue 07:30 ET
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: edited, draftedAt: MON_NIGHT, now: new Date('2026-09-29T14:00:00Z') })).toBe('sla_deadline_passed'); // Tue 10:00 ET
+  });
+
+  test('billingAmountCents is the one definition of the owed and paid figures both amount guards use', () => {
+    const { billingAmountCents } = require('../services/sms-shadow-drafter');
+    const context = { billing: { outstandingBalance: 0, openInvoice: { amountDue: 45.5 }, recentPayments: [{ amount: 95, status: 'paid' }, { amount: 60, status: 'failed' }, { amount: null }] } };
+    const { owed, paid } = billingAmountCents(context);
+    expect([...owed]).toEqual([4550]); // a zero balance is not owed; the open invoice is
+    expect([...paid].sort((a, b) => a - b)).toEqual([6000, 9500]);
+    expect([...billingAmountCents(context, { settledOnly: true }).paid]).toEqual([9500]);
+    expect(billingAmountCents(null)).toEqual({ owed: new Set(), paid: new Set() });
   });
 });

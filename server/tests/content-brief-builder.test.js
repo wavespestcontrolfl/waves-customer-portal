@@ -524,6 +524,74 @@ describe('_composeBrief related_posts (owner audit 2026-09-26)', () => {
   });
 });
 
+// C3 (blog work order 2026-09-28): every supporting-blog / customer-question
+// brief carries the 3 identification photo slots (pest/sign/look_alike),
+// sourced ONLY from the licensed-photo-library — the writer decides
+// post_type, not this composer, so the slots ride along unconditionally on
+// these two page types and are simply unused when the writer lands on a
+// non-diagnostic post_type.
+describe('_composeBrief photo_slots (C3, owner ruling 2026-09-28)', () => {
+  const baseArgs = (over = {}) => ({
+    opportunity: { id: 'opp-1', page_url: null, query: 'fire ant identification florida', city: 'Bradenton', service: 'pest', bucket: 'customer_need', signal_metadata: {} },
+    signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+    decision: {
+      page_type: 'supporting-blog',
+      action_type: 'new_supporting_blog',
+      final_score: 80,
+      score_breakdown: {},
+      human_review_required: false,
+      human_review_reason: null,
+      router_notes: null,
+    },
+    existingBriefVersions: 0,
+    ...over,
+  });
+
+  test('a supporting-blog brief carries photo_slots with a licensed match resolved from the query', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs());
+    const slots = brief.voice_constraints.photo_slots;
+    expect(Array.isArray(slots)).toBe(true);
+    expect(slots.map((s) => s.slot)).toEqual(['pest', 'sign', 'look_alike']);
+    const pestSlot = slots.find((s) => s.slot === 'pest');
+    expect(pestSlot.photo).not.toBeNull();
+    expect(pestSlot.photo.src).toMatch(/^\/images\//);
+    expect(pestSlot.flagged_for_human).toBe(false);
+    // No look-alike photo exists for fire ants in the catalog — flagged, not AI art.
+    const lookAlikeSlot = slots.find((s) => s.slot === 'look_alike');
+    expect(lookAlikeSlot.photo).toBeNull();
+    expect(lookAlikeSlot.flagged_for_human).toBe(true);
+  });
+
+  test('a customer-question brief also carries photo_slots', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      opportunity: { id: 'opp-1', page_url: null, query: 'is a huntsman spider dangerous', city: 'Bradenton', service: 'pest', bucket: 'customer_need', signal_metadata: {} },
+      decision: { page_type: 'customer-question', action_type: 'create_customer_question_page', final_score: 80, score_breakdown: {}, human_review_required: false, human_review_reason: null, router_notes: null },
+    }));
+    const slots = brief.voice_constraints.photo_slots;
+    expect(Array.isArray(slots)).toBe(true);
+    const pestSlot = slots.find((s) => s.slot === 'pest');
+    expect(pestSlot.photo.alt).toMatch(/huntsman/i);
+  });
+
+  test('a query with no catalog match flags every slot — never invents a photo', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      opportunity: { id: 'opp-1', page_url: null, query: 'termite swarmers', city: 'Bradenton', service: 'termite', bucket: 'customer_need', signal_metadata: {} },
+    }));
+    const slots = brief.voice_constraints.photo_slots;
+    for (const s of slots) {
+      expect(s.photo).toBeNull();
+      expect(s.flagged_for_human).toBe(true);
+    }
+  });
+
+  test('city-service briefs never carry photo_slots (not an identification page type)', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      decision: { page_type: 'city-service', action_type: 'create_or_refresh_city_service_page', final_score: 80, score_breakdown: {}, human_review_required: false, human_review_reason: null, router_notes: null },
+    }));
+    expect(brief.voice_constraints.photo_slots).toBeUndefined();
+  });
+});
+
 describe('_loadRelatedPosts gating', () => {
   test('compose propagates a related-post lookup failure before persistence or writer dispatch', async () => {
     const queue = require('../services/content/opportunity-queue');
@@ -818,6 +886,21 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directives).toHaveLength(2); // header + one deduped directive
     expect(directives[1]).toContain('SOMETHING_NEW');
     expect(directives[1]).toContain('novel failure');
+  });
+
+  test('citability advisory messages reach the redraft without joining the binding failure list', () => {
+    const directives = buildRetryDirectives({
+      findings: [{ severity: 'P1', code: 'QUALITY_GATE', message: 'hard quality miss' }],
+      advisory_messages: [
+        { code: 'CITABILITY_NAMED_SOURCES', message: 'no_named_source_attribution' },
+        { code: 'CITABILITY_HOW_TO_CHOOSE', message: 'no_how_to_choose_section' },
+      ],
+    });
+    expect(directives[0]).toContain('PREVIOUS ATTEMPT REJECTED');
+    expect(directives.join('\n')).toContain('OPTIONAL CITABILITY SIGNALS');
+    expect(directives.join('\n')).toContain('Citability (non-blocking)');
+    expect(directives.join('\n')).toContain('no_named_source_attribution');
+    expect(directives.join('\n')).toContain('no_how_to_choose_section');
   });
 
   test('canonical directives carry the gate finding text so the redraft knows the OFFENDING entity (Codex r4)', () => {
@@ -1286,5 +1369,99 @@ describe('_composeBrief listicle_family provenance rides gsc_signal (Codex r5 on
     expect(brief.gsc_signal.family_size).toBe(12);
     expect(brief.gsc_signal.family_avg_position).toBe(18.3);
     expect(brief.gsc_signal.family_variants[0].impressions).toBe(48);
+  });
+});
+
+describe('citability backfill consumer — brief composition', () => {
+  const seeder = require('../services/content/citability-backfill-seeder');
+  const queue = require('../services/content/opportunity-queue');
+  const router = require('../services/content/decision-router');
+  afterEach(() => jest.restoreAllMocks());
+
+  function stubBuilder(opp) {
+    const builder = new ContentBriefBuilder();
+    jest.spyOn(queue, 'getById').mockResolvedValue(opp);
+    jest.spyOn(router, 'route').mockReturnValue({ action_type: 'refresh_existing_page', page_type: 'refresh', human_review_required: false, human_review_reason: null });
+    builder._gatherSignals = jest.fn().mockResolvedValue({ serp_profile: null, customer_signal: null, conversion_feedback: null });
+    builder._countExistingBriefs = jest.fn().mockResolvedValue(0);
+    builder._loadFactsPack = jest.fn().mockResolvedValue(null);
+    builder._loadRelatedPosts = jest.fn().mockResolvedValue([]);
+    builder._composeBrief = jest.fn(({ opportunity, decision }) => ({ opportunity, decision }));
+    return builder;
+  }
+  const opp = { id: 7, bucket: 'citability_backfill', page_url: '/termite/x/', service: 'termite', signal_metadata: { citability_gaps: ['named_sources', 'comparison'], specialty_topic: null } };
+
+  test('gaps already fixed on the live page → do_not_publish, no draft', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: [], results: {}, ineligible: false, service: 'termite', specialty_topic: null });
+    const out = await stubBuilder(opp).compose(7, { persist: false });
+    expect(out.decision).toMatchObject({ action_type: 'do_not_publish', human_review_required: false, human_review_reason: 'citability_gaps_already_resolved' });
+  });
+
+  test('a target that turned non-indexable → do_not_publish', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: [], results: {}, ineligible: true });
+    const out = await stubBuilder(opp).compose(7, { persist: false });
+    expect(out.decision).toMatchObject({ action_type: 'do_not_publish', human_review_reason: 'citability_target_not_indexable' });
+  });
+
+  test('live gaps and topic replace the seeded ones', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: ['comparison', 'how_to_choose'], results: { comparison: { ok: false } }, ineligible: false, service: 'pest', specialty_topic: 'bed-bug' });
+    const builder = stubBuilder(opp);
+    const out = await builder.compose(7, { persist: false });
+    expect(out.decision.action_type).toBe('refresh_existing_page');
+    expect(out.opportunity.service).toBe('pest');
+    expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['comparison', 'how_to_choose']);
+    expect(out.opportunity.signal_metadata.specialty_topic).toBe('bed-bug');
+    // The router and signal gathering see the live topic too.
+    expect(builder._gatherSignals.mock.calls[0][0].service).toBe('pest');
+  });
+
+  test('unreadable page → seeded gaps and topic kept', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue(null);
+    const out = await stubBuilder({ ...opp, signal_metadata: { ...opp.signal_metadata, specialty_topic: 'wasp' } }).compose(7, { persist: false });
+    expect(out.decision.action_type).toBe('refresh_existing_page');
+    expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['named_sources', 'comparison']);
+    expect(out.opportunity.signal_metadata.specialty_topic).toBe('wasp');
+  });
+
+  test('a re-scan error keeps the seeded gaps instead of failing compose', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockRejectedValue(new Error('github down'));
+    const out = await stubBuilder(opp).compose(7, { persist: false });
+    expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['named_sources', 'comparison']);
+  });
+
+  test('other buckets never re-scan', async () => {
+    const rescan = jest.spyOn(seeder, 'rescanLive');
+    await stubBuilder({ ...opp, bucket: 'decay_refresh' }).compose(7, { persist: false });
+    expect(rescan).not.toHaveBeenCalled();
+  });
+
+  test('_gatherSignals skips the customer cluster for a null-query backfill only', async () => {
+    const builder = new ContentBriefBuilder();
+    builder._matchCustomerCluster = jest.fn().mockResolvedValue({ topic: 'unrelated', service: 'termite' });
+    const backfill = await builder._gatherSignals({ bucket: 'citability_backfill', query: null, service: null, city: null }, { skipSerp: true });
+    expect(builder._matchCustomerCluster).not.toHaveBeenCalled();
+    expect(backfill.customer_signal).toBeNull();
+    const decay = await builder._gatherSignals({ bucket: 'decay_refresh', query: null, service: null, city: null }, { skipSerp: true });
+    expect(builder._matchCustomerCluster).toHaveBeenCalledTimes(1);
+    expect(decay.customer_signal).toEqual({ topic: 'unrelated', service: 'termite' });
+  });
+
+  test('surgical required_sections: slug + dateModified, one binding line per gap, gaps ride gsc_signal', () => {
+    const builder = new ContentBriefBuilder();
+    const base = { id: 1, page_url: '/termite/x/', service: 'termite', city: null, query: null };
+    const decision = { action_type: 'refresh_existing_page', page_type: 'refresh', human_review_required: false, human_review_reason: null };
+    const signals = { serp_profile: null, customer_signal: null, conversion_feedback: null };
+    const gaps = ['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose'];
+    const backfill = builder._composeBrief({ opportunity: { ...base, bucket: 'citability_backfill', signal_metadata: { citability_gaps: gaps } }, signals, decision, existingBriefVersions: 0 });
+    expect(backfill.required_sections.slice(0, 2)).toEqual(['preserve existing slug', 'update dateModified']);
+    expect(backfill.required_sections).not.toContain('add 1+ new section reflecting current data');
+    expect(backfill.required_sections).not.toContain('refresh CTAs to current promo');
+    for (const g of gaps) expect(backfill.required_sections.filter((l) => l.startsWith(`citability (${g}):`))).toHaveLength(1);
+    expect(backfill.gsc_signal).toMatchObject({ bucket: 'citability_backfill', citability_gaps: gaps });
+
+    const generic = builder._composeBrief({ opportunity: { ...base, bucket: 'decay_refresh', signal_metadata: { citability_gaps: gaps } }, signals, decision, existingBriefVersions: 0 });
+    expect(generic.required_sections).toContain('add 1+ new section reflecting current data');
+    expect(generic.required_sections.some((l) => l.startsWith('citability ('))).toBe(false);
+    expect(generic.gsc_signal.citability_gaps).toBeNull();
   });
 });

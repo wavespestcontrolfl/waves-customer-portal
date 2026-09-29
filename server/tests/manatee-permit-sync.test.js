@@ -25,11 +25,16 @@ const {
 
 const savedFetch = global.fetch;
 
+// Retries must not sleep in tests.
+process.env.POOL_PERMIT_SYNC_RETRY_DELAY_MS = '0';
+
 afterEach(() => {
   global.fetch = savedFetch;
   delete process.env.GATE_PERMIT_SYNC;
   delete process.env.POOL_PERMIT_SYNC_START;
   delete process.env.CONSTRUCTION_PERMIT_SYNC_START;
+  delete process.env.POOL_PERMIT_SYNC_TIMEOUT_MS;
+  delete process.env.POOL_PERMIT_SYNC_ATTEMPTS;
   delete db.transaction;
   jest.clearAllMocks();
 });
@@ -203,6 +208,70 @@ describe('syncPoolPermits fetch + upsert', () => {
   });
 });
 
+// A request ACA accepts and never answers: rejects only when the caller's
+// abort signal fires (the 2026-08-17..09-28 production failure shape).
+function hangUntilAborted(url, init) {
+  return new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })));
+  });
+}
+
+describe('ACA fetch retries (hung-request regression, permit-sync 7 straight failures)', () => {
+  beforeEach(() => {
+    process.env.GATE_PERMIT_SYNC = 'true';
+    process.env.POOL_PERMIT_SYNC_TIMEOUT_MS = '20';
+    useSingleWindowSync();
+    db.mockImplementation(() => builder(1));
+    db.fn = { now: () => 'NOW()' };
+    installTransactionMock();
+  });
+
+  test('a hung first request retries on a fresh session and the sync succeeds', async () => {
+    global.fetch = jest.fn()
+      .mockImplementationOnce(hangUntilAborted)
+      .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE, cookies: ['ASP.NET_SessionId=fresh'] }))
+      .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
+      .mockResolvedValueOnce(acaResponse({ text: CSV, contentType: 'APPLICATION/CSV' }));
+    const res = await syncPoolPermits();
+    expect(res.written).toBe(3);
+    expect(global.fetch).toHaveBeenCalledTimes(4);
+    // The retry started a new session: its first request carries no cookie.
+    expect(global.fetch.mock.calls[1][1].headers.Cookie).toBeUndefined();
+    expect(global.fetch.mock.calls[3][1].headers.Cookie).toBe('ASP.NET_SessionId=fresh');
+  });
+
+  test('exhausted attempts throw a message naming the step and timeout, not "operation was aborted"', async () => {
+    global.fetch = jest.fn(hangUntilAborted);
+    await expect(syncPoolPermits()).rejects.toThrow('report 22615: report form request timed out after 20ms (3 attempts)');
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a stalled response BODY is covered by the timeout too', async () => {
+    const stalled = (url, init) => Promise.resolve({
+      ...acaResponse({ text: '' }),
+      text: () => hangUntilAborted(url, init),
+    });
+    process.env.POOL_PERMIT_SYNC_ATTEMPTS = '1';
+    global.fetch = jest.fn(stalled);
+    await expect(syncPoolPermits()).rejects.toThrow(/report form request timed out after 20ms \(1 attempt\)/);
+  });
+
+  test('5xx retries; deterministic failures (non-CSV, 4xx) do not', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ...acaResponse({ text: '' }), ok: false, status: 503 })
+      .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
+      .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
+      .mockResolvedValueOnce(acaResponse({ text: '<html>login</html>' }));
+    await expect(syncPoolPermits()).rejects.toThrow(/not CSV/);
+    expect(global.fetch).toHaveBeenCalledTimes(4);
+
+    global.fetch = jest.fn(async () => ({ ...acaResponse({ text: '' }), ok: false, status: 404 }));
+    await expect(syncPoolPermits()).rejects.toThrow('report form request HTTP 404');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('findSyncedPoolPermit', () => {
   test('no identifiers → null without a DB call', async () => {
     expect(await findSyncedPoolPermit({})).toBeNull();
@@ -337,13 +406,14 @@ describe('syncPermits', () => {
       .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
       .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
       .mockResolvedValueOnce(acaResponse({ text: CSV, contentType: 'APPLICATION/CSV' }))
-      .mockRejectedValue(new Error('ECONNRESET'));
+      .mockRejectedValue(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }));
     // The pool section completed (fetch was called for all 3 pool steps +
     // the failing construction step) and its partial success is in the
     // error message — but the run still rejects so runExclusive/job health
     // records a failure instead of a silent success.
-    await expect(syncPermits()).rejects.toThrow(/construction: .*ECONNRESET.*pool ok \(3 rows\)/);
-    expect(global.fetch.mock.calls.length).toBeGreaterThanOrEqual(4);
+    await expect(syncPermits()).rejects.toThrow(/construction: .*ECONNRESET \(3 attempts\).*pool ok \(3 rows\)/);
+    // 3 pool steps + 3 construction attempts (fresh session each).
+    expect(global.fetch).toHaveBeenCalledTimes(6);
   });
 });
 

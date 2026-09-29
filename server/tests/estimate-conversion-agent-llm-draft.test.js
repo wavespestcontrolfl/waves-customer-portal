@@ -205,6 +205,42 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(payload.prompt_version).toBe('house_voice_v12_real_answers');
   });
 
+  test('persists the drafter\'s facts-generated instant as input_snapshot.facts_generated_at (Codex #5194 P2)', async () => {
+    seedActiveSchedulingThread();
+    const factsAt = new Date('2026-09-28T23:59:30.000Z');
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'A teammate will follow up.', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], auto_send_safe: false, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v12_real_answers',
+      factsGeneratedAt: factsAt,
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER, from: '+19415551234', to: '+19415550000',
+      body: 'Hello what happened this morning', smsLogId: 'sms-in-10',
+    });
+
+    const snapshot = JSON.parse(lastDecisionInsert().input_snapshot);
+    expect(snapshot.facts_generated_at).toBe(factsAt.toISOString());
+  });
+
+  test('omits facts_generated_at when the drafter returns none (legacy/frozen replay)', async () => {
+    seedActiveSchedulingThread();
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Happy to help.', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers',
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER, from: '+19415551234', to: '+19415550000',
+      body: 'Hello what happened this morning', smsLogId: 'sms-in-11',
+    });
+
+    expect(JSON.parse(lastDecisionInsert().input_snapshot)).not.toHaveProperty('facts_generated_at');
+  });
+
   test('passes the already-resolved estimate id through to generateGroundedDraft (pre-push audit P2)', async () => {
     // fetchOpenTimesBlock's getAvailableSlots(city, estimateId, {customerId})
     // needs THAT estimate's own service minutes, not a generic default —
@@ -555,5 +591,38 @@ describe('processInboundSms — intended actions persist on the estimate-review 
     await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Can we do Tuesday', smsLogId: 'sms-in-actions-2' });
     const snapshot = JSON.parse(lastDecisionInsert().input_snapshot);
     expect(snapshot).not.toHaveProperty('intended_actions');
+  });
+});
+
+
+// #5194 r2/r8: only the estimate's short code pins it as the priced job —
+// never merely because the customer has one open, nor because the text says
+// "estimate" or "quote".
+describe('processInboundSms — estimate forwarded only when the message is linked to it', () => {
+  test('a generic request with no short code forwards estimateId null', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    generateGroundedDraft.mockResolvedValue({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers' });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Can you add lawn service Tuesday?', smsLogId: 'sms-link-1' });
+    const calls = generateGroundedDraft.mock.calls;
+    expect(calls[calls.length - 1][0]).toMatchObject({ estimateId: null });
+  });
+});
+
+
+// A linked estimate prices the lookup itself; an unlinked open estimate is
+// handed to the drafter as one job the reply may be about, and the drafter's
+// service identity step decides (owner 2026-09-28; the choice itself is
+// covered in sms-real-answers.test.js).
+describe('generateLlmReviewDraft — estimate linkage from the conversation', () => {
+  const draft = () => ({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers' });
+  test('not linked → estimateId null and the estimate offered as an option; linked → estimateId, no option', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [], upcomingServices: [] });
+    generateGroundedDraft.mockResolvedValue(draft());
+    await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Sounds good, can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42', service_interest: 'Mosquito Control' }, estimateLinked: false });
+    expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: null, openEstimate: { id: 'estimate-42', service: 'Mosquito Control' } }));
+    generateGroundedDraft.mockResolvedValue(draft());
+    await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'About my estimate — can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42', service_interest: 'Mosquito Control' }, estimateLinked: true });
+    expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: 'estimate-42', openEstimate: null }));
   });
 });

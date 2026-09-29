@@ -55,7 +55,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
-import ServiceReportDocument from './ServiceReportDocument';
+import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -1525,6 +1525,13 @@ function applicationManufacturer(app = {}) {
   return app.product?.manufacturer || '';
 }
 
+// GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28) — the server omits
+// `report_copy` entirely when the gate is off or the product has no
+// approved wording, so this reads as absent, never a placeholder.
+function applicationReportCopy(app = {}) {
+  return app.product?.report_copy || null;
+}
+
 // Product-specific watering guidance for the lawn report, sourced ONLY from the
 // approved per-product irrigation note (label-derived `irrigation_notes`). We do
 // not synthesize watering intervals from product category/name — that would
@@ -2660,8 +2667,32 @@ function PlanSummaryCard({ data, mode }) {
     : `This year: ${visits} ${visitWord}`;
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
-      <div className="section-eyebrow">Your plan</div>
+      {/* h2, not .section-eyebrow: the glass theme hides every
+          .section-eyebrow outside the hero kicker, which left this card
+          with no visible title (codex P2 on #5177; same fix as
+          UpcomingVisitsCard). */}
+      <h2>Your plan</h2>
       <p className="map-context-copy">{yearLine}</p>
+    </section>
+  );
+}
+
+// "Near you" line on a lawn report (owner ask 2026-09-28, "lawn only",
+// GATE_REPORT_NEAR_YOU): the lawn pest most often found around the
+// customer's city this past month. The server sends it only for a live lawn
+// report once enough other customers there had that pest, and strips it from
+// pdf/static/sms_preview renders; `mode` is the same belt-and-braces check
+// as PlanSummaryCard.
+function NearYouCard({ data, mode }) {
+  const nearYou = data.nearYou;
+  if (mode !== 'live' || !nearYou?.city || !nearYou?.pest) return null;
+  return (
+    <section data-glass="card" className="sr-section near-you-section" id="near-you">
+      {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
+      <h2>Near you</h2>
+      <p className="map-context-copy">
+        Around {nearYou.city} this past month, {nearYou.pest} were the lawn pest we found most often.
+      </p>
     </section>
   );
 }
@@ -2927,10 +2958,18 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
     if (!q || asking) return;
     setAsking(true);
     setAnswer('');
+    // Staff browsers send their portal JWT, as on the /data read, so the
+    // server can leave a staff QA question out of customer engagement.
+    // Guarded like that read: sandboxed webviews can throw on localStorage.
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     try {
       const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(staffToken ? { Authorization: `Bearer ${staffToken}` } : {}),
+        },
         body: JSON.stringify({ question: q }),
       });
       const payload = await response.json();
@@ -3439,14 +3478,6 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
-      {/* GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
-          a findings/season-picked offer ("We noted roach activity today...").
-          Absent for the unchanged ladder pick. */}
-      {offer.reason && (
-        <p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 14, lineHeight: 1.5, textAlign: 'center' }}>
-          {offer.reason}
-        </p>
-      )}
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -3618,6 +3649,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const precautionSummary = applicationPrecautionSummary(app);
             const reentrySummary = applicationReentrySummary(app);
             const manufacturer = applicationManufacturer(app);
+            const reportCopy = applicationReportCopy(app);
             const watering = isLawn ? lawnWateringGuidance(app) : null;
             const substitution = substitutionByName.get(String(productName).toLowerCase());
             const technicalFacts = [
@@ -3677,6 +3709,26 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                   <div className="product-why">
                     <div className="sr-cell-label">Product note</div>
                     <p>{productSummary}</p>
+                  </div>
+                )}
+                {/* Owner-approved product wording (GATE_REPORT_PRODUCT_COPY,
+                    2026-09-28) — customer-display only, never fed into the
+                    AI report writer. "Also labeled for" describes the
+                    LABEL, never what was treated on this visit, so it never
+                    reads next to "Why used today" above. LESCO carries no
+                    also_labeled_for key at all (owner ruling). */}
+                {reportCopy && (
+                  <div className="product-why">
+                    <div className="sr-cell-label">How it works</div>
+                    <p>{reportCopy.how_it_works}</p>
+                    {reportCopy.also_labeled_for && (
+                      <>
+                        <div className="sr-cell-label">Also labeled for</div>
+                        <p>{reportCopy.also_labeled_for}</p>
+                      </>
+                    )}
+                    <div className="sr-cell-label">Pets &amp; kids</div>
+                    <p>{sanitizeReentryCopy(reportCopy.pets_kids)}</p>
                   </div>
                 )}
               <details className="solution-detail report-accordion" open={mode !== 'live'}>
@@ -8976,6 +9028,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
         <PlanSummaryCard data={data} mode={mode} />
+
+        <NearYouCard data={data} mode={mode} />
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on

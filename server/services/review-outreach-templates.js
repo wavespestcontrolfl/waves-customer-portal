@@ -27,13 +27,26 @@
  * that sends.
  */
 
+// {sender} when no technician resolves: the company speaks ("Hi Sam! It's
+// Waves. If we earned it…"), never a person's name and never the full
+// "Waves Pest Control" (owner rulings 2026-09-28). "It's Waves" is a whole
+// sentence, so it only fits where {sender} stands alone as one ("Hi Sam!
+// {sender}. If…"); an operator-edited body that uses {sender} inside a
+// sentence ("this is {sender}.", "{sender} here.") gets the bare name.
+const SENDER_FALLBACK = "It's Waves";
+const SENDER_FALLBACK_IN_SENTENCE = 'Waves';
+// Stands alone = the start, . ! ? or a new line before it and . ! ?, a new
+// line or the end after it, with any spaces or tabs in between.
+const SENTENCE_START_RE = /(?:^|[.!?]|\n)[ \t]*$/;
+const SENTENCE_END_RE = /^[ \t]*(?:[.!?]|\n|$)/;
+
 const OUTREACH_TEMPLATES = [
   {
     // The cadence's Day-0 ask (owner decision 2026-09-07, a narrow revision of
     // the 2026-07-30 personalized-drafting spec for THIS touch only): composed
     // from verified fields — the recipient's first name, the technician on the
-    // completed service ({sender} = "<tech> with Waves", or "Waves Pest
-    // Control" when no tech resolves), the tokenized link, and the uniform
+    // completed service ({sender} = "<tech> with Waves", or SENDER_FALLBACK
+    // "It's Waves" when no tech resolves), the tokenized link, and the uniform
     // reply invite everyone gets. Day-agnostic on purpose: the smart send
     // window and quiet hours can carry the ask past midnight, and a "today"
     // written at 8 PM read wrong at 8 AM. No service label — with the reply
@@ -48,7 +61,7 @@ const OUTREACH_TEMPLATES = [
     id: 'friendly_ask',
     name: 'Friendly Ask',
     sentiment: 'happy',
-    body: "Hey {first}! Adam with Waves here. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
+    body: "Hey {first}, it's Waves. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
   },
   {
     id: 'soft_reminder',
@@ -66,38 +79,38 @@ const OUTREACH_TEMPLATES = [
     id: 'post_service_hot',
     name: 'Post-Service Hot (2hr)',
     sentiment: 'happy',
-    body: "Hey {first}! {tech} here, just finished up at your place. A quick Google review would make my day:\n\n{review_url}",
+    body: "Hey {first}! {tech} with Waves, just finished at your place. A quick Google review would make my day:\n\n{review_url}",
   },
   {
     id: 'service_specific_pest',
     name: 'Service-Specific: Pest Control',
     sentiment: 'happy',
-    body: "Hi {first}! Hope the bugs are staying away after your treatment. If we earned it:\n\n{review_url}",
+    body: "Hi {first}! Hope the bugs are staying away after your Waves treatment. If we earned it:\n\n{review_url}",
   },
   {
     id: 'service_specific_lawn',
     name: 'Service-Specific: Lawn Care',
     sentiment: 'happy',
-    body: "Hey {first}! Hope the yard is looking great. If you love the results, a quick review helps:\n\n{review_url}",
+    body: "Hey {first}, it's Waves. Hope the yard is looking great. If you love the results, a quick review helps:\n\n{review_url}",
   },
   {
     id: 'resolution_check',
     name: 'Issue Resolution Check',
     sentiment: 'issue',
     // No review link — this is a private check-in, not an ask.
-    body: "Hi {first}, Adam with Waves. Just making sure everything has been taken care of - if there is anything else we can do, reply here anytime.",
+    body: "Hi {first}, it's Waves. Just making sure everything has been taken care of - if there is anything else we can do, reply here anytime.",
   },
   {
     id: 'satisfaction_confirm',
     name: 'Satisfaction Confirm',
     sentiment: 'issue',
-    body: "Hey {first} - checking in one more time. Is everything resolved to your satisfaction? Let me know!",
+    body: "Hey {first} - Waves checking in one more time. Is everything resolved to your satisfaction? Let us know!",
   },
   {
     id: 'recovery_review',
     name: 'Recovery → Review',
     sentiment: 'issue',
-    body: "Hi {first}! Glad we got it sorted. Would you mind sharing your experience?\n\n{review_url}\n\nThank you!",
+    body: "Hi {first}! Glad we got it sorted. Would you mind sharing your experience with Waves?\n\n{review_url}\n\nThank you!",
   },
   {
     id: 'winback_checkin',
@@ -115,7 +128,7 @@ const OUTREACH_TEMPLATES = [
     id: 'qr_followup',
     name: 'QR Code Follow-Up',
     sentiment: 'happy',
-    body: "Hey {first}! Great seeing you today. Here is that review link one more time:\n\n{review_url}",
+    body: "Hey {first}, it's Waves - great seeing you today. Here is that review link one more time:\n\n{review_url}",
   },
   {
     id: 'first_treatment_ask',
@@ -247,7 +260,7 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     tech: vars.tech || 'Your tech',
     // Sender identity from the record: the technician's first name when one
     // resolves, else the company — never a hardcoded person.
-    sender: vars.sender || (vars.tech ? `${vars.tech} with Waves` : 'Waves Pest Control'),
+    sender: vars.sender || (vars.tech ? `${vars.tech} with Waves` : SENDER_FALLBACK),
     service_type: vars.service_type || 'service',
     review_url: vars.review_url || '',
     date: vars.date || '',
@@ -256,10 +269,15 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     .replace(/\{first\}/g, v.first)
     .replace(/\{name\}/g, v.name)
     .replace(/\{tech\}/g, v.tech)
-    .replace(/\{sender\}/g, v.sender)
     .replace(/\{service_type\}/g, v.service_type)
     .replace(/\{review_url\}/g, v.review_url)
-    .replace(/\{date\}/g, v.date);
+    .replace(/\{date\}/g, v.date)
+    // Last, so the sentence check reads the finished words around {sender}.
+    .replace(/\{sender\}/g, (token, offset, text) => (
+      v.sender === SENDER_FALLBACK
+        && !(SENTENCE_START_RE.test(text.slice(0, offset)) && SENTENCE_END_RE.test(text.slice(offset + token.length)))
+        ? SENDER_FALLBACK_IN_SENTENCE
+        : v.sender));
 
   // Safety net: if a link is required but the body no longer contains it
   // (operator deleted the token while editing), append it so the ask is never
@@ -285,4 +303,5 @@ module.exports = {
   isAskTemplate,
   getOutreachTemplate,
   renderOutreachBody,
+  SENDER_FALLBACK,
 };

@@ -65,6 +65,13 @@ const GATE_RETRY_INSTRUCTIONS = {
   EMPTY_AFFILIATE_LINK_TEXT: 'Every <AffiliateLink> must wrap visible link text and close with </AffiliateLink> — write <AffiliateLink product="…" placement="…">a plain product name</AffiliateLink>; never self-close it, leave it empty, or put only a comment or expression inside (the text becomes the link).',
   INVALID_INLINECTA_PROPS: 'Every <InlineCTA> prop must be one the component accepts (headline, description, ctaLabel, ctaHref, phone, tel, eyebrow — exact casing) with a valid literal value; tel must be a phone number (optionally tel:-prefixed). Remove or fix any other prop.',
   INVALID_INLINECTA_DESTINATION: 'Every <InlineCTA ctaHref> must be a single quoted literal that is a root-relative path (no dot segments) or an https URL — never a spread, expression, duplicate, or any other scheme; omit ctaHref entirely to use the default quote page.',
+  CITABILITY_NAMED_SOURCES: 'Citability (non-blocking): attribute technical claims to the specific named authority behind the evidence, never generic experts or an invented source.',
+  CITABILITY_CONCRETE_SPECIFICS: 'Citability (non-blocking): preserve supported measurements as numbers with units instead of vague qualifiers; never invent a number or use a dollar amount.',
+  CITABILITY_COMPARISON: 'Citability (non-blocking): when the post frames a real choice, use one neutral <ComparisonTable>; do not add a filler comparison.',
+  CITABILITY_HOW_TO_CHOOSE: 'Citability (non-blocking): pair a real comparison with a How-to-choose H2 and 3–5 observable condition-to-option bullets.',
+  // Citability backfill completion (binding on that lane only): the gate
+  // message names the unresolved gaps / regressed traits.
+  CITABILITY_BACKFILL_GAPS_CLEARED: 'Citability refresh (binding): close every planned citability gap in required_sections with the actual structure — a named source in prose, a stated measurement, a <ComparisonTable>, a How-to-choose H2 with 3–5 criteria — and keep every table, How-to-choose section, named source and measurement the live page already has; never invent a source or a number to do it.',
 };
 
 // The header defaults to the RUN-LEVEL framing (one feedback-informed
@@ -73,6 +80,7 @@ const GATE_RETRY_INSTRUCTIONS = {
 // so the "final attempt" language would be false there.
 function buildRetryDirectives(gateRetry, { header } = {}) {
   const findings = Array.isArray(gateRetry?.findings) ? gateRetry.findings : [];
+  const advisoryMessages = Array.isArray(gateRetry?.advisory_messages) ? gateRetry.advisory_messages : [];
   // Always carry the gate's own finding text alongside the canonical
   // directive: the message names the OFFENDING entity (which competitor,
   // which city, which product), and without it a directive like "move the
@@ -83,9 +91,20 @@ function buildRetryDirectives(gateRetry, { header } = {}) {
     if (!canonical) return `Previous draft failed ${f.severity || 'P0'} ${f.code || 'gate check'}${f.message ? `: ${f.message}` : ''} — do not repeat it.`;
     return f.message ? `${canonical} [Gate reported: ${f.message}]` : canonical;
   });
+  const advisories = advisoryMessages.map((message) => {
+    const canonical = GATE_RETRY_INSTRUCTIONS[message.code];
+    if (!canonical) return `Optional quality signal ${message.code || 'citability'}${message.message ? `: ${message.message}` : ''}.`;
+    return message.message ? `${canonical} [Gate reported: ${message.message}]` : canonical;
+  });
   return [
     header || 'PREVIOUS ATTEMPT REJECTED by hard content gates. This is the final attempt — the draft is discarded (never published, never reviewed) if any of these repeat:',
     ...Array.from(new Set(directives)),
+    ...(advisories.length
+      ? [
+        'OPTIONAL CITABILITY SIGNALS — apply only when the brief evidence supports them; never invent a source, measurement, or comparison:',
+        ...Array.from(new Set(advisories)),
+      ]
+      : []),
   ];
 }
 

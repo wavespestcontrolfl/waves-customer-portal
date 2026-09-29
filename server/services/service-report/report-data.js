@@ -27,6 +27,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
+const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -59,15 +60,23 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
-const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
+const {
+  STRUCTURED_OBSERVATION_FINDING_DETAIL,
+  LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS,
+  lawnDefiniteLivePestLabelForObservation,
+} = require('../../../shared/service-completion-observations');
 // The plan's callbacks, as a customer knows them ("re-service"). Not
 // re-service.js's RE_SERVICE_SERVICE_KEYS: that billing set also holds
 // rodent_trapping_followup, an included trapping-program visit that no
 // customer would call a re-service.
 const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
 const { isActivePlanCustomer } = require('../waveguard-existing-services');
-const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
-const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
+const { isPerformedVisitOutcome, NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
+const { serviceRecordSuppressesCustomerArtifacts, customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
+// "Near you" privacy floor: a lawn pest is named for a city only once this
+// many OTHER customers there had it in the window, so one household's
+// problem is never broadcast.
+const NEAR_YOU_MIN_CUSTOMERS = 3;
 
 let PhotoService = null;
 try {
@@ -643,6 +652,20 @@ function snapshotAreaValues(service = {}) {
     .filter(Boolean)));
 }
 
+// Every persisted spelling a per-product application area can arrive under —
+// camelCase JS objects (`applicationArea`), snake_case DB rows
+// (`application_area`), and the shorter `area` alias a couple of older
+// readers use. Exported so any other reader of `service_products` (e.g. the
+// email-division visit reader) merges the same values instead of growing its
+// own copy (codex round 8 P2 on #5164).
+function applicationAreaValues(applications = []) {
+  const values = [];
+  for (const app of applications || []) {
+    values.push(app.applicationArea, app.application_area, app.area);
+  }
+  return values;
+}
+
 function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const values = [
@@ -650,14 +673,10 @@ function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
     ...parseJsonArray(structured.areasServiced),
     ...parseJsonArray(structured.areasTreated),
     ...snapshotAreaValues(service),
+    ...applicationAreaValues(applications),
   ];
 
   for (const app of applications || []) {
-    values.push(
-      app.applicationArea,
-      app.application_area,
-      app.area,
-    );
     values.push(...parseJsonArray(app.targets));
   }
 
@@ -1924,6 +1943,69 @@ function structuredCustomerConcern(structured = {}) {
   ).trim();
 }
 
+// The lawn pest most often recorded among OTHER lawn customers in this
+// report's own service city over the last 30 ET days, named only once
+// NEAR_YOU_MIN_CUSTOMERS distinct customers had it (the "Near you" line,
+// GATE_REPORT_NEAR_YOU, lawn only). Performed, customer-visible records only
+// (the Pest Pressure prior-visit rule). A visit's city is the one its own
+// report shows: the frozen reportIdentitySnapshot city when the record has
+// one (applyReportIdentitySnapshot), else the stamped service address city,
+// else the customer's, so a customer who later moved never carries old
+// findings to the new city (codex P2 on #5177). The pest comes only from each visit's
+// completion-form snapshot (structured_notes.formObservations: server-
+// allowlisted values, the provenance buildProtocolPayload trusts), matched
+// exactly to a definite-live-pest observation. Never from service_findings
+// titles, which can be free text (codex P0 on #5177). Returns { city, pest }
+// (a fixed customer noun, never a count, name, or address) or null.
+async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } = {}) {
+  const nearYouCity = String(city || '').trim();
+  if (!customerId || !nearYouCity) return null;
+  const todayEt = etDateString(now);
+  const sinceEt = etDateString(addETDays(now, -29));
+  const { rows } = await knex.raw(`
+    SELECT sr.customer_id,
+           sr.structured_notes->'formObservations' AS form_observations,
+           COALESCE(ss.service_address_city, c.city) AS live_city,
+           sr.service_data->'reportIdentitySnapshot' AS identity_snapshot
+    FROM service_records sr
+    LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+    JOIN customers c ON c.id = sr.customer_id
+    WHERE sr.status = 'completed'
+      AND sr.service_line = 'lawn'
+      AND sr.customer_id <> ?
+      AND sr.service_date >= ?::date AND sr.service_date <= ?::date
+      AND (
+        LOWER(TRIM(COALESCE(ss.service_address_city, c.city))) = LOWER(?)
+        OR LOWER(TRIM(sr.service_data->'reportIdentitySnapshot'->'address'->>'city')) = LOWER(?)
+      )
+      AND ${customerVisibleServiceRecordPredicate('sr')}
+      AND COALESCE(sr.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+  `, [customerId, sinceEt, todayEt, nearYouCity, nearYouCity, ...NON_PERFORMED_VISIT_OUTCOMES]);
+  const cityKey = nearYouCity.toLowerCase();
+  const customersByLabel = new Map();
+  for (const row of rows || []) {
+    if (!row.customer_id) continue;
+    // The SQL keeps either city; the report's own rule picks the one that counts.
+    const visitCity = applyReportIdentitySnapshot({
+      city: row.live_city,
+      service_data: { reportIdentitySnapshot: row.identity_snapshot },
+    }).city;
+    if (String(visitCity || '').trim().toLowerCase() !== cityKey) continue;
+    for (const observation of parseJsonArray(row.form_observations)) {
+      const label = lawnDefiniteLivePestLabelForObservation(observation);
+      if (!label) continue;
+      if (!customersByLabel.has(label)) customersByLabel.set(label, new Set());
+      customersByLabel.get(label).add(String(row.customer_id));
+    }
+  }
+  const [top] = [...customersByLabel.entries()]
+    .map(([label, customers]) => ({ label, customers: customers.size }))
+    .filter((entry) => entry.customers >= NEAR_YOU_MIN_CUSTOMERS)
+    .sort((a, b) => (b.customers - a.customers) || a.label.localeCompare(b.label));
+  const pest = top ? LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS.get(top.label) : null;
+  return pest ? { city: nearYouCity, pest } : null;
+}
+
 // LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
 // place: cached PDFs / static renders are content-key-insensitive snapshots,
 // and a reschedule after render would leave a stale appointment fossilized in
@@ -1938,7 +2020,23 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
   delete data.planSummary;
+  delete data.nearYou;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
+  return data;
+}
+
+// report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+// 2026-09-28): the PDF/static/sms_preview cache keys never varied on this
+// gate, so a rolling deploy could otherwise cache copy under the worker's
+// OWN gate state rather than what the browser actually rendered. Same
+// contract/shape as stripLiveOnlyScheduleFields above — called from the
+// route helper's mode !== 'live' block AND directly from pdf-queue.js's
+// queued renderer, which builds its payload outside that helper.
+function stripLiveOnlyReportProductCopy(data) {
+  if (!data || typeof data !== 'object' || !Array.isArray(data.applications)) return data;
+  data.applications.forEach((app) => {
+    if (app?.product && 'report_copy' in app.product) delete app.product.report_copy;
+  });
   return data;
 }
 
@@ -2374,7 +2472,9 @@ class PinnedAssessmentUnavailable extends Error {
 // p5: before/after pairing is Front-only; close-up / trouble photos never
 // pair or fill the fallback (owner ruling 2026-09-24). PDFs rendered under
 // the old any-zone pairing must not be reused.
-const LAWN_RENDER_STRATEGY = 'p5';
+// p6: lawn water-plan credits now require explicit product-instruction
+// provenance; older PDFs may contain the former inferred 24-hour instruction.
+const LAWN_RENDER_STRATEGY = 'p6-aftercare-guards-20260927';
 
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
@@ -2834,15 +2934,45 @@ async function resolvePestWeekWeatherForBuild(service, serviceLine, knex, mode) 
   return result;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
-  if (serviceLine !== 'lawn') return null;
+// The identity both the scorecard render and the PDF cache signature must
+// agree on: which assessment is CURRENTLY linked, and — when history goes
+// back far enough to pair a before/after — which earlier assessment anchors
+// the baseline. One resolver, so a caller resolving photo identity for the
+// cache key (photo-set-signature.js, through report-photo-set.js's
+// resolveLawnPhotoAssessmentIds) can never drift from what the render itself
+// can show (pre-push P1, second round, 2026-09-28: the render's before/after
+// slider shows a customer-visible lawn_assessment_photos row from the
+// BASELINE assessment too, not only the currently linked one, and the
+// signature ignored that entirely).
+//
+// `failClosed` is threaded into loadLinkedLawnAssessment and, for the
+// gate-off history query below, changes catch-and-degrade into rethrow.
+// buildLawnAssessmentReportData calls this with failClosed left false — its
+// long-standing fail-soft posture, an unreadable assessment or history
+// degrades to "no lawn section" rather than 500ing a customer's report — a
+// signature caller opts in so the same failure reaches its own unique-token
+// fence instead of resolving a false empty identity.
+//
+// loadLinkedLawnAssessment already branches on `failClosed` on its own (see
+// its doc a few lines above, issue #3135: `const swallow = (err) => {
+// if (failClosed) throw err; return null; }` on every lookup inside it) —
+// that behavior predates this function and is unchanged here; this resolver
+// only forwards the flag. The photo-set-signature.js failClosed tests
+// (server/tests/report-photo-set-signature.test.js, "the linked-assessment
+// lookup throwing") exercise this exact path end-to-end.
+async function resolveLawnAssessmentAndHistory(service, knex = db, {
+  pinnedAssessmentId = null,
+  propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
+  lawnHistory,
+  failClosed = false,
+} = {}) {
   // Pinned-empty is unconditional: the attachment provably carries no lawn
   // section, which is exactly what the fence sealed.
-  if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return null;
+  if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return { assessment: null, historyRows: [] };
   let assessment = pinnedAssessmentId
     ? await loadPinnedLawnAssessment(service, pinnedAssessmentId, knex)
-    : await loadLinkedLawnAssessment(service, knex, { propertyHistoryEnabled });
-  if (!assessment) return null;
+    : await loadLinkedLawnAssessment(service, knex, { failClosed, propertyHistoryEnabled });
+  if (!assessment) return { assessment: null, historyRows: [] };
 
   let historyRows;
   if (propertyHistoryEnabled) {
@@ -2853,14 +2983,37 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     assessment = { ...resolved.current, is_baseline: resolved.isBaseline };
     historyRows = resolved.rows.map((row) => ({ ...row, service_date: row.visit_date }));
   } else {
-    const allAssessments = await knex('lawn_assessments')
+    const historyQuery = knex('lawn_assessments')
       .where({ customer_id: service.customer_id, confirmed_by_tech: true })
       .orderBy('service_date', 'asc')
-      .orderBy('created_at', 'asc')
-      .catch(() => []);
+      .orderBy('created_at', 'asc');
+    const allAssessments = failClosed ? await historyQuery : await historyQuery.catch(() => []);
     const assessmentIndex = allAssessments.findIndex((row) => String(row.id) === String(assessment.id));
     historyRows = assessmentIndex >= 0 ? allAssessments.slice(0, assessmentIndex + 1) : allAssessments;
   }
+  return { assessment, historyRows };
+}
+
+// The subset of resolveLawnAssessmentAndHistory's identity that actually
+// carries customer-visible PHOTOS: the current assessment, plus — only when
+// it differs — the earliest (baseline) assessment in its history. Consumed
+// by the PDF cache signature through report-photo-set.js's
+// resolveLawnPhotoAssessmentIds, which requires this module lazily (this
+// file requires report-photo-set.js back, for the render's own turf-gallery
+// lookup below) to avoid a load-time require cycle.
+async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
+  const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, options);
+  if (!assessment?.id) return [];
+  const ids = [assessment.id];
+  const baselineId = historyRows?.[0]?.id;
+  if (baselineId != null && String(baselineId) !== String(assessment.id)) ids.push(baselineId);
+  return ids;
+}
+
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
+  if (serviceLine !== 'lawn') return null;
+  const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
+  if (!assessment) return null;
   const initialRow = historyRows[0] || assessment;
   const currentScore = formatLawnAssessmentScore(assessment);
   const initialScore = formatLawnAssessmentScore(initialRow);
@@ -3997,6 +4150,35 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // part of the public /api/reports/:token/data payload (gate on or
         // off, every service line). See expectationFactsOut below — the
         // ONLY channel that carries them to the render path.
+        //
+        // report_copy (GATE_REPORT_PRODUCT_COPY, owner-approved 2026-09-28):
+        // the three short customer-facing lines for THIS product, matched
+        // against the static reviewed config — never fuzzy, never guessed.
+        // KEY OMITTED (not null) when the gate is off, the product has no
+        // approved wording, or the report is a termite-family visit — same
+        // "omit, never serialize null" contract the top-level
+        // planSummary/nearYou keys follow. LIVE-VIEW ONLY: stripped back off
+        // for every non-live render by stripLiveOnlyReportProductCopy above
+        // (the PDF cache key doesn't vary on this gate).
+        //
+        // Termite exclusion (codex P1 2026-09-28): the approved wording is
+        // written for the PEST line (ant/roach/spider labeled-for text).
+        // Taurus SC and other shared products are also used on termite
+        // liquid/trench/bait visits, where that wording is wrong. Reuses the
+        // SAME service-line classifier every other termite-vs-not decision
+        // in this file already reads (`serviceLine`, resolved above from
+        // `service.service_line || detectServiceLine(service.service_type)`)
+        // rather than a new regex — `detectServiceLine` always resolves to a
+        // line (defaults to 'pest' when it can't tell), so an unclassifiable
+        // service type never surfaces as "termite" and never spuriously gets
+        // copy it can't confirm is termite-safe either; it comes down to
+        // "not termite" only through that same existing default.
+        ...(reportProductCopyGateOn() && serviceLine !== 'termite'
+          ? (() => {
+            const copy = reportProductCopyForApplicationProduct(product);
+            return copy ? { report_copy: copy } : {};
+          })()
+          : {}),
       },
       method,
       // Explicit vs inferred decides whether pesticide identity may override
@@ -4474,12 +4656,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must
-      // never reach the customer's permanent report token.
-      const turfPhotos = await knex('lawn_assessment_photos')
-        .where({ assessment_id: linkedAssessment.id, customer_visible: true })
-        .orderBy('photo_order', 'asc')
-        .orderBy('taken_at', 'asc')
-        .catch(() => []);
+      // never reach the customer's permanent report token. Shared with the
+      // cache-signature side (photo-set-signature.js) through
+      // resolveLawnReportPhotos — see report-photo-set.js — so the two never
+      // drift on which rows a report can show (pre-push P1).
+      const turfPhotos = await require('./report-photo-set').resolveLawnReportPhotos(linkedAssessment.id, knex);
       const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
         const url = await lawnPhotoUrl(photo);
         // Dropped-but-expected turf photo — same silent-omission class.
@@ -5351,6 +5532,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       }
     }
   } catch { /* best-effort */ }
+
+  // "Near you" line on the LIVE lawn report (owner ask 2026-09-28, "lawn
+  // only", GATE_REPORT_NEAR_YOU): see loadNearYouLawnPest. Same page-only
+  // opt-in as the plan card (the /ask build never pays for it).
+  let nearYou = null;
+  if (opts.mode === 'live' && opts.nearYou === true && featureGates.isEnabled('reportNearYou')
+    && serviceLine === 'lawn') {
+    try {
+      nearYou = await loadNearYouLawnPest(knex, { customerId: service.customer_id, city: service.city });
+    } catch { /* best-effort */ }
+  }
 
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
   // links the customer to their active bond on the portal My Plan tab with
@@ -6238,6 +6430,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // stripLiveOnlyScheduleFields deletes it for every non-live render, same
     // staleness rule as nextAppointment.
     ...(planSummary ? { planSummary } : {}),
+    ...(nearYou ? { nearYou } : {}),
     termiteNextMonitoringVisit,
     // Present (possibly null) ONLY when the live cockroach pick ran — the
     // attach composer reads presence as "schedule resolved" (pdf/static
@@ -6409,11 +6602,14 @@ module.exports = {
   resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
+  stripLiveOnlyReportProductCopy,
+  loadNearYouLawnPest,
   lawnScoreDelta,
   singleVoiceObservation,
   parseJsonObject,
   parseJsonArray,
   uniqueStrings,
+  applicationAreaValues,
   locationAreaLabels,
   taggedNoteLines,
   minutesFromElapsed,
@@ -6429,6 +6625,8 @@ module.exports = {
   serviceDisplayName,
   treatmentScope,
   buildLawnAssessmentReportData,
+  resolveLawnAssessmentAndHistory,
+  resolveLawnPhotoAssessmentIds,
   loadLinkedLawnAssessment,
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,

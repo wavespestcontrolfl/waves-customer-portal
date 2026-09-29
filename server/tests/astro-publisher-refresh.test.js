@@ -13,6 +13,10 @@ jest.mock('../services/content-astro/github-client', () => ({
   putFile: jest.fn(),
   createPr: jest.fn(),
   createIssueComment: jest.fn(),
+  deleteRef: jest.fn(),
+  findOpenPrByHead: jest.fn(),
+  retireBranch: jest.fn(),
+  runWithRequestDeadline: jest.fn((_deadlineAt, fn) => fn()),
 }));
 
 const gh = require('../services/content-astro/github-client');
@@ -58,8 +62,13 @@ function refreshDraft(overrides = {}) {
 }
 const BRIEF = { action_type: 'refresh_existing_page', target_url: '/pest-control-sarasota-fl/', city: 'Sarasota', service: 'pest' };
 
+// The publisher's owner-list chokepoint makes one company-extraction model
+// call on the final text; these pages name no company unless a test says so
+// (the chokepoint's own decision logic stays real).
+const businessNameConfirmer = require('../services/content/business-name-confirmer');
 beforeEach(() => {
   db.mockReset();
+  jest.spyOn(businessNameConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: [] });
 });
 
 function registryQuery(row, seen = []) {
@@ -102,6 +111,148 @@ describe('publishRefresh frontmatter freeze', () => {
     gh.createIssueComment.mockResolvedValue({});
   });
 
+  test.each(['false', 'true'])('citability publication honors the live gate (%s)', async (enabled) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    gates.citabilityBackfill = enabled === 'true';
+    try {
+      const result = pub.publishRefresh(refreshDraft(), { ...BRIEF, gsc_signal: { bucket: 'citability_backfill' } });
+      if (enabled === 'true') {
+        await expect(result).resolves.toMatchObject({ status: 'pr_open' });
+        expect(gh.createPr).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(result).rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_DISABLED' });
+        expect(gh.createBranch).not.toHaveBeenCalled();
+        expect(gh.putFile).not.toHaveBeenCalled();
+        expect(gh.createPr).not.toHaveBeenCalled();
+      }
+    } finally {
+      gates.citabilityBackfill = previous;
+    }
+  });
+
+  test.each(['getFile', 'createBranch', 'putFile'])('a stop during %s prevents the next publishing write', async (method) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    gates.citabilityBackfill = true;
+    gh[method].mockImplementationOnce(async () => {
+      gates.citabilityBackfill = false;
+      return method === 'getFile' ? { content: EXISTING, sha: 'existing-sha' } : {};
+    });
+    try {
+      await expect(pub.publishRefresh(refreshDraft(), { ...BRIEF, gsc_signal: { bucket: 'citability_backfill' } }))
+        .rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_DISABLED' });
+      expect(gh.createPr).not.toHaveBeenCalled();
+      if (method !== 'putFile') expect(gh.putFile).not.toHaveBeenCalled();
+      if (method === 'getFile') expect(gh.createBranch).not.toHaveBeenCalled();
+      else expect(gh.deleteRef).toHaveBeenCalledTimes(1);
+    } finally {
+      gates.citabilityBackfill = previous;
+    }
+  });
+
+  describe('commitGuard and timed-out writes', () => {
+    const deadline = () => Object.assign(new Error('GitHub POST x → request deadline exceeded (timeout)'), { code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+
+    test('the guard wraps only the GitHub write phase, after every pre-commit check', async () => {
+      const events = [];
+      businessNameConfirmer.extractCompanyNames.mockImplementation(async () => {
+        events.push('owner_list_check');
+        return { ok: true, key: 'k', companies: [] };
+      });
+      gh.createBranch.mockImplementation(async () => { events.push('createBranch'); return {}; });
+      gh.createPr.mockImplementation(async () => {
+        events.push('createPr');
+        return { number: 77, html_url: 'https://github.com/x/y/pull/77', head: { sha: 'h' } };
+      });
+      const commitGuard = jest.fn(async (write) => {
+        events.push('guard_enter');
+        const out = await write();
+        events.push('guard_exit');
+        return out;
+      });
+
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF, { commitGuard })).resolves.toMatchObject({ status: 'pr_open' });
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      expect(events).toEqual(['owner_list_check', 'guard_enter', 'createBranch', 'createPr', 'guard_exit']);
+    });
+
+    test('a createPr that timed out but landed is recovered as this attempt\'s PR', async () => {
+      gh.createPr.mockRejectedValueOnce(deadline());
+      gh.findOpenPrByHead.mockResolvedValueOnce({ number: 88, html_url: 'https://github.com/x/y/pull/88', head: { sha: 'landed-sha' } });
+
+      const res = await pub.publishRefresh(refreshDraft(), BRIEF);
+      expect(res).toMatchObject({ status: 'pr_open', pr_number: 88, commit_sha: 'new-sha' });
+      expect(gh.findOpenPrByHead).toHaveBeenCalledWith(res.branch);
+      expect(gh.retireBranch).not.toHaveBeenCalled();
+    });
+
+    test('with no PR found, the branch is cleaned up but the row is still parked: the write may still land', async () => {
+      gh.createPr.mockRejectedValueOnce(deadline());
+      gh.findOpenPrByHead.mockResolvedValueOnce(null);
+      gh.retireBranch.mockResolvedValueOnce(true);
+
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'REFRESH_PUBLISH_UNRECONCILED' });
+      expect(gh.retireBranch).toHaveBeenCalledTimes(1);
+    });
+
+    test('a timed-out commit skips the PR lookup, cleans up, and parks', async () => {
+      gh.putFile.mockRejectedValueOnce(deadline());
+      gh.retireBranch.mockResolvedValueOnce(true);
+
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'REFRESH_PUBLISH_UNRECONCILED' });
+      expect(gh.findOpenPrByHead).not.toHaveBeenCalled();
+      expect(gh.createPr).not.toHaveBeenCalled();
+      expect(gh.retireBranch).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['the PR lookup fails', () => gh.findOpenPrByHead.mockRejectedValueOnce(new Error('503'))],
+      ['the branch cleanup fails', () => { gh.findOpenPrByHead.mockResolvedValueOnce(null); gh.retireBranch.mockRejectedValueOnce(new Error('500')); }],
+    ])('an unproven outcome is REFRESH_PUBLISH_UNRECONCILED when %s', async (_label, arrange) => {
+      gh.createPr.mockRejectedValueOnce(deadline());
+      arrange();
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({
+        code: 'REFRESH_PUBLISH_UNRECONCILED', branch: expect.stringMatching(/^content\/refresh-/),
+      });
+    });
+
+    test('reconciliation runs under its own bounded GitHub deadline', async () => {
+      gh.createPr.mockRejectedValueOnce(deadline());
+      gh.findOpenPrByHead.mockRejectedValueOnce(deadline());
+      const before = Date.now();
+
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'REFRESH_PUBLISH_UNRECONCILED' });
+      const [deadlineAt] = gh.runWithRequestDeadline.mock.calls.at(-1);
+      expect(deadlineAt).toBeGreaterThan(before);
+      expect(deadlineAt).toBeLessThanOrEqual(Date.now() + 60_000);
+    });
+
+    test('a non-deadline write failure is not reconciled', async () => {
+      gh.createPr.mockRejectedValueOnce(Object.assign(new Error('GitHub POST → 422'), { status: 422 }));
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ status: 422 });
+      expect(gh.findOpenPrByHead).not.toHaveBeenCalled();
+      expect(gh.retireBranch).not.toHaveBeenCalled();
+    });
+  });
+
+  // Refreshes auto-merge too, so the owner-list chokepoint runs on the final
+  // refreshed text (Codex r5 on #5146).
+  test('a refresh naming an off-list company is refused before any branch is cut, and the check saw the final text', async () => {
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const draft = refreshDraft({ body: 'Bug Out competes with local providers in Sarasota for recurring plans.' });
+
+    await expect(pub.publishRefresh(draft, BRIEF)).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED' });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('Bug Out competes');
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][1]).toMatchObject({ final: true });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+    expect(draft.company_extraction).toMatchObject({ companies: ['Bug Out'] });
+  });
+
   test('preserves protected frontmatter and changes only meta + body + modified', async () => {
     const res = await pub.publishRefresh(refreshDraft(), BRIEF);
     expect(res.status).toBe('pr_open');
@@ -128,6 +279,30 @@ describe('publishRefresh frontmatter freeze', () => {
     // Freshness bumped (body changed). Not the old date.
     expect(data.modified).not.toBe('2026-01-01T12:00:00');
     expect(String(data.modified)).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00$/);
+  });
+
+  test('a refreshed SERVICE page body that links a competitor is refused before any branch (owner rulings 2026-09-28: every page; refuse, don\'t rewrite)', async () => {
+    await expect(pub.publishRefresh(refreshDraft({
+      body: 'Fresh Sarasota guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    }), BRIEF)).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
+  test('a competitor page listed in notes_for_reviewer reaches the editorial review as evidence, never the page (Codex r6 on #5191)', async () => {
+    const editorialEvidence = require('../services/content/editorial-evidence');
+    const filesSpy = jest.spyOn(editorialEvidence, 'filesForDocument').mockResolvedValue([]);
+    try {
+      const res = await pub.publishRefresh({
+        ...refreshDraft({ body: 'Fresh Sarasota guidance. Per the published terms, plans renew yearly.' }),
+        notes_for_reviewer: 'Evidence sources: https://www.orkin.com/terms',
+      }, BRIEF);
+      expect(res.status).toBe('pr_open');
+      expect(filesSpy).toHaveBeenCalledWith(expect.objectContaining({ evidenceUrls: ['https://www.orkin.com/terms'] }));
+      expect(gh.putFile.mock.calls[0][0].content).not.toMatch(/orkin\.com/);
+    } finally {
+      filesSpy.mockRestore();
+    }
   });
 
   test('no_changes when body and meta are identical to live', async () => {
@@ -229,6 +404,8 @@ describe('loadExistingPageBody', () => {
     expect(r).not.toBeNull();
     expect(r.body).toContain('Old body content about Sarasota pest control.');
     expect(r.word_count).toBe(7);
+    // The citability re-scan needs the real extension (.md cannot carry MDX).
+    expect(r.source_file).toMatch(/\.mdx?$/);
   });
 });
 
@@ -357,6 +534,38 @@ describe('publishRefresh blog-schema validation gate', () => {
       pub.publishRefresh(blogRefreshDraft({ frontmatter: { meta_description: tooLong } }), BLOG_BRIEF),
     ).rejects.toMatchObject({ code: 'BLOG_FRONTMATTER_INVALID' });
     expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
+  test('a blog-target refresh that links a competitor is refused too (Codex r1 P2)', async () => {
+    await expect(pub.publishRefresh(blogRefreshDraft({
+      body: 'Refreshed guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    }), BLOG_BRIEF)).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('a metadata rewrite is refused when its meta, or a service page\'s untouched frontmatter, links a competitor (owner ruling: every page)', async () => {
+    gh.getFile.mockResolvedValue({ content: VALID_BLOG, sha: 'blog-sha' });
+    await expect(pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: BLOG_FILE_PATH,
+      title: 'Drywood Termite Signs vs Orkin',
+      meta_description: 'Compare our approach with https://www.orkin.com/terms and see what Waves techs check first for drywood termite signs in Sarasota homes today.',
+    }, { action_type: 'rewrite_title_meta', target_url: '/blog/drywood-termite-signs-sarasota/' })).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    const svcWithLink = EXISTING.replace(
+      'pageType: "city-hub"',
+      'pageType: "city-hub"\nsourceNote: "Compare to https://www.orkin.com/terms"',
+    );
+    gh.getFile.mockResolvedValue({ content: svcWithLink, sha: 'svc-sha' });
+    await expect(pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: FILE_PATH,
+      title: 'ignored (protected metaTitle)',
+      meta_description: 'A brand-new Sarasota pest control meta description for the service page rewrite lane.',
+    }, { action_type: 'rewrite_title_meta', target_url: '/pest-control-sarasota-fl/' })).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
   });
 
   test('does NOT blog-validate a non-blog (service) page refresh', async () => {

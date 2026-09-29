@@ -38,6 +38,8 @@ const TOOLS = [
       properties: {
         reason: { type: 'string', description: 'Why this needs human attention' },
         priority: { type: 'string', enum: ['urgent', 'normal', 'low'] },
+        // Gap reports only (services/agent-gap-reports.js) — never shown to the customer.
+        not_supported: { type: 'boolean', description: 'true ONLY when the customer asked for something you have no way to do or answer. Leave it out for cancellations, schedule changes, complaints, billing, pricing, or anything the team handles by design.' },
       },
       required: ['reason'],
     },

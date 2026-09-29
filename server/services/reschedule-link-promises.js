@@ -502,20 +502,33 @@ function narrowBySubject(candidates, subject) {
 // duplicate, narrower allowlist here parked a link the customer could
 // already use the page for (codex #4293 P1 r8). Group membership and the
 // token stay here; eligibility() alone decides status AND missed-vs-past.
-// Self-serve notice window (owner ruling 2026-09-23): the public page now
-// refuses to MOVE a visit that itself starts within SELF_SERVE_NOTICE_HOURS
+// Self-serve MOVE notice window (owner ruling 2026-09-23; split from the
+// book window 2026-09-28, SELF_SERVE_MOVE_NOTICE_HOURS): the public page now
+// refuses to MOVE a visit that itself starts within the move notice window
 // (missed visits exempt — they are being rebooked), so a promised link for
 // such a visit would land on a page that says "call us". Sending that link is
 // a self-serve act, distinct from the exempt voice BOOKING; park it for the
 // office instead. Same predicate reschedule-public.js layers over
 // eligibilityAsync (withSelfServeNotice), kept out of the shared eligibility
 // module the voice-agent surfaces also read.
+//
+// Shared with reschedule-link.js (buildRescheduleLink, codex/plan C3/C6):
+// true when an otherwise self-serviceable visit (eligibility().ok, and not a
+// missed-visit rebook — that customer is picking a NEW time, not moving a
+// visit off its own too-soon start) currently starts inside the self-serve
+// MOVE notice window, so a "reschedule online" link/CTA for it would land on
+// a page that refuses the move. `verdict` is the caller's own
+// `eligibility(visit, now)` result, so this never recomputes it.
+function tooSoonToSelfServeMove(visit, verdict, now) {
+  if (!verdict.ok || verdict.missed) return false;
+  return require('./scheduling/self-serve-notice').visitInsideMoveNoticeWindow(visit, now);
+}
+
 function visitNotSelfServiceReason(visit, now) {
   if (!visit.reschedule_token || (visit.visit_id && visit.follow_through_group_eligible !== true)) return 'visit_not_self_service';
   const verdict = require('./reschedule-eligibility').eligibility(visit, now);
   if (verdict.ok) {
-    const { visitInsideNoticeWindow } = require('./scheduling/self-serve-notice');
-    if (!verdict.missed && visitInsideNoticeWindow(visit, now)) return 'visit_not_self_service';
+    if (tooSoonToSelfServeMove(visit, verdict, now)) return 'visit_not_self_service';
     return null;
   }
   return verdict.reason === 'past' ? 'visit_elapsed' : 'visit_not_self_service';
@@ -2147,4 +2160,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isPromisedFloor, promisedFloorAt };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isPromisedFloor, promisedFloorAt, tooSoonToSelfServeMove };

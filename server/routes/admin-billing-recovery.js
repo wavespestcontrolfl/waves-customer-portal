@@ -28,13 +28,14 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
-const InvoiceService = require('../services/invoice');
-const { customerOnAutopay, autopayActivePredicate } = require('../services/autopay-eligibility');
+const { autopayActivePredicate } = require('../services/autopay-eligibility');
 const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { etDateString } = require('../utils/datetime-et');
-const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('../services/no-cost-visit-types');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require('../services/billing-lane').stampedZeroFreeLive();
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
@@ -49,6 +50,7 @@ router.use(adminAuthenticate, requireAdmin);
 // namespace would let a recovery Bill and a concurrent mint both create
 // duplicate drafts. Imported, never re-declared (codex #3344 r8).
 const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+const { billVisit, dueDateFromVisit, siblingCoverageStatus } = require('../services/billing-recovery-bill');
 
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
@@ -66,9 +68,6 @@ const matchesPatterns = (serviceType, patterns) => {
   const s = String(serviceType || '').toLowerCase();
   return patterns.some((p) => s.includes(p.replace(/%/g, '')));
 };
-// Always-free check for the write path (POST /bill) — a stale/direct request
-// must not bill an always-free type.
-const isNoCostServiceType = isAlwaysFreeServiceType;
 const isReviewServiceType = (serviceType) => matchesPatterns(serviceType, REVIEW_PATTERNS);
 
 // Packet invoices keep ownership after reversal; only ordinary void invoices
@@ -93,16 +92,6 @@ function clampDays(raw) {
   return Math.min(365, Math.max(1, n));
 }
 
-// Match the completion path's due date (the service date), so a recovered
-// 60/90-day-old visit ages correctly instead of resetting to today+30. A
-// date-only string is used as-is; a timestamp is normalized to its ET date.
-function dueDateFromVisit(v) {
-  const raw = v.service_date || v.completed_at;
-  if (!raw) return undefined;
-  if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
-  return etDateString(new Date(raw));
-}
-
 // Shared base query for uninvoiced completed visits, with the full no-cost
 // allowlist applied. Returns visits with an effective price: the row's
 // estimated_price, or — when the billing_mode column exists (perAppAware) —
@@ -112,8 +101,17 @@ function dueDateFromVisit(v) {
 // monthly_rate). All req-derived values are bound, never interpolated.
 function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false } = {}) {
   const autopay = autopayActivePredicate();
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): the NULLIF below turns
+  // a STAMPED 0 into NULL so it falls to the per-application fee — exactly
+  // the "$0 means charge nothing" violation the gate exists to close. Under
+  // the gate, drop the NULLIF: a stamped 0 stays 0, so it fails the
+  // `effectivePriceSql > 0` filter below and never surfaces as a leak or a
+  // fee at all. A genuinely blank row (NULL) is unaffected either way —
+  // COALESCE still falls to the fee.
   const effectivePriceSql = perAppAware
-    ? "COALESCE(NULLIF(ss.estimated_price, 0), CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)"
+    ? (stampedZeroFreeLive()
+      ? "COALESCE(ss.estimated_price, CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)"
+      : "COALESCE(NULLIF(ss.estimated_price, 0), CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)")
     : 'COALESCE(ss.estimated_price, 0)';
   // Effective payer mirrors resolveForInvoice: a per-job self-pay pin blocks
   // inheriting the customer default, so a pinned visit on a default-payer
@@ -197,6 +195,10 @@ router.get('/leaks', async (req, res) => {
         'ss.annual_prepay_term_id',
         'ss.scheduled_date',
         'ss.completed_at',
+        // Sibling first-application coverage (siblingCoverageStatus).
+        'ss.source_estimate_id',
+        'ss.first_application_invoice_id',
+        'ss.primary_line_price',
         'c.id as customer_id',
         'c.first_name',
         'c.last_name',
@@ -215,7 +217,18 @@ router.get('/leaks', async (req, res) => {
     const coveredFlags = await Promise.all(
       rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r)),
     );
-    const activeRows = rows.filter((_, i) => !coveredFlags[i]);
+    const prepayActiveRows = rows.filter((_, i) => !coveredFlags[i]);
+    // A visit billed on its trip's combined first-application invoice has no
+    // invoice of its own, so the leak query lists it — and Bill refuses it
+    // (billing-recovery-bill.js siblingCoverageRefusal). Drop only a
+    // DEFINITIVE 'covered' verdict. A needs-review one (combined invoice
+    // voided or refunded) or a lookup error stays listed — the money may
+    // still be owed, and hiding it could read as handled; Bill refuses those
+    // with the reason. Leak rows exclude callbacks by construction.
+    const siblingStatuses = await Promise.all(
+      prepayActiveRows.map((r) => siblingCoverageStatus(r, db, { trustRowStamp: true })),
+    );
+    const activeRows = prepayActiveRows.filter((_, i) => siblingStatuses[i] !== 'covered');
 
     // Effective price mirrors the query + the bill route: row price →
     // per-application fee (never monthly_rate).
@@ -330,204 +343,11 @@ router.get('/at-risk-mrr', async (req, res) => {
 router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
   const { scheduledServiceId } = req.params;
   try {
-    // Same effective-payer resolution as the leak list: a per-job self-pay pin
-    // means the visit bills the customer directly, so the payer-billed reject
-    // below must not fire off the ignored account default. Column-guarded.
-    let billSelfPayAware = false;
-    try {
-      billSelfPayAware = await db.schema.hasColumn('scheduled_services', 'self_pay_override');
-    } catch { /* keep legacy */ }
-    const visit = await db({ ss: 'scheduled_services' })
-      .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
-      .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
-      .where('ss.id', scheduledServiceId)
-      .select(
-        'ss.id as scheduled_service_id',
-        'sr.id as service_record_id',
-        'ss.service_type',
-        'ss.estimated_price',
-        'ss.prepaid_amount',
-        'ss.prepaid_method',
-        'ss.annual_prepay_term_id',
-        'ss.scheduled_date',
-        db.raw(billSelfPayAware
-          ? 'COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END) as payer_id'
-          : 'COALESCE(ss.payer_id, c.payer_id) as payer_id'),
-        db.raw('COALESCE(ss.is_callback, false) as ss_callback'),
-        db.raw('COALESCE(sr.is_callback, false) as sr_callback'),
-        'sr.status as sr_status',
-        'sr.service_date',
-        'ss.completed_at',
-        'c.id as customer_id',
-        'c.monthly_rate',
-        'c.property_type',
-        'c.autopay_enabled',
-        'c.autopay_paused_until',
-        'c.ach_status',
-      )
-      .first();
-
-    if (!visit) return res.status(404).json({ error: 'Visit not found' });
-    if (!visit.service_record_id) {
-      return res.status(422).json({ error: 'Visit has no completion record — cannot invoice' });
-    }
-    // Office-handoff visits write service_records.status='incomplete' and the
-    // completion flow intentionally skips invoicing — never bill those here.
-    if (visit.sr_status !== 'completed') {
-      return res.status(422).json({ error: 'Visit completion record is incomplete (office-handoff) — cannot invoice.' });
-    }
-
-    // Per-application pricing lives at the CUSTOMER level when the visit row
-    // carries no price (follow-up rows seed estimated_price NULL by design),
-    // so probe mode + fee once up front: the autopay guard below and the
-    // price fallback both key off it, and the fallback must apply whether or
-    // not the customer's autopay is currently healthy (a per-app visit whose
-    // saved method died still needs a recoverable price). Column-guarded —
-    // pre-migration environments keep exact legacy behavior.
-    let recoveryBillingMode = null;
-    let recoveryPerApplicationFee = 0;
-    try {
-      const modeRow = await db('customers')
-        .where({ id: visit.customer_id })
-        .first('billing_mode', 'per_application_fee');
-      recoveryBillingMode = modeRow?.billing_mode || null;
-      recoveryPerApplicationFee = parseFloat(modeRow?.per_application_fee || 0);
-    } catch { /* billing_mode column absent — keep legacy behavior */ }
-
-    // Conservative v1 double-bill guard (owner priority): reject active-autopay
-    // customers outright. The completion predicate only treats autopay as covering
-    // NO-price visits, so an autopay one-off priced visit is technically billable —
-    // recovering those is a deliberate follow-up; v1 stays conservative. Keyed on
-    // the canonical customerOnAutopay() (default payment_methods row, ET pause,
-    // ACH-not-active → card-only). Never trust the client.
-    const onAutopay = await customerOnAutopay({
-      id: visit.customer_id,
-      autopay_enabled: visit.autopay_enabled,
-      autopay_paused_until: visit.autopay_paused_until,
-      ach_status: visit.ach_status,
-    });
-    if (onAutopay) {
-      // Per-application customers are on autopay BY DESIGN — the saved card
-      // is HOW each visit charge collects, and the monthly cron skips them
-      // (GUARD 3b), so "autopay = monthly-covered" is exactly wrong for
-      // them: a per-app visit that completion failed to invoice/charge is
-      // THE case this workbench exists to recover (Codex round-7). The
-      // explicit per_visit/one_time lanes get the same exemption — the cron
-      // skips them too, and their uninvoiced completions are real leaks
-      // (Codex billing-lane r7). annual_prepay stays blocked (uncovered
-      // visits belong to the renewal flow, covered ones to prepaid stamps).
-      if (!['per_application', 'per_visit', 'one_time'].includes(recoveryBillingMode)) {
-        return res.status(409).json({ error: 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.' });
-      }
-    }
-    // v1 is self-pay only — a payer-billed visit is owed by the payer's AP inbox,
-    // not the homeowner, and must be cut through the payer invoice path.
-    if (visit.payer_id) {
-      return res.status(409).json({ error: 'Visit is billed to a third-party payer — handle via the payer AP flow.' });
-    }
-    if (visit.ss_callback || visit.sr_callback) {
-      return res.status(409).json({ error: 'Visit is flagged as a callback / re-treat (no-cost).' });
-    }
-    if (isNoCostServiceType(visit.service_type)) {
-      return res.status(409).json({ error: 'Visit type is always no-cost (appointment / estimate / re-service / follow-up) — not billable here.' });
-    }
-    // A LIVE annual-prepay-covered visit is fully covered by the term. Its stamp is
-    // a DISCOUNTED slice < the undiscounted estimated_price, so without this guard it
-    // would fall into the "partial prepay → bill manually" 409 below and get
-    // double-billed. Fail-closed: a stale/refunded stamp is NOT covered and still bills.
-    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-    if (await AnnualPrepayRenewals.annualPrepayCoversVisit(visit)) {
-      return res.status(409).json({ error: 'Visit is covered by an active annual prepay — already paid; do not bill manually.' });
-    }
-    // Past the coverage gate: a lingering annual_prepay_invoice stamp is STALE
-    // (term voided/refunded) — its amount is NOT real coverage, so ignore it and
-    // bill normally rather than block as "fully/partially prepaid" with refunded
-    // money (mirror the completion fallback). Other methods keep their real amount.
-    const prepaid = visit.prepaid_method === AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
-      ? 0
-      : parseFloat(visit.prepaid_amount || 0);
-    // Mirror completion billing's per-application precedence (row price →
-    // customers.per_application_fee, NEVER monthly_rate): a leaked per-app
-    // visit whose amount lives at the customer level must be recoverable
-    // here, not bounce as "no price" (Codex round-11).
-    const rowPrice = parseFloat(visit.estimated_price || 0);
-    const price = rowPrice > 0
-      ? rowPrice
-      : (recoveryBillingMode === 'per_application' ? recoveryPerApplicationFee : 0);
-    if (!(price > 0)) {
-      return res.status(422).json({ error: 'Visit has no price to invoice.' });
-    }
-    if (prepaid >= price) {
-      return res.status(409).json({ error: 'Visit is already fully prepaid.' });
-    }
-    if (prepaid > 0) {
-      // Partial prepay needs the prepaid credit applied (completion does this via
-      // a local helper not reused here) — route to the manual invoice flow.
-      return res.status(409).json({ error: `Visit has a partial prepayment ($${prepaid.toFixed(2)}) — bill it manually so the prepaid credit is applied.` });
-    }
-
-    // Serialize concurrent bills on the same visit, recheck inside the lock,
-    // then create the invoice + disposition. Prevents duplicate draft invoices.
-    const invoice = await db.transaction(async (trx) => {
-      await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
-
-      const existingInvoice = await trx('invoices')
-        .where(function () {
-          this.where('service_record_id', visit.service_record_id).orWhere('scheduled_service_id', scheduledServiceId);
-        })
-        .whereNot('status', 'void')
-        .first();
-      if (existingInvoice) {
-        const e = new Error('An invoice already exists for this visit.');
-        e.status = 409;
-        throw e;
-      }
-
-      const existingDisposition = await trx('visit_billing_dispositions')
-        .where('scheduled_service_id', scheduledServiceId)
-        .first();
-      if (existingDisposition) {
-        const e = new Error('Visit has already been handled.');
-        e.status = 409;
-        throw e;
-      }
-
-      // Canonical completion path (replays scheduled-service line items + discounts).
-      // THIS transaction is threaded through (codex #3344 r6 P1): we hold
-      // the schedule.invoice.mint advisory lock above, and an un-threaded
-      // createFromService would open a SEPARATE connection and request the
-      // same lock — a self-deadlock that blocked /bill until timeout.
-      // Same-session re-acquisition is a no-op, the replay mint runs under
-      // a savepoint on this trx, and invoice⇄disposition now commit
-      // atomically as a bonus.
-      const created = await InvoiceService.createFromService(visit.service_record_id, {
-        database: trx,
-        amount: price,
-        description: visit.service_type,
-        // No taxRate override: an explicit rate (even 0) pre-empts
-        // TaxCalculator in InvoiceService.create (tax_exemptions,
-        // service_taxability, county tax_rates) and mis-billed `business`
-        // property_type at 0%. Leave the key ABSENT so the replay mint
-        // resolves tax the same way a fresh invoice does.
-        useScheduledReplay: true,
-        // The row price this amount derived from — lets the locked replay
-        // rebuild 409 instead of silently minting a since-repriced visit at
-        // the stale figure (codex #3344 r2). Unpriced rows (per-app fee
-        // lane) have no basis to drift.
-        scheduledPriceBasis: rowPrice > 0 ? visit.estimated_price : undefined,
-        dueDate: dueDateFromVisit(visit), // age from the service date, not today+30
-      });
-
-      await trx('visit_billing_dispositions').insert({
-        scheduled_service_id: scheduledServiceId,
-        service_record_id: visit.service_record_id,
-        disposition: 'billed',
-        invoice_id: created.id,
-        actor_user_id: req.technicianId,
-      });
-
-      return created;
-    });
+    // Checks + locked mint live in services/billing-recovery-bill.js, shared
+    // with the Intelligence Bar closeout repair's bill_visit step.
+    const result = await billVisit(scheduledServiceId, { actorId: req.technicianId });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    const { invoice } = result;
 
     let payUrl = null;
     if (invoice.token) {
@@ -543,8 +363,6 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     logger.info(`[billing-recovery] billed visit ${scheduledServiceId} -> invoice ${invoice.id} by tech ${req.technicianId}`);
     res.json({ ok: true, invoice: { id: invoice.id, total: invoice.total, status: invoice.status }, payUrl });
   } catch (err) {
-    if (err && err.status === 409) return res.status(409).json({ error: err.message });
-    if (err && err.code === '23505') return res.status(409).json({ error: 'Visit has already been handled.' });
     logger.error(`[billing-recovery] bill failed for ${scheduledServiceId}: ${err.message}`);
     res.status(500).json({ error: 'Failed to create invoice' });
   }

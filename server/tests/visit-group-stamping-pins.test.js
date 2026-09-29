@@ -31,9 +31,9 @@ describe('every booking path stamps or deliberately skips', () => {
     expect((src.match(/maybeGroupRow\(\w+\.id,/g) || []).length).toBe(8);
   });
 
-  test('estimate-converter stamps BOTH paths (standalone + recurring unit)', () => {
+  test('estimate-converter stamps all three paths (standalone unit + recurring unit + reserved start after catalog relink)', () => {
     const src = read('services/estimate-converter.js');
-    expect((src.match(/VisitGroups\.maybeGroupRow\(/g) || []).length).toBe(2);
+    expect((src.match(/VisitGroups\.maybeGroupRow\(/g) || []).length).toBe(3);
   });
 
   test('annual-prepay timed seeds carry the sole-property anchor (GH codex r8 P2)', () => {
@@ -46,9 +46,11 @@ describe('every booking path stamps or deliberately skips', () => {
     expect(src).toMatch(/async function coverageSeedPropertyId\(term, cols, conn\) \{\s*\n\s*if \(!cols\.property_id\) return null;[\s\S]{0,200}return require\('\.\/customer-properties'\)\.soleActivePropertyId\(term\.customer_id, conn\);/);
   });
 
-  test('admin-dispatch follow-up booking stamps inside the comms-lock trx', () => {
-    const src = read('routes/admin-dispatch.js');
-    expect(src).toMatch(/const inserted = await trx\('scheduled_services'\)\.insert\(insertData\)\.returning\('\*'\);[\s\S]{0,600}maybeGroupRow\(inserted\[0\]\.id, \{ database: trx, createdBy: 'dispatch' \}\)/);
+  test('the completion follow-up booking (Dispatch CTA + IB closeout repair) stamps inside the comms-lock trx', () => {
+    // The CTA's write moved into the shared service and adopted the booking
+    // contract (completeScheduledServiceInsert → followupInsert).
+    const src = read('services/completion-followup-booking.js');
+    expect(src).toMatch(/const inserted = await trx\('scheduled_services'\)\.insert\(followupInsert\)\.returning\('\*'\);[\s\S]{0,600}maybeGroupRow\(inserted\[0\]\.id, \{ database: trx, createdBy: 'dispatch' \}\)/);
     // The follow-up carries the source visit's property anchor, or the
     // stamp is a permanent no-op (GH codex r6 P2).
     expect(src).toContain("if (cols.property_id && svc.property_id) insertData.property_id = svc.property_id;");

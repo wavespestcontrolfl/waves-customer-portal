@@ -36,6 +36,7 @@ const { createNewsletterDraft, persistNewsletterDraft } = require('./newsletter-
 const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadSharedYearPool,
 } = require('./newsletter-event-selection');
 const {
   selectPortfolio, rankAlternates, effectiveScore, unmetConstraints,
@@ -130,18 +131,30 @@ async function applyListwiseRerank(scored) {
     // Cross-provider per repo policy: generated structured output goes
     // through a named TEXT_POLICIES entry + the shared dispatcher, so an
     // Anthropic outage fails over to OpenAI instead of silently skipping
-    // the re-rank (and only then fails open).
+    // the re-rank (and only then fails open). Owner ruling 2026-09-27: this
+    // is part of the same 'newsletter' lane as the draft itself — moved to
+    // newsletterWriter (Opus 5.5, effort 'max' — this is a cron/autopilot
+    // call, not interactive, so it gets the full effort like the draft).
     const MODELS = require('../config/models');
     const { dispatchWithFallback } = require('./llm/call');
     const lines = pool.map((ev) => `- id: ${ev.id}\n  title: ${ev.title}\n  score: ${ev.editorial_score}\n  desc: ${(ev.description || '').replace(/\s+/g, ' ').slice(0, 180)}`);
-    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    // 4000 tokens: Opus 5+ always thinks and spends that from max_tokens
+    // ahead of the JSON reply — the old 1200-token cap was sized for a
+    // non-thinking Sonnet reply and left no headroom above the automatic
+    // 8192-token thinking floor (anthropic-wire.js), let alone 'max' effort's
+    // actual thinking depth.
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.newsletterWriter, {
       laneId: 'newsletter',
-      maxTokens: 1200,
+      // Opus 5.5 at max effort spends thinking from max_tokens; 4000 was
+      // lifted only to the 8192 wire floor, which max-effort thinking can
+      // exhaust before the ranking JSON arrives.
+      maxTokens: 16000,
+      timeoutMs: 5 * 60 * 1000,
       jsonMode: true,
       jsonSchema: RANKING_SCHEMA,
       system: 'You are a precise, demanding local-events editor.',
       text: `Rank ALL of these candidate events from the one local readers would be MOST disappointed to learn about only after it happened, down to the least. Judge reader disappointment — rarity, draw, one-time-ness — not category variety. Use every id exactly once.\n\n${lines.join('\n')}`,
-    });
+    }, { reserveFallbackBudget: true });
     const text = response?.json ? JSON.stringify(response.json) : (response?.text || '');
     const ranking = parseListwiseRanking(text, pool.map((ev) => ev.id));
     // A mostly-missing ranking is noise, not signal.
@@ -172,7 +185,7 @@ async function buildDigestPlan({ reference = new Date() } = {}) {
       'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
       'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url', 'e.image_url',
       'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
-      'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at', 'e.source_id',
+      'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at', 'e.source_id',
       'e.region_zone', 'e.family_friendly', 'e.is_free', 'e.price_text',
       'e.editorial_score', 'e.score_breakdown', 'e.novelty_type', 'e.audience_tags',
       's.name as source_name', 's.priority_tier as source_priority_tier',
@@ -182,13 +195,27 @@ async function buildDigestPlan({ reference = new Date() } = {}) {
     .where('e.start_at', '>=', startDate)
     .where('e.start_at', '<=', endDate)
     .whereNotNull('e.event_url')
-    .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+    // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+    // 2026-09-27, second pass) — it used to be, ANDed at this top level,
+    // which unconditionally removed EVERY routine row before
+    // excludeRoutineRecurringFromQuery's own OR-group ever got a chance to
+    // admit a genuine first-of-year occurrence (a continuity-proven weekly/
+    // monthly row keeps the normalizer's 'stale_recurring' classification —
+    // classifyFreshness has no pool access to know about continuity). A
+    // stale_recurring row's fate is decided entirely by
+    // excludeRoutineRecurringFromQuery below, never by a blanket exclusion
+    // outside it.
+    .whereNotIn('e.freshness_status', ['expired'])
     .orderByRaw('e.freshness_score DESC NULLS LAST');
 
   const rows = await excludeRoutineRecurringFromQuery(query);
 
-  const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate });
-  const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate });
+  // One calendar-year identity pool for this batch, shared by both filters
+  // below (Codex P2, 2026-09-27: "Reuse the calendar-year pool across
+  // eligibility filters") instead of each loading its own copy.
+  const yearPool = await loadSharedYearPool(db, rows, startDate);
+  const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate, yearPool });
+  const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate, yearPool });
   const eligible = historicallyNewRows.filter((r) => isEligibleForFreshDigest(r, startDate));
   const scored = dedupeDigestEvents(eligible
     .map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))

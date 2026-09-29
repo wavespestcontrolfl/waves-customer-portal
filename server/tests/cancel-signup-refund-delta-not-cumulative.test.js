@@ -22,6 +22,11 @@ jest.mock('../services/invoice', () => ({
   voidInvoice: (...args) => mockVoidInvoice(...args),
   voidOpenInvoicesForCancelledService: jest.fn(async () => {}),
   CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'paid', 'cancelled'],
+  // The shared post-void scope, issued against this suite's db mock exactly
+  // as the old inline query was.
+  unresolvedInvoicesForCancelledService: (conn, id) => conn('invoices')
+    .where({ scheduled_service_id: id })
+    .whereNotIn('status', ['void', 'paid', 'cancelled']),
 }));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn(async () => {}) }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitCancelled: jest.fn() }));

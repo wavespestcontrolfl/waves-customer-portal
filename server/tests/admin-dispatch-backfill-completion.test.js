@@ -2004,7 +2004,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       );
       expect(refreshMatch).not.toBeNull();
       const refreshAt = source.indexOf("if (invErr?.code === 'SCHEDULED_PRICE_MOVED'");
-      const requiredCatchAt = source.indexOf('if (backfillReviewMintRequired && !invoice?.id) {');
+      const requiredCatchAt = source.indexOf('if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {');
       const releaseAt = source.indexOf('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
       expect(requiredCatchAt).toBeGreaterThan(-1);
       expect(refreshAt).toBeGreaterThan(requiredCatchAt);
@@ -2219,7 +2219,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // and only when no invoice row exists (a partial createFromService
       // that DID insert converges on resume via the existing-invoice
       // suppressors).
-      const guardAt = body.indexOf("if (backfillReviewMintRequired && !invoice?.id) {");
+      const guardAt = body.indexOf("if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {");
       expect(guardAt).toBeGreaterThan(-1);
       // The catch never recomputes the predicate from the live profile.
       expect(body).not.toContain('backfillTypedOneTimeMintRequired');
@@ -2384,8 +2384,10 @@ describe('completion route wiring (source contracts)', () => {
     // One-time visits only, never the other explicit billing lanes.
     expect(verdictSource).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& svc\.is_recurring !== true/);
     // The per-application acceptance-fee fallback and the setup-fee
-    // allowances never widen this lane's cap.
-    expect(verdictSource).toMatch(/: \(perApplicationBilling && svc\.cust_per_application_fee != null/);
+    // allowances never widen this lane's cap. GATE_STAMPED_ZERO_FREE
+    // (owner ruling 2026-09-28) adds a guard ahead of the fee fallback: a
+    // stamped $0 visit anchors at a zero base, never the acceptance fee.
+    expect(verdictSource).toMatch(/: \(perVisitStampedZero \? 0\s*\n\s*: \(perApplicationBilling\s*\n\s*&& svc\.cust_per_application_fee != null/);
     expect(verdictSource).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
     expect(verdictSource).toMatch(/if \(perApplicationBilling\s*&& \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\s*&& setupLine\) \{/);
     // Autopay-ledger entries name the actual lane (three-way since the
@@ -2848,7 +2850,7 @@ describe('completion route wiring (source contracts)', () => {
       // route-level posture the resume block swaps to the FROZEN value, so a
       // flagless resumed retry of a failed required mint can neither
       // evaluate as non-required nor finalize uninvoiced
-      'if (backfillReviewMintRequired && !invoice?.id) {',
+      'if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {',
     ];
     for (const gate of postCommitGates) {
       const at = source.indexOf(gate);
@@ -2911,7 +2913,7 @@ describe('completion route wiring (source contracts)', () => {
 
   test('the backfill mint opts out of the deposit roll-forward and leaves the reviewer a breadcrumb (fix round 2)', () => {
     // The route passes the opt-out on the completion mint…
-    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,5000}skipDepositCredit: isBackfillCompletion,/);
+    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,5200}skipDepositCredit: isBackfillCompletion,/);
     // …and logs the unapplied balance for review, like the prepaid skip.
     expect(source).toMatch(/if \(isBackfillCompletion && svc\.source_estimate_id\) \{[\s\S]{0,600}estimate deposit NOT auto-applied[\s\S]{0,300}left open for review/);
     // The service honors the opt-out BEFORE any ledger read: the
@@ -2927,7 +2929,7 @@ describe('completion route wiring (source contracts)', () => {
   test('the backfill mint opts out of payer-statement accrual and leaves the reviewer a breadcrumb (fix round 5)', () => {
     // The route passes BOTH opt-outs on the completion mint — the same
     // options object, so the accrual skip rides the deposit skip's gate.
-    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,5000}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\};/);
+    expect(source).toMatch(/const mintOptions = \{[\s\S]{0,5200}skipDepositCredit: isBackfillCompletion,[\s\S]{0,900}skipAccrual: isBackfillCompletion,\s*\n\s*\};/);
     // …and logs the skipped accrual for the reviewer — only when an accrual
     // WOULD have happened (payer-billed + gate + NET terms) — including the
     // operator's re-attach path (attachment exists only at create, so:

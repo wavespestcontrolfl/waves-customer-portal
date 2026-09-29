@@ -656,7 +656,10 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   if (!loserRow) return 'no loser row';
   const winnerRow = lockedRows.get(winnerId);
   if (!winnerRow) {
-    const count = await trx(table).where(column, loserId).update({ [column]: winnerId });
+    // A moved row sheds a legacy receipts-off flag too (see the merge below).
+    const receiptsOn = table === 'notification_prefs' && loserRow.payment_receipt === false
+      ? { payment_receipt: true } : {};
+    const count = await trx(table).where(column, loserId).update({ [column]: winnerId, ...receiptsOn });
     return count;
   }
   const booleanMode = SINGLETON_BOOLEAN_SEMANTICS[table] || 'and';
@@ -678,6 +681,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   const forUpdate = (v) => (Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object))
     ? JSON.stringify(v) : v;
   const updates = table === 'notification_prefs' ? mergedBillingChannelUpdates(winnerRow, loserRow) : {};
+  // Customers cannot turn payment receipts off (owner ruling 2026-09-26): a
+  // legacy payment_receipt=false never survives on the kept row.
+  if (table === 'notification_prefs' && winnerRow.payment_receipt === false) updates.payment_receipt = true;
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
     // These columns are native text[], not JSONB. The shared merge rule
@@ -686,6 +692,8 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     // Choice provenance follows its channel below; it is not SMS consent
     // and must not pass through the generic boolean AND rule.
     if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
+    // Settled above: receipts are always on after a merge.
+    if (table === 'notification_prefs' && col === 'payment_receipt') continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
@@ -2319,6 +2327,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         }
       }
     }
+    // Customers cannot turn payment receipts off (owner ruling 2026-09-26).
+    // When the sweep moved a duplicate's prefs row whole (no collision, so
+    // mergeSingletonPrefRow never ran), clear a legacy opt-out it carried.
+    if (typeof repointed['notification_prefs.customer_id'] === 'number') {
+      await trx('notification_prefs').where({ customer_id: winnerId, payment_receipt: false })
+        .update({ payment_receipt: true });
+    }
     // An operator's customer link on a call (call_log.metadata.
     // customer_link_override — admin relink) embeds the customer id in
     // jsonb, so the FK repoint above never sees it; the next processing
@@ -3225,7 +3240,7 @@ const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'cus
 // denormalized copy of the customer email. This table MIRRORS the canonical
 // registry in server/services/customer-email-fanout.js (:108-244 — leads,
 // open estimates incl. 'sending', active automation enrollments, queued
-// template runs, referral promoters, billing prefs, open contracts, pending
+// template runs, pending automation intent markers, referral promoters, billing prefs, open contracts, pending
 // booking follow-ups, newsletter subscribers). That module exports functions
 // and a disclosure string, not a machine-readable surface list, so the
 // mirror is BY HAND: extend BOTH in the same commit (same rule as its own
@@ -3278,6 +3293,27 @@ const EMAIL_BOUND_SURFACES = [
     active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled', 'running']),
     label: 'queued template send(s)',
     carriesName: true,
+  },
+  {
+    // Pending email-template-automation INTENT markers (#5154, codex P1
+    // round 7) — the step BEFORE a queued run: a 'pending' marker replays
+    // through the executor later and delivers to the payload's own
+    // customer_email snapshot (the executor looks a live address up only
+    // when the payload has none). customer-email-fanout.js retargets these
+    // (same commit rule as every other surface here), so an undo clearing
+    // the merged-in email must see them exactly like queued runs. Linkage
+    // and address live in the jsonb payload (payload.customer_id /
+    // payload.customer_email, the fan-out's own predicates); the payload
+    // carries no name. Only 'pending' delivers again — processed and
+    // unrecoverable markers are history.
+    table: 'email_template_automation_intents',
+    emailColumn: "payload->>'customer_email'",
+    linkWhere: (q, winnerId) => {
+      q.whereRaw("payload->>'customer_id' = ?", [String(winnerId)]);
+    },
+    active: (q) => q.where('status', 'pending'),
+    label: 'pending automation intent(s)',
+    carriesName: false,
   },
   {
     // first_touch_holds.held_email is a LIVE delivery target (r23 — the
@@ -3415,6 +3451,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   estimates: ['created_at', 'updated_at'],
   automation_enrollments: ['created_at', 'updated_at'],
   email_template_automation_runs: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260928220000.
+  email_template_automation_intents: ['created_at', 'updated_at'],
   notification_prefs: ['created_at', 'updated_at'],
   customer_contracts: ['created_at', 'updated_at'],
   booking_intents: ['created_at', 'updated_at'],

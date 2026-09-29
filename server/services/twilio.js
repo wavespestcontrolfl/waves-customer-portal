@@ -8,6 +8,7 @@ const { normalizeGsmPunctuation } = require("./messaging/gsm-normalize");
 const { stripSmsUrlScheme } = require("./messaging/sms-link-policy");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
 const { publicPortalUrl } = require("../utils/portal-url");
+const { lockSmsPhone } = require("../utils/customer-comms-lock");
 
 // Owner/admin SMS controls.
 //
@@ -885,6 +886,10 @@ const TwilioService = {
         // billingDeliveryLeg==='sms') would never find it — reading a
         // genuinely accepted send as unsent and re-texting the customer.
         ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
+        // Same template evidence as buildSmsLogRow, so a promoted
+        // reservation row stays attributable to the row that rendered it.
+        ...(options.templateKey ? { template_key: options.templateKey } : {}),
+        ...(options.templateVariantId ? { template_variant_id: options.templateVariantId } : {}),
         // Durable provenance: the operator typed (or edited) this body in the
         // Comms composer. message_type 'manual' alone is overloaded across
         // automated senders, so readers that need "a human wrote this"
@@ -1022,6 +1027,11 @@ const TwilioService = {
           requestNotification: options.requestNotification,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
           preSendCheck: options.preSendCheck,
+          // Same rendering-template evidence the SMS leg's sms_log row gets
+          // (buildSmsLogRow below) — a push-delivered notice is the SAME
+          // logical send, so its proof row carries the same key.
+          templateKey: options.templateKey,
+          templateVariantId: options.templateVariantId,
         });
         if (pushed.delivered) {
           deliveryOutcome = 'accepted';
@@ -1143,6 +1153,16 @@ const TwilioService = {
             : {}),
           ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
           ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
+          // The sms_templates key requested for this body — never inferred
+          // from messageType (a guessed key is worse than none). Callers
+          // that render through router.getTemplate / renderSmsTemplate /
+          // renderRequiredSmsTemplate pass the exact key they requested;
+          // omitted when the send wasn't template-rendered (hand-typed
+          // composer text, etc.). getTemplate may render a variant of that
+          // key and does not report which, so template_variant_id stays
+          // empty until a caller can supply it.
+          ...(options.templateKey ? { template_key: options.templateKey } : {}),
+          ...(options.templateVariantId ? { template_variant_id: options.templateVariantId } : {}),
           // The visit this send is about, on the primary row itself: the
           // messaging audit is best-effort, and readers that scope by
           // property (SMS commitment evidence) must not depend on it
@@ -1345,7 +1365,32 @@ const TwilioService = {
           channel: 'sms', providerAcceptedAt: handoffAt, metadata: providerSmsMetadata(),
         });
         providerCoordination.recordProviderOutcome(providerHandoffReservation, { deliveryOutcome: 'uncertain' });
-        message = await c.messages.create(msgPayload);
+        try {
+          message = await c.messages.create(msgPayload);
+        } catch (createErr) {
+          // codex #5196 r4 P2: a definitive rejection here still has the
+          // caller's withSmsHandoff transaction open — lockSmsPhone is
+          // still held. Give the caller a chance to clear its own
+          // pre-provider marker (onDispatchAbort's sibling for THIS
+          // outcome) before that lock releases, instead of only after
+          // sendCustomerMessage returns. Same predicate as the outer catch
+          // below, so the two can never disagree. Best-effort: never lets
+          // a hook failure change the original error.
+          // 21610 is excluded: its opt-out is recorded only in the outer
+          // catch (recordSyncProviderOptOut), after this lock releases, so
+          // the marker must stay until then or a queued sender could see
+          // neither and text an opted-out number. The caller's post-return
+          // cleanup removes it after that write.
+          if (typeof options.onDispatchRejected === 'function' && isDefinitiveTwilioRejection(createErr)
+              && String(createErr.code) !== '21610') {
+            try {
+              await options.onDispatchRejected();
+            } catch (hookErr) {
+              logger.error(`[twilio] onDispatchRejected failed: ${hookErr.message}`);
+            }
+          }
+          throw createErr;
+        }
         if (!message?.sid) throw new Error("Twilio messages.create returned no SID");
         acceptedMessage = message;
         deliveryOutcome = "accepted";
@@ -1368,25 +1413,74 @@ const TwilioService = {
         // transaction insert further down (`if (!options.logInHandoff)`),
         // byte-identical to origin/main's behavior.
         if (options.logInHandoff) {
+          // codex #5018 r15/r16 P1 follow-up: take the SAME advisory key
+          // the recovery insert below already does
+          // (hashtextextended('sms_log_sid:'||sid, 0)) — on `trx` itself,
+          // never inside a savepoint: pg_advisory_xact_lock releases only
+          // at REAL transaction end (COMMIT/ROLLBACK), never at a savepoint
+          // boundary, so one acquisition here covers every attempt below.
+          // Only when a real trx is held: an xact-scoped lock taken on a
+          // bare `db` call (no transaction) would release the instant that
+          // single query finished, guarding nothing — the ORIGINAL window
+          // this closes only exists for the opt-in, transaction-scoped path
+          // this whole block already requires. See the recovery lock's own
+          // comment, below, for what taking it HERE too actually closes: if
+          // the COMMIT here succeeded but its acknowledgement was lost,
+          // recovery's own lock acquisition now genuinely blocks until this
+          // transaction ends, then its SELECT sees the committed row and
+          // skips inserting; if this transaction instead rolled back,
+          // recovery finds nothing and inserts once, itself.
+          const sidLockKey = `sms_log_sid:${message.sid}`;
+          if (trx) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [sidLockKey]);
+          }
+          const insertLogRow = (conn) => conn('sms_log').insert(buildSmsLogRow());
           try {
-            await (trx || db)("sms_log").insert(buildSmsLogRow());
+            // codex #5196 P1-B: SAVEPOINT-wrapped — `trx.transaction(...)`
+            // called on an already-open `trx` is a nested SAVEPOINT in knex
+            // (the same idiom routes/booking.js and others already use),
+            // never a new top-level transaction. Before this fix, a failed
+            // INSERT here left the OUTER transaction aborted (Postgres:
+            // once a statement inside a transaction errors, every later
+            // statement — including COMMIT — fails too, until a ROLLBACK
+            // brings it back), which is exactly why the old code below had
+            // to `throw logErr` and force the caller's whole transaction to
+            // roll back, releasing its phone lock (lockSmsPhone) before ANY
+            // recovery could run — the gap a waiting composer send, Leads
+            // send, or this lane's own worker tick could land in. A
+            // savepoint failure instead leaves `trx` itself valid, so the
+            // catch below can recover WHILE the phone lock is still held.
+            if (trx) {
+              await trx.transaction((sp) => insertLogRow(sp));
+            } else {
+              await insertLogRow(db);
+            }
           } catch (logErr) {
             logger.error(`SMS log failed: ${logErr.message}`);
-            // codex #5018 round-3 P1: on a HELD trx, this failed INSERT
-            // leaves Postgres's transaction aborted — its later COMMIT does
-            // not error, it silently performs a ROLLBACK instead (standard
-            // Postgres protocol behavior for a COMMIT issued on an aborted
-            // transaction), so swallowing this error here would let the
-            // caller's own `conn.transaction(...)` resolve as if it had
-            // succeeded. That would skip the withSmsHandoff catch's own
-            // accepted-send recovery entirely (it only runs when
-            // withSmsHandoff's promise actually REJECTS), losing the sms_log
-            // row with no recovery attempt at all. Rethrow so the caller's
-            // transaction genuinely rolls back and rejects, landing in that
-            // recovery path. A bare `dispatch()` call (no trx) has no
-            // transaction to abort — this insert's own failure is already
-            // the final word there, so it stays swallowed, unchanged.
-            if (trx) throw logErr;
+            if (trx) {
+              // Recover INSIDE this still-open transaction, on a FRESH
+              // savepoint, idempotent on twilio_sid exactly like the
+              // post-rollback recovery further below (same check-then-
+              // insert shape). Succeeding here means the recovered row
+              // commits ATOMICALLY with everything else this handoff
+              // writes — by the time the phone lock actually releases
+              // (trx's own COMMIT), the row is already visible to any
+              // waiter, closing the insert-failure case fully. Only a
+              // genuinely broken connection/transaction reaches the
+              // rethrow, which falls through to the post-rollback recovery
+              // below as the last-resort backstop — the same outcome this
+              // whole block produced before this fix, unchanged for that
+              // narrow case.
+              try {
+                await trx.transaction(async (sp) => {
+                  const alreadyLogged = await sp('sms_log').where({ twilio_sid: message.sid }).first('id');
+                  if (!alreadyLogged) await insertLogRow(sp);
+                });
+              } catch (recoverErr) {
+                logger.error(`SMS log in-handoff recovery also failed, falling back to post-rollback recovery: ${recoverErr.message}`);
+                throw logErr;
+              }
+            }
           }
         }
       };
@@ -1469,19 +1563,60 @@ const TwilioService = {
                 // never collide with that lock or with lockSmsPhone's
                 // separate two-key family.
                 //
-                // What this does NOT close: the ORIGINAL commit itself
-                // becoming visible to a reader on a different connection
-                // AFTER this lock releases. This lock only serializes
-                // recovery attempts against EACH OTHER — if the caller's
-                // own transaction actually committed (the "lost ack" case
-                // this recovery exists for) but that commit's row is not
-                // yet visible to a read here (a snapshot taken before the
-                // commit finished landing), the SELECT below can still see
-                // nothing and this insert can still land as a genuine
-                // duplicate. Stated plainly: nothing short of a real
-                // UNIQUE constraint on twilio_sid closes that specific
-                // window, and this lock does not claim to.
+                // codex #5018 r15/r16 P1 follow-up: the ORIGINAL in-handoff
+                // insert above now takes this SAME key, transaction-scoped
+                // on its own held trx, right before it inserts — closing
+                // the window this comment used to say nothing but a real
+                // UNIQUE constraint could close. Before that follow-up, this
+                // lock only serialized recovery attempts against EACH
+                // OTHER: the original transaction held no lock of its own,
+                // so a recovery attempt could run its check-then-insert
+                // WHILE the original was still open (its insert made but
+                // not yet committed, invisible to this SELECT under READ
+                // COMMITTED) and land a genuine duplicate the instant the
+                // original then committed. Now, a recovery attempt racing
+                // a still-open original genuinely blocks on THIS
+                // pg_advisory_xact_lock call until that original's
+                // transaction ends: if it committed, the lock's release IS
+                // the commit becoming visible, and the SELECT below finds
+                // the row and skips; if it rolled back, the SELECT finds
+                // nothing and this inserts once, itself. The one case that
+                // was never in scope for either lock, before or after this
+                // follow-up, is a completely UNRELATED failure this whole
+                // `if (options.logInHandoff)` catch is for — the original's
+                // commit genuinely lost in flight (a real network partition
+                // mid-COMMIT) rather than merely un-acknowledged; ordinary
+                // Postgres commit visibility has no such gap on one primary.
+                //
+                // codex #5196 P1-B: this is the COMMIT-failure case — the
+                // caller's own transaction already rolled back (or failed to
+                // commit) by the time this catch runs, which means its
+                // lockSmsPhone has ALREADY released. Re-acquire it here,
+                // BEFORE the sid lock and the check-then-insert, so this
+                // recovery competes fairly for the SAME phone lock against
+                // any waiter (a composer send, admin-leads' manual send, or
+                // this lane's own next worker tick) instead of writing the
+                // recovery row unprotected while a waiter already reads
+                // linkSentRecently with no evidence.
+                //
+                // For a consultation-link send specifically, this gap is now
+                // fully closed, not merely narrowed: linkSentRecently's own
+                // consultation_link_send_attempts check (codex #5196, see
+                // that function) reads a row EVERY consultation-link sender
+                // (this lane's own worker, admin-leads.js, admin-
+                // communications.js) writes at onDispatchStart — BEFORE
+                // messages.create() runs, on markerDb()'s own separate,
+                // immediately-committed connection — so it is already
+                // durably visible to any waiter's read well before this
+                // recovery transaction even opens, regardless of how
+                // Postgres's own lock queue orders lockSmsPhone
+                // re-acquisition here. Re-acquiring the lock is still
+                // correct — it is what serializes this sms_log recovery
+                // insert itself against a concurrent writer — it is just no
+                // longer what closes the consultation-link duplicate-send
+                // window.
                 await db.transaction(async (trx) => {
+                  await lockSmsPhone(trx, to);
                   await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${message.sid}`]);
                   const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');
                   if (!alreadyLogged) await trx('sms_log').insert(buildSmsLogRow());
@@ -1940,7 +2075,7 @@ const TwilioService = {
             // manual tech/admin taps only; geofence/system transitions
             // never set it (validators/send-window.js).
             ...(operatorInitiated ? { operatorInitiated: true } : {}),
-            metadata: { original_message_type: "tech_en_route", useCustomerChannel: true, notificationEventKey },
+            metadata: { original_message_type: "tech_en_route", useCustomerChannel: true, notificationEventKey, templateKey: "tech_en_route" },
           }),
         );
       }
@@ -2137,6 +2272,7 @@ const TwilioService = {
               appointment_progress_event: "tech_arrived",
               useCustomerChannel: true,
               ...(scheduledServiceId ? { notificationEventKey: `scheduled-service:${arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, customerId })}:arrived` } : {}),
+              templateKey: "tech_arrived",
             },
           }),
         );
@@ -2246,7 +2382,7 @@ const TwilioService = {
       customerId,
       identityTrustLevel: "service_contact_authorized",
       messageType: "service_complete",
-      metadata: { serviceRecordId },
+      metadata: { serviceRecordId, templateKey: "service_complete" },
     });
   },
 

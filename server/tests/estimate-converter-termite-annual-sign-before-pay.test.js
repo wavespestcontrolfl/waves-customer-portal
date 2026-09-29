@@ -250,6 +250,24 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       // them regardless of whether the promise it returns rejects.
     });
 
+    test('#5311 r1: the park persists the IDENTITY of the customer this accept minted (never a bare boolean), and drops the legacy boolean opt', async () => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter } = setup(termiteAnnualLine, { gateOn: true, estimateUpdate });
+
+      await EstimateConverter.convertEstimate('estimate-1', { ...convertOpts, createdCustomerId: 'customer-1' });
+      const withId = JSON.parse(estimateUpdate.mock.calls[0][0].annual_plan_deferred_invoice);
+      expect(withId.createdCustomerId).toBe('customer-1');
+      expect(Object.hasOwn(withId, 'customerCreatedAtAccept')).toBe(false);
+
+      jest.resetModules();
+      const legacyUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter: Legacy } = setup(termiteAnnualLine, { gateOn: true, estimateUpdate: legacyUpdate });
+      await Legacy.convertEstimate('estimate-1', { ...convertOpts, customerCreatedAtAccept: true });
+      const legacy = JSON.parse(legacyUpdate.mock.calls[0][0].annual_plan_deferred_invoice);
+      expect(legacy.createdCustomerId).toBeNull();
+      expect(Object.hasOwn(legacy, 'customerCreatedAtAccept')).toBe(false);
+    });
+
     test('codex P1-1: already activated (replay / retry / manual re-run) — no-ops entirely, never re-parks, never touches the customer row', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
       const customerUpdate = jest.fn().mockResolvedValue(1);

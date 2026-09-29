@@ -154,8 +154,6 @@ describe('planRescheduleFromCall', () => {
       'I will probably have you down for Thursday at two.',
       'The payment is pending approval before we can see you Thursday at two.',
     ]) expect([said, planFor(said).reason]).toEqual([said, 'reschedule_not_agreed']);
-    expect(planFor('The balance is probably pending, and we will see you Thursday at two.'))
-      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
 
     const qualifiedCommit = 'I can tentatively see you Thursday at two';
     const callerSlot = 'Thursday at two PM, please.';

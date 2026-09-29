@@ -723,6 +723,52 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(note.textContent).toMatch(/FDACS ID card #JE000001/);
   });
 
+  // GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28): the server omits
+  // `product.report_copy` entirely when the gate is off or the product has
+  // no approved wording — the client renders purely off that key's presence,
+  // so these two payloads stand in for gate-off and gate-on.
+  it('renders "How it works" / "Also labeled for" / "Pets & kids" when the server includes report_copy', async () => {
+    const withCopy = JSON.parse(JSON.stringify(legacyLawnReport));
+    withCopy.applications[0].product.name = 'Taurus SC';
+    withCopy.applications[0].product.report_copy = {
+      how_it_works: 'Pests can’t detect it, so they walk right through the treated band.',
+      also_labeled_for: 'Big-headed, crazy, carpenter and pharaoh ants.',
+      pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+    };
+    const { container } = renderReport(withCopy);
+    await screen.findByText('Visit Summary');
+    const card = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(card).getByText('How it works')).toBeInTheDocument();
+    expect(within(card).getByText(/walk right through the treated band/)).toBeInTheDocument();
+    expect(within(card).getByText('Also labeled for')).toBeInTheDocument();
+    expect(within(card).getByText(/Big-headed, crazy, carpenter and pharaoh ants/)).toBeInTheDocument();
+    expect(within(card).getByText('Pets & kids')).toBeInTheDocument();
+    expect(within(card).getByText(/Keep people and pets off treated areas/)).toBeInTheDocument();
+  });
+
+  it('never renders "Also labeled for" when report_copy carries no such key (the LESCO ruling), and renders nothing when report_copy is absent', async () => {
+    const lescoCopy = JSON.parse(JSON.stringify(legacyLawnReport));
+    lescoCopy.applications[0].product.name = 'LESCO 90/10 Nonionic Surfactant';
+    lescoCopy.applications[0].product.report_copy = {
+      how_it_works: 'A spreader added to the spray so it covers evenly and sticks to surfaces.',
+      pets_kids: 'Follows the spray it’s mixed into.',
+    };
+    const { container } = renderReport(lescoCopy);
+    await screen.findByText('Visit Summary');
+    const lescoCard = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'LESCO 90/10 Nonionic Surfactant' }).closest('.applied-product-card');
+    expect(within(lescoCard).getByText('How it works')).toBeInTheDocument();
+    expect(within(lescoCard).queryByText('Also labeled for')).toBeNull();
+    expect(within(lescoCard).getByText('Pets & kids')).toBeInTheDocument();
+
+    // Base fixture (no report_copy on any application) — gate-off shape.
+    const { container: plainContainer } = renderReport(legacyLawnReport);
+    await screen.findByText('Visit Summary');
+    const plainProducts = plainContainer.querySelector('#products-applied');
+    expect(within(plainProducts).queryByText('How it works')).toBeNull();
+    expect(within(plainProducts).queryByText('Also labeled for')).toBeNull();
+    expect(within(plainProducts).queryByText('Pets & kids')).toBeNull();
+  });
+
   it('a bait-station check or an unknown verdict gets Poison Control but names no applicator', async () => {
     const rodentBait = { id: 'rb-2', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
     for (const payload of [
@@ -1256,9 +1302,13 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     payload.planSummary = { year: 2026, visitsThisYear: 4, reservicesThisYear: 1 };
     const { container } = renderReport(payload);
 
-    await screen.findByText('Your plan');
+    // A real <h2>: the glass theme hides every .section-eyebrow outside the
+    // hero, so the title must not ride one (codex P2 on #5177).
+    const heading = await screen.findByRole('heading', { name: 'Your plan', level: 2 });
     const section = container.querySelector('#your-plan');
     expect(section).not.toBeNull();
+    expect(section.contains(heading)).toBe(true);
+    expect(section.querySelector('.section-eyebrow')).toBeNull();
     expect(within(section).getByText('This year: 4 visits, including 1 re-service')).toBeInTheDocument();
     expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
   });
@@ -1303,5 +1353,77 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     } finally {
       window.history.pushState({}, '', originalUrl);
     }
+  });
+});
+
+// "Near you" line (owner ask 2026-09-28, lawn only): a fixed sentence naming
+// the lawn pest found most often around the customer's city, live mode only.
+describe('ReportViewPage — "Near you" line (nearYou)', () => {
+  it('live mode with nearYou renders the fixed sentence', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
+    const { container } = renderReport(payload);
+
+    // A real <h2>, never a glass-hidden .section-eyebrow (codex P2 on #5177).
+    const heading = await screen.findByRole('heading', { name: 'Near you', level: 2 });
+    const section = container.querySelector('#near-you');
+    expect(section).not.toBeNull();
+    expect(section.contains(heading)).toBe(true);
+    expect(section.querySelector('.section-eyebrow')).toBeNull();
+    expect(within(section).getByText('Around Parrish this past month, chinch bugs were the lawn pest we found most often.')).toBeInTheDocument();
+  });
+
+  it('renders nothing when the payload carries no nearYou', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    delete payload.nearYou;
+    const { container } = renderReport(payload);
+
+    await screen.findByText(payload.customerName, { exact: false });
+    expect(container.querySelector('#near-you')).toBeNull();
+  });
+
+  it('stays hidden in pdf mode even when the payload carries nearYou (the server already strips it)', async () => {
+    const originalUrl = window.location.href;
+    window.history.pushState({}, '', '/report/test-legacy-lawn?mode=pdf');
+    try {
+      const payload = structuredClone(legacyLawnReport);
+      payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
+      const { container } = renderReport(payload);
+
+      await screen.findByText(payload.customerName, { exact: false });
+      expect(container.querySelector('#near-you')).toBeNull();
+    } finally {
+      window.history.pushState({}, '', originalUrl);
+    }
+  });
+});
+
+// Ask Waves (codex P2 on #5167): a staff browser sends its portal JWT on the
+// /ask request, as on the /data read, so the server can leave staff QA
+// questions out of customer engagement; a customer's browser sends none.
+describe('ReportViewPage — Ask Waves request carries the staff JWT only for staff', () => {
+  async function askAndReadHeaders() {
+    renderReport(structuredClone(pestReportV2));
+    const input = await screen.findByLabelText('Ask Waves about this service report');
+    fireEvent.change(input, { target: { value: 'What was applied today?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+    let askCall;
+    await waitFor(() => {
+      askCall = globalThis.fetch.mock.calls.find(([url]) => String(url).endsWith('/ask'));
+      expect(askCall).toBeTruthy();
+    });
+    return askCall[1].headers;
+  }
+
+  it('a staff browser sends Authorization: Bearer <portal JWT>', async () => {
+    localStorage.setItem('waves_admin_token', 'staff-jwt');
+    const headers = await askAndReadHeaders();
+    expect(headers.Authorization).toBe('Bearer staff-jwt');
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  it('a customer browser sends no Authorization header', async () => {
+    const headers = await askAndReadHeaders();
+    expect(headers).not.toHaveProperty('Authorization');
   });
 });

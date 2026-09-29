@@ -4,6 +4,10 @@
 // (CI's DB-gated step); fixtures are fictitious (555-01xx, fake SIDs).
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
+// These cases pin the contract while an association proof is only a HINT
+// (the switch off, byte-identical to before); what the switch does when on is
+// covered by call-commitments-evidence-db.test.js.
+process.env.PROMISE_EVIDENCE_CLOSE = 'off';
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 

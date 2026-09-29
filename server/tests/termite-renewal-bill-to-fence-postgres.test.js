@@ -23,7 +23,9 @@ jest.mock('../services/customer-credit', () => ({ autoApplyAccountCreditIfEnable
 jest.mock('../services/invoice-followups', () => ({ scheduleForInvoice: jest.fn(), stopForInvoice: jest.fn() }));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null), issuedCloseoutOwnsRecord: () => false }));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async () => null }));
-jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false }));
+// gateEnvValue: the termite renewal gate, ON for this suite — the synchronous
+// withdrawal (owner ruling 2026-09-28) is gated like the sweep.
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false, gateEnvValue: (name) => name === 'GATE_TERMITE_ANNUAL_PLAN' }));
 
 const { randomUUID } = require('node:crypto');
 
@@ -353,12 +355,16 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     await worker;
     const decided = await cancel;
     expect(decided).toMatchObject({ renewal_decision: 'cancel' });
-    const sentInvoice = await db('invoices').where({ annual_prepay_term_id: successor.id }).first('status');
-    expect(sentInvoice.status).toBe('sent');
     // The provider ran while the parent was still undecided — the cancel
     // could not commit until the whole send had finished.
     expect(parentAtProvider).toEqual({ status: 'active', renewal_decision: null });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // Synchronous withdrawal (owner ruling 2026-09-28): the cancel, once it
+    // committed, killed the link the text carried — the sent invoice is
+    // void and the renewal cancelled, with no sweep in between.
+    const sentInvoice = await db('invoices').where({ annual_prepay_term_id: successor.id }).first('status');
+    expect(sentInvoice.status).toBe('void');
+    expect(await successorStatus(successor.id)).toBe('cancelled');
   });
 
   test('a queued send of an invoice that is not a renewal takes no renewal lock; a renewal\'s send does', async () => {
@@ -400,6 +406,47 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     } finally {
       gate.mockRestore();
     }
+  });
+
+  // Synchronous withdrawal (owner ruling 2026-09-28): the pay link dies the
+  // moment the prior plan stops backing the renewal — no sweep, no worker
+  // run in between.
+  test('a cancel decision on the parent withdraws its unpaid renewal at once: invoice void, successor cancelled, no sweep', async () => {
+    const Renewals = require('../services/annual-prepay-renewals');
+    const { invoiceId, successor } = await queuedRenewal();
+    const decided = await Renewals.recordDecision({ termId: successor.renewed_from_term_id, action: 'cancel' });
+    expect(decided).toMatchObject({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect(await readInvoice(invoiceId)).toMatchObject({ status: 'void', sent_at: null, sms_sent_at: null });
+    expect(await successorStatus(successor.id)).toBe('cancelled');
+    // The worker then has nothing to send.
+    await Invoice.processScheduledSends();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('deleting the account withdraws its unpaid renewal at once', async () => {
+    const Charge = require('../services/termite-annual-renewal-charge');
+    const { customerId, invoiceId, successor } = await queuedRenewal();
+    await Charge.withCustomerDeletionGate(customerId, (trx) => trx('customers').where({ id: customerId }).update({ deleted_at: new Date() }));
+    expect(await readInvoice(invoiceId)).toMatchObject({ status: 'void' });
+    expect(await successorStatus(successor.id)).toBe('cancelled');
+  });
+
+  test('editing the unpaid renewal\'s OWN dates (through its prepay invoice) withdraws it at once', async () => {
+    const Renewals = require('../services/annual-prepay-renewals');
+    const { customerId, invoiceId, successor } = await queuedRenewal();
+    // The renewal starts the day after its parent ends (2026-09-27); moving
+    // it by a day means it no longer abuts the parent.
+    await Renewals.createTermForAnnualPrepay({ customerId, prepayInvoiceId: invoiceId, termStart: '2026-09-28', termEnd: '2027-09-27' });
+    expect(await readInvoice(invoiceId)).toMatchObject({ status: 'void' });
+    expect(await successorStatus(successor.id)).toBe('cancelled');
+  });
+
+  test('a renew decision on the parent leaves the renewal collectible', async () => {
+    const Renewals = require('../services/annual-prepay-renewals');
+    const { invoiceId, successor } = await queuedRenewal();
+    await Renewals.recordDecision({ termId: successor.renewed_from_term_id, action: 'renew' });
+    expect((await readInvoice(invoiceId)).status).toBe('scheduled');
+    expect(await successorStatus(successor.id)).toBe('payment_pending');
   });
 
   // Codex #4971 r16 P1 — finding 1: the queued/scheduled send
