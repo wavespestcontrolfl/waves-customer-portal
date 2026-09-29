@@ -100,13 +100,14 @@ describe('get_product_info safety block', () => {
 });
 
 // The label rate itself: nothing a tech reads is in mL (owner ruling). A rate
-// the catalog keeps in mL comes back in tsp or fl oz; any other rate as stored.
+// the catalog keeps in mL is left out, so the tech is sent to the label; any
+// other rate reads as stored.
 describe('get_product_info label rate', () => {
-  test('an mL label rate comes back in tsp, and nothing in the answer reads mL', async () => {
+  test('an mL label rate is left out, and nothing in the answer reads mL', async () => {
     mockRow = { name: 'Sample SC', default_rate: '5-10', default_unit: 'ml/gal' };
     const result = await productInfo();
-    expect(result.default_rate).toBe('1¼–2');
-    expect(result.default_unit).toBe('tsp/gal');
+    expect(result.default_rate).toBeNull();
+    expect(result.default_unit).toBeNull();
     expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
   });
 

@@ -8,7 +8,6 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const { createDeepMessage } = require('./llm/deep');
 const { etDateString } = require('../utils/datetime-et');
 const { convertToOz, costLineFromUsage, countUnitsCompatible, normalizeUnit, parsePackCount } = require('./product-costing');
-const { techLabelRateText } = require('./label-rate-text');
 
 // ══════════════════════════════════════════════════════════════
 // SLUG GENERATION
@@ -804,10 +803,7 @@ const KnowledgeBaseService = {
         if (p.moa_group) lines.push(`MOA Group: ${p.moa_group}`);
         if (p.formulation) lines.push(`Formulation: ${p.formulation}`);
         if (p.container_size) lines.push(`Container: ${p.container_size}`);
-        // An mL label rate reads in tsp or fl oz for the techs who search
-        // these pages; every other rate reads exactly as before.
-        const defaultRateText = techLabelRateText(p.default_rate, p.default_unit);
-        if (defaultRateText) lines.push(`Default Rate: ${defaultRateText}`);
+        if (p.default_rate) lines.push(`Default Rate: ${p.default_rate} ${p.default_unit || ''}`);
         if (p.best_price) lines.push(`Best Price: $${parseFloat(p.best_price).toFixed(2)} (${p.best_vendor || 'unknown'})`);
         if (p.signal_word) lines.push(`Signal Word: ${p.signal_word}`);
         if (p.rei_hours) lines.push(`REI: ${p.rei_hours} hours`);
