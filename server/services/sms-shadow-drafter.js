@@ -536,12 +536,13 @@ const COMPLAINT_MONEY_BACK_RE = /\b(?:refund\w*|reimburs\w*|money\s+back|charge\
 const COMPLAINT_DISPUTE_RE = /\b(?:dispute\w*|not\s+what\s+(?:i|we|you)\s+(?:paid|agreed|promised)\s+for|wrongly\s+charged|overcharged)\b/i;
 const COMPLAINT_DAMAGE_RE = /\b(?:damag(?:e|ed|ing)|ruin(?:ed|ing)?|destroy(?:ed|ing)?)\b/i;
 const COMPLAINT_REPEATED_FAILURE_RE = /\b(?:third|fourth|fifth|sixth|\d+(?:st|nd|rd|th))\s+time\b|\bagain\s+and\s+again\b|\bover\s+and\s+over\b|\bevery\s+(?:single\s+)?time\b|\bkeeps?\s+happening\b/i;
-// Repetition alone is not a complaint ("can we do 9am every time?"): it
-// counts only alongside a pest-problem or failed-service context. A plain
+// Repetition alone is not a complaint ("can we do pest control at 9am every
+// time?"): it counts only alongside actual FAILURE wording (came back, still
+// seeing, not working) — a bare service or pest noun is not failure evidence. A plain
 // cancellation is NOT a complaint either — owner ruling 2026-09-27: the
 // agent answers cancellations itself (real options only), so cancel wording
 // never trips this hold on its own.
-const COMPLAINT_FAILURE_CONTEXT_RE = /\b(?:bugs?|roach\w*|ants?|spiders?|pests?|termites?|mosquito\w*|rodents?|mice|rats?|fleas?|ticks?|wasps?|bees?|still\s+(?:seeing|have|got|there)|came\s+back|come\s+back|(?:are|is|they'?re|it'?s)\s+back|didn'?t\s+work|not\s+working|doesn'?t\s+work|isn'?t\s+working)\b/i;
+const COMPLAINT_FAILURE_CONTEXT_RE = /\b(?:still\s+(?:seeing|have|having|got|getting|there|finding)|came\s+back|come\s+back|coming\s+back|(?:are|is|they'?re|it'?s)\s+back|back\s+again|didn'?t\s+work|doesn'?t\s+work|not\s+work(?:ing|ed)?|isn'?t\s+working|never\s+(?:went|go)\s+away|won'?t\s+go\s+away|no\s+better|worse)\b/i;
 const COMPLAINT_SIGNAL_RES = [COMPLAINT_MONEY_BACK_RE, COMPLAINT_DISPUTE_RE, COMPLAINT_DAMAGE_RE];
 function hasComplaintSignal(text) {
   const t = String(text || '');

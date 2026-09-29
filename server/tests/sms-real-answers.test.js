@@ -1928,6 +1928,8 @@ describe('validateComplaintEscalation — deterministic backstop when GATE_SMS_A
       'I want to cancel my service',
       'please stop my service while we are traveling',
       'can you come the same time every time going forward',
+      'Can we do pest control at 9am every time?',
+      'we have ants every summer, can you come every time in June?',
     ]) {
       expect(hasComplaintSignal(inboundMessage)).toBe(false);
       expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [{ date: 'Mon', window: '9-11am' }] }).ok).toBe(true);
