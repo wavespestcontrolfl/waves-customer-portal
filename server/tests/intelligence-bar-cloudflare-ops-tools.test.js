@@ -148,6 +148,17 @@ describe('intelligence bar Cloudflare write tools (preview only)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
+  // Codex r5 on #5275: an unmatched target (possibly customer text) reaches
+  // the operator's refusal, never the module error log.
+  test('purge_cloudflare_cache: an unmatched zone name is refused without logging the raw target', async () => {
+    const logger = require('../services/logger');
+    process.env.CF_API_TOKEN = 'cf-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ success: true, result: [{ id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false }] }));
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'Synthia Tester 12 Elm St' });
+    expect(result.error).toMatch(/Synthia Tester 12 Elm St/);
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/Synthia Tester/);
+  });
+
   test('purge_cloudflare_cache: unconfirmed builds a preview naming the real zone by its pinned id, never purges', async () => {
     process.env.CF_API_TOKEN = 'cf-token';
     global.fetch.mockResolvedValueOnce(jsonResponse({ success: true, result: [{ id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false }] }));

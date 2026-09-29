@@ -2525,7 +2525,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - Adding confirmed: true does nothing; it is ignored. Only the operator's Confirm click on the card executes the write.
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
-- Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.`;
+- Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.
+- EXCEPTION — preview-only outside-service actions (Sentry, Cloudflare, Railway, GitHub, Search Console): their card CANNOT be confirmed yet. Never say they will run on Confirm; say the preview is shown and executing it is not available yet.`;
     }
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to

@@ -320,7 +320,15 @@ async function executeCloudflareOpsTool(toolName, input = {}) {
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
-    logger.error(`[intelligence-bar:cloudflare-ops] Tool ${toolName} failed:`, err);
+    // Outside-write refusals can echo operator/model-supplied target text
+    // (a zone, project, service, domain or assignee — possibly customer
+    // text), so those log the tool and status only; the operator still gets
+    // the full message (Codex r5 on #5275). Read tools keep full logs.
+    if (require('./write-gates').OUTSIDE_WRITE_TOOL_NAMES.has(toolName)) {
+      logger.error(`[intelligence-bar:cloudflare-ops] Tool ${toolName} failed (status=${err.status || 'n/a'})`);
+    } else {
+      logger.error(`[intelligence-bar:cloudflare-ops] Tool ${toolName} failed:`, err);
+    }
     return { error: err.message };
   }
 }
