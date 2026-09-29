@@ -91,6 +91,7 @@ jest.mock('../services/appointment-cancel-impact', () => {
     computeRowFingerprint: actual.computeRowFingerprint,
     legacyAddressFingerprint: actual.legacyAddressFingerprint,
     cardRailFingerprint: actual.cardRailFingerprint,
+    cardRailRows: actual.cardRailRows,
     prepaidCommitmentReason: (...a) => mockPrepaidCommitmentReason(...a),
   };
 });
@@ -686,4 +687,25 @@ test('a prepaid commitment that appears between the card and Confirm refuses und
   expect(result.success).not.toBe(true);
   expect(result.error).toMatch(/prepayment or prepaid plan coverage/);
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});
+
+// Codex round 10 on #5244, P2: a visit that went terminal between the initial
+// read and the lock chain (which refuses a never-ran visit) is a stale card.
+test('a visit closed just before the lock chain returns preview_changed, not an invoice error', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  const chain = require('../services/scheduled-invoice-mint');
+  const spy = jest.spyOn(chain, 'acquireScheduledMintLockChain').mockImplementation(async () => {
+    const e = new Error('Scheduled visit is cancelled'); e.status = 409; e.code = 'SCHEDULED_VISIT_NOT_LIVE'; throw e;
+  });
+  try {
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN,
+    }, {});
+    expect(result.preview_changed).toBe(true);
+    expect(result.error).toMatch(/cancelled or closed since the card was shown/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  } finally {
+    spy.mockRestore();
+  }
 });

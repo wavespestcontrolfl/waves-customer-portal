@@ -149,15 +149,15 @@ test('prepaid coverage or an estimate-level commitment refuses as prepaid_covera
   expect((await computeCancelAppointmentImpact('svc-synthetic-1')).card_cancel_refusals).not.toContain('prepaid_coverage');
 });
 
-// Codex round 9 on #5244, P2: open overdue-family alerts the cancel will
-// auto-resolve are counted into the (drift-checked) impact.
-test('open_overdue_alerts counts the visit\'s open tech_late / unassigned_overdue alerts', async () => {
+// Codex round 10 on #5244, P1: ANY card-rail row refuses — a fee-exempt
+// request today can become chargeable if the Bill-To payer is cleared.
+test('any card hold or card request row at all refuses as card_rail_present', async () => {
   mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
   mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
-  mockOpenOverdueAlerts = 2;
-  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).open_overdue_alerts).toBe(2);
-  mockOpenOverdueAlerts = 0;
-  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).open_overdue_alerts).toBe(0);
+  mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [{ id: 'req-1', status: 'completed' }] };
+  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).card_cancel_refusals).toContain('card_rail_present');
+  mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
+  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).card_cancel_refusals).not.toContain('card_rail_present');
 });
 
 test('returns null for an appointment that no longer exists', async () => {

@@ -134,16 +134,19 @@ function legacyAddressFingerprint({ line1, line2, city, state, zip } = {}) {
 // round 7 on #5244, P1). Hash every rail row's (table, id, status) —
 // recomputed under the visit lock at commit (tools.js); both rails' writers
 // lock the same visit row FOR UPDATE, so that read serializes with them.
-async function cardRailFingerprint(conn, scheduledServiceId) {
+async function cardRailRows(conn, scheduledServiceId) {
   const [holds, requests] = await Promise.all([
     conn('estimate_card_holds').where({ scheduled_service_id: scheduledServiceId }).select('id', 'status'),
     conn('appointment_card_requests').where({ scheduled_service_id: scheduledServiceId }).select('id', 'status'),
   ]);
-  const rows = [
+  return [
     ...holds.map((r) => `hold:${r.id}:${r.status}`),
     ...requests.map((r) => `request:${r.id}:${r.status}`),
   ].sort();
-  return crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+}
+
+async function cardRailFingerprint(conn, scheduledServiceId) {
+  return crypto.createHash('sha256').update(JSON.stringify(await cardRailRows(conn, scheduledServiceId))).digest('hex');
 }
 
 // The schedule route's canonical money-commitment readers (admin-schedule.js
@@ -327,8 +330,14 @@ function feeRailClear(fee) {
 // card does not pin, so the visit is cancelled from Dispatch instead. Sorted
 // codes, so the frozen impact (and its drift comparison) covers the verdict
 // too.
-function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyInvoiceLinked, anyInspectionCreditOffer, prepaidCommitment = null }) {
+function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyInvoiceLinked, anyInspectionCreditOffer, prepaidCommitment = null, anyCardRail = false }) {
   const refusals = [];
+  // ANY card-rail row at all (Codex round-10 P1): a completed /secure
+  // request can be fee-exempt only because a Bill-To payer is set today,
+  // and clearing customers.payer_id changes neither the request id nor its
+  // status, so the unpinned follow-through could charge a fee the card
+  // never showed. Bare means no card rail of any kind — not "no fee today".
+  if (anyCardRail) refusals.push('card_rail_present');
   // Money committed to the visit OUTSIDE any linked invoice (Codex round-9
   // P1): a hand-collected prepayment, live annual-prepay coverage, or an
   // estimate-level deposit / still-open prepay invoice. Decided by the SAME
@@ -419,13 +428,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
   const { previewCancellationNoticeVerdict } = require('./job-status');
 
   const prepaidCommitment = await prepaidCommitmentReason(db, row);
-  // Open overdue-family dispatch alerts the cancel will auto-resolve
-  // (job-status.js → dispatch-alerts.js#autoResolveOverdueAlertsForJob).
-  // Pinned in the impact (drift-checked) and disclosed on the card.
-  const { OVERDUE_ALERT_TYPES } = require('./dispatch-alerts');
-  const [{ count: openOverdueAlerts } = { count: 0 }] = await db('dispatch_alerts')
-    .whereIn('type', OVERDUE_ALERT_TYPES).where({ job_id: scheduledServiceId }).whereNull('resolved_at')
-    .count({ count: '*' });
+  const anyCardRail = (await cardRailRows(db, scheduledServiceId)).length > 0;
   const [railFee, invoiceRows, customerNotice, anyInvoiceRow, anyCreditRow] = await Promise.all([
     previewCancelFee(scheduledServiceId, now),
     InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId),
@@ -501,10 +504,10 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
       anyInvoiceLinked: Boolean(anyInvoiceRow),
       anyInspectionCreditOffer: Boolean(anyCreditRow),
       prepaidCommitment,
+      anyCardRail,
     }),
     customer_notice: customerNotice,
     technician_notice: technicianNotice,
-    open_overdue_alerts: Number(openOverdueAlerts) || 0,
     // Codex round-5 P2 — see legacyAddressFingerprint's own header. Always
     // null for a stamped row (its address is already fully covered by
     // identity_fingerprint below).
@@ -554,6 +557,7 @@ module.exports = {
   // with no stamped service_address_*.
   legacyAddressFingerprint,
   cardRailFingerprint,
+  cardRailRows,
   prepaidCommitmentReason,
   _stableStringify: stableStringify,
 };

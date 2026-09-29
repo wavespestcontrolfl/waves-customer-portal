@@ -942,15 +942,12 @@ test('lead status derived effects: the funnel advance is conditional, never prom
   expect(c.effects.some((e) => /^Advances/.test(e.label))).toBe(false);
 });
 
-// Codex round 9 on #5244, P2: open overdue dispatch alerts the cancel will
-// auto-resolve are disclosed on the card and bind the contract hash.
-test('cancel_appointment discloses open overdue alerts it will close, and the count binds the hash', () => {
-  const { buildContract, contractHash } = require('../services/intelligence-bar/authorization-contract');
-  const base = { cancellation: { appointment: { id: 'svc-1' }, customer_notice: 'none', technician_notice: 'none', open_overdue_alerts: 0 } };
-  const withAlerts = { cancellation: { ...base.cancellation, open_overdue_alerts: 2 } };
-  const none = buildContract({ toolName: 'cancel_appointment', params: { appointment_id: 'svc-1' }, preview: base });
-  const two = buildContract({ toolName: 'cancel_appointment', params: { appointment_id: 'svc-1' }, preview: withAlerts });
-  expect(none.effects.map((e) => e.label).join(' ')).not.toMatch(/overdue dispatch alert/);
-  expect(two.effects.some((e) => e.kind === 'operational' && /Closes 2 open overdue dispatch alerts/.test(e.label))).toBe(true);
-  expect(contractHash(two)).not.toBe(contractHash(none));
+// Codex rounds 9-10 on #5244: the cancel auto-resolves the visit's open
+// overdue dispatch alerts; alert creation doesn't lock the visit, so the card
+// discloses it as a standing conditional effect rather than a frozen count.
+test('cancel_appointment always discloses that it closes any open overdue dispatch alert', () => {
+  const { buildContract } = require('../services/intelligence-bar/authorization-contract');
+  const preview = { cancellation: { appointment: { id: 'svc-1' }, customer_notice: 'none', technician_notice: 'none' } };
+  const contract = buildContract({ toolName: 'cancel_appointment', params: { appointment_id: 'svc-1' }, preview });
+  expect(contract.effects.some((e) => e.kind === 'operational' && /running-late \/ unassigned-overdue dispatch alert/.test(e.label))).toBe(true);
 });

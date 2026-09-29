@@ -916,13 +916,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
 
   // transitionJobStatus auto-resolves this visit's open overdue-family
   // dispatch alerts (tech_late / unassigned_overdue) inside the cancel
-  // (dispatch-alerts.js#autoResolveOverdueAlertsForJob) — disclosed, and the
-  // count is pinned in the impact so it cannot drift silently (Codex
-  // round-9 P2).
-  const overdueAlerts = toolName === 'cancel_appointment'
-    ? Number(preview?.cancellation?.open_overdue_alerts) || 0 : 0;
-  if (overdueAlerts > 0) {
-    push('operational', `Closes ${overdueAlerts} open overdue dispatch alert${overdueAlerts === 1 ? '' : 's'} (running late / unassigned) for this visit`);
+  // (dispatch-alerts.js#autoResolveOverdueAlertsForJob). Alert creation does
+  // not lock the visit, so a count frozen at proposal can't be exact at
+  // commit (Codex round-10 P2) — disclosed as a standing conditional effect
+  // instead (Codex round-9 P2 asked for the disclosure).
+  if (toolName === 'cancel_appointment') {
+    push('operational', 'Closes any open running-late / unassigned-overdue dispatch alert for this visit at the moment it is cancelled');
   }
 
   // Canonical order (kind, then label) so the contract — and therefore its
