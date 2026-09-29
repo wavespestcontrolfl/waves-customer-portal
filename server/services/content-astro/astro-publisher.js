@@ -2469,17 +2469,22 @@ function imageRefsInText(text, defs) {
     if (!span.isImage) continue;
     for (; cursor < span.start; cursor += 1) if (str[cursor] === '\n') line += 1;
     const alt = str.slice(span.labelStart + 1, span.labelEnd).replace(/\s+/g, ' ').trim();
+    // endLine: the line the image syntax closes on (a label or destination
+    // can wrap across soft breaks) — the quality gate reads the credit from
+    // the line after it (Codex r2 on #5272).
+    const spanEnd = span.kind === 'inline' ? span.destEnd : (span.kind === 'reference' ? span.refEnd : span.labelEnd);
+    const endLine = line + (str.slice(span.start, spanEnd + 1).match(/\n/g) || []).length;
     if (span.kind === 'inline') {
       // An EMPTY destination still renders (empty src) → surfaced as '' so
       // validation rejects it rather than the image vanishing from the scan.
       const dest = contentGuardrails.parseLinkDestination(str.slice(span.destStart, span.destEnd + 1), { allowEmpty: true });
-      if (dest !== null) out.push({ alt, src: decodeDestination(dest), line });
+      if (dest !== null) out.push({ alt, src: decodeDestination(dest), line, endLine });
       continue;
     }
     if (span.kind === 'malformed') continue;
     const tail = span.kind === 'reference' ? str.slice(span.refStart, span.refEnd + 1) : '';
     const label = contentGuardrails.normalizeReferenceLabel(tail || alt);
-    if (label && defs && defs.has(label)) out.push({ alt, src: decodeDestination(defs.get(label)), line });
+    if (label && defs && defs.has(label)) out.push({ alt, src: decodeDestination(defs.get(label)), line, endLine });
   }
   return out;
 }
