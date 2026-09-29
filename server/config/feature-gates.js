@@ -120,7 +120,7 @@
  *   SELF_SERVE_MOVE_NOTICE_HOURS=24 (not a gate — the self-serve MOVE notice window, same module, split out 2026-09-28 so a book-only env change never touches it, no fallback to SELF_SERVE_NOTICE_HOURS: no SELF-SERVE reschedule of a visit that itself currently starts within this many hours of now, on public reschedule (reschedule-public.js) and the promised-reschedule-link worker (reschedule-link-promises.js); the DESTINATION slot of a move still uses the book window above; read at call time, default 24)
  *   GATE_SELF_BOOK_DAY_CAP=true (owner ruling 2026-09-23: the old "max 3 self-bookings per calendar day" cap — retired in favor of the self-serve notice window, server/services/scheduling/self-serve-notice.js. Unset (default) = no per-day cap anywhere: the offer-time date filtering in routes/booking.js buildBookingAvailability, the commit-time re-checks in routes/booking.js createSelfBooking and services/availability.js confirmBooking, and the offer-time day-loop skip in services/availability.js getAvailableSlots all skip their countActiveSelfBookingsForDay / acquireSelfBookingDayCapLock calls. 'true' = today's cap behavior byte-for-byte. Read at call time via selfBookDayCapEnabled() below — a flip needs no redeploy. The lock/count primitives themselves are unaffected and stay available to every self-booking writer.)
  *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
- *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). Requires GATE_APPOINTMENT_PAGE ALSO on — this rides that router. Off = the SAME generic 404 the token/gate guard already gives, before the new route's own limiter runs, and the GET payload carries no prepPhotos key. Sends nothing to anyone; no client/technician surface yet.)
+ *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). The appointment-page entry ALSO needs GATE_APPOINTMENT_PAGE (it rides that router). The Waves app entry — POST /api/schedule/:id/prep-photos and the prepPhotos field on GET /api/schedule/next — needs only this gate; flipping it opens both entry points. Off = the generic 404 on both POST routes: the anonymous appointment-page route answers it before any body parse (visitPrepPreParserGuard, mounted ahead of the shared parsers in index.js); the authenticated app route answers it after the schedule router's normal authentication and shared parsers (a logged-in route exposes nothing to an anonymous probe), before its own limiter and multipart parse. Neither GET payload carries a prepPhotos key. Surfaces when on: the appointment-page box, the app's Send photos button, the tech Visit Brief's Customer flagged block, the stop chip, and the office feed item. Sends nothing to a customer.)
  *   GATE_VISIT_PREP_TECH_ALERTS=true (PR 6, customer-visit-photos scope doc §5.4 item 4: the assigned field technician gets a tech-home card plus a one-line push — "A customer sent photos for a visit on your route" — when a customer submits visit prep photos. Strict opt-in, read at call time via visitPrepTechAlertsLive() in server/services/visit-prep-tech-alert.js. ALSO requires GATE_VISIT_PREP_PHOTOS live (nothing to alert about otherwise). Deliberately its OWN gate rather than GATE_TECH_VISIT_NOTIFICATIONS — that gate is off in production, and this can be the first tech visit card to go live; it reuses that mechanism's card/push plumbing (tech_notifications + PushService.sendToAdminUser) without depending on its gate. Recipient = the visit's CURRENT assigned technician, re-read fresh at send time — never the pre-lock row. No technician, or a non-assignable one → no card. Never fired for a duplicate-only resubmit. Sends nothing to a customer.)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -656,6 +656,10 @@ const gates = {
   // every caller, present and future, must use that, not this cached-at-
   // load value, so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
+
+  // Email division area-intel recompute cron (dark, no caller sends
+  // anything). Map entry for logGateStatus only; canonical reader below.
+  emailAreaIntel: process.env.GATE_EMAIL_AREA_INTEL === 'true',
 
   // Tech-reviewed completion-photo captions/summary grounding the AI report
   // writer (owner spec 2026-09-27). This map entry is for logGateStatus
@@ -3488,6 +3492,12 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// GATE_EMAIL_AREA_INTEL read at CALL time. Unset = the scheduler tick
+// (server/services/scheduler.js) returns immediately.
+function emailAreaIntelLive() {
+  return process.env.GATE_EMAIL_AREA_INTEL === 'true';
+}
+
 // GATE_REPORT_PHOTO_CONTENT read at CALL time — off unless exactly 'true'
 // (repo gate convention, matching discountStackingLive above). On, the AI
 // report writer's grounding (POST /generate-report, admin-schedule.js) may
@@ -3767,5 +3777,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, visitPrepTechAlertsLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive };
 // gates 1775330914
