@@ -4239,13 +4239,29 @@ function initScheduledJobs() {
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
             // Amount revalidation (Codex r9): the account can change between
             // review and fire (a portal payment sends no inbound SMS, so the
-            // anchor check can't see it). Non-human-authored agent text
-            // carrying numeric amounts must still match the CURRENT
-            // authoritative billing values; unverifiable or mismatched →
-            // block + retire, same path as a stale anchor. Fail CLOSED on
-            // any error — an unknowable account state must not send figures.
+            // anchor check can't see it). Agent text carrying numeric amounts
+            // must still match the CURRENT authoritative billing values;
+            // unverifiable or mismatched → block + retire, same path as a
+            // stale anchor. Fail CLOSED on any error — an unknowable account
+            // state must not send figures.
+            //
+            // Independent-review P1 (round 4, PR #5331, finding 3): this used
+            // to run ONLY for `human_authored !== true`, so an operator who
+            // edited so much as a word of the drafted reply skipped it
+            // entirely at fire time — including the Zelle recipient/
+            // eligibility recheck bundled inside it, which has nothing to do
+            // with the wording the operator reviewed (ZELLE_RECIPIENT is a
+            // live env var, and the invoice it was eligible against can
+            // settle or start a saved-card charge between review and fire).
+            // It now runs for EVERY agent-decision-linked scheduled reply,
+            // human-edited or not; only the OWED-amount half of the shared
+            // binder (a price/balance figure) is excused for a human edit,
+            // via trustOwedAmounts — the owner's 2026-07-30 ruling was about
+            // trusting a REVIEWED PRICE, never a Zelle offer or a payment-
+            // receipt claim, both of which assert a fact that can go stale
+            // regardless of who wrote the words.
             let amountsStale = false;
-            if (!anchorStale && claimMeta.human_authored !== true && msg.customer_id) {
+            if (!anchorStale && msg.customer_id) {
               // Shared with the immediate Agent Review send since PR #5119
               // follow-up #2 (sms-amount-recheck): fresh context, current
               // obligations only, payment history only for an ack, fail
@@ -4256,10 +4272,16 @@ function initScheduledJobs() {
               // Pre-push audit P1 (finding 2): same recheck the immediate
               // Agent Review send runs (agent-decision-send-checks.js) — the
               // invoice the drafter's Zelle fact was built for, re-verified
-              // at fire time.
+              // at fire time. null for a human-authored reply with no
+              // drafted snapshot — outgoingAmountsStale resolves the
+              // customer's CURRENT open invoice itself in that case.
               const zelleInvoiceId = parseInputSnapshot(amountDecision?.input_snapshot)?.zelle_invoice_id || null;
               amountsStale = (await outgoingAmountsStale({
-                customerId: msg.customer_id, body: msg.message_body, promptVersion: amountDecision?.prompt_version ?? null, zelleInvoiceId,
+                customerId: msg.customer_id,
+                body: msg.message_body,
+                promptVersion: amountDecision?.prompt_version ?? null,
+                zelleInvoiceId,
+                trustOwedAmounts: claimMeta.human_authored === true,
               })).stale;
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it

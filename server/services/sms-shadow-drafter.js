@@ -407,7 +407,19 @@ async function fetchReserviceLanes({ customerId } = {}) {
 // lanes. Fails CLOSED: no open invoice, a DB error, or a timeout all
 // resolve to "not eligible" — under-offering Zelle is the safe direction,
 // never over-offering it past what the pay page would actually show.
-async function fetchZelleEligibility({ customerId, openInvoiceId } = {}) {
+// Independent-review P2 (round 4, PR #5331, finding 5): every DB/Stripe read
+// this does (the invoice row, the deposit-settlement check, the Zelle
+// eligibility predicate) is dead work whenever real answers is off or no
+// Zelle recipient is configured — the PAYMENT OPTIONS fact's Zelle branch
+// can never render either way (see buildFactsBlock below). Short-circuited
+// on the SAME two live reads the fact itself gates on, before any lookup.
+function fetchZelleEligibility({ customerId, openInvoiceId } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !manualPayOptionsFromEnv()?.zelle?.recipient) {
+    return Promise.resolve(false);
+  }
+  return fetchZelleEligibilityLookup({ customerId, openInvoiceId });
+}
+async function fetchZelleEligibilityLookup({ customerId, openInvoiceId } = {}) {
   if (!customerId || !openInvoiceId) return false;
   let timer = null;
   try {
@@ -1047,10 +1059,60 @@ const PAYMENT_NEGATION_RE = /\b(?:haven't|have not|hasn't|has not|didn't|did not
 // Splits on the same boundaries as the per-clause loop below (sentence
 // ends, commas, "and"/"but", dashes) so the whole-reply ack guard judges
 // one clause at a time instead of the whole reply.
-const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/;
+// Independent-review P2 (round 4, PR #5331): the bare ",\s" branch broke a
+// stated "Month Day, Year" apart — "September 12, 2026" split into "…
+// September 12" and "2026" as TWO clauses, so parseClaimedPaymentDate (below)
+// never saw the year the customer actually typed and bindPaidPaymentRow could
+// only ever match by month/day, silently accepting a same-month-day row from
+// the WRONG year. The comma between a 1–2 digit day and a bare 4-digit year is
+// the one comma this split must never break on; every other list/clause comma
+// ("$50, $60, and $70", "Got it, thanks") is followed by something other than
+// a bare 4-digit token and still splits exactly as before.
+const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:and|but)\s|\s[—–-]\s/;
 function hasAffirmativePaymentAck(text) {
   const clauses = String(text || '').split(CLAUSE_SPLIT_RE);
   return clauses.some((clause) => PAYMENT_ACK_RE.test(clause) && !PAYMENT_NEGATION_RE.test(clause));
+}
+
+// Independent-review P1 (round 4, PR #5331, finding 4): a phrase list keyed
+// on the VERB after "payment" ("cleared", "posted", "was successful", "went
+// through", "is complete", "paid up", "current", …) has already failed to
+// converge across four review rounds — there is always one more synonym for
+// "arrived". STRUCTURAL default-deny instead: key on the SUBJECT, a small,
+// closed, stable set of ways a reply refers to the customer's own
+// payment/balance/account STATUS ("your payment", "the payment", "we have
+// your payment", "you're paid up", "paid in full", "all paid", "your account
+// is current") — never the verb that completes it. Two families:
+//  - SETTLEMENT ("you're paid up", "paid in full", "all paid", "your account
+//    is current/up to date"): a claim that NOTHING is owed — grounded only
+//    when the account's own current owed figures are actually empty.
+//  - EVENT ("your/the payment <completed>", "we have your payment", "payment
+//    is complete"): a claim about ONE payment — grounded only when it names
+//    the amount so it can bind to a specific paid row exactly like the
+//    narrower PAYMENT_ACK_RE claims above; bare, it names no specific
+//    payment (same rule as any other amount-free ack) but the account must
+//    at least show SOME settled payment on file, never zero.
+// Excluded, so the false-positive rate stays low: a question, a negated
+// clause (PAYMENT_NEGATION_RE, shared with the narrower guard above), and a
+// how-to/instruction on WAYS to pay (never a claim that payment already
+// happened).
+const PAYMENT_SETTLEMENT_STATUS_RE = /\byou'?re\s+paid\s+up\b|\byou\s+are\s+paid\s+up\b|\bpaid\s+in\s+full\b|\ball\s+paid\b|\byour\s+account\s+is\s+(?:current|up[- ]to[- ]date)\b/i;
+// "payment"-anchored, either order, so an inline amount between "your" and
+// "payment" (e.g. masked "your  AMT  payment cleared") never breaks the
+// match — the anchor is the word "payment" itself, never its possessive
+// prefix.
+const PAYMENT_EVENT_STATUS_RE = /\bpayment\b[^.\n]{0,25}\b(?:clear(?:ed|s)?|post(?:ed|s)?|went\s+through|(?:was|is|'s)\s+(?:successful|complete|processed))\b|\b(?:clear(?:ed|s)?|post(?:ed|s)?)\b[^.\n]{0,25}\bpayment\b|\bwe\s+have\s+your\s+payment\b/i;
+const PAYMENT_HOWTO_RE = /\byou\s+can\s+pay\b|\bpay\s+link\b|\bto\s+pay\b|\bpay(?:ing)?\s+(?:via|by|with|through)\b|\bways?\s+to\s+pay\b/i;
+// null (not a status claim, or excluded by question/negation/how-to), else
+// 'settlement' | 'event'.
+function paymentStatusClaimKind(clause) {
+  const text = String(clause || '');
+  if (/\?/.test(text)) return null;
+  if (PAYMENT_NEGATION_RE.test(text)) return null;
+  if (PAYMENT_HOWTO_RE.test(text)) return null;
+  if (PAYMENT_SETTLEMENT_STATUS_RE.test(text)) return 'settlement';
+  if (PAYMENT_EVENT_STATUS_RE.test(text)) return 'event';
+  return null;
 }
 
 // The billing figures a reply may quote, in cents — one definition for this
@@ -1276,10 +1338,32 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
       // ("we haven't received your payment yet"), so a truthful denial still
       // passes through untouched.
       if (hasAffirmativePaymentAck(masked)) return true;
+      // Independent-review P1 (round 4, finding 4): the same amount-free
+      // rule extended to the broader, verb-agnostic status claim — "Your
+      // payment cleared."/"We have your payment." names no specific payment
+      // (EVENT) and is always rejected here, same as any other amount-free
+      // ack; "You're paid up."/"Your account is current." (SETTLEMENT) is
+      // grounded only when nothing is actually owed right now.
+      const kind = paymentStatusClaimKind(masked);
+      if (kind === 'event') return true;
+      if (kind === 'settlement' && owedCents.size > 0) return true;
       continue;
     }
     const owed = AMOUNT_OWED_RE.test(masked);
-    const ack = PAYMENT_ACK_RE.test(masked);
+    // Independent-review P1 (round 4, finding 3): `trustOwedAmounts` is the
+    // scheduler's own "a human already reviewed this exact figure" trust
+    // (owner ruling 2026-07-30, "the former price-quote fire-time block is
+    // RETIRED") — it excuses only an OWED clause (a price/balance the
+    // operator approved), never a RECEIPT/status claim, which asserts a
+    // fact about what already happened and can go stale (a refund, a
+    // settled invoice) exactly like a Zelle recipient can.
+    if (owed && opts.trustOwedAmounts) continue;
+    // Independent-review P1 (round 4, finding 4): an amount-bearing EVENT
+    // status claim ("Your $120.00 payment cleared") is exactly as specific
+    // as a PAYMENT_ACK_RE claim and binds the same way — but never when the
+    // clause already reads as OWED language (`owed` wins; "your balance is
+    // $120.00" is a grounded-owed statement, not a receipt claim).
+    const ack = PAYMENT_ACK_RE.test(masked) || (!owed && paymentStatusClaimKind(masked) === 'event');
     if (owed === ack) return true;
     const allowed = owed ? owedCents : paidCents;
     if (amounts.some((a) => !allowed.has(a))) return true;

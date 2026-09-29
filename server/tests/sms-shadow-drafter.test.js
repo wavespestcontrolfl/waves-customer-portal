@@ -1015,6 +1015,91 @@ describe('independent-review P1 (round 2, PR #5331): an affirmative receipt clai
   });
 });
 
+describe('Codex round 4 P2 (finding 2): CLAUSE_SPLIT_RE preserves a stated year when binding a payment date', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const ctxWith = (payments) => ({ billing: { outstandingBalance: 0, recentPayments: payments } });
+
+  test('a 2026 row binds when the reply states "September 12, 2026"', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from September 12, 2026.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a 2025 row does NOT bind when the reply states "September 12, 2026" — the year must match', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2025-09-12' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from September 12, 2026.', ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('a 2026 row binds and a 2025 row does not, for the SAME reply text — proves the year survived the comma split both ways', () => {
+    const reply = 'We received your $120.00 payment from September 12, 2026.';
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12' }]), { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([{ amount: 120, status: 'paid', payment_date: '2025-09-12' }]), { byMeaning: true })).toBe(true);
+  });
+
+  test('an ordinary list comma still splits clauses as before (no collateral damage)', () => {
+    // "$50, $60, and $70" — none of these commas sit between a day number and
+    // a bare 4-digit year, so the split is unaffected; each amount is judged
+    // as owed language on its own and none is authorized.
+    const ctx = { billing: { outstandingBalance: 0, recentPayments: [] } };
+    expect(replyQuotesUngroundedAmount('Your balance is $50, $60, and $70 across three invoices.', ctx, { byMeaning: true })).toBe(true);
+  });
+});
+
+describe('Codex round 4 P1 (finding 4): structural default-deny for ordinary affirmative payment-receipt wording', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const ctxWith = (payments, outstandingBalance = 0) => ({ billing: { outstandingBalance, recentPayments: payments } });
+
+  test('a grounded OWED amount is fine, even though "your balance" is a status subject', () => {
+    const ctx = ctxWith([], 120);
+    expect(replyQuotesUngroundedAmount('Your balance is $120.00.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a how-to instruction is fine, never read as a claim that payment already happened', () => {
+    const ctx = ctxWith([]);
+    expect(replyQuotesUngroundedAmount('You can pay with card or bank account any time.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a negated claim is fine', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'pending' }]);
+    expect(replyQuotesUngroundedAmount("We haven't received your payment yet.", ctx, { byMeaning: true })).toBe(false);
+  });
+
+  describe('amount-free affirmative forms are recognized and rejected (no matching row/settlement)', () => {
+    test.each([
+      'Your payment cleared.',
+      'Your payment posted this morning.',
+      'Your payment was successful.',
+      'We have your payment.',
+      'Payment is complete.',
+    ])('%s', (text) => {
+      const ctx = ctxWith([]); // no settled payment on file at all
+      expect(replyQuotesUngroundedAmount(text, ctx, { byMeaning: true })).toBe(true);
+    });
+
+    test.each([
+      "You're paid up!",
+      'Paid in full — thank you!',
+      "You're all paid.",
+      'Your account is current.',
+    ])('%s (settlement family, still owed)', (text) => {
+      const ctx = ctxWith([], 250); // $250 still outstanding
+      expect(replyQuotesUngroundedAmount(text, ctx, { byMeaning: true })).toBe(true);
+    });
+  });
+
+  test('the settlement family passes when the account genuinely owes nothing', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid' }], 0);
+    expect(replyQuotesUngroundedAmount("You're paid up!", ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your account is current.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('an amount-bearing EVENT claim binds like any other receipt — passes with a matching row, fails without', () => {
+    const matching = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12' }]);
+    const nothing = ctxWith([]);
+    expect(replyQuotesUngroundedAmount('Your payment of $120.00 cleared on Sep 12.', matching, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your payment of $120.00 cleared on Sep 12.', nothing, { byMeaning: true })).toBe(true);
+  });
+});
+
 describe('v9 — natural voice + owner-approved voice profile', () => {
   test('house voice drops the closer boilerplate and every-message greeting', () => {
     // The old rules MANDATED a closer and a greeting on every message —
@@ -1252,7 +1337,86 @@ describe('auto-send fallback publication', () => {
   });
 });
 
+describe('Codex round 4 P2 (finding 5): fetchZelleEligibility short-circuits with no DB/Stripe reads when unused', () => {
+  let priorGate, priorZelle;
+  beforeEach(() => {
+    priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    priorZelle = process.env.ZELLE_RECIPIENT;
+  });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT;
+    else process.env.ZELLE_RECIPIENT = priorZelle;
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/estimate-deposits');
+    jest.dontMock('../routes/pay-v2');
+    jest.resetModules();
+  });
+
+  function freshDrafterWithSpies() {
+    jest.resetModules();
+    const dbFn = jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('DB should never be read'); } }) }));
+    jest.doMock('../models/db', () => dbFn);
+    const assertInvoiceDepositSettlementReady = jest.fn(async () => { throw new Error('deposit settlement should never be read'); });
+    jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady }));
+    const isZelleTransferEligible = jest.fn(async () => { throw new Error('Stripe/pay-v2 should never be read'); });
+    jest.doMock('../routes/pay-v2', () => ({ isZelleTransferEligible }));
+    const drafter = require('../services/sms-shadow-drafter');
+    return { drafter, dbFn, assertInvoiceDepositSettlementReady, isZelleTransferEligible };
+  }
+
+  test('GATE_SMS_REAL_ANSWERS off ⇒ false, no DB/Stripe reads even with a Zelle recipient configured', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    const { drafter, dbFn, isZelleTransferEligible } = freshDrafterWithSpies();
+    await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(false);
+    expect(dbFn).not.toHaveBeenCalled();
+    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+  });
+
+  test('GATE_SMS_REAL_ANSWERS on but no ZELLE_RECIPIENT ⇒ false, no DB/Stripe reads', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    delete process.env.ZELLE_RECIPIENT;
+    const { drafter, dbFn, isZelleTransferEligible } = freshDrafterWithSpies();
+    await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(false);
+    expect(dbFn).not.toHaveBeenCalled();
+    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+  });
+
+  test('both gate ON and a recipient configured ⇒ the real lookup runs', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'inv-1', customer_id: 'c1' }) }) })));
+    jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
+    const isZelleTransferEligible = jest.fn(async () => true);
+    jest.doMock('../routes/pay-v2', () => ({ isZelleTransferEligible }));
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(true);
+    expect(isZelleTransferEligible).toHaveBeenCalled();
+  });
+});
+
 describe('fetchZelleEligibility — independent-review P1 (round 2, PR #5331): a committed-but-unapplied estimate-deposit receipt blocks Zelle at DRAFT time too', () => {
+  // Independent-review P2 (round 4, finding 5): fetchZelleEligibility now
+  // short-circuits before any lookup unless real answers is on AND a Zelle
+  // recipient is configured — the two live reads the fact itself gates on.
+  // Every test in this block exercises the ACTUAL lookup, so both must be set.
+  let priorGate, priorZelle;
+  beforeEach(() => {
+    priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    priorZelle = process.env.ZELLE_RECIPIENT;
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+  });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT;
+    else process.env.ZELLE_RECIPIENT = priorZelle;
+  });
+
   function freshDrafter({ invoiceRow, depositError, isZelleTransferEligible }) {
     jest.resetModules();
     jest.doMock('../models/db', () => {

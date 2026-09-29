@@ -66,11 +66,45 @@ function zelleBodyContacts(body) {
 const ZELLE_NEGATION_RE = /\b(?:don't|do not|doesn't|does not|didn't|did not|isn't|is not|aren't|are not|can't|cannot|can not|won't|will not|couldn't|could not|wouldn't|would not|no longer|not able|unable|unavailable|not currently|not right now|stopped (?:taking|accepting))\b/i;
 // Same clause-boundary split as the drafter's own CLAUSE_SPLIT_RE (not
 // exported — kept as a parallel literal since both only ever need to agree
-// on how a reply is split into clauses, never on a shared regex object).
-const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/;
+// on how a reply is split into clauses, never on a shared regex object). The
+// day/year comma guard mirrors the drafter's own fix (independent-review P2,
+// round 4): "September 12, 2026" must stay one clause so a Zelle RECEIPT
+// clause's stated date keeps its year (see classifyZelleClause below).
+const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:and|but)\s|\s[—–-]\s/;
+
+// Independent-review P1 (round 4, PR #5331, finding 1): a Zelle-mentioning
+// clause is either an INSTRUCTION/OFFER ("you can Zelle us", "Zelle to
+// <contact>", "we accept Zelle") — a live payment instruction that must still
+// point at the CURRENT recipient and an eligible invoice — or a HISTORICAL
+// RECEIPT ("We received your $120 Zelle payment from Sep 12") — a report of
+// something that already happened, which the amount/date/tender binder above
+// (bindPaidPaymentRow, in sms-shadow-drafter.js) already verifies on its own
+// terms. Treating every affirmative Zelle mention as an OFFER (the old rule)
+// meant a truthful receipt confirmation started failing the recipient/
+// eligibility recheck the moment the invoice it paid off had nothing left
+// owing (zelleInvoiceId resolves to null — "zelle_invoice_unresolved" — for a
+// payment that already succeeded). STRUCTURAL, DEFAULT-DENY: only a clause
+// that reads UNAMBIGUOUSLY as past-tense history, with no offer/instruction
+// wording of its own, is a receipt; anything else — plain offer language, or
+// a clause this pattern cannot confidently read as history — is an OFFER,
+// the stricter path (recipient + eligibility still recheck it). A clause
+// naming both ("we got your Zelle payment; you can also Zelle the rest to
+// X") is a live instruction too, whatever else it also reports.
+const ZELLE_OFFER_RE = /\b(?:can|could|may|feel free to|please)\b[^.\n]{0,30}\bzelle\b|\buse\s+zelle\b|\bzelle\s+(?:us|to|it|that)\b|\bpay(?:ing)?\s*(?:via|by|with|through)\s+zelle\b|\baccept(?:s|ed|ing)?\s+zelle\b|\bsend\b[^.\n]{0,20}\bzelle\b/i;
+const ZELLE_RECEIPT_RE = /\b(?:received|got|cleared|posted|processed)\b[^.\n]{0,30}\bzelle\b|\bzelle\b[^.\n]{0,30}\b(?:received|cleared|posted|processed)\b|\byour\b[^.\n]{0,25}\bzelle\b[^.\n]{0,15}\bpayment\b/i;
+// null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
+function classifyZelleClause(clause) {
+  const text = String(clause || '');
+  if (!ZELLE_WORD_RE.test(text) || ZELLE_NEGATION_RE.test(text)) return null;
+  if (ZELLE_OFFER_RE.test(text)) return 'offer';
+  if (ZELLE_RECEIPT_RE.test(text)) return 'receipt';
+  // Ambiguous — mentions Zelle affirmatively but matches neither pattern —
+  // fails closed as an OFFER (the stricter path).
+  return 'offer';
+}
 function hasAffirmativeZelleMention(body) {
   const clauses = String(body || '').split(CLAUSE_SPLIT_RE);
-  return clauses.some((clause) => ZELLE_WORD_RE.test(clause) && !ZELLE_NEGATION_RE.test(clause));
+  return clauses.some((clause) => classifyZelleClause(clause) === 'offer');
 }
 
 /**
@@ -164,25 +198,54 @@ function strictForVersion(promptVersion) {
   return require('./sms-followup-sla').realAnswersGateOn();
 }
 
-async function outgoingAmountsStale({ customerId, body, promptVersion = null, zelleInvoiceId = null, dbh = db } = {}) {
+// `trustOwedAmounts` (independent-review P1, round 4, finding 3): the
+// scheduler's own "a human already reviewed this exact figure" trust (owner
+// ruling 2026-07-30) — passed straight through to the drafter's clause-aware
+// binder, which excuses only an OWED clause (a price/balance the operator
+// approved), never a RECEIPT/status claim or a Zelle offer, both of which
+// assert a fact that can go stale between review and fire regardless of who
+// wrote the words.
+async function outgoingAmountsStale({
+  customerId, body, promptVersion = null, zelleInvoiceId = null, dbh = db, trustOwedAmounts = false,
+} = {}) {
   const text = String(body || '');
   // Independent-review P1 (finding 4): checked unconditionally, ahead of
   // the amount rules below and regardless of prompt version — a Zelle
   // contact is real payment instructions whether or not the body also
-  // carries a dollar figure, and this same function is the one place both
-  // send-time seams (the immediate Agent Review send via
-  // agent-decision-send-checks.js, and the scheduler's queued-send fire-
-  // time recheck) already share.
+  // carries a dollar figure, and this same function is the one place every
+  // send-time seam (the immediate Agent Review send via
+  // agent-decision-send-checks.js, and the scheduler's queued-send fire-time
+  // recheck, human-edited or not — independent-review P1, round 4, finding 3)
+  // shares.
   const zelle = outgoingZelleStale(text);
   if (zelle.stale) return zelle;
   // Pre-push audit P1 (finding 2), widened round 3 (finding 1): checked
   // right alongside the recipient check above, for any AFFIRMATIVE Zelle
-  // mention — contact or not. A body that offers Zelle with no contact
-  // ("Yes, you can use Zelle") still needs the SAME invoice-eligibility
-  // recheck; only a body with no affirmative Zelle mention at all has
+  // OFFER — contact or not (a HISTORICAL RECEIPT clause never reaches here;
+  // classifyZelleClause/hasAffirmativeZelleMention route it to the amount
+  // binder below instead). A body with no affirmative Zelle offer at all has
   // nothing to recheck.
   if (hasAffirmativeZelleMention(text)) {
-    const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh });
+    // Independent-review P1 (round 4, finding 3): a caller with no drafted
+    // Zelle fact to re-check against (a human-authored scheduled edit with no
+    // agent-decision snapshot, or any other caller that never resolved one)
+    // passes no zelleInvoiceId — resolve the customer's CURRENT open invoice
+    // through the SAME canonical aggregator every other Zelle/amount fact
+    // reads, rather than re-deriving "open" here. Fails CLOSED (via
+    // zelleInvoiceStillEligible's own "no id ⇒ zelle_invoice_unresolved"
+    // rule) when there is none, or the lookup itself errors.
+    let effectiveZelleInvoiceId = zelleInvoiceId;
+    if (!effectiveZelleInvoiceId && customerId) {
+      try {
+        const customerRow = await dbh('customers').where({ id: customerId }).first();
+        const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
+        effectiveZelleInvoiceId = ctx?.billing?.openInvoice?.id || null;
+      } catch (err) {
+        logger.warn(`[sms-amount-recheck] open-invoice lookup for Zelle recheck failed for customer ${customerId}: ${err.message}; blocking send`);
+        return { stale: true, reason: 'zelle_recheck_failed' };
+      }
+    }
+    const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: effectiveZelleInvoiceId, dbh });
     if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
   }
   const strict = strictForVersion(promptVersion);
@@ -191,10 +254,19 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, ze
     // Price grammar the numeric extractor cannot verify ("fifty dollars",
     // "45/mo") is unverifiable, not amount-free (audit P1): with real
     // answers on it fails closed, mirroring the drafter's draft-time rule.
+    // NOT exempted by trustOwedAmounts — unlike the clause-aware binder
+    // below, this whole-body check cannot tell an owed figure from a receipt
+    // one, so it stays conservative for every caller.
     const unverifiable = strict && require('./sms-suggest-mode').hasPriceQuote(text);
     return unverifiable ? { stale: true, reason: 'amount_unverifiable' } : { stale: false };
   }
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
+  // trustOwedAmounts on the POOLED (pre-v12) rule has nothing left to check —
+  // it excuses the whole amount figure, not just its owed half (see the
+  // comment above the pooled branch) — so this skips the customer/billing
+  // read entirely, matching the scheduler's original human-authored
+  // exemption byte-for-byte (no DB read at all).
+  if (trustOwedAmounts && !strict) return { stale: false };
   try {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
     const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
@@ -210,9 +282,14 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, ze
     // stops at a period, and "$95.50" must not end the clause).
     const { owed, paid } = drafter.billingAmountCents(ctx);
     const ack = PAYMENT_ACK_RE.test(text.replace(AMOUNT_FORMS_RE, ' AMT '));
+    // The pooled rule (pre-v12 prompts) has no per-clause owed/receipt
+    // split to excuse only the owed half — trustOwedAmounts here matches
+    // the ORIGINAL scope of the 2026-07-30 exemption exactly (skip the
+    // whole amount check for a human-reviewed legacy reply), same as before
+    // this finding widened the STRICT rule's own, finer-grained trust.
     const stale = strict
-      ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true })
-      : amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
+      ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts })
+      : !trustOwedAmounts && amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] amount revalidation failed for customer ${customerId}: ${err.message}; blocking send`);
@@ -222,5 +299,5 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, ze
 
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention,
+  hasAffirmativeZelleMention, classifyZelleClause,
 };
