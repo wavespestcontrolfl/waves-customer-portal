@@ -2384,8 +2384,10 @@ describe('completion route wiring (source contracts)', () => {
     // One-time visits only, never the other explicit billing lanes.
     expect(verdictSource).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& svc\.is_recurring !== true/);
     // The per-application acceptance-fee fallback and the setup-fee
-    // allowances never widen this lane's cap.
-    expect(verdictSource).toMatch(/: \(perApplicationBilling && svc\.cust_per_application_fee != null/);
+    // allowances never widen this lane's cap. GATE_STAMPED_ZERO_FREE
+    // (owner ruling 2026-09-28) adds a guard ahead of the fee fallback: a
+    // stamped $0 visit anchors at a zero base, never the acceptance fee.
+    expect(verdictSource).toMatch(/: \(perVisitStampedZero \? 0\s*\n\s*: \(perApplicationBilling\s*\n\s*&& svc\.cust_per_application_fee != null/);
     expect(verdictSource).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
     expect(verdictSource).toMatch(/if \(perApplicationBilling\s*&& \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\s*&& setupLine\) \{/);
     // Autopay-ledger entries name the actual lane (three-way since the

@@ -64,7 +64,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 // missed-appointment rule) lives in a service so the promised-link worker
 // reaches the SAME answer this page gives (codex #4293 r3 P2).
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
-const { visitInsideNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
+const { visitInsideMoveNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -120,6 +120,33 @@ function shouldReanchor(svc, targetDateStr) {
     return !!target && apptDateStr(svc.scheduled_date) !== target;
   }
   return pullForwardDays(apptDateStr(svc.scheduled_date), targetDateStr) >= REANCHOR_PULLFORWARD_DAYS;
+}
+
+// True when ANY date in [rangeFrom, rangeTo] would re-anchor this visit's
+// series if picked (Codex round 1 P1 on PR #5267, PRRT_kwDOR3YQi86mzgqT): a
+// re-anchor commits through rescheduleSeries, which always nulls route_order
+// and never reads capacityPlacement — so a mid-route insertion offer built
+// for a date the commit would actually re-anchor is a promise the commit
+// can't keep. For a SINGLE-day range (rangeFrom === rangeTo — the commit
+// route's own anti-forgery rebuild, buildAvailabilityForService below,
+// always calls it that way) this is the EXACT same predicate shouldReanchor
+// evaluates for that date, so the offer and the commit's re-check can never
+// disagree. For a multi-day range (the GET picker, the find-slots search)
+// it is deliberately conservative: `rangeFrom` is the range's EARLIEST
+// candidate — the one with the largest pull-forward, so the one most likely
+// to re-anchor — and finding it inside the re-anchor zone disables
+// capacityPlacement for the WHOLE call rather than trying to split a single
+// buildBookingAvailability build's insertion policy per day. That only
+// under-offers insertion for a non-recurring-adjacent date sharing the
+// build with a re-anchoring one; it never over-offers one the commit would
+// refuse.
+function pickerMayReanchor(svc, rangeFrom, rangeTo) {
+  if (!isSeriesVisit(svc)) return false;
+  const currentDateStr = apptDateStr(svc.scheduled_date);
+  if (collectiveAnchorActive()) {
+    return rangeFrom !== currentDateStr || rangeTo !== currentDateStr;
+  }
+  return pullForwardDays(currentDateStr, rangeFrom) >= REANCHOR_PULLFORWARD_DAYS;
 }
 
 // GET→POST scope pin (codex P1, hardened r2): the page disclosed whether a
@@ -222,15 +249,16 @@ async function eligibilityAsync(svc, now = new Date()) {
   return grouped ? { ok: false, reason: 'grouped' } : elig;
 }
 
-// Self-serve notice window (owner ruling 2026-09-23) layered ON TOP of
+// Self-serve MOVE notice window (owner ruling 2026-09-23; split from the
+// book window 2026-09-28, SELF_SERVE_MOVE_NOTICE_HOURS) layered ON TOP of
 // eligibilityAsync's verdict: refuse even an otherwise-eligible visit that
-// itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED visit is being
+// itself starts within the move notice window. A MISSED visit is being
 // REBOOKED — its own past start is irrelevant — so the notice rule doesn't
 // apply to it. Kept OUT of services/reschedule-eligibility.js: that module
 // is shared with the call-driven promised-link worker, which the notice
 // rule must not reach (self-serve only).
 function withSelfServeNotice(elig, svc, now = new Date()) {
-  if (elig.ok && !elig.missed && visitInsideNoticeWindow(svc, now)) {
+  if (elig.ok && !elig.missed && visitInsideMoveNoticeWindow(svc, now)) {
     return { ok: false, reason: 'self_serve_notice' };
   }
   return elig;
@@ -403,7 +431,7 @@ function searchParseOpts(config, now = new Date()) {
 
 async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay }) {
   const booking = require('./booking');
-  const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey } = booking._internals;
+  const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey, bookInsertionOffersLive } = booking._internals;
 
   let lat = svc.latitude != null ? parseFloat(svc.latitude) : null;
   let lng = svc.longitude != null ? parseFloat(svc.longitude) : null;
@@ -445,6 +473,27 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     // Self-serve surface — a new target starting within the notice window
     // (owner ruling 2026-09-23) can't be offered or committed.
     selfServeNotice: true,
+    // Mid-route insertion (owner 2026-09-28; docs/public-route-contracts.md):
+    // this is the ONLY picker on the page — GET, the AI find-slots search,
+    // and the commit route's own anti-forgery re-check all funnel through
+    // here — so it reads the same canonical policy /book's self-booking
+    // offers do (routes/booking.js's bookInsertionOffersLive). Offering a
+    // slot BETWEEN two existing stops is safe here only because the
+    // single-visit commit (SmartRebooker.reschedule, below) now certifies
+    // and persists that exact position under the tech-day lock the same
+    // way createSelfBooking does — a big-pull-forward commit re-anchors the
+    // whole series through rescheduleSeries instead, which stays
+    // append-only, so it must never be OFFERED in the first place
+    // (Codex round 1 P1 on PR #5267: an offer that turned out to need
+    // reanchoring couldn't just "re-validate and refuse" — rescheduleSeries
+    // has no capacityPlacement to refuse against, it silently commits
+    // append-only). pickerMayReanchor is the same predicate shouldReanchor
+    // itself evaluates for a single-day range (the commit re-check below),
+    // so the two can never disagree. A row that still carries a visit_id
+    // (even a singleton group) is excluded too: rescheduleOnce skips
+    // certification for any visit_id row, so it would commit append-only
+    // (Codex round 2 P1 on PR #5267).
+    capacityPlacement: bookInsertionOffersLive() && !svc.visit_id && !pickerMayReanchor(svc, rangeFrom, rangeTo),
     ...(timeOfDay ? { timeOfDay } : {}),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
@@ -687,8 +736,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       });
     }
 
-    // Self-serve notice window (owner ruling 2026-09-23): refuse moving a
-    // visit that itself starts within SELF_SERVE_NOTICE_HOURS. A MISSED
+    // Self-serve MOVE notice window (owner ruling 2026-09-23; split from the
+    // book window 2026-09-28, SELF_SERVE_MOVE_NOTICE_HOURS): refuse moving a
+    // visit that itself starts within the move notice window. A MISSED
     // visit is being rebooked, not moved off its own too-soon start. Runs
     // AFTER the idempotent replay above: a move that succeeded just outside
     // the boundary but lost its response must replay as success when
@@ -696,7 +746,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // (not the generic reason above) so the client renders the specific
     // call-us guidance (ScheduleFlowPage.jsx falls back to body.error
     // verbatim for an unrecognized code).
-    if (!elig.missed && visitInsideNoticeWindow(svc)) {
+    if (!elig.missed && visitInsideMoveNoticeWindow(svc)) {
       return res.status(409).json({
         error: 'This visit starts too soon to move online — call (941) 297-5749 and our team can help.',
         code: 'SELF_SERVE_NOTICE',
@@ -710,18 +760,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'That date is outside the online scheduling window.' });
     }
 
-    // Anti-forgery: the customer can only commit a slot the availability
-    // engine still offers for that day (route feasibility, lunch reserve,
-    // self-book day caps, whole-hour grid). The rebooker's transactional
-    // conflict check below still owns the race.
-    const dayAvailability = await buildAvailabilityForService(svc, {
-      rangeFrom: date,
-      rangeTo: date,
-      config,
-    });
-    const day = dayAvailability?.days?.find((d) => d.date === date);
-    const slot = day?.slots?.find((s) => s.start_time === startTime);
-    if (!slot) {
+    // Shared SLOT_TAKEN recovery response (Codex round 1 P2 on PR #5267,
+    // PRRT_kwDOR3YQi86mzgqa): the anti-forgery miss below AND a capacity
+    // verify failure inside the commit itself (rescheduleOnce's
+    // verifyArrivalCapacity, surfaced as capacityError's SLOT_UNAVAILABLE —
+    // caught below) are the SAME customer-facing event — "the slot you
+    // picked isn't there any more" — and must render through the ONE
+    // recovery path ScheduleFlowPage actually has (it only clears the
+    // selected slot and refreshes the calendar on `code === 'SLOT_TAKEN'`;
+    // any other code falls through to a bare error line with the stale
+    // slot still selected).
+    const slotTakenResponse = async () => {
       let refreshed = null;
       try {
         refreshed = await buildAvailabilityForService(svc, { ...range, config });
@@ -735,6 +784,21 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           ? { slots: refreshed.slots, days: refreshed.days, nearby: refreshed.nearby, rangeFrom: range.rangeFrom, rangeTo: range.rangeTo }
           : null,
       });
+    };
+
+    // Anti-forgery: the customer can only commit a slot the availability
+    // engine still offers for that day (route feasibility, lunch reserve,
+    // self-book day caps, whole-hour grid). The rebooker's transactional
+    // conflict check below still owns the race.
+    const dayAvailability = await buildAvailabilityForService(svc, {
+      rangeFrom: date,
+      rangeTo: date,
+      config,
+    });
+    const day = dayAvailability?.days?.find((d) => d.date === date);
+    const slot = day?.slots?.find((s) => s.start_time === startTime);
+    if (!slot) {
+      return slotTakenResponse();
     }
 
     const newWindow = { start: slot.start_time, end: slot.end_time };
@@ -751,16 +815,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // should have every later visit follow, not sit a double interval out.
     // Strict statuses only (no allowLive) — eligibility already gated those.
     const reanchor = shouldReanchor(svc, date);
-    // Self-serve notice window re-check INSIDE the rebooker's transaction
-    // (owner ruling 2026-09-23): the guard above ran on an unlocked snapshot
-    // before the availability build. The `expect` fence below pins the row to
-    // that snapshot (a concurrent staff move that changed date/start aborts
-    // the CAS with SLOT_TAKEN instead of moving a row this page never saw),
-    // and beforeMove re-reads the clock under the scheduling locks so a
-    // request that waited across the boundary is refused, missed exemption
+    // Self-serve MOVE notice window re-check INSIDE the rebooker's
+    // transaction (owner ruling 2026-09-23; split from the book window
+    // 2026-09-28): the guard above ran on an unlocked snapshot before the
+    // availability build. The `expect` fence below pins the row to that
+    // snapshot (a concurrent staff move that changed date/start aborts the
+    // CAS with SLOT_TAKEN instead of moving a row this page never saw), and
+    // beforeMove re-reads the clock under the scheduling locks so a request
+    // that waited across the boundary is refused, missed exemption
     // preserved. Same code/message as the pre-check.
     const noticeRecheck = async () => {
-      if (!elig.missed && visitInsideNoticeWindow(svc)) {
+      if (!elig.missed && visitInsideMoveNoticeWindow(svc)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
         });
@@ -818,11 +883,25 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             technicianId: slot.technician_id,
             seriesPolicy: 'single',
             travelGap: true,
+            // Single-visit ONLY — see buildAvailabilityForService above.
+            capacityPlacement: true,
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
           }
         );
     } catch (err) {
+      // Capacity verify failure (rescheduleOnce's verifyArrivalCapacity,
+      // single-visit path only — capacityError's own code): the slot passed
+      // the anti-forgery check above but failed the deeper route-capacity
+      // re-verify under lock (a changed fingerprint, an infeasible live
+      // fit, or a technician that stopped qualifying since). Same customer
+      // event as the anti-forgery miss — the slot is gone — so it gets the
+      // SAME recovery response, not the bare error line SLOT_UNAVAILABLE
+      // would otherwise fall through to (ScheduleFlowPage only clears the
+      // stale selection and refreshes the calendar on SLOT_TAKEN).
+      if (err?.code === 'SLOT_UNAVAILABLE') {
+        return slotTakenResponse();
+      }
       if (err?.statusCode) {
         // subcode (e.g. SERIES_PROJECTION) rides along so the page can
         // explain a plan-level conflict honestly instead of the "that time
@@ -989,6 +1068,7 @@ router._test = {
   label12,
   pullForwardDays,
   shouldReanchor,
+  pickerMayReanchor,
   REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove,
   WEATHER_MOVE_MAX_AGE_DAYS,

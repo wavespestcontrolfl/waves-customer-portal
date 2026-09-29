@@ -84,6 +84,28 @@ describe('Twilio messaging provider adapter', () => {
     );
   });
 
+  test('forwards metadata.templateKey/templateVariantId to TwilioService.sendSMS', async () => {
+    await sendViaTwilio(baseInput({
+      metadata: { templateKey: 'reminder_72h', templateVariantId: 'variant-abc' },
+    }));
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ templateKey: 'reminder_72h', templateVariantId: 'variant-abc' }),
+    );
+  });
+
+  test('forwards templateKey as undefined when the caller did not render a template', async () => {
+    await sendViaTwilio(baseInput({ metadata: { original_message_type: 'manual' } }));
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ templateKey: undefined, templateVariantId: undefined }),
+    );
+  });
+
   test('forwards the optional final provider predicate unchanged', async () => {
     const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
 

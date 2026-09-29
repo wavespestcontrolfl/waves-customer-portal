@@ -13,6 +13,9 @@ const {
   isVariableOrCustomDiscountPreset,
 } = require("./discount-stack");
 const { discountStackingLive } = require("../config/feature-gates");
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require("./billing-lane").stampedZeroFreeLive();
 const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
@@ -450,6 +453,64 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) additions — both
+  // independent of the scheduled_service_id early-return below, so they
+  // also cover a combined-visit packet invoice and one linked only by
+  // service_record_id, and both gated so the function stays byte-identical
+  // while off. Fail CLOSED on a read error, same posture as every other
+  // guard in this function. No customer billing_mode lookup needed — the
+  // rule is lane-free.
+  if (stampedZeroFreeLive()) {
+    // A combined-visit packet invoice bills EVERY member stamped with its
+    // id, not only the owner visit resolved below — a member re-priced to
+    // $0 after the void would ride back in on the restored combined
+    // charge.
+    if (invoiceRow.visit_completion_packet_id) {
+      let freeMember = null;
+      try {
+        let q = conn("visit_completion_packet_items as p")
+          .join("scheduled_services as s", "s.id", "p.scheduled_service_id")
+          .where("p.packet_id", invoiceRow.visit_completion_packet_id)
+          .where("p.invoice_id", invoiceRow.id)
+          .where("s.estimated_price", 0);
+        if (lock) q = q.forShare("s");
+        freeMember = await q.first("s.id");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the combined invoice's visits — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (freeMember) {
+        throw new Error(
+          "Cannot unvoid — a visit on this combined invoice is now priced at $0; re-price that visit before restoring a charge",
+        );
+      }
+    }
+    // Most post-completion invoices carry only service_record_id — when
+    // there is no scheduled_service_id for the block below to check,
+    // resolve the visit through the service record so the $0 rule still
+    // covers it. Every OTHER linked-visit guard below still only runs when
+    // scheduled_service_id is present — unchanged by this gate.
+    if (!invoiceRow.scheduled_service_id && invoiceRow.service_record_id) {
+      let svcViaRecord = null;
+      try {
+        let q = conn("service_records as sr")
+          .join("scheduled_services as s", "s.id", "sr.scheduled_service_id")
+          .where("sr.id", invoiceRow.service_record_id);
+        if (lock) q = q.forUpdate("s");
+        svcViaRecord = await q.first("s.estimated_price", "s.primary_line_price");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the linked service record's visit — refusing to unvoid (${err.message})`,
+        );
+      }
+      if (svcViaRecord && hasAuthoritativeZeroPrice(svcViaRecord.estimated_price, svcViaRecord.primary_line_price)) {
+        throw new Error(
+          "Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge",
+        );
+      }
+    }
+  }
   if (!invoiceRow.scheduled_service_id) return;
   let svc = null;
   try {
@@ -485,6 +546,15 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   if (svc.is_callback && !(Number(svc.estimated_price) > 0)) {
     throw new Error(
       "Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge",
+    );
+  }
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): ANY visit now stamped
+  // $0 — not only a callback conversion — refuses the restore the same
+  // way; the check above stays narrow (callback-only) for gate-off
+  // byte-identical behavior.
+  if (stampedZeroFreeLive() && hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)) {
+    throw new Error(
+      "Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge",
     );
   }
   // Annual-prepay stamping: prepaid_method + amount + term link mean the
@@ -1798,8 +1868,12 @@ async function buildScheduledServiceInvoiceLines(
   // Delegate to the shared predicate so this can never drift from
   // completionInvoiceAmount / predictCompletionBilling's own reading of
   // the same provenance signal.
-  const authoritativeZero = primaryBaseKnown
-    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
+  // primaryBaseKnown is implied with the gate off (the predicate needs a
+  // positive primary_line_price there); under GATE_STAMPED_ZERO_FREE a bare
+  // stamped $0 with no primary is authoritative too, so stored add-ons
+  // reconcile down to it (Codex r1 P1 on #5256). Checkout extras are
+  // appended after this reconciliation, untouched.
+  const authoritativeZero = hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
   // Whether storedNetAmount below actually came from a stamped price on this
   // row (a real positive estimated_price, or the provenance-backed genuine
   // $0) versus the fee/rate fallback another caller resolved because this
@@ -2590,7 +2664,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // line. Runs under `database` (the caller's own transaction) so the
 // enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
-  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, database = db,
+  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, templateKey = null, database = db,
 }) {
   // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
   // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
@@ -2630,6 +2704,8 @@ async function queuePendingChannelReplay({
       // which keep finalizeDeferredCompletionSend's SMS-only stamp).
       partial_fanout_retry: true,
       original_block_code: originalBlockCode,
+      // The frozen body's template row; the scheduler replay forwards it.
+      ...(templateKey ? { template_key: templateKey } : {}),
       // sendViaSMSAndEmail's nested leg: the wrapper's own sendInvoiceEmail
       // already owns (and sent) this notice's Email, so the replay must keep
       // Email out of its fan-out exactly like the nested call did; the
@@ -4086,8 +4162,18 @@ const InvoiceService = {
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
-          const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
-          await acquireScheduledInvoiceMintLock(database, linkedScheduledServiceId);
+          // The SHARED lock chain (mint advisory lock → customer KEY SHARE →
+          // visit row FOR UPDATE + the never-ran status refusal), not a bare
+          // visit FOR UPDATE: this path is every linked create() caller that
+          // does not otherwise route through the chain (manual admin, project/
+          // WDO, prepay-switch undo, estimate converter). A cancellation that
+          // won the mint lock and committed while this waited must not be
+          // billed past (Codex #5244 r7), and the customer key-share must come
+          // BEFORE the visit lock — the invoice insert's customer FK would
+          // otherwise take it after, inverting the order the chain exists to
+          // hold against the extension accept (ABBA deadlock).
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(database, { scheduledServiceId: linkedScheduledServiceId, customerId });
         }
         if (stampedEstimateIdInNotes) {
           await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
@@ -5873,6 +5959,10 @@ const InvoiceService = {
     // variant). If the row is missing/disabled, we skip the SMS rather than
     // falling back to inline copy.
     let body = null;
+    // Tracks whichever of the three rows below actually rendered — never
+    // guessed, so a caught template-lookup error below (body stays null)
+    // leaves this null too.
+    let renderedTemplateKey = null;
     try {
       const templates = require("../routes/admin-sms-templates");
       const tplOpts = {
@@ -5906,6 +5996,7 @@ const InvoiceService = {
           first_visit_clause: firstVisitClause,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
       }
       // Upfront invoices — the setup + first-application invoice auto-sent at
       // estimate acceptance, or any invoice billed before its service date —
@@ -5922,6 +6013,7 @@ const InvoiceService = {
           service_type: serviceType,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_upfront";
       }
       if (!body) {
         // Either an ordinary invoice, or the prepay template was missing/disabled
@@ -5933,6 +6025,7 @@ const InvoiceService = {
           service_date: formattedDate || "today",
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent";
       }
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
@@ -6044,6 +6137,7 @@ const InvoiceService = {
       if (updated && pendingChannelToQueue) {
         const queueOutcome = await queuePendingChannelReplay({
           invoiceId, customerId: customer.id, toPhone: customer.phone || "", body,
+          templateKey: renderedTemplateKey,
           database: trx, ...pendingChannelToQueue,
         });
         pendingChannelQueued = queueOutcome.queued === true;
@@ -6110,6 +6204,10 @@ const InvoiceService = {
           original_message_type: "invoice",
           billingDeliveryCategory: "invoice",
           notificationEventKey: `invoice:${invoiceId}:sent`,
+          // Which of the three invoice_sent* rows actually rendered
+          // (never inferred — the messageType above is the fixed
+          // kill-switch key, not the rendering row).
+          ...(renderedTemplateKey ? { templateKey: renderedTemplateKey } : {}),
         },
         ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
         // The canonical sender owns push-first / push+SMS / Twilio routing.
@@ -6227,6 +6325,7 @@ const InvoiceService = {
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
         err.smsBody = body;
+        if (renderedTemplateKey) err.smsTemplateKey = renderedTemplateKey;
         err.toPhone = customer.phone;
         throw err;
       }
@@ -6770,6 +6869,7 @@ const InvoiceService = {
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
+        if (err.smsTemplateKey) sms.heldTemplateKey = err.smsTemplateKey;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
     }
@@ -6818,6 +6918,8 @@ const InvoiceService = {
               billingDeliveryCategory: "invoice",
               notificationEventKey: `invoice:${invoiceId}:sent`,
               hasEmailLeg: true,
+              // The held body's template row; the scheduler replay forwards it.
+              ...(sms.heldTemplateKey ? { template_key: sms.heldTemplateKey } : {}),
               original_block_code: sms.code,
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
@@ -6847,6 +6949,7 @@ const InvoiceService = {
       }
     }
     delete sms.heldBody;
+    delete sms.heldTemplateKey;
     delete sms.heldToPhone;
 
     // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a
@@ -7872,6 +7975,7 @@ const InvoiceService = {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",
         notificationEventKey: `invoice:${invoiceId}:receipt`,
+        templateKey: "invoice_receipt",
       },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
@@ -11563,3 +11667,8 @@ module.exports.claimInvoiceForSend = claimInvoiceForSend;
 // be asserted against real schema without driving the whole send twice.
 module.exports.restoreSendClaim = restoreSendClaim;
 module.exports.withPayLinkSendClaim = withPayLinkSendClaim;
+// Test-only seam (GATE_STAMPED_ZERO_FREE): exercises the unvoid linked-visit
+// guard directly, without driving the whole unvoidInvoice call chain, so the
+// gate's on/off behavior (incl. the combined-packet member check and the
+// service_record_id-only fallback) can be pinned with a minimal conn mock.
+module.exports._assertUnvoidableLinkedVisit = assertUnvoidableLinkedVisit;

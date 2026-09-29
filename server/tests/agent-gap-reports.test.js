@@ -7,7 +7,6 @@ describe('agent-gap-reports', () => {
   let returningRows;
   let loggerMock;
   let sightings;
-  let storedNames;
 
   beforeEach(() => {
     jest.resetModules();
@@ -18,7 +17,6 @@ describe('agent-gap-reports', () => {
     loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
     sightings = [];
-    storedNames = {};
     const table = jest.fn((name) => {
       if (name === 'agent_gap_reports') {
         return {
@@ -40,9 +38,6 @@ describe('agent-gap-reports', () => {
       }
       if (name === 'agent_gap_report_sightings') {
         return { insert: jest.fn(async (row) => { sightings.push(row); }) };
-      }
-      if (name === 'customers' || name === 'leads') {
-        return { whereRaw: jest.fn(() => ({ select: jest.fn(async () => storedNames[name] || []) })) };
       }
       throw new Error(`Unexpected table ${name}`);
     });
@@ -90,45 +85,14 @@ describe('agent-gap-reports', () => {
       expect(prepareGapRow({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'send_sms kept failing' })).toBeNull();
     });
 
-    test('redacts contact details, UUIDs, record numbers and the request customer names', () => {
+    test('the description is stored as written, with no name or contact scrubbing (owner 2026-09-28)', () => {
       const { _private: { prepareGapRow } } = load();
-      const row = prepareGapRow({
-        source: 'intelligence-bar',
-        kind: 'missing_capability',
-        summary: 'Add property 61760 for Dana Synthwell, dana@example.com, 941-555-0100, id 3f6012af-0fff-4b41-865a-76061b85818d',
-        freeText: true,
-        attempted: 'Tried update_customer for Synthwell',
-      }, ['Dana Synthwell', 'Dana', 'Synthwell']);
-      expect(row.summary).not.toMatch(/Dana|Synthwell|dana@example\.com|941-555-0100|61760|3f6012af/);
-      expect(row.summary).toContain('[name]');
-      expect(row.summary).toContain('[email]');
-      expect(row.summary).toContain('[phone]');
-      expect(row.summary).toContain('[number]');
-      expect(row.summary).toContain('[id]');
-      expect(row.attempted).not.toContain('Synthwell');
+      const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability',
+        summary: 'add property manager zoë at 12 Palm Row,  dana@example.com' });
+      expect(row.summary).toBe('add property manager zoë at 12 Palm Row, dana@example.com');
     });
 
-    test('redacts a request customer name that ends in an accented letter', () => {
-      const { _private: { prepareGapRow } } = load();
-      const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a rental for José Núñez and Chloé' },
-        ['José Núñez', 'José', 'Núñez', 'Chloé']);
-      expect(row.summary).toBe('add a rental for [name] and [name]');
-    });
-
-    test('model-written text loses names and new addresses the request never resolved', () => {
-      const { _private: { prepareGapRow } } = load();
-      const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', freeText: true,
-        summary: 'Refund a Stripe payment for Dana Synthwell at 12 Palm Row on Monday' });
-      expect(row.summary).toBe('Refund a Stripe payment for [name] [name] at [address] on Monday');
-    });
-
-    test('a capitalized first word is kept only when it reads as the verb; acronyms and tiers stay', () => {
-      const { _private: { scrubProperNouns } } = load();
-      expect(scrubProperNouns('Dana wants a WDO inspection')).toBe('[name] wants a WDO inspection');
-      expect(scrubProperNouns('Add a Silver tier discount for GA4 visitors')).toBe('Add a Silver tier discount for GA4 visitors');
-    });
-
-    test("the server's own phrasing is not scrubbed as if a model wrote it", () => {
+    test("the server's own phrasing is stored as written", () => {
       const { _private: { prepareGapRow } } = load();
       const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'Asked for a tool that does not exist: create_property',
         attempted: 'Searched the bar; no matching tool' });
@@ -288,34 +252,6 @@ describe('agent-gap-reports', () => {
       await collector.flush({ reply: DECLINE });
       expect(insertedRows[0]).toMatchObject({ closest_tool: 'save_customer_estimate', attempted: 'The tool exists but does not support this case',
         summary: 'save_customer_estimate: Commercial estimates are not supported by this tool' });
-    });
-
-    test('a stored customer or lead name is redacted in any case, with a lowercase street', async () => {
-      storedNames = { leads: [{ first_name: 'José', last_name: 'Synthwell' }] };
-      const { createGapCollector } = load();
-      const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.discovery({ query: 'add josé at 12 palm row' }, MISS);
-      await collector.flush({ reply: DECLINE });
-      expect(insertedRows[0].summary).toBe('add [name] at [address]');
-    });
-
-    test('nothing is written when the stored-name lookup fails', async () => {
-      const { createGapCollector } = load();
-      dbMock.mockImplementation((name) => { if (name === 'customers') throw Object.assign(new Error('down'), { code: 'ECONNRESET' }); return {}; });
-      const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.discovery({ query: 'add a second service address' }, MISS);
-      await collector.flush({ reply: DECLINE });
-      expect(insertedRows).toHaveLength(0);
-      expect(dbMock.transaction).not.toHaveBeenCalled();
-      expect(loggerMock.warn).toHaveBeenCalledWith('[agent-gap-reports] collector flush failed (ECONNRESET)');
-    });
-
-    test('the request customer names are redacted from a model-written search', async () => {
-      const { createGapCollector } = load();
-      const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.discovery({ query: 'add a rental property for Dana Synthwell at 12 Palm Row' }, MISS);
-      await collector.flush({ reply: DECLINE, taskContext: { targets: [{ label: 'Dana Synthwell', address: '12 Palm Row' }] } });
-      expect(insertedRows[0].summary).not.toMatch(/Dana|Synthwell|Palm Row/);
     });
 
     test('flush never rejects, even when the database throws', async () => {

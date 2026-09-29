@@ -19,7 +19,7 @@ const emailMigration = require('../models/migrations/20260702000012_reschedule_l
 
 const {
   eligibility, eligibilityAsync, accountInactive, bookingRange, searchParseOpts, apptDateStr, label12,
-  pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
+  pullForwardDays, shouldReanchor, pickerMayReanchor, REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
   seriesScopeMismatch,
 } = reschedulePublicRouter._test;
@@ -148,6 +148,51 @@ describe('reschedule-public series re-anchor rule', () => {
     // BOOSTER extras share recurring_parent_id but are is_recurring=false —
     // moving one must NEVER shift the base plan (codex P1 2026-07-13).
     expect(shouldReanchor({ is_recurring: false, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-07-16')).toBe(false);
+  });
+});
+
+describe('pickerMayReanchor — the picker\'s own conservative reanchor check (Codex round 1 P1 on PR #5267, PRRT_kwDOR3YQi86mzgqT)', () => {
+  afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+
+  test('never true for a non-recurring visit, at any range', () => {
+    const oneTime = { is_recurring: false, scheduled_date: '2026-08-13' };
+    expect(pickerMayReanchor(oneTime, '2026-07-01', '2026-07-16')).toBe(false);
+  });
+
+  test('non-collective: true whenever the range\'s EARLIEST date (rangeFrom) sits at or past the pull-forward threshold — matches shouldReanchor exactly for that date', () => {
+    const recurring = { is_recurring: true, scheduled_date: '2026-08-13' };
+    const at = new Date(Date.UTC(2026, 7, 13, 12) - REANCHOR_PULLFORWARD_DAYS * 86400000)
+      .toISOString().slice(0, 10);
+    const under = new Date(Date.UTC(2026, 7, 13, 12) - (REANCHOR_PULLFORWARD_DAYS - 1) * 86400000)
+      .toISOString().slice(0, 10);
+    // A single-day range (the commit's own anti-forgery rebuild) agrees
+    // with shouldReanchor for that SAME date, exactly.
+    expect(pickerMayReanchor(recurring, at, at)).toBe(shouldReanchor(recurring, at));
+    expect(pickerMayReanchor(recurring, at, at)).toBe(true);
+    expect(pickerMayReanchor(recurring, under, under)).toBe(shouldReanchor(recurring, under));
+    expect(pickerMayReanchor(recurring, under, under)).toBe(false);
+    // A push-back range never re-anchors.
+    expect(pickerMayReanchor(recurring, '2026-08-20', '2026-09-01')).toBe(false);
+  });
+
+  test('non-collective: a multi-day range whose EARLIEST candidate falls inside the pull-forward zone is conservatively true for the WHOLE range, even though later dates in it would not individually re-anchor', () => {
+    const recurring = { is_recurring: true, scheduled_date: '2026-08-13' };
+    // rangeFrom is a 28-day pull-forward (re-anchors); rangeTo is only a
+    // 10-day pull-forward (on its own, would NOT re-anchor) — the whole
+    // multi-day build still comes back true, so capacityPlacement is
+    // disabled for the ENTIRE picker call rather than split per day.
+    expect(pickerMayReanchor(recurring, '2026-07-16', '2026-08-03')).toBe(true);
+  });
+
+  test('collective (GATE_COLLECTIVE_SERIES_ANCHOR=true): true for ANY range other than exactly the visit\'s own current date — matches shouldReanchor\'s any-date-move rule', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const recurring = { is_recurring: true, scheduled_date: '2026-08-13' };
+    expect(pickerMayReanchor(recurring, '2026-08-13', '2026-08-13')).toBe(shouldReanchor(recurring, '2026-08-13'));
+    expect(pickerMayReanchor(recurring, '2026-08-13', '2026-08-13')).toBe(false);
+    expect(pickerMayReanchor(recurring, '2026-08-14', '2026-08-14')).toBe(shouldReanchor(recurring, '2026-08-14'));
+    expect(pickerMayReanchor(recurring, '2026-08-14', '2026-08-14')).toBe(true);
+    // A multi-day range straddling the current date is still true.
+    expect(pickerMayReanchor(recurring, '2026-08-10', '2026-08-20')).toBe(true);
   });
 });
 
@@ -788,6 +833,70 @@ describe('reschedule-public inactive-account fail-closed (C4)', () => {
       expect(body.missed).toBe(true);
       expect(body.reason).toBeNull();
     });
+
+    // Split book/move notice windows (owner ruling 2026-09-28): production
+    // set SELF_SERVE_NOTICE_HOURS=1 for BOOK. That must not shrink the MOVE
+    // window a customer's own visit is checked against.
+    describe('SELF_SERVE_NOTICE_HOURS=1 (book) with SELF_SERVE_MOVE_NOTICE_HOURS unset (default 24h move)', () => {
+      const prevBook = process.env.SELF_SERVE_NOTICE_HOURS;
+      const prevMove = process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+      beforeEach(() => {
+        process.env.SELF_SERVE_NOTICE_HOURS = '1';
+        delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+      });
+      afterAll(() => {
+        if (prevBook === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
+        else process.env.SELF_SERVE_NOTICE_HOURS = prevBook;
+        if (prevMove === undefined) delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+        else process.env.SELF_SERVE_MOVE_NOTICE_HOURS = prevMove;
+      });
+
+      // ET wall-clock {date, startTime} for an absolute instant N hours from
+      // now, the same shape violatesSelfServeNotice/visitInsideMoveNoticeWindow
+      // consume — via etParts, never UTC getters (DST/offset-safe).
+      const { etParts } = require('../utils/datetime-et');
+      const etWallClockIn = (hours) => {
+        const at = new Date(Date.now() + hours * 3600000);
+        const { year, month, day, hour, minute } = etParts(at);
+        return {
+          date: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+          startTime: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+        };
+      };
+
+      test('GET: a visit currently starting ~3h out is refused (not_reschedulable / self_serve_notice) — the BOOK var=1h does not shrink the 24h MOVE default', async () => {
+        const { date, startTime } = etWallClockIn(3);
+        wireSvc(svcRow({
+          customer_active: true,
+          scheduled_date: date,
+          window_start: startTime, window_end: '23:59',
+        }));
+        const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.state).toBe('not_reschedulable');
+        expect(body.reason).toBe('self_serve_notice');
+      });
+
+      test('GET: a visit currently starting ~30h out is reschedulable — outside even the 24h MOVE default', async () => {
+        const { date, startTime } = etWallClockIn(30);
+        wireSvc(svcRow({
+          customer_active: true,
+          scheduled_date: date,
+          window_start: startTime, window_end: '23:59',
+        }));
+        const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.state).toBe('reschedulable');
+        expect(body.reason).toBeNull();
+      });
+
+      test('the DESTINATION slot still uses the BOOK window (1h here): a slot ~2h out clears SELF_SERVE_NOTICE_HOURS=1 via the exact helper the POST commit calls for newWindow.start', () => {
+        const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
+        expect(violatesSelfServeNotice(etWallClockIn(2))).toBe(false);
+      });
+    });
   });
 });
 
@@ -811,7 +920,7 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     const recheckIdx = src.indexOf('const noticeRecheck = async () => {');
     expect(recheckIdx).toBeGreaterThan(-1);
     const recheck = src.slice(recheckIdx, recheckIdx + 1400);
-    expect(recheck).toMatch(/!elig\.missed && visitInsideNoticeWindow\(svc\)/);
+    expect(recheck).toMatch(/!elig\.missed && visitInsideMoveNoticeWindow\(svc\)/);
     expect(recheck).toMatch(/code: 'SELF_SERVE_NOTICE'/);
     // The DESTINATION is re-checked under the locks too (Codex r1 P1) —
     // a missed visit's only guard, since it skips the current-visit check.

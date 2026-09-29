@@ -5104,6 +5104,33 @@ function safeFleetUrlPath(value, allowedHosts = hubHostSet()) {
 
 // Every internal-route candidate in the text, normalized. Shared by the
 // gate and by the refresh grandfathering pass over the prior live body.
+// Every internal link destination the body RENDERS — the same text
+// preparation and extraction internalRouteFinding uses (the PR poller
+// rechecks related-post liveness on it at merge time, Codex r2 on #5272),
+// plus reference-style links resolved through the multi-line-aware
+// definition parser (Codex r4 on #5272: `[ants][fire]` + a `[fire]:`
+// definition whose destination sits on the next line).
+function renderedInternalDestinations(body) {
+  // Block context (blockquote depth, list membership) is kept for the
+  // definition parser: a definition started by a container transition
+  // ("> [fire]:") resolves as the publisher resolves it (Codex r6 on #5272).
+  const { text: base, depths, inList } = blankNonRenderedMarkdownWithDepths(String(body || ''));
+  const text = blankExpressionStringLiterals(base, { attrValues: false });
+  // Definitions are metadata: an UNUSED "[fire]: /path/" renders nothing, so
+  // destinations are collected with definitions blanked, and a definition
+  // counts only through a reference that resolves to it (Codex r9 on #5272).
+  const rendered = blankReferenceDefinitions(text, { depths, inList });
+  const dests = collectInternalDestinations(rendered).map((d) => d.dest);
+  const defs = markdownReferenceDefinitions(text, { depths, inList });
+  for (const span of eachMarkdownLink(rendered)) {
+    if (span.isImage || span.kind === 'inline' || span.kind === 'malformed') continue;
+    const tail = span.kind === 'reference' ? rendered.slice(span.refStart, span.refEnd + 1) : '';
+    const label = normalizeReferenceLabel(tail || rendered.slice(span.labelStart + 1, span.labelEnd));
+    if (label && defs.has(label)) dests.push(defs.get(label));
+  }
+  return [...new Set(dests)];
+}
+
 function collectInternalDestinations(text) {
   const s = String(text || '');
   const dests = [];
@@ -5822,7 +5849,9 @@ const REENTRY_SPELLED_NUM_SRC = `(?:(?:one|two|three|four|five|six|seven|eight|n
 // is a figure — a single-word endpoint would drop the compound half.
 // Seconds/days/weeks are figures too (Codex PR r8 audit): "do not
 // re-enter for 90 seconds", "keep pets off for one day".
-const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour|a\\s+(?:day|week)\\b)`;
+// Fractional hours are figures in every wording (codex PR #5187 r11): "a
+// quarter hour", "a quarter-hour", "three quarters of an hour".
+const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour|(?:(?:a|one)\\s+)?quarter(?:-|\\s+of\\s+an?\\s+|\\s+)hour|three[-\\s]quarters\\s+of\\s+an\\s+hour|a\\s+(?:day|week)\\b)`;
 // Copular/modal predicate grammar shared by the safety-subject patterns
 // (Codex PR r8 audit): "will be safe", "becomes safe", "should be safe"
 // are the same unconditional claim as "is safe". Bounded NON-NEGATING
@@ -7019,6 +7048,7 @@ module.exports = {
   blankLinkDefinitionsAndTitles,
   blankMarkdownLinkDestinations,
   markdownReferenceDefinitions,
+  blankReferenceDefinitions,
   normalizeReferenceLabel,
   parseLinkDestination,
   eachMarkdownLink,
@@ -7068,7 +7098,7 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
+  _internals: { closeOfExpressionAt, eachJsxAttr, decodeEntitiesForScan, renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
     // #4905 perf regression guard (content-guardrails.test.js): exposes the
     // precompiled reentry-safety RegExp objects so a test can confirm
     // reentrySafetyClaimFinding reuses the SAME objects call over call

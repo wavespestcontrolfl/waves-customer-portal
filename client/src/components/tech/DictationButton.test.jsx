@@ -88,3 +88,45 @@ describe("DictationButton", () => {
     expect(screen.getByRole("button")).toHaveAttribute("aria-pressed", "false");
   });
 });
+
+// No SpeechRecognition: the hook records a clip for server transcription,
+// and the caller is told when a save must wait for it.
+describe("DictationButton recorded-clip pending", () => {
+  beforeEach(() => {
+    localStorage.setItem("waves_admin_token", "tech-jwt");
+    window.MediaRecorder = class {
+      static isTypeSupported() { return false; }
+      start() {}
+      stop() {}
+    };
+    // The permission prompt stays open: getUserMedia never settles.
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: vi.fn(() => new Promise(() => {})) },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ available: true }) })));
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    delete window.MediaRecorder;
+    delete navigator.mediaDevices;
+  });
+
+  it("is pending from the tap, while the mic is still starting, and not once the mic is gone", async () => {
+    const onPendingChange = vi.fn();
+    const { unmount } = render(
+      <DictationButton onAppend={vi.fn()} title="Dictate" uploadServiceId="svc-1" onPendingChange={onPendingChange} />,
+    );
+    const mic = await screen.findByRole("button", { name: "Dictate" });
+    expect(onPendingChange).toHaveBeenLastCalledWith(false);
+
+    fireEvent.click(mic);
+    expect(onPendingChange).toHaveBeenLastCalledWith(true);
+
+    // Unmounting abandons the clip, so a caller holding its own buttons on
+    // this flag is released.
+    unmount();
+    expect(onPendingChange).toHaveBeenLastCalledWith(false);
+  });
+});

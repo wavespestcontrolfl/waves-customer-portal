@@ -24,7 +24,12 @@ const InvoiceService = require('./invoice');
 const { customerOnAutopay } = require('./autopay-eligibility');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
+const { refuseCoveredMemberMintInTrx } = require('./estimate-first-application-invoice');
 const { etDateString } = require('../utils/datetime-et');
+const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
 
 // Match the completion path's due date (the service date), so a recovered
 // 60/90-day-old visit ages correctly instead of resetting to today+30. A
@@ -62,6 +67,9 @@ async function loadBillableVisit(scheduledServiceId, serviceRecordId, database) 
       'ss.recurring_parent_id',
       'ss.source_estimate_id',
       'ss.property_id',
+      // Sibling first-application coverage (siblingCoverageStatus).
+      'ss.first_application_invoice_id',
+      'ss.primary_line_price',
       'sr.id as service_record_id',
       'ss.service_type',
       'ss.estimated_price',
@@ -171,6 +179,72 @@ async function coverageRefusal(visit, billingMode, database) {
     return refuse(503, 'Annual-prepay coverage could not be verified — try again.');
   }
   if (covered) return refuse(409, 'Visit is covered by an active annual prepay — already paid; do not bill manually.');
+  return siblingCoverageRefusal(visit, database);
+}
+
+// Sibling first-application coverage (#5237 follow-up): a visit billed on
+// its trip's combined first-application invoice has no invoice on its own
+// row, so it reaches Billing Recovery as an "uninvoiced" completion, and Bill
+// would mint a second charge for an application that invoice already bills.
+// The same composition Charge Now's resolver runs
+// (resolveScheduledServiceCharge, admin-schedule.js): the shape gate
+// (isSiblingCoverageEligibleVisit), a priced visit only as a stamped covered
+// member (isPricedCoveredMemberVisit), that member's own refunded invoice
+// first (pricedCoveredMemberOwnRefundHold, as completion does), then the
+// shared verdict (siblingInvoiceCoverageVerdict, which also carries the
+// REFUSE AFTER A VOID ruling). Returns 'none' | 'covered' | 'needs_review'
+// | 'error'.
+// `trustRowStamp` (the read-only leaks list only): a priced row whose own
+// read carries a NULL stamp is not a member — no extra query per row. The
+// Bill write never passes it: a NULL can be stale, so it is re-read.
+async function siblingCoverageStatus(visit, database, { trustRowStamp = false } = {}) {
+  const {
+    hasAuthoritativeZeroPrice, isSiblingCoverageEligibleVisit, siblingInvoiceCoverageVerdict,
+  } = require('./billing-lane');
+  const isCallback = !!(visit.ss_callback || visit.sr_callback);
+  if (!isSiblingCoverageEligibleVisit({
+    sourceEstimateId: visit.source_estimate_id, hasOwnPrice: false, isCallback, serviceType: visit.service_type,
+  })) return 'none';
+  const hasOwnPrice = (visit.estimated_price != null && Number(visit.estimated_price) > 0)
+    || hasAuthoritativeZeroPrice(visit.estimated_price, visit.primary_line_price ?? null);
+  const svc = {
+    id: visit.scheduled_service_id,
+    customer_id: visit.customer_id,
+    source_estimate_id: visit.source_estimate_id,
+    scheduled_date: visit.scheduled_date,
+    first_application_invoice_id: visit.first_application_invoice_id,
+    estimated_price: visit.estimated_price,
+    primary_line_price: visit.primary_line_price ?? null,
+    is_callback: isCallback,
+    service_type: visit.service_type,
+  };
+  if (hasOwnPrice && trustRowStamp && visit.first_application_invoice_id === null) return 'none';
+  const firstApp = require('./estimate-first-application-invoice');
+  try {
+    // isPricedCoveredMemberVisit already reads true on its own read error
+    // (fail closed); inside the try so any other failure is 'error' too.
+    const isPricedCoveredMember = hasOwnPrice ? await firstApp.isPricedCoveredMemberVisit(svc, database) : false;
+    if (!isSiblingCoverageEligibleVisit({
+      sourceEstimateId: visit.source_estimate_id, hasOwnPrice, isCallback, serviceType: visit.service_type, isPricedCoveredMember,
+    })) return 'none';
+    if (isPricedCoveredMember && await firstApp.pricedCoveredMemberOwnRefundHold(svc, database)) return 'needs_review';
+    return (await siblingInvoiceCoverageVerdict(svc, database)).status;
+  } catch {
+    return 'error';
+  }
+}
+
+async function siblingCoverageRefusal(visit, database) {
+  const status = await siblingCoverageStatus(visit, database);
+  if (status === 'covered') {
+    return refuse(409, 'This visit is billed on the combined trip invoice — do not bill it separately.');
+  }
+  if (status === 'needs_review') {
+    return refuse(409, 'This visit\'s combined-trip invoice needs manual review before billing — handle it from Customer 360.');
+  }
+  if (status === 'error') {
+    return refuse(503, 'Could not confirm whether this visit\'s combined-trip invoice already covers it — try again.');
+  }
   return null;
 }
 
@@ -186,7 +260,14 @@ function priceRefusalOrAmount(visit, billing) {
     ? 0
     : parseFloat(visit.prepaid_amount || 0);
   const rowPrice = parseFloat(visit.estimated_price || 0);
-  const price = rowPrice > 0 ? rowPrice : (billing.mode === 'per_application' ? billing.perApplicationFee : 0);
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 (as
+  // opposed to a genuinely blank row) is this visit's own price, never the
+  // per-application fee — same predicate the completion resolver uses.
+  // Guarded explicitly by the live gate (not just the predicate's own
+  // internal check) because this call site never consulted the predicate
+  // at all before, so it must stay byte-identical while the gate is off.
+  const stampedZero = stampedZeroFreeLive() && hasAuthoritativeZeroPrice(visit.estimated_price, null);
+  const price = rowPrice > 0 ? rowPrice : (stampedZero ? 0 : (billing.mode === 'per_application' ? billing.perApplicationFee : 0));
   if (!(price > 0)) return refuse(422, 'Visit has no price to invoice.');
   if (prepaid >= price) return refuse(409, 'Visit is already fully prepaid.');
   // Partial prepay needs the prepaid credit applied (completion does this via
@@ -366,6 +447,10 @@ async function billVisit(scheduledServiceId, {
         scheduledPriceBasis: rowPrice > 0 ? visit.estimated_price : undefined,
         dueDate: dueDateFromVisit(visit), // age from the service date, not today+30
         refuseDepositCredit,
+        // A stamp that lands after the assessment above is refused under
+        // the visit row lock (#5237's completion guard): the stamper locks
+        // the same row, so either this sees it or it sees this invoice.
+        recheckInTrx: (conn) => refuseCoveredMemberMintInTrx(conn, scheduledServiceId),
       });
 
       const postRefusal = postMintRefusal(created, visit, { expectedTotal, expectedBreakdown });
@@ -424,4 +509,6 @@ async function previewBillVisit(scheduledServiceId, options = {}) {
   };
 }
 
-module.exports = { assessVisitBillable, billVisit, previewBillVisit, pendingDepositForVisit, liveCardHoldForVisit, dueDateFromVisit };
+module.exports = {
+  assessVisitBillable, billVisit, previewBillVisit, pendingDepositForVisit, liveCardHoldForVisit, dueDateFromVisit, siblingCoverageStatus,
+};

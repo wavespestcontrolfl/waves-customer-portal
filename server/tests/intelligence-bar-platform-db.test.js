@@ -1244,9 +1244,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
   // Gap reports (server/services/agent-gap-reports.js): recorded server-side
   // from the tool loop, only when the reply says the bar could not do it.
   describe('gap reports', () => {
-    // NOT crypto.randomUUID(): the recorder scrubs UUID-shaped text out of
-    // the summary before storing it, so a uniqueness token used in the
-    // assertions below must not look like one.
+    // A short letters-and-digits token keeps each test's summary unique.
     const uniqueToken = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     const missQuery = () => `zzqx${uniqueToken()} wwzy${uniqueToken()}`; // no real word: discovery truly finds nothing
 

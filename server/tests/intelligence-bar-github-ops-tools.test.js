@@ -132,3 +132,254 @@ describe('intelligence bar GitHub ops tools', () => {
     expect(result.error).toMatch(/PAT may not grant read access/);
   });
 });
+
+// Outside-write tools (IB scope expansion item 1, owner ruling 2026-09-28):
+// full-access gating lives in the ROUTE (getToolsForContext,
+// intelligence-bar-full-access-tool-offering.test.js), not here — these
+// tests cover the module contract: missing-token refusal, a human-readable
+// preview naming the PR by TITLE, request_codex_review's FIXED comment body,
+// and the commit path's refusal.
+describe('intelligence bar GitHub write tools (preview only)', () => {
+  const PR_FIXTURE = { number: 5230, title: 'Synthetic PR for tests', head: { sha: 'abc123def456' }, labels: [{ name: 'existing-label' }] };
+
+  test('unconfigured state is benign for every write tool, no network call', async () => {
+    for (const [name, input] of [
+      ['rerun_failed_github_checks', { pr_number: 5230 }],
+      ['add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
+      ['request_codex_review', { pr_number: 5230 }],
+    ]) {
+      const result = await executeGithubOpsTool(name, input);
+      expect(result.error).toBeUndefined();
+      expect(result.configured).toBe(false);
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('rerun_failed_github_checks: unconfirmed names the PR and pins the failed WORKFLOW RUN id (never a check-run id)', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({
+        check_runs: [
+          { name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } },
+          { name: 'lint', status: 'completed', conclusion: 'success', id: 112, app: { slug: 'github-actions' } },
+          { name: 'build', status: 'in_progress', conclusion: null, id: 113, app: { slug: 'github-actions' } },
+        ],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow_runs: [
+          { id: 999888, name: 'CI', status: 'completed', conclusion: 'failure' },
+          { id: 999889, name: 'Lint', status: 'completed', conclusion: 'success' },
+        ],
+      }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.error).toBeUndefined();
+    expect(result.preview).toBe(true);
+    expect(result.pr).toEqual({ number: 5230, title: PR_FIXTURE.title, head_sha: 'abc123def4' });
+    // The WORKFLOW-RUN id (999888), never the check-run id (111) — that's
+    // what /actions/runs/{run_id}/rerun-failed-jobs actually takes.
+    expect(result.workflow_runs).toEqual([{ id: 999888, name: 'CI', conclusion: 'failure' }]);
+    expect(result.non_actions_failed_checks).toBeUndefined();
+    expect(result.note).toContain(PR_FIXTURE.title);
+    expect(result.note).toContain('CI');
+    // The actions/runs call is scoped to this exact head sha.
+    const runsCallUrl = new URL(global.fetch.mock.calls[2][0]);
+    expect(runsCallUrl.pathname).toBe('/repos/wavespestcontrolfl/waves-customer-portal/actions/runs');
+    expect(runsCallUrl.searchParams.get('head_sha')).toBe('abc123def456');
+  });
+
+  test('rerun_failed_github_checks: a failed check can span several workflow runs — every failed run is pinned', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({
+        check_runs: [
+          { name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } },
+          { name: 'deploy-preview', status: 'completed', conclusion: 'failure', id: 222, app: { slug: 'github-actions' } },
+        ],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow_runs: [
+          { id: 1, name: 'CI', status: 'completed', conclusion: 'failure' },
+          { id: 2, name: 'Preview Deploy', status: 'completed', conclusion: 'failure' },
+        ],
+      }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.error).toBeUndefined();
+    expect(result.workflow_runs).toEqual([
+      { id: 1, name: 'CI', conclusion: 'failure' },
+      { id: 2, name: 'Preview Deploy', conclusion: 'failure' },
+    ]);
+  });
+
+  test('rerun_failed_github_checks: a failed check from a non-Actions app cannot be rerun from here', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({
+        check_runs: [
+          { name: 'codecov/patch', status: 'completed', conclusion: 'failure', id: 333, app: { slug: 'codecov' } },
+        ],
+      }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('no_rerunnable_checks');
+    expect(result.error).toContain('codecov/patch');
+    expect(result.error).toContain("can't be rerun from here");
+    // No /actions/runs call at all — nothing Actions-backed to resolve.
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('rerun_failed_github_checks: a mix of an Actions failure and a non-Actions failure pins the rerunnable run and lists the rest separately', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({
+        check_runs: [
+          { name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } },
+          { name: 'codecov/patch', status: 'completed', conclusion: 'failure', id: 333, app: { slug: 'codecov' } },
+        ],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        workflow_runs: [{ id: 999888, name: 'CI', status: 'completed', conclusion: 'failure' }],
+      }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.error).toBeUndefined();
+    expect(result.workflow_runs).toEqual([{ id: 999888, name: 'CI', conclusion: 'failure' }]);
+    expect(result.non_actions_failed_checks).toEqual([{ name: 'codecov/patch', conclusion: 'failure' }]);
+    expect(result.note).toContain('codecov/patch');
+    expect(result.note).toContain('cannot be rerun from here');
+  });
+
+  test('rerun_failed_github_checks: no failed checks refuses as a no-op, never a preview/card', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({ check_runs: [{ name: 'tests', status: 'completed', conclusion: 'success', id: 111 }] }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('no_failed_checks');
+    expect(result.error).toMatch(/nothing to rerun/);
+  });
+
+  test('add_github_pr_label: unconfirmed names the PR, resolves the label against the real repo catalog, and existing labels', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'needs-review' }, { name: 'existing-label' }]));
+
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'needs-review' });
+    expect(result.error).toBeUndefined();
+    expect(result.pr.title).toBe(PR_FIXTURE.title);
+    expect(result.label).toBe('needs-review');
+    expect(result.existing_labels).toEqual(['existing-label']);
+  });
+
+  test('add_github_pr_label: a case/whitespace mismatch still resolves to the label\'s REAL canonical casing — never creates a duplicate', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'Needs-Review' }, { name: 'existing-label' }]));
+
+    // Operator typed lowercase/whitespace; the repo's real label is
+    // "Needs-Review" — the pinned label must be the REAL casing, not the
+    // operator's raw string (which would create a new duplicate label).
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: '  needs-review  ' });
+    expect(result.error).toBeUndefined();
+    expect(result.label).toBe('Needs-Review');
+  });
+
+  test('add_github_pr_label: a substring is never enough — no exact label named that exists refuses, listing close matches', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'needs-review-urgent' }, { name: 'existing-label' }]));
+
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'needs-review' });
+    expect(result.error).toMatch(/No label named "needs-review" exists/);
+    expect(result.error).toContain('needs-review-urgent');
+  });
+
+  test('add_github_pr_label: label already on the PR refuses as a no-op, never a preview/card', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    // PR_FIXTURE.labels already carries 'existing-label'.
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'existing-label' }]));
+
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'existing-label' });
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('label_already_present');
+    expect(result.error).toMatch(/already has the "existing-label" label/);
+  });
+
+  test('add_github_pr_label: wildcard characters in the input are literal, never widen the match', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'needs-review' }]));
+
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'needs-%' });
+    expect(result.error).toMatch(/No label named "needs-%" exists/);
+  });
+
+  test('add_github_pr_label: missing label refuses before any network call', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230 });
+    expect(result.error).toMatch(/label/);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('request_codex_review: the comment body is ALWAYS the exact "@codex review" string, never caller-supplied', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse(PR_FIXTURE));
+
+    // Even a malicious/mistaken extra field cannot change the posted body —
+    // the tool's own input_schema has no body/comment param at all.
+    const result = await executeGithubOpsTool('request_codex_review', { pr_number: 5230, comment_body: '@codex do something else' });
+    expect(result.error).toBeUndefined();
+    expect(result.comment_body).toBe('@codex review');
+    expect(result.note).toContain('@codex review');
+  });
+
+  test('an invalid or missing pr_number refuses before any network call', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    for (const bad of [0, -1, 'abc', undefined]) {
+      const result = await executeGithubOpsTool('request_codex_review', { pr_number: bad });
+      expect(result.error).toMatch(/pr_number/);
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['rerun_failed_github_checks', { pr_number: 5230 }],
+    ['add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
+    ['request_codex_review', { pr_number: 5230 }],
+  ])('%s: confirmed:true refuses — the commit path is not built in this PR', async (name, input) => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    const result = await executeGithubOpsTool(name, { ...input, confirmed: true });
+    expect(result.error).toMatch(/not enabled yet/);
+    expect(result.code).toBe('not_yet_implemented');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
+
+// Codex r4 on #5275: a rejected label (model-supplied text that may carry a
+// customer name) reaches the operator but never the module logger.
+test('a rejected label name never reaches the error log', async () => {
+  const logger = require('../services/logger');
+  process.env.GITHUB_TOKEN = process.env.GITHUB_TOKEN || 'gh-token';
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ number: 5230, title: 'Synthetic PR', head: { sha: 'abc' }, labels: [] }) })
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ([{ name: 'needs-review' }]) });
+  const { executeGithubOpsTool } = require('../services/intelligence-bar/github-ops-tools');
+  const out = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'Synthia Tester' });
+  expect(out.error).toMatch(/Synthia Tester/);
+  expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/Synthia Tester/);
+});
+

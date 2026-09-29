@@ -204,6 +204,56 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a STAMPED 0 — as
+  // opposed to the genuinely-blank row the test above covers — must never
+  // reach the per-application fee either, once the gate is on. Off is
+  // byte-identical to today (the fee still bills, same as a blank row).
+  describe('a stamped $0 row (not a blank one) — GATE_STAMPED_ZERO_FREE', () => {
+    afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
+
+    test('off: bills the per_application_fee, same as today', async () => {
+      db.mockImplementation((arg) => {
+        if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: 0, monthly_rate: '55.30' } });
+        if (arg === 'customers') return makeQB({ first: { billing_mode: 'per_application', per_application_fee: '55.30' } });
+        throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+      });
+      customerOnAutopay.mockResolvedValue(true);
+      const dispositionQB = makeQB({ first: null });
+      installTransaction((arg) => {
+        if (arg === 'invoices') return makeQB({ first: null });
+        if (arg === 'visit_billing_dispositions') return dispositionQB;
+        throw new Error(`unexpected trx table ${arg}`);
+      });
+      InvoiceService.createFromService.mockResolvedValue({ id: 'inv-3', total: '55.30', status: 'draft', token: 'tok', customer_id: 'cust-1' });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+          method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+        });
+        expect(res.status).toBe(200);
+        expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ amount: 55.3 }));
+      });
+    });
+
+    test('on: refuses with "no price to invoice" — never the fee', async () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      db.mockImplementation((arg) => {
+        if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: 0, monthly_rate: '55.30' } });
+        if (arg === 'customers') return makeQB({ first: { billing_mode: 'per_application', per_application_fee: '55.30' } });
+        throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+      });
+      customerOnAutopay.mockResolvedValue(true);
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+          method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const body = await res.json();
+        expect(res.status).toBe(422);
+        expect(body.error).toMatch(/no price/i);
+        expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+      });
+    });
+  });
+
   test('a per-application visit with neither row price nor fee still 422s (no invented amount)', async () => {
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: null, monthly_rate: '55.30' } });

@@ -10693,6 +10693,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // #5237, refuseCoveredMemberMintInTrx): handled by its own
         // release-for-resume below, never the manual-billing bell.
         const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;
+        // Visit went non-live (cancelled/no-show/skipped) WHILE this
+        // REQUIRED mint waited on the shared schedule.invoice.mint lock
+        // (Codex #5244 r7 P0 — the exact race this fix closes): unlike a
+        // stale price or Bill-To, there is nothing to reconcile and no
+        // resume can ever succeed, so this is NOT a release-for-resume
+        // case. Surface the SAME 409/`already_terminal` shape the
+        // pre-transaction terminal guard at the top of this function
+        // already returns for an ordinary (non-raced) cancel, instead of
+        // the generic "mint failed — retry the closeout" 503, and leave
+        // the completion attempt row untouched (never promise an
+        // immediate resume that would just re-enter this same mint and
+        // 409 again) — the stale-attempt window reclaims it, and by then
+        // a genuine retry re-reads the visit fresh and hits that same
+        // early guard before ever reaching this mint.
+        if (invErr?.code === 'SCHEDULED_VISIT_NOT_LIVE' && !invoice?.id) {
+          logger.error(`[dispatch] visit ${svc.id} went ${invErr.visitStatus} while its REQUIRED completion invoice was minting — closeout NOT finalized (no resume promised): ${invErr.message}`);
+          return ({ status: 409, body: {
+            error: `This visit was ${invErr.visitStatus} while its invoice was being created and can no longer be completed. Refresh and try again.`,
+            code: 'already_terminal',
+            status: invErr.visitStatus,
+            serviceRecordId: record.id,
+          } });
+        }
         if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
           // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
@@ -11865,7 +11888,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               identityTrustLevel: 'phone_matches_customer',
               // billing_mode_at_send: the owner autopay digest (#3607) classifies
               // the text against the lane that authorized it.
-              metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
+              metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode, templateKey: 'payment_failed' },
             }));
             paymentFailedNoticeSent = !!failResult.sent;
             const noticeLegs = (failResult.channelResults || failResult.deduped === true)
@@ -11898,6 +11921,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   message_type: 'payment_failed',
                   metadata: JSON.stringify({
                     entry_point: 'autopay_completion_decline_deferred',
+                    // The frozen payment_failed body's template row; the
+                    // scheduler replay forwards it.
+                    template_key: 'payment_failed',
                     notificationEventKey: `payment-problem:service:${record.id}`,
                     service_record_id: record.id,
                     invoice_id: invoice.id,
@@ -12598,7 +12624,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           };
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
-          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true };
+          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true, templateKey: sentSmsType };
           if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
@@ -12727,6 +12753,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 metadata: JSON.stringify({
                   entry_point: 'dispatch_completion_deferred',
                   replay_purpose: 'service_completion',
+                  // The frozen body above came from this template row; the
+                  // morning replay records it on the sent sms_log row.
+                  ...(sentSmsType ? { template_key: sentSmsType } : {}),
                   notificationEventKey: `scheduled-service:${svc.id}:completed`,
                   useCustomerChannel: true,
                   service_record_id: record.id,

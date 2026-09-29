@@ -117,18 +117,20 @@ function anthropicAcceptsEffort(model, level) {
 // a no-thinking reply ends the turn with no text. Sonnet 5 also thinks by
 // default, but its lanes' caps were already tuned against it in production
 // (previsit brief 1000 → 2000 → 3000), so it is left out and this stays
-// inert for today's traffic.
-const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+// inert for today's traffic. Sonnet 5.5 and later cannot turn thinking off
+// (even `between_tools` returns progress-update thinking blocks), so they
+// take the floor like Opus 5.5.
+const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
 // `thinking: { type: 'disabled' }` — the voice-relay override tests and the
 // live inbound/sandbox chain both rely on picking it with that literal still
-// sent. Opus 5.5 and later minors/majors (5-5, 5-6, 6, 7, …), plus Fable and
-// Mythos, are the ones that 400 on it outright. One id shape, so a future
-// Opus minor needs a change here only, never at either call site that reads
-// this.
-const ANTHROPIC_THINKING_REQUIRED_RE = /^claude-opus-5-[0-9]|^claude-opus-[6-9](?![0-9])|^claude-(fable|mythos)-/;
+// sent. Opus 5.5 and later minors/majors (5-5, 5-6, 6, 7, …), Sonnet 5.5 and
+// later (its floor is `between_tools`), plus Fable and Mythos, are the ones
+// that 400 on it outright. One id shape per family, so a future minor needs a
+// change here only, never at either call site that reads this.
+const ANTHROPIC_THINKING_REQUIRED_RE = /^claude-opus-5-[0-9]|^claude-opus-[6-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 // What a CALLER needs to know before building a request: can `thinking` be
 // sent as `{ type: 'disabled' }` at all? The two voice-relay lanes that
 // always send it check this before picking a model.
@@ -346,6 +348,13 @@ const MODEL_CATALOG = {
   'claude-opus-5-5': { label: 'Claude Opus 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep', voice: { thinking: 'adaptive' } },
   'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy' },
   'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  // Sonnet 5.5 (released 2026-09-28) rejects `thinking: { type: 'disabled' }`
+  // (anthropicThinkingAlwaysOn); its lowest setting is `between_tools`, which
+  // `voice.thinking` hands the voice relay's sandbox / eval-harness path so a
+  // test call keeps up-front thinking off. `requires: 'deep'` keeps it off the
+  // WORKHORSE / FAST / VOICE pickers, whose call sites were not migrated —
+  // same containment as Opus 5.5 above.
+  'claude-sonnet-5-5': { label: 'Claude Sonnet 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep', voice: { thinking: 'between_tools' } },
   // Fable's thinking blocks + refusal semantics are handled only by
   // services/llm/deep.js, so only DEEP / EXTREME selectors may take it.
   'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep' },

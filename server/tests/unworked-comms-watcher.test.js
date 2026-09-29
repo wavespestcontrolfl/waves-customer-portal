@@ -45,7 +45,22 @@ const request = (over = {}) => ({
 describe('composeUnworkedCommsDigest', () => {
   test('itemKeys are lane-prefixed so ids from different tables never collide', () => {
     const out = composeUnworkedCommsDigest({ callbacks: [callback({ id: 42, total_count: 1 })], followUps: [followUp({ id: 42, total_count: 1 })] });
-    expect(out.itemKeys).toEqual(expect.arrayContaining(['call:42', 'task:42']));
+    // The follow-up key also carries its status (see the next test) —
+    // followUp()'s default status is 'expired'.
+    expect(out.itemKeys).toEqual(expect.arrayContaining(['call:42', 'task:42:expired']));
+  });
+
+  // Follow-up to #5269 (codex r8 P1): a task silently going pending/
+  // in_progress -> expired (or resurfacing through the bogus-verified
+  // branch) at the SAME task id is a new incident, not the same set — the
+  // key must carry the task's own status, mirroring reschedule-intent-
+  // watcher.js's visit_status.
+  test('a follow-up task\'s status rides the item key, so a silent expiry at the same id is a new item', () => {
+    const pending = composeUnworkedCommsDigest({ followUps: [followUp({ id: 7, status: 'in_progress', total_count: 1 })] });
+    const expired = composeUnworkedCommsDigest({ followUps: [followUp({ id: 7, status: 'expired', total_count: 1 })] });
+    expect(pending.itemKeys).toEqual(['task:7:in_progress']);
+    expect(expired.itemKeys).toEqual(['task:7:expired']);
+    expect(pending.itemKeys).not.toEqual(expired.itemKeys);
   });
 
   test('texts key on the latest unanswered inbound message, so a new text from the same peer is a new item', () => {

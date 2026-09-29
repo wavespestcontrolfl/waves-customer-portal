@@ -15,6 +15,14 @@ import { isNativeApp } from './platform';
  * can run inside an older installed binary that predates the Camera plugin, so
  * Camera.getPhoto() throws UNIMPLEMENTED even though isNativeApp() is true.
  */
+// Fired on document around the native camera sheet ({ detail: { open } }) so the
+// Face ID app lock (BiometricGate) doesn't read the sheet as leaving the app.
+export const NATIVE_PICKER_EVENT = 'waves:native-picker';
+
+function announcePicker(open) {
+  try { document.dispatchEvent(new CustomEvent(NATIVE_PICKER_EVENT, { detail: { open } })); } catch { /* noop */ }
+}
+
 export async function captureCameraPhoto() {
   if (!isNativeApp()) return { unavailable: true };
 
@@ -26,6 +34,7 @@ export async function captureCameraPhoto() {
   }
 
   const { Camera, CameraResultType, CameraSource } = mod;
+  announcePicker(true);
   try {
     const photo = await Camera.getPhoto({
       quality: 70,
@@ -45,5 +54,7 @@ export async function captureCameraPhoto() {
     }
     // User cancelled or denied permission — a no-op (don't re-pop a picker).
     return { cancelled: true };
+  } finally {
+    announcePicker(false);
   }
 }

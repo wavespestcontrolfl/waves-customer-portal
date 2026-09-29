@@ -194,10 +194,92 @@ function escapeRegExp(value) {
 // vs huntsman spider" names one catalog species plus an uncatalogued one,
 // and a safety post must never show a licensed-but-wrong species as THE
 // pest. Deliberately broad; a false trigger only sends a slot to a human.
-const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?)\b/i;
+// These words are unambiguous comparison constructions on their own, so
+// any occurrence anywhere in the topic fails it closed. Bare `like` is one
+// of them ("bugs like fire ants", Codex r1 on #5272): only the terminal
+// "what do X look like" identification phrase is exempt, and it is already
+// stripped from comparisonTestText below before this runs (Codex r5/r7).
+// Main's connector words stay UNCONDITIONAL comparison markers — and, or,
+// from, not (Codex r6–r9 on #5272: every narrowing of them let a two-subject
+// topic through: "fire ants and insects", "…or pests", "…and gnats",
+// "this is not a fire ant"). The catalog pest count below is an extra
+// check on top, never a replacement. Cost: "where do fire ants come from"
+// gets no automatic photo — the slot goes to a human (fail closed).
+const COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?|not|and|or|from)\b/i;
+// A hyphenated "-like" suffix ("ant-like insects") is the same look-alike
+// construction without the word "look" — still a comparison, not an
+// identification of the named species itself.
+const SUFFIX_LIKE_RE = /\w-like\b/i;
+
+// Codex r3 on #5272 (the third round on connector words): a comparison is
+// judged by COUNTING the pests a topic names, not by reading the words
+// between them. Once the matched species' own names are taken out (its
+// library aliases plus every catalog name/alias of that species), the topic
+// must name no other pest: no generic pest noun (below) and no complete
+// name or alias of any other organism in the approved species catalog
+// (species-catalog.js, read on first use). "brown recluse and huntsman
+// spider", "huntsman spider and daddy long legs" and "fire ants and
+// no-see-ums" name two; "where do fire ants come from" and "fire ant signs
+// and identification" name one. An unreadable catalog fails closed.
+const PEST_NOUN_RE = /\b(ants?|roach(?:es)?|cockroach(?:es)?|spiders?|beetles?|bugs?|termites?|wasps?|bees?|hornets?|fl(?:y|ies)|moths?|mosquito(?:e?s)?|ticks?|fleas?|mites?|lizards?|geckos?|anoles?|snakes?|rodents?|rats?|mouse|mice|caterpillars?|worms?|grubs?|earwigs?|silverfish|centipedes?|millipedes?|scorpions?|weevils?|aphids?|whitefl(?:y|ies)|crickets?|grasshoppers?)\b/i;
+// A name as a whole word/phrase, ordinary plural tolerated.
+function namePattern(name, flags = 'i') {
+  return new RegExp(`\\b${escapeRegExp(name)}(?:e?s)?\\b`, flags);
+}
+// undefined = not loaded yet, null = unreadable.
+let catalogOrganisms;
+function getCatalogOrganisms() {
+  if (catalogOrganisms === undefined) {
+    try {
+      catalogOrganisms = require('../species-catalog').listEntries({ kind: 'organism' }).map((entry) => {
+        const names = [entry.common_name, ...(entry.aliases || [])]
+          .map((name) => String(name || '').trim().toLowerCase())
+          .filter((name) => name.length >= 3);
+        // Global patterns, compiled once: matchAll clones them, so their
+        // lastIndex is never shared between scans.
+        return { slug: entry.slug, names, patterns: names.map((name) => namePattern(name, 'gi')) };
+      });
+    } catch {
+      catalogOrganisms = null;
+    }
+  }
+  return catalogOrganisms;
+}
+function namesAnotherPest(text, entry) {
+  const organisms = getCatalogOrganisms();
+  if (!organisms) return true;
+  const own = organisms.find((o) => o.slug === entry.catalog_slug);
+  // Spans the matched species' own names cover (overlapping names —
+  // "florida huntsman" + "huntsman spider" — merge into one covered range).
+  const ownSpans = [];
+  for (const name of [...(entry.aliases || []), ...(own ? own.names : [])]) {
+    for (const m of text.matchAll(namePattern(name, 'gi'))) ownSpans.push([m.index, m.index + m[0].length]);
+  }
+  const insideOwn = (start, end) => ownSpans.some(([s, e]) => s <= start && e >= end);
+  // Another organism's name counts unless it sits wholly inside one of the
+  // species' own names ("carpenter ant" inside "florida carpenter ant").
+  // Checked BEFORE blanking, so a longer name that CONTAINS an own alias —
+  // "little fire ants" around "fire ants" — is still seen (Codex r6 on
+  // #5272).
+  for (const o of organisms) {
+    if (o.slug === entry.catalog_slug) continue;
+    for (const re of o.patterns) {
+      for (const m of text.matchAll(re)) {
+        if (!insideOwn(m.index, m.index + m[0].length)) return true;
+      }
+    }
+  }
+  const covered = new Array(text.length).fill(false);
+  for (const [s, e] of ownSpans) covered.fill(true, s, e);
+  const rest = [...text].map((ch, i) => (covered[i] ? ' ' : ch)).join('');
+  return PEST_NOUN_RE.test(rest) || OTHER_ORGANISM_CLASS_RE.test(rest);
+}
+// "…and other insects", "…or other stinging pests": a broad class after
+// "other"/"similar"/"related" is a second subject too (Codex r7 on #5272).
+const OTHER_ORGANISM_CLASS_RE = /\b(?:other|similar|related|different)\s+(?:[a-z-]+\s+){0,2}?(?:insects?|pests?|arachnids?|reptiles?|amphibians?|critters?|creatures?|animals?|wildlife|vermin|invertebrates?|arthropods?|mammals?|birds?|species)\b/i;
 
 // Codex r5 on #5216 ("Do not classify identification phrasing as
-// comparison"): the bare `like` alternative above makes ordinary TERMINAL
+// comparison"): the `looks?\s+like` alternative above makes ordinary TERMINAL
 // identification phrasing — "what do fire ants look like", optional
 // trailing "?" — comparison-shaped, nulling every photo slot on the most
 // common identification-post phrasing there is. Only a trailing "look(s)
@@ -218,7 +300,7 @@ function matchSpeciesEntry(topic) {
   const norm = String(topic || '').trim().toLowerCase();
   if (!norm) return null;
   const comparisonTestText = norm.replace(TERMINAL_LOOKS_LIKE_RE, '').trim();
-  if (COMPARISON_RE.test(comparisonTestText)) return null;
+  if (COMPARISON_WORDS_RE.test(comparisonTestText) || SUFFIX_LIKE_RE.test(comparisonTestText)) return null;
   const matched = new Set();
   for (const entry of PHOTO_LIBRARY) {
     // Trailing e?s? tolerates the ordinary plural ("fire ants").
@@ -226,8 +308,11 @@ function matchSpeciesEntry(topic) {
     if (hits(entry.aliases) && !hits(entry.not_if)) matched.add(entry);
   }
   // "florida carpenter ant" and "carpenter ant" are one entry; a topic
-  // matching two ENTRIES is ambiguous.
-  return matched.size === 1 ? [...matched][0] : null;
+  // matching two ENTRIES is ambiguous, and so is one that names any other
+  // pest besides the matched species.
+  if (matched.size !== 1) return null;
+  const [entry] = matched;
+  return namesAnotherPest(comparisonTestText, entry) ? null : entry;
 }
 function matchSpecies(topic) {
   return matchSpeciesEntry(topic)?.species || null;
