@@ -16593,7 +16593,7 @@ export default function PortalPage() {
     cancelledAccount && !CANCELLED_TABS.includes(initialTab) ? 'plan' : initialTab,
   );
   // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
-  usePortalActivity(activeTab);
+  usePortalActivity(activeTab, `${customer?.id ?? ''}:${sessionEpoch}`);
   const resetTabScroll = useRef(false);
   const moreButtonRef = useRef(null);
   useEffect(() => {

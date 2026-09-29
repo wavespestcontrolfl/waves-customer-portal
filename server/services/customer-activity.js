@@ -3,12 +3,14 @@
  * (GATE_PORTAL_ACTIVITY, dark by default). Three signals, all comms-free:
  *
  *   1. customers.last_seen_at — stampLastSeen(), called fire-and-forget from
- *      the foreground beacon routes only (page-view, push-open, heartbeat) — NOT from the
+ *      the foreground beacon routes only (page-view, heartbeat, and a confirmed push-open) — NOT from the
  *      auth middleware, so background polling never counts. The throttle lives in the UPDATE's
  *      WHERE clause (only rows older than LAST_SEEN_THROTTLE_MINUTES move),
  *      so it holds across pods and a busy tab costs one cheap no-op UPDATE.
  *   2. portal tab views — customer_page_views rows with page 'portal:<tab>'.
- *   3. app opens from a push notification — page 'push:open'.
+ *   3. app opens from a push notification — page 'push:open', recorded ONLY
+ *      for a bell notification the server can prove belongs to the signed-in
+ *      customer (see recordPushOpen).
  *
  * Both view kinds go through the shared recorder (customer-page-views.js), so
  * they inherit its bot / staff-browser / WAVES_ADMIN_IPS skip, IP hashing and
@@ -23,17 +25,14 @@
  *
  *   portal:<tab>  subject_type = platform ('web' | 'ios' | 'android', the
  *                 client's Capacitor platform hint), subject_id = null.
- *   push:open     subject_type = platform; subject_id = 'notification:<id>'
- *                 when the push carried a bell notification id (the
- *                 notifyCustomer path sends notificationId), else
- *                 'tap:<uuid>' — a per-tap id the client generates when the
- *                 tap happens. Both id forms dedupe forever per customer (no
- *                 ip or time window), so a duplicate delivery collapses but
- *                 two genuine opens of the same push type do not collapse
- *                 (routed-SMS pushes have no stable id at send time:
- *                 push-channel-routing's sendPush writes its sms_log row
- *                 after delivery). 'type:<name>' (routed tag / category) is
- *                 only the fallback for an older client that sends no tap id.
+ *   push:open     subject_type = platform; subject_id =
+ *                 'notification:<uuid>' — the bell notification id that
+ *                 notifyCustomer puts in the push payload — deduped forever
+ *                 per customer (no ip or time window), so a duplicate
+ *                 delivery collapses. Pushes with no such id (routed-SMS
+ *                 pushes carry only a type tag, and their sms_log row is
+ *                 written after delivery) are NOT counted: an open that
+ *                 cannot be tied to this customer records nothing.
  *
  * <tab> is the portal's tab id (the customer portal is one page whose
  * tabs — dashboard, plan, visits, billing, refer, documents, property,
@@ -51,9 +50,7 @@ const ROUTE_RE = /^[a-z][a-z-]{0,29}$/;
 // PRIMARY_TABS + MORE_TABS). Anything else is refused so a client cannot
 // invent page categories and defeat the page-based dedupe (Codex #5335).
 const PORTAL_TABS = new Set(['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn']);
-const TYPE_RE = /^[a-z][a-z0-9_-]{0,47}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ROUTED_TAG_PREFIX = 'push-routed:';
 
 /**
  * Stamp customers.last_seen_at for a foreground activity beacon.
@@ -103,47 +100,57 @@ function recordPortalView(req, { customerId, route, platform }) {
   });
 }
 
-/**
- * subject_id for a push open: the bell notification id when the client has a
- * real uuid, else the per-tap uuid, else the notification type (routed tag,
- * then category), else null when nothing usable was sent.
- */
-function pushSubjectId({ notificationId, tapId, tag, category } = {}) {
+/** subject_id for a push open: 'notification:<uuid>' for a real uuid, else null. */
+function pushSubjectId(notificationId) {
   if (typeof notificationId === 'string' && UUID_RE.test(notificationId.trim())) {
     return `notification:${notificationId.trim().toLowerCase()}`;
-  }
-  if (typeof tapId === 'string' && UUID_RE.test(tapId.trim())) {
-    return `tap:${tapId.trim().toLowerCase()}`;
-  }
-  if (typeof tag === 'string' && tag.startsWith(ROUTED_TAG_PREFIX)) {
-    const t = tag.slice(ROUTED_TAG_PREFIX.length).toLowerCase();
-    if (TYPE_RE.test(t)) return `type:${t}`;
-  }
-  if (typeof category === 'string') {
-    const c = category.trim().toLowerCase();
-    if (TYPE_RE.test(c)) return `type:${c}`;
   }
   return null;
 }
 
+// True only when this bell notification is addressed to this customer
+// (notifications.recipient_type = 'customer', recipient_id = the customer).
+async function customerOwnsNotification(customerId, notificationUuid) {
+  const res = await db.raw(
+    `SELECT 1 FROM notifications
+      WHERE id = ?::uuid AND recipient_type = 'customer' AND recipient_id = ?::uuid
+      LIMIT 1`,
+    [notificationUuid, customerId],
+  );
+  return Array.isArray(res?.rows) && res.rows.length > 0;
+}
+
 /**
- * Record one app open from a push notification. A stable id (bell
- * 'notification:<uuid>' or per-tap 'tap:<uuid>') dedupes forever for that
- * customer, regardless of ip or how much later a duplicate arrives; only the
- * legacy 'type:<name>' fallback keeps the recorder's normal ip + window dedupe.
+ * Record one app open from a push notification, server-attributed. A row is
+ * written (and last_seen_at stamped) ONLY when the payload carries a
+ * notification uuid AND that notification belongs to `customerId`; anything
+ * else (no id, a routed-SMS push, a notification owned by another profile of
+ * the account) records nothing, so an open is never filed under the wrong
+ * profile. The row dedupes forever per customer + notification. Resolves
+ * true when a row was written; never throws.
  */
-function recordPushOpen(req, { customerId, platform, notificationId, tapId, tag, category }) {
-  const subjectId = pushSubjectId({ notificationId, tapId, tag, category });
-  return recordPageView({
-    req,
-    page: 'push:open',
-    customerId,
-    subjectType: sanitizePlatform(platform),
-    subjectId,
-    dedupeForever: typeof subjectId === 'string' && /^(notification|tap):/.test(subjectId),
-  });
+async function recordPushOpen(req, { customerId, platform, notificationId }) {
+  try {
+    if (!customerId || !portalActivityLive() || !shouldRecord(req)) return false;
+    const subjectId = pushSubjectId(notificationId);
+    if (!subjectId) return false;
+    if (!(await customerOwnsNotification(customerId, subjectId.slice('notification:'.length)))) return false;
+    stampLastSeen(req, customerId);
+    return await recordPageView({
+      req,
+      page: 'push:open',
+      customerId,
+      subjectType: sanitizePlatform(platform),
+      subjectId,
+      dedupeForever: true,
+    });
+  } catch (err) {
+    try { logger.warn(`[activity] push-open failed: ${err.message}`); } catch { /* never throw */ }
+    return false;
+  }
 }
 
 module.exports = {
-  stampLastSeen, sanitizeRouteName, pushSubjectId, recordPortalView, recordPushOpen, LAST_SEEN_THROTTLE_MINUTES,
+  stampLastSeen, sanitizeRouteName, pushSubjectId, recordPortalView, recordPushOpen, customerOwnsNotification,
+  LAST_SEEN_THROTTLE_MINUTES,
 };

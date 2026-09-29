@@ -23,7 +23,6 @@ beforeEach(() => {
   resetPortalActivityForTests();
 });
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe('portal page-view beacon', () => {
@@ -92,21 +91,24 @@ describe('portal page-view beacon', () => {
 });
 
 describe('push-open beacon', () => {
-  it('sends the notification id, category and tag from the push data, capped', async () => {
+  it('sends only the notification id and the platform hint (capped), never a tap id, tag or category', async () => {
     platform.value = 'android';
     reportPushOpen({ notificationId: 'n-1', category: 'billing', tag: 'push-routed:receipt', url: '/?tab=billing', extra: 'ignored' });
     await flush();
-    expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', {
-      platform: 'android', notificationId: 'n-1', tapId: expect.stringMatching(UUID), category: 'billing', tag: 'push-routed:receipt',
-    });
+    expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', { platform: 'android', notificationId: 'n-1' });
+    reportPushOpen({ notificationId: 'x'.repeat(200) });
+    await flush();
+    expect(beacon.mock.calls[1][1].notificationId).toHaveLength(80);
   });
 
-  it('sends what it has when the push carried no ids', async () => {
+  it('a bare push (no notification id) still POSTs once: the server decides whether it counts', async () => {
+    reportPushOpen({ tag: 'push-routed:receipt', category: 'appointment' });
+    await flush();
+    expect(beacon).toHaveBeenCalledTimes(1);
+    expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', { platform: 'web', notificationId: undefined });
     reportPushOpen(undefined);
     await flush();
-    expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', {
-      platform: 'web', notificationId: undefined, tapId: expect.stringMatching(UUID), category: undefined, tag: undefined,
-    });
+    expect(beacon).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -143,14 +145,6 @@ describe('push-open: one fire-and-forget beacon, nothing parked or replayed', ()
     await flush();
     expect(beacon).toHaveBeenCalledTimes(2);
     expect(localStorage.getItem('waves_pending_push_open')).toBeNull();
-  });
-
-  it('each tap gets its own tap id', async () => {
-    reportPushOpen({ tag: 'push-routed:receipt' });
-    reportPushOpen({ tag: 'push-routed:receipt' });
-    await flush();
-    expect(beacon.mock.calls[0][1].tapId).toMatch(UUID);
-    expect(beacon.mock.calls[1][1].tapId).not.toBe(beacon.mock.calls[0][1].tapId);
   });
 
   it('a dark gate answer blocks later opens for the session', async () => {

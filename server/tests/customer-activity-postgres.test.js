@@ -30,6 +30,13 @@ const settle = () => new Promise((r) => setTimeout(r, 200));
       t.uuid('id').primary();
       t.string('first_name');
     });
+    await mockPg.schema.createTable('notifications', (t) => {
+      t.uuid('id').primary();
+      t.string('recipient_type', 20).notNullable();
+      t.uuid('recipient_id').nullable();
+      t.string('category', 30).notNullable().defaultTo('billing');
+      t.string('title', 200).notNullable().defaultTo('t');
+    });
     await migration.up(mockPg);
     await pageViewsMigration.up(mockPg);
     process.env.GATE_PORTAL_ACTIVITY = 'true';
@@ -80,60 +87,53 @@ const settle = () => new Promise((r) => setTimeout(r, 200));
     expect(new Date(again.last_seen_at).getTime()).toBe(firstStamp);
   });
 
-  test('push-open dedupe is per customer: two customers on one IP both count, one customer twice counts once', async () => {
-    const [a, b] = [randomUUID(), randomUUID()];
-    await mockPg('customers').insert([{ id: a, first_name: 'D' }, { id: b, first_name: 'E' }]);
-    const open = (customerId) => recordPushOpen(HUMAN_REQ, {
-      customerId, platform: 'ios', tag: 'push-routed:appointment_reminder',
-    });
-    expect(await open(a)).toBe(true);
-    expect(await open(b)).toBe(true);
-    expect(await open(a)).toBe(false);
-    const rows = await mockPg('customer_page_views').where({ page: 'push:open' }).select('customer_id', 'subject_type', 'subject_id');
-    expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.customer_id).sort()).toEqual([a, b].sort());
-    expect(rows[0]).toMatchObject({ subject_type: 'ios', subject_id: 'type:appointment_reminder' });
-  });
+  const notify = async (recipientId, recipientType = 'customer') => {
+    const id = randomUUID();
+    await mockPg('notifications').insert({ id, recipient_type: recipientType, recipient_id: recipientId });
+    return id;
+  };
 
-  test('routed pushes: a retried tap dedupes, two separate taps of the same type both count', async () => {
+  test('push-open: an owned notification records once and dedupes forever, from any IP or time', async () => {
     const c = randomUUID();
-    await mockPg('customers').insert({ id: c, first_name: 'F' });
-    const tap = (tapId) => recordPushOpen(HUMAN_REQ, {
-      customerId: c, platform: 'ios', tag: 'push-routed:appointment_reminder', tapId,
-    });
-    const [t1, t2] = [randomUUID(), randomUUID()];
-    expect(await tap(t1)).toBe(true);
-    expect(await tap(t1)).toBe(false);
-    expect(await tap(t2)).toBe(true);
-    const rows = await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c }).select('subject_id');
-    expect(rows.map((r) => r.subject_id).sort()).toEqual([`tap:${t1}`, `tap:${t2}`].sort());
+    await mockPg('customers').insert({ id: c, first_name: 'D' });
+    const n = await notify(c);
+    const otherIpReq = { ...HUMAN_REQ, ip: '198.51.100.77' };
+    const open = (req) => recordPushOpen(req, { customerId: c, platform: 'ios', notificationId: n });
+    expect(await open(HUMAN_REQ)).toBe(true);
+    await mockPg('customer_page_views').where({ customer_id: c }).update({ viewed_at: mockPg.raw("now() - interval '3 hours'") });
+    expect(await open(otherIpReq)).toBe(false);
+    expect(await open(HUMAN_REQ)).toBe(false);
+    const rows = await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c }).select('subject_id', 'subject_type');
+    expect(rows).toEqual([{ subject_id: `notification:${n}`, subject_type: 'ios' }]);
+    // a second, different notification of the same customer still counts
+    expect(await open({ ...HUMAN_REQ, ip: '198.51.100.99' })).toBe(false);
+    expect(await recordPushOpen(HUMAN_REQ, { customerId: c, platform: 'ios', notificationId: await notify(c) })).toBe(true);
   });
 
-  test('a tap id dedupes forever: same id from another IP more than 10 minutes later is still one row', async () => {
+  test('push-open: a notification owned by another customer (or an admin) records nothing and stamps nothing', async () => {
+    const [a, b] = [randomUUID(), randomUUID()];
+    await mockPg('customers').insert([{ id: a, first_name: 'E' }, { id: b, first_name: 'F' }]);
+    const ofB = await notify(b);
+    const ofAdmin = await notify(null, 'admin');
+    expect(await recordPushOpen(HUMAN_REQ, { customerId: a, platform: 'ios', notificationId: ofB })).toBe(false);
+    expect(await recordPushOpen(HUMAN_REQ, { customerId: a, platform: 'ios', notificationId: ofAdmin })).toBe(false);
+    expect(await recordPushOpen(HUMAN_REQ, { customerId: a, platform: 'ios', notificationId: randomUUID() })).toBe(false);
+    await settle();
+    expect(await mockPg('customer_page_views').where({ page: 'push:open', customer_id: a })).toHaveLength(0);
+    expect((await mockPg('customers').where({ id: a }).first('last_seen_at')).last_seen_at).toBeNull();
+    // the real owner is counted and stamped
+    expect(await recordPushOpen(HUMAN_REQ, { customerId: b, platform: 'ios', notificationId: ofB })).toBe(true);
+    await settle();
+    expect((await mockPg('customers').where({ id: b }).first('last_seen_at')).last_seen_at).not.toBeNull();
+  });
+
+  test('push-open: no notification id records nothing and stamps nothing', async () => {
     const c = randomUUID();
     await mockPg('customers').insert({ id: c, first_name: 'G' });
-    const otherIpReq = { ...HUMAN_REQ, ip: '198.51.100.77' };
-    const tapId = randomUUID();
-    const notificationId = randomUUID();
-    const open = (req, ids) => recordPushOpen(req, { customerId: c, platform: 'ios', ...ids });
-    expect(await open(HUMAN_REQ, { tapId })).toBe(true);
-    expect(await open(HUMAN_REQ, { notificationId })).toBe(true);
-    await mockPg('customer_page_views').where({ customer_id: c }).update({ viewed_at: mockPg.raw("now() - interval '3 hours'") });
-    expect(await open(otherIpReq, { tapId })).toBe(false);
-    expect(await open(otherIpReq, { notificationId })).toBe(false);
-    const rows = await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c }).select('subject_id');
-    expect(rows.map((r) => r.subject_id).sort()).toEqual([`notification:${notificationId}`, `tap:${tapId}`].sort());
-    // a different tap id from the other IP still counts
-    expect(await open(otherIpReq, { tapId: randomUUID() })).toBe(true);
-  });
-
-  test('the legacy type fallback still dedupes by ip + window only', async () => {
-    const c = randomUUID();
-    await mockPg('customers').insert({ id: c, first_name: 'H' });
-    const otherIpReq = { ...HUMAN_REQ, ip: '198.51.100.78' };
-    const open = (req) => recordPushOpen(req, { customerId: c, platform: 'ios', tag: 'push-routed:receipt' });
-    expect(await open(HUMAN_REQ)).toBe(true);
-    expect(await open(otherIpReq)).toBe(true);
-    expect(await open(HUMAN_REQ)).toBe(false);
+    expect(await recordPushOpen(HUMAN_REQ, { customerId: c, platform: 'ios' })).toBe(false);
+    expect(await recordPushOpen(HUMAN_REQ, { customerId: c, platform: 'ios', notificationId: 'push-routed:receipt' })).toBe(false);
+    await settle();
+    expect(await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c })).toHaveLength(0);
+    expect((await mockPg('customers').where({ id: c }).first('last_seen_at')).last_seen_at).toBeNull();
   });
 });

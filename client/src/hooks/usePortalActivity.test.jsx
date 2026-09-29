@@ -28,6 +28,31 @@ it('reports a tab only after the customer stays on it, debounced', () => {
   expect(report).toHaveBeenCalledWith('billing');
 });
 
+it('a profile switch on the same tab re-reports that tab once; the same identity does not', () => {
+  const { rerender } = renderHook(({ tab, who }) => usePortalActivity(tab, who), { initialProps: { tab: 'visits', who: 'cust-a:1' } });
+  vi.advanceTimersByTime(1000);
+  expect(report).toHaveBeenCalledTimes(1);
+  rerender({ tab: 'visits', who: 'cust-a:1' }); // nothing changed
+  vi.advanceTimersByTime(2000);
+  expect(report).toHaveBeenCalledTimes(1);
+  rerender({ tab: 'visits', who: 'cust-b:2' }); // profile switch, same tab
+  vi.advanceTimersByTime(300);
+  expect(report).toHaveBeenCalledTimes(1); // debounced like any view
+  vi.advanceTimersByTime(1000);
+  expect(report).toHaveBeenCalledTimes(2);
+  expect(report).toHaveBeenLastCalledWith('visits');
+  vi.advanceTimersByTime(5000);
+  expect(report).toHaveBeenCalledTimes(2);
+});
+
+it('a profile switch does not restart the heartbeat timer', () => {
+  const { rerender } = renderHook(({ who }) => usePortalActivity('visits', who), { initialProps: { who: 'cust-a:1' } });
+  vi.advanceTimersByTime(30 * 1000);
+  rerender({ who: 'cust-b:2' });
+  vi.advanceTimersByTime(31 * 1000); // 61s since mount: the original interval fires once
+  expect(heartbeat).toHaveBeenCalledTimes(1);
+});
+
 it('does not report while the page is hidden or after unmount', () => {
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
   renderHook(() => usePortalActivity('plan'));

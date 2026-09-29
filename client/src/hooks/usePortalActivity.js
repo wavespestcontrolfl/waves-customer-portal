@@ -20,8 +20,13 @@ const INTERACTION_EVENTS = ['pointerdown', 'keydown', 'scroll', 'touchstart'];
  * otherwise never refresh it, so a heartbeat (lightweight endpoint, stamps
  * last_seen_at only, no page-view row) fires while the page is visible and the
  * customer has interacted recently.
+ *
+ * `identity` is the active signed-in identity (customer id + session epoch from
+ * useAuth). It is only an effect dependency: a profile switch that stays on the
+ * same tab re-reports that tab once for the new customer (the lib's same-tab
+ * memo is keyed per identity, so it does not collapse into the old profile's).
  */
-export default function usePortalActivity(route) {
+export default function usePortalActivity(route, identity = null) {
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     let lastInteraction = Date.now(); // the portal just mounted for a customer
@@ -56,5 +61,5 @@ export default function usePortalActivity(route) {
       clearTimeout(timer);
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [route]);
+  }, [route, identity]);
 }

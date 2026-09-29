@@ -3,7 +3,7 @@
  * session only, fire-and-forget from the portal SPA and the Capacitor app.
  *
  *   POST /api/customer/activity/page-view  { route, platform? }
- *   POST /api/customer/activity/push-open  { platform?, notificationId?, tapId?, tag?, category? }
+ *   POST /api/customer/activity/push-open  { platform?, notificationId? }
  *   POST /api/customer/activity/heartbeat  {}
  *
  * While the gate is off both answer 200 { enabled: false } without writing;
@@ -13,7 +13,7 @@
  * silent), so a beacon reveals nothing about the recorder's filters. Row
  * conventions: see services/customer-activity.js. Sends nothing.
  *
- * These three foreground beacons are the ONLY writers of customers.last_seen_at
+ * These foreground beacons are the ONLY writers of customers.last_seen_at
  * (throttled in SQL, staff/bot skipped): the client sends them only while the
  * page is visible, so background polling on authenticated routes (bell count,
  * visit tracker) never makes an idle hidden portal look active. The heartbeat
@@ -47,16 +47,16 @@ router.post('/heartbeat', (req, res) => {
   return res.json({ ok: true, enabled: true });
 });
 
+// Records ONLY when notificationId names a bell notification owned by the
+// signed-in customer; the stamp and the row both happen inside that check, so
+// an unconfirmable open (no id, routed-SMS push, another profile's
+// notification) writes nothing. The answer is identical either way.
 router.post('/push-open', (req, res) => {
   const body = req.body || {};
-  activity.stampLastSeen(req, req.customerId);
   void activity.recordPushOpen(req, {
     customerId: req.customerId,
     platform: body.platform,
     notificationId: body.notificationId,
-    tapId: body.tapId,
-    tag: body.tag,
-    category: body.category,
   });
   return res.json({ ok: true, enabled: true });
 });

@@ -25,7 +25,7 @@
  *     unique constraint) — an accepted, rare double count.
  *   - `dedupeForever: true` (with a subjectId) drops the ip, time and
  *     subject_type conditions: page + subject + customer is unique for good. For subjects
- *     that are a stable id for one event (a push-open tap id).
+ *     that are a stable id for one event (a push notification id).
  *
  * ip_hash is sha256 of the client IP, hex — identical to short_code_clicks.
  */
@@ -118,7 +118,7 @@ function recordPageView({
     const subjId = subjectId == null ? null : String(subjectId);
     const custId = customerId || null;
     const windowMinutes = Number.isInteger(dedupeMinutes) && dedupeMinutes > 0 ? dedupeMinutes : DEDUPE_MINUTES;
-    // dedupeForever: the subject_id is a stable id for ONE event (a push tap),
+    // dedupeForever: the subject_id is a stable id for ONE event (a push notification),
     // so the same page + customer + subject is never written twice, whatever
     // the ip or how much later a duplicate arrives. Needs a subject id.
     const forever = dedupeForever === true && subjId != null;
