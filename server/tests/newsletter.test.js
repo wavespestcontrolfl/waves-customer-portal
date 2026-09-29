@@ -1470,12 +1470,22 @@ describe('sendgrid newsletter suppression ledger writes', () => {
     }));
   });
 
-  test('subscriber-level effects are fenced to the address the delivery was mailed to', async () => {
+  test('a bounce is fenced to the address the delivery was mailed to', async () => {
     // A delivery re-pointed at the surviving subscriber by a typo-correction
-    // merge (or a subscriber whose email moved) must not let a late event from
-    // the OLD mailbox bounce-count or unsubscribe the corrected address.
+    // merge must not let a late bounce from the OLD mailbox bounce-count the
+    // corrected address.
+    const { client, calls } = fakeClient();
+    await handleNewsletterEvent({ event: 'bounce', type: 'bounce', email: 'Old.Typo@Example.com' }, {
+      id: 'delivery-5', send_id: 'send-5', subscriber_id: 16, email: ' Old.Typo@example.com ',
+    }, client);
+    const q = calls.newsletter_subscribers[0];
+    expect(q.where).toHaveBeenCalledWith({ id: 16 });
+    expect(q.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ?', ['old.typo@example.com']);
+    expect(q.update).toHaveBeenCalled();
+  });
+
+  test('opt-outs are never fenced by address: unsubscribe and spam complaint always apply', async () => {
     for (const ev of [
-      { event: 'bounce', type: 'bounce', email: 'Old.Typo@Example.com' },
       { event: 'spamreport', email: 'Old.Typo@Example.com' },
       { event: 'dropped', reason: 'Unsubscribed Address', email: 'Old.Typo@Example.com' },
     ]) {
@@ -1485,7 +1495,7 @@ describe('sendgrid newsletter suppression ledger writes', () => {
       }, client);
       const q = calls.newsletter_subscribers[0];
       expect(q.where).toHaveBeenCalledWith({ id: 16 });
-      expect(q.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ?', ['old.typo@example.com']);
+      expect(q.whereRaw).not.toHaveBeenCalled();
       expect(q.update).toHaveBeenCalled();
     }
   });

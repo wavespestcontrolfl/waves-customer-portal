@@ -889,13 +889,13 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   }
   if (updates.subscriberAction && delivery.subscriber_id) {
     const at = updates.subscriberAt;
-    // Subscriber-level effects apply only while the subscriber is still AT the
-    // address this delivery was mailed to. A delivery is re-pointed at the
-    // surviving subscriber when a customer's email typo merges two subscriber
-    // rows (customer-email-fanout), and a subscriber's own email can be moved:
-    // a late bounce / unsubscribe / complaint from the OLD mailbox must not
-    // damage or unsubscribe the corrected address. The delivery row and the
-    // suppression ledger below still record the event for the mailed address.
+    // A delivery can be re-pointed at the surviving subscriber when a
+    // customer's email typo merges two subscriber rows (customer-email-fanout).
+    // BOUNCES are fenced to the address the delivery was mailed to: a late
+    // bounce from the dead OLD mailbox must not bounce-count the corrected
+    // address. Opt-outs (unsubscribe / spam complaint) are NEVER fenced: an
+    // opt-out is honored on the subscription even if its address moved —
+    // over-honoring is safe, dropping one is not.
     const subscriberRow = () => {
       const q = client('newsletter_subscribers').where({ id: delivery.subscriber_id });
       const mailed = String(delivery.email || '').trim().toLowerCase();
@@ -908,13 +908,14 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'force_unsubscribe') {
-      await subscriberRow().update({
+      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
         status: 'unsubscribed',
         unsubscribed_at: at,
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'unsubscribe_if_active') {
-      await subscriberRow()
+      await client('newsletter_subscribers')
+        .where({ id: delivery.subscriber_id })
         .whereNot({ status: 'unsubscribed' })
         .update({
           status: 'unsubscribed',
