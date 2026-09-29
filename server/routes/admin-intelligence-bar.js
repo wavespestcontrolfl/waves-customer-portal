@@ -2808,7 +2808,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           success: !failed,
           durationMs: Date.now() - toolStartedAt,
           circuitOpen,
-          errorMessage: toolTelemetrySensitive && errorMessage ? REDACTED_TOOL_HEALTH_ERROR : errorMessage,
+          // Only PII and outside-write tools lose their health-event error
+          // text — not every tool under GATE_IB_PLATFORM (which redacts
+          // logged INPUTS wholesale): tool-health triage keeps real errors.
+          errorMessage: (PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)) && errorMessage
+            ? REDACTED_TOOL_HEALTH_ERROR
+            : errorMessage,
         });
         gapCollector?.toolResult(toolUse.name, result, failed);
 
