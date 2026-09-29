@@ -778,6 +778,10 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     expect(p).toMatch(/never invent a Zelle phone\/email/i);
     expect(p).toMatch(/Did you get my payment.*Recent payments shows each payment's status/i);
     expect(p).toMatch(/Confirm receipt ONLY for a line marked paid/i);
+    // Independent-review P1 (round 2, PR #5331): confirming receipt always
+    // states the exact amount and date — never a bare "all set" ack.
+    expect(p).toMatch(/ALWAYS confirm it by stating the EXACT amount and date/i);
+    expect(p).toMatch(/never a bare "you're all set"\/"got it, thanks"\/"we got your payment" with no amount named/i);
     expect(p).toMatch(/A line marked processing means it's still processing/i);
     expect(p).toMatch(/A line marked failed or refunded means it did NOT go through/i);
     expect(p).toMatch(/NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid/i);
@@ -883,20 +887,26 @@ describe('pre-push audit P1: the amount-free receipt guard fires only on AFFIRMA
     expect(replyQuotesUngroundedAmount("Got your payment, you're all set!", ctx, { byMeaning: true })).toBe(true);
   });
 
-  test('an AFFIRMATIVE receipt claim WITH a settled payment on record passes', () => {
+  // Independent-review P1 (round 2, PR #5331): an amount-free affirmative
+  // claim is now ALWAYS rejected, even beside a genuinely settled payment —
+  // an old, unrelated paid row must never "confirm" a payment that's
+  // actually new, pending, or not on file at all. The model must name the
+  // specific payment (amount + date) to confirm receipt at all.
+  test('an AFFIRMATIVE receipt claim with NO amount fails closed even WITH a settled payment on record', () => {
     const ctx = ctxWith([{ amount: 50, status: 'paid' }]);
-    expect(replyQuotesUngroundedAmount("Got your payment, you're all set!", ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount("Got your payment, you're all set!", ctx, { byMeaning: true })).toBe(true);
   });
 
-  test('a mixed reply ("got March, not April") binds each clause on its own — documented, not a new guarantee', () => {
-    // Neither clause carries a dollar amount, so this stays on the
-    // whole-reply guard (no per-clause amount binding applies). The clause
-    // split on "but" keeps "not April's" from negating the "got...payment"
-    // clause, so the guard's verdict still turns on whether ANY settled
-    // payment exists on the account, not on which month it was for.
+  test('a mixed reply ("got March, not April") still rejects — neither clause names an amount', () => {
+    // Neither clause carries a dollar amount, so the "got...payment" clause
+    // is an affirmative claim binding to nothing specific and is rejected
+    // regardless of what is settled on the account. The clause split on
+    // "but" still keeps "not April's" from negating the "got...payment"
+    // clause (documented, not a new guarantee) — it just no longer matters,
+    // since an amount-free ack clause is always rejected now.
     const settled = ctxWith([{ amount: 50, status: 'paid' }]);
     const unsettled = ctxWith([{ amount: 50, status: 'pending' }]);
-    expect(replyQuotesUngroundedAmount("We got your March payment but not April's.", settled, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount("We got your March payment but not April's.", settled, { byMeaning: true })).toBe(true);
     expect(replyQuotesUngroundedAmount("We got your March payment but not April's.", unsettled, { byMeaning: true })).toBe(true);
   });
 
@@ -918,6 +928,42 @@ describe('pre-push audit P1: the amount-free receipt guard fires only on AFFIRMA
       { billing: { outstandingBalance: 95, recentPayments: [] } },
       { byMeaning: true },
     )).toBe(false);
+  });
+});
+
+describe('independent-review P1 (round 2, PR #5331): an affirmative receipt claim must be bound to the specific payment', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const ctxWith = (payments) => ({ billing: { outstandingBalance: 0, recentPayments: payments } });
+
+  test('an OLD paid row plus an amount-free "got your payment" is rejected — never over-offers a confirmation the amount cannot back', () => {
+    const ctx = ctxWith([{ amount: 300, status: 'paid', payment_date: '2026-01-05', payment_method_type: 'card' }]);
+    expect(replyQuotesUngroundedAmount("We got your payment, you're all set!", ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('the amount-bound correct row passes, with or without a stated tender', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 payment from Sep 12.', ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 card payment from Sep 12.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a mismatched tender is rejected even though the amount is genuinely paid', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 Zelle payment from Sep 12.', ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('a matching tender passes', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-1 — zelle (Sep 12)' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 Zelle payment from Sep 12.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a stated tender the paid row cannot verify (no "via ..." tag) is rejected — never guess the method', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120.00 Zelle payment from Sep 12.', ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('negation still passes with no amount named', () => {
+    const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }]);
+    expect(replyQuotesUngroundedAmount("We haven't received your payment yet.", ctx, { byMeaning: true })).toBe(false);
   });
 });
 
@@ -1155,5 +1201,56 @@ describe('auto-send fallback publication', () => {
       if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
       else process.env.SHADOW_FEWSHOT = priorFewshot;
     }
+  });
+});
+
+describe('fetchZelleEligibility — independent-review P1 (round 2, PR #5331): a committed-but-unapplied estimate-deposit receipt blocks Zelle at DRAFT time too', () => {
+  function freshDrafter({ invoiceRow, depositError, isZelleTransferEligible }) {
+    jest.resetModules();
+    jest.doMock('../models/db', () => {
+      const dbFn = jest.fn(() => ({ where: () => ({ first: async () => invoiceRow }) }));
+      return dbFn;
+    });
+    jest.doMock('../services/estimate-deposits', () => ({
+      assertInvoiceDepositSettlementReady: jest.fn(async () => {
+        if (depositError) throw depositError;
+      }),
+    }));
+    jest.doMock('../routes/pay-v2', () => ({
+      isZelleTransferEligible: jest.fn(async () => isZelleTransferEligible),
+    }));
+    return require('../services/sms-shadow-drafter');
+  }
+
+  afterEach(() => {
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/estimate-deposits');
+    jest.dontMock('../routes/pay-v2');
+    jest.resetModules();
+  });
+
+  test('no customerId / openInvoiceId → false without a lookup', async () => {
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1' }, isZelleTransferEligible: true });
+    expect(await drafter.fetchZelleEligibility({ customerId: null, openInvoiceId: 'inv-1' })).toBe(false);
+    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: null })).toBe(false);
+  });
+
+  test('a pending deposit-settlement receipt blocks Zelle even when isZelleTransferEligible would say yes', async () => {
+    const depositError = Object.assign(new Error('A received deposit is awaiting invoice reconciliation'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' });
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError, isZelleTransferEligible: true });
+    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
+    const { isZelleTransferEligible } = require('../routes/pay-v2');
+    // Fails closed BEFORE reaching pay-v2's own predicate.
+    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+  });
+
+  test('deposit settlement ready and isZelleTransferEligible true → eligible', async () => {
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, isZelleTransferEligible: true });
+    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(true);
+  });
+
+  test('an unexpected deposit-settlement read error fails closed too (never a throw)', async () => {
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError: new Error('db down'), isZelleTransferEligible: true });
+    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
   });
 });

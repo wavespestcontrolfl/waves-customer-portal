@@ -308,6 +308,18 @@ async function invoiceCreditWouldFullyCover(invoice) {
 // saved-card charge in flight or awaiting reconciliation (codex r5 P1),
 // and no attached PaymentIntent Stripe has already moved to
 // succeeded/processing (codex r6 P1, inspect-only via prepaid-pi-guard).
+//
+// NOTE (independent-review P1 round 2, PR #5331): this predicate does NOT
+// check estimate-deposit settlement readiness itself — GET /:token already
+// refuses the whole page for a pending receipt via withInvoiceDepositSettlement
+// before it ever reaches this predicate, so re-checking here would only
+// duplicate work on every call and risk a second, unmocked DB read for every
+// caller of this shared predicate (pay-v2's own tests mock estimate-deposits
+// narrowly). The two ASYNC callers that do NOT run inside that fence —
+// fetchZelleEligibility (sms-shadow-drafter.js) and zelleInvoiceStillEligible
+// (sms-amount-recheck.js) — run the SAME assertInvoiceDepositSettlementReady
+// check themselves, alongside this predicate, so pay-v2's own route behavior
+// stays byte-identical while both other callers gain the missing condition.
 // `creditWillCoverAnchor`, `hasPreviousBalance`, and `saveRequired` are
 // accepted as overrides so THIS route reuses its own already-computed
 // values instead of re-querying; an omitted one is derived fresh so a

@@ -17,10 +17,12 @@ jest.mock('../services/sms-shadow-drafter', () => ({
 jest.mock('../services/sms-followup-sla', () => ({ realAnswersGateOn: jest.fn(() => false) }));
 jest.mock('../services/sms-suggest-mode', () => ({ hasPriceQuote: jest.fn((t) => /\b(?:fifty|forty|twenty|hundred)\s+dollars\b|\d+\s?\/\s?mo\b|\$\s?\d/i.test(String(t || ''))) }));
 jest.mock('../routes/pay-v2', () => ({ isZelleTransferEligible: jest.fn() }));
+jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
 const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
 const { realAnswersGateOn } = require('../services/sms-followup-sla');
 const ContextAggregator = require('../services/context-aggregator');
 const { isZelleTransferEligible } = require('../routes/pay-v2');
+const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
 const { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible } = require('../services/sms-amount-recheck');
 
 function dbWithCustomer(row) {
@@ -48,6 +50,7 @@ beforeEach(() => {
   replyQuotesUngroundedAmount.mockReset().mockReturnValue(false);
   realAnswersGateOn.mockReset().mockReturnValue(false);
   isZelleTransferEligible.mockReset();
+  assertInvoiceDepositSettlementReady.mockReset().mockImplementation(async () => {});
 });
 
 test('gate ON: the drafter\'s clause-aware guard is the stricter authority (a reversed payment no longer backs an acknowledgement)', async () => {
@@ -204,6 +207,29 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
 
   test('a lookup error fails closed rather than throwing', async () => {
     await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: new Error('db down') }) }))
+      .resolves.toEqual({ eligible: false, reason: 'zelle_recheck_failed' });
+  });
+
+  // Independent-review P1 (round 2, PR #5331): a receipt can commit (and its
+  // credit stay unapplied) between the draft's own fetchZelleEligibility
+  // read and this send-time recheck — GET /:token refuses the whole pay
+  // page for that case, and this recheck must too, before ever asking
+  // pay-v2's own isZelleTransferEligible predicate.
+  test('a pending deposit-settlement receipt blocks the send even when isZelleTransferEligible would say yes', async () => {
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
+    assertInvoiceDepositSettlementReady.mockRejectedValueOnce(
+      Object.assign(new Error('A received deposit is awaiting invoice reconciliation'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' }),
+    );
+    isZelleTransferEligible.mockResolvedValue(true);
+    await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }) }))
+      .resolves.toEqual({ eligible: false, reason: 'zelle_invoice_ineligible' });
+    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+  });
+
+  test('an unexpected deposit-settlement read error fails closed too (never a throw)', async () => {
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
+    assertInvoiceDepositSettlementReady.mockRejectedValueOnce(new Error('db down'));
+    await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }) }))
       .resolves.toEqual({ eligible: false, reason: 'zelle_recheck_failed' });
   });
 

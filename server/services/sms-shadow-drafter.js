@@ -394,14 +394,19 @@ async function fetchReserviceLanes({ customerId } = {}) {
 // annual_prepay, a recurring signup's first invoice; owner ruling
 // 2026-09-28: new customers pay at visit, card on file only), a credit that
 // will fully cover it, a combined previous balance, a pending saved-card
-// reconciliation, or an already succeeded/processing PaymentIntent. Reuses
-// pay-v2.js's OWN predicate (isZelleTransferEligible) — never a re-derived
-// copy — so this fact and the pay page can never disagree. Resolved
-// upstream of buildFactsBlock (which stays SYNC on purpose — see its own
-// comment) exactly like OPEN TIMES / re-service lanes. Fails CLOSED: no
-// open invoice, a DB error, or a timeout all resolve to "not eligible" —
-// under-offering Zelle is the safe direction, never over-offering it past
-// what the pay page would actually show.
+// reconciliation, an already succeeded/processing PaymentIntent, or a
+// committed estimate-deposit receipt whose credit isn't posted yet (round 2:
+// GET /:token itself refuses the whole page for that case via
+// withInvoiceDepositSettlement — a check pay-v2.js's own isZelleTransferEligible
+// predicate does NOT run, since every one of ITS callers besides this one
+// already sits inside that same fence; run explicitly here since this path
+// does not). Reuses pay-v2.js's OWN predicate (isZelleTransferEligible) —
+// never a re-derived copy — so this fact and the pay page can never
+// disagree. Resolved upstream of buildFactsBlock (which stays SYNC on
+// purpose — see its own comment) exactly like OPEN TIMES / re-service
+// lanes. Fails CLOSED: no open invoice, a DB error, or a timeout all
+// resolve to "not eligible" — under-offering Zelle is the safe direction,
+// never over-offering it past what the pay page would actually show.
 async function fetchZelleEligibility({ customerId, openInvoiceId } = {}) {
   if (!customerId || !openInvoiceId) return false;
   let timer = null;
@@ -412,6 +417,12 @@ async function fetchZelleEligibility({ customerId, openInvoiceId } = {}) {
     const work = (async () => {
       const row = await db('invoices').where({ id: openInvoiceId, customer_id: customerId }).first();
       if (!row) return false;
+      try {
+        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, row, { lock: false });
+      } catch (err) {
+        if (err.code !== 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
+        return false;
+      }
       const { isZelleTransferEligible } = require('../routes/pay-v2');
       return Boolean(await isZelleTransferEligible(row));
     })();
@@ -1063,6 +1074,36 @@ function billingAmountCents(context, { settledOnly = false } = {}) {
   };
 }
 
+// Independent-review P1 (round 2, PR #5331): the tender a REPLY claims
+// ("I Zelled you", "paid by check"), canonicalized to the SAME labels
+// paymentTenderLabel (below) derives from a payment row's own columns, so
+// the two can only ever agree or disagree — never fuzzy-matched. Bare
+// "bank"/"ACH"/"bank transfer"/"bank account" all read as paymentTenderLabel's
+// 'bank/ACH'. null when the clause names no tender at all.
+const REPLY_TENDER_RE = /\b(zelle|card|check|cash|ach|bank transfer|bank account)\b/i;
+function replyClaimedTender(clauseText) {
+  const m = REPLY_TENDER_RE.exec(String(clauseText || ''));
+  if (!m) return null;
+  const word = m[1].toLowerCase();
+  if (word === 'zelle') return 'Zelle';
+  if (word === 'card') return 'card';
+  if (word === 'check') return 'Check';
+  if (word === 'cash') return 'Cash';
+  return 'bank/ACH';
+}
+
+// The SETTLED ('paid') Recent payments rows backing one specific amount —
+// never the pooled owed/paid cents Sets billingAmountCents returns, which
+// throw away which ROW an amount came from and so cannot back a tender
+// check (an old paid card row and a brand-new paid Zelle row at the same
+// amount must not be interchangeable).
+function paidRowsForCents(context, cents) {
+  return (context?.billing?.recentPayments || []).filter((p) => (
+    p && String(p?.status || '').toLowerCase() === 'paid'
+      && Number.isFinite(Number(p?.amount)) && Math.round(Number(p.amount) * 100) === cents
+  ));
+}
+
 // `opts.byMeaning` pins the strict clause/status-aware rule regardless of
 // the live gate (Codex #5194 r2 P1): a v12 review card that outlives a gate
 // rollback is still a v12 draft and is rechecked as one.
@@ -1093,20 +1134,6 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     return replyAmounts.some((a) => !owedCents.has(a) && !paidCents.has(a));
   }
 
-  // Independent-review P2: a payment-confirmation reply with NO dollar
-  // figure at all ("Yes! We got your payment, you're all set.") skips the
-  // per-clause loop below entirely (no amount → `continue`, never checked)
-  // and would otherwise pass even against a failed/processing/refunded-only
-  // history. Cheap whole-reply guard: confirming language with zero SETTLED
-  // ('paid') payments on record is ungrounded — status-aware per
-  // context-aggregator.js (payments.status: upcoming/processing/paid/
-  // failed/refunded; only 'paid' ever backs "received").
-  if (replyAmounts.length === 0 && hasAffirmativePaymentAck(text.replace(AMOUNT_MASK_RE, ' AMT '))) {
-    const hasSettledPayment = (context?.billing?.recentPayments || [])
-      .some((p) => String(p?.status || '').toLowerCase() === 'paid');
-    if (!hasSettledPayment) return true;
-  }
-
   // Gate ON: each amount is authorized by the MEANING of its own clause
   // (Codex r5/r6). An owed figure backs a statement about what is owed; a
   // payment figure backs a payment acknowledgement. Judging the language
@@ -1115,6 +1142,20 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // as both, or as neither, cannot be bound and fails closed. The language
   // tests run on the clause with its amounts masked — the ack grammar stops
   // at a period, and "$95.50" must not end it.
+  //
+  // Independent-review P1 (round 2, PR #5331): an affirmative receipt claim
+  // must NAME the specific payment, structurally — never accepted on
+  // language alone. An ack clause with NO amount in it is always rejected
+  // (below, replacing the old whole-reply "any settled row on file passes
+  // it" special case, which let an old, unrelated paid row "confirm" a
+  // payment that's actually new, pending, or not on file at all): the model
+  // has to say "we received your $120.00 payment from Sep 12", never a bare
+  // "you're all set"/"we got your payment". An amount IN the clause is what
+  // lets the allowed-cents check below prove it's a genuine PAID row. And
+  // when the clause also names a tender ("I Zelled you", "paid by check"),
+  // the paid row bound to that clause's amount must carry that SAME "via
+  // <tender>" tag — otherwise an old card payment could "confirm" a Zelle
+  // the customer is still waiting on, or vice versa.
   const clauses = text.split(CLAUSE_SPLIT_RE);
   for (const clause of clauses) {
     const text = String(clause || '');
@@ -1125,12 +1166,25 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     // r4 P1) or the same one (r8 P1: "$95 plus a fee of fifty dollars").
     if (suggestMode.hasPriceQuote(masked)) return true;
     const amounts = amountsIn(text);
-    if (!amounts.length) continue;
+    if (!amounts.length) {
+      // An affirmative payment-received claim with no amount in THIS clause
+      // names no specific payment — reject, not converged (see comment
+      // above). hasAffirmativePaymentAck already excludes a negated clause
+      // ("we haven't received your payment yet"), so a truthful denial still
+      // passes through untouched.
+      if (hasAffirmativePaymentAck(masked)) return true;
+      continue;
+    }
     const owed = AMOUNT_OWED_RE.test(masked);
     const ack = PAYMENT_ACK_RE.test(masked);
     if (owed === ack) return true;
     const allowed = owed ? owedCents : paidCents;
     if (amounts.some((a) => !allowed.has(a))) return true;
+    if (ack) {
+      const claimedTender = replyClaimedTender(text);
+      if (claimedTender && !amounts.every((a) => paidRowsForCents(context, a)
+        .some((p) => paymentTenderLabel(p) === claimedTender))) return true;
+    }
   }
   return false;
 }
@@ -1265,7 +1319,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const paymentMoneyExtra = realAnswersOn
     ? `
 - Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
-- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid — say exactly what that line shows. A line marked processing means it's still processing, not received yet — say so. A line marked failed or refunded means it did NOT go through — never say it was received. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
+- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid, and ALWAYS confirm it by stating the EXACT amount and date that line shows ("we received your $120.00 payment from Sep 12") — never a bare "you're all set"/"got it, thanks"/"we got your payment" with no amount named, even when a payment is genuinely on file; if you can't state the amount and date, say it isn't showing yet and you'll confirm. A line marked processing means it's still processing, not received yet — say so. A line marked failed or refunded means it did NOT go through — never say it was received. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
     : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
@@ -2735,6 +2789,7 @@ module.exports = {
   replyPromisesFollowup: followupSla.replyPromisesFollowup,
   slaPhraseStatus: followupSla.slaPhraseStatus,
   replyQuotesUngroundedAmount,
+  fetchZelleEligibility,
   billingAmountCents,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,

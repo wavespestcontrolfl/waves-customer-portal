@@ -83,12 +83,27 @@ function outgoingZelleStale(body) {
  * no zelleInvoiceId (a body a human typed Zelle into by hand carries no
  * snapshot), an invoice that no longer resolves to this customer, or any
  * lookup error are all treated as ineligible.
+ *
+ * Independent-review P1 (round 2, PR #5331): also re-checks estimate-deposit
+ * settlement readiness — a receipt can commit (and its credit stay
+ * unposted) between the draft's own fetchZelleEligibility read and this
+ * send-time recheck, exactly like every other condition here. GET /:token
+ * refuses the whole pay page for this case via withInvoiceDepositSettlement,
+ * a fence pay-v2.js's own isZelleTransferEligible predicate does not run
+ * itself (every other caller of it already sits inside that fence) — so
+ * this path, like fetchZelleEligibility's, runs it explicitly alongside.
  */
 async function zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh = db } = {}) {
   if (!customerId || !zelleInvoiceId) return { eligible: false, reason: 'zelle_invoice_unresolved' };
   try {
     const invoiceRow = await dbh('invoices').where({ id: zelleInvoiceId, customer_id: customerId }).first();
     if (!invoiceRow) return { eligible: false, reason: 'zelle_invoice_unresolved' };
+    try {
+      await require('./estimate-deposits').assertInvoiceDepositSettlementReady(dbh, invoiceRow, { lock: false });
+    } catch (err) {
+      if (err.code !== 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
+      return { eligible: false, reason: 'zelle_invoice_ineligible' };
+    }
     const { isZelleTransferEligible } = require('../routes/pay-v2');
     const eligible = Boolean(await isZelleTransferEligible(invoiceRow));
     return eligible ? { eligible: true } : { eligible: false, reason: 'zelle_invoice_ineligible' };
