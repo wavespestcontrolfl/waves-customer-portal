@@ -475,6 +475,21 @@ async function createVisitPrepSubmission({
   // their already-uploaded objects are cleaned up regardless of outcome.
   await Promise.all(result.dropped.map((u) => deleteUploadedObject(u.s3Key)));
 
+  // Tech card + push (PR 6, scope doc §5.4 item 4) — post-commit,
+  // fire-and-forget, never awaited: the module owns its own gate and
+  // swallows every error itself, so this can never block or fail the
+  // customer's request. Only for a submission that stored something new
+  // (never a duplicate-only resubmit).
+  if (result.created) {
+    try {
+      require('./visit-prep-tech-alert').notifyTechVisitPrepPhotos({
+        scheduledServiceId: result.current.id,
+      }).catch((err) => logger.error(`[visit-prep] tech alert failed for ${result.current.id}: ${err.message}`));
+    } catch (err) {
+      logger.error(`[visit-prep] tech alert could not start for ${result.current.id}: ${err.message}`);
+    }
+  }
+
   return { created: result.created, stored: result.stored, summary: result.summary, svc: result.current };
 }
 
