@@ -16,6 +16,8 @@
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 const DEFAULT_DAILY_CAP = 40;
+// The statuses no read engine holds.
+const UNCLAIMED_STATUSES = ['none', 'unsupported'];
 const CAP_LOCK_KEY = 'visit-prep-pest-read-cap';
 
 function dailyCap() {
@@ -52,9 +54,12 @@ async function readsToday(conn, now = new Date()) {
  *   a falsy return means unsupported, anything else is handed back.
  * @param {object} opts.pendingPatch  the columns written with read_status 'pending'
  * @param {Date} [opts.now]
- * @returns {Promise<{ claimed: true, value: any } | 'unsupported' | 'refused'>}
+ * @param {string[]} [opts.expectStatus] statuses the claim may take the row from
+ * @returns {Promise<{ claimed: true, value: any } | 'unsupported' | 'refused' | 'taken'>}
  */
-async function claimReadSlot(conn, submissionId, svc, { applicable, pendingPatch, now = new Date() }) {
+async function claimReadSlot(conn, submissionId, svc, {
+  applicable, pendingPatch, now = new Date(), expectStatus = UNCLAIMED_STATUSES,
+}) {
   const { lockStopForRow } = require('./visit-groups');
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -69,7 +74,12 @@ async function claimReadSlot(conn, submissionId, svc, { applicable, pendingPatch
         const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
         if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
         if (await readsToday(trx, now) >= dailyCap()) return 'refused';
-        await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', ...pendingPatch });
+        // Claimed only from a status the caller expected (no engine holds the
+        // row): a row another engine already claimed is never taken twice
+        // (Codex #5320 r1 P2).
+        const updated = await trx('visit_prep_submissions').where({ id: submissionId })
+          .whereIn('read_status', expectStatus).update({ read_status: 'pending', ...pendingPatch });
+        if (!updated) return 'taken';
         return { claimed: true, value };
       });
     } catch (err) {
@@ -89,7 +99,7 @@ async function markUnclaimed(conn, submissionId, status, logger) {
   try {
     await conn('visit_prep_submissions')
       .where({ id: submissionId })
-      .whereIn('read_status', ['none', 'unsupported'])
+      .whereIn('read_status', UNCLAIMED_STATUSES)
       .update({ read_status: status });
   } catch (err) {
     logger?.error?.(`[visit-prep-read] failed to write read_status=${status} submission=${submissionId}: ${err.message}`);
@@ -98,4 +108,4 @@ async function markUnclaimed(conn, submissionId, status, logger) {
 
 const markUnsupported = (conn, submissionId, logger) => markUnclaimed(conn, submissionId, 'unsupported', logger);
 
-module.exports = { claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };
+module.exports = { UNCLAIMED_STATUSES, claimReadSlot, markUnclaimed, markUnsupported, dailyCap, etDayStart, readsToday, CAP_LOCK_KEY };

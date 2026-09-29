@@ -60,13 +60,17 @@ async function resolveApplicability(svc, conn) {
 async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
   const out = await claimSharedReadSlot(conn, submissionId, svc, {
     applicable: (stop, trx) => plantSubjectForStop(stop, trx),
-    pendingPatch: { read_result: null },
+    // read_result carries the engine marker from the claim on, so the tech
+    // display can tell a plant read from a pest one (Codex #5320 r1 P2).
+    pendingPatch: { read_result: JSON.stringify(PLANT_MARKER) },
     now,
   });
   return out && out.claimed ? { claimed: true, subject: out.value } : out;
 }
 
-async function setReadStatus(conn, submissionId, status, readResult = null) {
+const PLANT_MARKER = Object.freeze({ engine: 'plant' });
+
+async function setReadStatus(conn, submissionId, status, readResult = JSON.stringify(PLANT_MARKER)) {
   try {
     await conn('visit_prep_submissions').where({ id: submissionId }).update({
       read_status: status,
@@ -131,6 +135,7 @@ async function triggerVisitPrepPlantRead({
     await markUnclaimed(conn, submissionId, 'none', logger);
     return;
   }
+  if (claim === 'taken') return; // another read holds the row
   if (claim === 'unsupported') {
     await markUnsupported(conn, submissionId, logger);
     return;
@@ -164,7 +169,7 @@ async function triggerVisitPrepPlantRead({
   try {
     await conn('visit_prep_submissions').where({ id: submissionId }).update({
       read_status: 'done',
-      read_result: JSON.stringify({ v2: result.v2, internal: result.internal, subject_type: claim.subject }),
+      read_result: JSON.stringify({ ...PLANT_MARKER, v2: result.v2, internal: result.internal, subject_type: claim.subject }),
     });
   } catch (err) {
     logger.error(`[visit-prep-plant-read] storing the read failed submission=${submissionId}: ${err.message}`);

@@ -718,6 +718,24 @@ const asList = (value) => (Array.isArray(value) ? value : []);
 // ordinary dot access instead of a repeated chain of `?.`s (kept complexity
 // low; split out of plantReadFactsFromResult for the same reason
 // answerName() is split out of readFactsFromContract above).
+// Which engine made a claimed read: the plant read keeps an engine marker in
+// read_result from its claim on; a claimed row without one is the pest
+// read's. Unclaimed rows (none / unsupported) have no origin.
+function readOrigin(readStatus, plantResult) {
+  if (!['pending', 'done', 'failed'].includes(readStatus)) return null;
+  return plantResult && (plantResult.engine === 'plant' || plantResult.v2) ? 'plant' : 'pest';
+}
+
+// Every catalog safety line the read carries (the identified plant, each
+// named weed, each condition possibility), deduplicated, so a warning on
+// the plant is never dropped for one on the top condition (Codex #5320 r1).
+function plantSafetyLines(v2) {
+  const plant = (v2.subject && v2.subject.plant) || {};
+  const weeds = asList(v2.subject && v2.subject.weeds);
+  const lines = [plant.safety_line, ...weeds.map((w) => w && w.safety_line), ...asList(v2.possibilities).map((p) => p && p.safety_line)];
+  return [...new Set(lines.filter(Boolean))];
+}
+
 function plantTopFields(v2) {
   const top = (Array.isArray(v2.possibilities) && v2.possibilities[0]) || {};
   const plant = (v2.subject && v2.subject.plant) || {};
@@ -727,7 +745,7 @@ function plantTopFields(v2) {
     fits: asList(top.fits),
     notYet: asList(top.not_yet),
     plantCommonName: plant.common_name || null,
-    safetyLine: top.safety_line || plant.safety_line || null,
+    safetyLines: plantSafetyLines(v2),
     hazards: top.safety || plant.safety || null,
   };
 }
@@ -894,10 +912,18 @@ async function customerFlaggedFacts(svc, conn = db) {
     // both features off — shows 'unsupported' whenever at least one of the
     // two features is live at all, exactly as the pest-only read did before
     // this lane existed.
-    if (readsLive && stillPest) {
+    // A claimed read (pending/done/failed) is shown only by the engine that
+    // made it, and only while the stop still suits that engine; an
+    // unclaimed row follows the stop's current applicability (Codex #5320
+    // r1 P2).
+    const plantResult = s.read_result ? parseJsonMaybe(s.read_result) : null;
+    const origin = readOrigin(s.read_status, plantResult);
+    const showPest = readsLive && stillPest && origin !== 'plant';
+    const showPlant = plantReadsLive && plantSubject && origin !== 'pest';
+    if (showPest) {
       entry.read = readFactsFromContract(status, s.read_ref ? contractsByRef.get(s.read_ref) : null);
-    } else if (plantReadsLive && plantSubject) {
-      entry.read = plantReadFactsFromResult(status, s.read_result ? parseJsonMaybe(s.read_result) : null);
+    } else if (showPlant) {
+      entry.read = plantReadFactsFromResult(status, plantResult);
     } else if (readsLive || plantReadsLive) {
       entry.read = { status: 'unsupported' };
     }

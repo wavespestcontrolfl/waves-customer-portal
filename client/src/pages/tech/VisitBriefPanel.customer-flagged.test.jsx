@@ -169,7 +169,7 @@ describe('VisitBriefPanel — Customer flagged section', () => {
         status: 'done', kind: 'plant', wordingTier: 'likely', headline: 'Likely: Brown Patch',
         plantCommonName: 'St. Augustinegrass', conditionName: 'Brown Patch',
         fits: ['Roughly circular brown patch'], notYet: ['A smoke-ring edge'],
-        nextStepText: 'A technician checks this on your next visit.', referralKind: null, safetyLine: null,
+        nextStepText: 'A technician checks this on your next visit.', referralKind: null, safetyLines: [],
       },
     }] });
     expect(screen.getByText(

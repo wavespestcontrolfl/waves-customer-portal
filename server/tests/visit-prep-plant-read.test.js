@@ -52,7 +52,7 @@ function fakeConn(tables = {}) {
     pest_identifications: [], scheduled_services: [], visit_prep_submissions: [], ...tables,
   };
   if (!store.visit_prep_submissions.some((r) => r.id === 'sub-1')) {
-    store.visit_prep_submissions = [...store.visit_prep_submissions, { id: 'sub-1', created_at: new Date() }];
+    store.visit_prep_submissions = [...store.visit_prep_submissions, { id: 'sub-1', created_at: new Date(), read_status: 'none' }];
   }
   const writes = [];
   let nextId = 1;
@@ -88,12 +88,13 @@ function fakeConn(tables = {}) {
       },
     });
     q.update = async (patch) => {
+      let matched = 0;
       writes.push({ table, where: { ...q._where }, patch });
       for (const row of (store[table] || [])) {
         if (q._whereIn && !q._whereIn.vals.includes(row[q._whereIn.col])) continue;
-        if (Object.entries(q._where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
+        if (Object.entries(q._where).every(([k, v]) => row[k] === v)) { Object.assign(row, patch); matched += 1; }
       }
-      return 1;
+      return matched;
     };
     return q;
   };
@@ -344,7 +345,8 @@ describe('a successful read', () => {
     });
     expect(mockGetPhotoBase64).toHaveBeenCalledWith('visitprep/a.jpg');
     const writes = readStatusWrites(conn, 'sub-1');
-    expect(writes[0]).toEqual({ read_status: 'pending', read_result: null });
+    // The claim stamps the engine marker so the display knows who owns it.
+    expect(writes[0]).toEqual({ read_status: 'pending', read_result: JSON.stringify({ engine: 'plant' }) });
     expect(writes[1].read_status).toBe('done');
     const stored = JSON.parse(writes[1].read_result);
     expect(stored.subject_type).toBe('lawn');
@@ -366,9 +368,22 @@ describe('_internal.resolveApplicability', () => {
 
 describe('claim day', () => {
   test('a submission from before today\'s ET midnight never claims a slot (photos still delivered)', async () => {
-    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000) }] });
+    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000), read_status: 'none' }] });
     await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
     expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
+  });
+});
+
+describe('one engine per row (Codex #5320 r1)', () => {
+  test('a row the pest read already claimed is never claimed again (no plant engine call)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', service_type: 'Weekly Lawn Care', status: 'confirmed', visit_id: null }],
+      visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(), read_status: 'pending' }],
+    });
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    await triggerVisitPrepPlantRead({ submissionId: 'sub-1', svc: { id: 'svc-1', customer_id: 'cust-1', service_type: 'Weekly Lawn Care', visit_id: null }, photos: PHOTOS, conn });
+    expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
+    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('pending');
   });
 });

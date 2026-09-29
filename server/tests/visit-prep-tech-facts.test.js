@@ -619,7 +619,7 @@ describe('plantReadFactsFromResult', () => {
       notYet: ['A smoke-ring edge'],
       nextStepText: 'A technician checks this on your next visit.',
       referralKind: null,
-      safetyLine: null,
+      safetyLines: [],
       hazards: null,
     });
   });
@@ -703,11 +703,23 @@ describe('customerFlaggedFacts — plant read integration (GATE_VISIT_PREP_PLANT
     expect(facts[0].read).toEqual({ status: 'unsupported' });
   });
 
-  test('a PENDING plant read on a currently-lawn stop shows pending', async () => {
+  test('a PENDING PEST read on a stop reclassified to lawn is not shown as a plant read (unsupported)', async () => {
     const conn = fakeConn({
       scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
       visit_prep_submissions: [
         { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_result: null },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a PENDING plant read on a currently-lawn stop shows pending', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_result: JSON.stringify({ engine: 'plant' }) },
       ],
       visit_prep_photos: [],
     });
@@ -726,5 +738,20 @@ describe('customerFlaggedFacts — plant read integration (GATE_VISIT_PREP_PLANT
     });
     const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
     expect(facts[0]).not.toHaveProperty('read');
+  });
+});
+
+describe('plant read safety lines (Codex #5320 r1)', () => {
+  const { plantReadFactsFromResult } = visitPrep._internal;
+  test('every catalog safety line (plant, weeds, every possibility) is kept, deduplicated', () => {
+    const read = plantReadFactsFromResult('done', {
+      engine: 'plant',
+      v2: {
+        answer: { wording: 'likely', level: 'entry', headline: 'Likely: Citrus canker' },
+        subject: { plant: { common_name: 'Citrus', safety_line: 'Citrus leaves can upset pets.' }, weeds: [{ safety_line: 'Spotted spurge sap irritates skin.' }] },
+        possibilities: [{ common_name: 'Citrus canker', safety_line: null }, { safety_line: 'Spotted spurge sap irritates skin.' }],
+      },
+    });
+    expect(read.safetyLines).toEqual(['Citrus leaves can upset pets.', 'Spotted spurge sap irritates skin.']);
   });
 });

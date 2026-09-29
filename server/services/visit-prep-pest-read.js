@@ -63,7 +63,7 @@ async function resolveApplicability(svc, conn) {
 async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
   const out = await claimSharedReadSlot(conn, submissionId, svc, {
     applicable: (stop, trx) => isPestStop(stop, trx),
-    pendingPatch: { read_ref: null },
+    pendingPatch: { read_ref: null, read_result: null },
     now,
   });
   return out && out.claimed ? 'claimed' : out;
@@ -169,6 +169,7 @@ async function triggerVisitPrepPestRead({
     await markUnclaimed(conn, submissionId, 'none', logger);
     return;
   }
+  if (claimed === 'taken') return; // another read holds the row
   if (claimed === 'unsupported') {
     await markUnsupported(conn, submissionId, logger);
     return;

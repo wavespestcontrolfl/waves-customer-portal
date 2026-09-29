@@ -60,7 +60,7 @@ function fakeConn(tables = {}) {
   // The submission under test exists and was sent today (claimReadSlot
   // only lets a same-ET-day submission claim).
   if (!store.visit_prep_submissions.some((r) => r.id === 'sub-1')) {
-    store.visit_prep_submissions = [...store.visit_prep_submissions, { id: 'sub-1', created_at: new Date() }];
+    store.visit_prep_submissions = [...store.visit_prep_submissions, { id: 'sub-1', created_at: new Date(), read_status: 'none' }];
   }
   const writes = [];
   let nextId = 1;
@@ -99,12 +99,13 @@ function fakeConn(tables = {}) {
       },
     });
     q.update = async (patch) => {
+      let matched = 0;
       writes.push({ table, where: { ...q._where }, patch });
       for (const row of (store[table] || [])) {
         if (q._whereIn && !q._whereIn.vals.includes(row[q._whereIn.col])) continue;
-        if (Object.entries(q._where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
+        if (Object.entries(q._where).every(([k, v]) => row[k] === v)) { Object.assign(row, patch); matched += 1; }
       }
-      return 1;
+      return matched;
     };
     return q;
   };
@@ -492,7 +493,7 @@ describe('a successful read', () => {
     expect(stored.mode).toBe('internal');
     expect(stored.customer_id).toBe('cust-1');
     const writes = readStatusWrites(conn, 'sub-1');
-    expect(writes[0]).toEqual({ read_status: 'pending', read_ref: null });
+    expect(writes[0]).toEqual({ read_status: 'pending', read_ref: null, read_result: null });
     expect(writes[1].read_status).toBe('done');
     expect(writes[1].read_ref).toBe(stored.id);
   });
@@ -533,7 +534,7 @@ describe('unsupported never clobbers the other engine', () => {
 
 describe('claim day', () => {
   test('a submission from before today\'s ET midnight never claims a slot (photos still delivered)', async () => {
-    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000) }] });
+    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000), read_status: 'none' }] });
     await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none' }]);
