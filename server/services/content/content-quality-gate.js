@@ -683,7 +683,12 @@ function checkLocalBusinessServiceSchema(draft) {
 function boxPropInfo(tag, name) {
   const { eachJsxAttr } = require('./content-guardrails')._internals;
   const attrs = String(tag).replace(/^<BottomLineBox\b/, '').replace(/\/?>\s*$/, '');
-  const attr = eachJsxAttr(attrs).find((a) => a.name === name);
+  // A repeated prop renders its LAST value; rather than guess, a box that
+  // repeats verdict/recommendation is opaque and fails closed (Codex r9 on
+  // #5272).
+  const matches = eachJsxAttr(attrs).filter((a) => a.name === name);
+  if (matches.length > 1) return { text: '', opaque: true };
+  const [attr] = matches;
   if (!attr) return { text: '', opaque: false };
   let text = '';
   if (attr.literal !== null && attr.literal !== undefined) text = require('entities').decodeHTML(String(attr.literal));
@@ -722,11 +727,11 @@ function staticExpressionString(expr) {
 function leadingVerdictBox(body) {
   const trimmed = String(body || '').replace(/^\s+/, '');
   if (!/^<BottomLineBox\b/.test(trimmed)) return null;
-  const tag = trimmed.match(BOTTOM_LINE_BOX_TAG_RE);
+  const tag = findBottomLineBoxTag(trimmed);
   if (!tag || tag.index !== 0) return null;
   return {
-    verdict: boxProp(tag[0], 'verdict').trim(),
-    recommendation: boxProp(tag[0], 'recommendation').trim(),
+    verdict: boxProp(tag.text, 'verdict').trim(),
+    recommendation: boxProp(tag.text, 'recommendation').trim(),
   };
 }
 
@@ -1374,25 +1379,51 @@ const DANGER_TERMS_RE = /\b(dangerous|danger|harmless|safe|unsafe|venom\w*|sting
 // without that having held.
 const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
 const BOX_PHONE_RE = /\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/;
-const BOTTOM_LINE_BOX_TAG_RE = /<BottomLineBox\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/;
+// The first <BottomLineBox …> tag, located the way MDX reads it: quoted
+// attribute values skip to their closing quote, and a {…} expression skips
+// to its balanced close through the guardrails' expression walker
+// (strings, escapes, comments) — an escaped quote inside {"Don\"t…"} does
+// not end the tag early (Codex r9 on #5272; the older quote-aware regex,
+// Codex r10 on #5216, could not see escapes). { index, text } or null.
+function findBottomLineBoxTag(body) {
+  const s = String(body || '');
+  const start = s.search(/<BottomLineBox\b/);
+  if (start < 0) return null;
+  const { closeOfExpressionAt } = require('./content-guardrails')._internals;
+  for (let j = start + '<BottomLineBox'.length; j < s.length; j += 1) {
+    const c = s[j];
+    if (c === '{') {
+      const end = closeOfExpressionAt(s, j);
+      if (end < 0) return null;
+      j = end;
+    } else if (c === '"' || c === "'") {
+      const end = s.indexOf(c, j + 1);
+      if (end < 0) return null;
+      j = end;
+    } else if (c === '>') {
+      return { index: start, text: s.slice(start, j + 1) };
+    }
+  }
+  return null;
+}
 function checkCtaAfterVerdictBox(draft, brief, context) {
   if (!isIdentificationOrQuestionDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_or_question' };
   const body = String(draft.body || '');
   // Codex P1 (r10): quote-aware — a naive `[^>]*` stopped at the first
   // literal `>` INSIDE a prop value ("more than > 1/4 inch"), truncating the
   // tag so a link later in the same prop escaped both checks below.
-  const boxMatch = body.match(BOTTOM_LINE_BOX_TAG_RE);
-  if (!boxMatch) return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
-  const boxStart = boxMatch.index;
+  const box = findBottomLineBoxTag(body);
+  if (!box) return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
+  const boxStart = box.index;
   ANY_MD_LINK_RE.lastIndex = 0;
-  if (ANY_MD_LINK_RE.test(boxMatch[0])) return { ok: false, reason: 'link_inside_verdict_box' };
+  if (ANY_MD_LINK_RE.test(box.text)) return { ok: false, reason: 'link_inside_verdict_box' };
   // The box's props render as the reader's first answer — a sales pitch in
   // plain text ("Get a free estimate now", "Call today", a phone number)
   // is a pitch before the answer just like a link (Codex r8 on #5216).
   // Same sales-copy detectors the blog meta gate uses; "call a licensed
   // pro" style advice is not sales copy.
-  const verdictProp = boxPropInfo(boxMatch[0], 'verdict');
-  const recommendationProp = boxPropInfo(boxMatch[0], 'recommendation');
+  const verdictProp = boxPropInfo(box.text, 'verdict');
+  const recommendationProp = boxPropInfo(box.text, 'recommendation');
   if (verdictProp.opaque || recommendationProp.opaque) return { ok: false, reason: 'verdict_box_prop_not_static' };
   const boxText = `${verdictProp.text} ${recommendationProp.text}`;
   if (SALESY_META_RE.test(boxText) || metaHasSalesCopy(boxText) || PHONE_TOKEN_RE.test(boxText) || CITY_PHONE_TOKEN_RE.test(boxText) || BOX_PHONE_RE.test(boxText) || BARE_PHONE_DIGITS_RE.test(boxText)) {
@@ -1463,7 +1494,7 @@ function validateLibraryPhoto(photo, alt, url, renderedBody, line, { viewLines =
 // form, never folded into 'markdown'. An MDX component is not an image
 // source today — SAFE_MDX_COMPONENTS carries none with an image-shaped prop;
 // add an entry here if one is ever added.
-const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware (see BOTTOM_LINE_BOX_TAG_RE)
+const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware
 const { htmlAttrValue: attrValue, isIdentificationPost, photoAttributionLine, libraryPhotoBySrc } = require('./licensed-photo-library');
 // alt is trimmed in every form.
 function collectBodyImageOccurrences(body, { mdx = true } = {}) {

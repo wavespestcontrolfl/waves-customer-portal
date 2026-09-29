@@ -133,3 +133,11 @@ test('a related link whose definition starts in a blockquote is rechecked', asyn
   expect(res.ok).toBe(false);
 });
 
+// Codex r9 on #5272 ("Ignore unused reference definitions during liveness checks").
+test('an unused reference definition is not a rendered link', async () => {
+  const file = '---\ntitle: T\nslug: /pest-control/t/\ndomains: ["wavespestcontrol.com"]\n---\n\nBody with no link.\n\n[fire]: /pest-control/fire-ants/\n';
+  const res = await relatedPostsLivenessVerdict(file, { paths: ['/pest-control/fire-ants/'] });
+  expect(res).toEqual({ ok: true });
+  expect(relatedPosts.getLiveRelatedPaths).not.toHaveBeenCalled();
+});
+

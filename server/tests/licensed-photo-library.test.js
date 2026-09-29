@@ -191,12 +191,17 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
   // phrases"): and/or/from/not are ordinary connector words too, and
   // matching them unconditionally nulled everyday single-species
   // identification topics that happen to contain one.
-  test('a standalone connector word with no pest on both sides is not comparison-shaped', () => {
-    expect(matchSpecies('where do fire ants come from')).toBe('fire ant');
-    expect(matchSpecies('fire ant signs and identification')).toBe('fire ant');
-    // "not" is an unconditional exclusion marker again (Codex r8 on #5272):
-    // the slot goes to a human rather than risk an excluded species' photo.
+  // Codex r6–r9 on #5272: every narrowing of the connector words let a
+  // two-subject topic through, so and/or/from/not stay unconditional (as on
+  // main). The cost is fail-closed: these single-species topics get no
+  // automatic photo, and a human fills the slot.
+  test('a standalone connector word fails closed (no automatic photo)', () => {
+    expect(matchSpecies('where do fire ants come from')).toBeNull();
+    expect(matchSpecies('fire ant signs and identification')).toBeNull();
     expect(matchSpecies('is it a fire ant or not')).toBeNull();
+    expect(matchSpecies('fire ants and insects')).toBeNull();
+    expect(matchSpecies('fire ants or pests')).toBeNull();
+    expect(matchSpecies('fire ants and gnats')).toBeNull();
   });
 
   test('a connector naming a pest on BOTH sides still reads as a comparison', () => {
@@ -299,8 +304,8 @@ describe('connector comparisons use the catalog\'s organism names', () => {
   test.each([
     ['southern black widow or huntsman spider', null],
     ['huntsman spider and brown widows', null],
-    ['fire ant bites and mounds', 'fire ant'],
-    ['fire ant signs and identification', 'fire ant'],
+    ['fire ant bites and mounds', null],
+    ['fire ant signs and identification', null],
   ])('%s -> %s', (topic, expected) => {
     expect(matchSpecies(topic)).toBe(expected);
   });

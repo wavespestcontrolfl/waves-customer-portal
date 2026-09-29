@@ -5116,12 +5116,16 @@ function renderedInternalDestinations(body) {
   // ("> [fire]:") resolves as the publisher resolves it (Codex r6 on #5272).
   const { text: base, depths, inList } = blankNonRenderedMarkdownWithDepths(String(body || ''));
   const text = blankExpressionStringLiterals(base, { attrValues: false });
-  const dests = collectInternalDestinations(text).map((d) => d.dest);
+  // Definitions are metadata: an UNUSED "[fire]: /path/" renders nothing, so
+  // destinations are collected with definitions blanked, and a definition
+  // counts only through a reference that resolves to it (Codex r9 on #5272).
+  const rendered = blankReferenceDefinitions(text, { depths, inList });
+  const dests = collectInternalDestinations(rendered).map((d) => d.dest);
   const defs = markdownReferenceDefinitions(text, { depths, inList });
-  for (const span of eachMarkdownLink(text)) {
+  for (const span of eachMarkdownLink(rendered)) {
     if (span.isImage || span.kind === 'inline' || span.kind === 'malformed') continue;
-    const tail = span.kind === 'reference' ? text.slice(span.refStart, span.refEnd + 1) : '';
-    const label = normalizeReferenceLabel(tail || text.slice(span.labelStart + 1, span.labelEnd));
+    const tail = span.kind === 'reference' ? rendered.slice(span.refStart, span.refEnd + 1) : '';
+    const label = normalizeReferenceLabel(tail || rendered.slice(span.labelStart + 1, span.labelEnd));
     if (label && defs.has(label)) dests.push(defs.get(label));
   }
   return [...new Set(dests)];
@@ -7092,7 +7096,7 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { eachJsxAttr, decodeEntitiesForScan, renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
+  _internals: { closeOfExpressionAt, eachJsxAttr, decodeEntitiesForScan, renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
     // #4905 perf regression guard (content-guardrails.test.js): exposes the
     // precompiled reentry-safety RegExp objects so a test can confirm
     // reentrySafetyClaimFinding reuses the SAME objects call over call

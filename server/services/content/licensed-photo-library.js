@@ -199,9 +199,13 @@ function escapeRegExp(value) {
 // of them ("bugs like fire ants", Codex r1 on #5272): only the terminal
 // "what do X look like" identification phrase is exempt, and it is already
 // stripped from comparisonTestText below before this runs (Codex r5/r7).
-// "not" marks an exclusion ("this is not a fire ant") — unconditional, as
-// on main (Codex r8 on #5272).
-const COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?|not)\b/i;
+// Main's connector words stay UNCONDITIONAL comparison markers — and, or,
+// from, not (Codex r6–r9 on #5272: every narrowing of them let a two-subject
+// topic through: "fire ants and insects", "…or pests", "…and gnats",
+// "this is not a fire ant"). The catalog pest count below is an extra
+// check on top, never a replacement. Cost: "where do fire ants come from"
+// gets no automatic photo — the slot goes to a human (fail closed).
+const COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?|not|and|or|from)\b/i;
 // A hyphenated "-like" suffix ("ant-like insects") is the same look-alike
 // construction without the word "look" — still a comparison, not an
 // identification of the named species itself.

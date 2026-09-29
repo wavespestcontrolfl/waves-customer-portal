@@ -886,3 +886,17 @@ test('#5272 r8: a verdict-box prop that is not a static string fails closed', ()
     .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
 });
 
+// ── Codex r9 on #5272 ────────────────────────────────────────────────
+describe('#5272 r9: escape-aware box tag, duplicate props', () => {
+  test('an escaped quote inside an expression prop does not hide the box', () => {
+    const body = '<BottomLineBox verdict={"Yes, ants sting."} recommendation={"Don\\"t wait; call today."} />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('a repeated recommendation prop fails closed', () => {
+    const body = '<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." recommendation="Call today." />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
+  });
+});
+
