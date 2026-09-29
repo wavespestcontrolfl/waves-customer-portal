@@ -515,9 +515,8 @@ passes although the line breaks the rule):
 
 Uncovered exemptions (a replay fails although the line is fine):
 
-- `no_spanish_estimate_delivery_date` — a time in a causal or temporal subordinate
-  clause binds to readiness: "El presupuesto estará listo porque mañana la oficina lo
-  revisará", "El presupuesto estará listo cuando mañana lo revise".
+- `no_spanish_estimate_delivery_date` — a time in a causal subordinate clause binds
+  to readiness: "El presupuesto estará listo porque mañana la oficina lo revisará".
 - `no_spanish_estimate_delivery_date` — a bare proper-name subject does not reset the
   estimate context: "Le prepararemos el presupuesto, Carlos estará disponible mañana".
 - `no_price_disclosure` — scope counts after a plan label: "Plan: 2 clientes",
