@@ -473,7 +473,13 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // ("...letting pets out") — a duration/wait phrase checked in a narrow
 // window right around the matched number (never sentence-wide) wins over
 // the sentence-level trigger.
-const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their)\s+way|en\s*route|heading\s+(?:over|your\s+way)|arriv\w*|eta|away|out|get(?:ting)?\s+there|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up)\b/i;
+// Round 3 (audit P1: "take about 12 minutes to arrive" slipped through): a
+// STRONG arrival word in the sentence makes EVERY minutes figure in it a
+// claim, with no duration exclusion — arrival wording always wins. Only the
+// weak trigger "out" ("12 minutes out" vs "letting pets out") consults the
+// duration exclusions.
+const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in)\b/i;
+const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in)\b/i;
 const ETA_MINUTES_TOKEN_RE = /\b(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
 const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
 const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it)\b[^.?!\n]{0,20}$/i;
@@ -502,6 +508,10 @@ function findEtaMinutesClaims(text) {
     const span = spans.find(([s, e]) => m.index >= s && m.index < e) || spans[spans.length - 1];
     const sentence = str.slice(span[0], span[1]);
     if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) {
+      claims.push({ minutes: parseInt(m[1], 10), index: m.index });
+      continue;
+    }
     const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
     const before = str.slice(Math.max(0, m.index - 30), m.index);
     if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) continue;
@@ -554,14 +564,15 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const claims = findEtaMinutesClaims(reply);
   if (!claims.length) return { ok: true, violations: [] };
-  const factsMatch = String(factsBlock || '').match(/LIVE ETA: about (\d+) minutes/);
-  const factsMinutes = factsMatch ? parseInt(factsMatch[1], 10) : null;
-  if (factsMinutes == null) {
+  // Every LIVE ETA line, not only the first (audit P1): a customer with two
+  // distinct live stops has two figures, and a reply about either is grounded.
+  const factsMinutes = new Set([...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10)));
+  if (!factsMinutes.size) {
     return { ok: false, violations: ['the reply states a minutes-away ETA but the facts carry no LIVE ETA line — never compute, round, or invent one'] };
   }
-  const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => m !== factsMinutes))];
+  const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => !factsMinutes.has(m)))];
   if (wrong.length) {
-    return { ok: false, violations: [`the reply states ${wrong.join('/')} minute(s) away but LIVE ETA is ${factsMinutes} minutes — use that EXACT number`] };
+    return { ok: false, violations: [`the reply states ${wrong.join('/')} minute(s) away but LIVE ETA is ${[...factsMinutes].join(' or ')} minutes — use that EXACT number`] };
   }
   return { ok: true, violations: [] };
 }

@@ -355,8 +355,12 @@ describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes 
   // The exclusion must win even when a duration phrase shares a sentence
   // with a generic trigger word like "out" ("...letting pets out" carries
   // "out") or "away"/"eta" elsewhere nearby.
-  test('a duration exclusion inside an arrival-triggered sentence still excludes just that number', () => {
-    expect(findEtaMinutesClaims('He\'s on the way — allow 30 minutes before letting pets out.').map((c) => c.minutes)).toEqual([]);
+  // Round 3 (audit P1): a STRONG arrival word in the sentence makes every
+  // figure in it a claim — conservative on purpose. The worst case is a
+  // revision that splits the sentence; the alternative let "take about 12
+  // minutes to arrive" skip every freshness check.
+  test('a strong arrival word in the sentence wins over a duration exclusion (conservative)', () => {
+    expect(findEtaMinutesClaims('He\'s on the way — allow 30 minutes before letting pets out.').map((c) => c.minutes)).toEqual([30]);
   });
 
   test('gate off: never runs (byte-identical to v11 — no LIVE ETA fact can exist anyway)', () => {
@@ -397,6 +401,36 @@ describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes 
       factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)',
     });
     expect(result).toEqual({ ok: true, violations: [] });
+  });
+});
+
+describe('round 3 (audit P1s): arrival wording beats duration exclusions; every LIVE ETA line grounds', () => {
+  const { findEtaMinutesClaims, validateLiveEtaMinutes } = require('../services/sms-shadow-drafter');
+  let prior;
+  beforeEach(() => { prior = process.env.GATE_SMS_REAL_ANSWERS; process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; });
+
+  test.each([
+    'The tech will take about 12 minutes to arrive.',
+    'Please allow 12 minutes for him to arrive.',
+    'He should be here in 12 minutes.',
+    'Give it about 12 minutes and he will show up.',
+  ])('counts as an ETA claim: %s', (reply) => {
+    expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual([12]);
+  });
+
+  test.each([
+    'The treatment takes about 30 minutes to dry.',
+    'Please allow 30 minutes before letting pets out.',
+  ])('still not an ETA claim: %s', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+  });
+
+  test('two distinct live stops: a reply quoting the second ETA is grounded', () => {
+    const factsBlock = 'UPCOMING SERVICES:\n- Pest TODAY LIVE ETA: about 9 minutes\n- Lawn TODAY LIVE ETA: about 20 minutes';
+    expect(validateLiveEtaMinutes({ reply: 'Your lawn tech is about 20 minutes away.', factsBlock }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply: 'Your tech is about 9 minutes away.', factsBlock }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply: 'Your tech is about 15 minutes away.', factsBlock }).ok).toBe(false);
   });
 });
 
