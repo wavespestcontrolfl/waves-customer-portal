@@ -912,6 +912,8 @@ router.get('/next', async (req, res, next) => {
 // authenticated session's own `req.customer.active`; the recheck from a
 // FOR SHARE read taken under the lock, mirroring appointment-public.js's own
 // customer-then-visit lock order, Codex r3 P1).
+const VISIT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const VISIT_PREP_SVC_COLUMNS = [
   'id', 'customer_id', 'technician_id', 'status', 'scheduled_date',
   'window_start', 'window_end', 'service_type', 'is_recurring',
@@ -980,6 +982,9 @@ router.post(
   async (req, res, next) => {
     try {
       if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
+      // A malformed id would reach the uuid column as a 22P02 (500); it is
+      // just another unknown visit (Codex #5306 r2 P2).
+      if (!VISIT_ID_RE.test(String(req.params.id || ''))) return res.status(404).json({ error: 'Not found' });
       // Saved-property scope (GATE_APP_PROPERTY_SCOPE), same predicate as
       // confirm/reschedule: a visit at another of the customer's properties
       // is not this session's (Codex #5306 r1 P1).

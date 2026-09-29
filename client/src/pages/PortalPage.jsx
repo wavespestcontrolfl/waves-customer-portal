@@ -45,6 +45,7 @@ import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlN
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
+import useSheetViewport from '../hooks/useSheetViewport';
 import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
@@ -14723,33 +14724,6 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // =========================================================================
 // NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
-// Keyboard opening can resize AND pan the visual viewport on iOS.
-function useSheetViewport(open, dialogRef) {
-  const [viewport, setViewport] = useState(null);
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!open || !vv) return undefined;
-    const update = () => setViewport({ height: Math.round(vv.height), top: Math.round(vv.offsetTop) });
-    update();
-    vv.addEventListener('resize', update);
-    vv.addEventListener('scroll', update);
-    return () => {
-      vv.removeEventListener('resize', update);
-      vv.removeEventListener('scroll', update);
-    };
-  }, [open]);
-  useEffect(() => {
-    if (!open || !viewport) return undefined;
-    const frame = requestAnimationFrame(() => {
-      const focused = document.activeElement;
-      if (dialogRef.current?.contains(focused) && focused.matches('input, textarea')) {
-        focused.scrollIntoView({ block: 'nearest' });
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [open, viewport?.height, viewport?.top, dialogRef]);
-  return viewport;
-}
 
 // My Property under a SECONDARY saved-property selection (GitHub codex r4
 // P1): the tab's facts, gate codes, pet plan, irrigation settings and access

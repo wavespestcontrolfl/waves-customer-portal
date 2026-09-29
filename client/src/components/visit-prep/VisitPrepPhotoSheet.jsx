@@ -22,6 +22,7 @@ import { useEffect, useRef } from 'react';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useModalFocus from '../../hooks/useModalFocus';
 import useIsMobile from '../../hooks/useIsMobile';
+import useSheetViewport from '../../hooks/useSheetViewport';
 import { CUSTOMER_SURFACE as S } from '../../theme-customer';
 import { FONTS } from '../../theme-brand';
 import Icon from '../Icon';
@@ -45,6 +46,8 @@ export default function VisitPrepPhotoSheet({
   // nothing while closed — both no-op when `open` is false.
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
+  // Keep the note field and Send above the iOS keyboard (Codex #5306 r2 P2).
+  const viewport = useSheetViewport(open, dialogRef);
   const compact = useIsMobile(760);
   // The visit the sheet was opened for. Photos picked for it must never go
   // to a different visit: if the card's next visit changes while the sheet
@@ -78,6 +81,7 @@ export default function VisitPrepPhotoSheet({
         alignItems: compact ? 'stretch' : 'center',
         justifyContent: 'center',
         padding: compact ? 0 : 24,
+        ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
       }}
     >
       <style>{`
