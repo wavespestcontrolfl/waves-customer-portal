@@ -1,9 +1,14 @@
 // Email division per-visit product reader — pure-function tests only (no
 // DB). DB-backed reads are covered in email-division-postgres.test.js.
+const fs = require('fs');
+const path = require('path');
 const {
-  PRODUCT_FAMILIES, PRODUCT_LABELS, PEST_KEYWORDS, classifyProduct, rankVisibleProducts, parsePestsNamed, pestsTargeted, nutrientsListed,
+  PRODUCT_FAMILIES, PRODUCT_LABELS, PEST_KEYWORDS, classifyProduct, rankVisibleProducts, parsePestsNamed, treatmentTargets, nutrientsListed,
   allCustomerFacingStrings, readVisitProducts,
 } = require('../services/email-division/visit-products');
+const { FACTS } = require('../services/email-division/fact-register-data');
+const { targetForSentence } = require('../services/email-division/area-intel');
+const { etDateString } = require('../utils/datetime-et');
 
 // Minimal knex-shaped stub:
 // conn('service_products as sp').leftJoin(...).where(...).orderBy(...).select(...) -> rows.
@@ -214,13 +219,21 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
     for (const label of Object.values(PRODUCT_LABELS)) expect(label.notes).toEqual([]);
   });
 
-  test('the ONLY fact slugs visit-products can emit are these three fact-register slugs', () => {
-    // Each must exist in server/services/email-division/fact-register-data.js
-    // (PR #5187). A slug that is not a real register fact must never be
-    // emitted — families carry no slugs at all; a label carries its fact's.
-    const emittable = new Set(Object.values(PRODUCT_LABELS).flatMap((label) => label.factSlugs));
+  test('every fact slug visit-products can emit is a live fact in the fact register', () => {
+    // The register (server/services/email-division/fact-register-data.js,
+    // #5187) is the authority: a slug that is missing, or a fact past its
+    // expiresOn, must never be emitted. Families carry no slugs at all; a
+    // label carries its fact's.
+    const register = new Map(FACTS.map((fact) => [fact.slug, fact]));
+    const today = etDateString();
+    const emittable = [...new Set(Object.values(PRODUCT_LABELS).flatMap((label) => label.factSlugs))];
     for (const def of Object.values(PRODUCT_FAMILIES)) expect(def.factSlugs).toBeUndefined();
-    expect([...emittable].sort()).toEqual(['fact-bifenthrin-talak-label', 'fact-gentrol-igr-hydroprene', 'fact-taurus-sc-non-repellent']);
+    expect(emittable.length).toBeGreaterThan(0);
+    for (const slug of emittable) {
+      const fact = register.get(slug);
+      expect({ slug, inRegister: Boolean(fact) }).toEqual({ slug, inRegister: true });
+      if (fact.expiresOn) expect(today < fact.expiresOn).toBe(true);
+    }
   });
 
   test('no label text claims a residual, and every label cites its source', () => {
@@ -259,14 +272,49 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
   });
 });
 
-describe('pestsTargeted (area-intel treatment evidence)', () => {
-  test.each([
-    [['Ghost ants', 'Big-headed ants', 'Fire ants'], ['ghost ants', 'big-headed ants', 'fire ants']],
-    [['Wolf spiders', 'Widow spiders'], ['widow spiders']], // specific subtype suppresses generic parent
-    [['Green-up', 'Iron chlorosis', 'Ficus whitefly'], []], // non-pest / unlisted targets never count
-    [[], []], [null, []],
-  ])('%j -> %j', (targets, expected) => {
-    expect(pestsTargeted(targets)).toEqual(expect.arrayContaining(expected));
-    expect(pestsTargeted(targets)).toHaveLength(expected.length);
+describe('treatmentTargets (area-intel treatment evidence)', () => {
+  const bifen = (targets) => ({ product_name: 'Bifen I/T', active_ingredient: 'bifenthrin', targets });
+
+  // The completion picker's own catalog (SchedulePage.jsx) — the canonical
+  // source of service_products.targets chips. Read as text: it is client code.
+  const schedulePage = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/SchedulePage.jsx'), 'utf8');
+  const pickerList = (name) => {
+    const match = schedulePage.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`));
+    return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  };
+
+  test.each(['PEST_TARGET_SUGGESTIONS', 'LAWN_TARGET_SUGGESTIONS', 'ORNAMENTAL_TARGET_SUGGESTIONS'])('every %s chip on a pest product is counted as itself', (list) => {
+    const chips = pickerList(list);
+    expect(chips.length).toBeGreaterThan(10);
+    const keys = treatmentTargets([bifen(chips)]);
+    expect(keys).toHaveLength(new Set(chips.map((c) => c.replace(/\s*\([^)]*\)\s*$/, '').toLowerCase())).size);
+  });
+
+  test('NUTRITION_TARGET_SUGGESTIONS chips on a fertilizer are feeding goals, never pests', () => {
+    const chips = pickerList('NUTRITION_TARGET_SUGGESTIONS');
+    expect(chips.length).toBeGreaterThan(5);
+    expect(treatmentTargets([{ product_name: 'LESCO K-Flow 0-0-25', active_ingredient: 'Potassium 0-0-25 + sulfur', targets: chips }])).toEqual([]);
+  });
+
+  test('species a keyword allowlist dropped are counted, keyed case-/space-insensitively across products', () => {
+    expect(treatmentTargets([
+      bifen(['White-footed ants', 'Bed bugs', ' Subterranean  termites ']),
+      { product_name: 'Distance IGR', active_ingredient: 'Pyriproxyfen', targets: ['Chilli thrips', 'white-footed ants'] },
+      { product_name: 'Celsius WG', active_ingredient: 'thiencarbazone', targets: ['Annual bluegrass (Poa annua)'] },
+    ])).toEqual(['white-footed ants', 'bed bugs', 'subterranean termites', 'chilli thrips', 'annual bluegrass']);
+  });
+
+  test('an adjuvant\'s chips and blank / missing targets never count', () => {
+    expect(treatmentTargets([
+      { product_name: 'Dispatch Sprayable Wetting Agent', active_ingredient: 'Alkoxylated polyols', catalog_category: 'soil_surfactant', targets: ['Dry spots'] },
+      bifen([' ', '']), bifen(null), { product_name: 'Talak' },
+    ])).toEqual([]);
+    expect(treatmentTargets(null)).toEqual([]);
+  });
+
+  test('the area-intel sentence restores proper nouns in a lower-cased key', () => {
+    expect(targetForSentence('german cockroaches')).toBe('German cockroaches');
+    expect(targetForSentence('sri lanka weevil')).toBe('Sri Lanka weevil');
+    expect(targetForSentence('big-headed ants')).toBe('big-headed ants');
   });
 });

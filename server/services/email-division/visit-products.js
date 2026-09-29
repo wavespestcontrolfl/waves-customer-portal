@@ -254,21 +254,47 @@ function parsePestsNamed(technicianNotes) {
   return found.filter((key) => !GENERIC_PARENTS[key]?.some((specific) => foundSet.has(specific)));
 }
 
-// Canonical pest keys from one visit's recorded application targets
-// (service_products.targets — the technician's structured picks for what
-// each product was applied against). This, not free-text notes, is the
-// treatment evidence area intel counts: a note that merely observes or
-// negates a pest ("saw a few fire ants", "no fire ants found") is never a
-// treatment. A target outside PEST_KEYWORDS (a nutrition goal such as
-// "Green-up", an unlisted species) is not counted.
-function pestsTargeted(targets) {
+// Treatment-target keys from one visit's applied products. Area intel's
+// only treatment evidence is service_products.targets — the chips the
+// technician commits for what each product was applied against. Those
+// chips ARE the canonical target catalog: the completion picker's
+// suggestion lists (SchedulePage.jsx PEST/LAWN/ORNAMENTAL_TARGET_SUGGESTIONS)
+// and each product's label list (products_catalog.target_pests, seeded by
+// the target-prefill migrations) are where they come from. So a recorded
+// target is counted as itself — never filtered through a local keyword
+// allowlist that silently drops a real species (White-footed ants, Bed bugs,
+// Subterranean termites, Chilli thrips …). Free-text notes never count: a
+// note that observes or negates a pest ("saw a few fire ants", "no fire
+// ants found") is not a treatment.
+//
+// Excluded: targets on a nutrition or adjuvant product — a fertilizer's
+// chips are the feeding goal ("Nitrogen green-up", "Iron chlorosis"), never
+// a pest. The key is the chip normalised for counting: whitespace collapsed,
+// a trailing parenthetical dropped ("Annual bluegrass (Poa annua)" ->
+// "annual bluegrass"), lower-cased so "Fire ants" and "fire ants" are one
+// pest. A one-off hand-typed chip can never surface in copy on its own:
+// getAreaIntelSentence needs >= 10% of >= 20 visits in the city.
+const NON_TARGET_FAMILIES = new Set(['nutrition', 'adjuvant']);
+
+function treatmentTargetKey(target) {
+  const key = String(target || '').replace(/\s*\([^)]*\)\s*$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return key || null;
+}
+
+function treatmentTargets(productRows) {
   const found = new Set();
-  for (const target of asArray(targets)) {
-    const text = String(target || '').toLowerCase();
-    if (!text.trim()) continue;
-    for (const [canonical, pattern] of PEST_KEYWORDS) if (pattern.test(text)) found.add(canonical);
+  for (const row of asArray(productRows)) {
+    const family = classifyProduct({
+      productName: row.product_name, activeIngredient: row.active_ingredient, productCategory: row.product_category,
+      catalogCategory: row.catalog_category, catalogProductType: row.catalog_product_type,
+    });
+    if (NON_TARGET_FAMILIES.has(family)) continue;
+    for (const target of asArray(row.targets)) {
+      const key = treatmentTargetKey(target);
+      if (key) found.add(key);
+    }
   }
-  return [...found].filter((key) => !GENERIC_PARENTS[key]?.some((specific) => found.has(specific)));
+  return [...found];
 }
 
 // pg already parses jsonb into objects/arrays; these guard null/wrong-shape
@@ -404,6 +430,6 @@ async function getActivityRatingAverages({ conn = db } = {}) {
 
 module.exports = {
   PRODUCT_FAMILIES: FAMILIES, PRODUCT_LABELS: LABELS, FAMILY_ORDER, PRIMARY_FAMILY_RANK, PEST_KEYWORDS,
-  classifyProduct, rankVisibleProducts, parsePestsNamed, pestsTargeted, nutrientsListed, expandElidedSpeciesLists, allCustomerFacingStrings,
+  classifyProduct, rankVisibleProducts, parsePestsNamed, treatmentTargets, treatmentTargetKey, nutrientsListed, expandElidedSpeciesLists, allCustomerFacingStrings,
   readVisitProducts, readVisitSummary, getActivityRatingAverages,
 };

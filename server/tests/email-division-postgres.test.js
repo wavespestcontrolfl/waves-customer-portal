@@ -48,14 +48,14 @@ suite('email division against real Postgres', () => {
   }
   // `targets` (optional) records one applied product carrying those
   // structured targets — area intel's only treatment evidence.
-  async function makeVisit(customerId, { targets, ...overrides } = {}) {
+  async function makeVisit(customerId, { targets, product = { product_name: 'Bifen I/T', active_ingredient: 'bifenthrin' }, ...overrides } = {}) {
     const id = randomUUID();
     await trx('service_records').insert({
       id, customer_id: customerId, service_date: '2026-09-10', service_type: 'Pest Control',
       technician_notes: 'WHAT WE DID: treated the perimeter.', status: 'completed', ...overrides,
     });
     if (targets) {
-      await trx('service_products').insert({ id: randomUUID(), service_record_id: id, product_name: 'Bifen I/T', active_ingredient: 'bifenthrin', targets });
+      await trx('service_products').insert({ id: randomUUID(), service_record_id: id, ...product, targets });
     }
     return id;
   }
@@ -369,8 +369,8 @@ suite('email division against real Postgres', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ visits: 5, pest_key: 'fleas', visits_with_pest: 5 });
     expect(rows.find((r) => r.pest_key === 'ticks')).toBeUndefined();
-    expect(rows.find((r) => r.pest_key === 'wasps')).toBeUndefined();
-    expect(rows.find((r) => r.pest_key === 'spiders')).toBeUndefined();
+    expect(rows.find((r) => r.pest_key === 'paper wasps')).toBeUndefined();
+    expect(rows.find((r) => r.pest_key === 'wolf spiders')).toBeUndefined();
   });
 
   test('computeAreaIntel: one customer with 5+ completed visits never alone clears the privacy floor', async () => {
@@ -388,11 +388,19 @@ suite('email division against real Postgres', () => {
     await makeCityVisits('Ruskin', 2, { service_date: '2026-09-05', targets: ['Fire ants'] });
     await makeCityVisits('Ruskin', 1, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: sprayed the perimeter and saw a few fire ants outside.' });
     await makeCityVisits('Ruskin', 1, { service_date: '2026-09-05', technician_notes: 'Inspected the yard, no fire ants found.' });
-    // A nutrition goal is a recorded target but not a pest.
-    await makeCityVisits('Ruskin', 1, { service_date: '2026-09-05', technician_notes: 'Fleas mentioned by customer.', targets: ['Green-up'] });
+    // A fertilizer's chip is the feeding goal, not a pest.
+    await makeCityVisits('Ruskin', 1, {
+      service_date: '2026-09-05', technician_notes: 'Fleas mentioned by customer.', targets: ['Nitrogen green-up'],
+      product: { product_name: 'LESCO K-Flow 0-0-25', active_ingredient: 'Potassium 0-0-25 + sulfur' },
+    });
+    // A canonical picker species no keyword list named is still counted.
+    await makeCityVisits('Ruskin', 1, { service_date: '2026-09-05', targets: ['Bed bugs'] });
     await computeAreaIntel({ month, conn: trx });
-    const rows = await trx('email_area_intel_monthly').where({ city: 'ruskin' });
-    expect(rows).toMatchObject([{ visits: 5, pest_key: 'fire ants', visits_with_pest: 2 }]);
+    const rows = await trx('email_area_intel_monthly').where({ city: 'ruskin' }).orderBy('pest_key');
+    expect(rows).toMatchObject([
+      { visits: 6, pest_key: 'bed bugs', visits_with_pest: 1 },
+      { visits: 6, pest_key: 'fire ants', visits_with_pest: 2 },
+    ]);
   });
 
   test('computeAreaIntel: a completed visit with no recorded targets still counts toward the visit denominator', async () => {

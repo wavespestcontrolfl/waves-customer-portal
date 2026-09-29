@@ -6,7 +6,8 @@
  * visits (multiple service lines, callbacks) must never alone clear the
  * re-identification floor; `visits` (the raw visit count) is still the
  * stored/sentence denominator once the floor clears. The pest numerator
- * is structured application targets only (service_products.targets),
+ * is structured application targets only (service_products.targets, the
+ * canonical completion-picker / product-label chips, counted as recorded),
  * never technician_notes. This file is the authority on both rules; the
  * table's migration header (20260928070000, frozen once pushed) predates
  * them and still says "named in technician_notes" / "5-visit floor".
@@ -14,7 +15,7 @@
 
 const db = require('../../models/db');
 const { etMonthStart, etMonthEnd } = require('../../utils/datetime-et');
-const { pestsTargeted } = require('./visit-products');
+const { treatmentTargets } = require('./visit-products');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 
@@ -47,7 +48,7 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   //
   // The pest numerator counts STRUCTURED treatment evidence only — the
   // targets recorded on the visit's applied products (service_products.
-  // targets, via pestsTargeted) — never technician_notes free text, where
+  // targets, via treatmentTargets) — never technician_notes free text, where
   // a pest can be merely observed or negated ("saw a few fire ants", "no
   // fire ants found") and would turn into a false "technicians treated X".
   const query = conn('service_records as sr')
@@ -64,15 +65,17 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   const rows = await query
     .select('sr.id', 'sr.customer_id', conn.raw('COALESCE(ss.service_address_city, c.city) as city'));
 
-  const targetsByVisit = new Map();
+  const productsByVisit = new Map();
   const visitIds = rows.map((row) => row.id);
   for (let i = 0; i < visitIds.length; i += TARGET_READ_CHUNK) {
-    const productRows = await conn('service_products')
-      .whereIn('service_record_id', visitIds.slice(i, i + TARGET_READ_CHUNK))
-      .select('service_record_id', 'targets');
+    const productRows = await conn('service_products as sp')
+      .leftJoin('products_catalog as pc', 'pc.id', 'sp.product_id')
+      .whereIn('sp.service_record_id', visitIds.slice(i, i + TARGET_READ_CHUNK))
+      .select('sp.service_record_id', 'sp.targets', 'sp.product_name', 'sp.active_ingredient', 'sp.product_category',
+        'pc.category as catalog_category', 'pc.product_type as catalog_product_type');
     for (const product of productRows) {
-      if (!targetsByVisit.has(product.service_record_id)) targetsByVisit.set(product.service_record_id, []);
-      targetsByVisit.get(product.service_record_id).push(...(Array.isArray(product.targets) ? product.targets : []));
+      if (!productsByVisit.has(product.service_record_id)) productsByVisit.set(product.service_record_id, []);
+      productsByVisit.get(product.service_record_id).push(product);
     }
   }
 
@@ -84,7 +87,7 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
     const entry = byCity.get(city);
     entry.visits += 1;
     entry.customers.add(row.customer_id);
-    for (const pest of pestsTargeted(targetsByVisit.get(row.id) || [])) {
+    for (const pest of treatmentTargets(productsByVisit.get(row.id) || [])) {
       entry.pestCounts.set(pest, (entry.pestCounts.get(pest) || 0) + 1);
     }
   }
@@ -113,6 +116,15 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   return { month: monthStart, citiesProcessed: summary.length, summary };
 }
 
+// pest_key is a lower-cased target chip; restore the capital on the
+// proper nouns the picker's catalog uses ("German cockroaches", "Norway
+// rats", "Sri Lanka weevil", "Pythium root rot").
+const PROPER_TARGET_WORDS = new Map(['german', 'american', 'australian', 'asian', 'oriental', 'florida', 'argentine',
+  'pharaoh', 'norway', 'formosan', 'sri', 'lanka', 'pythium', 'cuban', 'caribbean'].map((w) => [w, w[0].toUpperCase() + w.slice(1)]));
+function targetForSentence(key) {
+  return String(key).split(' ').map((word) => PROPER_TARGET_WORDS.get(word) || word).join(' ');
+}
+
 /** A single sentence for the top pest in a city that month, or null when the
  * city didn't clear `minVisits` visits or no pest reached 10% of them. */
 async function getAreaIntelSentence({ city, month = new Date(), minVisits = 20, conn = db } = {}) {
@@ -131,7 +143,7 @@ async function getAreaIntelSentence({ city, month = new Date(), minVisits = 20, 
   if (ratio < 0.10) return null;
   const pct = Math.round(ratio * 100);
   const monthName = new Date(`${monthStart}T12:00:00Z`).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
-  return `In ${monthName} our technicians treated ${top.pest_key} at ${pct}% of our ${top.visits} visits in ${String(city).trim()}.`;
+  return `In ${monthName} our technicians treated ${targetForSentence(top.pest_key)} at ${pct}% of our ${top.visits} visits in ${String(city).trim()}.`;
 }
 
-module.exports = { computeAreaIntel, getAreaIntelSentence, MIN_CITY_CUSTOMERS };
+module.exports = { computeAreaIntel, getAreaIntelSentence, targetForSentence, MIN_CITY_CUSTOMERS };
