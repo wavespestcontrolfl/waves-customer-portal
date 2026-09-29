@@ -3,6 +3,28 @@ const { reserviceReportCopyGateOn } = require('./reservice-report');
 const { detectServiceLine } = require('./service-line-configs');
 const { dateOnlyToNoonUtc, formatVisitLabel, normalizeDate } = require('./time-format');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const {
+  SCALE_TECHNICIAN_RATING,
+  SCALE_BLENDED,
+  SCALE_UNKNOWN,
+  loadScaleMap,
+  scaleWithoutProvenance,
+  isComparable,
+} = require('../pest-pressure/score-scale');
+
+// Readings recorded before/after the #4741 tech-rating cutover sit on
+// different scales (see pest-pressure/score-scale.js) and are never compared
+// or charted together.
+
+const PRIOR_SCAN_LIMIT = 25; // same bound as store.loadPreviousScore
+
+function pressureScaleOf(row) {
+  if ([SCALE_TECHNICIAN_RATING, SCALE_BLENDED, SCALE_UNKNOWN].includes(row?.pressure_scale)) {
+    return row.pressure_scale;
+  }
+  // No provenance: blended before the cutover, unknown (fail closed) after it.
+  return scaleWithoutProvenance(serviceStartedAt(row));
+}
 
 const SEVERITY_RANK = {
   critical: 5,
@@ -50,6 +72,7 @@ function pointFromRow(row, findings = []) {
     findingsCount: findings.length,
     criticalFindingsCount: findings.filter((finding) => String(finding.severity || '').toLowerCase() === 'critical').length,
     mainDriver: highest?.title || undefined,
+    scale: pressureScaleOf(row),
   };
 }
 
@@ -64,6 +87,9 @@ function groupFindingsByRecordId(findings = []) {
 }
 
 function buildCustomerSummary({ direction, percentChange, baseline, current }) {
+  // 'rescaled': earlier visits exist but were scored on the pre-#4741 scale,
+  // so there is nothing comparable yet. Not a first visit, and no up/down.
+  if (direction === 'rescaled') return 'Pressure trend will appear after more visits.';
   if (direction === 'first_visit') {
     return current?.pressureIndex != null
       ? `This is your first pressure marker: ${current.pressureIndex.toFixed(1)}. Future reports will show the trend.`
@@ -111,11 +137,21 @@ function buildPressureTrendContextFromRows({
     ...(currentPressureIndex != null ? [{ ...record, pressure_index: currentPressureIndex }] : []),
   ];
 
-  const points = rows
+  const dated = rows
     .map((row) => pointFromRow(row, findingsByRecordId[String(row.id)] || []))
     .filter((point) => point.pressureIndex != null)
-    .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))
-    .slice(-limit);
+    .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+
+  // Only readings on the newest reading's scale are comparable (and chartable):
+  // when the newest is a technician tap and every earlier one is a pre-#4741
+  // blended score, the series is just the newest point - never a fake up/down
+  // and never a fake jump on the report chart. Those earlier visits DO exist,
+  // so this is not a first visit either: direction 'rescaled' (below).
+  const newest = dated[dated.length - 1];
+  const points = dated
+    .filter((point) => point === newest || isComparable(point.scale, newest?.scale))
+    .slice(-limit)
+    .map(({ scale, ...point }) => point);
 
   if (!points.length) return undefined;
 
@@ -127,7 +163,7 @@ function buildPressureTrendContextFromRows({
     : undefined;
 
   let direction = 'unknown';
-  if (points.length < 2) direction = 'first_visit';
+  if (points.length < 2) direction = dated.length > points.length ? 'rescaled' : 'first_visit';
   else if (Math.abs(delta) < 0.1) direction = 'flat';
   else if (delta < 0) direction = 'down';
   else direction = 'up';
@@ -193,10 +229,15 @@ async function buildPressureTrendContext({
     })
     .orderBy('service_date', 'desc')
     .orderBy('started_at', 'desc')
-    .limit(Math.max(0, limit - 1))
+    // Fetch a bounded window wider than the chart needs: the scale filter runs
+    // afterwards, and alternating tap/blended visits would otherwise starve
+    // the comparable older readings out of a limit-1 window.
+    .limit(limit > 1 ? Math.max(limit - 1, PRIOR_SCAN_LIMIT) : 0)
     .catch(() => []);
 
   const ids = [...priorRows.map((row) => row.id), record.id].filter(Boolean);
+  const scales = await loadScaleMap(knex, ids);
+  const withScale = (row) => (scales.has(String(row.id)) ? { ...row, pressure_scale: scales.get(String(row.id)) } : row);
   const findings = ids.length
     ? await knex('service_findings')
       .whereIn('service_record_id', ids)
@@ -205,8 +246,8 @@ async function buildPressureTrendContext({
     : [];
 
   return buildPressureTrendContextFromRows({
-    record,
-    priorRows,
+    record: withScale(record),
+    priorRows: priorRows.map(withScale),
     findings,
     currentPressureIndexOverride,
     limit,

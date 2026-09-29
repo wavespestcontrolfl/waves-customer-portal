@@ -69,6 +69,27 @@ describe('orchestrate gatherInputs — technicianDirectRating pass-through', () 
     expect(inputs.technicianDirectRating).toBe(5);
   });
 
+  test('the previous-score baseline is requested on the same scale as this score (#4741)', async () => {
+    const { loadPreviousScore } = require('../services/pest-pressure/store');
+    const record = { id: 'svc-1', customer_id: 'cust-1', service_type: 'Quarterly Pest Control', service_date: '2026-09-24' };
+    mockClientRating = { value: 3, present: true, source: 'technician', capturedAt: null };
+    await gatherInputs(fakeKnex(), record, DEFAULT_CONFIG);
+    expect(loadPreviousScore).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ currentScale: 'technician_rating' }));
+    mockClientRating = { value: 3, present: true, source: 'customer', capturedAt: null };
+    await gatherInputs(fakeKnex(), record, DEFAULT_CONFIG);
+    expect(loadPreviousScore).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ currentScale: 'blended' }));
+  });
+
+  test('forwards "earlier scores exist only on the other scale" to the calculation', async () => {
+    const { loadPreviousScore } = require('../services/pest-pressure/store');
+    const record = { id: 'svc-1', customer_id: 'cust-1', service_type: 'Quarterly Pest Control', service_date: '2026-09-24' };
+    mockClientRating = { value: 3, present: true, source: 'technician', capturedAt: null };
+    loadPreviousScore.mockResolvedValueOnce({ value: null, otherScaleOnly: true });
+    expect((await gatherInputs(fakeKnex(), record, DEFAULT_CONFIG)).inputs.previousScoreOnOtherScaleOnly).toBe(true);
+    loadPreviousScore.mockResolvedValueOnce({ value: null, otherScaleOnly: false });
+    expect((await gatherInputs(fakeKnex(), record, DEFAULT_CONFIG)).inputs.previousScoreOnOtherScaleOnly).toBe(false);
+  });
+
   test('customer-sourced rating leaves technicianDirectRating null', async () => {
     mockClientRating = { value: 3, present: true, source: 'customer', capturedAt: null };
     const { inputs } = await gatherInputs(fakeKnex(), {
