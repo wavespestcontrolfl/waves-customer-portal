@@ -14,6 +14,42 @@ const {
 } = require('../services/sms-shadow-drafter');
 const { CUSTOMER_SMS_HOUSE_VOICE, AGENT_CONFIG } = require('../services/ai-assistant/managed-agent-config');
 
+// Independent-review P1 (PR #5331): the documented contract (module header,
+// ~lines 87-92) says gate-off buildSystemPromptWithProfile/buildFactsBlock
+// are byte-identical to v11. A prior version of this PR broke that (two new
+// BILLING & MONEY RULES bullets and the PAYMENT OPTIONS fact rendered
+// unconditionally). These hashes are pinned from the v11 output actually
+// produced by origin/main commit 6b8bc684ee (the base this PR branched
+// from, pre-dating any #5331 change) — a gate-unset vs gate-false
+// comparison alone would not have caught the bug, since both sides of that
+// comparison were already wrong in the same way.
+const crypto = require('crypto');
+describe('gate-off contract: byte-identical to the pre-#5331 v11 text (pinned hash, not gate-unset vs gate-false)', () => {
+  let priorGate;
+  beforeEach(() => {
+    priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+  });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+  });
+
+  test('buildSystemPrompt() matches the v11 hash from origin/main@6b8bc684ee', () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt.length).toBe(9881);
+    expect(crypto.createHash('sha256').update(prompt).digest('hex'))
+      .toBe('8fc58d9bcd7cdf437f7f6d49290a01c375c696f31f346a2db121ed59e98da0f3');
+  });
+
+  test('buildFactsBlock() matches the v11 hash from origin/main@6b8bc684ee', () => {
+    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } });
+    expect(block.length).toBe(626);
+    expect(crypto.createHash('sha256').update(block).digest('hex'))
+      .toBe('845d01aa86bba6f543aee32bec9558660c947a739297ff3a85075bef8f930708');
+  });
+});
+
 describe('few-shot voice grounding (v7)', () => {
   test('gratitude policy changes reset the live prompt cohort', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
@@ -690,14 +726,22 @@ describe('v10 — full-account grounding', () => {
 });
 
 describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did you get my payment)', () => {
-  let priorZelle;
+  let priorZelle, priorGate;
   beforeEach(() => {
     priorZelle = process.env.ZELLE_RECIPIENT;
     delete process.env.ZELLE_RECIPIENT;
+    // Independent-review P1: the fact (and its two prompt bullets) are gated
+    // behind GATE_SMS_REAL_ANSWERS — gate off is byte-identical to v11 (see
+    // the "gate off" describe block below), so every test in here that
+    // exercises this fact/prompt text needs the gate on.
+    priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
   });
   afterEach(() => {
     if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT;
     else process.env.ZELLE_RECIPIENT = priorZelle;
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
   });
 
   test('ZELLE_RECIPIENT unset ⇒ card/ACH only, never a guessed Zelle contact', () => {
@@ -707,13 +751,20 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     expect(block).not.toMatch(/Zelle to \S/);
   });
 
-  test('ZELLE_RECIPIENT set ⇒ the SAME canonical value the public /pay page reads, never a hardcoded one', () => {
+  test('ZELLE_RECIPIENT set but this customer is NOT Zelle-eligible (no zelleEligible extra) ⇒ card/ACH only, distinct wording from "not configured"', () => {
     process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
     const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } });
+    expect(block).not.toMatch(/Zelle to \S/);
+    expect(block).toContain('Zelle is not available for this account right now, so do not offer it');
+  });
+
+  test('ZELLE_RECIPIENT set AND this customer is Zelle-eligible ⇒ the SAME canonical value the public /pay page reads, never a hardcoded one', () => {
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } }, { zelleEligible: true });
     expect(block).toContain('Zelle to payments@wavespestcontrol.com');
     expect(block).toContain('their name or invoice number in the Zelle memo');
-    // send_payment_link is documented as producing the pay-page link
-    expect(block).toContain('{"type":"send_payment_link"} texts a link to their pay page (portal.wavespestcontrol.com)');
+    // Neutral about what the pay page itself renders (independent-review P1)
+    expect(block).toContain('{"type":"send_payment_link"} texts their personal pay link');
   });
 
   test('renders even when billing itself is unavailable — payment options are business config, not this customer\'s ledger', () => {
@@ -721,12 +772,69 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     expect(block).toContain('- Payment options: card or bank account (ACH)');
   });
 
-  test('BILLING & MONEY RULES: payment-method questions answer from PAYMENT OPTIONS, and payment confirmation is gated on Recent payments/Open invoice', () => {
+  test('BILLING & MONEY RULES: payment-method questions answer from PAYMENT OPTIONS, and payment confirmation is status-aware over Recent payments', () => {
     const p = buildSystemPrompt();
     expect(p).toMatch(/Payment-method questions.*answer directly from the Payment options line/i);
     expect(p).toMatch(/never invent a Zelle phone\/email/i);
-    expect(p).toMatch(/Did you get my payment.*confirm ONLY when Recent payments/i);
-    expect(p).toMatch(/NEVER say a payment was received, applied, or that they're all set unless BILLING actually shows it/i);
+    expect(p).toMatch(/Did you get my payment.*Recent payments shows each payment's status/i);
+    expect(p).toMatch(/Confirm receipt ONLY for a line marked paid/i);
+    expect(p).toMatch(/A line marked processing means it's still processing/i);
+    expect(p).toMatch(/A line marked failed or refunded means it did NOT go through/i);
+    expect(p).toMatch(/NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid/i);
+    // Finding 4: the old "(or Open invoice)" reference is gone — Open
+    // invoice only ever lists what is UNPAID, never a paid confirmation.
+    expect(p).not.toMatch(/\(or Open invoice\)/i);
+  });
+
+  test('gate off ⇒ neither BILLING & MONEY RULES bullet nor the PAYMENT OPTIONS fact appear (byte-identical to v11)', () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const p = buildSystemPrompt();
+    expect(p).not.toMatch(/Payment-method questions/i);
+    expect(p).not.toMatch(/Did you get my payment/i);
+    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } });
+    expect(block).not.toContain('Payment options');
+  });
+
+  test('finding 5: Recent payments carries a derived tender label ("via ...") when it can be reliably told apart, and none when it cannot', () => {
+    const { paymentTenderLabel } = require('../services/sms-shadow-drafter');
+    // Card/Stripe payment — snapshotted columns from the 20260924000032 migration
+    expect(paymentTenderLabel({ payment_method_type: 'card', card_brand: 'Visa' })).toBe('card');
+    expect(paymentTenderLabel({ card_last_four: '4242' })).toBe('card'); // brand/last4 alone still reads as a card
+    // Bank/ACH
+    expect(paymentTenderLabel({ payment_method_type: 'us_bank_account' })).toBe('bank/ACH');
+    expect(paymentTenderLabel({ payment_method_type: 'bank' })).toBe('bank/ACH');
+    // Manual off-gateway payment — the keyword ONLY, never the reference/memo (PII)
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — zelle (John Smith)' })).toBe('Zelle');
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — check (#1029)' })).toBe('Check');
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — cash' })).toBe('Cash');
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — venmo' })).toBe('Venmo');
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — paypal' })).toBe('PayPal');
+    // Not reliably derivable — 'other', no description, unknown shape
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — other' })).toBeNull();
+    expect(paymentTenderLabel({})).toBeNull();
+    expect(paymentTenderLabel(null)).toBeNull();
+
+    const block = buildFactsBlock({
+      summary: 'X',
+      billing: {
+        outstandingBalance: 0,
+        recentPayments: [
+          { amount: 95, status: 'paid', payment_date: '2026-07-01', description: 'Invoice INV-1 — zelle (memo text never rendered)' },
+          { amount: 40, status: 'paid', payment_date: '2026-07-05' }, // no derivable tender
+        ],
+      },
+    });
+    const paymentsLine = block.split('\n').find((l) => l.startsWith('- Recent payments:'));
+    expect(paymentsLine).toMatch(/\$95\.00 paid \S+, Jul 1 via Zelle/);
+    expect(paymentsLine).not.toContain('memo text never rendered');
+    expect(paymentsLine).toMatch(/\$40\.00 paid \S+, Jul 5(;|$)/); // no "via ..." suffix at all
+  });
+
+  test('finding 5: the confirmation rule requires a matching "via ..." tender tag before confirming HOW a payment was made', () => {
+    const p = buildSystemPrompt();
+    expect(p).toMatch(/how it was paid \("via Zelle", "via card", "via bank\/ACH"\)/i);
+    expect(p).toMatch(/confirm that specific method ONLY when a paid line shows that exact "via \.\.\." tag/i);
+    expect(p).toMatch(/never guess or state a method it doesn't show/i);
   });
 
   test('a Zelle phone/email in the facts never trips the deterministic amount guard (real or spoofed formats)', () => {

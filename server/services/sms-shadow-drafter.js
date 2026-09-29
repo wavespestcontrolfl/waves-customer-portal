@@ -102,7 +102,16 @@ const PROMPT_VERSION = 'house_voice_v11';
 // cancellation). generateGroundedDraft stamps this version instead of
 // PROMPT_VERSION on a draft that actually used the rewritten prompt, so
 // judge/ledger rows tell the two cohorts apart.
-const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers';
+// v12.3 (PR #5331, independent-review round 1): the BILLING & MONEY RULES
+// bullets and the PAYMENT OPTIONS fact are now properly gated (a P1 fix,
+// not new behavior — see paymentMoneyExtra and buildFactsBlock's own
+// comments) and the payment-confirmation rule/guard are status-aware and
+// Zelle-eligibility-aware. Bumped so cohort evidence never pools pre- and
+// post-fix drafts under one identity. Sibling PRs bump the SAME constant
+// independently (#5336 → …2, #5334 → …4); merge order resolves the
+// conflict to whichever suffix is highest, which is fine — each bump only
+// needs to be its own distinct identity, not a specific number.
+const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers3';
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -374,6 +383,42 @@ async function fetchReserviceLanes({ customerId } = {}) {
   } catch (err) {
     logger.warn(`[sms-shadow] free re-service eligibility lookup failed (${err.message}); treating as not eligible`);
     return [];
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Independent-review P1 (PR #5331): the PAYMENT OPTIONS fact must not offer
+// Zelle for a customer whose open invoice the public pay page would itself
+// withhold it for — a saved-method-required invoice (per_application,
+// annual_prepay, a recurring signup's first invoice; owner ruling
+// 2026-09-28: new customers pay at visit, card on file only), a credit that
+// will fully cover it, a combined previous balance, a pending saved-card
+// reconciliation, or an already succeeded/processing PaymentIntent. Reuses
+// pay-v2.js's OWN predicate (isZelleTransferEligible) — never a re-derived
+// copy — so this fact and the pay page can never disagree. Resolved
+// upstream of buildFactsBlock (which stays SYNC on purpose — see its own
+// comment) exactly like OPEN TIMES / re-service lanes. Fails CLOSED: no
+// open invoice, a DB error, or a timeout all resolve to "not eligible" —
+// under-offering Zelle is the safe direction, never over-offering it past
+// what the pay page would actually show.
+async function fetchZelleEligibility({ customerId, openInvoiceId } = {}) {
+  if (!customerId || !openInvoiceId) return false;
+  let timer = null;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Zelle eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
+    });
+    const work = (async () => {
+      const row = await db('invoices').where({ id: openInvoiceId, customer_id: customerId }).first();
+      if (!row) return false;
+      const { isZelleTransferEligible } = require('../routes/pay-v2');
+      return Boolean(await isZelleTransferEligible(row));
+    })();
+    return await Promise.race([work, timeout]);
+  } catch (err) {
+    logger.warn(`[sms-shadow] Zelle eligibility check failed (${err.message}); treating as not eligible`);
+    return false;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -970,7 +1015,16 @@ const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', '
 // + reviewer's territory. One definition, with PAYMENT_ACK_RE, for this
 // draft-time guard and the send-time recheck (sms-amount-recheck).
 const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
+// Independent-review P1 (round 1, finding 3): widened to also catch "got
+// your payment" and "your payment is all set/paid" — the "all set"/"all
+// paid" branches still require "payment" within the same 30-char window as
+// every other branch, so an unrelated "You're all set for Tuesday…"
+// scheduling confirmation (no "payment" word anywhere near it) never
+// matches. A reply that confirms receipt with NO payment word anywhere at
+// all ("Yes, you're all set!") is outside what a regex can safely
+// distinguish from a scheduling confirmation — see the whole-reply
+// settled-payment guard below, which relies on this same anchor.
+const PAYMENT_ACK_RE = /\b(?:received|processed|went through|got)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through|got|all set|all paid|paid in full)\b|\b(?:all set|all paid|paid in full)\b[^.\n]{0,30}\bpayment\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
 // The billing figures a reply may quote, in cents — one definition for this
 // draft-time guard and the send-time recheck (sms-amount-recheck): what is
 // OWED (balance, open invoice, published monthly dues) and what was PAID.
@@ -1021,6 +1075,20 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // passes — so live behavior is unchanged by PR #5119.
   if (!realAnswers) {
     return replyAmounts.some((a) => !owedCents.has(a) && !paidCents.has(a));
+  }
+
+  // Independent-review P2: a payment-confirmation reply with NO dollar
+  // figure at all ("Yes! We got your payment, you're all set.") skips the
+  // per-clause loop below entirely (no amount → `continue`, never checked)
+  // and would otherwise pass even against a failed/processing/refunded-only
+  // history. Cheap whole-reply guard: confirming language with zero SETTLED
+  // ('paid') payments on record is ungrounded — status-aware per
+  // context-aggregator.js (payments.status: upcoming/processing/paid/
+  // failed/refunded; only 'paid' ever backs "received").
+  if (replyAmounts.length === 0 && PAYMENT_ACK_RE.test(text.replace(AMOUNT_MASK_RE, ' AMT '))) {
+    const hasSettledPayment = (context?.billing?.recentPayments || [])
+      .some((p) => String(p?.status || '').toLowerCase() === 'paid');
+    if (!hasSettledPayment) return true;
   }
 
   // Gate ON: each amount is authorized by the MEANING of its own clause
@@ -1173,6 +1241,16 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
+  // Independent-review P1: these two bullets are v12-only (the PAYMENT
+  // OPTIONS fact and status-aware payment-confirmation reading they depend
+  // on exist ONLY gate-on — see buildFactsBlock). Gate off must stay
+  // byte-identical to v11, which never had either bullet, so both render
+  // as '' off the gate rather than always.
+  const paymentMoneyExtra = realAnswersOn
+    ? `
+- Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
+- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid — say exactly what that line shows. A line marked processing means it's still processing, not received yet — say so. A line marked failed or refunded means it did NOT go through — never say it was received. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
+    : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
@@ -1189,9 +1267,7 @@ FACT DISCIPLINE — the single most important rule. A fabricated detail is the w
 
 BILLING & MONEY RULES:
 - Real amounts shown in BILLING or PENDING ESTIMATE are facts you MAY state, exactly as written ("your balance is $120.00"). Never round, never estimate, never compute a new total, and never state a figure the facts don't show — an invented or derived amount is the worst kind of fabrication. A figure the CUSTOMER mentions ("I think my balance is $50") is a question to answer from BILLING, never a fact to confirm.
-- When the customer needs to act on an amount: point them to portal.wavespestcontrol.com (the one URL you may write), or say we'll text their pay link — and add {"type":"send_payment_link"} to intended_actions so a teammate actually sends it. NEVER invent or guess any other URL.
-- Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
-- "Did you get my payment?" / any payment-confirmation question: confirm ONLY when Recent payments (or Open invoice) lists a matching payment — state exactly what that line shows. If nothing matches, say it isn't showing on our end yet and you'll confirm — NEVER say a payment was received, applied, or that they're all set unless BILLING actually shows it; a Zelle or ACH payment can be genuinely sent and still take time to show up here.
+- When the customer needs to act on an amount: point them to portal.wavespestcontrol.com (the one URL you may write), or say we'll text their pay link — and add {"type":"send_payment_link"} to intended_actions so a teammate actually sends it. NEVER invent or guess any other URL.${paymentMoneyExtra}
 - If the open invoice is BILLED TO A THIRD-PARTY PAYER, never ask the customer to pay it.
 - Autopay and card questions: answer from the Autopay and Card-on-file lines (brand + last-4 only — a full card number never exists here).
 
@@ -1319,6 +1395,29 @@ function monthlyChargeNote(dues) {
   // Fail closed on any state we did not positively resolve.
   return MONTHLY_CHARGE_NOTES[dues.basis]
     || '. Whether these dues are currently collecting could not be confirmed, so state the dues and never a charge total';
+}
+
+// Independent-review P2 (finding 5, PR #5331): "did you get my Zelle
+// payment?" needs enough evidence to match the CLAIMED tender, not just the
+// amount — Recent payments otherwise shows only amount/status/date, so a
+// $95 Zelle and a $95 card charge look identical to the model. Derived from
+// existing snapshot columns only (payments.payment_method_type/card_brand/
+// card_last_four for a card/Stripe payment — see the 20260924000032
+// migration; a manual off-gateway row's description, e.g.
+// "Invoice INV-1 — zelle", per invoice-manual-payment.js's VALID_PAYMENT_
+// METHODS). NEVER the raw description or any reference/memo text (PII) —
+// only ONE of the fixed tender words below, or null when it can't be
+// reliably told apart.
+const MANUAL_TENDER_RE = /\b(zelle|venmo|paypal|check|cash)\b/i;
+function paymentTenderLabel(p) {
+  if (!p) return null;
+  const type = String(p.payment_method_type || '').toLowerCase();
+  if (type.includes('bank') || type === 'us_bank_account' || type === 'ach') return 'bank/ACH';
+  if (type === 'card' || p.card_brand || p.card_last_four) return 'card';
+  const m = MANUAL_TENDER_RE.exec(String(p.description || ''));
+  if (!m) return null;
+  const word = m[1].toLowerCase();
+  return word === 'paypal' ? 'PayPal' : word[0].toUpperCase() + word.slice(1);
 }
 
 /**
@@ -1482,14 +1581,46 @@ function buildFactsBlock(context, extras = {}) {
   // still needs the office to match and record it before it is a fact here,
   // which is why "did you get my payment" is answered from Recent payments
   // below, never assumed from having quoted this line.
-  const manualPayOptions = manualPayOptionsFromEnv();
-  const zelleRecipient = manualPayOptions?.zelle?.recipient || null;
-  billingLines.push(zelleRecipient
-    ? `- Payment options: card or bank account (ACH) through their personal pay link, or Zelle to ${zelleRecipient} (have them put their name or invoice number in the Zelle memo so the office can match it) — {"type":"send_payment_link"} texts a link to their pay page (portal.wavespestcontrol.com) showing the Pay button and this same Zelle info`
-    : '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts a link to their pay page (portal.wavespestcontrol.com) showing the Pay button; no Zelle recipient is configured right now, so do not offer Zelle');
+  // Gate off must stay byte-identical to v11 (v11 never had a Payment
+  // options fact at all) — independent-review P1, same contract as
+  // paymentMoneyExtra above, which is the only prompt text that references
+  // this line.
+  if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+    const manualPayOptions = manualPayOptionsFromEnv();
+    const configuredZelleRecipient = manualPayOptions?.zelle?.recipient || null;
+    // Zelle is offered in the fact ONLY when a recipient is configured AND
+    // this customer's own open invoice (when there is one) passes the SAME
+    // eligibility the pay page enforces (fetchZelleEligibility, resolved
+    // upstream — independent-review P1). No open invoice at all ⇒ not
+    // eligible: with nothing to check against, the safe direction is to
+    // under-offer Zelle rather than risk it for a new customer whose first
+    // (not-yet-open, or just-created) invoice would require a saved card.
+    const zelleRecipient = (configuredZelleRecipient && extras.zelleEligible) ? configuredZelleRecipient : null;
+    // Neutral about what the pay PAGE itself renders (independent-review
+    // P1) — the page's own Zelle-eligibility rules (collectible, not
+    // withdrawn, no saved-method requirement, etc., pay-v2.js) are a
+    // separate, narrower gate than "a Zelle recipient is configured", so
+    // this line never asserts the page shows a Pay button or Zelle info;
+    // it only describes what the action does. Three distinct wordings so
+    // the fact never states something untrue: no recipient configured at
+    // all, vs a recipient exists but this account isn't Zelle-eligible
+    // right now (a saved-method-required invoice, combined balance, etc.).
+    billingLines.push(zelleRecipient
+      ? `- Payment options: card or bank account (ACH) through their personal pay link, or Zelle to ${zelleRecipient} (have them put their name or invoice number in the Zelle memo so the office can match it) — {"type":"send_payment_link"} texts their personal pay link`
+      : configuredZelleRecipient
+        ? '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; Zelle is not available for this account right now, so do not offer it'
+        : '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; no Zelle recipient is configured right now, so do not offer Zelle');
+  }
   const pays = billingKnown ? (context.billing?.recentPayments || []).filter((p) => p && p.amount != null) : [];
   if (pays.length) {
-    billingLines.push(`- Recent payments: ${pays.map((p) => `$${Number(p.amount).toFixed(2)} ${p.status || ''} ${formatEtDate(p.payment_date || p.date)}`.replace(/\s+/g, ' ').trim()).join('; ')}`);
+    billingLines.push(`- Recent payments: ${pays.map((p) => {
+      const tender = paymentTenderLabel(p);
+      const base = `$${Number(p.amount).toFixed(2)} ${p.status || ''} ${formatEtDate(p.payment_date || p.date)}`.replace(/\s+/g, ' ').trim();
+      // No suffix at all when the tender can't be reliably told apart — its
+      // absence IS the signal (paired with the prompt rule below: confirm
+      // only amount/date then, never guess the method).
+      return tender ? `${base} via ${tender}` : base;
+    }).join('; ')}`);
   }
   const card = context.billing?.cardOnFile;
   if (card) {
@@ -1923,6 +2054,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
+  // Independent-review P1: gate the PAYMENT OPTIONS fact's Zelle branch on
+  // the SAME eligibility the pay page enforces. Skipped entirely on a
+  // frozen replay (nothing to re-check against live state) or when there
+  // is no open invoice to check against (no invoice ⇒ nothing the pay page
+  // could withhold Zelle for — the "no Zelle configured" branch is
+  // unaffected either way).
+  const zelleEligible = presetFactsBlock || !context?.billing?.openInvoice?.id
+    ? false
+    : await fetchZelleEligibility({ customerId: context?.customer?.id || null, openInvoiceId: context.billing.openInvoice.id });
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -1935,7 +2075,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, zelleEligible, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -2528,6 +2668,7 @@ module.exports = {
   buildUserPrompt,
   buildUserPromptFromFacts,
   buildFactsBlock,
+  paymentTenderLabel,
   formatExemplarBlock,
   exemplarLooksClean,
   fetchVoiceExemplars,

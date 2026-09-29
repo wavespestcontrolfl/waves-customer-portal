@@ -287,6 +287,67 @@ async function invoiceCreditWouldFullyCover(invoice) {
   return credit > 0 && credit >= invoiceAmountDue(invoice);
 }
 
+// The SINGLE eligibility predicate for offering an off-Stripe transfer
+// (Zelle today) on this invoice — extracted (independent-review P1, PR
+// #5331) so the SMS real-answers PAYMENT OPTIONS fact can ask the exact
+// same question the public pay page answers here, instead of maintaining
+// a second copy that can silently disagree. Byte-identical to the inline
+// predicate this replaced: off-Stripe tenders are offered only when a
+// transfer is actually the right thing to do (codex #3610 P1 ×2) — never
+// when the invoice must capture a saved method (a Zelle transfer creates
+// neither the Stripe method nor the consent a recurring signup needs;
+// owner ruling 2026-09-28: new customers pay at visit, card on file only),
+// never when account credit will settle the whole invoice at /setup (the
+// customer owes no cash), never on a combined-balance session (codex r2
+// P1 — a transfer + record-payment would settle only the anchor while the
+// panel advertised the COMBINED total), and never on a WITHDRAWN packet
+// invoice (codex r25 P1 — a transfer happens entirely off-platform and
+// can't be clawed back). Two further live checks run only once every
+// other condition already passed (same short-circuit as before, so a
+// non-collectible/save-required/etc. invoice never reaches Stripe): no
+// saved-card charge in flight or awaiting reconciliation (codex r5 P1),
+// and no attached PaymentIntent Stripe has already moved to
+// succeeded/processing (codex r6 P1, inspect-only via prepaid-pi-guard).
+// `creditWillCoverAnchor`, `hasPreviousBalance`, and `saveRequired` are
+// accepted as overrides so THIS route reuses its own already-computed
+// values instead of re-querying; an omitted one is derived fresh so a
+// caller with only the invoice row (e.g. the SMS drafter) still gets a
+// faithful answer.
+async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPreviousBalance, saveRequired } = {}) {
+  if (!invoice) return false;
+  if (!isInvoiceCollectibleStatus(invoice.status)) return false;
+  if (invoiceWithdrawnFromCustomer(invoice)) return false;
+  const needsSavedMethod = saveRequired != null ? saveRequired : await invoiceRequiresSavedMethod(invoice);
+  if (needsSavedMethod) return false;
+  const creditCovers = creditWillCoverAnchor != null ? creditWillCoverAnchor : await invoiceCreditWouldFullyCover(invoice);
+  if (creditCovers) return false;
+  let hasPrevBalance = hasPreviousBalance;
+  if (hasPrevBalance == null) {
+    hasPrevBalance = false;
+    if (!invoice.payer_id) {
+      const PayCombined = require('../services/pay-combined');
+      const siblings = await PayCombined.combinedEligibleSiblings(invoice, {
+        reusePaymentIntentId: invoice.stripe_payment_intent_id || null,
+      });
+      hasPrevBalance = !!(siblings && siblings.length);
+    }
+  }
+  if (hasPrevBalance) return false;
+  try {
+    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
+  } catch (err) {
+    if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
+    return false;
+  }
+  if (invoice.stripe_payment_intent_id) {
+    const verdict = await require('../services/prepaid-pi-guard')
+      .guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly: true })
+      .catch(() => ({ ok: false }));
+    if (!verdict.ok) return false;
+  }
+  return true;
+}
+
 router.get('/:token', async (req, res, next) => {
   try {
     const firstRead = await InvoiceService.getByToken(req.params.token);
@@ -385,52 +446,19 @@ router.get('/:token', async (req, res, next) => {
     }
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
-    // Off-Stripe tenders are offered only when a transfer is actually the
-    // right thing to do (codex #3610 P1 ×2): never when the invoice must
-    // capture a saved method (a Zelle/Venmo/PayPal transfer creates neither
-    // the Stripe method nor the consent the recurring signup needs), and
-    // never when account credit will settle the whole invoice at /setup
-    // (the customer owes no cash — a transfer of `amountDue` would be an
-    // overpayment).
-    // …nor on a combined-balance session (codex r2 P1): the panel advertises
-    // the COMBINED total but a transfer + record-payment settles only the
-    // anchor — the siblings would stay open while the customer believes
-    // they paid "Total due today". No manual tenders whenever siblings ride.
-    // …nor on a WITHDRAWN packet invoice (codex r25 P1): the guarded POST
-    // routes can refuse a card, but a Zelle/Venmo/PayPal transfer happens
-    // entirely off-platform — advertising an amount here is the one collection
-    // rail this application cannot claw back. Collectibility is not a property
-    // of `status` alone for these rows, so the status-only read is not enough.
-    let manualPayOptions = isInvoiceCollectibleStatus(data.status) && !invoiceWithdrawnFromCustomer(data) && !getSaveRequired && !creditWillCoverAnchor && !previousBalance
+    // Off-Stripe tenders (see isZelleTransferEligible for the full
+    // predicate and its history) — extracted so every other caller that
+    // needs to know "would the pay page offer Zelle for this invoice"
+    // (e.g. the SMS real-answers PAYMENT OPTIONS fact) asks the SAME
+    // question this route answers, rather than re-deriving it and risking
+    // disagreement (independent-review P1).
+    let manualPayOptions = (await isZelleTransferEligible(data, {
+      creditWillCoverAnchor,
+      hasPreviousBalance: !!previousBalance,
+      saveRequired: getSaveRequired,
+    }))
       ? manualPayOptionsFromEnv()
       : null;
-    if (manualPayOptions) {
-      // Cross-rail fence (codex r5 P1): the SAME guard /setup applies before
-      // minting a public PI. A committed saved-card claim (off-session charge
-      // in flight or awaiting reconciliation) must not be offered a second
-      // rail — the customer could transfer while the attempt also settles.
-      // Read-only here (this GET never parks the invoice); a fenced state
-      // simply withholds the block, the way /setup 409s.
-      try {
-        await StripeService.assertNoInvoiceChargeReconciliationPending(data.id);
-      } catch (err) {
-        if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
-        manualPayOptions = null;
-      }
-    }
-    if (manualPayOptions && data.stripe_payment_intent_id) {
-      // Attached pay-page PaymentIntent (codex r6 P1): Stripe may already have
-      // moved the stamped PI to succeeded/processing while the row is still
-      // collectible (webhook delayed or failed). Same verdict the off-Stripe
-      // settlement paths use — services/prepaid-pi-guard.js, inspect-only
-      // (this GET cancels nothing): money in flight or unverifiable ⇒ no
-      // second rail. A fresh, still-cancelable PI (the page's own mint) is
-      // fine. Only runs when a PI is stamped, so a fresh link costs nothing.
-      const verdict = await require('../services/prepaid-pi-guard')
-        .guardOpenPaymentIntentForPrepaid(data, { inspectOnly: true })
-        .catch(() => ({ ok: false }));
-      if (!verdict.ok) manualPayOptions = null;
-    }
     if (manualPayOptions) {
       // Transfer amount = what the invoice owes RIGHT NOW (gross amount due).
       // Partial account credit is applied only when /setup mints (codex r2
@@ -1692,3 +1720,4 @@ module.exports = router;
 module.exports.invoiceRequiresSavedMethod = invoiceRequiresSavedMethod;
 module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;
 module.exports.invoiceCreditWouldFullyCover = invoiceCreditWouldFullyCover;
+module.exports.isZelleTransferEligible = isZelleTransferEligible;

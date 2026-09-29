@@ -784,6 +784,10 @@ class ContextAggregator {
         // can never shadow it — Codex r5); the payer-billed note rides
         // separately so both facts surface.
         openInvoice: openInvoice ? {
+          // id rides through so a caller can re-fetch the full row to check
+          // pay-page eligibility (e.g. Zelle offer gating) without this
+          // trimmed projection growing every column that check might need.
+          id: openInvoice.id,
           title: openInvoice.title || null,
           status: openInvoice.status,
           // Net of applied credit (invoice-helpers.invoiceAmountDue) — the

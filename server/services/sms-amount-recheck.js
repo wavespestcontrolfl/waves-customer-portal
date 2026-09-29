@@ -23,6 +23,38 @@ function bodyAmountCents(body) {
   return (String(body || '').match(AMOUNT_FORMS_RE) || []).map((a) => cents(a.replace(/[^\d.]/g, '')));
 }
 
+// Independent-review P1 (finding 4, PR #5331): ZELLE_RECIPIENT is a live env
+// var (no redeploy to flip), so it can change — or disappear — between a
+// card's draft time and the moment it actually sends. "Zelle to <contact>"
+// is the ONLY wording the drafter's own PAYMENT OPTIONS fact ever produces
+// (buildFactsBlock / the paymentMoneyExtra prompt bullet in
+// sms-shadow-drafter.js), so this same shape catches both an unedited draft
+// and a human-edited body that still carries one.
+const ZELLE_CONTACT_RE = /\bzelle\b[^.\n]{0,20}\bto\b\s+([^\s,;()]+)/i;
+function bodyClaimsZelleContact(body) {
+  const m = String(body || '').match(ZELLE_CONTACT_RE);
+  return m ? m[1].replace(/[.,;:]+$/, '') : null;
+}
+
+/**
+ * Is the Zelle contact a body claims still the one Waves actually accepts?
+ * { stale: false } when the body names no Zelle contact at all; otherwise
+ * true unless it matches the CURRENT manualPayOptionsFromEnv recipient
+ * exactly (case-insensitive — an email may round-trip differently cased)
+ * AND Zelle is currently enabled at all. Fail CLOSED: a reconfigured or
+ * now-disabled recipient blocks the send exactly like a stale dollar
+ * amount, never a silent send of an old contact.
+ */
+function outgoingZelleStale(body) {
+  const claimed = bodyClaimsZelleContact(body);
+  if (!claimed) return { stale: false };
+  const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
+  const current = manualPayOptionsFromEnv()?.zelle?.recipient || null;
+  return current && claimed.toLowerCase() === current.toLowerCase()
+    ? { stale: false }
+    : { stale: true, reason: 'zelle_recipient_stale' };
+}
+
 /**
  * Are the amounts in `body` still backed by the customer's CURRENT billing
  * facts? Returns { stale: false } when the body carries no amounts or every
@@ -43,6 +75,15 @@ function strictForVersion(promptVersion) {
 
 async function outgoingAmountsStale({ customerId, body, promptVersion = null, dbh = db } = {}) {
   const text = String(body || '');
+  // Independent-review P1 (finding 4): checked unconditionally, ahead of
+  // the amount rules below and regardless of prompt version — a Zelle
+  // contact is real payment instructions whether or not the body also
+  // carries a dollar figure, and this same function is the one place both
+  // send-time seams (the immediate Agent Review send via
+  // agent-decision-send-checks.js, and the scheduler's queued-send fire-
+  // time recheck) already share.
+  const zelle = outgoingZelleStale(text);
+  if (zelle.stale) return zelle;
   const strict = strictForVersion(promptVersion);
   const amounts = bodyAmountCents(text);
   if (!amounts.length) {
@@ -78,4 +119,4 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
   }
 }
 
-module.exports = { outgoingAmountsStale, bodyAmountCents };
+module.exports = { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, bodyClaimsZelleContact };

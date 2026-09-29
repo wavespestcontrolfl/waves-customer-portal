@@ -120,6 +120,16 @@ const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
 // drafted) and are unaffected — this only excludes items being graded AS v12
 // evidence that were never given v12 facts.
 const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
+// PR #5331: the PAYMENT OPTIONS fact is now properly gated (see
+// sms-shadow-drafter.js buildFactsBlock's own comment) and, like
+// V12_FACTS_MARKER, renders on EVERY gate-on facts block unconditionally
+// (one of its three wordings always pushes) — so it belongs in the same
+// base contract, not a category marker. Kept as its own constant rather
+// than folded into an array (open PR #5336 introduces a
+// V12_BASE_FACT_MARKERS array on a parallel branch for the same reason;
+// this stays a minimal, easy-to-merge addition and the two are expected to
+// conflict on this exact spot).
+const V12_PAYMENT_OPTIONS_MARKER = '- Payment options:';
 
 function isV12PromptVersion(promptVersion) {
   return typeof promptVersion === 'string' && promptVersion.startsWith('house_voice_v12');
@@ -134,7 +144,7 @@ const CATEGORY_FACT_MARKERS = Object.freeze({ c: 'FREE RE-SERVICE:' });
 function requiredFactMarkers(promptVersion) {
   if (!isV12PromptVersion(promptVersion)) return [];
   const tags = String(promptVersion).split('+')[1] || '';
-  return [V12_FACTS_MARKER, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
+  return [V12_FACTS_MARKER, V12_PAYMENT_OPTIONS_MARKER, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
 // carry must be ABSENT too — an item frozen while complaints were on carries
@@ -142,7 +152,7 @@ function requiredFactMarkers(promptVersion) {
 // grade the plain v12 prompt after a rollback or switch. Every version has
 // one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
 // replay items frozen with the v12 SLA or category lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)]);
+const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, V12_PAYMENT_OPTIONS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)]);
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));
