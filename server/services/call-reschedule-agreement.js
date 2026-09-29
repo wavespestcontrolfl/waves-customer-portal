@@ -394,18 +394,19 @@ function namesRelativeDate(words, date, started, relativeQuotes = []) {
   if (said.month !== undefined || said.day !== undefined || said.year !== undefined) return false;
   if (new Date(`${date}T12:00:00Z`).getUTCDay() !== said.weekday) return false;
   if (!withinHorizon) return false;
-  // A pinned clause whose exact closed-set offset ("Thursday three days from
-  // now") computes to the resolved date is computed, so it may land on the
-  // nearest weekday. Otherwise only a date that is NOT the nearest fits:
-  // "next Thursday", "this Thursday", "the following Thursday" and a weekday
-  // with a looser count ("Thursday two weeks from now") are ambiguous. A
-  // bound modifier on any offset in the clause rejects it either way.
+  // A pinned clause with an exact closed-set offset ("Thursday three days
+  // from now", "Thursday a week from now") is computed: the resolved date is
+  // that weekday's first occurrence on or after the offset date, so it may
+  // be the nearest weekday, and a date any other week contradicts the
+  // offset. Only a clause with no offset falls back to "not the nearest":
+  // "next Thursday", "this Thursday", "the following Thursday" and looser
+  // counts are ambiguous. A bound modifier on any offset rejects.
   return relativeQuotes.some((q) => {
     const offsets = quoteOffsets(q);
-    if (offsets.some((o) => boundedPhrase(q, o.text))) return false;
+    if (!offsets.length) return nearestDate(said, started) !== date;
     const days = quoteOffsetDays(q);
-    if (days !== null && etDateString(addETDays(started, days)) === date) return true;
-    return nearestDate(said, started) !== date;
+    if (days === null || offsets.some((o) => boundedPhrase(q, o.text))) return false;
+    return date >= etDateString(addETDays(started, days)) && date < etDateString(addETDays(started, days + 7));
   });
 }
 

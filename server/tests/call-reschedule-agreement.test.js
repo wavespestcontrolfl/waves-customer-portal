@@ -685,6 +685,22 @@ describe('groundRescheduleAgreement', () => {
     });
 
     // The offset's number is part of the date, never a second clock hour.
+    // A weekday with an exact offset is that weekday's first occurrence on or
+    // after the offset date; an extraction date in any other week contradicts it.
+    test('a weekday with an exact offset must agree with the offset', () => {
+      const said = 'We will see you Thursday eight days from now at two PM.';
+      expect(judged({ said, slot: '2026-10-01T14:00:00-04:00', flags: relativeTrue }).ok).toBe(true);
+      expect(judged({ said, slot: '2026-10-08T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+      expect(judged({ said, slot: '2026-09-24T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+      const weeks = 'We will see you Thursday two weeks from now at two PM.';
+      expect(judged({ said: weeks, slot: '2026-10-08T14:00:00-04:00', flags: relativeTrue }).ok).toBe(true);
+      expect(judged({ said: weeks, slot: '2026-10-15T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+      expect(judged({ said: 'We will see you Thursday a week from now at two PM.', slot: '2026-10-01T14:00:00-04:00', flags: relativeTrue }).ok).toBe(true);
+      expect(judged({ said: 'We will see you Thursday a week from now at two PM.', slot: '2026-10-08T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+      // Two different offsets in one clause are ambiguous.
+      expect(judged({ said: 'We will see you Thursday in two days or in eight days at two PM.', slot: '2026-10-01T14:00:00-04:00', flags: relativeTrue }).ok).toBe(false);
+    });
+
     test('a relative offset\'s number is not read as a clock hour', () => {
       const bare = { day: 'Thursday', hour: 'two', period: null };
       for (const said of [
