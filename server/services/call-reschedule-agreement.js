@@ -690,6 +690,9 @@ const SLOT_SCOPE_WORDS = new Set([
   ...[...EXACT_TAILS].filter((w) => w !== 'next'), ...HOUR_LEAD_DAYS, ...DAY_WORDS, ...Object.keys(HOUR_WORDS),
   ...Object.keys(PERIOD_PHRASES).flatMap((p) => p.split(' ')), 'night', 'exactly', 'can', 'could', 'do', 'does', 'would',
   'work', 'fine', 'free', 'available', 'my', 'me', 'am', 'is', 'are', 'please', 'this', 'of', 'in', 'an', 'hi', 'hello', 'seeing', 'by', 'no', 'call', 'really', 'moving', 'following', 'request', 'definitely', 'absolutely', 'certainly',
+  // Ordinary ways of saying the booking is made.
+  'schedule', 'scheduled', 'scheduling', 'reschedule', 'rescheduled', 'book', 'booked', 'booking', 'confirm', 'confirmed',
+  'change', 'changed', 'switched', 'updated', 'arranged', 'calendar', 'noted',
   // Clock minutes, so the minute checks below still give their own verdict.
   'm', 'oh', 'quarter', 'half', 'past', 'minute', 'minutes', 'before', 'till', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
   'seventeen', 'eighteen', 'nineteen', 'twenty', 'thirty', 'forty', 'fifty', 'sixty',

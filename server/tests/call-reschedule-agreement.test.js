@@ -387,6 +387,10 @@ describe('groundRescheduleAgreement', () => {
       'The payment is pending, and we will see you Thursday at two PM.',
       'The payment is pending and we will see you Thursday at two PM, and a tech will call you.',
       'We will see you Thursday at exactly two PM.',
+      'I have you scheduled for Thursday at two PM.',
+      'You are booked for Thursday at two PM.',
+      'I have rescheduled you to Thursday at two PM.',
+      'We have you confirmed for Thursday at two PM.',
       'Your plan renews a week from now, and we will see you Thursday at two PM.',
     ]) expect([said, agentSays(said)]).toEqual([said, true]);
     expect(plain(THURSDAY_2PM, 'Following your request, we will see you Thursday at two.', 'two').ok).toBe(true);
