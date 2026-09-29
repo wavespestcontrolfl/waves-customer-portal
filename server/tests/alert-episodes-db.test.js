@@ -456,12 +456,18 @@ maybeDescribe('churned customer with live work: the finder (live Postgres)', () 
     expect(await legsOf(endNow)).toBeNull();
   });
 
-  test('only a lapse\'s own kept visits ride out: an unlinked visit, a rescheduled rebook, a visit left on an end-now lapse, kept visits whose paid coverage was revoked, or visits on a live term still page', async () => {
+  test('only a lapse\'s own kept visits ride out: an unlinked visit, one outside the term\'s window, a rescheduled rebook, a visit left on an end-now lapse, kept visits whose paid coverage was revoked, or visits on a live term still page', async () => {
     const extra = await customer();
     const kept = await lapse(extra, 'end_at_term', await paidInvoice(extra));
     await visit(extra, { annual_prepay_term_id: kept.id });
     await visit(extra, { service_type: 'Lawn Care' }); // not the term's: the cancel pulls it
     await visit(extra, { annual_prepay_term_id: kept.id, status: 'rescheduled', scheduled_date: '2026-08-01' });
+    await visit(extra, { annual_prepay_term_id: kept.id, status: 'confirmed', scheduled_date: '2027-01-15' }); // moved past term_end
+    const early = await customer(); // a lapse whose window has not started: a linked visit before term_start is not covered
+    const future = await insert('annual_prepay_terms', { customer_id: early.id, term_start: '2026-11-01', term_end: '2027-10-31',
+      status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term', prepay_invoice_id: (await paidInvoice(early)).id });
+    await visit(early, { annual_prepay_term_id: future.id, scheduled_date: '2026-10-15' });
+    await visit(early, { annual_prepay_term_id: future.id, scheduled_date: '2026-11-05' });
     const endNow = await customer();
     const refunding = await lapse(endNow, 'end_now_refund', await paidInvoice(endNow));
     await visit(endNow, { annual_prepay_term_id: refunding.id });
@@ -471,7 +477,8 @@ maybeDescribe('churned customer with live work: the finder (live Postgres)', () 
     const live = await customer(); // churned outside Cancel plan: the term was never decided
     const active = await insert('annual_prepay_terms', { customer_id: live.id, term_start: '2026-01-01', term_end: '2026-12-31', status: 'active' });
     await visit(live, { annual_prepay_term_id: active.id });
-    expect(await legsOf(extra)).toMatchObject({ live_visits: 2, prepay_terms: 0 });
+    expect(await legsOf(extra)).toMatchObject({ live_visits: 3, prepay_terms: 0 });
+    expect(await legsOf(early)).toMatchObject({ live_visits: 1, prepay_terms: 0 });
     expect(await legsOf(endNow)).toMatchObject({ live_visits: 1, prepay_terms: 0 });
     expect(await legsOf(revoked)).toMatchObject({ live_visits: 1, prepay_terms: 0 });
     expect(await legsOf(live)).toMatchObject({ live_visits: 1, prepay_terms: 1 });

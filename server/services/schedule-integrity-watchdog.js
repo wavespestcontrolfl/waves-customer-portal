@@ -393,14 +393,18 @@ async function findChurnedLiveWork(todayET) {
   const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
   const cancelled = [...INVOICE_CANCELLED_STATUSES];
   // A visit an end-at-term lapse keeps: linked to that term (the link its
-  // upkeep attaches inside the paid window), the term still paid coverage and
-  // in isEndAtTermLapseInWindow's shape (the inline twin
-  // refreshActiveTermsForCustomer reads). A 'rescheduled' rebook intent is
-  // never kept: the cancel pulls it whatever its date.
+  // upkeep attaches inside the paid window), dated inside the term's stored
+  // window (term_end is the cancel's keepThrough; a slid window is persisted
+  // there), the term still paid coverage and in isEndAtTermLapseInWindow's
+  // shape (the inline twin refreshActiveTermsForCustomer reads). A linked
+  // visit moved past term_end is uncovered work the cancel would have pulled,
+  // and a 'rescheduled' rebook intent is never kept (the cancel pulls it
+  // whatever its date).
   const keptByEndAtTermLapse = () => coveredTermsAsOf(db, null)
     .whereRaw('t.id = sv.annual_prepay_term_id').whereRaw('t.customer_id = sv.customer_id')
     .where({ 't.status': 'cancelled', 't.renewal_decision': 'cancel', 't.cancel_disposition': 'end_at_term' })
     .where('t.term_end', '>=', todayET)
+    .whereRaw('sv.scheduled_date BETWEEN t.term_start AND t.term_end')
     .whereRaw("sv.status <> 'rescheduled'")
     .select(db.raw('1'));
   const legs = {
