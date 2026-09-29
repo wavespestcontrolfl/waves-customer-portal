@@ -1654,6 +1654,8 @@ async function inboundConversation(conn, { callId, after, until, phone, customer
 // A message a person at Waves sent from the Gmail-synced mailbox to the
 // customer: SENT and not INBOX (a self-addressed control message is both),
 // from a Waves address, with the customer's exact address as one recipient.
+// The sync must have linked the message to this customer (emails.customer_id,
+// recorded at sync time), so a later change of address cannot re-bind it.
 // An address another live customer also has (a household sharing one) does
 // not say which of them the message was for, so it proves nothing.
 async function staffEmailTo(conn, { after, until, customerId }) {
@@ -1665,6 +1667,7 @@ async function staffEmailTo(conn, { after, until, customerId }) {
     .whereRaw("lower(trim(email)) = ?", [address]).first("id");
   if (shared) return null;
   const row = await conn("emails")
+    .where("customer_id", customerId)
     .where("received_at", ">", after)
     .where("received_at", "<=", until)
     .whereRaw("lower(from_address) ~ ?", [STAFF_ADDRESS_RE])
@@ -1842,9 +1845,9 @@ async function customerLeftProof(conn, commitment, call) {
 // proof first, then associationProof over the lookups it has always made.
 
 // send_estimate's reused-lead lookup: an estimate on a lead this call did not
-// mint (a hint, never direct), handed off once associations count — and, for
-// a promise it can close, within the association window like every other
-// association (a hint alone keeps its old open end).
+// mint (a hint: never direct, and never closes either — the lead's estimate
+// is not necessarily this customer's), handed off once associations count,
+// within the association window for a promise the portal can close.
 async function reusedLeadEstimate({ conn, call, commitment, leadIds, associated }, probe) {
   const { after } = associated;
   const until = associationCloses(commitment) ? associated.until : null;
@@ -1875,7 +1878,7 @@ async function reusedLeadEstimate({ conn, call, commitment, leadIds, associated 
       }), after, until)
       .orderByRaw(handoffOrder(conn, after, until))
       .first(...HANDOFF_COLS(conn));
-    if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
+    if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call", hint_only: true };
   }
   return null;
 }
@@ -2295,11 +2298,11 @@ const closedAtSql = (cc = "cc") => `(${cc}.fulfillment ->> 'closed_at')::timesta
 
 // An association proof closes a promise the portal may close, of a kind an
 // association closes (associationCloses) — never one bound to a confirmed
-// slot (resolveScheduleVisit). A customer who left dismisses any promise the
+// slot (resolveScheduleVisit), nor a hint_only proof (a reused lead's estimate). A customer who left dismisses any promise the
 // portal may close, whatever its kind: the promise is moot, not kept.
 function closesOnAssociation(commitment, proof) {
   if (proof.kind === CUSTOMER_LEFT) return evidenceCloseApplies(commitment);
-  return proof.strength === "association" && !proof.slot_bound && associationCloses(commitment);
+  return proof.strength === "association" && !proof.slot_bound && !proof.hint_only && associationCloses(commitment);
 }
 
 async function refreshFulfillment(conn, callLogId, call = null) {

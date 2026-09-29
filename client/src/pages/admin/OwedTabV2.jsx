@@ -70,6 +70,9 @@ function autoClosedPage(next) {
   return adminFetch(`/admin/call-recordings/commitments/auto-closed?${params.toString()}`);
 }
 
+// True while any of the flags is set (a Load more in flight on either list).
+const anyPending = (...flags) => flags.some(Boolean);
+
 function humanize(value) {
   return value ? String(value).replace(/_/g, " ") : "";
 }
@@ -187,6 +190,50 @@ function AutoClosedList({ party, rows, canReopen, busyId, onReopen, hasMore, loa
   );
 }
 
+// Promises the portal closed on its own in the last week, each with its
+// proof and a Reopen. Secondary to the open list: a failed read leaves the
+// last list on screen rather than raising an error over the real queue.
+// Load more walks back with the cursor each page returns; a refresh reads
+// again as many pages as are on screen, from the top.
+function useAutoClosedCommitments() {
+  const [list, setList] = useState({ rows: [], next: null, pages: 1 });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const seqRef = useRef(0);
+  const load = useCallback(async (pages = 1) => {
+    const seq = ++seqRef.current;
+    try {
+      let body = await autoClosedPage(null);
+      let rows = body.commitments || [];
+      let read = 1;
+      while (read < pages && body.has_more && body.next) {
+        body = await autoClosedPage(body.next);
+        rows = [...rows, ...(body.commitments || [])];
+        read += 1;
+      }
+      if (seq === seqRef.current) setList({ rows, next: body.has_more ? body.next : null, pages: read });
+    } catch {
+      // Keep the list already on screen.
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const loadMore = async () => {
+    if (loadingMore || !list.next) return;
+    const seq = ++seqRef.current;
+    setLoadingMore(true);
+    try {
+      const body = await autoClosedPage(list.next);
+      if (seq === seqRef.current) {
+        setList((s) => ({ rows: [...s.rows, ...(body.commitments || [])], next: body.has_more ? body.next : null, pages: s.pages + 1 }));
+      }
+    } catch {
+      // Keep the list already on screen.
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+  return { rows: list.rows, next: list.next, pages: list.pages, loadingMore, load, loadMore };
+}
+
 export default function OwedTabV2() {
   const [party, setParty] = useState("waves");
   const [showHints, setShowHints] = useState(true);
@@ -202,46 +249,7 @@ export default function OwedTabV2() {
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 60 * 1000); return () => clearInterval(t); }, []);
   const [busyId, setBusyId] = useState(null);
   const [actionError, setActionError] = useState(null);
-  // Promises the portal closed on its own in the last week, each with its
-  // proof and a Reopen. Secondary to the open list: a failed read leaves the
-  // last list on screen rather than raising an error over the real queue.
-  // Load more walks back with the cursor each page returns; a refresh reads
-  // again as many pages as are on screen, from the top.
-  const [autoClosed, setAutoClosed] = useState({ rows: [], next: null, pages: 1 });
-  const [loadingMoreClosed, setLoadingMoreClosed] = useState(false);
-  const autoClosedSeq = useRef(0);
-  const loadAutoClosed = useCallback(async (pages = 1) => {
-    const seq = ++autoClosedSeq.current;
-    try {
-      let body = await autoClosedPage(null);
-      let rows = body.commitments || [];
-      let read = 1;
-      while (read < pages && body.has_more && body.next) {
-        body = await autoClosedPage(body.next);
-        rows = [...rows, ...(body.commitments || [])];
-        read += 1;
-      }
-      if (seq === autoClosedSeq.current) setAutoClosed({ rows, next: body.has_more ? body.next : null, pages: read });
-    } catch {
-      // Keep the list already on screen.
-    }
-  }, []);
-  useEffect(() => { loadAutoClosed(); }, [loadAutoClosed]);
-  const loadMoreAutoClosed = async () => {
-    if (loadingMoreClosed || !autoClosed.next) return;
-    const seq = ++autoClosedSeq.current;
-    setLoadingMoreClosed(true);
-    try {
-      const body = await autoClosedPage(autoClosed.next);
-      if (seq === autoClosedSeq.current) {
-        setAutoClosed((s) => ({ rows: [...s.rows, ...(body.commitments || [])], next: body.has_more ? body.next : null, pages: s.pages + 1 }));
-      }
-    } catch {
-      // Keep the list already on screen.
-    } finally {
-      setLoadingMoreClosed(false);
-    }
-  };
+  const closed = useAutoClosedCommitments();
   // Only the latest request may paint: a filter change while an earlier
   // load (or a post-action reload) is in flight would otherwise let the
   // older response overwrite the newer selection.
@@ -295,8 +303,8 @@ export default function OwedTabV2() {
   }, [party, showHints]);
 
   useEffect(() => { load(); return () => { requestSeq.current += 1; }; }, [load]);
-  useVisiblePageRefresh(() => { loadAutoClosed(autoClosed.pages); return load({ background: true, pageCount: state.loadedPages }); }, {
-    intervalMs: 60000, enabled: state.status !== "loading" && !busyId && !loadingMore && !loadingMoreClosed,
+  useVisiblePageRefresh(() => { closed.load(closed.pages); return load({ background: true, pageCount: state.loadedPages }); }, {
+    intervalMs: 60000, enabled: state.status !== "loading" && !busyId && !anyPending(loadingMore, closed.loadingMore),
   });
 
   // The server pages at 200: walk the queue with the offset it returned and
@@ -335,7 +343,7 @@ export default function OwedTabV2() {
     try {
       await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await loadRef.current();
-      await loadAutoClosed();
+      await closed.load();
     } catch (err) {
       setActionError(err.message || "That change did not save.");
     } finally {
@@ -454,8 +462,8 @@ export default function OwedTabV2() {
           <Button size="sm" variant="ghost" onClick={loadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more"}</Button>
         </div>
       )}
-      <AutoClosedList party={party} rows={autoClosed.rows} canReopen={state.enabled} busyId={busyId} onReopen={(row) => act(row, "reopen")}
-        hasMore={Boolean(autoClosed.next)} loadingMore={loadingMoreClosed} onLoadMore={loadMoreAutoClosed} />
+      <AutoClosedList party={party} rows={closed.rows} canReopen={state.enabled} busyId={busyId} onReopen={(row) => act(row, "reopen")}
+        hasMore={Boolean(closed.next)} loadingMore={closed.loadingMore} onLoadMore={closed.loadMore} />
     </div>
   );
 }

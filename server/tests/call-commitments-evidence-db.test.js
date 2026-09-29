@@ -135,7 +135,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     scheduled_date: '2026-12-01', service_type: 'General Pest Control', status: 'pending', customer_id: w.customerId, created_at: later(), ...extra }));
   const staffEmail = (w, extra = {}) => addEmail(db('emails').insert({
     gmail_id: `g-${w.n}-${Object.keys(extra).length}`, gmail_thread_id: `t-${w.n}`, from_address: 'office@wavespestcontrol.com', to_address: w.email,
-    label_ids: JSON.stringify(['SENT']), received_at: later(), ...extra }));
+    customer_id: w.customerId, label_ids: JSON.stringify(['SENT']), received_at: later(), ...extra }));
   const estimate = async (w) => {
     const [r] = await db('estimates').insert({
       status: 'sent', customer_id: w.customerId, customer_phone: w.phone, sent_at: later(), created_at: later(),
@@ -216,6 +216,8 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await stayOpen('callback', (w) => staffEmail(w, { from_address: 'someone@example.invalid' }));
     await stayOpen('callback', (w) => staffEmail(w, { to_address: `x${w.email}` }));
     await stayOpen('callback', (w) => staffEmail(w, { received_at: new Date(Date.now() - 3 * DAY - 60 * 1000) }));
+    // The exact address, but the sync linked the message to no one, or to another customer.
+    await stayOpen('callback', (w) => staffEmail(w, { customer_id: null }));
     await stayOpen('send_report', (w) => sms(w, 'service_report', { status: 'failed' }));
     // Queued for quiet hours, or never accepted by the provider, is not sent.
     await stayOpen('send_report', (w) => sms(w, 'service_report_v1', { status: 'scheduled' }));
@@ -227,6 +229,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       return other.id;
     };
     await stayOpen('send_report', async (w) => sms(w, 'service_report', { customer_id: await householdMember(w) }));
+    await stayOpen('callback', async (w) => staffEmail(w, { customer_id: await householdMember(w) }));
     await stayOpen('send_appointment_confirmation', async (w) => sms(w, 'confirmation', { customer_id: await householdMember(w) }));
     await stayOpen('send_report', (w) => reportEmail(w, { status: 'bounced' }));
     await stayOpen('send_report', (w) => reportEmail(w, { status: 'dropped' }));
@@ -628,7 +631,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect((await row(w.commitment.id)).status).toBe('open');
   });
 
-  test('a reused lead\'s estimate closes a quote promise only inside the association window, like every other association', async () => {
+  test('a reused lead\'s estimate is only a hint: the promise stays open whether it was handed off inside or outside the association window', async () => {
     const w = await world({ kind: 'send_estimate' });
     const [lead] = await db('leads').insert({ first_name: `Reused${w.n}`, phone: w.phone, created_at: new Date(Date.now() - 30 * DAY) }).returning('id');
     made.leadIds.push(lead.id);
@@ -636,12 +639,13 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const handedOff = (at) => ({ sent_at: at, estimate_data: JSON.stringify({ lead_id: lead.id, deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } }) });
     const [est] = await db('estimates').insert({ status: 'sent', customer_phone: w.phone, created_at: new Date(Date.now() - 4 * DAY), ...handedOff(new Date(Date.now() - 3 * DAY + 20 * DAY)) }).returning('id');
     made.estimateIds.push(est.id);
-    // Handed off twenty days after the call: past the window.
+    // Handed off twenty days after the call: past the window, nothing to show.
     expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
-    expect((await row(w.commitment.id)).status).toBe('open');
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    // Inside the window: still open, carrying the reused-lead hint.
     await db('estimates').where({ id: est.id }).update(handedOff(later()));
-    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
-    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: est.id, strength: 'association' });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: { record_id: est.id, basis: 'estimate_sent_on_a_lead_reused_from_an_earlier_call', hint_only: true } });
   });
 
   test('a staff text closes a promise only with a person\'s provenance: an automated send typed \'manual\' (the reschedule acknowledgement) is not a follow-up', async () => {
