@@ -28,24 +28,36 @@ function serverSources(dir = SERVER, out = []) {
   return out;
 }
 
-// The names a destructuring pattern binds from, comments and defaults stripped.
+// Comments out, so a path or name mentioned in one never reads as code.
+function withoutComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+}
+
+// The root names a destructuring pattern reads: defaults stripped, and a
+// nested pattern (`_private: { a }`) reads only its own key.
 function destructuredNames(pattern) {
-  return pattern.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+  return pattern.replace(/(\w+)\s*:\s*\{[^{}]*\}/g, '$1')
     .split(',')
     .map((part) => part.split(/[:=]/)[0].trim())
     .filter((name) => name && !name.startsWith('...'));
 }
 
 // Every root read in one file: `const { a } = require(...)`,
-// `require(...).a`, and `const R = require(...); R.a`.
-function rootReads(src) {
+// `require(...).a`, and through an alias `const R = require(...)`: `R.a` and
+// `const { a } = R`.
+function rootReads(source) {
+  const src = withoutComments(source);
   const reads = [];
-  for (const m of src.matchAll(new RegExp(String.raw`const\s*\{([^}]*)\}\s*=\s*require\((['"])${MODULE_PATH}\2\)(\s*\._private)?`, 'g'))) {
+  for (const m of src.matchAll(new RegExp(String.raw`const\s*\{((?:[^{}]|\{[^{}]*\})*)\}\s*=\s*require\((['"])${MODULE_PATH}\2\)(\s*\._private)?`, 'g'))) {
     if (!m[3]) reads.push(...destructuredNames(m[1]));
   }
   for (const m of src.matchAll(new RegExp(String.raw`require\((['"])${MODULE_PATH}\1\)\.(\w+)`, 'g'))) reads.push(m[2]);
   for (const m of src.matchAll(new RegExp(String.raw`(?:const|let|var)\s+(\w+)\s*=\s*require\((['"])${MODULE_PATH}\2\)\s*;`, 'g'))) {
-    for (const use of src.matchAll(new RegExp(String.raw`\b${m[1]}\.(\w+)`, 'g'))) reads.push(use[1]);
+    // A standalone name only: `annual-prepay-renewals.js` or `x.renewals.y` is not the alias.
+    for (const use of src.matchAll(new RegExp(String.raw`(?<![\w$.-])${m[1]}\.(\w+)`, 'g'))) reads.push(use[1]);
+    for (const use of src.matchAll(new RegExp(String.raw`const\s*\{((?:[^{}]|\{[^{}]*\})*)\}\s*=\s*${m[1]}\s*;`, 'g'))) {
+      reads.push(...destructuredNames(use[1]));
+    }
   }
   return reads.filter((name) => name !== '_private');
 }
@@ -66,6 +78,16 @@ describe('annual-prepay-renewals root exports', () => {
   test('the scan sees the reads it guards: admin-cancellation.js reads coverageRowsForTerm from the root, and it is a function', () => {
     const src = fs.readFileSync(path.join(SERVER, 'services/admin-cancellation.js'), 'utf8');
     expect(rootReads(src)).toContain('coverageRowsForTerm');
+    // Nested destructuring reads its key; a commented mention or a hyphenated path is not a read.
+    const sample = [
+      "const { a, _private: { b } } = require('./annual-prepay-renewals');",
+      "const R = require('./annual-prepay-renewals');",
+      '// R.fromAComment, and annual-prepay-renewals.js in prose',
+      'R.c();',
+      'const { d } = R;',
+      'const { e } = R._private;',
+    ].join('\n');
+    expect(rootReads(sample).sort()).toEqual(['a', 'c', 'd']);
     expect(typeof renewals.coverageRowsForTerm).toBe('function');
     expect(renewals.coverageRowsForTerm).toBe(renewals._private.coverageRowsForTerm);
   });

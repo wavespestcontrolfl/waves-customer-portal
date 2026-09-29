@@ -472,7 +472,7 @@ async function computePrepayRefund(term, { coveredIds = null } = {}) {
     const rows = Array.isArray(coveredIds)
       ? await db('scheduled_services').whereIn('id', coveredIds).select('id', 'status', 'annual_prepay_term_id')
       : await renewals.coverageRowsForTerm({ ...term });
-    completedRows = (Array.isArray(rows) ? rows : []).filter((r) =>
+    completedRows = rows.filter((r) =>
       String(r.status || '').toLowerCase() === 'completed'
       // Overlapping terms: a visit committed to ANOTHER term never consumes
       // THIS term's slices (rows predating the term-id stamp stay counted).
@@ -548,7 +548,9 @@ async function liveCoveredKeepIds(term, customerId) {
 // covered visit falls inside the scope (fail closed — a failed covered-row
 // read also refuses).
 async function scopedCoverageConflict(customerId, scope) {
-  const { coveredTermsAsOf, coverageRowsForTerm, _private: { successorCoverageScope } } = require('./annual-prepay-renewals');
+  const renewals = require('./annual-prepay-renewals');
+  const { coveredTermsAsOf, coverageRowsForTerm } = renewals;
+  const { successorCoverageScope } = renewals._private;
   // A pending, still-payable prepay invoice for a selected family is the
   // scoped twin of the whole-account refusal: the scoped cancel would pull
   // the family's visits and recurrence, and the payment landing later
