@@ -406,6 +406,7 @@ describe('pest read hook (PR 5)', () => {
   });
   afterEach(() => {
     delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_FACTS;
     delete process.env.GATE_VISIT_PREP_PHOTOS;
   });
   const flushImmediate = () => new Promise((resolve) => setImmediate(resolve));
@@ -421,6 +422,7 @@ describe('pest read hook (PR 5)', () => {
   test('gate on: the read starts on the next tick, after the submission returns', async () => {
     process.env.GATE_VISIT_PREP_PHOTOS = 'true';
     process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
     mockTriggerPestRead.mockClear();
     const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
     await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() });

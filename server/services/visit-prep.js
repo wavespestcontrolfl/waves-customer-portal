@@ -723,6 +723,13 @@ async function customerFlaggedFacts(svc, conn = db) {
     for (const row of rows) contractsByRef.set(row.id, parseJsonMaybe(row.report_contract));
   }
 
+  // A read shows only while the stop is STILL a pest stop: an office
+  // reclassification (Pest → Lawn) after the upload hides an old pest read
+  // (Codex #5305 r8). Checked before the membership recheck below.
+  const stillPest = readsLive && readRefs.length
+    ? await require('./visit-prep-pest-read')._internal.isPestStop(svc, conn)
+    : true;
+
   // The LAST await: members re-resolved after every read above.
   const current = await stillOnTechStop(svc, conn);
   const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
@@ -737,7 +744,9 @@ async function customerFlaggedFacts(svc, conn = db) {
     photoIds: photoIdsBySubmission.get(s.id) || [],
     // The read's own kill switch hides stored reads too (Codex #5305 r1 P1).
     ...(readsLive ? {
-      read: readFactsFromContract(effectiveReadStatus(s.read_status || 'none', s.created_at), s.read_ref ? contractsByRef.get(s.read_ref) : null),
+      read: stillPest
+        ? readFactsFromContract(effectiveReadStatus(s.read_status || 'none', s.created_at), s.read_ref ? contractsByRef.get(s.read_ref) : null)
+        : { status: 'unsupported' },
     } : {}),
   }));
 }

@@ -59,7 +59,10 @@ function dailyCap() {
 async function liveStopServiceTypes(svc, conn) {
   // svc is the row this submission just committed against (rechecked
   // under the stop lock), so it always counts for itself.
-  const own = svc?.service_type ? [svc.service_type] : [];
+  // Callers that pass a partial row (the facts read) get its type from the DB.
+  const ownType = svc?.service_type !== undefined ? svc.service_type
+    : (svc?.id ? (await conn('scheduled_services').where({ id: svc.id }).first('service_type'))?.service_type : null);
+  const own = ownType ? [ownType] : [];
   if (!svc?.visit_id) return own;
   const { techStopMemberIds } = require('./visit-prep');
   const others = (await techStopMemberIds(svc, conn)).filter((id) => String(id) !== String(svc.id));
@@ -135,10 +138,6 @@ async function setReadStatus(conn, submissionId, status, readRef = null) {
 // admin resize paths use) and hands them to identifyPestV2 in the exact
 // `{ data, mimeType }` shape it already consumes from the app's Photo ID
 // route.
-async function runEngine(photos) {
-  const loaded = await Promise.all(photos.map((p) => PhotoService.getPhotoBase64(p.s3Key)));
-  return identifyPestV2(loaded);
-}
 
 // Insert the read into pest_identifications — mode='internal' (keeps it out
 // of the customer's own history + the prospect funnel), source='visit_prep'
@@ -219,9 +218,20 @@ async function triggerVisitPrepPestRead({
     return;
   }
 
+  // Photos first: a storage failure never reached the engine, so the claim
+  // is released ('none') instead of counting a paid read (Codex #5305 r8).
+  let loaded;
+  try {
+    loaded = await Promise.all(photos.map((p) => PhotoService.getPhotoBase64(p.s3Key)));
+  } catch (err) {
+    logger.error(`[visit-prep-pest-read] photo load failed for submission=${submissionId}: ${err.message}`);
+    await setReadStatus(conn, submissionId, 'none');
+    return;
+  }
+
   let result;
   try {
-    result = await runEngine(photos);
+    result = await identifyPestV2(loaded);
   } catch (err) {
     logger.error(`[visit-prep-pest-read] engine threw for submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');

@@ -65,10 +65,12 @@ describe('customerFlaggedFacts', () => {
   beforeEach(() => {
     process.env.GATE_VISIT_PREP_PHOTOS = 'true';
     process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
   });
   afterEach(() => {
     delete process.env.GATE_VISIT_PREP_PHOTOS;
     delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_FACTS;
   });
 
   beforeEach(() => jest.clearAllMocks());
@@ -160,8 +162,22 @@ describe('customerFlaggedFacts', () => {
     }]);
   });
 
+  test('a stop reclassified to a non-pest service after the read shows no read (unsupported)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Lawn Weed & Feed' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_ref: 'pi-1' },
+      ],
+      visit_prep_photos: [],
+      pest_identifications: [{ id: 'pi-1', report_contract: JSON.stringify({ v2: { entry: { common_name: 'German cockroach' } } }) }],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
   test('pest-read gate off: stored reads are not served at all (the kill switch hides them)', async () => {
     delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_FACTS;
     const conn = fakeConn({
       scheduled_services: [{ id: 'svc-1', visit_id: null }],
       visit_prep_submissions: [
@@ -176,7 +192,7 @@ describe('customerFlaggedFacts', () => {
 
   test('a DONE read merges ONLY the fixed engine fields from the stored contract, batched in one query', async () => {
     const conn = fakeConn({
-      scheduled_services: [{ id: 'svc-1', visit_id: null }],
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
       visit_prep_submissions: [
         {
           id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'),
@@ -319,8 +335,8 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
   // it, so its note and photo must not come back.
   function reassignedMidRead() {
     const before = [
-      { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
-      { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+      { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', service_type: 'Quarterly Pest Control' },
+      { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', service_type: 'Quarterly Pest Control' },
     ];
     const after = [before[0], { ...before[1], technician_id: 'tech-2' }];
     const base = fakeConn({
@@ -353,6 +369,7 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
   test('with reads on, the read contracts are fetched BEFORE the final membership recheck (Codex #5305 r7 P1)', async () => {
     process.env.GATE_VISIT_PREP_PHOTOS = 'true';
     process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
     try {
       const inner = reassignedMidRead();
       // Both submissions carry a finished read, so the contracts ARE fetched.
@@ -380,6 +397,7 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
     } finally {
       delete process.env.GATE_VISIT_PREP_PHOTOS;
       delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_FACTS;
     }
   });
 

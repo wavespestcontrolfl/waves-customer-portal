@@ -344,14 +344,14 @@ describe('engine failure — never blocks the submission, always ends at failed'
     expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
 
-  test('S3 load throws (PhotoService.getPhotoBase64 rejects)', async () => {
+  test('S3 load throws: the engine is never called and the claim is released (none, not a counted failure)', async () => {
     const conn = fakeConn();
     mockGetPhotoBase64.mockRejectedValue(new Error('S3 unavailable'));
     await triggerVisitPrepPestRead({
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
+    expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'none']);
   });
 
   test('storing the pest_identifications row throws: still resolves to failed, never throws out of the trigger', async () => {
