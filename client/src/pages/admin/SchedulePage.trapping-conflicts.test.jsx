@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   completionAreasForTypedFindings,
   labelsPresentInMarkerNotes,
+  normalizedEntries,
   reconcileProtocolActions,
   withoutProtocolMarkerLines,
   offListTypedAreaValues,
@@ -245,6 +246,29 @@ describe("submit reconciliation of protocol action markers", () => {
     const dropped = reconcileProtocolActions({ ...args, context: loaded });
     expect(dropped.reportProtocolActions).toEqual([]);
     expect(dropped.reportTechnicianNotes).toBe("");
+  });
+
+  it("counts a whitespace-variant duplicate marker once, like the server", () => {
+    const labels = Array.from({ length: 20 }, (_, i) => `Action number ${i}`);
+    const result = reconcileProtocolActions({
+      labels,
+      notes: "[Action]  action   NUMBER 3 \n[Protocol]Action\tnumber 4",
+      context: pestContext,
+    });
+    expect(result.completedActions).toHaveLength(20);
+    expect(result.completedActions.some((line) => line.length > 240)).toBe(false);
+  });
+
+  it("measures length after whitespace collapse, and still rejects a genuinely long entry", () => {
+    const padded = `Treated ${" ".repeat(400)}the perimeter`;
+    const collapsed = reconcileProtocolActions({ labels: [], notes: `[Action]${padded}`, context: pestContext });
+    expect(collapsed.completedActions).toEqual(["Treated the perimeter"]);
+    const long = reconcileProtocolActions({ labels: [], notes: `[Action]${"x".repeat(241)}`, context: pestContext });
+    expect(long.completedActions.some((line) => line.length > 240)).toBe(true);
+  });
+
+  it("normalizes entries the way the server does", () => {
+    expect(normalizedEntries(["  a   b ", "A B", "", "   ", "c"])).toEqual(["a b", "c"]);
   });
 
   it("limits specialty lanes to their own actions", () => {

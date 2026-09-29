@@ -314,6 +314,22 @@ export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, 
 // pruning and the completed-actions count all go through this, so they cannot
 // disagree (codex P2 #5051). `tag` is lowercased, `text` trimmed.
 const MARKER_LINE_RX = new RegExp(completionMarkerGrammar.lineSource);
+const ENTRY_WHITESPACE_RX = new RegExp(completionMarkerGrammar.whitespaceSource, "g");
+const ENTRY_MAX_LENGTH = completionMarkerGrammar.maxLength;
+// The entries a submit will actually persist, per the server's
+// normalizeCompletionTextArray (same shared constants): trim, collapse
+// whitespace, drop empties, dedupe case-insensitively on the persisted
+// (length-capped) form. Text is returned uncut so the caller can REJECT an
+// over-long entry instead of losing its tail silently.
+export function normalizedEntries(lines) {
+  const seen = new Set();
+  return lines
+    .map((line) => String(line || "").trim().replace(ENTRY_WHITESPACE_RX, " "))
+    .filter((text) => {
+      const key = text.slice(0, ENTRY_MAX_LENGTH).toLowerCase();
+      return text && !seen.has(key) && seen.add(key);
+    });
+}
 const PROTOCOL_MARKER_TAGS = ["protocol", "protocol optional", "action"];
 function parseMarkerLine(line) {
   const match = String(line || "").trim().match(MARKER_LINE_RX);
@@ -386,11 +402,10 @@ export function reconcileProtocolActions({ labels, notes, context }) {
     notes,
     labels.filter((label) => !reportProtocolActions.includes(label)),
   );
-  const seen = new Set();
-  const completedActions = [
+  const completedActions = normalizedEntries([
     ...reportProtocolActions,
     ...markerTexts(reportTechnicianNotes, PROTOCOL_MARKER_TAGS),
-  ].filter((line) => !seen.has(line.toLowerCase()) && seen.add(line.toLowerCase()));
+  ]);
   return { reportProtocolActions, reportTechnicianNotes, completedActions };
 }
 // Specialty preset actions carry a default scope, but the treated areas say
@@ -17151,7 +17166,7 @@ export function CompletionPanel({
         }
         // the merged lines ([Found]/[Next] and parked ones included) are what
         // persist — a long tagged line would otherwise be sliced at 240
-        if (lines.some((line) => line.length > 240)) {
+        if (lines.some((line) => line.length > ENTRY_MAX_LENGTH)) {
           freeTextProblems.push(`${label}: keep each line under 240 characters`);
         }
       }

@@ -1,4 +1,6 @@
 {
-  "_comment": "Grammar of a completion technician-notes marker line, after the line is trimmed: [Tag] text, whitespace after the closing bracket optional. Read by the server (taggedCompletionNoteLines in services/complete-scheduled-service.js) and the admin completion panel (SchedulePage.jsx), so the client's active-marker detection and pruning can never disagree with what the server reconstructs.",
-  "lineSource": "^\\[([^\\]]+)\\]\\s*(.+)$"
+  "_comment": "Completion technician-notes marker grammar and entry normalization. lineSource: a trimmed marker line is [Tag] text, whitespace after the closing bracket optional. whitespaceSource + maxLength: each completed-action / observation / recommendation entry is trimmed, runs of whitespace collapse to one space, and it is cut to maxLength before case-insensitive dedupe. Read by the server (taggedCompletionNoteLines, normalizeCompletionTextArray in services/complete-scheduled-service.js) and the admin completion panel (SchedulePage.jsx), so client-side counts and validation match what the server persists.",
+  "lineSource": "^\\[([^\\]]+)\\]\\s*(.+)$",
+  "whitespaceSource": "\\s+",
+  "maxLength": 240
 }
