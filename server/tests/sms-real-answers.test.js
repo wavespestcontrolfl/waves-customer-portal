@@ -1909,15 +1909,28 @@ describe('validateComplaintEscalation — deterministic backstop when GATE_SMS_A
     expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'escalate' }], offeredTimes: [] }).ok).toBe(true);
   });
 
-  test('other complaint signals: damage, dispute, and a cancel threat', () => {
+  test('other complaint signals: damage, dispute, and repeated failure with a pest context', () => {
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
     for (const inboundMessage of [
       'your technician damaged my irrigation line',
       "that's not what I agreed to, this is a dispute over the bill",
-      'if this happens again I am going to cancel my service',
+      'this is the fourth time the ants came back',
     ]) {
       expect(hasComplaintSignal(inboundMessage)).toBe(true);
       expect(validateComplaintEscalation({ inboundMessage, intendedActions: [], offeredTimes: [] }).ok).toBe(false);
+    }
+  });
+
+  test('false-positive control: routine scheduling and plain cancellations are not complaints (audit P1)', () => {
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+    for (const inboundMessage of [
+      'Can we do 9am every time?',
+      'I want to cancel my service',
+      'please stop my service while we are traveling',
+      'can you come the same time every time going forward',
+    ]) {
+      expect(hasComplaintSignal(inboundMessage)).toBe(false);
+      expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [{ date: 'Mon', window: '9-11am' }] }).ok).toBe(true);
     }
   });
 

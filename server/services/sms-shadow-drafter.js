@@ -536,11 +536,17 @@ const COMPLAINT_MONEY_BACK_RE = /\b(?:refund\w*|reimburs\w*|money\s+back|charge\
 const COMPLAINT_DISPUTE_RE = /\b(?:dispute\w*|not\s+what\s+(?:i|we|you)\s+(?:paid|agreed|promised)\s+for|wrongly\s+charged|overcharged)\b/i;
 const COMPLAINT_DAMAGE_RE = /\b(?:damag(?:e|ed|ing)|ruin(?:ed|ing)?|destroy(?:ed|ing)?)\b/i;
 const COMPLAINT_REPEATED_FAILURE_RE = /\b(?:third|fourth|fifth|sixth|\d+(?:st|nd|rd|th))\s+time\b|\bagain\s+and\s+again\b|\bover\s+and\s+over\b|\bevery\s+(?:single\s+)?time\b|\bkeeps?\s+happening\b/i;
-const COMPLAINT_CANCEL_THREAT_RE = /\b(?:cancel(?:l?ing)?|end|stop|drop)\w*\b[^.!?\n]{0,40}\b(?:service|account|contract|plan|membership)\b/i;
-const COMPLAINT_SIGNAL_RES = [COMPLAINT_MONEY_BACK_RE, COMPLAINT_DISPUTE_RE, COMPLAINT_DAMAGE_RE, COMPLAINT_REPEATED_FAILURE_RE, COMPLAINT_CANCEL_THREAT_RE];
+// Repetition alone is not a complaint ("can we do 9am every time?"): it
+// counts only alongside a pest-problem or failed-service context. A plain
+// cancellation is NOT a complaint either — owner ruling 2026-09-27: the
+// agent answers cancellations itself (real options only), so cancel wording
+// never trips this hold on its own.
+const COMPLAINT_FAILURE_CONTEXT_RE = /\b(?:bugs?|roach\w*|ants?|spiders?|pests?|termites?|mosquito\w*|rodents?|mice|rats?|fleas?|ticks?|wasps?|bees?|still\s+(?:seeing|have|got|there)|came\s+back|come\s+back|(?:are|is|they'?re|it'?s)\s+back|didn'?t\s+work|not\s+working|doesn'?t\s+work|isn'?t\s+working)\b/i;
+const COMPLAINT_SIGNAL_RES = [COMPLAINT_MONEY_BACK_RE, COMPLAINT_DISPUTE_RE, COMPLAINT_DAMAGE_RE];
 function hasComplaintSignal(text) {
   const t = String(text || '');
-  return COMPLAINT_SIGNAL_RES.some((re) => re.test(t));
+  return COMPLAINT_SIGNAL_RES.some((re) => re.test(t))
+    || (COMPLAINT_REPEATED_FAILURE_RE.test(t) && COMPLAINT_FAILURE_CONTEXT_RE.test(t));
 }
 function validateComplaintEscalation({ inboundMessage, intendedActions, offeredTimes }) {
   if (gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return { ok: true, violations: [] }; // held by the prompt's own category rule
