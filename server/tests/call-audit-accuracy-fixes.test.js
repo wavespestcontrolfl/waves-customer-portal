@@ -312,7 +312,7 @@ describe('schema 1.3.0 additive widenings', () => {
         email: null, relationship_to_property: 'owner', on_site_authorization: true, decision_maker_present: true,
         preferred_contact_method: 'phone',
       },
-      consent: { sms_consent_given: false, sms_consent_quote: null, call_recording_disclosed: true, do_not_contact_request: false },
+      consent: { sms_consent_given: false, sms_consent_quote: null, call_recording_disclosed: true, do_not_contact_request: false, sms_declined: false },
       property: {
         service_address: { raw_text: '123 Oak St', street_line_1: '123 Oak St', street_line_2: null, city: 'Venice', state: 'FL', postal_code: '34285', county: 'Sarasota', subdivision_or_community: null, normalization_status: 'not_attempted' },
         property_type: 'single_family', hoa_community_flag: false, hoa_common_area_service: false,

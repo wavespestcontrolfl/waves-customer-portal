@@ -59,7 +59,17 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // fit and it also covers strangers. Callers arranging service for their
 // OWN spouse/partner's household still use spouse_partner, unchanged. New
 // enum value the model must now choose between, so this is a new cohort.
-const PROMPT_VERSION = 'v16';
+// v17: consent.sms_declined (schema 1.19.0; codex P1 on #5292). The
+// booking-link dry-run's removal of the sms_consent_given===false staging
+// check (that field is true only on an explicit yes, so false meant "never
+// asked" and blocked 151/159 real new-lead calls) also stopped catching an
+// explicit "no" to "may I text you?", recorded the SAME way. sms_declined
+// is a new, separately-judged field: true ONLY on an explicit decline of
+// texting. Additive/optional in both schemas (never added to `required`,
+// per AGENTS.md's extraction-schema rule), but the model is instructed to
+// always give an explicit true/false. New field and instructions: a new
+// cohort.
+const PROMPT_VERSION = 'v17';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -277,6 +287,7 @@ CONSENT:
 - sms_consent_quote: Verbatim quote where consent was given. null if not given.
 - call_recording_disclosed: true if the greeting or agent mentioned recording/AI.
 - do_not_contact_request: true if caller explicitly asked not to be contacted.
+- sms_declined: true only if the caller explicitly declines text messages (says no when asked to be texted, or asks not to be texted / to be called instead of texted), even if calls are fine. false otherwise, including when texting never came up. Always true or false — never null.
 
 VOICEMAIL & SPAM (definitions tightened 2026-07 after a 1,000-call audit — these
 exact mistakes lost real leads; apply them literally):
