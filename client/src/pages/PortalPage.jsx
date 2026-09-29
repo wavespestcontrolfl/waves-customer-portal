@@ -10953,13 +10953,15 @@ const STATION_MAP_STALE_MS = 90 * 60 * 1000;
 
 function PlanStationMap({ map, onOpen = null, onImageError = null }) {
   const [open, setOpen] = useState(false);
-  const retriedUrl = useRef(null);
+  const retried = useRef(false);
   const handleImageError = useCallback(() => {
-    const url = map?.image?.url || null;
-    if (!onImageError || retriedUrl.current === url) return;
-    retriedUrl.current = url; // one refetch per URL, never a loop
+    // ONE refetch per mounted map, not per URL: a refetch returns a brand-new
+    // link, so keying on the URL would loop whenever the image keeps failing
+    // for a reason a fresh link cannot fix (e.g. the upstream provider is down).
+    if (!onImageError || retried.current) return;
+    retried.current = true;
     onImageError();
-  }, [map, onImageError]);
+  }, [onImageError]);
   const [entered, setEntered] = useState(false);
   useEffect(() => {
     if (!open) { setEntered(false); return undefined; }
