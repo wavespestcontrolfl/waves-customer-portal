@@ -1827,7 +1827,7 @@ class SmartRebooker {
       // Any member of the accept's shared first-application set keeps that
       // draft on its owner's date (same transaction; no-op for other rows).
       if (updated > 0 && service.first_application_invoice_id && String(newDate).slice(0, 10) !== String(originalDate instanceof Date ? originalDate.toISOString() : originalDate).slice(0, 10)) {
-        await require('./visit-groups').syncFirstApplicationInvoiceDate(trx, serviceId);
+        await require('./visit-groups').syncFirstApplicationInvoiceDate(trx, serviceId, { follower: options.unitMoveFollower === true });
       }
       if (updated === 0) {
         if (membershipFenced) {

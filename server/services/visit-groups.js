@@ -364,12 +364,12 @@ function windowedMembersConnected(members) {
  * condition must hold, else it freezes exactly as any invoice does:
  *  - linked to a member (invoices.scheduled_service_id) AND named by a
  *    member's first_application_invoice_id (the accept's own stamp);
- *  - status 'draft', never sent / viewed / paid / prepaid / receipted, no
+ *  - status 'draft', never sent / paid / prepaid / receipted (viewed_at is NOT a signal: invoice.getByToken stamps it on any /pay view, and the accept response hands the customer that link), no
  *    scheduled send, no completion packet or service record, no payer,
  *    prepay term, or batch — the columns the closeout adoption also demands;
  *  - no payment attempted or recorded: no PaymentIntent / charge / reference
  *    / method on the invoice, and no charge attempt, payment plan, payments
- *    row (metadata.invoice_id), completion claim, packet item, billing
+ *    row (metadata invoice_id / dispute_invoice_id / waves_invoice_id), completion claim, packet item, billing
  *    disposition, receipt job, follow-up sequence, orphan charge or terminal
  *    handoff for it.
  * Service records on members are checked separately (visitActivity's
@@ -384,7 +384,7 @@ async function unsentFirstApplicationInvoiceIds(trx, memberIds) {
   const stamped = trx('scheduled_services').whereIn('id', ids)
     .whereNotNull('first_application_invoice_id').select('first_application_invoice_id');
   const untouched = [
-    'sent_at', 'viewed_at', 'paid_at', 'sms_sent_at', 'email_sent_at', 'receipt_sent_at',
+    'sent_at', 'paid_at', 'sms_sent_at', 'email_sent_at', 'receipt_sent_at',
     'receipt_sms_sent_at', 'scheduled_send_at', 'payment_recorded_at', 'prepaid_at',
     'ach_processing_notified_at', 'annual_delivery_attempted_at', 'send_claim_token',
     'stripe_payment_intent_id', 'stripe_charge_id', 'payment_reference', 'payment_method',
@@ -401,7 +401,11 @@ async function unsentFirstApplicationInvoiceIds(trx, memberIds) {
     'invoice_followup_sequences', 'stripe_orphan_charges', 'terminal_handoff_tokens']) {
     q.whereNotExists(trx(`${table} as x`).whereRaw('x.invoice_id = i.id').select(trx.raw('1')));
   }
-  q.whereNotExists(trx('payments as pay').whereRaw("pay.metadata->>'invoice_id' = i.id::text").select(trx.raw('1')));
+  // The three payment→invoice linkage keys the money fences use (invoice.js
+  // retotal fence, stripe-webhook findInvoiceForPayment): any status counts.
+  q.whereNotExists(trx('payments as pay').whereRaw(
+    "(pay.metadata::jsonb ->> 'invoice_id' = i.id::text OR pay.metadata::jsonb ->> 'dispute_invoice_id' = i.id::text OR pay.metadata::jsonb ->> 'waves_invoice_id' = i.id::text)",
+  ).select(trx.raw('1')));
   return (await q.select('i.id')).map((row) => row.id);
 }
 
@@ -427,17 +431,26 @@ async function unsentFirstApplicationInvoiceIds(trx, memberIds) {
  * ungrouped row, or one whose owner is elsewhere, keeps today's behavior:
  * the invoice is left alone and the move proceeds.
  */
-async function syncFirstApplicationInvoiceDate(trx, serviceId) {
+async function syncFirstApplicationInvoiceDate(trx, serviceId, { follower = false } = {}) {
   if (!serviceId) return 0;
   const row = await trx('scheduled_services').where({ id: serviceId })
     .first('id', 'visit_id', 'first_application_invoice_id');
-  if (!row || !row.first_application_invoice_id) return 0;
+  // Only a GROUPED covered row has anything to do here: the exemption exists
+  // for grouped stops. An ungrouped row (every pre-gate booking) takes no
+  // invoice lock and no service_date write — byte-identical to before.
+  if (!row || !row.visit_id || !row.first_application_invoice_id) return 0;
   let invoice;
   try {
     invoice = await trx('invoices').where({ id: row.first_application_invoice_id })
       .forUpdate().noWait().first('id', 'scheduled_service_id', 'service_date');
   } catch (err) {
     if (err && err.code === '55P03') {
+      // A follower of a unit move never fails: the stop must finish moving
+      // as one (an invoice being sent only leaves its date for the office).
+      if (follower) {
+        require('./logger').warn(`[visit-groups] first-application invoice ${row.first_application_invoice_id} busy during a unit move — service_date left for the office`);
+        return 0;
+      }
       throw Object.assign(new Error('This visit\'s invoice is being processed — try again in a moment.'), { statusCode: 409, isOperational: true, code: 'VISIT_BUSY' });
     }
     throw err;
@@ -449,6 +462,15 @@ async function syncFirstApplicationInvoiceDate(trx, serviceId) {
   const qualifies = (await unsentFirstApplicationInvoiceIds(trx, [owner.id])).includes(invoice.id);
   if (!qualifies) {
     if (row.visit_id && owner.visit_id && String(owner.visit_id) === String(row.visit_id)) {
+      // The FIRST member write of a move (the tapped/primary member, whichever
+      // row that is) is the verification point: refusing rolls its own date
+      // write back, so nothing has moved. Later members of the same unit move
+      // (followers) never refuse — half a stop on the old date is worse than
+      // a stale invoice date, which only sends closeout adoption to the office.
+      if (follower) {
+        require('./logger').warn(`[visit-groups] first-application invoice ${invoice.id} stopped being pristine mid-move — service_date left for the office`);
+        return 0;
+      }
       throw Object.assign(new Error('Cannot move this stop: its invoice was sent or has a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'child_artifacts' });
     }
     return 0;
@@ -587,7 +609,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
         'ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
         'ss.source_action', 'ss.customer_confirmed',
         'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.status',
-        'ss.visit_id',
+        'ss.visit_id', 'ss.first_application_invoice_id',
         'svc.groupable as groupable', 'svc.group_family as group_family',
       );
     if (lock) q = q.forUpdate('ss');
@@ -756,6 +778,26 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
         const vActivity = await visitActivity(v.id, t);  
         if (!canSplit(vActivity).ok || vActivity.firstApplicationInvoice) continue;
         visit = v; break;
+      }
+    }
+
+    // The rows one accept invoice covers never spread across stops: an
+    // incoming unattached row stamped with a first_application_invoice_id may
+    // only land in the visit its already-attached covered siblings sit in
+    // (the invoice owner's stop) — never in, or as, a different one.
+    const stampedIncoming = fresh.filter((r) => !r.visit_id && r.first_application_invoice_id);
+    if (stampedIncoming.length) {
+      const covered = await t('scheduled_services as cs')
+        .join('service_visits as cv', 'cv.id', 'cs.visit_id')
+        .whereIn('cs.first_application_invoice_id', [...new Set(stampedIncoming.map((r) => String(r.first_application_invoice_id)))])
+        .whereNotIn('cs.id', ids)
+        .where('cv.status', 'open')
+        .whereNotIn('cs.status', TERMINAL_ROW_STATUSES)
+        .select('cs.visit_id', 'cs.first_application_invoice_id');
+      for (const r of stampedIncoming) {
+        const elsewhere = covered.some((c) => String(c.first_application_invoice_id) === String(r.first_application_invoice_id)
+          && (!visit || String(c.visit_id) !== String(visit.id)));
+        if (elsewhere) throw new Error('rows not mutually groupable: first_application_covered_set');
       }
     }
 
@@ -3058,7 +3100,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect, unitMoveFollower: true };
     // Callers sync reminders for the tapped row only (r2): every moved
     // sibling gets its reminder row synced here, notice suppressed — the
     // visit's one reminder text is the primary's. A sibling's own series

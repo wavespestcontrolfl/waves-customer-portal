@@ -12327,7 +12327,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // completion artifact (r13) and combined closeout never gets its
           // one stop. No-op with the gates off or fewer than two rows
           // sharing the invoice; the post-commit linkage below still runs.
-          if (standardConversionResult?.firstScheduledServiceId
+          // Card lane ONLY: there the attached draft is never delivered (see
+          // recurringCardLaneActive below), so it stays pristine and the stop
+          // stays movable. Outside the lane the invoice is texted/emailed right
+          // after commit, which freezes any visit it hangs on (a sent invoice
+          // is a real completion-stage signal), so grouping it here would only
+          // trade separate movable rows for one unmovable stop — those accepts
+          // (and invoice mode, delivered the same way) keep separate rows.
+          if (recurringCardLaneActive
+            && standardConversionResult?.firstScheduledServiceId
             && standardConversionResult?.combinedInvoiceMemberIds?.length) {
             await require('../services/estimate-property-linkage').linkFirstDayRowsBeforeFirstInvoice({
               estimateId: estimate.id,
