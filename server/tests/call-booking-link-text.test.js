@@ -1383,6 +1383,103 @@ describe('linkSentRecently: consultation_link_send_attempts scoping (codex #5196
   });
 });
 
+// ── smsDeclinedOnEarlierCall — codex P1 on #5292 ──────────────────────────
+// The dedicated consent.sms_declined check (STAGING_CHECKS) judges only the
+// CURRENT call's own extraction — a caller who declined on an EARLIER call
+// then makes a later, eligible call where texting is never discussed would
+// otherwise read as clear. Query-construction proof on a mocked conn, same
+// idiom as the linkSentRecently/neverSendRecheck suites above — the real
+// cross-call SQL behavior against a live Postgres connection is proven in
+// call-booking-link-text-postgres.test.js.
+describe('smsDeclinedOnEarlierCall', () => {
+  const { smsDeclinedOnEarlierCall } = _private;
+  const PHONE = '+19415550100';
+  const ORIGIN_CALL_ID = 'call-current';
+  const AS_OF = new Date('2026-09-28T18:00:00Z');
+
+  // Builds a mocked call_log query chain that answers `.first(...)` with
+  // `row` regardless of which where/whereRaw/orderBy calls preceded it —
+  // the real filtering (phone match, v2_extraction_status, created_at,
+  // the decisive-consent OR, ORDER BY) is SQL the Postgres suite proves;
+  // this suite proves the function's OWN interpretation of whatever the
+  // query hands back, plus the bindings it sends for the phone scope.
+  function declineConn(row) {
+    const raws = [];
+    const chain = {};
+    ['where', 'orWhere'].forEach((m) => {
+      chain[m] = jest.fn((...args) => {
+        if (typeof args[0] === 'function') args[0](chain);
+        return chain;
+      });
+    });
+    ['whereRaw', 'orWhereRaw'].forEach((m) => {
+      chain[m] = jest.fn((...args) => { raws.push(args); return chain; });
+    });
+    chain.orderBy = jest.fn(() => chain);
+    chain.modify = jest.fn((fn) => { fn(chain); return chain; });
+    chain.first = jest.fn(async () => row);
+    const conn = jest.fn(() => chain);
+    conn.raws = raws;
+    return conn;
+  }
+
+  test('an earlier decisive call that declined blocks', async () => {
+    const conn = declineConn({ ai_extraction_enriched: { consent: { sms_declined: true, sms_consent_given: false } } });
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(true);
+  });
+
+  // A LATER explicit opt-in supersedes an EARLIER decline — the query's own
+  // ORDER BY created_at DESC (proven against real Postgres) means the row
+  // this function receives is always the MOST RECENT decisive one; this
+  // function's own job is trusting that row's opt-in over a decline it
+  // never even sees.
+  test('a later opt-in supersedes — the most recent decisive row is not a decline', async () => {
+    const conn = declineConn({ ai_extraction_enriched: { consent: { sms_declined: false, sms_consent_given: true } } });
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+  });
+
+  // Both fields true on the SAME row (a garbled/contradictory extraction)
+  // fails CLOSED as a decline — the same posture the dedicated sms_declined
+  // check already takes on an absent field.
+  test('both fields true on the same row reads as a decline (fail closed)', async () => {
+    const conn = declineConn({ ai_extraction_enriched: { consent: { sms_declined: true, sms_consent_given: true } } });
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(true);
+  });
+
+  test('no earlier decisive call at all does not block', async () => {
+    const conn = declineConn(undefined);
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+  });
+
+  // A decline recorded against a DIFFERENT phone is never this phone's
+  // concern — the query itself scopes to `phone` via nanpStoredPhoneClause,
+  // so a mocked "no row for this phone" answer (the SAME shape as "no
+  // earlier decisive call") is the correct behavior here; the bindings
+  // assertion below proves this phone's own key is what actually reaches
+  // the matcher, not some other number's.
+  test('a decline on another phone does not block — the query is scoped to this phone', async () => {
+    const conn = declineConn(undefined); // simulates the real query finding nothing for THIS phone
+    await expect(smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+    const { phoneIdentityKey } = require('../utils/phone');
+    const expectedKey = phoneIdentityKey(PHONE);
+    expect(conn.raws.some(([, bindings]) => Array.isArray(bindings) && bindings[0] === expectedKey)).toBe(true);
+  });
+
+  test('an unusable phone (too short / missing) never queries at all', async () => {
+    const conn = declineConn(undefined);
+    await expect(smsDeclinedOnEarlierCall(conn, null, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+    await expect(smsDeclinedOnEarlierCall(conn, '555', { originCallId: ORIGIN_CALL_ID, asOf: AS_OF })).resolves.toBe(false);
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('the origin call id joins the phone match via orWhere, when given', async () => {
+    const conn = declineConn(undefined);
+    await smsDeclinedOnEarlierCall(conn, PHONE, { originCallId: ORIGIN_CALL_ID, asOf: AS_OF });
+    const orWhereCall = conn.mock.results[0].value.orWhere.mock.calls.find(([col]) => col === 'id');
+    expect(orWhereCall).toEqual(['id', ORIGIN_CALL_ID]);
+  });
+});
+
 // ── neverSendRecheck — the providerPreSendCheck hook ──────────────────────
 // codex r2 P2: re-runs the MUTABLE never-send predicates on the connection
 // send-customer-message.js hands this callback, right before Twilio's own
@@ -1412,7 +1509,17 @@ describe('neverSendRecheck', () => {
     },
   };
 
-  function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null, freshCall = FRESH_CALL_LOG } = {}) {
+  // earlierDeclineCall (codex P1 on #5292): the row smsDeclinedOnEarlierCall's
+  // OWN plain (un-locked) call_log query answers with, distinct from the
+  // call_log FOR UPDATE reload above (freshCall) — both query the same
+  // table, on the same mocked conn, so the chain distinguishes them by
+  // whether THIS chain instance's own .forUpdate() was ever called (a new
+  // chain object is built per conn(table) invocation, so the two queries
+  // never share one). Defaults to freshCall, so every existing test that
+  // never overrides it keeps seeing the SAME row either way, as before.
+  function dbi({
+    lead = OPEN, bookedSince = null, smsWithLink = null, freshCall = FRESH_CALL_LOG, earlierDeclineCall = freshCall,
+  } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
       // codex #5018 P2: 'select' chains here like every other builder call —
@@ -1421,13 +1528,15 @@ describe('neverSendRecheck', () => {
       // undefined, so `!longFormCandidates.length` is true and it returns
       // `false` (no long-form candidates) without ever needing an array —
       // the SAME safe default every no-match path here already assumes.
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'join', 'select']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      let callLogLocked = false;
+      chain.forUpdate = jest.fn(() => { callLogLocked = true; return chain; });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return lead;
         if (table === 'scheduled_services') return bookedSince;
         if (table === 'sms_log') return smsWithLink;
-        if (table === 'call_log') return freshCall;
+        if (table === 'call_log') return callLogLocked ? freshCall : earlierDeclineCall;
         return undefined;
       });
       chain.pluck = jest.fn(async () => []);
@@ -1648,6 +1757,24 @@ describe('neverSendRecheck', () => {
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'booked_since_call' });
   });
 
+  // codex P1 on #5292: wiring proof — the send-time recheck must also catch
+  // a decline spoken on an EARLIER call for this phone, not only the
+  // CURRENT call's own extraction (FRESH_CALL_LOG, unchanged here, carries
+  // sms_declined: false — this block comes from the OTHER call entirely).
+  test('a decline on an earlier call for this phone blocks the send at recheck time', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi({ earlierDeclineCall: { ai_extraction_enriched: { consent: { sms_declined: true } } } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'sms_declined_earlier_call' });
+  });
+
+  // A later explicit opt-in on that same earlier-call query supersedes —
+  // the recheck must not block a caller who has since said yes.
+  test('an earlier decline superseded by a later opt-in does not block the send at recheck time', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi({ earlierDeclineCall: { ai_extraction_enriched: { consent: { sms_declined: false, sms_consent_given: true } } } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
+  });
+
   test('a link delivered in the last 14 days blocks the send', async () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const conn = dbi();
@@ -1796,8 +1923,15 @@ describe('dispatchClaimedCall', () => {
   // CALL itself is already a fully eligible default row, so reloading it
   // unchanged keeps every test below resolving exactly as before unless it
   // explicitly overrides `freshCall`.
+  // earlierDeclineCall (codex P1 on #5292): the row DISPATCH_CHECKS' OWN
+  // plain (un-locked) call_log query for smsDeclinedOnEarlierCall answers
+  // with — distinct from the call_log FOR UPDATE reload neverSendRecheck
+  // would do later (never reached here since sendCustomerMessage is
+  // mocked), distinguished the same way dbi() above does, for consistency.
+  // Defaults to freshCall, so every existing test keeps seeing the SAME row.
   function makeDb({ lead = OPEN_LEAD, bookedSince = null, visitCreatedAt = null, consultationCodes = [], smsWithLink = null,
     callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {}, freshCall = CALL,
+    earlierDeclineCall = freshCall,
     markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })),
     markerDel = jest.fn(async () => 1),
     // codex #5196: the shared consultation_link_send_attempts row — the
@@ -1814,8 +1948,10 @@ describe('dispatchClaimedCall', () => {
     customersPluck = jest.fn(async () => []) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'join', 'select']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      let callLogLocked = false;
+      chain.forUpdate = jest.fn(() => { callLogLocked = true; return chain; });
       chain.where = jest.fn((...args) => {
         if (table === 'scheduled_services' && args[0] === 'created_at') capture.bookedSinceBound = args[2];
         return chain;
@@ -1827,7 +1963,7 @@ describe('dispatchClaimedCall', () => {
           return bookedSince;
         }
         if (table === 'sms_log') return smsWithLink;
-        if (table === 'call_log') return freshCall;
+        if (table === 'call_log') return callLogLocked ? freshCall : earlierDeclineCall;
         return undefined;
       });
       chain.pluck = jest.fn(async () => {
@@ -2035,6 +2171,16 @@ describe('dispatchClaimedCall', () => {
     const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, visitCreatedAt });
     const result = await dispatchClaimedCall(conn, recovered, NOW);
     expect(result.skipped).toBe('booked_since_call');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // codex P1 on #5292: wiring proof — DISPATCH_CHECKS must also catch a
+  // decline spoken on an EARLIER call for this lead's phone, even though
+  // CALL's own extraction (unchanged here) carries sms_declined: false.
+  test('a decline on an earlier call for this phone blocks the dispatch', async () => {
+    const conn = makeDb({ earlierDeclineCall: { ai_extraction_enriched: { consent: { sms_declined: true } } } });
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.skipped).toBe('sms_declined_earlier_call');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 

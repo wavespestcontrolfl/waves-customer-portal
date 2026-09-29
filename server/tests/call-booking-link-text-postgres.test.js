@@ -655,6 +655,147 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  // ── smsDeclinedOnEarlierCall — codex P1 on #5292 ────────────────────────
+  // The dedicated consent.sms_declined check judges only the CURRENT call's
+  // own extraction — this cross-call query is the raw SQL a mocked knex
+  // cannot prove: the phone-scoped OR across from_phone/to_phone, the
+  // valid-only + created_at <= asOf filters, the sandbox exclusion, and the
+  // "most recent decisive row wins" ORDER BY.
+  describe('smsDeclinedOnEarlierCall (codex P1 on #5292)', () => {
+    test('an earlier call with an explicit decline blocks, even though the call under judgment never discussed texting', async () => {
+      const phone = '+15555550301';
+      const leadId = await insertLead(mockPg, { phone });
+      const earlierCallId = await insertCall(mockPg, {
+        from_phone: phone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: true } },
+        created_at: new Date('2027-01-10T12:00:00.000Z'), updated_at: new Date('2027-01-10T12:00:00.000Z'),
+      });
+      // The call actually under judgment: its OWN extraction never mentions
+      // consent either way — the exact gap the dedicated per-call check
+      // cannot close on its own.
+      const currentCallId = await insertCall(mockPg, {
+        from_phone: phone, metadata: { lead_id: leadId },
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: {} },
+        created_at: new Date('2027-01-15T10:00:00.000Z'), updated_at: new Date('2027-01-15T10:00:00.000Z'),
+      });
+
+      const result = await callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, phone, { originCallId: currentCallId, asOf: NOW },
+      );
+      expect(result).toBe(true);
+      void earlierCallId;
+    });
+
+    test('a later explicit opt-in supersedes an earlier decline', async () => {
+      const phone = '+15555550302';
+      await insertLead(mockPg, { phone });
+      await insertCall(mockPg, {
+        from_phone: phone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: true } },
+        created_at: new Date('2027-01-05T12:00:00.000Z'), updated_at: new Date('2027-01-05T12:00:00.000Z'),
+      });
+      await insertCall(mockPg, {
+        from_phone: phone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: false, sms_consent_given: true } },
+        created_at: new Date('2027-01-10T12:00:00.000Z'), updated_at: new Date('2027-01-10T12:00:00.000Z'),
+      });
+
+      const result = await callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, phone, { originCallId: null, asOf: NOW },
+      );
+      expect(result).toBe(false);
+    });
+
+    test('no earlier decisive call at all does not block', async () => {
+      const phone = '+15555550303';
+      await insertLead(mockPg, { phone });
+      await insertCall(mockPg, {
+        from_phone: phone, ai_extraction_enriched: { ...eligibleExtraction(), consent: {} },
+        created_at: new Date('2027-01-10T12:00:00.000Z'), updated_at: new Date('2027-01-10T12:00:00.000Z'),
+      });
+
+      const result = await callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, phone, { originCallId: null, asOf: NOW },
+      );
+      expect(result).toBe(false);
+    });
+
+    test('a decline recorded against a DIFFERENT phone does not block', async () => {
+      const otherPhone = '+15555550304';
+      await insertLead(mockPg, { phone: otherPhone });
+      await insertCall(mockPg, {
+        from_phone: otherPhone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: true } },
+        created_at: new Date('2027-01-10T12:00:00.000Z'), updated_at: new Date('2027-01-10T12:00:00.000Z'),
+      });
+
+      const result = await callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, '+15555550399', { originCallId: null, asOf: NOW },
+      );
+      expect(result).toBe(false);
+    });
+
+    // A voice-relay sandbox test call's extraction says nothing about a
+    // real caller — excluded here the same way callsWith/whereNotSandboxCall
+    // exclude it everywhere else in this lane.
+    test('a decline on a sandbox test call is excluded', async () => {
+      const phone = '+15555550305';
+      await insertLead(mockPg, { phone });
+      await insertCall(mockPg, {
+        from_phone: phone, source: 'voice_relay_sandbox',
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: true } },
+        created_at: new Date('2027-01-10T12:00:00.000Z'), updated_at: new Date('2027-01-10T12:00:00.000Z'),
+      });
+
+      const result = await callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, phone, { originCallId: null, asOf: NOW },
+      );
+      expect(result).toBe(false);
+    });
+
+    // A decline that, from the point of view of the call under judgment,
+    // has not happened yet must never count — asOf bounds the search to
+    // calls strictly at or before the instant being judged.
+    test('a decline recorded AFTER asOf does not block', async () => {
+      const phone = '+15555550306';
+      await insertLead(mockPg, { phone });
+      await insertCall(mockPg, {
+        from_phone: phone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: true } },
+        created_at: new Date(NOW.getTime() + 60 * 60 * 1000), updated_at: new Date(NOW.getTime() + 60 * 60 * 1000),
+      });
+
+      const result = await callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, phone, { originCallId: null, asOf: NOW },
+      );
+      expect(result).toBe(false);
+    });
+
+    // Full wiring, end to end: dispatchClaimedCall itself must skip on this
+    // cross-call evidence, not only the bare helper.
+    test('dispatchClaimedCall skips sms_declined_earlier_call against a real earlier call, even though this call\'s own extraction never declined', async () => {
+      const phone = '+15555550307';
+      const leadId = await insertLead(mockPg, { phone });
+      await insertCall(mockPg, {
+        from_phone: phone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: true } },
+        created_at: new Date('2027-01-10T12:00:00.000Z'), updated_at: new Date('2027-01-10T12:00:00.000Z'),
+      });
+      const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+      const currentCallId = await insertCall(mockPg, {
+        from_phone: phone,
+        metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+        created_at: new Date('2027-01-15T10:00:00.000Z'), updated_at: new Date('2027-01-15T10:00:00.000Z'),
+      });
+
+      const call = await mockPg('call_log').where({ id: currentCallId }).first();
+      const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+      expect(result).toEqual({ sent: false, skipped: 'sms_declined_earlier_call' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
   // codex #5018 pre-push P2 (2nd finding): a booking for a customer staff
   // quick-added straight from the appointment modal — matched only by
   // phone, never linked to this lead — can commit BETWEEN the earlier
