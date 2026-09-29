@@ -849,6 +849,41 @@ describe('the send', () => {
   });
 });
 
+// Codex r9 on #5244: a cancel that took the visit lock first and committed
+// while this writer waited must not get a fresh request row or a text — the
+// liveness check runs again on the row the lock returns.
+describe('liveness is re-read under the visit lock', () => {
+  const cancelledUnderLock = () => {
+    mockTableHandlers.scheduled_services = {
+      ...(mockTableHandlers.scheduled_services || {}),
+      first: (chain) => (chain.calls.some(([op]) => op === 'forUpdate')
+        ? { id: VISIT.id, status: 'cancelled' }
+        : { ...VISIT }),
+    };
+  };
+
+  test('inline: a visit cancelled while waiting on the lock gets no request row', async () => {
+    cancelledUnderLock();
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow', delivery: 'inline' });
+    expect(res.reason).toBe('visit_not_live');
+    const inserts = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
+  });
+
+  test('SMS: a visit cancelled while waiting on the lock gets no row, no text, and the claim is released', async () => {
+    cancelledUnderLock();
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('visit_not_live');
+    const inserts = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const ssUpdates = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(ssUpdates.some((p) => p.card_link_sent_at === null)).toBe(true);
+  });
+});
+
 describe('inline delivery (the /book wizard card step)', () => {
   test('creates the tokenized capture with no SMS and no one-text claim', async () => {
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow', delivery: 'inline' });
