@@ -2462,7 +2462,23 @@ async function createSelfBooking(payload = {}) {
       //     matches no account property, or a foreign contact all fall to
       //     the refusal / fix-it responses below.
       const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      const bindGateEstimate = async (estimateId) => {
+      // contactLinked = the estimate is a public quote-wizard draft, whose
+      // customer_id was attached by matching the UNVERIFIED contact the
+      // anonymous quoter typed (public-quote findExistingCustomerByContact),
+      // and whose handoff token is returned to that same anonymous caller.
+      // Possession of that token proves the quoter reached the draft, NOT
+      // that they are the matched customer — so a draft linked to an
+      // ESTABLISHED customer must not act as that customer's identity here
+      // (anyone knowing a customer's phone + street could otherwise book AS
+      // them, bypassing this gate's whole purpose). It refuses with a
+      // sign-in path instead; the customer proves identity with the portal
+      // OTP (bearer, resolved above) like every other entry. A draft linked
+      // to a row still in a pre-customer stage is the quoter's OWN freshly
+      // minted lead (public-quote upserts new prospects as new_lead), which
+      // this gate never protected — it keeps binding as before. Staff/system
+      // issued links (the accept token) are NOT contact-linked: their token
+      // goes to the estimate's own contact, so they stay identity.
+      const bindGateEstimate = async (estimateId, { contactLinked = false } = {}) => {
         const gateEstimate = await db('estimates')
           .where('id', estimateId)
           .first()
@@ -2475,6 +2491,16 @@ async function createSelfBooking(payload = {}) {
             .first()
             .catch(() => null);
           if (!estCustomer) return { valid: false };
+          if (contactLinked && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(estCustomer.pipeline_stage || ''))) {
+            return {
+              valid: true,
+              error: {
+                ok: false,
+                status: 409,
+                error: 'This contact is already on file with Waves. To book as an existing customer, please sign in to your customer portal with the code we text you, then book from the Book page — or call (941) 297-5749 and we will get you scheduled.',
+              },
+            };
+          }
           const bound = await bindCustomerRowByAddress(estCustomer);
           if (bound.error) return { valid: true, error: bound.error };
           return { valid: true, custId: bound.custId };
@@ -2526,7 +2552,7 @@ async function createSelfBooking(payload = {}) {
           gateShapeOk = !!consumedBy;
         }
         if (gateShapeOk) {
-          gatePass = await bindGateEstimate(pricing_estimate_id);
+          gatePass = await bindGateEstimate(pricing_estimate_id, { contactLinked: true });
           // A customer-less consumed draft deliberately yields NO custId
           // here: bindGateEstimate validates only the draft's stored
           // contact, and a forwarded handoff plus that stale contact must
