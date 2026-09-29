@@ -2210,6 +2210,13 @@ async function judgeOpenRow(conn, commitment, call) {
   return customerLeftProof(conn, commitment, call);
 }
 
+// The marker every proof refreshFulfillment closes a row with on its own
+// carries (an association close, a customer-left dismissal): the re-judge and
+// the Owed tab's closed-automatically list select on it, so a proof another
+// writer stored is never re-judged or listed as this file's.
+const CLOSED_BY_EVIDENCE = "promise_evidence";
+const storedProof = (proof) => (proof.strength === "direct" ? proof : { ...proof, closed_by: CLOSED_BY_EVIDENCE });
+
 // An association proof closes a Waves promise (never the customer's own)
 // while PROMISE_EVIDENCE_CLOSE is on.
 function closesOnAssociation(commitment, proof) {
@@ -2290,7 +2297,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
             this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
           });
         })
-        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });
+        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(proof)), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")
@@ -2316,8 +2323,8 @@ async function refreshFulfillment(conn, callLogId, call = null) {
 // person, so the human_state IS NULL fence above keeps human verdicts out).
 function autoClosedSql(evidenceClose) {
   if (!evidenceClose) return ["status = 'fulfilled' AND fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS]];
-  return ["((status = 'fulfilled' AND (fulfillment ->> 'basis' = ? OR fulfillment ->> 'strength' = 'association'))"
-    + " OR (status = 'dismissed' AND fulfillment ->> 'kind' = ?))", [SLOT_BOOKING_BASIS, CUSTOMER_LEFT]];
+  return ["((status = 'fulfilled' AND fulfillment ->> 'basis' = ?) OR (status IN ('fulfilled', 'dismissed') AND fulfillment ->> 'closed_by' = ?))",
+    [SLOT_BOOKING_BASIS, CLOSED_BY_EVIDENCE]];
 }
 
 // The proof an automatically closed row still stands on, judged the way it
@@ -2364,7 +2371,7 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
             this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
           });
         })
-        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(keeps), fulfilled_at: left ? null : keeps.matched_at || new Date(), updated_at: new Date() });
+        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(keeps)), fulfilled_at: left ? null : keeps.matched_at || new Date(), updated_at: new Date() });
       continue;
     }
     // No longer kept: owed again, carrying whatever hint the facts support.
@@ -2629,13 +2636,10 @@ async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_L
     .where('cc.updated_at', '>=', since)
     .whereRaw("cc.human_state IS DISTINCT FROM 'dismissed'")
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
-    .where(function closedOnItsOwn() {
-      this.where(function kept() {
-        this.where('cc.status', 'fulfilled').whereRaw("cc.fulfillment ->> 'strength' = 'association'");
-      }).orWhere(function left() {
-        this.where('cc.status', 'dismissed').whereRaw("cc.fulfillment ->> 'kind' = ?", [CUSTOMER_LEFT]);
-      });
-    })
+    // Closed by this file on its own (the CLOSED_BY_EVIDENCE marker): an
+    // association close or a customer-left dismissal — never another writer's.
+    .whereIn('cc.status', ['fulfilled', 'dismissed'])
+    .whereRaw("cc.fulfillment ->> 'closed_by' = ?", [CLOSED_BY_EVIDENCE])
     .orderBy('cc.updated_at', 'desc')
     .limit(Math.max(1, Math.min(AUTO_CLOSED_LIMIT, Number(limit) || AUTO_CLOSED_LIMIT)))
     .select(

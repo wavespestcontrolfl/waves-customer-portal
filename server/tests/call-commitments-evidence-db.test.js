@@ -289,6 +289,20 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     }
   });
 
+  test('only rows this file closed on its own are re-judged or listed: another writer\'s association-strength proof is left alone', async () => {
+    const w = await world({ kind: 'send_reschedule_link' });
+    const foreign = { kind: 'reschedule_link_delivered', strength: 'association', record_type: 'sms_log', basis: 'some_other_writer' };
+    await db('call_commitments').where({ id: w.commitment.id }).update({ status: 'fulfilled', fulfillment: JSON.stringify(foreign), fulfilled_at: new Date() });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ checked: 0, reopened: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: foreign });
+    expect((await cc.listAutoClosedCommitments(db, { days: 7 })).map((c) => c.id)).not.toContain(w.commitment.id);
+    // Its own closes carry the marker.
+    const own = await world({ kind: 'other' });
+    await visit(own);
+    await cc.refreshFulfillment(db, own.call.id);
+    expect((await row(own.commitment.id)).fulfillment).toMatchObject({ strength: 'association', closed_by: 'promise_evidence' });
+  });
+
   test('Reopen acts on the version the office was shown: a newer verdict answers 409 and is left standing', async () => {
     const w = await world({ kind: 'other' });
     await visit(w);
