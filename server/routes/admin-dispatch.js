@@ -3376,10 +3376,13 @@ function recapStatusForReason(reason) {
 }
 
 // GET /:serviceId/pest-recap/context — service info + timeline + product catalog.
+// ?include=common_products adds the Fast Complete picker's most-used list.
 router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    const ctx = await PestRecap.buildRecapContext(req.params.serviceId);
+    const ctx = await PestRecap.buildRecapContext(req.params.serviceId, undefined, {
+      includeCommonProducts: req.query.include === 'common_products',
+    });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
     res.json(ctx);
   } catch (err) { next(err); }
