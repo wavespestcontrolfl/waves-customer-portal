@@ -2346,6 +2346,8 @@ const storedProof = (proof, customerId, closedAt = new Date().toISOString()) => 
 // (contactCloseStands, no model call) and the lapse scan lists it when the
 // record goes.
 const PERSON_CONTACT_KIND = "person_contact";
+// What makes an automatic close the SAME close when it is judged again.
+const SAME_CLOSE_KEYS = ["basis", "record_id", "judged_customer_id"];
 const PERSON_CONTACT_BASIS = "model_judged_person_contact";
 // The same instant as SQL over a call_commitments alias: the stored ISO-Z
 // text, whose text order is time order (compared with ISO strings), so the
@@ -2509,8 +2511,7 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
     // A row still closed keeps the time it first closed.
     const stored = keeps ? storedProof(keeps, row.customer_id, prior?.closed_at) : null;
     // Same record, judged for the same customer: nothing to write.
-    if (stored && stored.basis === prior?.basis && stored.record_id === prior?.record_id
-      && (stored.judged_customer_id ?? null) === (prior?.judged_customer_id ?? null)) continue;
+    if (stored && SAME_CLOSE_KEYS.every((k) => (stored[k] ?? null) === (prior?.[k] ?? null))) continue;
     const unchanged = (q) => q
       .where({ id: c.id, status: c.status })
       .whereNull("human_state")
