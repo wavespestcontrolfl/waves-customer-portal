@@ -73,7 +73,6 @@ const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
-const TRACK_VIEW_DEDUPE_MINUTES = 60;
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -455,14 +454,6 @@ router.get('/:token', async (req, res, next) => {
     if (!isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
-    // Customer-page-view log. This endpoint is also the 30s en-route poll and
-    // the client sends nothing that tells a poll from a page open, so the
-    // recorder's same-ip/same-visit dedupe window is what keeps polls from
-    // counting as views: 60 minutes, i.e. one tracking session = one view
-    // (bots/staff skipped, never blocks).
-    void recordPageView({
-      req, page: 'track', customerId: row.customer_id, subjectType: 'scheduled_service', subjectId: row.id, dedupeMinutes: TRACK_VIEW_DEDUPE_MINUTES,
-    });
     row = await ensureEnRouteDestinationGeocoded(row);
 
     // Presign the tech's photo (if S3-managed) inside this trusted
@@ -646,6 +637,35 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
         ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop, headingToStop: stops.headingToStop }
         : null,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Customer-page-view write companion. The GET above is contractually
+// read-only (it is also the 30s en-route poll), so the page opens ONE view by
+// POSTing here once, on its first successful load, never on polls. Same token
+// resolution and expiry fence as the GET (unknown / malformed / expired = the
+// same generic 404, no write), same router-level rate limit, body ignored.
+// Answers 204 immediately; the insert is fire-and-forget (bots, staff
+// browsers and repeat opens inside the dedupe window are skipped by the
+// recorder).
+router.post('/:token/view', async (req, res, next) => {
+  res.set(PRIVACY_HEADERS);
+  if (!TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const row = await db('scheduled_services as s')
+      .where('s.track_view_token', req.params.token)
+      .first('s.id', 's.customer_id', 's.track_token_expires_at');
+    if (!row || !isTrackTokenLive(row.track_token_expires_at)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    void recordPageView({
+      req, page: 'track', customerId: row.customer_id, subjectType: 'scheduled_service', subjectId: row.id,
+    });
+    return res.status(204).end();
   } catch (err) {
     next(err);
   }

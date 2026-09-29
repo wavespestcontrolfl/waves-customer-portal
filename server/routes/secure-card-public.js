@@ -19,7 +19,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { recordPageView } = require('../services/customer-page-views');
+const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const {
   loadSecureCardPageData,
   completeSecureCardCapture,
@@ -73,7 +73,9 @@ async function recordSecureCardView(req, token) {
       subjectId: visitScoped ? request.scheduled_service_id : request.id,
     });
   } catch (err) {
-    logger.warn(`[secure-card-public] view log failed: ${err.message}`);
+    // Knex error messages carry the SQL + bound values, i.e. the bearer
+    // token: log the page, subject type and error code only.
+    logViewFailure('lookup', 'secure-card', 'appointment_card_request', err);
   }
 }
 
