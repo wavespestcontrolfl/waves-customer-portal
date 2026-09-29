@@ -393,7 +393,7 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
   // the very next on-the-hour start against a 15-minute buffer. Grace is the
   // whole-route simulation's OWN arrival delay for this exact slot
   // (arrival_delay_minutes) — never recomputed here.
-  const prevRow = { startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60 };
+  const prevRow = { startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60, technician_id: 't1' };
   const candidate = (delayMinutes, row = prevRow) => ({
     date: '2099-10-01', technician: { id: 't1' }, start_time: '10:00', end_time: '11:00',
     arrival_delay_minutes: delayMinutes,
@@ -456,10 +456,10 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
   test('an earlier-starting, later-ending live hold that is never chosen as the neighbour still blocks grace', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env[GRACE_ENV] = '90';
-    const committedPrevRow = { startMin: 600, endMin: 650, lat: 27.4, lng: -82.4, expectedMinutes: 50 }; // 10:00-10:50
+    const committedPrevRow = { startMin: 600, endMin: 650, lat: 27.4, lng: -82.4, expectedMinutes: 50, technician_id: 't1' }; // 10:00-10:50
     const unrelatedHold = {
       startMin: 540, endMin: 655, lat: 27.4, lng: -82.4, expectedMinutes: 115, // 09:00-10:55
-      reservation_expires_at: '2099-01-01T00:00:00Z', customer_id: null,
+      reservation_expires_at: '2099-01-01T00:00:00Z', customer_id: null, technician_id: null,
     };
     const slot = {
       date: '2099-10-01', technician: { id: 't1' }, start_time: '11:00', end_time: '12:00',
@@ -472,6 +472,29 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
     expect(packCapacityEnds([withoutHoldCheck], GRACE_CALLER).map((s) => s.start_time)).toEqual(['11:00']);
     // With the unrelated hold present, grace must be refused.
     expect(packCapacityEnds([slot], GRACE_CALLER)).toEqual([]);
+  });
+
+  test('an unassigned previous stop never earns grace (the simulation does not route this tech through it)', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    expect(packCapacityEnds([candidate(6, { ...prevRow, technician_id: null })], GRACE_CALLER)).toEqual([]);
+  });
+
+  test('a previous stop on ANOTHER technician\'s route never earns grace', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    expect(packCapacityEnds([candidate(6, { ...prevRow, technician_id: 't2' })], GRACE_CALLER)).toEqual([]);
+  });
+
+  test('another technician\'s live hold nearby does not block this technician\'s grace', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env[GRACE_ENV] = '90';
+    const otherTechHold = {
+      startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60,
+      reservation_expires_at: '2099-01-01T00:00:00Z', customer_id: null, technician_id: 't2',
+    };
+    const slot = { ...candidate(6), _gap: { ...candidate(6)._gap, holdRows: [otherTechHold] } };
+    expect(packCapacityEnds([slot], GRACE_CALLER).map((s) => s.start_time)).toEqual(['10:00']);
   });
 
   test('offer/commit parity: the grace-kept slot\'s own delay is exactly what verifyArrivalCapacity would compare against the same grace', () => {

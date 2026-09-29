@@ -686,6 +686,16 @@ async function prepareReservationCommit(scheduledServiceId, options = {}) {
  * opts: { estimateId, slotId, holdMinutes?, durationMinutes?, serviceMode?, selectedFrequency? }
  * returns: { scheduledServiceId, expiresAt }
  */
+// Why a slot's date can't be reserved, or null. A past date never can; a
+// graced offer minted before ET midnight for "tomorrow" is now same-day,
+// and same-day picks never get grace (Codex r3 P2 on #5314), so the
+// customer must refresh into a grace-0 offer.
+function slotDateRefusal(date, todayEt, offerArrivalGrace) {
+  if (date < todayEt) return 'slot date has already passed';
+  if (date === todayEt && offerArrivalGrace > 0) return 'graced offer is now same-day';
+  return null;
+}
+
 async function reserveSlot({
   estimateId,
   slotId,
@@ -753,8 +763,12 @@ async function reserveSlot({
   // starts AT the boundary (startMin >= earliest), so equality must pass
   // here too or a just-fetched boundary slot 409s on the first tap.
   const todayEt = etDateString();
-  if (date < todayEt) {
-    const err = new Error('slot date has already passed');
+  // A graced offer minted before ET midnight for "tomorrow" is now same-day,
+  // and same-day picks never get grace (Codex r3 P2 on #5314): refuse it so
+  // the customer refreshes into a grace-0 offer.
+  const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace);
+  if (dateRefusal) {
+    const err = new Error(dateRefusal);
     err.code = 'SLOT_UNAVAILABLE';
     err.slotId = slotId;
     throw err;

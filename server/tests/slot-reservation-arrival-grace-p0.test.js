@@ -135,3 +135,21 @@ describe('reserveSlot applies the grace baked into the offer token, not a live r
     expect(verifySlotOffer({ ...payload, exp: parsed.exp, arrivalGrace: parsed.arrivalGrace }, parsed.sig)).toBe(true);
   });
 });
+
+// Codex r3 P2 (#5314): a graced offer minted before ET midnight for
+// "tomorrow" becomes same-day after midnight; same-day picks never get
+// grace, so reserveSlot must refuse it (the customer refreshes into a
+// grace-0 offer) instead of applying the signed grace.
+describe('reserveSlot refuses a graced offer whose date is now today', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
+  test('the past-date guard also rejects date === today when the offer carries grace', () => {
+    expect(src).toMatch(/if \(date === todayEt && offerArrivalGrace > 0\) return 'graced offer is now same-day';/);
+    expect(src).toMatch(/const dateRefusal = slotDateRefusal\(date, todayEt, offerArrivalGrace\);/);
+  });
+  test('the refusal happens before any capacity verification runs', () => {
+    const guardAt = src.indexOf('const dateRefusal = slotDateRefusal(date, todayEt, offerArrivalGrace);');
+    const reserveVerifyAt = src.indexOf('arrivalGraceMinutes: offerArrivalGrace');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(reserveVerifyAt).toBeGreaterThan(guardAt);
+  });
+});

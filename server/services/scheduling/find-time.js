@@ -376,6 +376,10 @@ function capacityNeighbourEntity(row) {
   };
 }
 
+function sameAssignedTech(row, slot) {
+  return row?.technician_id != null && String(row.technician_id) === String(slot?.technician?.id);
+}
+
 // Packed-ends for capacity results (Codex r2 P1): findCapacitySlots
 // enumerates EVERY feasible whole-hour start against the complete route, so
 // a customer-facing caller would still see the hole-making mid-gap hours.
@@ -426,7 +430,10 @@ function capacityNeighbourEntity(row) {
 // stop's side, since the next customer's promised start is not this
 // customer's to spend.
 function graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbour) {
-  if (!arrivalGraceOptIn || isHoldStop(row)) return false;
+  // Only a previous stop the simulation actually routed THIS technician
+  // through: an unassigned blocker is a fixed overlap to the simulator, with
+  // no drive modelled to or from it (Codex r3 P1 on #5314).
+  if (!arrivalGraceOptIn || isHoldStop(row) || !sameAssignedTech(row, slot)) return false;
   const grace = selfServeArrivalGraceMinutes({ date: slot.date });
   if (!(grace > 0) || !Number.isFinite(slot.arrival_delay_minutes)) return false;
   if (slot.arrival_delay_minutes > grace) return false;
@@ -438,7 +445,9 @@ function graceWaivesBufferOnly(arrivalGraceOptIn, slot, row, candidate, neighbou
   // header). Grace never applies to a hold itself, so any such violation
   // blocks the grant outright, even though it isn't the neighbour being
   // waived.
-  const holdRows = slot._gap?.holdRows || [];
+  // This technician's holds plus unassigned ones — another technician's
+  // hold is on a different route (Codex r3 P2 on #5314).
+  const holdRows = (slot._gap?.holdRows || []).filter((holdRow) => holdRow.technician_id == null || sameAssignedTech(holdRow, slot));
   return holdRows.every((holdRow) => {
     const holdNeighbour = capacityNeighbourEntity(holdRow);
     return !holdNeighbour || !violatesTravelGap(candidate, [holdNeighbour]);
