@@ -36,7 +36,7 @@
         "USE /api/public/pest-identifier (inline function#14727834)",
         "USE /api/public/reservice (inline function#d0926d91)",
         "USE /api/public/secure-card (inline function#8abc12e6)",
-        "USE /api/public/track (inline function#d0a8987e)"
+        "USE /api/public/track (trackPublicPreparser#a6e0dc6f)"
       ]
     },
     {
