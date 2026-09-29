@@ -826,6 +826,29 @@ async function finalStopSnapshot(svc, conn, needPest, needPlant) {
   return conn.transaction((trx) => run(trx), FINAL_CHECK_SNAPSHOT);
 }
 
+// The read line one submission gets, or null when neither read feature is
+// live. Each engine's kill switch hides its stored reads too (Codex #5305 r1
+// P1). A claimed read (pending/done/failed) is shown only by the engine that
+// made it, and only while the stop still suits that engine and, for a plant
+// read, that subject (lawn vs tree_shrub; Codex #5320 r1/r3). An unclaimed
+// row on a stop a live engine suits hasn't been read YET, so an
+// 'unsupported' written by the other engine is served as 'none' and the
+// panel keeps polling (Codex #5320 r3 P2). Otherwise 'unsupported'.
+function servedRead(s, ctx) {
+  const status = effectiveReadStatus(s.read_status || 'none', s.created_at);
+  const plantResult = s.read_result ? parseJsonMaybe(s.read_result) : null;
+  const origin = readOrigin(s.read_status, plantResult);
+  const shownStatus = !origin && status === 'unsupported' ? 'none' : status;
+  if (ctx.readsLive && ctx.stillPest && origin !== 'plant') {
+    return readFactsFromContract(shownStatus, s.read_ref ? ctx.contractsByRef.get(s.read_ref) : null);
+  }
+  const subjectMatches = !plantResult?.subject_type || plantResult.subject_type === ctx.plantSubject;
+  if (ctx.plantReadsLive && ctx.plantSubject && origin !== 'pest' && subjectMatches) {
+    return plantReadFactsFromResult(shownStatus, plantResult);
+  }
+  return ctx.readsLive || ctx.plantReadsLive ? { status: 'unsupported' } : null;
+}
+
 async function customerFlaggedFacts(svc, conn = db) {
   const ids = await techStopMemberIds(svc, conn);
   if (ids.length === 0) return null;
@@ -907,35 +930,10 @@ async function customerFlaggedFacts(svc, conn = db) {
       note: s.note || null,
       photoIds: photoIdsBySubmission.get(s.id) || [],
     };
-    const status = effectiveReadStatus(s.read_status || 'none', s.created_at);
-    // Each engine's own kill switch hides its stored reads too (Codex #5305
-    // r1 P1, applied to the plant sibling): a stop currently judged pest
-    // renders the pest shape; one currently judged lawn/tree_shrub renders
-    // the plant shape (its own read_result column, untouched by the pest
-    // read); a stop that matches neither right now — reclassified away, or
-    // both features off — shows 'unsupported' whenever at least one of the
-    // two features is live at all, exactly as the pest-only read did before
-    // this lane existed.
-    // A claimed read (pending/done/failed) is shown only by the engine that
-    // made it, and only while the stop still suits that engine; an
-    // unclaimed row follows the stop's current applicability (Codex #5320
-    // r1 P2).
-    const plantResult = s.read_result ? parseJsonMaybe(s.read_result) : null;
-    const origin = readOrigin(s.read_status, plantResult);
-    const showPest = readsLive && stillPest && origin !== 'plant';
-    const showPlant = plantReadsLive && plantSubject && origin !== 'pest';
-    // An unclaimed row on a stop a live engine suits hasn't been read YET:
-    // the other engine may have marked it 'unsupported' before the right
-    // one claimed it, so it's served as 'none' and the panel keeps polling
-    // (Codex #5320 r3 P2).
-    const shownStatus = !origin && status === 'unsupported' ? 'none' : status;
-    if (showPest) {
-      entry.read = readFactsFromContract(shownStatus, s.read_ref ? contractsByRef.get(s.read_ref) : null);
-    } else if (showPlant) {
-      entry.read = plantReadFactsFromResult(shownStatus, plantResult);
-    } else if (readsLive || plantReadsLive) {
-      entry.read = { status: 'unsupported' };
-    }
+    const read = servedRead(s, {
+      readsLive, plantReadsLive, stillPest, plantSubject, contractsByRef,
+    });
+    if (read) entry.read = read;
     return entry;
   });
 }
