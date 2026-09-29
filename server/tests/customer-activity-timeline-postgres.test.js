@@ -16,13 +16,13 @@ const pg = url ? describe : describe.skip;
 const TEMP_TABLES = `
   CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, last_seen_at timestamp, deleted_at timestamp);
   CREATE TEMP TABLE leads (id uuid PRIMARY KEY, customer_id uuid);
-  CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp);
+  CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp, from_phone text, metadata jsonb);
   CREATE TEMP TABLE short_codes (id uuid PRIMARY KEY, customer_id uuid, lead_id uuid, kind text, channel text, purpose text);
   CREATE TEMP TABLE short_code_clicks (id uuid PRIMARY KEY, short_code_id uuid, clicked_at timestamp, is_bot boolean NOT NULL DEFAULT false);
   CREATE TEMP TABLE email_messages (id uuid PRIMARY KEY, recipient_type text, recipient_id text, recipient_email_snapshot text, status text, template_key text, subject_snapshot text, queued_at timestamp, updated_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
   CREATE TEMP TABLE automation_templates (key text PRIMARY KEY, name text);
   CREATE TEMP TABLE automation_enrollments (id uuid PRIMARY KEY, template_key text, customer_id uuid);
-  CREATE TEMP TABLE automation_step_sends (id uuid PRIMARY KEY, enrollment_id uuid, step_order int, status text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, updated_at timestamp);
+  CREATE TEMP TABLE automation_step_sends (id uuid PRIMARY KEY, enrollment_id uuid, step_order int, status text, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, updated_at timestamp);
   CREATE TEMP TABLE newsletter_sends (id uuid PRIMARY KEY, subject text);
   CREATE TEMP TABLE newsletter_subscribers (id int PRIMARY KEY, customer_id uuid);
   CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY, send_id uuid, subscriber_id int, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
@@ -31,7 +31,7 @@ const TEMP_TABLES = `
   CREATE TEMP TABLE estimate_views (id uuid PRIMARY KEY, estimate_id uuid, viewed_at timestamp);
   CREATE TEMP TABLE scheduled_services (id uuid PRIMARY KEY, customer_id uuid);
   CREATE TEMP TABLE projects (id uuid PRIMARY KEY, customer_id uuid, report_viewed_at timestamp, project_type text);
-  CREATE TEMP TABLE prep_guide_views (id serial PRIMARY KEY, project_id uuid, scheduled_service_id uuid, viewed_at timestamp);
+  CREATE TEMP TABLE prep_guide_views (id serial PRIMARY KEY, project_id uuid, scheduled_service_id uuid, viewed_at timestamp, user_agent text);
   CREATE TEMP TABLE service_records (id uuid PRIMARY KEY, customer_id uuid, report_viewed_at timestamp, service_type text);
   CREATE TEMP TABLE customer_contracts (id uuid PRIMARY KEY, customer_id uuid, viewed_at timestamp, title text);
   CREATE TEMP TABLE price_change_notices (id uuid PRIMARY KEY, customer_id uuid, first_viewed_at timestamp, view_count int);
@@ -71,6 +71,11 @@ pg('getCustomerActivity on Postgres', () => {
       { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'sending', message_type: 'reminder', message_body: 'sending reminder', created_at: T(81) },
       { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'canceled', message_type: 'reminder', message_body: 'canceled reminder', created_at: T(82) },
       { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'cancelled', message_type: 'reminder', message_body: 'cancelled reminder', created_at: T(83) },
+      // recruiting texts on a shared customer id are owner-only: never customer history or engagement
+      { id: randomUUID(), customer_id: cust, direction: 'inbound', status: 'received', message_type: 'job_applicant_reply', message_body: 'applicant reply', created_at: T(85) },
+      { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'sent', message_type: 'job_interview_invite', message_body: 'applicant invite', created_at: T(86) },
+      // push proof: an app notification a device accepted, not a text
+      { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'sent', message_type: 'appointment_reminder', message_body: 'Tomorrow at 9', created_at: T(6), from_phone: 'push', metadata: JSON.stringify({ channel: 'push' }) },
     ]);
 
     // link clicks: one by customer, one by the customer's lead, one bot (excluded)
@@ -109,10 +114,15 @@ pg('getCustomerActivity on Postgres', () => {
     await db('automation_templates').insert({ key: 'welcome', name: 'Welcome series' });
     await db('automation_enrollments').insert({ id: enr, template_key: 'welcome', customer_id: cust });
     await db('automation_step_sends').insert([
-      { id: randomUUID(), enrollment_id: enr, step_order: 0, status: 'sent', sent_at: T(30), delivered_at: T(31), opened_at: T(32) },
-      { id: randomUUID(), enrollment_id: enr, step_order: 1, status: 'bounced', sent_at: T(35), updated_at: T(36) },
-      { id: randomUUID(), enrollment_id: enr, step_order: 2, status: 'complained', sent_at: T(37), updated_at: T(38) },
+      { id: randomUUID(), enrollment_id: enr, step_order: 0, status: 'sent', email: ' SYNTHETIC.PERSON@example.test ', sent_at: T(30), delivered_at: T(31), opened_at: T(32) },
+      { id: randomUUID(), enrollment_id: enr, step_order: 1, status: 'bounced', email: 'synthetic.person@example.test', sent_at: T(35), updated_at: T(36) },
+      { id: randomUUID(), enrollment_id: enr, step_order: 2, status: 'complained', email: 'synthetic.person@example.test', sent_at: T(37), updated_at: T(38) },
     ]);
+    // payment_failed redirected to a billing contact: someone else's inbox, so its
+    // opens and clicks (the newest events of all) are not the customer's
+    const enrBill = randomUUID();
+    await db('automation_enrollments').insert({ id: enrBill, template_key: 'welcome', customer_id: cust });
+    await db('automation_step_sends').insert({ id: randomUUID(), enrollment_id: enrBill, step_order: 0, status: 'clicked', email: 'accounts.payable@example.test', sent_at: T(87), delivered_at: T(88), opened_at: T(89), clicked_at: T(91) });
     const send = randomUUID();
     await db('newsletter_sends').insert({ id: send, subject: 'September news' });
     await db('newsletter_subscribers').insert({ id: 7, customer_id: cust });
@@ -129,7 +139,14 @@ pg('getCustomerActivity on Postgres', () => {
     await db('estimate_views').insert({ id: randomUUID(), estimate_id: est, viewed_at: T(42) });
     await db('scheduled_services').insert({ id: visit, customer_id: cust });
     await db('projects').insert({ id: proj, customer_id: cust, report_viewed_at: T(46), project_type: 'wdo_inspection' });
-    await db('prep_guide_views').insert([{ project_id: null, scheduled_service_id: visit, viewed_at: T(43) }, { project_id: proj, scheduled_service_id: null, viewed_at: T(44) }]);
+    await db('prep_guide_views').insert([
+      { project_id: null, scheduled_service_id: visit, viewed_at: T(43), user_agent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1' },
+      { project_id: proj, scheduled_service_id: null, viewed_at: T(44) },
+      // link previewers and scanners: never listed, never engagement
+      { project_id: null, scheduled_service_id: visit, viewed_at: T(75), user_agent: 'Mozilla/5.0 (compatible; Googlebot/2.1)' },
+      { project_id: null, scheduled_service_id: visit, viewed_at: T(76), user_agent: 'WhatsApp/2.23.20 A' },
+      { project_id: proj, scheduled_service_id: null, viewed_at: T(77), user_agent: 'Slackbot-LinkExpanding 1.0' },
+    ]);
     await db('service_records').insert({ id: randomUUID(), customer_id: cust, report_viewed_at: T(45), service_type: 'Quarterly pest control' });
     await db('customer_contracts').insert({ id: randomUUID(), customer_id: cust, viewed_at: T(47), title: 'Service agreement' });
     await db('price_change_notices').insert({ id: randomUUID(), customer_id: cust, first_viewed_at: T(48), view_count: 3 });
@@ -189,6 +206,70 @@ pg('getCustomerActivity on Postgres', () => {
     expect(r.events.find((e) => e.source === 'automation' && e.kind === 'bounced').at).toBe(T(36).toISOString());
     expect(r.events.find((e) => e.source === 'automation' && e.kind === 'complained').at).toBe(T(38).toISOString());
     expect(r.events.filter((e) => e.source === 'automation' && ['bounced', 'complained'].includes(e.kind)).every((e) => e.engaged === false)).toBe(true);
+  });
+
+  test('recruiting texts on the customer id are hidden from the feed and the summary', async () => {
+    const r = await run({ limit: 200 });
+    expect(r.events.some((e) => /applicant/.test(e.detail || ''))).toBe(false);
+    // the T(85) applicant reply would otherwise be the newest "replied" event
+    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
+    const solo = randomUUID();
+    await db('customers').insert({ id: solo, email: 'recruit.only@example.test' });
+    await db('sms_log').insert({ id: randomUUID(), customer_id: solo, direction: 'inbound', status: 'received', message_type: 'job_applicant_reply', message_body: 'hi', created_at: T(3) });
+    const only = await timeline.getCustomerActivity(solo, {}, db);
+    expect(only.events).toEqual([]);
+    expect(only.summary.lastEngagedAt).toBeNull();
+  });
+
+  test('a push-proof row is an app notification, not a text, and is not engagement', async () => {
+    const r = await run({ limit: 200 });
+    const push = r.events.find((e) => e.channel === 'push');
+    expect(push).toMatchObject({ kind: 'delivered', engaged: false, title: 'App notification delivered (appointment reminder)', at: T(6).toISOString() });
+    expect(r.events.some((e) => e.channel === 'sms' && e.detail === 'Tomorrow at 9')).toBe(false);
+  });
+
+  test('prep views from link previewers are dropped from the feed and lastEngagedAt; browser and unknown agents stay', async () => {
+    const r = await run({ limit: 200 });
+    const prep = r.events.filter((e) => e.source === 'prep');
+    expect(prep.map((e) => e.at).sort()).toEqual([T(43).toISOString(), T(44).toISOString()]);
+    expect(prep.every((e) => /unfiltered for staff previews/.test(e.detail))).toBe(true);
+    // bot views at T(75-77) are after the portal visit (T(59)) and would have won
+    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
+    // a customer whose only prep views are bots has none of it
+    const solo = randomUUID(); const sv = randomUUID();
+    await db('customers').insert({ id: solo, email: 'prep.bot@example.test' });
+    await db('scheduled_services').insert({ id: sv, customer_id: solo });
+    await db('prep_guide_views').insert({ scheduled_service_id: sv, viewed_at: T(5), user_agent: 'Mozilla/5.0 (compatible; bingbot/2.0)' });
+    const only = await timeline.getCustomerActivity(solo, {}, db);
+    expect(only.events.filter((e) => e.source === 'prep')).toEqual([]);
+    expect(only.summary.lastEngagedAt).toBeNull();
+  });
+
+  test('the Postgres bot pattern agrees with isBotUserAgent on representative agents', async () => {
+    const { isBotUserAgent } = require('../utils/bot-ua');
+    const agents = [
+      'Mozilla/5.0 (compatible; Googlebot/2.1)', 'WhatsApp/2.23', 'Slackbot-LinkExpanding 1.0', 'curl/8.4.0', 'python-requests/2.31',
+      'facebookexternalhit/1.1', 'Mozilla/5.0 (iPhone) Safari/604.1', 'Mozilla/5.0 (Macintosh) Chrome/120 Safari/537.36',
+      'Mozilla/5.0 Preview', 'Twitterbot/1.0', 'HeadlessChrome/120', 'Robotics Club Browser', 'axios/1.6.0', '',
+    ];
+    const pattern = timeline.BOT_UA_PG;
+    for (const ua of agents) {
+      const { rows } = await db.raw("SELECT (COALESCE(?::text, '') ~* ?) AS bot", [ua, pattern]);
+      expect([ua, rows[0].bot]).toEqual([ua, isBotUserAgent(ua)]);
+    }
+  });
+
+  test('automation sends to a billing contact are shown masked and earn no engagement or open credit', async () => {
+    const r = await run({ limit: 200 });
+    const billing = r.events.filter((e) => e.source === 'automation' && /billing contact/.test(e.title));
+    expect(billing).toHaveLength(1);
+    expect(billing[0]).toMatchObject({ kind: 'sent', engaged: false, title: 'Sent to billing contact a***@example.test' });
+    // the redirected click (T91) and open (T89) are the newest of everything and must not surface
+    expect(r.events.filter((e) => e.source === 'automation' && ['clicked', 'opened', 'delivered'].includes(e.kind)).every((e) => e.at < T(80).toISOString())).toBe(true);
+    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
+    expect(r.summary.lastEmailOpenAt).toBe(T(70).toISOString());
+    // a customer-addressed send (case / spaces ignored) still lists its own open
+    expect(r.events.some((e) => e.source === 'automation' && e.kind === 'opened' && e.at === T(32).toISOString())).toBe(true);
   });
 
   test('an archived customer is not found', async () => {

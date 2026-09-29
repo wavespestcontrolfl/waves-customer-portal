@@ -14,9 +14,10 @@ const source = (name) => SOURCES.find((s) => s.name === name);
 
 // A permissive stand-in for a knex builder: every chain call returns itself,
 // awaiting it yields the table's rows, and .first() yields the customer / a null MAX.
-function fakeDb({ customer = { id: 'c1', email: 'A@Example.test' }, rows = {}, present = true, failTable = null, failMax = [], maxes = {} } = {}) {
+function fakeDb({ customer = { id: 'c1', email: 'A@Example.test' }, rows = {}, present = true, failTable = null, failMax = [], failMaxExpr = null, maxes = {} } = {}) {
   const calls = { limit: [], raw: [], chain: [] };
   const dbh = (name) => {
+    let lastSelect = null;
     const b = new Proxy(function builder() {}, {
       get(_t, prop) {
         if (prop === 'then') {
@@ -26,20 +27,29 @@ function fakeDb({ customer = { id: 'c1', email: 'A@Example.test' }, rows = {}, p
           return async () => {
             if (name === 'customers') return customer;
             if (failMax === 'all' || failMax.includes(name)) throw new Error('max boom');
-            return { m: maxes[name] || null };
+            if (failMaxExpr && failMaxExpr.test(name, lastSelect?.sql || '')) throw new Error('max boom');
+            const expr = lastSelect?.sql?.match(/MAX\(([^)]*)\)/)?.[1];
+            const m = maxes[name];
+            return { m: (m instanceof Date ? m : m && m[expr]) || null };
           };
         }
+        if (prop === 'select') return (...args) => { lastSelect = args.find((a) => a && a.sql) || lastSelect; calls.chain.push([name, 'select', args]); return b; };
         if (prop === 'limit') return (n) => { calls.limit.push(n); return b; };
         return (...args) => { calls.chain.push([name, String(prop), args]); return b; };
       },
     });
     return b;
   };
-  dbh.raw = async (sql, bindings) => {
+  // MAX(...) raws are select-list fragments: keep the SQL readable on the
+  // returned object so first() can tell which of a source's queries it is.
+  dbh.raw = (sql, bindings) => {
     calls.raw.push([sql, bindings]);
-    if (/to_regclass\(\?\) IS NOT NULL/.test(sql)) return { rows: [{ ok: typeof present === 'function' ? present(bindings[0]) : present }] };
-    if (/pg_attribute/.test(sql)) return { rows: (typeof present === 'function' ? present(bindings[0], bindings[1]) : present) ? [{ ok: 1 }] : [] };
-    return { rows: [] };
+    if (/^MAX\(/.test(sql)) return { sql };
+    return (async () => {
+      if (/to_regclass\(\?\) IS NOT NULL/.test(sql)) return { rows: [{ ok: typeof present === 'function' ? present(bindings[0]) : present }] };
+      if (/pg_attribute/.test(sql)) return { rows: (typeof present === 'function' ? present(bindings[0], bindings[1]) : present) ? [{ ok: 1 }] : [] };
+      return { rows: [] };
+    })();
   };
   dbh.calls = calls;
   return dbh;
@@ -70,8 +80,8 @@ describe('engagement rule', () => {
   test('automation emails: bounced and complained statuses each produce their event, dated updated_at', () => {
     const at = (m) => new Date(Date.UTC(2026, 8, 1, 12, m));
     const map = (status) => source('automation emails').toEvents({
-      id: 'a1', status, step_order: 0, template_key: 'k', sent_at: at(0), updated_at: at(7),
-    });
+      id: 'a1', status, step_order: 0, template_key: 'k', email: 'a@example.test', sent_at: at(0), updated_at: at(7),
+    }, { emailNorm: 'a@example.test' });
     const bounced = map('bounced');
     expect(bounced.map((e) => e.kind).sort()).toEqual(['bounced', 'sent']);
     expect(bounced.find((e) => e.kind === 'bounced').at).toBe(at(7).toISOString());
@@ -117,6 +127,45 @@ describe('engagement rule', () => {
     for (const status of ['scheduled', 'sending', 'canceled', 'cancelled', 'draft', 'held', 'pending', 'skipped', 'blocked', 'suppressed']) {
       expect(source('texts').toEvents({ id: 'x', direction: 'outbound', status, message_body: 'hi', created_at: t })).toEqual([]);
     }
+  });
+
+  test('texts: a push-proof row is an app notification, never "Text sent"', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    const map = (row) => source('texts').toEvents({ id: 'p', direction: 'outbound', status: 'sent', message_type: 'appointment_reminder', message_body: 'See you tomorrow', created_at: t, ...row })[0];
+    const byPhone = map({ from_phone: 'push', metadata: { channel: 'push' } });
+    expect(byPhone).toMatchObject({ channel: 'push', kind: 'delivered', engaged: false, title: 'App notification delivered (appointment reminder)' });
+    // metadata alone (jsonb string or object) identifies it too
+    expect(map({ from_phone: '+19415550100', metadata: JSON.stringify({ channel: 'push' }) })).toMatchObject({ channel: 'push', kind: 'delivered' });
+    expect(map({ from_phone: '+19415550100', metadata: {} })).toMatchObject({ channel: 'sms', kind: 'sent', title: 'Text sent (appointment reminder)' });
+    expect(map({ from_phone: '+19415550100', metadata: '{not json' })).toMatchObject({ channel: 'sms', kind: 'sent' });
+  });
+
+  test('automation emails: a send to a billing contact is shown masked with no engagement events', () => {
+    const at = (m) => new Date(Date.UTC(2026, 8, 1, 12, m));
+    const row = {
+      id: 'b1', status: 'clicked', step_order: 0, template_key: 'payment_failed', template_name: 'Payment failed',
+      email: 'Billing.Contact@Example.test', sent_at: at(0), delivered_at: at(1), opened_at: at(2), clicked_at: at(3), updated_at: at(4),
+    };
+    const ctx = { emailNorm: 'owner@example.test' };
+    const events = source('automation emails').toEvents(row, ctx);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'sent', engaged: false, channel: 'email', title: 'Sent to billing contact B***@Example.test', at: at(0).toISOString() });
+    expect(events[0].title).not.toMatch(/Billing\.Contact/);
+    // The customer's own address (case and whitespace ignored) keeps the full event set and its click counts.
+    const own = source('automation emails').toEvents({ ...row, email: '  OWNER@example.test ' }, ctx);
+    expect(own.map((e) => e.kind).sort()).toEqual(['clicked', 'delivered', 'opened', 'sent']);
+    expect(own.find((e) => e.kind === 'clicked').engaged).toBe(true);
+    // A send row with no recorded address is not provably the customer's.
+    expect(source('automation emails').toEvents({ ...row, email: null }, ctx)).toHaveLength(1);
+  });
+
+  test('automation emails: the summary MAX queries only count sends addressed to the customer', async () => {
+    const dbh = fakeDb({ customer: { id: 'c1', email: ' Owner@Example.test ' } });
+    await getCustomerActivity('c1', {}, dbh);
+    const scoped = dbh.calls.chain.filter(([t, m, a]) => t === 'automation_step_sends as s' && m === 'whereRaw' && /LOWER\(BTRIM\(COALESCE\(s\.email/.test(a[0]));
+    // engaged MAX + open MAX
+    expect(scoped).toHaveLength(2);
+    expect(scoped.every(([, , a]) => a[1][0] === 'owner@example.test')).toBe(true);
   });
 
   test('portal page views ride the portal channel; token pages ride the page channel', () => {
@@ -254,6 +303,21 @@ describe('getCustomerActivity guards', () => {
     const logged = mockWarn.mock.calls.map((c) => c.join(' ')).join('\n');
     expect(logged).toMatch(/summary \(newsletters\) failed for customer c1/);
     expect(logged).not.toMatch(/max boom|example\.test/);
+  });
+
+  test('a source whose open MAX fails but whose engagement MAX succeeds still contributes; it is reported unavailable', async () => {
+    const dbh = fakeDb({
+      failMaxExpr: { test: (table, sql) => table === 'email_messages as em' && /opened_at/.test(sql) },
+      maxes: { 'email_messages as em': { 'em.clicked_at': new Date('2026-09-09T10:00:00Z') } },
+    });
+    const r = await getCustomerActivity('c1', {}, dbh);
+    expect(r.summary).toMatchObject({ lastEngagedAt: '2026-09-09T10:00:00.000Z', lastEngagedFrom: 'emails', lastEmailOpenAt: null });
+    expect(r.unavailableSources).toEqual(['emails']);
+  });
+
+  test('summary stays non-null while any one of its queries succeeds, null only when all reject', async () => {
+    const onlyOne = fakeDb({ failMaxExpr: { test: (table, sql) => !(table === 'sms_log as sl' && /created_at/.test(sql)) } });
+    expect((await getCustomerActivity('c1', {}, onlyOne)).summary).not.toBeNull();
   });
 
   test('summary is null only when every MAX query failed', async () => {

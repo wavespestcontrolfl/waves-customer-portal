@@ -42,6 +42,8 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+const { BOT_UA_RE } = require('../utils/bot-ua');
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -164,6 +166,24 @@ function pageViewTitle(page) {
 // failed trying). 'queued' / 'accepted' are the provider's own handed-off states.
 const OUTBOUND_LEFT = ['', 'sent', 'queued', 'accepted', 'delivered', 'failed', 'undelivered'];
 
+function isPushProof(row) {
+  if (String(row.from_phone || '').toLowerCase() === 'push') return true;
+  let meta = row.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  return String(meta?.channel || '').toLowerCase() === 'push';
+}
+
+// Postgres regex (ARE) spelling of the shared bot user-agent filter, so the
+// feed AND the summary MAX() queries drop the same rows isBotUserAgent would.
+// The only construct that differs is the word boundary: JS \b is ARE \y.
+const BOT_UA_PG = BOT_UA_RE.source.replace(/\\b/g, '\\y');
+
+const maskEmail = (email) => {
+  const [local = '', domain = ''] = String(email || '').split('@');
+  return `${local.slice(0, 1)}***@${domain}`;
+};
+const normEmail = (email) => String(email || '').trim().toLowerCase();
+
 const SOURCES = [
   {
     name: 'texts',
@@ -172,10 +192,16 @@ const SOURCES = [
     // 'held', 'pending', 'skipped', 'blocked' and 'suppressed' rows never
     // reached the customer, so listing them as "Text sent" would be false.
     // An empty status is a legacy row written before statuses existed.
-    from: (dbh, ctx) => dbh('sms_log as sl').where('sl.customer_id', ctx.customerId)
+    // Recruiting texts (applicant replies and interview invites) can carry a
+    // customer's id when an applicant is also a customer; they are owner-only
+    // and never customer history, so the shared sms_log exclusion applies to
+    // the feed and to the summary MAX queries alike (both build from here).
+    from: (dbh, ctx) => excludeRecruitingSmsLog(dbh('sms_log as sl').where('sl.customer_id', ctx.customerId)
       .where((w) => w.where('sl.direction', 'inbound')
         .orWhereRaw(`LOWER(COALESCE(sl.status, '')) IN (${OUTBOUND_LEFT.map(() => '?').join(', ')})`, OUTBOUND_LEFT)),
-    select: ['sl.id', 'sl.direction', 'sl.status', 'sl.message_type', 'sl.message_body', 'sl.created_at'],
+    'sl.message_type'),
+    select: ['sl.id', 'sl.direction', 'sl.status', 'sl.message_type', 'sl.message_body', 'sl.created_at',
+      'sl.from_phone', 'sl.metadata'],
     ts: ['sl.created_at'],
     engaged: { expr: 'sl.created_at', where: (q) => q.where('sl.direction', 'inbound') },
     toEvents: (r) => {
@@ -187,10 +213,21 @@ const SOURCES = [
       }
       const status = String(r.status || '').toLowerCase();
       if (!OUTBOUND_LEFT.includes(status)) return [];
+      const type = r.message_type ? ` (${String(r.message_type).replace(/_/g, ' ')})` : '';
+      // A push-proof row (push-channel-routing.js) is the ledger record of an
+      // app notification a device accepted: status 'sent', from_phone 'push',
+      // metadata.channel 'push'. It is not a text, so it never reads "Text sent".
+      if (isPushProof(r)) {
+        const failed = ['failed', 'undelivered'].includes(status);
+        return compact([mk('sms', r.id, ref, {
+          at: r.created_at, channel: 'push', kind: failed ? 'failed' : 'delivered',
+          title: `${failed ? 'App notification failed' : 'App notification delivered'}${type}`,
+          detail: preview(r.message_body),
+        })]);
+      }
       const kind = status === 'delivered' ? 'delivered'
         : ['failed', 'undelivered'].includes(status) ? 'failed' : 'sent';
       const title = { delivered: 'Text delivered', failed: 'Text failed', sent: 'Text sent' }[kind];
-      const type = r.message_type ? ` (${String(r.message_type).replace(/_/g, ' ')})` : '';
       return compact([mk('sms', r.id, ref, {
         at: r.created_at, channel: 'sms', kind, title: `${title}${type}`, detail: preview(r.message_body),
       })]);
@@ -264,20 +301,24 @@ const SOURCES = [
       .leftJoin('automation_templates as t', 't.key', 'e.template_key')
       .where('e.customer_id', ctx.customerId),
     select: ['s.id', 's.status', 's.step_order', 's.sent_at', 's.delivered_at', 's.opened_at', 's.clicked_at',
-      's.updated_at', 't.name as template_name', 'e.template_key'],
+      's.updated_at', 's.email', 't.name as template_name', 'e.template_key'],
     // The webhook stamps a bounce/complaint only as status + updated_at (the
     // table has no bounced_at/complained_at), so updated_at dates all three.
     ts: ['s.sent_at', 's.delivered_at', 's.opened_at', 's.clicked_at',
       "CASE WHEN s.status IN ('failed', 'bounced', 'complained') THEN s.updated_at END"],
-    engaged: { expr: 's.clicked_at' },
-    open: { expr: 's.opened_at' },
-    toEvents: (r) => emailEvents('automation', r,
+    // A payment-failed enrollment redirected to a billing contact
+    // (automation-runner.js) sends to someone else's inbox, so its clicks and
+    // opens are that person's, not the customer's: only a send row addressed to
+    // the customer's own email counts toward the summary.
+    engaged: { expr: 's.clicked_at', where: (q, ctx) => customerOwnSend(q, ctx) },
+    open: { expr: 's.opened_at', where: (q, ctx) => customerOwnSend(q, ctx) },
+    toEvents: (r, ctx = {}) => (String(r.email || '') && normEmail(r.email) === ctx.emailNorm ? emailEvents('automation', r,
       `${r.template_name || r.template_key || 'Automation'} (step ${Number(r.step_order) + 1 || 1})`, {
         sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, clicked: r.clicked_at,
         failed: String(r.status || '') === 'failed' ? r.updated_at : null,
         bounced: String(r.status || '') === 'bounced' ? r.updated_at : null,
         complained: String(r.status || '') === 'complained' ? r.updated_at : null,
-      }, 'automation_step_sends'),
+      }, 'automation_step_sends') : billingContactSend(r)),
   },
   {
     name: 'newsletters',
@@ -325,17 +366,25 @@ const SOURCES = [
   },
   {
     name: 'prep guide views',
-    needs: ['prep_guide_views', ['prep_guide_views', 'scheduled_service_id'], 'scheduled_services', 'projects'],
+    needs: ['prep_guide_views', ['prep_guide_views', 'scheduled_service_id'], ['prep_guide_views', 'user_agent'],
+      'scheduled_services', 'projects'],
+    // prep-public.js logs every load of a prep token with no bot or staff
+    // filter. Rows whose stored user agent is a link previewer / scanner are
+    // dropped here, from the feed and from lastEngagedAt alike. A staff preview
+    // looks like a browser and cannot be told apart from a stored row, so those
+    // stay and the event's note says so.
     from: (dbh, ctx) => dbh('prep_guide_views as v')
       .leftJoin('scheduled_services as ss', 'ss.id', 'v.scheduled_service_id')
       .leftJoin('projects as p', 'p.id', 'v.project_id')
-      .where((w) => w.where('ss.customer_id', ctx.customerId).orWhere('p.customer_id', ctx.customerId)),
+      .where((w) => w.where('ss.customer_id', ctx.customerId).orWhere('p.customer_id', ctx.customerId))
+      .whereRaw("COALESCE(v.user_agent, '') !~* ?", [BOT_UA_PG]),
     select: ['v.id', 'v.viewed_at', 'v.scheduled_service_id', 'v.project_id'],
     ts: ['v.viewed_at'],
     engaged: { expr: 'v.viewed_at' },
     toEvents: (r) => compact([mk('prep', r.id,
       r.scheduled_service_id ? { type: 'scheduled_service', id: r.scheduled_service_id } : { type: 'project', id: r.project_id }, {
         at: r.viewed_at, channel: 'page', kind: 'viewed', title: 'Opened the prep guide',
+        detail: 'Prep views are unfiltered for staff previews',
       })]),
   },
   {
@@ -438,6 +487,25 @@ const SOURCES = [
   },
 ];
 
+// SQL twin of the `email matches the customer's` rule in the automation source.
+function customerOwnSend(q, ctx) {
+  return ctx.emailNorm
+    ? q.whereRaw("LOWER(BTRIM(COALESCE(s.email, ''))) = ?", [ctx.emailNorm])
+    : q.whereRaw('FALSE');
+}
+
+// The one thing shown for a send that went to someone other than the customer:
+// that it went out, to whom (masked). No delivery / open / click / failure
+// events and no engagement credit, since none of it is the customer's.
+function billingContactSend(r) {
+  const at = r.sent_at || r.delivered_at;
+  return compact([mk('automation', r.id, { type: 'automation_step_sends', id: r.id }, {
+    at, channel: 'email', kind: 'sent',
+    title: `Sent to billing contact${r.email ? ` ${maskEmail(r.email)}` : ''}`,
+    detail: preview(`${r.template_name || r.template_key || 'Automation'} (step ${Number(r.step_order) + 1 || 1})`),
+  })]);
+}
+
 function emailEvents(source, row, subject, stamps, table) {
   const ref = { type: table, id: row.id };
   const detail = preview(subject);
@@ -475,13 +543,13 @@ async function runSource(src, ctx) {
     .limit(limit + 1);
   const rows = await q;
   const before = new Date(beforeIso).getTime();
-  const events = rows.flatMap((r) => src.toEvents(r)).filter((e) => new Date(e.at).getTime() < before);
+  const events = rows.flatMap((r) => src.toEvents(r, ctx)).filter((e) => new Date(e.at).getTime() < before);
   return { events, saturated: rows.length > limit };
 }
 
 async function maxOf(dbh, src, ctx, spec) {
   let q = src.from(dbh, ctx);
-  if (spec.where) q = spec.where(q);
+  if (spec.where) q = spec.where(q, ctx);
   const row = await q.select(dbh.raw(`MAX(${spec.expr}) AS m`)).first();
   return iso(row?.m);
 }
@@ -491,7 +559,9 @@ const latest = (values) => values.filter(Boolean).sort().pop() || null;
 /**
  * Per-source MAX() queries settle independently: one failing source drops out
  * of the summary (and is named in `failed`) instead of blanking it for all.
- * Returns { summary, failed }; summary is null only when every query failed.
+ * Returns { summary, failed }; summary is null only when every query failed
+ * (a source with one failed and one fulfilled query is named in `failed` and
+ * still contributes what it returned).
  */
 async function computeSummary(sources, ctx) {
   const tasks = [];
@@ -511,7 +581,9 @@ async function computeSummary(sources, ctx) {
     } else if (kind === 'engaged') engaged.push({ s, at: r.value });
     else opens.push(r.value);
   });
-  if (tasks.length && failed.length === new Set(tasks.map((t) => t.s.name)).size) return { summary: null, failed };
+  // A source can run two queries (engagement MAX + open MAX): one failing does
+  // not hide the other, so the summary is null only when EVERY query failed.
+  if (tasks.length && results.every((r) => r.status === 'rejected')) return { summary: null, failed };
   const newest = engaged.filter((e) => e.at).sort((a, b) => (a.at < b.at ? 1 : -1))[0] || null;
   return {
     summary: {
@@ -566,7 +638,7 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
   const emails = [...new Set([customer.email, String(customer.email || '').toLowerCase()]
     .map((e) => String(e || '').trim()).filter(Boolean))];
   const leadLinkage = await hasColumn(dbh, 'short_codes', 'lead_id') && await hasColumn(dbh, 'leads', 'customer_id');
-  const ctx = { dbh, customerId: customer.id, emails, leadLinkage, limit: cap, beforeIso: beforeIso || FAR_FUTURE };
+  const ctx = { dbh, customerId: customer.id, emails, emailNorm: normEmail(customer.email), leadLinkage, limit: cap, beforeIso: beforeIso || FAR_FUTURE };
 
   const absentSources = [];
   const live = [];
@@ -613,6 +685,7 @@ module.exports = {
   DEFAULT_LIMIT,
   MAX_LIMIT,
   SOURCES,
+  BOT_UA_PG,
   hasRelation,
   hasColumn,
   needsPresent,
