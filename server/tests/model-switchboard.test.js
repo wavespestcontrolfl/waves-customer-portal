@@ -491,6 +491,11 @@ describe('model-switchboard', () => {
     expect(selectors.find((s) => s.key === 'FLAGSHIP').accepts.cap).toBe('vision');
     // OPENAI_BALANCED is the OpenAI leg of ROUTES.visionAnalysis (vision-delta, admin dispatch send images).
     expect(selectors.find((s) => s.key === 'OPENAI_BALANCED').accepts.cap).toBe('vision');
+    // PLANT_ID_REFEREE (ROUTES.plantIdReferee, plant-engine.js's runReferee)
+    // sends the SAME photos as the Gemini/Sol legs it decides between — a
+    // vision selector, matching the other photo-model selectors, never text
+    // (Codex #5307 r1 finding 6).
+    expect(selectors.find((s) => s.key === 'PLANT_ID_REFEREE').accepts.cap).toBe('vision');
     // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity — two lanes, two backups.
     expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
     expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);

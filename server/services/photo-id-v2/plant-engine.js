@@ -1613,7 +1613,11 @@ function reasonsFrom(pairs) {
 }
 
 /** The identity slots identify mode draws its one lane from (§6.1): turf
- * or weeds for a lawn, host otherwise. */
+ * or weeds for a lawn, host otherwise. Also reused by `runReferee` (Codex
+ * #5307 r1 finding 5) to restrict which identity slots are referee-candidate
+ * scopes AT ALL, in every mode — a slot the subject never populates (e.g.
+ * turf/weeds on a tree_shrub run) must never look "still unsure" just
+ * because a whole-ladder Gemini miss trips every slot's trigger uniformly. */
 function identifyLaneSlotsFor(subject) {
   return subject === 'lawn' ? ['turf', 'weeds'] : ['host'];
 }
@@ -1673,11 +1677,16 @@ function conditionTriggerReasons(conditions) {
   ]);
 }
 
-function escalationPromptArgs(run, identity, conditions) {
+// `indexIndexOverride` (Codex #5307 r1 finding 3): the referee prompt, run
+// AFTER `reconcileCorrectedHost` may have expanded the condition index for a
+// corrected host, reads THAT index (`escalation.conditionIndex`) rather than
+// the narrower pre-rerun `conditions.index` Call D itself was shown.
+function escalationPromptArgs(run, identity, conditions, conditionIndexOverride = null) {
+  const conditionIndex = conditionIndexOverride || conditions.index;
   return {
     subject: run.subject,
     ...run.indexTexts,
-    indexLines: conditionPromptArgs(run, conditions.index).indexLines,
+    indexLines: conditionPromptArgs(run, conditionIndex).indexLines,
     identityContext: identityContextFor(identity.catalogCandidates),
     conditionContext: conditions.possibilities.map((p) => buildConditionIndexLine(p.entry, p.sig)),
     chips: run.chips,
@@ -1717,22 +1726,36 @@ function scopeFlags(triggered, combined = {}) {
  * are dropped). */
 async function reconcileCorrectedHost(run, conditions, hostCombined, escalationJson, combined) {
   const correctedHost = hostCombined.openaiTop?.entry?.slug || null;
-  if (run.mode === 'identify' || !correctedHost || conditions.hostUnion.includes(correctedHost)) return { ...combined, rerun: null };
+  if (run.mode === 'identify' || !correctedHost || conditions.hostUnion.includes(correctedHost)) {
+    return { ...combined, rerun: null, conditionIndex: conditions.index };
+  }
   const index = conditionIndexForHosts(run.subject, [...conditions.hostUnion, correctedHost]);
   const remainingMs = run.deadline - Date.now();
   const result = remainingMs >= MIN_LEG_TIMEOUT_MS ? await callConditionSelection(run.images, conditionPromptArgs(run, index), remainingMs) : null;
   const json = validJson(result, 'conditions');
-  const rerun = { host: correctedHost, result, quality: json?.quality || null };
+  // The rerun's own top (against the EXPANDED index) is this scope's real
+  // "first" (Gemini) read from here on — the referee's `earlierReadsFor`
+  // reads it instead of the narrower pre-rerun top (Codex #5307 r1 finding
+  // 3), and `conditionIndex` (the index the rerun actually saw) rides along
+  // for the referee prompt and merge to use in place of `conditions.index`.
+  const rerunTop = json ? resolvePossibilities(json.candidates, index)[0] || null : null;
+  const rerun = {
+    host: correctedHost, result, quality: json?.quality || null, index, top: rerunTop,
+  };
   if (!json) {
     const classSlugs = new Set(conditionIndexFor(run.subject, null).map((e) => e.slug));
-    return { ...combined, possibilities: combined.possibilities.filter((p) => classSlugs.has(p.slug)), rerun };
+    return {
+      ...combined, possibilities: combined.possibilities.filter((p) => classSlugs.has(p.slug)), rerun, conditionIndex: conditions.index,
+    };
   }
   // OpenAI's picks are resolved against the index it was actually shown
   // (`conditions.index`) — a condition only the re-run's expanded index
   // lists, and element numbers OpenAI never saw for it, are not evidence
   // (pre-push audit on #5186 r1). New conditions come only from the re-run.
   const recombined = combinePossibilities(resolvePossibilities(json.candidates, index), escalationJson.conditions, conditions.index);
-  return { ...recombined, observedTerms: json.observed_terms, rerun };
+  return {
+    ...recombined, observedTerms: json.observed_terms, rerun, conditionIndex: index,
+  };
 }
 
 /** Call D (OpenAI escalation) when any scope's trigger fires, plus the
@@ -1754,6 +1777,7 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
     result: null,
     json: null,
     rerun: null,
+    conditionIndex: conditions.index,
     slots: identity.slots,
     possibilities: conditions.possibilities,
     observedTerms: conditions.observedTerms,
@@ -1773,6 +1797,7 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
     result,
     json,
     rerun: conditionCombined.rerun,
+    conditionIndex: conditionCombined.conditionIndex,
     slots: mapSlots((slot) => combined[slot].candidates),
     identityFlags: mapSlots((slot) => scopeFlags(slotTriggered[slot], combined[slot])),
     conditionFlags: scopeFlags(conditionsTriggered, conditionCombined),
@@ -1805,7 +1830,11 @@ function stillUnsureAfterEscalation(flags, topConfidence) {
 
 function describeIdentityRead(candidate) {
   if (!candidate) return null;
-  return { slug: candidate.slug || candidate.off_catalog_name || 'unknown', confidence: candidate.confidence ?? 0 };
+  // A resolved candidate's off-catalog name lives on the normalized
+  // `offCatalogName` field (`resolveIdentityCandidate`) — the raw model
+  // output's `off_catalog_name` never survives resolution, so reading it
+  // here always fell through to 'unknown' (Codex #5307 r1 finding 7).
+  return { slug: candidate.slug || candidate.offCatalogName || 'unknown', confidence: candidate.confidence ?? 0 };
 }
 function describePossibilityRead(possibility) {
   if (!possibility) return null;
@@ -1819,8 +1848,16 @@ function earlierReadsFor(identity, conditions, escalation, unsureScopes) {
   return unsureScopes.map((scope) => {
     if (scope === 'conditions') {
       const flags = escalation.conditionFlags;
-      const first = [...conditions.possibilities].sort(byConfidenceDesc)[0] || null;
-      const second = flags.openaiAnswered ? (escalation.possibilities[0] || null) : null;
+      const conditionIndex = escalation.conditionIndex || conditions.index;
+      // A corrected-host rerun's own top (against the EXPANDED index) IS the
+      // "first" read from here on — the narrower pre-rerun Gemini top it
+      // replaced is stale (Codex #5307 r1 finding 3).
+      const first = escalation.rerun?.top || [...conditions.possibilities].sort(byConfidenceDesc)[0] || null;
+      // OpenAI's own ranked top, resolved against the SAME index the merge
+      // uses — never the merged (Gemini+OpenAI) list's top, which can read
+      // as Gemini's own pick when OpenAI's answer lost the tie-break
+      // (Codex #5307 r1 finding 2).
+      const second = flags.openaiAnswered ? (resolvePossibilities(escalation.json?.conditions, conditionIndex)[0] || null) : null;
       return { scope, first: describePossibilityRead(first), second: describePossibilityRead(second) };
     }
     const flags = escalation.identityFlags[scope];
@@ -1843,6 +1880,22 @@ const REFEREE_SETTLED_FLAGS = Object.freeze({
   disagreed: false, blockPrettySure: true, openaiAnswered: true, disagreementPair: null,
 });
 
+/** Append the referee's own pick after the pre-referee list — NEVER through
+ * `dedupeCandidates`/`dedupePossibilities`, which re-rank the whole list by
+ * confidence and so could let a confident third answer climb over the real
+ * (pre-referee) top (Codex #5307 r1 finding 1). Already present (matched by
+ * identity/slug) leaves the list untouched; otherwise it is appended, and
+ * `cap` is kept by dropping the CURRENT list's own tail first — which entry
+ * leads, and the order of the ones kept, never changes. */
+function appendRefereeCandidate(existing, extra, cap = 3) {
+  if (!extra || existing.some((c) => sameCandidateKey(c, extra))) return existing;
+  return [...existing.slice(0, Math.max(0, cap - 1)), extra];
+}
+function appendRefereePossibility(existing, extra) {
+  if (!extra || existing.some((p) => p.slug === extra.slug)) return existing;
+  return [...existing, extra];
+}
+
 /** One identity slot's referee merge (2-of-3 majority, deterministic): `R`
  * is the referee's own top, resolved against this slot's own index. */
 function mergeIdentityScope(run, slot, escalation, refereeJson) {
@@ -1850,6 +1903,7 @@ function mergeIdentityScope(run, slot, escalation, refereeJson) {
   const refereeCandidates = dedupeCandidates((refereeJson?.[slot] || []).map((r) => resolveIdentityCandidate(r, run.indexes[slot])));
   const topReferee = refereeCandidates[0] || null;
   if (!topReferee) return { outcome: 'unavailable' };
+  const top = escalation.slots[slot][0] || null;
   if (flags.disagreementPair) {
     const [a, b] = flags.disagreementPair;
     const matched = sameCandidateKey(topReferee, a) ? a : (sameCandidateKey(topReferee, b) ? b : null);
@@ -1857,13 +1911,22 @@ function mergeIdentityScope(run, slot, escalation, refereeJson) {
       const rest = escalation.slots[slot].filter((c) => !sameCandidateKey(c, matched));
       return { outcome: 'settled', slots: [matched, ...rest].slice(0, 3), flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
     }
-    // A genuine third answer: the split stays a split (today's disagreement
-    // flags are untouched), and the referee's own read joins the list.
-    return { outcome: 'third_answer', slots: dedupeCandidates([...escalation.slots[slot], topReferee]).slice(0, 3), flags };
+    // A genuine third answer: still no majority — but the disagreement now
+    // sits between this scope's OWN current top and the referee's read
+    // (never the original pair, which the referee has already rejected on
+    // both sides), marked explicitly unresolved so the answer climbs or
+    // stays uncertain exactly like today's two-provider disagreement (Codex
+    // #5307 r1 finding 1). The referee pick only joins the visible list.
+    return {
+      outcome: 'third_answer',
+      slots: appendRefereeCandidate(escalation.slots[slot], topReferee),
+      flags: {
+        ...flags, disagreed: true, blockPrettySure: true, disagreementPair: [top, topReferee],
+      },
+    };
   }
   // No disagreement — this scope is a referee candidate only because OpenAI
   // never answered it (blockPrettySure) or its confidence is still low.
-  const top = escalation.slots[slot][0] || null;
   if (!top || sameCandidateKey(topReferee, top)) {
     return {
       outcome: 'confirmed',
@@ -1871,7 +1934,16 @@ function mergeIdentityScope(run, slot, escalation, refereeJson) {
       flags: { ...flags, ...REFEREE_SETTLED_FLAGS },
     };
   }
-  return { outcome: 'third_answer', slots: dedupeCandidates([...escalation.slots[slot], topReferee]).slice(0, 3), flags };
+  // The referee disagrees with the (undisputed, single earlier-read) top:
+  // that is a fresh disagreement of its own, not the answer moving to the
+  // referee's pick (Codex #5307 r1 finding 1).
+  return {
+    outcome: 'third_answer',
+    slots: appendRefereeCandidate(escalation.slots[slot], topReferee),
+    flags: {
+      ...flags, disagreed: true, blockPrettySure: true, disagreementPair: [top, topReferee],
+    },
+  };
 }
 
 /** The condition scope's referee merge — the same 2-of-3 rule on
@@ -1881,21 +1953,35 @@ function mergeIdentityScope(run, slot, escalation, refereeJson) {
  * `combinePossibilities` itself compares them. */
 function mergeConditionsScope(conditions, escalation, refereeJson) {
   const flags = escalation.conditionFlags;
-  const refereePossibilities = resolvePossibilities(refereeJson?.conditions, conditions.index);
+  // The index the referee's OWN prompt was actually built from (a
+  // corrected-host rerun's expanded index, when one happened) — never the
+  // narrower pre-rerun `conditions.index` (Codex #5307 r1 finding 3).
+  const index = escalation.conditionIndex || conditions.index;
+  const refereePossibilities = resolvePossibilities(refereeJson?.conditions, index);
   const topReferee = refereePossibilities[0] || null;
   if (!topReferee) return { outcome: 'unavailable' };
+  const top = escalation.possibilities[0] || null;
   if (flags.disagreed) {
     const geminiTop = [...conditions.possibilities].sort(byConfidenceDesc)[0] || null;
-    const openaiTop = resolvePossibilities(escalation.json?.conditions, conditions.index)[0] || null;
+    const openaiTop = resolvePossibilities(escalation.json?.conditions, index)[0] || null;
     const matched = geminiTop && topReferee.slug === geminiTop.slug ? geminiTop
       : (openaiTop && topReferee.slug === openaiTop.slug ? openaiTop : null);
     if (matched) {
       const rest = escalation.possibilities.filter((p) => p.slug !== matched.slug);
       return { outcome: 'settled', possibilities: [matched, ...rest], flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
     }
-    return { outcome: 'third_answer', possibilities: dedupePossibilities([...escalation.possibilities, topReferee]), flags };
+    // Still no majority — the disagreement now sits between this scope's
+    // OWN current top and the referee's read, marked explicitly unresolved
+    // (Codex #5307 r1 finding 1), and the referee's pick only joins the
+    // visible list (never re-ranked by confidence over the pre-referee top).
+    return {
+      outcome: 'third_answer',
+      possibilities: appendRefereePossibility(escalation.possibilities, topReferee),
+      flags: {
+        ...flags, disagreed: true, blockPrettySure: true, disagreementPair: [top, topReferee],
+      },
+    };
   }
-  const top = escalation.possibilities[0] || null;
   if (!top || topReferee.slug === top.slug) {
     return {
       outcome: 'confirmed',
@@ -1903,12 +1989,20 @@ function mergeConditionsScope(conditions, escalation, refereeJson) {
       flags: { ...flags, ...REFEREE_SETTLED_FLAGS },
     };
   }
-  return { outcome: 'third_answer', possibilities: dedupePossibilities([...escalation.possibilities, topReferee]), flags };
+  // The referee disagrees with the (undisputed, single earlier-read) top: a
+  // fresh disagreement of its own, never the answer moving to the referee's
+  // pick (Codex #5307 r1 finding 1).
+  return {
+    outcome: 'third_answer',
+    possibilities: appendRefereePossibility(escalation.possibilities, topReferee),
+    flags: {
+      ...flags, disagreed: true, blockPrettySure: true, disagreementPair: [top, topReferee],
+    },
+  };
 }
 
-const IDENTITY_AND_CONDITION_SCOPES = [...IDENTITY_SLOTS, 'conditions'];
 const NO_REFEREE_INFO = Object.freeze({
-  triggered: false, result: null, scopes: [], outcomes: {},
+  triggered: false, result: null, json: null, scopes: [], outcomes: {},
 });
 
 /** Step between `runEscalation` and `legFailureReason` (owner ruling
@@ -1924,12 +2018,24 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
   const remainingMs = run.deadline - Date.now();
   if (remainingMs < MIN_LEG_TIMEOUT_MS) return unchanged;
 
-  const unsureScopes = IDENTITY_AND_CONDITION_SCOPES.filter((scope) => (scope === 'conditions'
+  // Only the identity slots this SUBJECT can actually answer from — turf and
+  // weeds for a lawn, host for tree_shrub/palm — never a slot the subject
+  // never populates. A Gemini-wide miss trips `gemini_missed` on every
+  // identity slot uniformly (`identitySlotTriggers`), including a slot the
+  // subject can't use at all, so checking every IDENTITY_SLOT here made an
+  // irrelevant slot look "still unsure" and drew an unneeded referee call
+  // (Codex #5307 r1 finding 5). Conditions is a candidate scope only for a
+  // workup run whose OWN trigger actually fired.
+  const candidateIdentitySlots = identifyLaneSlotsFor(run.subject);
+  const conditionsApplies = run.mode !== 'identify' && !!escalation.conditionFlags.triggered;
+  const candidateScopes = conditionsApplies ? [...candidateIdentitySlots, 'conditions'] : candidateIdentitySlots;
+
+  const unsureScopes = candidateScopes.filter((scope) => (scope === 'conditions'
     ? stillUnsureAfterEscalation(escalation.conditionFlags, escalation.possibilities[0]?.confidence)
     : stillUnsureAfterEscalation(escalation.identityFlags[scope], escalation.slots[scope][0]?.confidence)));
   if (!unsureScopes.length) return unchanged;
 
-  const promptArgs = escalationPromptArgs(run, identity, conditions);
+  const promptArgs = escalationPromptArgs(run, identity, conditions, escalation.conditionIndex);
   const earlierReads = earlierReadsFor(identity, conditions, escalation, unsureScopes);
   const system = `${buildEscalationPrompt(promptArgs)}\n\n${buildRefereePrompt(earlierReads)}`;
   const result = await callWithProvider(MODELS.ROUTES?.plantIdReferee, {
@@ -1944,23 +2050,43 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
     promptVersion: PROMPT_VERSION,
   });
   const json = validJson(result, 'escalation');
-  const refereeInfo = { triggered: true, result, scopes: unsureScopes, outcomes: {} };
+  const refereeInfo = {
+    triggered: true, result, scopes: unsureScopes, outcomes: {}, json: json || null,
+  };
   if (!json) {
     for (const scope of unsureScopes) refereeInfo.outcomes[scope] = 'unavailable';
     return { ...escalation, refereeInfo };
   }
+  // The referee's own photo-quality verdict feeds `photoReadFor`'s
+  // conservative combine either way (see below); when it says the photos
+  // are unusable, its identity/condition votes are not trustworthy evidence
+  // either, so every still-unsure scope is left exactly as it was (Codex
+  // #5307 r1 finding 4).
+  const refereePhotosUnusable = json.quality?.usable === false || json.shows === 'nothing';
+  if (refereePhotosUnusable) {
+    for (const scope of unsureScopes) refereeInfo.outcomes[scope] = 'unavailable';
+    return { ...escalation, refereeInfo };
+  }
 
+  return applyRefereeMerges(run, conditions, escalation, json, unsureScopes, refereeInfo);
+}
+
+/** The per-scope merge loop, split out of `runReferee` (complexity):
+ * applies `mergeIdentityScope`/`mergeConditionsScope` for each still-unsure
+ * scope and folds an 'unavailable' outcome into `refereeInfo` without
+ * touching that scope's escalation result. */
+function applyRefereeMerges(run, conditions, escalation, refereeJson, unsureScopes, refereeInfo) {
   let { slots, identityFlags, possibilities, conditionFlags } = escalation;
   for (const scope of unsureScopes) {
     if (scope === 'conditions') {
-      const merged = mergeConditionsScope(conditions, escalation, json);
+      const merged = mergeConditionsScope(conditions, escalation, refereeJson);
       refereeInfo.outcomes.conditions = merged.outcome;
       if (merged.outcome !== 'unavailable') {
         possibilities = merged.possibilities;
         conditionFlags = merged.flags;
       }
     } else {
-      const merged = mergeIdentityScope(run, scope, escalation, json);
+      const merged = mergeIdentityScope(run, scope, escalation, refereeJson);
       refereeInfo.outcomes[scope] = merged.outcome;
       if (merged.outcome !== 'unavailable') {
         slots = { ...slots, [scope]: merged.slots };
@@ -2057,9 +2183,15 @@ function legFailureReason(run, identity, conditions, escalation) {
 }
 
 function photoReadFor(identity, conditions, escalation) {
+  // The referee's own parsed answer (`refereeInfo.json`) carries a
+  // `quality`/`shows` verdict of its own leg over the SAME photos, and it
+  // must join the conservative combine like every other leg — an "unusable"
+  // referee read (Codex #5307 r1 finding 4) still counts here even though
+  // its votes are never merged.
+  const refereeJson = escalation.refereeInfo?.json || null;
   return combineQuality(
-    [identity.candidatesJson?.quality, conditions.json?.quality, escalation.json?.quality, escalation.rerun?.quality],
-    [identity.candidatesJson?.shows, escalation.json?.shows],
+    [identity.candidatesJson?.quality, conditions.json?.quality, escalation.json?.quality, escalation.rerun?.quality, refereeJson?.quality],
+    [identity.candidatesJson?.shows, escalation.json?.shows, refereeJson?.shows],
   );
 }
 
@@ -2228,7 +2360,11 @@ module.exports = {
     runReferee,
     mergeIdentityScope,
     mergeConditionsScope,
+    appendRefereeCandidate,
+    appendRefereePossibility,
     stillUnsureAfterEscalation,
     earlierReadsFor,
+    describeIdentityRead,
+    reconcileCorrectedHost,
   },
 };

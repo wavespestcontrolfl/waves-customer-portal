@@ -374,12 +374,23 @@ when the run is not `photosUnusable`, the total budget (`PHOTO_ID_V2_TIMEOUT_MS`
 has room for one more leg, and at least one scope that **triggered**
 escalation is still unsure after it: the providers disagreed, OpenAI never
 answered that scope (`blockPrettySure`), or the combined top confidence is
-still below `PHOTO_ID_ESCALATE_BELOW`. One call covers every still-unsure
+still below `PHOTO_ID_ESCALATE_BELOW`. Candidate scopes are restricted to
+what the SUBJECT actually uses — `identifyLaneSlotsFor(subject)` (turf/weeds
+for a lawn, host for tree_shrub/palm) plus `conditions` for a workup run
+whose own trigger fired — never a slot the subject never populates (a
+whole-ladder Gemini miss trips `gemini_missed` on every identity slot
+uniformly, so an unfiltered check would draw a referee call for a lawn's
+turf/weeds on a tree_shrub request). One call covers every still-unsure
 scope at once — same photos, the same `ESCALATION_SCHEMA` output (so the
 existing resolvers/validators apply unchanged), with an appended "earlier
 reads" block (`buildRefereePrompt`) naming each still-unsure scope's first
 read and second opinion (slug + confidence) and asking the referee to look
-at the photos fresh, since either earlier read may be wrong.
+at the photos fresh, since either earlier read may be wrong. The condition
+scope's "first" read and index both follow a corrected-host rerun
+(`reconcileCorrectedHost`'s `conditionIndex`/`rerun.top`) when one happened,
+and its "second" read is OpenAI's own ranked top resolved against that same
+index — never the already-merged (Gemini+OpenAI) list's top, which can read
+as the wrong provider's pick.
 
 **Merge (2-of-3 majority, deterministic)**, per still-unsure scope, `R` =
 the referee's own top:
@@ -390,9 +401,20 @@ the referee's own top:
 - A scope with an undisputed combined top (no second opinion, or still low
   confidence) where `R` agrees → the referee stands in for the missing
   second opinion; order is kept, also capped at `likely`.
-- `R` is a third answer (agrees with neither) → the scope stays exactly as
-  unsure as it was (today's disagreement flags untouched), and `R` joins the
-  candidate/possibility list, deduped.
+- `R` is a third answer (agrees with neither, or disagrees with an
+  undisputed top) → the scope is marked EXPLICITLY unresolved
+  (`disagreed: true`, `blockPrettySure: true`, a fresh `disagreementPair` of
+  `[the scope's own pre-referee top, R]`) — the answer climbs or stays
+  uncertain exactly like today's two-provider disagreement. `R` is appended
+  AFTER the existing candidate/possibility list (deduped by identity/slug);
+  it is never re-ranked by confidence, so it can join the visible list
+  without ever displacing the pre-referee top or reordering the rest.
+- The referee's own `quality`/`shows` verdict always joins the conservative
+  photo-quality combine (`photoReadFor`), alongside every other leg's. When
+  it says the photos are unusable (`quality.usable === false` or
+  `shows === 'nothing'`), its identity/condition votes are NOT merged at
+  all — every still-unsure scope is left exactly as it was — but the quality
+  read still counts.
 - Referee missing, schema-invalid, or out of budget → that scope's
   escalation result stands unchanged.
 

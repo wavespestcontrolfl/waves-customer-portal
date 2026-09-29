@@ -1920,6 +1920,214 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(dispatch).toHaveBeenCalledTimes(3);
       expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
     });
+
+    test('finding 4: an unusable referee read never merges its votes, but its own quality still counts', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const unusableRefereeLeg = {
+        ok: true,
+        json: {
+          quality: { usable: false, issue: 'blurry' }, shows: 'plant', turf: [{ slug: 'fixture-seashore-paspalum', off_catalog_name: '', group_id: null, confidence: 0.99, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+        },
+      };
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, unusableRefereeLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      // The disagreement stands exactly as it did before the referee — its
+      // confident vote is never merged once it says the photos themselves
+      // are unusable.
+      expect(result.internal.referee.outcome.turf).toBe('unavailable');
+      expect(result.internal.identity.turf.disagreed).toBe(true);
+      // Its own quality read folds into the combined verdict — usable:false
+      // blocks naming entirely (the unknown answer + retake, same as any
+      // other leg's unusable read).
+      expect(result.v2.quality.usable).toBe(false);
+      expect(result.v2.answer).toMatchObject({ level: 'unknown' });
+    });
+
+    test('finding 5: a tree_shrub run with a total Gemini miss and a confident Sol host makes NO referee call (turf/weeds never apply)', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const geminiMiss = { ok: false, reason: 'provider_error' };
+      const solHostLeg = {
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [{ slug: 'fixture-citrus', off_catalog_name: '', group_id: null, confidence: 0.95, cues_visible: [1], cues_not_visible: [] }], observed_terms: [], conditions: [],
+        },
+      };
+      [geminiMiss, solHostLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'tree_shrub', mode: 'identify' });
+      // A whole-ladder Gemini miss trips `gemini_missed` on EVERY identity
+      // slot uniformly, including turf/weeds, which a tree_shrub run never
+      // populates at all. Old code checked every IDENTITY_SLOT regardless of
+      // subject and so called the referee a 3rd time for those irrelevant
+      // slots even though the one real slot (host) is fully settled.
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-citrus' });
+    });
+  });
+
+  // ── Codex #5307 r1 (referee round 1) ────────────────────────────────────
+  describe('Codex #5307 r1 referee regressions', () => {
+    const OK_QUALITY = { usable: true, issue: 'none' };
+
+    test('finding 1 (identity, non-disagreement path): a third answer never displaces the pre-referee top, and the scope becomes explicitly disagreed', () => {
+      const turfIndex = engine.turfIndexFor();
+      const existingTop = {
+        slug: 'fixture-bahia', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.4, entry: turfIndex.find((e) => e.slug === 'fixture-bahia'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
+      const escalation = {
+        identityFlags: {
+          turf: {
+            triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+          },
+        },
+        slots: { turf: [existingTop] },
+      };
+      const refereeJson = { turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', group_id: null, confidence: 0.97 }] };
+      const merged = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, refereeJson);
+      expect(merged.outcome).toBe('third_answer');
+      // Old code ran the combined list through `dedupeCandidates`, which
+      // re-sorts by confidence — the referee's 0.97 would climb over the
+      // pre-referee top (0.4).
+      expect(merged.slots[0].slug).toBe('fixture-bahia');
+      expect(merged.slots.map((c) => c.slug)).toContain('fixture-st-augustine');
+      expect(merged.flags.disagreed).toBe(true);
+      expect(merged.flags.blockPrettySure).toBe(true);
+      expect(merged.flags.disagreementPair.map((c) => c.slug)).toEqual(['fixture-bahia', 'fixture-st-augustine']);
+    });
+
+    test('finding 1 (identity, disagreement path): a genuine third answer keeps the ORIGINAL top first and rebuilds the pair around it', () => {
+      const turfIndex = engine.turfIndexFor();
+      const bahia = {
+        slug: 'fixture-bahia', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.6, entry: turfIndex.find((e) => e.slug === 'fixture-bahia'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
+      const stAug = {
+        slug: 'fixture-st-augustine', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.5, entry: turfIndex.find((e) => e.slug === 'fixture-st-augustine'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
+      const escalation = {
+        identityFlags: {
+          turf: {
+            triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [bahia, stAug],
+          },
+        },
+        slots: { turf: [bahia, stAug] },
+      };
+      const refereeJson = { turf: [{ slug: 'fixture-seashore-paspalum', off_catalog_name: '', group_id: null, confidence: 0.99 }] };
+      const merged = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, refereeJson);
+      expect(merged.outcome).toBe('third_answer');
+      expect(merged.slots[0].slug).toBe('fixture-bahia');
+      expect(merged.slots.map((c) => c.slug)).toContain('fixture-seashore-paspalum');
+      expect(merged.flags.disagreementPair.map((c) => c.slug)).toEqual(['fixture-bahia', 'fixture-seashore-paspalum']);
+    });
+
+    test('finding 1 (conditions, non-disagreement path): a third answer never displaces the pre-referee top', () => {
+      const conditionIndex = engine.conditionIndexFor('lawn', null);
+      const largePatch = engine.resolveConditionCandidate({
+        slug: 'fixture-large-patch', confidence: 0.4, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, conditionIndex);
+      const conditions = { possibilities: [largePatch], index: conditionIndex };
+      const escalation = {
+        conditionFlags: {
+          triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        },
+        possibilities: [largePatch],
+        conditionIndex,
+        json: { conditions: [{ slug: 'fixture-large-patch', confidence: 0.4, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+      };
+      const refereeJson = { conditions: [{ slug: 'fixture-drought', confidence: 0.9, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
+      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
+      expect(merged.outcome).toBe('third_answer');
+      // Old code ran this through `dedupePossibilities`, which re-sorts by
+      // confidence — the referee's 0.9 would climb over the pre-referee top.
+      expect(merged.possibilities[0].slug).toBe('fixture-large-patch');
+      expect(merged.possibilities.map((p) => p.slug)).toContain('fixture-drought');
+      expect(merged.flags.disagreed).toBe(true);
+      expect(merged.flags.blockPrettySure).toBe(true);
+    });
+
+    test('finding 1 (conditions, disagreement path): a genuine third answer keeps the original top first', () => {
+      const conditionIndex = engine.conditionIndexFor('lawn', null);
+      const largePatch = engine.resolveConditionCandidate({
+        slug: 'fixture-large-patch', confidence: 0.5, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, conditionIndex);
+      const drought = engine.resolveConditionCandidate({
+        slug: 'fixture-drought', confidence: 0.45, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, conditionIndex);
+      const conditions = { possibilities: [largePatch], index: conditionIndex };
+      const escalation = {
+        conditionFlags: {
+          triggered: true, disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        },
+        possibilities: [largePatch, drought],
+        conditionIndex,
+        json: { conditions: [{ slug: 'fixture-drought', confidence: 0.45, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+      };
+      const refereeJson = { conditions: [{ slug: 'fixture-herbicide-injury', confidence: 0.95, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
+      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
+      expect(merged.outcome).toBe('third_answer');
+      expect(merged.possibilities[0].slug).toBe('fixture-large-patch');
+      expect(merged.possibilities.map((p) => p.slug)).toContain('fixture-herbicide-injury');
+      expect(merged.flags.disagreementPair.map((p) => p.slug)).toEqual(['fixture-large-patch', 'fixture-herbicide-injury']);
+    });
+
+    test('finding 2: earlierReadsFor\'s conditions "second" read is OpenAI\'s own ranked top, never the merged list\'s top', () => {
+      const conditionIndex = engine.conditionIndexFor('lawn', null);
+      const geminiTop = engine.resolveConditionCandidate({
+        slug: 'fixture-large-patch', confidence: 0.95, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, conditionIndex);
+      const escalation = {
+        conditionFlags: {
+          triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        },
+        // The merged list's own top happens to be Gemini's (higher raw
+        // confidence) — old code read THIS as the "second opinion".
+        possibilities: [geminiTop],
+        conditionIndex,
+        json: { conditions: [{ slug: 'fixture-herbicide-injury', confidence: 0.6, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+      };
+      const conditions = { possibilities: [geminiTop], index: conditionIndex };
+      const identity = { slots: { turf: [], weeds: [], host: [] } };
+      const reads = engine._test.earlierReadsFor(identity, conditions, escalation, ['conditions']);
+      const conditionsRead = reads.find((r) => r.scope === 'conditions');
+      expect(conditionsRead.second.slug).toBe('fixture-herbicide-injury');
+    });
+
+    test('finding 3: reconcileCorrectedHost carries the expanded index and its own top out as conditionIndex/rerun.top', async () => {
+      const run = {
+        subject: 'tree_shrub', mode: 'workup', images: [{ data: 'x', mimeType: 'image/jpeg' }], chips: {}, context: {}, deadline: Date.now() + 60000, legTimeoutMs: () => 5000,
+      };
+      const originalIndex = engine.conditionIndexFor('tree_shrub', 'fixture-sago-palm');
+      const conditions = { index: originalIndex, hostUnion: ['fixture-sago-palm'], possibilities: [] };
+      const hostCombined = { openaiTop: { entry: catalog.getEntry('fixture-citrus') } };
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: OK_QUALITY, observed_terms: [], candidates: [{ slug: 'fixture-citrus-greening', confidence: 0.7, elements_visible: [1], signs_visible: [], symptoms_visible: [] }],
+        },
+      });
+      const result = await engine._test.reconcileCorrectedHost(run, conditions, hostCombined, { conditions: [] }, { possibilities: [] });
+      expect(result.rerun.host).toBe('fixture-citrus');
+      // The rerun's own top (against the EXPANDED index) — old code never
+      // carried this out at all.
+      expect(result.rerun.top?.slug).toBe('fixture-citrus-greening');
+      // `conditionIndex` is the expanded index the rerun actually used, not
+      // the narrower pre-rerun class/host index.
+      expect(result.conditionIndex.map((e) => e.slug)).toContain('fixture-citrus-greening');
+      expect(originalIndex.map((e) => e.slug)).not.toContain('fixture-citrus-greening');
+    });
+
+    test('finding 6: the PLANT_ID_REFEREE switchboard selector requires vision', () => {
+      const sb = require('../services/model-switchboard');
+      const selector = sb.SELECTORS.find((s) => s.key === 'PLANT_ID_REFEREE');
+      expect(selector.accepts.cap).toBe('vision');
+    });
+
+    test('finding 7: describeIdentityRead reads the normalized offCatalogName field, not the raw off_catalog_name', () => {
+      const resolved = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Mystery Grass', group_id: null, confidence: 0.5,
+      }, []);
+      expect(engine._test.describeIdentityRead(resolved)).toEqual({ slug: 'Mystery Grass', confidence: 0.5 });
+    });
   });
 });
 
