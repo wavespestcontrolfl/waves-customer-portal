@@ -183,7 +183,7 @@ postgres('scheduled-service invoice mint refuses a non-live visit (Codex #5244 r
   //    waits — proved with two REAL connections/transactions, not a
   //    single-connection savepoint (which cannot produce genuine
   //    cross-session lock contention). ──────────────────────────────────
-  test('a mint that starts BEFORE a concurrent cancel commits still refuses once its FOR UPDATE read wakes behind it', async () => {
+  test('a mint BLOCKED behind a cancel that holds the lock chain refuses once the cancel commits and it wakes', async () => {
     // This test needs its own two independent sessions — roll back the
     // shared outer trx's insert isn't visible to a second connection, so
     // insert on the real database directly and clean up after.
@@ -200,37 +200,30 @@ postgres('scheduled-service invoice mint refuses a non-live visit (Codex #5244 r
       status: 'confirmed', estimated_price: 120,
     });
     try {
-      const mintTrx = await database.transaction();
       const cancelTrx = await database.transaction();
+      const mintTrx = await database.transaction();
       try {
-        // The mint takes the advisory lock + visit FOR UPDATE first...
-        const mintLockedPromise = acquireScheduledMintLockChain(mintTrx, {
-          scheduledServiceId: visitId, customerId,
-        });
-        const mintLocked = await mintLockedPromise;
-        expect(mintLocked.status).toBe('confirmed');
-        // ...the cancel's own UPDATE queues behind the mint's row lock...
-        const cancelPromise = cancelTrx('scheduled_services')
-          .where({ id: visitId }).update({ status: 'cancelled' });
-        // ...the mint releases its lock without minting (simulating the
-        // real caller's decision to hold/replay), the cancel proceeds and
-        // commits...
-        await mintTrx.rollback();
-        await cancelPromise;
+        // The CANCEL wins the chain first (as the bar's card cancel does) and
+        // flips the visit, still uncommitted...
+        await acquireScheduledMintLockChain(cancelTrx, { scheduledServiceId: visitId, customerId });
+        await cancelTrx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+        // ...a mint that started meanwhile BLOCKS on the advisory lock...
+        let settled = false;
+        const mintPromise = acquireScheduledMintLockChain(mintTrx, { scheduledServiceId: visitId, customerId })
+          .finally(() => { settled = true; });
+        mintPromise.catch(() => {});
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(settled).toBe(false);
+        // ...the cancel commits, and the WAITING mint wakes, re-reads the
+        // visit under its own FOR UPDATE and refuses — the exact Codex #5244
+        // r7 race, not a fresh mint started after the fact.
         await cancelTrx.commit();
-        // ...and a FRESH mint attempt starting now must see the committed
-        // cancellation under its own FOR UPDATE read and refuse.
-        const secondMintTrx = await database.transaction();
-        try {
-          await expect(
-            acquireScheduledMintLockChain(secondMintTrx, { scheduledServiceId: visitId, customerId }),
-          ).rejects.toMatchObject({ status: 409, code: 'SCHEDULED_VISIT_NOT_LIVE', visitStatus: 'cancelled' });
-        } finally {
-          await secondMintTrx.rollback().catch(() => {});
-        }
+        await expect(mintPromise).rejects.toMatchObject({
+          status: 409, code: 'SCHEDULED_VISIT_NOT_LIVE', visitStatus: 'cancelled',
+        });
       } finally {
-        await mintTrx.rollback().catch(() => {});
         await cancelTrx.rollback().catch(() => {});
+        await mintTrx.rollback().catch(() => {});
       }
     } finally {
       await database('invoices').where({ scheduled_service_id: visitId }).del();
