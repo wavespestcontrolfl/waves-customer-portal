@@ -41,6 +41,11 @@ const FIELD_GROUPS = {
     // quotes, so a model that drifts on either must show in the replay.
     'agreed_slot_words',
     'moved_appointment_words',
+    // The language judgements (schema 1.20.0) the applier only verifies: a
+    // model that drifts on any of them must show in the replay.
+    'definite_commitment',
+    'relative_date_used',
+    'moved_appointment_relative_date_used',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -451,7 +456,8 @@ function normalizeField(field, value) {
   // judged, including every pre-1.19 row) must stay distinct from an
   // explicit false, which the booking-link staging check treats very
   // differently (null fails closed; false does not block).
-  if (field === 'sms_declined') return normalizeBool(value);
+  if (field === 'sms_declined' || field === 'definite_commitment' || field === 'relative_date_used'
+    || field === 'moved_appointment_relative_date_used') return normalizeBool(value);
   // agent_committed_booking postdates every legacy extraction: absent/null
   // means "not committed", identical to false — collapse them so replays
   // don't report a spurious high-severity delta on every pre-1.8.0 row

@@ -892,6 +892,18 @@ describe('call extraction replay variance reporting', () => {
   // (call-booking-link-text.js) — without it in FIELD_GROUPS, a model that
   // stops catching (or starts hallucinating) a refusal would go unnoticed
   // by the weekly replay/model bake-off.
+  // The reschedule language judgements (schema 1.20.0) the applier verifies.
+  describe('reschedule language judgement variance coverage', () => {
+    test('each is a high-severity replay field and stays a genuine tri-state', () => {
+      for (const field of ['definite_commitment', 'relative_date_used', 'moved_appointment_relative_date_used']) {
+        expect(FIELD_GROUPS.high).toContain(field);
+        expect(compareFlatFields({ [field]: true }, { [field]: false }, true).find((v) => v.field === field).severity).toBe('high');
+        expect(normalizeField(field, null)).toBeNull();
+        expect(normalizeField(field, false)).toBe(false);
+      }
+    });
+  });
+
   describe('consent.sms_declined variance coverage', () => {
     test('sms_declined is registered in FIELD_GROUPS', () => {
       const allFields = new Set(Object.values(FIELD_GROUPS).flat());

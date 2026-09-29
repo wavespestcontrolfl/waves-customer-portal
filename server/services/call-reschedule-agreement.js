@@ -36,6 +36,20 @@
  * Day words name one date: the next that fits from the call's day ("the
  * 1st" said on September 30 is October 1, never December 1); "next
  * Thursday", which can mean two dates, names none.
+ * Language the code cannot judge is judged by the extraction (prompt v19,
+ * schema 1.20.0) and only VERIFIED here:
+ *   - scheduling.definite_commitment must be true: the agent's promise was
+ *     not could/might/probably/tentative/conditional ("upon clearance",
+ *     "once cleared", "if ..."). Missing or null fails closed.
+ *   - scheduling.relative_date_used (agreed slot) and
+ *     scheduling.moved_appointment_relative_date_used (moved appointment)
+ *     must each be a boolean. False: the day words name the date by the
+ *     nearest-date rule above, and any disagreement fails closed. True (a
+ *     pinned quote required): the words are a bare weekday, the extraction's
+ *     resolved date has that weekday, is after the call's day and within
+ *     RELATIVE_DATE_HORIZON_DAYS, and is NOT the nearest such weekday (a
+ *     relative phrase that lands on the nearest date is ambiguous: "next
+ *     Thursday"); the code never falls back to the nearest date.
  * Which words are the final agreed ones (corrections, approximations,
  * ranges) is the extraction's judgement, as the owner ruled. A quote shorter
  * than three words must be the speaker's whole turn ("Yes."), never a
@@ -174,7 +188,7 @@ function stripAvailability(text, movedWords) {
   }).trim();
 }
 
-function plainlySaid(turn, quote, { askingFails = false, movedDate = false, movedWords = null, commitment = false, slot = false, evidenceWords = null } = {}) {
+function plainlySaid(turn, quote, { askingFails = false, movedDate = false, movedWords = null, commitment = false, slot = false } = {}) {
   const around = sentencesAround(turn, quote);
   // An agent's leading "No," answers the caller ("No, we'll just pop in for
   // noon"); it is not a refusal of what follows (commitment, or a slot quote
@@ -184,47 +198,8 @@ function plainlySaid(turn, quote, { askingFails = false, movedDate = false, move
   // two is unavailable".
   const text = around.map((x) => (answersNo && x.leadingNo && /^no (?:we|i) (?:ll|will) /.test(x.ns) ? x.ns.replace(/^no /, '') : x.ns)).join(' ');
   const screened = movedDate && movedWords ? stripAvailability(text, movedWords) : text;
-  return Boolean(text) && !turnHasNegationOrHedge(screened) && !hasQualifiedAgreement(screened, evidenceWords, quote)
-    && !hasUnresolvedAgreementCondition(screened)
-    && (movedDate || slotScopeIsPlain(around, evidenceWords))
+  return Boolean(text) && !turnHasNegationOrHedge(screened) && !turnHasUnresolvedConditional(screened)
     && !(askingFails && around.some((x) => x.question));
-}
-
-// The shared booking hedge screen predates these ordinary promise
-// qualifiers. Bind them to the scheduling clause: doubt about an unrelated
-// balance in the same sentence does not weaken a later definite promise.
-const COMMITMENT_QUALIFIER_RE = /\b(?:hopefully|perhaps|possibly|probably|tentatively)\b/;
-const AGREEMENT_PREDICATE_RE = /\b(?:arrive|book|come|mark|move|put|return|schedule|see|visit|works?|sounds?|perfect)\b/;
-const AGREEMENT_CLAUSE_BOUNDARY_RE = /\s+(?:and|but)\s+(?=(?:i|our|the|we|you|your)\b)/;
-function agreementClauses(text, evidenceWords, evidenceQuote) {
-  const clauses = normalize(text).split(AGREEMENT_CLAUSE_BOUNDARY_RE);
-  const pinned = normalize(evidenceQuote);
-  const holding = clauses.filter((clause) => padded(clause).includes(padded(pinned)));
-  // Evidence ownership wins over incidental repetitions of more slot words
-  // in another clause. The whole holding clause is still screened, so a
-  // model cannot quote just the unqualified tail of a tentative promise.
-  if (holding.length) return holding;
-  const phrases = (typeof evidenceWords === 'string'
-    ? [evidenceWords]
-    : [evidenceWords?.day, evidenceWords?.hour, evidenceWords?.period])
-    .filter((word) => typeof word === 'string' && normalize(word));
-  const scores = clauses.map((clause) => phrases.filter((phrase) => padded(clause).includes(padded(normalize(phrase)))).length);
-  const strongest = Math.max(0, ...scores);
-  if (strongest > 0) return clauses.filter((_clause, index) => scores[index] === strongest);
-  const owned = clauses.filter((clause) => AGREEMENT_PREDICATE_RE.test(clause));
-  return owned.length ? owned : clauses;
-}
-function hasQualifiedAgreement(text, evidenceWords, evidenceQuote) {
-  return agreementClauses(text, evidenceWords, evidenceQuote).some((clause) => COMMITMENT_QUALIFIER_RE.test(clause));
-}
-
-// Keep the shared fail-closed condition screen over the complete sentence so
-// an opening condition still governs a later coordinated promise. Only mask
-// "pending" when it is plainly the state of an unrelated account/balance
-// noun; clause-leading "Pending approval" and scheduling conditions remain.
-const UNRELATED_PENDING_STATUS_RE = /\b(?:account|balance|charge|invoice|payment|plan(?:\s+renewal)?|refund|renewal)\s+(?:is|are|was|were|remains?|stays?)\s+(?:(?:already|currently|just|possibly|probably|still)\s+){0,3}pending\b(?=\s+(?:and|but)\s+(?:i|our|the|we|you|your)\b|$)/g;
-function hasUnresolvedAgreementCondition(text) {
-  return turnHasUnresolvedConditional(normalize(text).replace(UNRELATED_PENDING_STATUS_RE, 'unresolved account status'));
 }
 
 // Does this quote hold these recorded words, word for word?
@@ -338,20 +313,38 @@ function namesDate(words, date, started) {
   return (said.weekday === undefined || said.weekday === weekday) && nearestDate(said, started) === date;
 }
 
+// The extraction resolved a relative date ("Thursday a week from now", "the
+// Thursday after this one", "Thursday eight days away") to `date` and said
+// so. The words recorded for it are the bare weekday; the code checks the
+// resolution is possible and never one the nearest-date rule would give.
+const RELATIVE_DATE_HORIZON_DAYS = 60;
+function namesRelativeDate(words, date, started) {
+  const said = statedDateComponents(String(words).replace(NEAREST_LEAD, ''), started);
+  if (!said || said.weekday === undefined || said.month !== undefined || said.day !== undefined || said.year !== undefined) return false;
+  if (new Date(`${date}T12:00:00Z`).getUTCDay() !== said.weekday) return false;
+  const today = etDateString(started);
+  return date > today && date <= etDateString(addETDays(started, RELATIVE_DATE_HORIZON_DAYS))
+    && nearestDate(said, started) !== date;
+}
+
 // Do the recorded slot words state exactly this slot? No day words only
 // when the slot keeps `movedDate`.
-function wordsStateSlot(words, slot, started, movedDate) {
+function wordsStateSlot(words, slot, started, movedDate, relative) {
   if (statedHour(words.hour, words.period) !== slot.hour24) return false;
-  return words.day ? namesDate(words.day, slot.date, started) : slot.date === movedDate;
+  if (!words.day) return !relative && slot.date === movedDate;
+  return relative ? namesRelativeDate(words.day, slot.date, started) : namesDate(words.day, slot.date, started);
 }
 
 // The moved appointment's recorded words name its date, and a grounded
 // moved-date quote holds them.
-function movedAppointmentGrounded(scheduling, quotes, turns, started) {
+function movedAppointmentGrounded(scheduling, quotes, relativeQuotes, started) {
   const words = scheduling.moved_appointment_words;
-  return typeof words === 'string' && namesDate(words, scheduling.moved_appointment_date, started)
-    && quotes.some((q) => holds(q, words)
-      && !movedAppointmentHasUnrecordedRelativeDate(sentencesHolding(turns, q, '\n'), words));
+  const relative = scheduling.moved_appointment_relative_date_used;
+  if (typeof words !== 'string' || typeof relative !== 'boolean') return false;
+  // A relative phrase is pinned by its own real quote.
+  if (relative && !relativeQuotes.length) return false;
+  const names = relative ? namesRelativeDate : namesDate;
+  return names(words, scheduling.moved_appointment_date, started) && quotes.some((q) => holds(q, words));
 }
 
 // Every quote the grounding uses is screened; a question fails the agent's
@@ -360,10 +353,9 @@ function movedAppointmentGrounded(scheduling, quotes, turns, started) {
 // contract ("Can you do Thursday at two?"), and a caller naming the visit to
 // move usually asks ("Can you move my September 24th visit?").
 const ASKING_FAILS = new Set(['/scheduling/agent_committed_booking', '/scheduling/confirmed_start_at']);
-function isPlain(holding, quote, fieldPath, movedWords = null, evidenceWords = null) {
+function isPlain(holding, quote, fieldPath, movedWords = null) {
   const how = {
     movedWords,
-    evidenceWords,
     askingFails: ASKING_FAILS.has(fieldPath),
     movedDate: fieldPath === '/scheduling/moved_appointment_date',
     commitment: fieldPath === '/scheduling/agent_committed_booking',
@@ -419,8 +411,7 @@ function spans(toks, words) {
 // to check.
 function periodIsTheHours(quote, words) {
   const toks = normalize(quote).split(' ');
-  const hours = hourSpans(toks, words);
-  if (!hours.length) return false;
+  const hours = spans(toks, words.hour);
   // Every place the hour is said must be on the hour ("two thirty" never
   // grounds "two").
   if (hours.some((span) => hourHasMinutes(toks, span))) return false;
@@ -458,7 +449,7 @@ const HOUR_LEAD_DAYS = new Set([
 // an alternative ("or four"), doubt ("I think", "approximately"), a length
 // ("two to four hours") — sends the call to the office.
 const AFTER_HOUR_WORDS = new Set([
-  ',', ';', 'o', 'clock', 'oclock', 'on', 'then', 'this', 'please', 'sharp', 'and', 'so',
+  ',', 'o', 'clock', 'oclock', 'on', 'then', 'this', 'please', 'sharp', 'and', 'so',
   'we', 'will', 'ill', 'll', 'see', 'you', 'guys', 'the', 'a', 'tech', 'technician', 'call', 'text', 'much',
   'thank', 'thanks', 'okay', 'ok', 'great', 'perfect', 'good', 'sounds', 'works', 'that', 'is', 'it', 'its', 's',
   'all', 'set', 'be', 'there', 'have', 'nice', 'day', 'bye', 'yes', 'yeah', 'yep', 'for', 'your', 'appointment', 'visit',
@@ -475,30 +466,6 @@ const ALTERNATIVE_WORDS = new Set([
   'or', 'either', 'actually', 'instead', 'rather',
   'around', 'about', 'approximately', 'roughly', 'ish', 'maybe', 'probably', 'sometime', 'somewhere',
 ]);
-
-// Find recorded date phrases in the punctuation-preserving token stream.
-// Commas inside a date ("Thursday, October 10") and the period in an
-// abbreviated month ("Oct. 10") do not break the phrase; the returned
-// indexes still refer to `toks`.
-const ABBREVIATED_MONTHS = new Set(['jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec']);
-const ABBREVIATED_MONTH_PERIOD_RE = new RegExp(String.raw`\b(${[...ABBREVIATED_MONTHS].join('|')})\.(?=\s*\d)`, 'g');
-function dateSpans(toks, day) {
-  if (typeof day !== 'string') return [];
-  const lexical = toks.flatMap((token, index) => {
-    const monthPeriod = token === ';' && ABBREVIATED_MONTHS.has(toks[index - 1]) && /^\d{1,2}(?:st|nd|rd|th)?$/.test(toks[index + 1] || '');
-    return token === ',' || monthPeriod ? [] : [{ token, index }];
-  });
-  return spans(lexical.map(({ token }) => token), day)
-    .map(([start, end]) => [lexical[start].index, lexical[end - 1].index + 1]);
-}
-
-function hourSpans(toks, words) {
-  const dates = dateSpans(toks, words.day);
-  // The recorded calendar phrase owns these numerals in both the exact-hour
-  // and minute/period checks ("October 10 at 10", "10/10 at 10").
-  return spans(toks, words.hour)
-    .filter(([start, end]) => !dates.some(([dateStart, dateEnd]) => start >= dateStart && end <= dateEnd));
-}
 
 // Is the hour at this span said exactly: an exact lead, an exact tail, and
 // only courtesy after it? Marks the tokens it explains (the hour, ":00", a
@@ -537,6 +504,7 @@ function exactHourAt(toks, [ha, end], dayIdx, explained, callerTurn) {
   return lead && tail && clean && (prev !== 'between' || rangeEnd);
 }
 
+const ABBREVIATED_MONTH_PERIOD_RE = /\b(jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.(?=\s*\d)/g;
 function hourExactIn(text, words, callerTurn = false) {
   // Tokens keeping clause punctuation, so "at two, a tech will call" ends
   // the hour at the comma.
@@ -558,44 +526,13 @@ function hourExactIn(text, words, callerTurn = false) {
   return exact && toks.every((t, k) => explained.has(k) || !(/^\d+$/.test(t) || hourNumber(t) != null || t === 'noon' || t === 'midnight'));
 }
 
-// The caller's moved-appointment words: a qualifier beside ANY mention of the
-// day that the recorded words do not carry ("Thursday next month", "next
-// week's Thursday", "Thursday eight days away") could point the move at the
-// nearer weekday, so it fails. Every occurrence of the day counts, not one
-// picked by proximity; a conjunction or sentence end ends a neighbourhood.
-// (The agreed slot is judged by the closed vocabulary below instead.)
-function regexpEscape(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-const RELATIVE_QUALIFIER_WORDS = new Set([
-  'next', 'following', 'after', 'before', 'later', 'hence', 'ago', 'away',
-  'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
-]);
-const CLAUSE_CONJUNCTIONS = new Set(['and', 'but', 'so', 'because', 'while', 'since', 'then']);
-const QUALIFIER_NEIGHBOURHOOD = 5;
-function hasQualifierNextTo(normalized, [from, to]) {
-  const before = normalized.slice(0, from).trim().split(' ').filter(Boolean).slice(-QUALIFIER_NEIGHBOURHOOD);
-  const after = normalized.slice(to).trim().split(' ').filter(Boolean).slice(0, QUALIFIER_NEIGHBOURHOOD);
-  const lastBreak = before.map((t) => CLAUSE_CONJUNCTIONS.has(t)).lastIndexOf(true);
-  const firstBreak = after.findIndex((t) => CLAUSE_CONJUNCTIONS.has(t));
-  const near = [...before.slice(lastBreak + 1), ...(firstBreak < 0 ? after : after.slice(0, firstBreak))];
-  return near.some((t) => RELATIVE_QUALIFIER_WORDS.has(t)) || / from (?:now|today) /.test(` ${near.join(' ')} `);
-}
-function movedAppointmentHasUnrecordedRelativeDate(text, day) {
-  if (typeof day !== 'string') return false;
-  const coreDay = normalize(day).replace(NEAREST_LEAD, '').replace(/^the\s+/, '');
-  if (!coreDay) return false;
-  const re = new RegExp(String.raw`\b${regexpEscape(coreDay).replace(/\s+/g, String.raw`\s+`)}\b`, 'g');
-  // One sentence per line: a qualifier in one sentence never attaches to a
-  // day named in another.
-  return String(text).split('\n').some((part) => {
-    const normalized = normalize(part);
-    return [...normalized.matchAll(re)].some((m) => hasQualifierNextTo(normalized, [m.index, m.index + m[0].length]));
-  });
-}
-
-function statesSlotWords(quote, words, turns, agreementQuotes = []) {
+function statesSlotWords(quote, words, turns, agreementQuotes = [], relative = false) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
+    // "Next", "a week from now", "the following Thursday" near the slot name
+    // a later week than the recorded day words can: they never ground —
+    // unless the extraction resolved that relative date itself and said so
+    // (relative_date_used), which grounds() and wordsStateSlot verify.
+    && (relative || !/ (?:next|week|weeks|following) /.test(padded(sentencesHolding(turns, quote))))
     && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
@@ -606,10 +543,10 @@ function statesSlotWords(quote, words, turns, agreementQuotes = []) {
 
 // The sentences, in every turn that holds this quote, that the quote
 // touches, as one normalized text.
-function sentencesHolding(turns, quote, separator = ' ') {
+function sentencesHolding(turns, quote) {
   const nq = padded(normalize(quote));
   return turns.filter((t) => padded(t.ns).includes(nq))
-    .flatMap((t) => sentencesAround(t, quote)).map((x) => x.ns).join(separator) || normalize(quote);
+    .flatMap((t) => sentencesAround(t, quote)).map((x) => x.ns).join(' ') || normalize(quote);
 }
 
 // Before an unstated hour is read as business hours, the sentences of the
@@ -672,55 +609,6 @@ const PLAIN_COMMIT_WORDS = new Set([
   'so', 'and', 'all', 'set', 've', 'got', 'your', 'appointment', 'visit', 'just', 's', 'over',
   'o', 'clock', 'oclock', '00', 'thank', 'thanks', 'awesome', 'alright',
 ]);
-// The agreed slot's scope is a CLOSED vocabulary. From the sentence's clause
-// start (a sentence start, or after "and"/"but") through the last word of
-// the recorded slot (day, hour), plus whatever trails it up to the clause
-// end, every word must be slot vocabulary: day/month names, numbers and
-// ordinals, clock and part-of-day words, and the plain words of a booking
-// ("we will see you ... at ... exactly"). Anything else inside that scope --
-// "upon clearance", "eight days away", "once cleared", "after the rain",
-// "next", "pending", "if" -- is a condition or a different date the
-// extraction may have dropped, so the promise is not grounded and the call
-// goes to the office. Every mention of the day or hour in the sentence
-// widens the scope, never just the one nearest the hour. Another clause
-// ("The plan renews a week from now, and we will see you Thursday at two")
-// is outside the scope unless it names the slot too.
-const SLOT_SCOPE_WORDS = new Set([
-  ...PLAIN_COMMIT_WORDS, ...AFTER_HOUR_WORDS, ...CALLER_AFTER_HOUR_WORDS, ...EXACT_LEADS,
-  ...[...EXACT_TAILS].filter((w) => w !== 'next'), ...HOUR_LEAD_DAYS, ...DAY_WORDS, ...Object.keys(HOUR_WORDS),
-  ...Object.keys(PERIOD_PHRASES).flatMap((p) => p.split(' ')), 'night', 'exactly', 'can', 'could', 'do', 'does', 'would',
-  'work', 'fine', 'free', 'available', 'my', 'me', 'am', 'is', 'are', 'please', 'this', 'of', 'in', 'an', 'hi', 'hello', 'seeing', 'by', 'no', 'call', 'really', 'moving', 'following', 'request', 'definitely', 'absolutely', 'certainly',
-  // Ordinary ways of saying the booking is made.
-  'schedule', 'scheduled', 'scheduling', 'reschedule', 'rescheduled', 'book', 'booked', 'booking', 'confirm', 'confirmed',
-  'change', 'changed', 'switched', 'updated', 'arranged', 'calendar', 'noted',
-  // Clock minutes, so the minute checks below still give their own verdict.
-  'm', 'oh', 'quarter', 'half', 'past', 'minute', 'minutes', 'before', 'till', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
-  'seventeen', 'eighteen', 'nineteen', 'twenty', 'thirty', 'forty', 'fifty', 'sixty',
-]);
-const SLOT_SCOPE_BREAKS = new Set(['and', 'but']);
-// A coordinated clause that points back at the appointment ("and that is next
-// week", "but it moves to the 30th") describes it, so it is in scope too.
-const APPOINTMENT_REFERENCES = new Set(['that', 'it', 'its', 'this', 'those', 'them', 'one', 'appointment', 'visit', 'service', 'time', 'slot', 'day', 'date']);
-function slotScopeIsPlain(sentences, words) {
-  if (!words || typeof words !== 'object') return true;
-  const slotTokens = new Set([words.day, words.hour].filter((w) => typeof w === 'string').flatMap((w) => normalize(w).split(' ')));
-  const recorded = new Set(slotPhrases(words).flatMap((w) => normalize(w).split(' ')));
-  const allowed = (t) => SLOT_SCOPE_WORDS.has(t) || recorded.has(t) || /^\d+(?:st|nd|rd|th)?$/.test(t);
-  return sentences.every(({ ns }) => {
-    const toks = ns.split(' ');
-    const clauses = [];
-    let start = 0;
-    toks.forEach((t, i) => {
-      if (SLOT_SCOPE_BREAKS.has(t)) { clauses.push(toks.slice(start, i)); start = i + 1; }
-    });
-    clauses.push(toks.slice(start));
-    const inScope = clauses.filter((c) => c.some((t) => slotTokens.has(t)));
-    if (!inScope.length) return true;
-    const scoped = clauses.filter((c) => c.some((t) => slotTokens.has(t) || APPOINTMENT_REFERENCES.has(t)));
-    // "Following your request, ..." is courtesy; "following Thursday" is a date.
-    return scoped.every((c) => c.every((t, i) => allowed(t) && !(t === 'following' && slotTokens.has(c[i + 1]))));
-  });
-}
 function plainCommitment(text, words) {
   const allowed = new Set([...normalize(words.hour).split(' '), ...normalize(words.period || '').split(' ').filter(Boolean)]);
   return normalize(text).split(' ').every((t) => PLAIN_COMMIT_WORDS.has(t) || allowed.has(t));
@@ -777,11 +665,21 @@ function twelveSaidTogether(quote, words) {
 /**
  * Pure function. See file header for contract.
  */
+function languageJudgementFailure(scheduling) {
+  if (scheduling.definite_commitment !== true) return 'agent_commitment_not_definite';
+  return typeof scheduling.relative_date_used === 'boolean' ? null : 'relative_date_unjudged';
+}
+
 function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   const fail = (reason) => ({ ok: false, reason, movedDate: null });
   const scheduling = v2?.scheduling || {};
   if (scheduling.caller_accepted_slot !== true) return fail('caller_did_not_accept');
   if (scheduling.agent_committed_booking !== true) return fail('agent_did_not_commit');
+  // The extraction's own judgements of the language (prompt v19): a definite
+  // promise, and whether a relative date was used. Absent = unjudged = manual.
+  const unjudged = languageJudgementFailure(scheduling);
+  if (unjudged) return fail(unjudged);
+  const relative = scheduling.relative_date_used;
   const wall = etWallClockOfConfirmedStart(scheduling.confirmed_start_at);
   const started = new Date(String(callStartedAt || ''));
   if (!wall || Number.isNaN(started.getTime())) return fail('unparseable_slot');
@@ -795,21 +693,24 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   // said wherever they appear (isPlain).
   const grounded = (fieldPath, speaker = null) => (Array.isArray(v2.evidence) ? v2.evidence : [])
     .filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker)
-      && isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath, stringOrNull(scheduling.moved_appointment_words),
-        fieldPath === '/scheduling/moved_appointment_date' ? scheduling.moved_appointment_words : scheduling.agreed_slot_words))
+      && isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath, stringOrNull(scheduling.moved_appointment_words)))
     .map((e) => e.quote);
   const commitments = grounded('/scheduling/agent_committed_booking', 'agent');
   if (!commitments.length) return fail('agent_commitment_ungrounded');
   if (!grounded('/scheduling/caller_accepted_slot', 'caller').length) return fail('caller_acceptance_ungrounded');
   const movedDate = stringOrNull(scheduling.moved_appointment_date);
-  if (movedDate && !movedAppointmentGrounded(scheduling, grounded('/scheduling/moved_appointment_date'), turns, started)) {
+  if (movedDate && !movedAppointmentGrounded(scheduling, grounded('/scheduling/moved_appointment_date'),
+    grounded('/scheduling/moved_appointment_relative_date_used'), started)) {
     return fail('moved_appointment_ungrounded');
   }
   const words = scheduling.agreed_slot_words;
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
-  if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
+  // A relative date is pinned by its own real quote, which the slot words'
+  // quote need not repeat.
+  if (relative && !grounded('/scheduling/relative_date_used').length) return fail('relative_date_ungrounded');
+  if (!wordsStateSlot(words, slot, started, movedDate, relative)) return fail('agreed_slot_words_mismatch');
   const agreementQuotes = [...commitments, ...grounded('/scheduling/caller_accepted_slot', 'caller')];
-  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes))) return fail('agreed_slot_ungrounded');
+  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes, relative))) return fail('agreed_slot_ungrounded');
   // The agent committed to THIS slot: the commitment quote says its hour,
   // on the hour, and no day but the slot's.
   if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24, turns))) return fail('agent_commitment_not_the_slot');

@@ -118,7 +118,20 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // a pre-1.19 row, which never has the field at all, still validates. The
 // booking-link staging check (call-booking-link-text.js) fails CLOSED
 // whenever the field is absent or not a boolean: 'sms_refusal_unrecorded'.
-const SCHEMA_VERSION = '1.19.0';
+// 1.20.0: additive — scheduling.definite_commitment,
+// scheduling.relative_date_used and
+// scheduling.moved_appointment_relative_date_used (each boolean|null,
+// optional in both schemas, never `required`). Owner direction 2026-09-30
+// ("best outcome") after word-list review rounds on #5201 did not converge:
+// the extraction judges the LANGUAGE of a reschedule promise — whether the
+// agent definitely committed (not could/might/probably/upon X/once Y/if Z)
+// and whether the agreed or moved day was said relatively (next week, the
+// following Thursday, eight days away) — and resolves relative dates to the
+// absolute date it already writes in confirmed_start_at /
+// moved_appointment_date. call-reschedule-agreement.js only verifies the
+// flags, the quotes and the resolved date's weekday; a missing flag fails
+// closed there.
+const SCHEMA_VERSION = '1.20.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

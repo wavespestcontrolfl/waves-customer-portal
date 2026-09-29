@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v18');
-    expect(PROMPT_HASH).toMatch(/^v18-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v19');
+    expect(PROMPT_HASH).toMatch(/^v19-[a-f0-9]{12}$/);
   });
 
   test('includes the family_member relationship instructions (schema 1.18.0)', () => {
@@ -146,6 +146,17 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('moved_appointment_words: for reschedule_requested only');
     expect(prompt).toContain('null whenever moved_appointment_date is null');
     expect(prompt).toContain('When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values');
+  });
+
+  test('includes the reschedule language-judgement rules (schema 1.20.0, owner direction 2026-09-30)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('- definite_commitment: for a slot the call agreed');
+    expect(prompt).toContain('PREFER false when unsure');
+    expect(prompt).toContain('"upon ..."');
+    expect(prompt).toContain('- relative_date_used: for a slot the call agreed');
+    expect(prompt).toContain('RESOLVE it against the call date');
+    expect(prompt).toContain('- moved_appointment_relative_date_used:');
+    expect(prompt).toContain('- scheduling.relative_date_used (when true');
   });
 
   test('includes the sms_declined consent rule (schema 1.19.0, codex P1 on #5292)', () => {
@@ -314,7 +325,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.19.0');
+    expect(SCHEMA_VERSION).toBe('1.20.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
