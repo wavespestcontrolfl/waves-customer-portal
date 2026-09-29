@@ -4251,9 +4251,15 @@ function initScheduledJobs() {
               // obligations only, payment history only for an ack, fail
               // closed on any error.
               const { outgoingAmountsStale } = require('./sms-amount-recheck');
-              const amountDecision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version');
+              const { parseInputSnapshot } = require('./agent-decision-send-checks');
+              const amountDecision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot');
+              // Pre-push audit P1 (finding 2): same recheck the immediate
+              // Agent Review send runs (agent-decision-send-checks.js) — the
+              // invoice the drafter's Zelle fact was built for, re-verified
+              // at fire time.
+              const zelleInvoiceId = parseInputSnapshot(amountDecision?.input_snapshot)?.zelle_invoice_id || null;
               amountsStale = (await outgoingAmountsStale({
-                customerId: msg.customer_id, body: msg.message_body, promptVersion: amountDecision?.prompt_version ?? null,
+                customerId: msg.customer_id, body: msg.message_body, promptVersion: amountDecision?.prompt_version ?? null, zelleInvoiceId,
               })).stale;
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it

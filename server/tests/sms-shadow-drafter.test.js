@@ -852,6 +852,75 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
   });
 });
 
+describe('pre-push audit P1: the amount-free receipt guard fires only on AFFIRMATIVE claims', () => {
+  // The whole-reply guard added for "Did you get my payment?" (v13, no
+  // dollar figure in the reply) matched the same received/paid/all-set
+  // vocabulary whether or not it was negated — a truthful "we haven't
+  // received your payment yet" against a pending/failed/refunded-only
+  // history was flagged ungrounded and withheld right alongside a genuine
+  // false confirmation. The fix excludes negation within the same clause.
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const ctxWith = (payments) => ({ billing: { outstandingBalance: 0, recentPayments: payments } });
+
+  test('a truthful negative reply passes against a PENDING-only history', () => {
+    const ctx = ctxWith([{ amount: 50, status: 'pending' }]);
+    expect(replyQuotesUngroundedAmount("We haven't received your payment yet.", ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a truthful negative reply passes against a FAILED-only history', () => {
+    const ctx = ctxWith([{ amount: 50, status: 'failed' }]);
+    expect(replyQuotesUngroundedAmount("It isn't showing as paid on our end.", ctx, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('We don\'t see a payment from you yet.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a truthful negative reply passes against a REFUNDED-only history', () => {
+    const ctx = ctxWith([{ amount: 50, status: 'refunded' }]);
+    expect(replyQuotesUngroundedAmount('No payment has come through on our end yet.', ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('an AFFIRMATIVE receipt claim with no settled payment still fails closed', () => {
+    const ctx = ctxWith([{ amount: 50, status: 'pending' }]);
+    expect(replyQuotesUngroundedAmount("Got your payment, you're all set!", ctx, { byMeaning: true })).toBe(true);
+  });
+
+  test('an AFFIRMATIVE receipt claim WITH a settled payment on record passes', () => {
+    const ctx = ctxWith([{ amount: 50, status: 'paid' }]);
+    expect(replyQuotesUngroundedAmount("Got your payment, you're all set!", ctx, { byMeaning: true })).toBe(false);
+  });
+
+  test('a mixed reply ("got March, not April") binds each clause on its own — documented, not a new guarantee', () => {
+    // Neither clause carries a dollar amount, so this stays on the
+    // whole-reply guard (no per-clause amount binding applies). The clause
+    // split on "but" keeps "not April's" from negating the "got...payment"
+    // clause, so the guard's verdict still turns on whether ANY settled
+    // payment exists on the account, not on which month it was for.
+    const settled = ctxWith([{ amount: 50, status: 'paid' }]);
+    const unsettled = ctxWith([{ amount: 50, status: 'pending' }]);
+    expect(replyQuotesUngroundedAmount("We got your March payment but not April's.", settled, { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount("We got your March payment but not April's.", unsettled, { byMeaning: true })).toBe(true);
+  });
+
+  test('regression: the amount-bearing clause-loop path (settledOnly) is unaffected', () => {
+    // Codex r4/r5/r6 coverage, re-affirmed: a paid line backs an
+    // acknowledgement only when settledOnly excludes non-paid history.
+    expect(replyQuotesUngroundedAmount(
+      'We received your $120.00 payment — thank you!',
+      { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid' }] } },
+      { byMeaning: true },
+    )).toBe(false);
+    expect(replyQuotesUngroundedAmount(
+      'We received your $120.00 payment — thank you!',
+      { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'pending' }] } },
+      { byMeaning: true },
+    )).toBe(true);
+    expect(replyQuotesUngroundedAmount(
+      'Your balance is $95.00.',
+      { billing: { outstandingBalance: 95, recentPayments: [] } },
+      { byMeaning: true },
+    )).toBe(false);
+  });
+});
+
 describe('v9 — natural voice + owner-approved voice profile', () => {
   test('house voice drops the closer boilerplate and every-message greeting', () => {
     // The old rules MANDATED a closer and a greeting on every message —

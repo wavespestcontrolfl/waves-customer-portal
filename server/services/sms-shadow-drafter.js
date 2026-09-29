@@ -1025,6 +1025,22 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // distinguish from a scheduling confirmation — see the whole-reply
 // settled-payment guard below, which relies on this same anchor.
 const PAYMENT_ACK_RE = /\b(?:received|processed|went through|got)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through|got|all set|all paid|paid in full)\b|\b(?:all set|all paid|paid in full)\b[^.\n]{0,30}\bpayment\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
+// Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
+// vocabulary whether or not it's negated, so a truthful denial ("we
+// haven't received your payment yet", "we don't see a payment") was
+// flagged as an ungrounded confirmation and withheld. Cues checked within
+// the SAME clause as the match (never the whole reply) so a mixed "we got
+// your March payment but not April's" still binds each half on its own —
+// the negation half never voids the affirmative one.
+const PAYMENT_NEGATION_RE = /\b(?:haven't|have not|hasn't|has not|didn't|did not|isn't|is not|don't see|do not see|doesn't|does not|no\b|not\b|yet to)\b/i;
+// Splits on the same boundaries as the per-clause loop below (sentence
+// ends, commas, "and"/"but", dashes) so the whole-reply ack guard judges
+// one clause at a time instead of the whole reply.
+const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/;
+function hasAffirmativePaymentAck(text) {
+  const clauses = String(text || '').split(CLAUSE_SPLIT_RE);
+  return clauses.some((clause) => PAYMENT_ACK_RE.test(clause) && !PAYMENT_NEGATION_RE.test(clause));
+}
 // The billing figures a reply may quote, in cents — one definition for this
 // draft-time guard and the send-time recheck (sms-amount-recheck): what is
 // OWED (balance, open invoice, published monthly dues) and what was PAID.
@@ -1085,7 +1101,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // ('paid') payments on record is ungrounded — status-aware per
   // context-aggregator.js (payments.status: upcoming/processing/paid/
   // failed/refunded; only 'paid' ever backs "received").
-  if (replyAmounts.length === 0 && PAYMENT_ACK_RE.test(text.replace(AMOUNT_MASK_RE, ' AMT '))) {
+  if (replyAmounts.length === 0 && hasAffirmativePaymentAck(text.replace(AMOUNT_MASK_RE, ' AMT '))) {
     const hasSettledPayment = (context?.billing?.recentPayments || [])
       .some((p) => String(p?.status || '').toLowerCase() === 'paid');
     if (!hasSettledPayment) return true;
@@ -1099,7 +1115,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // as both, or as neither, cannot be bound and fails closed. The language
   // tests run on the clause with its amounts masked — the ack grammar stops
   // at a period, and "$95.50" must not end it.
-  const clauses = text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/);
+  const clauses = text.split(CLAUSE_SPLIT_RE);
   for (const clause of clauses) {
     const text = String(clause || '');
     const masked = text.replace(AMOUNT_MASK_RE, ' AMT ');
@@ -2063,6 +2079,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const zelleEligible = presetFactsBlock || !context?.billing?.openInvoice?.id
     ? false
     : await fetchZelleEligibility({ customerId: context?.customer?.id || null, openInvoiceId: context.billing.openInvoice.id });
+  // Pre-push audit P1 (finding 2): the invoice this Zelle eligibility check
+  // actually ran against, for the caller to persist alongside
+  // facts_generated_at. A send-time recheck re-runs isZelleTransferEligible
+  // against THIS invoice's CURRENT state — never the customer's open
+  // invoice at send time, which may no longer be the one the draft was
+  // eligible for (paid off, replaced, or a saved-card charge/PI started
+  // since). null when the fact was never offered, so a body a human typed
+  // Zelle into by hand (no snapshot) fails the send-time recheck closed.
+  const zelleInvoiceId = zelleEligible ? context.billing.openInvoice.id : null;
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -2108,7 +2133,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId,
   };
   let { parsed, model, servedModel } = first;
   // Kill switch / single-pass mode: no LLM verification claim, behave as
@@ -2130,7 +2155,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // also switches real answers off at the delivery boundary.
     logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
     return {
-      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId,
       openTimesSnapshot: null,
     };
   }
@@ -2152,12 +2177,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
-        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId,
         openTimesSnapshot: null,
       };
     }
     return {
-      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId,
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType,
       }),
@@ -2244,7 +2269,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   }
 
   return {
-    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion,
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId,
     // Computed off the FINAL parsed.reply (after every revision pass) — an
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
@@ -2356,7 +2381,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot, factsGeneratedAt,
+      openTimesSnapshot, factsGeneratedAt, zelleInvoiceId,
     } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null,
     });
@@ -2534,6 +2559,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // input_snapshot so slaDraftedAt can anchor the deadline to it
           // instead of the row's own (later) created_at.
           factsGeneratedAt,
+          // Pre-push audit P1 (finding 2): the invoice this draft's Zelle
+          // fact was actually eligible against — the executor re-runs
+          // isZelleTransferEligible against its CURRENT state before
+          // sending a body that carries a Zelle contact.
+          zelleInvoiceId,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -2572,6 +2602,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               intendedActions: parsed.intended_actions,
               // Codex #5194 P2 — see the maybeAutoSend call's comment above.
               factsGeneratedAt,
+              // Pre-push audit P1 (finding 2) — see the maybeAutoSend call's
+              // comment above.
+              zelleInvoiceId,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -2623,6 +2656,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             intendedActions: parsed.intended_actions,
             // Codex #5194 P2 — see the maybeAutoSend call's comment above.
             factsGeneratedAt,
+            // Pre-push audit P1 (finding 2) — see the maybeAutoSend call's
+            // comment above.
+            zelleInvoiceId,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }

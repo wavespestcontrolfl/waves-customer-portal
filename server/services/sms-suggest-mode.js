@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null, zelleInvoiceId = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -666,6 +666,14 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // callers that predate this field.
             ...(sanitizedIntendedActions !== null ? { intended_actions: sanitizedIntendedActions } : {}),
             ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+            // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle
+            // fact was built for, so a send-time recheck can re-run
+            // isZelleTransferEligible against that SAME invoice's CURRENT
+            // state — never the customer's open invoice as it stands at
+            // send time, which the fact may no longer describe (paid off,
+            // a saved-card charge or PI started since). null when the
+            // draft was never Zelle-eligible.
+            ...(zelleInvoiceId ? { zelle_invoice_id: zelleInvoiceId } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',

@@ -16,13 +16,30 @@ jest.mock('../services/sms-shadow-drafter', () => ({
 }));
 jest.mock('../services/sms-followup-sla', () => ({ realAnswersGateOn: jest.fn(() => false) }));
 jest.mock('../services/sms-suggest-mode', () => ({ hasPriceQuote: jest.fn((t) => /\b(?:fifty|forty|twenty|hundred)\s+dollars\b|\d+\s?\/\s?mo\b|\$\s?\d/i.test(String(t || ''))) }));
+jest.mock('../routes/pay-v2', () => ({ isZelleTransferEligible: jest.fn() }));
 const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
 const { realAnswersGateOn } = require('../services/sms-followup-sla');
 const ContextAggregator = require('../services/context-aggregator');
-const { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts } = require('../services/sms-amount-recheck');
+const { isZelleTransferEligible } = require('../routes/pay-v2');
+const { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible } = require('../services/sms-amount-recheck');
 
 function dbWithCustomer(row) {
   return () => ({ where: () => ({ first: async () => row }) });
+}
+
+// Distinguishes by table name, unlike dbWithCustomer above — needed once a
+// test exercises BOTH the invoices lookup (Zelle eligibility) and the
+// customers lookup (the amount-grounding path) in the same call.
+function dbWithTables(map) {
+  return (table) => ({
+    where: () => ({
+      first: async () => {
+        const entry = map[table];
+        if (entry instanceof Error) throw entry;
+        return entry === undefined ? null : entry;
+      },
+    }),
+  });
 }
 
 beforeEach(() => {
@@ -30,6 +47,7 @@ beforeEach(() => {
   ContextAggregator.authorizedDuesCents.mockReset().mockReturnValue([]);
   replyQuotesUngroundedAmount.mockReset().mockReturnValue(false);
   realAnswersGateOn.mockReset().mockReturnValue(false);
+  isZelleTransferEligible.mockReset();
 });
 
 test('gate ON: the drafter\'s clause-aware guard is the stricter authority (a reversed payment no longer backs an acknowledgement)', async () => {
@@ -137,6 +155,89 @@ describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still 
       .resolves.toEqual({ stale: true, reason: 'zelle_recipient_stale' });
     // never even reaches the billing lookup
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+});
+
+describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1 (finding 2): a valid Zelle CONTACT is not enough, the INVOICE it was drafted for must still be eligible', () => {
+  let priorZelle;
+  beforeEach(() => {
+    priorZelle = process.env.ZELLE_RECIPIENT;
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+  });
+  afterEach(() => {
+    if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT;
+    else process.env.ZELLE_RECIPIENT = priorZelle;
+  });
+
+  test('no zelleInvoiceId (a human-typed Zelle body, or a caller that predates the snapshot) fails closed', async () => {
+    await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: null }))
+      .resolves.toEqual({ eligible: false, reason: 'zelle_invoice_unresolved' });
+    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+  });
+
+  test('no customerId fails closed without a lookup', async () => {
+    await expect(zelleInvoiceStillEligible({ customerId: null, zelleInvoiceId: 'inv-1' }))
+      .resolves.toEqual({ eligible: false, reason: 'zelle_invoice_unresolved' });
+    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+  });
+
+  test('the invoice no longer resolves to this customer (paid off, reassigned, or never existed) fails closed', async () => {
+    await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: undefined }) }))
+      .resolves.toEqual({ eligible: false, reason: 'zelle_invoice_unresolved' });
+    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+  });
+
+  test('the invoice resolves but isZelleTransferEligible now says no (paid, saved-card charge, or a succeeded/processing PI since the draft)', async () => {
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'paid' };
+    isZelleTransferEligible.mockResolvedValue(false);
+    await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }) }))
+      .resolves.toEqual({ eligible: false, reason: 'zelle_invoice_ineligible' });
+    expect(isZelleTransferEligible).toHaveBeenCalledWith(invoiceRow);
+  });
+
+  test('the invoice resolves and is still eligible', async () => {
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
+    isZelleTransferEligible.mockResolvedValue(true);
+    await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }) }))
+      .resolves.toEqual({ eligible: true });
+  });
+
+  test('a lookup error fails closed rather than throwing', async () => {
+    await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: new Error('db down') }) }))
+      .resolves.toEqual({ eligible: false, reason: 'zelle_recheck_failed' });
+  });
+
+  test('outgoingAmountsStale: a body with no Zelle mention never triggers the invoice recheck', async () => {
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'See you Tuesday!', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }) }))
+      .resolves.toEqual({ stale: false });
+    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+  });
+
+  test('outgoingAmountsStale: recipient still matches, but the snapshot carries no invoice id ⇒ blocked', async () => {
+    const body = 'You can Zelle to payments@wavespestcontrol.com — just add your name.';
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }) }))
+      .resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
+  });
+
+  test('outgoingAmountsStale: recipient matches AND the invoice is still eligible ⇒ not stale (no dollar amount in the body)', async () => {
+    const body = 'You can Zelle to payments@wavespestcontrol.com — just add your name.';
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
+    isZelleTransferEligible.mockResolvedValue(true);
+    await expect(outgoingAmountsStale({
+      customerId: 'c1', body, zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }),
+    })).resolves.toEqual({ stale: false });
+    // the amount branch is never reached — the Zelle body carries no dollar
+    // figure — so the customers/billing lookup never runs.
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('outgoingAmountsStale: recipient matches but the invoice was paid off since the draft ⇒ blocked, billing never re-read for amounts', async () => {
+    const body = 'You can Zelle to payments@wavespestcontrol.com — just add your name.';
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'paid' };
+    isZelleTransferEligible.mockResolvedValue(false);
+    await expect(outgoingAmountsStale({
+      customerId: 'c1', body, zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }),
+    })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
 });
 

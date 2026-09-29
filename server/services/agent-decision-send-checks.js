@@ -63,7 +63,11 @@ async function amountsBlock({ decision, outgoingBody }) {
   const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
   if (!realAnswers || !decision.customer_id) return null;
   const { outgoingAmountsStale } = require('./sms-amount-recheck');
-  const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody, promptVersion: decision.prompt_version });
+  // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
+  // built for, so a body carrying a Zelle contact is rechecked against that
+  // SAME invoice's CURRENT eligibility, not just its recipient.
+  const zelleInvoiceId = parseInputSnapshot(decision.input_snapshot)?.zelle_invoice_id || null;
+  const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody, promptVersion: decision.prompt_version, zelleInvoiceId });
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 

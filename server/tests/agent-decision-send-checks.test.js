@@ -41,7 +41,18 @@ test('parseInputSnapshot: string, object, malformed, absent', () => {
 test('everything passes → null; the recheck carries the snapshot lookup including serviceType', async () => {
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ city: 'Venice', customerId: 'c1', serviceType: 'Lawn Care' }));
-  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers' });
+  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers', zelleInvoiceId: null });
+});
+
+// Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
+// built for rides the same input_snapshot as facts_generated_at, and this
+// seam must read it back and thread it into the recheck.
+test('a decision carrying zelle_invoice_id threads it into the amount recheck', async () => {
+  await agentDecisionSendBlockReason({
+    decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, zelle_invoice_id: 'inv-42' }) }),
+    outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?',
+  });
+  expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ zelleInvoiceId: 'inv-42' }));
 });
 
 test('an unverifiable edit refuses before any availability call', async () => {

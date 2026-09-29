@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -256,6 +256,11 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
           ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+          // Pre-push audit P1 (finding 2) — see publishSuggestion's identical
+          // comment (sms-suggest-mode.js): the invoice the drafter's Zelle
+          // fact was built for, for the send-time recheck to re-run
+          // isZelleTransferEligible against its CURRENT state.
+          ...(zelleInvoiceId ? { zelle_invoice_id: zelleInvoiceId } : {}),
         }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
@@ -300,7 +305,12 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     });
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot };
+    return {
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot,
+      // Pre-push audit P1 (finding 2): threaded to the pre-send Zelle
+      // eligibility recheck in dispatchClaimedSend.
+      zelleInvoiceId,
+    };
   });
 }
 
@@ -821,6 +831,32 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
           await reopenParked('Auto-send held: a quoted appointment time is no longer open — suggestion reopened.');
           return outcome;
         }
+      }
+    }
+    // Zelle send-time recheck (pre-push audit P1, finding 2): autoSendReadiness's
+    // hasPriceQuote check (3.7) refuses any reply with a dollar figure before
+    // the claim, but a "You can Zelle to X" reply carries no dollar amount at
+    // all and would otherwise reach the provider with no recheck. Checked
+    // ONLY when the reply actually mentions a Zelle contact (zelleBodyContacts
+    // is a cheap regex, independent of the amount-grounding machinery below
+    // it in sms-amount-recheck.js) — recipient staleness first (outgoingZelleStale,
+    // shared with the other two send seams), then the SAME invoice-eligibility
+    // recheck fetchZelleEligibility ran at draft time (zelleInvoiceStillEligible):
+    // re-runs isZelleTransferEligible against claim.zelleInvoiceId's CURRENT
+    // state. Fails closed on a paid-off invoice, a started saved-card charge/PI,
+    // a missing snapshot, or any error. Same supersede-via-failClaim mechanism
+    // as the OPEN TIMES recheck.
+    const { outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible } = require('./sms-amount-recheck');
+    if (zelleBodyContacts(reply).length) {
+      const zelleContact = outgoingZelleStale(reply);
+      const zelleEligibility = zelleContact.stale
+        ? { eligible: false, reason: zelleContact.reason }
+        : await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: claim.zelleInvoiceId || null });
+      if (!zelleEligibility.eligible) {
+        logger.warn(`[sms-auto-send] Zelle recheck failed (decision ${claim.decisionId}): ${zelleEligibility.reason}`);
+        const outcome = await notSent(zelleEligibility.reason);
+        await reopenParked('Auto-send held: the payment instructions are no longer valid — suggestion reopened.');
+        return outcome;
       }
     }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };

@@ -622,7 +622,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt, zelleInvoiceId } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -690,6 +690,11 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
+      // Pre-push audit P1 (finding 2) — see draftShadowReply's identical
+      // field (sms-shadow-drafter.js): the invoice this draft's Zelle fact
+      // was built for, persisted onto the decision so the same send-time
+      // recheck applies here.
+      zelleInvoiceId: zelleInvoiceId ?? null,
     };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
@@ -807,6 +812,11 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         ...(llmDraft?.factsGeneratedAt instanceof Date && Number.isFinite(llmDraft.factsGeneratedAt.getTime())
           ? { facts_generated_at: llmDraft.factsGeneratedAt.toISOString() }
           : {}),
+        // Pre-push audit P1 (finding 2) — see publishSuggestion's identical
+        // field (sms-suggest-mode.js): the invoice the drafter's Zelle fact
+        // was built for, read back by agentDecisionSendBlockReason at send
+        // time.
+        ...(llmDraft?.zelleInvoiceId ? { zelle_invoice_id: llmDraft.zelleInvoiceId } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),

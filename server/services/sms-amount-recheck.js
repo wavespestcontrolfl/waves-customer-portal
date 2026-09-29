@@ -72,6 +72,33 @@ function outgoingZelleStale(body) {
 }
 
 /**
+ * Pre-push audit P1 (finding 2): a Zelle contact that still matches the
+ * CURRENT recipient (outgoingZelleStale above) is not enough on its own —
+ * the invoice the drafter checked isZelleTransferEligible against when it
+ * built the fact may have since been paid off, or a saved-card charge or
+ * PaymentIntent may have started, either of which the pay page would now
+ * withhold Zelle for. Re-runs the SAME predicate (server/routes/pay-v2.js)
+ * against that invoice's CURRENT state, exactly as fetchZelleEligibility
+ * (sms-shadow-drafter.js) does at draft time. Fail CLOSED: no customerId,
+ * no zelleInvoiceId (a body a human typed Zelle into by hand carries no
+ * snapshot), an invoice that no longer resolves to this customer, or any
+ * lookup error are all treated as ineligible.
+ */
+async function zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh = db } = {}) {
+  if (!customerId || !zelleInvoiceId) return { eligible: false, reason: 'zelle_invoice_unresolved' };
+  try {
+    const invoiceRow = await dbh('invoices').where({ id: zelleInvoiceId, customer_id: customerId }).first();
+    if (!invoiceRow) return { eligible: false, reason: 'zelle_invoice_unresolved' };
+    const { isZelleTransferEligible } = require('../routes/pay-v2');
+    const eligible = Boolean(await isZelleTransferEligible(invoiceRow));
+    return eligible ? { eligible: true } : { eligible: false, reason: 'zelle_invoice_ineligible' };
+  } catch (err) {
+    logger.warn(`[sms-amount-recheck] Zelle eligibility recheck failed for customer ${customerId}: ${err.message}; blocking send`);
+    return { eligible: false, reason: 'zelle_recheck_failed' };
+  }
+}
+
+/**
  * Are the amounts in `body` still backed by the customer's CURRENT billing
  * facts? Returns { stale: false } when the body carries no amounts or every
  * amount is authorized; { stale: true, reason } otherwise (including any
@@ -89,7 +116,7 @@ function strictForVersion(promptVersion) {
   return require('./sms-followup-sla').realAnswersGateOn();
 }
 
-async function outgoingAmountsStale({ customerId, body, promptVersion = null, dbh = db } = {}) {
+async function outgoingAmountsStale({ customerId, body, promptVersion = null, zelleInvoiceId = null, dbh = db } = {}) {
   const text = String(body || '');
   // Independent-review P1 (finding 4): checked unconditionally, ahead of
   // the amount rules below and regardless of prompt version — a Zelle
@@ -100,6 +127,13 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
   // time recheck) already share.
   const zelle = outgoingZelleStale(text);
   if (zelle.stale) return zelle;
+  // Pre-push audit P1 (finding 2): checked right alongside the recipient
+  // check above, and only when the body actually mentions a Zelle contact —
+  // a body with no Zelle contact has nothing to recheck.
+  if (zelleBodyContacts(text).length) {
+    const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh });
+    if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
+  }
   const strict = strictForVersion(promptVersion);
   const amounts = bodyAmountCents(text);
   if (!amounts.length) {
@@ -135,4 +169,4 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
   }
 }
 
-module.exports = { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts };
+module.exports = { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible };
