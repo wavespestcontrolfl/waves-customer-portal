@@ -388,7 +388,7 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
   // (arrival_delay_minutes) — never recomputed here.
   const prevRow = { startMin: 540, endMin: 600, lat: 27.4, lng: -82.4, expectedMinutes: 60 };
   const candidate = (delayMinutes, row = prevRow) => ({
-    date: '2026-10-01', technician: { id: 't1' }, start_time: '10:00', end_time: '11:00',
+    date: '2099-10-01', technician: { id: 't1' }, start_time: '10:00', end_time: '11:00',
     arrival_delay_minutes: delayMinutes,
     _gap: { prevId: 's1', nextId: null, prevRow: row },
   });
@@ -450,7 +450,7 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
     // Next stop at 11:00 right after a 10:00-11:00 candidate: fails the buffer on the next side.
     const nextRow = { startMin: 660, endMin: 720, lat: 27.4, lng: -82.4, expectedMinutes: 60 };
     const slot = {
-      date: '2026-10-01', technician: { id: 't1' }, start_time: '10:00', end_time: '11:00',
+      date: '2099-10-01', technician: { id: 't1' }, start_time: '10:00', end_time: '11:00',
       arrival_delay_minutes: 0, _gap: { prevId: null, nextId: 's2', nextRow },
     };
     expect(packCapacityEnds([slot], { lat: 27.4, lng: -82.4, durationMinutes: 60 })).toEqual([]);
@@ -462,7 +462,7 @@ describe('packCapacityEnds — self-serve arrival grace (owner ruling 2026-09-28
     const { arrivalExceedsGrace } = require('../services/scheduling/arrival-route')._internals;
     // No real neighbours at all (nothing for the strict buffer to reject), but the route runs 50 late.
     const free = {
-      date: '2026-10-01', technician: { id: 't1' }, start_time: '13:00', end_time: '14:00',
+      date: '2099-10-01', technician: { id: 't1' }, start_time: '13:00', end_time: '14:00',
       arrival_delay_minutes: 50, _gap: { prevId: null, nextId: null },
     };
     expect(arrivalExceedsGrace({ arrivalDelayMinutes: 50 }, 30)).toBe(true);
