@@ -261,7 +261,12 @@ async function profilesSharingAddress(conn, email) {
 // email is the same mailbox (sameMailboxSql — an unsubscribed
 // john.doe+news@gmail.com row blocks johndoe@gmail.com and vice versa), or
 // that is linked to ANY profile sharing it. Ordered so a still-active row
-// always wins the read.
+// always wins the read. Returns the found row (`status` may itself be NULL
+// or '' — the column has no CHECK constraint) or `undefined` when NO row
+// matches at all — the caller (classifyAddress) must never confuse the two
+// (codex P1): a NULL/empty status on a REAL row still fails closed, rather
+// than being read as "no existing row" and letting a new active row in
+// alongside it.
 async function existingAddressStatus(conn, profileIds, email) {
   const mailbox = sameMailboxSql('email', email);
   const result = await conn.raw(
@@ -278,7 +283,7 @@ async function existingAddressStatus(conn, profileIds, email) {
       LIMIT 1`,
     [profileIds, ...mailbox.bindings],
   );
-  return result.rows?.[0]?.status || null;
+  return result.rows?.[0];
 }
 
 // Active suppressions for this MAILBOX. activeSuppressionsFor stays the
@@ -308,14 +313,18 @@ async function mailboxSuppressions(conn, email) {
 // one inbox, whichever profile the subscriber row ends up linked to.
 // Returns an exclusion reason, 'already_active', or null (importable).
 async function classifyAddress(conn, { email, profileIds }) {
-  const status = await existingAddressStatus(conn, profileIds, email);
+  const existing = await existingAddressStatus(conn, profileIds, email);
+  const status = existing?.status;
   if (status === 'active') return 'already_active';
   if (status === 'unsubscribed') return 'previously_unsubscribed';
   if (status === 'pending') return 'pending_confirmation';
   // Fail closed: newsletter_subscribers.status has no CHECK constraint, so
-  // any other stored value (a bounce/complaint label, a future status) is a
-  // row this import must not route around — counted with the inactive rows.
-  if (status) return 'inactive_subscriber';
+  // any other stored value (a bounce/complaint label, a future status —
+  // NULL and '' included) is a row this import must not route around —
+  // counted with the inactive rows. Judged on `existing` (a found row),
+  // never on `status`'s own truthiness (codex P1) — a NULL/empty status on
+  // a REAL row must never read as "no existing row at all".
+  if (existing) return 'inactive_subscriber';
 
   const suppressions = await mailboxSuppressions(conn, email);
   if (suppressions.length) return 'suppressed';

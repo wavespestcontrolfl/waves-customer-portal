@@ -1071,3 +1071,24 @@ test('an unrecognised subscriber status on the same mailbox fails closed (no CHE
   expect(write.imported).toBe(0);
   expect(state.subscribers).toHaveLength(1);
 });
+
+// Codex P1 (:281) — "Distinguish a NULL subscriber status from an absent
+// subscriber": existingAddressStatus used to return `status || null`,
+// which reads a FOUND row whose own status is NULL or '' exactly like NO
+// row at all — classifyAddress would then fall through every exclusion and
+// let a second, active row into the SAME mailbox. Same fixture shape as
+// the 'bounced' case above (a differently-spelled row on the mailbox), just
+// with a falsy-but-real status.
+test.each([[null], ['']])('an existing subscriber row with status %p is a REAL row, not "no row" — fails closed as inactive_subscriber', async (status) => {
+  const state = {
+    customers: [cust({ email: 'johndoe@gmail.com' })],
+    subscribers: [{ id: 's1', customer_id: null, email: 'john.doe+x@gmail.com', status }],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.excluded.inactive_subscriber).toBe(1);
+  expect(dry.importable).toBe(0);
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(0);
+  expect(state.subscribers).toHaveLength(1); // no second row ever inserted for this mailbox
+});
