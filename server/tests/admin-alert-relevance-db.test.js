@@ -103,4 +103,22 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect(retired.read_at).toBeInstanceOf(Date);
     expect(retired.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'A visit was booked' });
   });
+
+  test('a quote sent to the lead\'s customer after the bell keeps its bell retired when a newer draft takes over the lead\'s estimate pointer', async () => {
+    const now = new Date();
+    const bellAt = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    const customer = await insert('customers', { first_name: 'Quoted', phone: '+15555557003' });
+    const sent = await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: new Date(bellAt.getTime() + 60 * 60 * 1000) });
+    const lead = await insert('leads', { first_name: 'Quoted', phone: '+15555557003', status: 'new', customer_id: customer.id, estimate_id: sent.id });
+    const leadBell = await bell({ category: 'new_lead', link: `/admin/leads?lead=${lead.id}`, created_at: bellAt,
+      metadata: { triggerKey: 'new_lead', payload: { leadId: lead.id } } });
+    await relevance.runAdminAlertRelevanceSweep({ now });
+    const retired = await get(leadBell.id);
+    expect(retired.metadata.retired).toMatchObject({ reason: 'Estimate was sent' });
+    // A newer draft takes over leads.estimate_id; the next run's re-arm pass keeps the retirement.
+    const draft = await insert('estimates', { status: 'draft', customer_id: customer.id });
+    await db('leads').where({ id: lead.id }).update({ estimate_id: draft.id });
+    await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
+    expect((await get(leadBell.id)).read_at).toEqual(retired.read_at);
+  });
 });

@@ -123,7 +123,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
@@ -162,6 +162,15 @@ async function loadSubjects(rows, conn = db) {
       .whereNull('recurring_parent_id').whereNull('parent_service_id')
       .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
     data.leadVisits = new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
+    // Every quote sent to the lead's customer, not only the one the lead
+    // points at now: a newer draft can take over leads.estimate_id
+    // (draft-builder's writeGuardedLeadEstimateLink) without un-sending it.
+    const quotes = await conn('estimates').whereIn('customer_id', leadCustomerIds).whereNotNull('sent_at').select('customer_id', 'sent_at');
+    for (const quote of quotes) {
+      const key = String(quote.customer_id);
+      const at = new Date(quote.sent_at);
+      if (!Number.isNaN(at.getTime()) && !(data.leadQuotes.get(key) >= at)) data.leadQuotes.set(key, at);
+    }
   }
   return data;
 }
@@ -178,6 +187,7 @@ function subjectFor(row, data, todayET) {
     // A visit the row names, by id; loaded ids only, so a miss is a visit gone.
     visitOf: (id) => data.visits.get(id),
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
+    leadQuotedAt: resolved.lead?.customer_id ? data.leadQuotes.get(String(resolved.lead.customer_id)) : null,
   };
 }
 
@@ -223,8 +233,8 @@ function seriesMoveMovedOn(s) {
 }
 
 // A new-lead bell is about the submission that raised it, so only what
-// happened AFTER the bell counts: the lead deleted, its estimate sent, or a
-// live visit booked for its customer. Timestamped facts only — a status
+// happened AFTER the bell counts: the lead deleted, a quote sent (the one it
+// points at, or any to its customer), or a live visit booked for its customer. Timestamped facts only — a status
 // carries no time, and the lead's state can predate the bell (a website
 // submission attached to a lead already quoted or worked). Not converted_at:
 // booking the lead stamps it and cancelling that visit never clears it, so
@@ -236,7 +246,7 @@ function newLeadMovedOn(s) {
   if (!lead || !s.bellAt) return null;
   const after = (at) => !!at && new Date(at).getTime() > s.bellAt.getTime();
   if (after(lead.deleted_at)) return 'Lead was deleted';
-  if (after(s.estimate?.sent_at)) return 'Estimate was sent';
+  if (after(s.estimate?.sent_at) || after(s.leadQuotedAt)) return 'Estimate was sent';
   if (after(s.leadBookedAt)) return 'A visit was booked';
   return null;
 }

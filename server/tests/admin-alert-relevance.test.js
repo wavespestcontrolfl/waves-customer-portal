@@ -45,6 +45,7 @@ jest.mock('../models/db', () => {
       return b;
     };
     b.whereNull = (col) => { q.calls.push(['whereNull', col]); conds.push((r) => r[col] == null); return b; };
+    b.whereNotNull = (col) => { q.calls.push(['whereNotNull', col]); conds.push((r) => r[col] != null); return b; };
     b.whereIn = (col, ids) => { q.calls.push(['whereIn', col, ids]); conds.push((r) => ids.includes(String(r[strip(col)]))); return b; };
     b.whereRaw = (sql, args = []) => {
       q.calls.push(['whereRaw', sql, args]);
@@ -213,8 +214,9 @@ describe('subject references are parsed defensively', () => {
       note({ category: 'billing', metadata: { invoiceId: INV } }),
     ]);
     const counts = mockQueries.reduce((a, q) => ({ ...a, [q.table]: (a[q.table] || 0) + 1 }), {});
-    // Visits, leads, the lead's estimate, and the lead customer's latest booked visit.
-    expect(counts).toEqual({ 'scheduled_services as ss': 1, leads: 1, estimates: 1, scheduled_services: 1 });
+    // Visits, leads, the lead's estimate plus every quote sent to the lead's
+    // customer, and the lead customer's latest booked visit — per batch, never per row.
+    expect(counts).toEqual({ 'scheduled_services as ss': 1, leads: 1, estimates: 2, scheduled_services: 1 });
     mockQueries = [];
     await loadSubjects([note({ metadata: { scheduledServiceId: 'nope', customerId: 'nope' } })]);
     expect(mockQueries).toEqual([]);
@@ -336,6 +338,17 @@ describe('class rules', () => {
     expect((await reasonFor(note({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead' } }))).reason).toBe('Lead was deleted');
   });
 
+  test('new lead: a quote sent after the bell stays evidence when a newer draft takes over the lead\'s estimate pointer', async () => {
+    const DRAFT = uid(60);
+    // writeGuardedLeadEstimateLink lets a newer draft replace leads.estimate_id.
+    mockTables.leads = [lead({ estimate_id: DRAFT })];
+    mockTables.estimates = [{ id: EST, customer_id: CUST, sent_at: AFTER_BELL }, { id: DRAFT, customer_id: CUST, sent_at: null }];
+    expect((await reasonFor(leadNote())).reason).toBe('Estimate was sent');
+    // A quote to the customer from before the bell is not.
+    mockTables.estimates = [{ id: EST, customer_id: CUST, sent_at: BEFORE_BELL }, { id: DRAFT, customer_id: CUST, sent_at: null }];
+    expect((await reasonFor(leadNote())).reason).toBeNull();
+  });
+
   test('new lead: a conversion is never evidence on its own — booking stamps it, cancelling the visit never clears it, so only the live booking counts', async () => {
     // Converted by a booking after the bell, then the visit was cancelled: no live booking is left.
     mockTables.leads = [lead({ converted_at: AFTER_BELL })];
@@ -350,7 +363,7 @@ describe('class rules', () => {
     // applyLeadAttachUpdate keeps an open lead's status, and the intake trigger rings for the new submission.
     for (const status of ['estimate_sent', 'estimate_viewed', 'contacted', 'spam', 'cancelled', 'won', 'lost', 'duplicate']) {
       mockTables.leads = [lead({ status, estimate_id: EST })];
-      mockTables.estimates = [{ id: EST, sent_at: BEFORE_BELL }];
+      mockTables.estimates = [{ id: EST, customer_id: CUST, sent_at: BEFORE_BELL }];
       mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: BEFORE_BELL }];
       expect((await reasonFor(leadNote())).reason).toBeNull();
     }
