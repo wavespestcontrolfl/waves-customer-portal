@@ -21,6 +21,7 @@ const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { getServiceContactSlots } = require('../services/customer-contact');
+const { applyOutlinkTracking } = require('../services/outlink-tracking');
 
 // Full names of the configured service-contact slots (tenant, home buyer,
 // property manager) — same shape as the tracker's contact block
@@ -377,8 +378,17 @@ router.get('/:token', async (req, res) => {
     if (!source) return res.status(503).json({ error: 'Try again in a moment' });
     const { customer } = source;
     const {
-      customerFirstName, typeLabel, serviceDate, techName, propertyAddress, renderedBlocks,
+      customerFirstName, typeLabel, serviceDate, techName, propertyAddress,
     } = guide;
+    // Outside links → /go/<code> click logging (GATE_OUTLINK_TRACKING; page
+    // only — the PDF twin keeps direct links). Fails open to the original.
+    const { blocks: renderedBlocks } = await applyOutlinkTracking({
+      blocks: guide.renderedBlocks,
+      templateKey: source.templateKey,
+      prepToken: token,
+      customerId: source.customerId,
+      surface: 'page',
+    });
 
     const ipHash = req.ip
       ? crypto.createHash('sha256').update(req.ip).digest('hex').slice(0, 16)
