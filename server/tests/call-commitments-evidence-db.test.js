@@ -46,7 +46,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   let db;
   let cc;
   let seq = 0;
-  const made = { callIds: [], customerIds: [], smsIds: [], visitIds: [], estimateIds: [], emailIds: [], emailMessageIds: [], commitmentIds: [] };
+  const made = { callIds: [], customerIds: [], smsIds: [], visitIds: [], estimateIds: [], emailIds: [], emailMessageIds: [], commitmentIds: [], leadIds: [] };
   const original = process.env.PROMISE_EVIDENCE_CLOSE;
 
   beforeAll(() => {
@@ -60,6 +60,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await del('email_messages', made.emailMessageIds);
     await del('emails', made.emailIds);
     await del('estimates', made.estimateIds);
+    await del('leads', made.leadIds);
     await del('scheduled_services', made.visitIds);
     await del('sms_log', made.smsIds);
     await del('call_log', made.callIds); // cascades the commitments
@@ -93,6 +94,8 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     return { n, phone, email, customerId, call, commitment };
   }
   const later = (minutes = 30) => new Date(Date.now() - 3 * DAY + (90 + minutes * 60) * 1000);
+  // A churned customer: the live stage plus the churn date, N days ago.
+  const churnedStage = (daysAgo) => ({ pipeline_stage: 'churned', churned_at: new Date(Date.now() - daysAgo * DAY).toISOString().slice(0, 10) });
   // Every page of the closed-automatically list, walked with its cursor.
   const allAutoClosed = async (days, limit = 100) => {
     const all = [];
@@ -266,10 +269,10 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   });
 
   test('customer left: a churn after the call dismisses the Waves promise with the proof and no human verdict; a churn before the call, a soft delete (a merge), or the customer\'s own promise does not', async () => {
-    const churned = await world({ kind: 'send_report', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+    const churned = await world({ kind: 'send_report', customerExtra: churnedStage(1) });
     const deleted = await world({ kind: 'other', customerExtra: { deleted_at: new Date(Date.now() - 1 * DAY) } });
-    const before = await world({ kind: 'other', customerExtra: { churned_at: new Date(Date.now() - 10 * DAY).toISOString().slice(0, 10) } });
-    const theirs = await world({ kind: 'send_photos', party: 'customer', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+    const before = await world({ kind: 'other', customerExtra: churnedStage(10) });
+    const theirs = await world({ kind: 'send_photos', party: 'customer', customerExtra: churnedStage(1) });
     for (const w of [churned, deleted, before, theirs]) await cc.refreshFulfillment(db, w.call.id);
     expect(await row(churned.commitment.id)).toMatchObject({
       status: 'dismissed', human_state: null, fulfilled_at: null,
@@ -281,7 +284,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(await row(theirs.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     // Off: nobody is dismissed.
     process.env.PROMISE_EVIDENCE_CLOSE = 'false';
-    const off = await world({ kind: 'other', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+    const off = await world({ kind: 'other', customerExtra: churnedStage(1) });
     await cc.refreshFulfillment(db, off.call.id);
     expect(await row(off.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
   });
@@ -299,7 +302,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     made.customerIds.push(other.id);
     const kept = await world({ kind: 'other' });
     await visit(kept);
-    const left = await world({ kind: 'other', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+    const left = await world({ kind: 'other', customerExtra: churnedStage(1) });
     for (const w of [kept, left]) await cc.refreshFulfillment(db, w.call.id);
     expect((await row(kept.commitment.id)).status).toBe('fulfilled');
     expect((await row(left.commitment.id)).status).toBe('dismissed');
@@ -340,11 +343,12 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   test('a visit cancelled after it closed a promise, or a customer who returned, is found by the periodic scan and the promise reopens', async () => {
     const booked = await world({ kind: 'other' });
     const v = await visit(booked);
-    const left = await world({ kind: 'other', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+    const left = await world({ kind: 'other', customerExtra: churnedStage(1) });
     for (const w of [booked, left]) await cc.refreshFulfillment(db, w.call.id);
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toEqual(expect.arrayContaining([booked.call.id]));
     await db('scheduled_services').where({ id: v.id }).update({ status: 'cancelled' });
-    await db('customers').where({ id: left.customerId }).update({ churned_at: null });
+    // Reactivated, the old churn date left behind: the live stage decides.
+    await db('customers').where({ id: left.customerId }).update({ pipeline_stage: 'active_customer' });
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).toEqual(expect.arrayContaining([booked.call.id, left.call.id]));
     for (const w of [booked, left]) {
       expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1 });
@@ -439,7 +443,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   test('listAutoClosedCommitments: association closes and customer-left dismissals in the window, newest first; never direct, manual, human-dismissed, reopened, customer-party or out-of-window rows', async () => {
     const kept = await world({ kind: 'other' });
     await visit(kept);
-    const left = await world({ kind: 'send_report', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+    const left = await world({ kind: 'send_report', customerExtra: churnedStage(1) });
     const direct = await world({ kind: 'other' });
     const manual = await world({ kind: 'other' });
     const humanDismissed = await world({ kind: 'other' });
@@ -469,7 +473,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     gates.callCommitments = true;
     process.env.GATE_CALLBACK_CARD = 'true';
     try {
-      const w = await world({ kind: 'callback', human_state: 'confirmed', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+      const w = await world({ kind: 'callback', human_state: 'confirmed', customerExtra: churnedStage(1) });
       await inbound(w);
       await staffEmail(w);
       await visit(w);
@@ -577,5 +581,52 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(new Set(seen).size).toBe(seen.length);
     const mine = new Set(worlds.map((w) => w.commitment.id));
     expect(seen.filter((id) => mine.has(id))).toEqual([worlds[2].commitment.id, ...[...tied].sort().reverse()]);
+  });
+
+  test('customer left is the live churned stage: a reactivated customer who still carries an old churn date, or a churned row with no date, is not dismissed', async () => {
+    const reactivated = await world({ kind: 'other', customerExtra: { ...churnedStage(1), pipeline_stage: 'active_customer' } });
+    const undated = await world({ kind: 'other', customerExtra: { pipeline_stage: 'churned' } });
+    for (const w of [reactivated, undated]) {
+      await cc.refreshFulfillment(db, w.call.id);
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    }
+  });
+
+  test('a promise for a slot the call confirmed is kept only by a booking for that slot: once it lapses, another visit on the books stays a hint and never closes it again', async () => {
+    const w = await world({ kind: 'schedule_visit' });
+    const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+    const day = etDateString(new Date(Date.now() - 2 * DAY));
+    const slotAt = parseETDateTime(`${day}T15:00`);
+    const offset = slotAt.getUTCHours() === 19 ? '-04:00' : '-05:00';
+    await db('call_log').where({ id: w.call.id }).update({
+      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: `${day}T15:00:00${offset}` } }),
+    });
+    await db('call_commitments').where({ id: w.commitment.id }).update({ due_at: slotAt, due_type: 'floor' });
+    const atSlot = await visit(w, { scheduled_date: day, window_start: '15:00' });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_at_the_promised_time' });
+    // The slot booking lapses; another visit for the customer, booked after the slot came, is on the books.
+    await db('scheduled_services').where({ id: atSlot.id }).update({ status: 'cancelled' });
+    const another = await visit(w, { scheduled_date: '2026-12-15', created_at: new Date(Date.now() - 1 * DAY) });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: { record_id: another.id, strength: 'association', slot_bound: true } });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+    expect((await row(w.commitment.id)).status).toBe('open');
+  });
+
+  test('a reused lead\'s estimate closes a quote promise only inside the association window, like every other association', async () => {
+    const w = await world({ kind: 'send_estimate' });
+    const [lead] = await db('leads').insert({ first_name: `Reused${w.n}`, phone: w.phone, created_at: new Date(Date.now() - 30 * DAY) }).returning('id');
+    made.leadIds.push(lead.id);
+    await db('call_log').where({ id: w.call.id }).update({ metadata: JSON.stringify({ lead_id: lead.id }) });
+    const handedOff = (at) => ({ sent_at: at, estimate_data: JSON.stringify({ lead_id: lead.id, deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } }) });
+    const [est] = await db('estimates').insert({ status: 'sent', customer_phone: w.phone, created_at: new Date(Date.now() - 4 * DAY), ...handedOff(new Date(Date.now() - 3 * DAY + 20 * DAY)) }).returning('id');
+    made.estimateIds.push(est.id);
+    // Handed off twenty days after the call: past the window.
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+    expect((await row(w.commitment.id)).status).toBe('open');
+    await db('estimates').where({ id: est.id }).update(handedOff(later()));
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: est.id, strength: 'association' });
   });
 });

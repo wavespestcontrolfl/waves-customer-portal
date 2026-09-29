@@ -1502,12 +1502,17 @@ function statedSlot(commitment, after) {
 // one), confirmed_start_at by the booking path's wall-clock rule. A promise
 // whose own time disagrees stays a hint. schedule_visit only; the follow-up
 // pager applies the same slot test to its own evidence (appointmentSlot).
-async function slotBookingProof(conn, commitment, call, customerId, after) {
+// The stated slot of a schedule_visit promise the call's own extraction
+// confirmed (the rule above), or null.
+async function confirmedPromisedSlot(conn, commitment, call, after) {
   const slot = commitment.kind === "schedule_visit" ? statedSlot(commitment, after) : null;
   if (!slot) return null;
   const v2 = await conn("call_log").where({ id: call.id, v2_extraction_status: "valid" }).first("ai_extraction_enriched");
   const confirmed = v2 && require("./call-booking-miss-watchdog").extractConfirmedSlot(v2.ai_extraction_enriched);
-  if (!confirmed || confirmed.dateET !== slot.day || confirmed.minutes !== slot.minutes) return null;
+  return confirmed && confirmed.dateET === slot.day && confirmed.minutes === slot.minutes ? slot : null;
+}
+
+async function slotBookingProof(conn, slot, customerId, after) {
   const booked = await conn("scheduled_services")
     .where("customer_id", customerId)
     .where("created_at", ">", after)
@@ -1809,17 +1814,19 @@ async function evidenceBoundary(conn, commitment, call) {
 }
 
 // The promise is moot once the customer it was made to has left: churned
-// after the boundary (no window). refreshFulfillment writes it as a
-// dismissal, never as a kept promise. A soft delete is NOT leaving — a
-// merge soft-deletes the duplicate profile while the caller is still a
-// customer on the surviving one.
+// NOW (the live pipeline stage — churned_at is history a reactivated
+// customer can still carry; email-division eligibility reads it the same
+// way), on a churn date after the boundary (no window). refreshFulfillment
+// writes it as a dismissal, never as a kept promise. A soft delete is NOT
+// leaving — a merge soft-deletes the duplicate profile while the caller is
+// still a customer on the surviving one.
 const CUSTOMER_LEFT = "customer_left";
 async function customerLeftProof(conn, commitment, call) {
   const after = await evidenceBoundary(conn, commitment, call);
   if (!call?.customer_id || !after) return null;
   const customer = await conn("customers").where({ id: call.customer_id })
-    .first("id", conn.raw("to_char(churned_at, 'YYYY-MM-DD') as churned_day"));
-  if (!customer?.churned_day || customer.churned_day <= etDateString(after)) return null;
+    .first("id", "pipeline_stage", conn.raw("to_char(churned_at, 'YYYY-MM-DD') as churned_day"));
+  if (customer?.pipeline_stage !== "churned" || !customer.churned_day || customer.churned_day <= etDateString(after)) return null;
   return { kind: CUSTOMER_LEFT, record_type: "customer", record_id: customer.id, matched_at: parseETDateTime(`${customer.churned_day}T12:00`), strength: "association", basis: "customer_left_after_promise" };
 }
 
@@ -1830,8 +1837,12 @@ async function customerLeftProof(conn, commitment, call) {
 // proof first, then associationProof over the lookups it has always made.
 
 // send_estimate's reused-lead lookup: an estimate on a lead this call did not
-// mint (a hint, never direct), handed off once associations count.
-async function reusedLeadEstimate({ conn, call, leadIds, associated: { after } }, probe) {
+// mint (a hint, never direct), handed off once associations count — and, for
+// a promise it can close, within the association window like every other
+// association (a hint alone keeps its old open end).
+async function reusedLeadEstimate({ conn, call, commitment, leadIds, associated }, probe) {
+  const { after } = associated;
+  const until = associationCloses(commitment) ? associated.until : null;
   // A REUSED earlier call's lead — reached through the lead_id /
   // relay_lead_id stamp, or carrying this call's SID only because
   // attribution re-stamped a lead older than the call — is a hint,
@@ -1856,8 +1867,8 @@ async function reusedLeadEstimate({ conn, call, leadIds, associated: { after } }
       .where(function linkedToLeads() {
         if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
         if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
-      }), after)
-      .orderByRaw(handoffOrder(conn, after))
+      }), after, until)
+      .orderByRaw(handoffOrder(conn, after, until))
       .first(...HANDOFF_COLS(conn));
     if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
   }
@@ -2028,12 +2039,18 @@ async function resolveScheduleVisit(ctx) {
     return { kind: "appointment_rescheduled", record_type: "scheduled_service", record_id: movedMeta.scheduled_service_id, matched_at: movedRow.created_at, strength: "direct", basis: "visit_rescheduled_from_this_call" };
   }
   if (!customerId) return null;
-  const slotProof = await slotBookingProof(conn, commitment, call, customerId, after);
+  const slot = await confirmedPromisedSlot(conn, commitment, call, after);
+  const slotProof = slot && await slotBookingProof(conn, slot, customerId, after);
   if (slotProof) return slotProof;
-  return associationProof(ctx, [async () => {
+  const proof = await associationProof(ctx, [async () => {
     const visit = await bookedVisit(conn, associated);
     return visit ? { kind: "appointment_booked", record_type: "scheduled_service", record_id: visit.id, matched_at: visit.at, strength: "association", basis: `visit_booked_for_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
   }]);
+  // A promise for a slot the call confirmed is kept only by a booking for that
+  // slot: any other visit stays a hint (slot_bound), never a close — or a
+  // lapsed slot booking would reopen the promise only for another visit on the
+  // books to close it again for good.
+  return proof && slot ? { ...proof, slot_bound: true } : proof;
 }
 
 async function resolveSendPhotos({ conn, after, until, phone }) {
@@ -2266,9 +2283,10 @@ const storedProof = (proof, customerId) => (proof.strength === "direct" ? proof
   : { ...proof, closed_by: CLOSED_BY_EVIDENCE, judged_customer_id: customerId || null });
 
 // An association proof closes a promise the portal may close, of a kind an
-// association closes (associationCloses).
+// association closes (associationCloses) — never one bound to a confirmed
+// slot (resolveScheduleVisit).
 function closesOnAssociation(commitment, proof) {
-  return proof.strength === "association" && associationCloses(commitment);
+  return proof.strength === "association" && !proof.slot_bound && associationCloses(commitment);
 }
 
 async function refreshFulfillment(conn, callLogId, call = null) {
@@ -2488,7 +2506,8 @@ async function listSlotKeptCallIds(conn) {
 // the proof was judged for (a relink, whenever it happened and whatever
 // kind of evidence closed it — the gate off at the time, or the refresh
 // after it failed), a visit booked or done that is now gone or off the
-// books, or a customer-left dismissal whose customer is no longer churned.
+// books, or a customer-left dismissal whose customer is no longer churned
+// (the live stage).
 // The periodic sweep refreshes them beside the calls with open promises, so
 // the lapse reopens the promise whenever it happened; the sweep's work
 // follows the lapses, not every promise ever closed. Sent texts, emails,
@@ -2508,7 +2527,7 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           OR ((cc.fulfillment ->> 'kind') = ?
-              AND (cu.id IS NULL OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id)))`,
+              AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id)))`,
     [CUSTOMER_LEFT, CLOSED_BY_EVIDENCE, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT],
   );
   return (rows?.rows || []).map((r) => r.call_log_id);
