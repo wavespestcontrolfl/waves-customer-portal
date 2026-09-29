@@ -500,6 +500,15 @@ function parseDecision(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
+// Retry reuse of a persisted draft (sendOutreachTouch): it must still pass
+// today's service facts, and one drafted WITH facts is never reused once
+// the facts gate is off (serviceFacts null).
+function reusableDraft(prior, serviceFacts, names) {
+  if (!prior?.custom_body) return false;
+  if (prior.drafted_with_service_facts && !serviceFacts) return false;
+  return !require("./review-ask-drafter").verifyTreatmentClaims(prior.custom_body, serviceFacts, { names });
+}
+
 // Visit outcomes where no work was performed (pest-recap.js,
 // visit-completion-packets.js): the review drafters must not claim a
 // treatment on them (GATE_REVIEW_ASK_SERVICE_FACTS).
@@ -4604,6 +4613,9 @@ const ReviewService = {
     // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
     let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
+    // GATE_REVIEW_ASK_SERVICE_FACTS: whether persistedBody was drafted with
+    // the service report's facts (stamped on the row for retry reuse).
+    let draftUsedServiceFacts = false;
     // Controlled Day-0 composition (owner decision 2026-09-07): a cadence's
     // step-0 SMS ask is the day0_ask template rendered from verified fields —
     // never the LLM drafter, and never a draft persisted by an earlier
@@ -4669,8 +4681,11 @@ const ReviewService = {
             .first();
           // A draft verified against earlier service facts (report edited,
           // outcome changed) is re-checked against today's; a miss redrafts.
-          if (prior?.custom_body && !require("./review-ask-drafter").verifyTreatmentClaims(prior.custom_body, serviceFacts, { names: [smsFirstName, techName] })) {
+          // One drafted WITH facts is never reused once the facts gate is off
+          // (Codex r2 on #5317): the gate is the kill switch for that copy.
+          if (reusableDraft(prior, serviceFacts, [smsFirstName, techName])) {
             persistedBody = prior.custom_body;
+            draftUsedServiceFacts = !!prior.drafted_with_service_facts;
           }
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
       }
@@ -4690,7 +4705,10 @@ const ReviewService = {
             serviceDate,
             serviceFacts,
           });
-        if (drafted) persistedBody = drafted;
+        if (drafted) {
+          persistedBody = drafted;
+          draftUsedServiceFacts = !!serviceFacts;
+        }
       }
       // Analytics provenance (Codex P1, r1): personalized touches must not be
       // credited to the control template — the outreach funnel groups by
@@ -4730,8 +4748,9 @@ const ReviewService = {
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
-          if (prior?.custom_body && !require("./review-ask-drafter").verifyTreatmentClaims(prior.custom_body, serviceFacts, { names: [emailFirstName, techName] })) {
+          if (reusableDraft(prior, serviceFacts, [emailFirstName, techName])) {
             persistedBody = prior.custom_body;
+            draftUsedServiceFacts = !!prior.drafted_with_service_facts;
           }
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
@@ -4744,7 +4763,10 @@ const ReviewService = {
             serviceDate,
             serviceFacts,
           });
-          if (drafted) persistedBody = drafted;
+          if (drafted) {
+            persistedBody = drafted;
+            draftUsedServiceFacts = !!serviceFacts;
+          }
         }
         if (persistedBody) {
           recordedTemplateKey = "review_request_email_personalized";
@@ -4785,6 +4807,7 @@ const ReviewService = {
         channel: actualChannel,
         template_key: recordedTemplateKey,
         custom_body: persistedBody,
+        ...(draftUsedServiceFacts ? { drafted_with_service_facts: true } : {}),
         sequence_id: sequenceId,
         sequence_step: sequenceStep,
         status: "pending",

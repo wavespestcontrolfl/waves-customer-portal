@@ -5045,6 +5045,38 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(tables.filter((t) => t === 'service_records').length).toBeLessThanOrEqual(1);
     });
 
+    test('a fresh draft written with facts is stamped drafted_with_service_facts', async () => {
+      mockGates.reviewAskServiceFacts = true;
+      mockDraftAskBody.mockResolvedValue('Hi Stan, hope the ants are backing off since we treated the kitchen: {review_url}');
+      const mock = makeMock(withRecord('seq-sf-stamp', customer, { visitOutcome: 'completed', areasTreated: ['Kitchen'] }));
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      const touch = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1);
+      expect(touch.drafted_with_service_facts).toBe(true);
+    });
+
+    test('with the facts gate off, a retry never reuses a draft written with facts (Codex r2 on #5317)', async () => {
+      mockGates.reviewAskServiceFacts = false;
+      const fx = withRecord('seq-sf-kill', customer, { visitOutcome: 'completed', areasTreated: ['Kitchen'] });
+      fx.review_requests.push({ id: 'rr-facts', sequence_id: 'seq-sf-kill', sequence_step: 1, customer_id: customer.id, channel: 'sms', status: 'failed', drafted_with_service_facts: true, custom_body: 'Hi Stan, hope the ants are backing off since we treated the kitchen: {review_url}', created_at: new Date(Date.now() - 3600000) });
+      const mock = makeMock(fx);
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(mockDraftAskBody).toHaveBeenCalled();
+      const touch = mock.__state.rows.review_requests.filter((r) => r.sequence_step === 1).pop();
+      expect(touch.custom_body ?? '').not.toContain('treated the kitchen');
+      expect(touch.drafted_with_service_facts).toBeUndefined();
+    });
+
+    test('with the facts gate off, a draft written without facts is still reused as before', async () => {
+      mockGates.reviewAskServiceFacts = false;
+      const fx = withRecord('seq-sf-plain', customer, { visitOutcome: 'completed', areasTreated: ['Kitchen'] });
+      fx.review_requests.push({ id: 'rr-plain', sequence_id: 'seq-sf-plain', sequence_step: 1, customer_id: customer.id, channel: 'sms', status: 'failed', custom_body: 'Hi Stan, hope the ants are staying gone. If we earned it: {review_url}', created_at: new Date(Date.now() - 3600000) });
+      db.mockImplementation(makeMock(fx));
+      await ReviewService.processReviewSequences();
+      expect(mockDraftAskBody).not.toHaveBeenCalled();
+    });
+
     test('a retry reuses a persisted draft only while it still passes today\'s facts', async () => {
       mockGates.reviewAskServiceFacts = true;
       const fx = withRecord('seq-sf-reuse', customer, { visitOutcome: 'inspection_only', areasTreated: [] });
