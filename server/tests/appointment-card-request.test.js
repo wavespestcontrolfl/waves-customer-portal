@@ -870,6 +870,23 @@ describe('liveness is re-read under the visit lock', () => {
     expect(inserts).toHaveLength(0);
   });
 
+  test('SMS re-send of an existing pending token: a visit cancelled after the fast-path read gets no text and the claim is released', async () => {
+    cancelledUnderLock();
+    mockTableHandlers.appointment_card_requests = {
+      ...(mockTableHandlers.appointment_card_requests || {}),
+      first: () => ({ id: 'req-existing', status: 'pending', token: 'existingToken12345678ab' }),
+    };
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('visit_not_live');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const ssUpdates = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(ssUpdates.some((p) => p.card_link_sent_at === null)).toBe(true);
+    const dels = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'del'));
+    expect(dels).toHaveLength(0);
+  });
+
   test('SMS: a visit cancelled while waiting on the lock gets no row, no text, and the claim is released', async () => {
     cancelledUnderLock();
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });

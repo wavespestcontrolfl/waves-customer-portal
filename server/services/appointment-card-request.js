@@ -1108,6 +1108,20 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           await releaseClaim();
           return skip('request_exists');
         }
+      } else {
+        // Re-sending an existing pending request inserts nothing, so it never
+        // reached the locked insert above — re-read liveness under the same
+        // visit lock before texting the link (Fable review on #5309: a
+        // cancel committed after the fast-path read would otherwise still get
+        // a card text pointing at a dead /secure page).
+        const live = await db.transaction(async (trx) => {
+          const lockedVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id', 'status');
+          return Boolean(lockedVisit && LIVE_VISIT_STATUSES.includes(lockedVisit.status));
+        });
+        if (!live) {
+          await releaseClaim();
+          return skip('visit_not_live');
+        }
       }
     } catch (insertErr) {
       // Certainly unsent — nothing reached the provider yet. Release the
