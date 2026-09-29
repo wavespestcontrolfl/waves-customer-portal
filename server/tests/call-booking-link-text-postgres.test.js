@@ -731,6 +731,19 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       )).resolves.toBe(true);
     });
 
+    test('an earlier call with sms_declined: null also blocks (fail closed)', async () => {
+      const phone = '+15555550331';
+      await insertLead(mockPg, { phone });
+      await insertCall(mockPg, {
+        from_phone: phone,
+        ai_extraction_enriched: { ...eligibleExtraction(), consent: { sms_declined: null } },
+        created_at: new Date('2027-01-05T12:00:00.000Z'), updated_at: new Date('2027-01-05T12:00:00.000Z'),
+      });
+      await expect(callBookingLinkText._private.smsDeclinedOnEarlierCall(
+        mockPg, phone, { originCallId: null, asOf: NOW },
+      )).resolves.toBe(true);
+    });
+
     test('a later explicit opt-in does NOT clear an earlier decline (owner ruling 2026-09-29)', async () => {
       const phone = '+15555550302';
       await insertLead(mockPg, { phone });
