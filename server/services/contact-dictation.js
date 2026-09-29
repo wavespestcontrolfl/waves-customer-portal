@@ -32,7 +32,6 @@
 
 const logger = require('./logger');
 const { cleanValidEmailOrNull, looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
-const { emailsEquivalent, emailEquivalenceKey } = require('../utils/email-equivalence');
 
 const ENABLED = () => process.env.CONTACT_DICTATION_ENABLED !== 'false';
 // Literal default (NOT chained to GEMINI_EXTRACTION_MODEL): the extraction
@@ -184,13 +183,9 @@ function sanitizeEmailCandidates(candidates) {
     const value = cleanValidEmailOrNull(c?.value);
     if (!value || looksGarbledTranscriptEmail(value)) continue;
     const confidence = Math.max(0, Math.min(1, Number(c?.confidence) || 0));
-    // Gmail dot-only variants are one address (owner ruling, 2026-09-29):
-    // group on the equivalence key so a dotted + undotted pair is one
-    // candidate, not a two-way ambiguity. Non-Gmail values key on themselves.
-    const key = emailEquivalenceKey(value);
-    const existing = byValue.get(key);
+    const existing = byValue.get(value);
     if (!existing || confidence > existing.confidence) {
-      byValue.set(key, {
+      byValue.set(value, {
         value,
         confidence,
         basis: Array.isArray(c?.basis) ? c.basis.slice(0, 5).map(String) : [],
@@ -279,10 +274,10 @@ function applyEmailDictationPolicy({ extracted = {}, dictation = null } = {}) {
     && top.risks.length === 0;
   // A clean extracted email that disagrees with the single candidate is a
   // conflict, not a correction — hold both for the read-back.
-  const conflictsWithExtracted = !!existing && !!top && !emailsEquivalent(existing, top.value);
+  const conflictsWithExtracted = !!existing && !!top && existing !== top.value;
 
   if (single && !conflictsWithExtracted) {
-    return { adopt: emailsEquivalent(existing, top.value) ? null : top.value, hold: false, payload };
+    return { adopt: existing === top.value ? null : top.value, hold: false, payload };
   }
   return { adopt: null, hold: !!existing, payload };
 }

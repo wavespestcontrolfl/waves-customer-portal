@@ -62,7 +62,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { etCalendarDayOf } = require('../utils/datetime-et');
-const { emailsEquivalent } = require('../utils/email-equivalence');
 const { v2PrimaryLabelForCategory, composeWordsForV2Category } = require('../utils/lead-service-interest');
 
 const SPAM_AGE_DAYS = 7;
@@ -1297,10 +1296,7 @@ function unambiguousDictationTarget(item, { now = new Date(), maxAgeDays = FIRST
   // V1 and V2 heard the same address as the target — three-way agreement.
   const v1 = parseMaybeJson(item.call_extraction_v1) || {};
   const v2 = parseMaybeJson(item.call_extraction) || {};
-  // Gmail dot-only variants count as the same address (owner ruling,
-  // 2026-09-29): a V1/V2 pair the call collapsed to one undotted address must
-  // still read as three-way agreement here.
-  if (!emailsEquivalent(v1.email, target) || !emailsEquivalent(v2.caller?.email, target)) return null;
+  if (emailLc(v1.email) !== target || emailLc(v2.caller?.email) !== target) return null;
   // The name/email mismatch flag is its own doubt about this address.
   const flags = Array.isArray(v2.triage_flags) ? v2.triage_flags : [];
   if (flags.includes('name_email_mismatch')) return null;

@@ -1,7 +1,6 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
-const { collapseGmailDotEquivalent } = require('../utils/email-equivalence');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
@@ -2412,15 +2411,6 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
     ? extracted.email_candidates.filter((v) => v != null && String(v).trim())
     : [];
   if (candidates.length < 2) return { extracted, dictationEmailPayload };
-  // Gmail dot-only pairs are one address, not a disagreement (owner ruling,
-  // 2026-09-29). adoptV2PrimaryFields already collapses these before stamping
-  // candidates; if such a pair still arrives here, save the one address
-  // instead of holding it (never leave the email blank with no card).
-  const dotEquivalent = collapseGmailDotEquivalent(candidates);
-  if (dotEquivalent) {
-    const { email_candidates: _dropped, ...rest } = extracted;
-    return { extracted: { ...rest, email: dotEquivalent }, dictationEmailPayload };
-  }
   const [v1Email, v2Email] = candidates;
   const nextExtracted = { ...extracted, email: null };
   const payload = { ...(dictationEmailPayload || {}) };

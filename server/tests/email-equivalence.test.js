@@ -1,7 +1,8 @@
-const { collapseGmailDotEquivalent, emailsEquivalent, emailEquivalenceKey } = require('../utils/email-equivalence');
+const fs = require('fs');
+const path = require('path');
+const { collapseGmailDotEquivalent } = require('../utils/email-equivalence');
 const { adoptV2PrimaryFields } = require('../utils/extraction-compat');
 const { applyEmailDisagreementHold } = require('../services/call-triage-flags');
-const { applyEmailDictationPolicy, sanitizeEmailCandidates } = require('../services/contact-dictation');
 
 function v2With(email) {
   return {
@@ -21,6 +22,9 @@ describe('collapseGmailDotEquivalent', () => {
   test('googlemail dot-only pair collapses at googlemail.com', () => {
     expect(collapseGmailDotEquivalent(['j.q.sample1990@googlemail.com', 'jqsample1990@googlemail.com'])).toBe('jqsample1990@googlemail.com');
   });
+  test('dots before a +tag collapse; the tag is kept verbatim', () => {
+    expect(collapseGmailDotEquivalent(['j.q.sample1990+home@gmail.com', 'jqsample1990+home@gmail.com'])).toBe('jqsample1990+home@gmail.com');
+  });
   test('three candidates collapse only when every one is dot-equivalent', () => {
     expect(collapseGmailDotEquivalent(['j.qsample1990@gmail.com', 'jq.sample1990@gmail.com', 'jqsample1990@gmail.com'])).toBe('jqsample1990@gmail.com');
     expect(collapseGmailDotEquivalent(['j.qsample1990@gmail.com', 'jqsample1990@gmail.com', 'jqsample1991@gmail.com'])).toBeNull();
@@ -28,24 +32,21 @@ describe('collapseGmailDotEquivalent', () => {
   test('negatives', () => {
     expect(collapseGmailDotEquivalent(['jqsample1990@gmail.com', 'jqsample1990@googlemail.com'])).toBeNull();
     expect(collapseGmailDotEquivalent(['jqsample1990+a@gmail.com', 'jqsample1990@gmail.com'])).toBeNull();
+    // A dot INSIDE the tag is deliberate (codex #5323 r1 P2): never collapsed.
+    expect(collapseGmailDotEquivalent(['jane+lead.1@gmail.com', 'jane+lead1@gmail.com'])).toBeNull();
     expect(collapseGmailDotEquivalent(['j.q.sample1990@example.com', 'jqsample1990@example.com'])).toBeNull();
     expect(collapseGmailDotEquivalent(['j.q.sample1990@gmail.com', 'j.q.sample1991@gmail.com'])).toBeNull();
+    expect(collapseGmailDotEquivalent(['jqsample1990@gmail.com'])).toBeNull();
     expect(collapseGmailDotEquivalent([])).toBeNull();
-  });
-  test('emailsEquivalent / emailEquivalenceKey', () => {
-    expect(emailsEquivalent(' A@x.com', 'a@X.com')).toBe(true);
-    expect(emailsEquivalent('j.q@gmail.com', 'jq@gmail.com')).toBe(true);
-    expect(emailsEquivalent('j.q@x.com', 'jq@x.com')).toBe(false);
-    expect(emailEquivalenceKey('J.Q@Gmail.com')).toBe('jq@gmail.com');
-    expect(emailEquivalenceKey('J.Q@X.com')).toBe('j.q@x.com');
   });
 });
 
 describe('adoptV2PrimaryFields — Gmail dot-only equivalence (2026-09-29)', () => {
-  test('dotted V1 vs undotted V2 saves the undotted address, no hold', () => {
+  test('dotted V1 vs undotted V2 saves the undotted address, no hold, both readings kept for the processor check', () => {
     const { merged, adoptedFields } = adopt('j.q.sample1990@gmail.com', 'jqsample1990@gmail.com');
     expect(merged.email).toBe('jqsample1990@gmail.com');
     expect(merged.email_candidates).toBeUndefined();
+    expect(merged.email_gmail_variants).toEqual(['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com']);
     expect(adoptedFields).not.toContain('email_disagreement');
     expect(adoptedFields).toContain('email_gmail_dot_equivalent');
   });
@@ -57,48 +58,48 @@ describe('adoptV2PrimaryFields — Gmail dot-only equivalence (2026-09-29)', () 
   test.each([
     ['gmail vs googlemail', 'jqsample1990@gmail.com', 'j.q.sample1990@googlemail.com'],
     ['+tag difference', 'jqsample1990+a@gmail.com', 'jqsample1990@gmail.com'],
+    ['dot inside the tag', 'jane+lead.1@gmail.com', 'jane+lead1@gmail.com'],
     ['non-Gmail dot difference', 'j.q.sample1990@example.com', 'jqsample1990@example.com'],
     ['letter difference', 'j.q.sample1990@gmail.com', 'j.q.sample1991@gmail.com'],
   ])('stays held: %s', (_label, a, b) => {
     const { merged, adoptedFields } = adopt(a, b);
     expect(merged.email).toBeNull();
     expect(merged.email_candidates).toEqual([a, b]);
+    expect(merged.email_gmail_variants).toBeUndefined();
     expect(adoptedFields).toContain('email_disagreement');
   });
 });
 
-describe('downstream consumers do not re-open the hold', () => {
-  test('applyEmailDisagreementHold saves the one address on a dot-only Gmail pair, still holds a real disagreement', () => {
-    const same = { email: null, email_candidates: ['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com'] };
-    const out = applyEmailDisagreementHold(same, null);
-    expect(out.extracted.email).toBe('jqsample1990@gmail.com');
-    expect(out.extracted.email_candidates).toBeUndefined();
-    expect(out.dictationEmailPayload).toBeNull();
-    const diff = applyEmailDisagreementHold({ email: null, email_candidates: ['a@gmail.com', 'b@gmail.com'] }, null);
-    expect(diff.dictationEmailPayload.email_disagreement).toEqual({ v1: 'a@gmail.com', v2: 'b@gmail.com' });
+describe('a re-held dot-equivalent pair (suppressed / owned elsewhere) takes the normal disagreement hold', () => {
+  test('applyEmailDisagreementHold holds a dot-only pair like any other pair', () => {
+    const out = applyEmailDisagreementHold({ email: null, email_candidates: ['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com'] }, null);
+    expect(out.extracted.email).toBeNull();
+    expect(out.dictationEmailPayload.email_disagreement).toEqual({ v1: 'j.q.sample1990@gmail.com', v2: 'jqsample1990@gmail.com' });
   });
-  test('decoder: dotted + undotted candidates dedupe to one candidate', () => {
-    const out = sanitizeEmailCandidates([
-      { value: 'j.q.sample1990@gmail.com', confidence: 0.7 },
-      { value: 'jqsample1990@gmail.com', confidence: 0.9 },
-    ]);
-    expect(out).toHaveLength(1);
-    expect(out[0].value).toBe('jqsample1990@gmail.com');
+});
+
+// The processor's post-adoption check is DB-backed; pin its contract in the
+// source so a refactor cannot silently drop the suppression/ownership re-hold.
+describe('call processor re-holds a collapsed Gmail pair on suppression or foreign ownership', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  const start = src.indexOf('if (Array.isArray(extracted.email_gmail_variants))');
+  const block = src.slice(start, src.indexOf('if (adoption.adoptedFields.length)', start));
+  test('the check exists right after adoption', () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(block).toContain('delete extracted.email_gmail_variants');
   });
-  test('decoder policy: dot-variant of the saved Gmail address is agreement, not a conflict', () => {
-    const dictation = { emails: [{ raw_spoken: 'j q sample 1990 at gmail', confirmation_question: '', candidates: [
-      { value: 'j.q.sample1990@gmail.com', confidence: 0.9, risks: [], basis: [] },
-    ] }] };
-    const res = applyEmailDictationPolicy({ extracted: { email: 'jqsample1990@gmail.com' }, dictation });
-    expect(res.hold).toBe(false);
-    expect(res.adopt).toBeNull();
+  test('suppressions are matched by Google mailbox identity, active only, failing closed', () => {
+    expect(block).toContain("db('email_suppressions')");
+    expect(block).toContain('GOOGLE_MAILBOX_SQL.mailbox');
+    expect(block).toContain("where({ status: 'active' })");
+    expect(block).toContain('() => true');
   });
-  test('decoder policy: non-Gmail dot difference is still a conflict', () => {
-    const dictation = { emails: [{ raw_spoken: 'x', confirmation_question: '', candidates: [
-      { value: 'j.q.sample1990@example.com', confidence: 0.9, risks: [], basis: [] },
-    ] }] };
-    const res = applyEmailDictationPolicy({ extracted: { email: 'jqsample1990@example.com' }, dictation });
-    expect(res.hold).toBe(true);
-    expect(res.adopt).toBeNull();
+  test('ownership uses the shared Gmail mailbox check, failing closed', () => {
+    expect(block).toContain('gmailMailboxOwnedByOther(extracted.email, ownCustomerId)');
+    expect(block).toContain('.catch(() => true)');
+  });
+  test('a hit restores the pair for the read-back hold', () => {
+    expect(block).toContain('extracted.email = null');
+    expect(block).toContain('extracted.email_candidates = variants');
   });
 });
