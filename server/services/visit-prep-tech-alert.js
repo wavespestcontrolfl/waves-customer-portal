@@ -114,6 +114,19 @@ async function notifyTechVisitPrepPhotos({ scheduledServiceId } = {}) {
   if (!scheduledServiceId) return;
   try {
     if (!enabled()) return;
+  } catch (err) {
+    logger.error(`[visit-prep-tech-alert] gate read failed for visit ${scheduledServiceId}: ${err.message}`);
+    return;
+  }
+  // Through tech-visit-notifications.js's per-visit queue (Codex #5303 r4
+  // P1): a reassignment or cancellation right after the photos lands its
+  // card AND push strictly after this one, never overtaken by a slow push.
+  const { enqueueForVisit } = require('./tech-visit-notifications');
+  await enqueueForVisit(scheduledServiceId, () => sendPhotoAlert(scheduledServiceId));
+}
+
+async function sendPhotoAlert(scheduledServiceId) {
+  try {
     const technicianId = await writeCard(scheduledServiceId);
     if (!technicianId) return;
     try {

@@ -7,6 +7,11 @@ const mockInsertCard = jest.fn().mockResolvedValue(undefined);
 const mockSendToAdminUser = jest.fn().mockResolvedValue({ sent: 1 });
 
 jest.mock('../models/db', () => jest.fn());
+// The shared per-visit ordering chain (tech-visit-notifications.js).
+const mockEnqueue = jest.fn((_visitId, fn) => fn());
+jest.mock('../services/tech-visit-notifications', () => ({
+  enqueueForVisit: (...args) => mockEnqueue(...args),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/push-notifications', () => ({
   sendToAdminUser: (...args) => mockSendToAdminUser(...args),
@@ -112,6 +117,8 @@ describe('notifyTechVisitPrepPhotos', () => {
         message: 'A customer sent photos for a visit on your route',
         payload: { scheduled_service_id: 'svc-1', visit_id: 'visit-9', scheduled_date: '2026-10-02' },
       }));
+      // Delivered through the visit's shared queue, keyed by the service id.
+      expect(mockEnqueue).toHaveBeenCalledWith('svc-1', expect.any(Function));
       // The visit row is read FOR SHARE inside the card's transaction.
       expect(db.transaction).toHaveBeenCalledTimes(1);
       expect(mockLastSvcChain.forShare).toHaveBeenCalled();
