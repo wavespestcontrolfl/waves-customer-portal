@@ -14,6 +14,7 @@ const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 const { openInvoiceFacts } = require('../visit-context/balance');
+const { techLabelRate } = require('../label-rate-text');
 
 const TECH_TOOLS = [
   {
@@ -445,6 +446,10 @@ async function getProductInfo(productName) {
     sds_url: product.sds_url || undefined,
   };
 
+  // A label rate the catalog keeps in mL reads in tsp or fl oz (owner ruling:
+  // nothing a tech reads is in mL); every other rate reads as stored.
+  const labelRate = techLabelRate(product.default_rate, product.default_unit);
+
   return {
     name: product.name,
     category: product.category,
@@ -452,8 +457,8 @@ async function getProductInfo(productName) {
     moa_group: product.moa_group,
     formulation: product.formulation,
     container_size: product.container_size,
-    default_rate: product.default_rate,
-    default_unit: product.default_unit,
+    default_rate: labelRate.rate,
+    default_unit: labelRate.unit,
     sku: product.sku,
     safety,
   };

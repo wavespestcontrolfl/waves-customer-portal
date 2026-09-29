@@ -98,3 +98,22 @@ describe('get_product_info safety block', () => {
     expect(result.safety).toBeUndefined();
   });
 });
+
+// The label rate itself: nothing a tech reads is in mL (owner ruling). A rate
+// the catalog keeps in mL comes back in tsp or fl oz; any other rate as stored.
+describe('get_product_info label rate', () => {
+  test('an mL label rate comes back in tsp, and nothing in the answer reads mL', async () => {
+    mockRow = { name: 'Sample SC', default_rate: '5-10', default_unit: 'ml/gal' };
+    const result = await productInfo();
+    expect(result.default_rate).toBe('1¼–2');
+    expect(result.default_unit).toBe('tsp/gal');
+    expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
+  });
+
+  test('any other label rate reads exactly as the catalog states it', async () => {
+    mockRow = { name: 'Sample CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' };
+    const result = await productInfo();
+    expect(result.default_rate).toBe('0.2-0.8');
+    expect(result.default_unit).toBe('fl_oz/gal');
+  });
+});
