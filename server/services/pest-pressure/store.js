@@ -127,8 +127,9 @@ async function loadActiveConfig(knex = db, { scope = 'global' } = {}) {
  * previous score recorded on the SAME scale is a baseline. #4741 (2026-09-24)
  * made a technician tap the score directly while older scores were blended,
  * so a June 0.9 -> September 3.0 "+2.1 vs. last visit" compares two scales.
- * With no same-scale previous score the result is { value: null } - the same
- * as a first score (no trend persisted). Omit currentScale for the legacy
+ * With no same-scale previous score the result is { value: null } (plus
+ * otherScaleOnly: true when earlier scores exist on the other scale), so no
+ * up/down trend is persisted. Omit currentScale for the legacy
  * any-scale lookup.
  */
 const PREVIOUS_SCORE_SCAN_LIMIT = 25;
@@ -152,6 +153,9 @@ async function loadPreviousScore(knex, { customerId, serviceLine = null, beforeS
       componentScores: candidate.component_scores,
       at: candidate.service_date,
     }) === currentScale);
+    // Earlier scores exist, just none on this scale: not a first score
+    // (calculate.js turns this into the neutral 'rescaled' trend).
+    if (!row) return { value: null, otherScaleOnly: (candidates || []).length > 0 };
   } else {
     row = await q.limit(1).first('displayed_score', 'service_date', 'service_record_id');
   }

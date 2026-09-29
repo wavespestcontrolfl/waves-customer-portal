@@ -27,19 +27,14 @@ const sep = { displayed_score: '4.0', service_date: '2026-09-25', service_record
 const args = { customerId: 'cust-synthetic-1', serviceLine: 'pest', beforeServiceRecordId: 'rec-now', beforeServiceDate: '2026-09-28' };
 
 describe('loadPreviousScore scale awareness', () => {
-  test('a tap-scored completion ignores an older blended score (no baseline, no trend)', async () => {
+  test('a tap-scored completion ignores an older blended score (no baseline, flagged other-scale-only)', async () => {
     const result = await loadPreviousScore(fakeKnex([june]), { ...args, currentScale: 'technician_rating' });
-    expect(result).toEqual({ value: null });
+    expect(result).toEqual({ value: null, otherScaleOnly: true });
   });
 
-  test('and the persisted trend is then the same as a first score', () => {
-    const previous = null;
-    const result = calculatePestPressureScore({
-      clientRating: null, technicianRating: null, reServiceImpact: null, recurringIssueRating: null, riskFactorRating: null,
-      previousScore: previous, technicianDirectRating: 3,
-    }, DEFAULT_CONFIG);
-    expect(result.trend).toBe('first_marker');
-    expect(result.trendDelta ?? null).toBeNull();
+  test('with no earlier scores at all it is a genuine first score (not flagged)', async () => {
+    const result = await loadPreviousScore(fakeKnex([]), { ...args, currentScale: 'technician_rating' });
+    expect(result).toEqual({ value: null, otherScaleOnly: false });
   });
 
   test('a tap-scored completion skips blended rows and uses the newest tap-scored one', async () => {
@@ -60,8 +55,52 @@ describe('loadPreviousScore scale awareness', () => {
   test('a score row with unreadable components falls back to the cutover date', async () => {
     const legacyJune = { ...june, component_scores: null };
     const undated = await loadPreviousScore(fakeKnex([legacyJune]), { ...args, currentScale: 'technician_rating' });
-    expect(undated).toEqual({ value: null });
+    expect(undated).toMatchObject({ value: null });
     const legacyBlendedLike = await loadPreviousScore(fakeKnex([legacyJune]), { ...args, currentScale: 'blended' });
     expect(legacyBlendedLike).toMatchObject({ value: 0.9 });
+  });
+});
+
+describe('persisted trend when the earlier scores are all on the other scale', () => {
+  const { resolveCustomerSummary } = require('../services/pest-pressure/explanation');
+  const { VALID_TRENDS } = require('../services/pest-pressure/trend');
+  const inputs = (extra) => ({
+    clientRating: null, technicianRating: null, reServiceImpact: null, recurringIssueRating: null, riskFactorRating: null,
+    previousScore: null, technicianDirectRating: 3, ...extra,
+  });
+
+  test('is a neutral "rescaled" state: no delta, approved sentence, never the first-score copy', () => {
+    const result = calculatePestPressureScore(inputs({ previousScoreOnOtherScaleOnly: true }), DEFAULT_CONFIG);
+    expect(result.trend).toBe('rescaled');
+    expect(result.trendDelta ?? null).toBeNull();
+    expect(result.summary).toBe('Pressure trend will appear after more visits.');
+    expect(result.summary).not.toMatch(/first/i);
+    expect(VALID_TRENDS).toContain('rescaled');
+    expect(resolveCustomerSummary({ trend: 'rescaled', label: { key: 'moderate' }, dataCompleteness: 'complete' }))
+      .toBe('Pressure trend will appear after more visits.');
+  });
+
+  test('a genuine first score keeps first_marker and its copy', () => {
+    const result = calculatePestPressureScore(inputs({}), DEFAULT_CONFIG);
+    expect(result.trend).toBe('first_marker');
+    expect(result.summary).toMatch(/first Pest Pressure score/);
+  });
+
+  test('a same-scale previous score still drives a real trend', () => {
+    const result = calculatePestPressureScore(inputs({ previousScore: 4 }), DEFAULT_CONFIG);
+    expect(result.trend).toBe('improving');
+    expect(result.trendDelta).toBe(-1);
+  });
+});
+
+describe('customer surfaces given a "rescaled" gauge trend', () => {
+  test('the visit-summary AI grounding facts assert no trend', () => {
+    const { groundingFacts } = require('../services/service-report/visit-summary-narrative')._test
+      || require('../services/service-report/visit-summary-narrative');
+    const facts = groundingFacts({
+      pestPressure: { enabled: true, displayScore: '3.0', maxScore: 5, label: 'Moderate', trend: 'rescaled', trendDelta: null, summary: 'Pressure trend will appear after more visits.' },
+    });
+    expect(facts.pressure.trend).toBeNull();
+    expect(facts.pressure.summary).toBe('Pressure trend will appear after more visits.');
   });
 });

@@ -127,6 +127,7 @@ async function gatherInputs(knex, serviceRecord, config) {
       recurringIssueRating: pickValue(recurring),
       riskFactorRating: pickValue(risk),
       previousScore: previous.value,
+      previousScoreOnOtherScaleOnly: previous.otherScaleOnly === true,
       technicianDirectRating,
     },
     extractorResults: { client, technician, reService, recurring, risk, previous },
