@@ -199,6 +199,15 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await stayOpen('send_report', (w) => sms(w, 'service_report', { status: 'failed' }));
     // Queued for quiet hours, or never accepted by the provider, is not sent.
     await stayOpen('send_report', (w) => sms(w, 'service_report_v1', { status: 'scheduled' }));
+    await stayOpen('send_appointment_confirmation', (w) => sms(w, 'confirmation', { status: 'scheduled' }));
+    // A text to the shared number for another household member keeps nothing.
+    const householdMember = async (w) => {
+      const [other] = await db('customers').insert({ first_name: `Member${w.n}`, phone: w.phone }).returning('id');
+      made.customerIds.push(other.id);
+      return other.id;
+    };
+    await stayOpen('send_report', async (w) => sms(w, 'service_report', { customer_id: await householdMember(w) }));
+    await stayOpen('send_appointment_confirmation', async (w) => sms(w, 'confirmation', { customer_id: await householdMember(w) }));
     await stayOpen('send_report', (w) => reportEmail(w, { status: 'bounced' }));
     await stayOpen('send_report', (w) => reportEmail(w, { status: 'dropped' }));
     // Off the books is no appointment.
@@ -301,6 +310,38 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await visit(own);
     await cc.refreshFulfillment(db, own.call.id);
     expect((await row(own.commitment.id)).fulfillment).toMatchObject({ strength: 'association', closed_by: 'promise_evidence' });
+  });
+
+  test('a close found through the old customer is not written once the call was relinked meanwhile (the write re-checks the call\'s customer)', async () => {
+    const w = await world({ kind: 'other' });
+    await visit(w);
+    const staleCall = await db('call_log').where({ id: w.call.id }).first();
+    const [other] = await db('customers').insert({ first_name: 'RelinkedMeanwhile', phone: '+15555559998' }).returning('id');
+    made.customerIds.push(other.id);
+    await db('call_log').where({ id: w.call.id }).update({ customer_id: other.id });
+    // A refresh that read the call before the relink still judges customer A's visit…
+    expect(await cc.refreshFulfillment(db, w.call.id, staleCall)).toMatchObject({ fulfilled: 0 });
+    // …but its write is fenced to the call's current customer.
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+  });
+
+  test('a visit cancelled after it closed a promise, or a customer who returned, is found by the periodic scan and the promise reopens', async () => {
+    const booked = await world({ kind: 'other' });
+    const v = await visit(booked);
+    const left = await world({ kind: 'other', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+    for (const w of [booked, left]) await cc.refreshFulfillment(db, w.call.id);
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toEqual(expect.arrayContaining([booked.call.id]));
+    await db('scheduled_services').where({ id: v.id }).update({ status: 'cancelled' });
+    await db('customers').where({ id: left.customerId }).update({ churned_at: null });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).toEqual(expect.arrayContaining([booked.call.id, left.call.id]));
+    for (const w of [booked, left]) {
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    }
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toEqual(expect.arrayContaining([booked.call.id, left.call.id]));
+    // Off: nothing is listed.
+    process.env.PROMISE_EVIDENCE_CLOSE = 'off';
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).toEqual([]);
   });
 
   test('Reopen acts on the version the office was shown: a newer verdict answers 409 and is left standing', async () => {

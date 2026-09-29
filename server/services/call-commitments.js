@@ -1685,7 +1685,7 @@ async function estimateSentTo(conn, { after, until, phone, customerId }) {
 }
 
 // A service report sent to the caller: the report text, or the report email.
-async function reportTextTo(conn, { after, until, phone }) {
+async function reportTextTo(conn, { after, until, phone, customerId }) {
   if (!phone) return null;
   const row = await conn("sms_log")
     .where("direction", "outbound")
@@ -1693,7 +1693,9 @@ async function reportTextTo(conn, { after, until, phone }) {
     .whereIn("status", PROVIDER_ACCEPTED)
     .where("created_at", ">", after)
     .where("created_at", "<=", until)
-    .modify((b) => phoneWhere(b, "to_phone", phone))
+    // A LINKED call is kept only by a text linked to the same customer
+    // (shared household numbers), like the human-text helper.
+    .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomerWhere(b, "customer_id", customerId); })
     .orderBy("created_at", "asc")
     .first("id", "created_at");
   return row ? { id: row.id, at: row.created_at } : null;
@@ -1856,14 +1858,21 @@ async function resolveSendEstimate(ctx) {
   ]);
 }
 
-async function resolveAppointmentConfirmation({ conn, after, until, phone }) {
+async function resolveAppointmentConfirmation({ conn, commitment, after, until, phone, customerId }) {
   if (!phone) return null;
   // A confirmation that failed or was never delivered is not a kept
   // promise; the earliest surviving row is the hint so a later delivery
-  // is not hidden behind an earlier failure (Codex r16 P2).
+  // is not hidden behind an earlier failure (Codex r16 P2). Once the proof
+  // CLOSES the promise (PROMISE_EVIDENCE_CLOSE), it must also have reached
+  // the provider — a quiet-hours row is still `scheduled` — and, for a linked
+  // call, belong to the same customer (shared household numbers).
+  const closing = promiseEvidenceCloseLive() && commitment.party === "waves";
   const sms = await conn("sms_log")
     .where({ direction: "outbound", message_type: "confirmation" })
-    .whereNotIn("status", ["failed", "undelivered", "canceled", "error"])
+    .modify((b) => {
+      if (!closing) return b.whereNotIn("status", ["failed", "undelivered", "canceled", "error"]);
+      return b.whereIn("status", PROVIDER_ACCEPTED).modify((q) => sameCustomerWhere(q, "customer_id", customerId));
+    })
     .where("created_at", ">", after)
     .where("created_at", "<=", until)
     .modify((b) => phoneWhere(b, "to_phone", phone))
@@ -2286,13 +2295,13 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         // landed meanwhile moved the evidence boundary, so the write is
         // skipped and the next refresh judges the new version.
         .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
-        // A slot proof was found through the call's CUSTOMER: it is written
-        // only while the call still has that customer, read under a share
-        // lock in this same statement — a relink either waits for this write
-        // (and the refresh after it re-judges the row) or has already moved
-        // the call (and nothing is written).
+        // A slot proof — and every association close, all found through the
+        // call's CUSTOMER — is written only while the call still has that
+        // customer, read under a share lock in this same statement: a relink
+        // either waits for this write (and the refresh after it re-judges
+        // the row) or has already moved the call (and nothing is written).
         .modify((q) => {
-          if (proof.basis !== SLOT_BOOKING_BASIS) return;
+          if (proof.strength === "direct" && proof.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
             this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
           });
@@ -2366,7 +2375,7 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
       const left = keeps.kind === CUSTOMER_LEFT;
       await unchanged(conn("call_commitments"))
         .modify((q) => {
-          if (keeps.basis !== SLOT_BOOKING_BASIS) return;
+          if (keeps.strength === "direct" && keeps.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
             this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
           });
@@ -2431,6 +2440,34 @@ async function listSlotKeptCallIds(conn) {
 }
 
 
+
+// Calls holding a promise the evidence close shut (the CLOSED_BY_EVIDENCE
+// marker) on evidence that can be taken back — a visit booked or done that
+// is now gone, off the books, or another customer's; a customer-left
+// dismissal whose customer is no longer churned (or no longer the call's).
+// The periodic sweep refreshes them beside the calls with open promises, so
+// the lapse reopens the promise whenever it happened; the sweep's work
+// follows the lapses, not every promise ever closed. Sent texts, emails,
+// calls and estimates are not taken back. Nothing while the switch is off
+// (refreshFulfillment does not re-judge those rows then).
+async function listLapsedEvidenceClosedCallIds(conn) {
+  if (!promiseEvidenceCloseLive()) return [];
+  const rows = await conn.raw(
+    `SELECT DISTINCT cc.call_log_id
+       FROM call_commitments cc
+       JOIN call_log cl ON cl.id = cc.call_log_id
+       LEFT JOIN scheduled_services ss ON (cc.fulfillment ->> 'record_type') = 'scheduled_service' AND ss.id::text = cc.fulfillment ->> 'record_id'
+       LEFT JOIN customers cu ON (cc.fulfillment ->> 'kind') = ? AND cu.id::text = cc.fulfillment ->> 'record_id'
+      WHERE cc.human_state IS NULL AND cc.status IN ('fulfilled', 'dismissed')
+        AND (cc.fulfillment ->> 'closed_by') = ?
+        AND (((cc.fulfillment ->> 'record_type') = 'scheduled_service'
+              AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
+          OR ((cc.fulfillment ->> 'kind') = ?
+              AND (cu.id IS NULL OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id)))`,
+    [CUSTOMER_LEFT, CLOSED_BY_EVIDENCE, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT],
+  );
+  return (rows?.rows || []).map((r) => r.call_log_id);
+}
 
 // ── Queue reads (the Owed tab, Customer 360, the lead card, the bell) ─────
 // A Waves promise with no stated due time is still owed promptly. The
@@ -3292,6 +3329,7 @@ module.exports = {
   resolveFulfillment,
   refreshFulfillment,
   listSlotKeptCallIds,
+  listLapsedEvidenceClosedCallIds,
   applyHumanUpdate,
   editRestatesRow,
   callbackEditEventMetadata,
