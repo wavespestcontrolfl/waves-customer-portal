@@ -191,19 +191,28 @@ function scopePhotoCardsToLiveVisits(q, conn) {
 }
 
 // The card's date comes from the visit as it is now (a same-tech move
-// keeps the card, with the new date). Mutates and returns the parsed rows.
+// keeps the card, with the new date), read with the SAME live-visit rules
+// as the feed scope: a card whose visit stopped qualifying between the feed
+// query and this read is dropped, not returned (Codex #5303 r14). Returns
+// the rows to serve.
 async function refreshPhotoCardDates(rows, conn) {
   const cards = rows.filter((r) => r.type === TYPE && r.payload?.scheduled_service_id);
   if (!cards.length) return rows;
-  const live = await conn('scheduled_services')
-    .whereIn('id', [...new Set(cards.map((r) => r.payload.scheduled_service_id))])
-    .select('id', 'scheduled_date', 'visit_id');
+  const q = conn('scheduled_services as s')
+    .join('technicians as t', 't.id', 's.technician_id')
+    .whereIn('s.id', [...new Set(cards.map((r) => r.payload.scheduled_service_id))])
+    .whereNotIn('s.status', OFF_ROUTE_STATUSES)
+    .where('s.scheduled_date', '>=', techAccessCutoff());
+  applyAssignable(q, 't');
+  const live = await q.select('s.id', 's.scheduled_date', 's.visit_id', 's.technician_id');
   const byId = new Map(live.map((v) => [String(v.id), v]));
-  for (const r of cards) {
+  return rows.filter((r) => {
+    if (r.type !== TYPE || !r.payload?.scheduled_service_id) return true;
     const v = byId.get(String(r.payload.scheduled_service_id));
-    if (v) r.payload = { ...r.payload, scheduled_date: dateOnlyString(v.scheduled_date), visit_id: v.visit_id || null };
-  }
-  return rows;
+    if (!v || String(v.technician_id) !== String(r.technician_id)) return false;
+    r.payload = { ...r.payload, scheduled_date: dateOnlyString(v.scheduled_date), visit_id: v.visit_id || null };
+    return true;
+  });
 }
 
 module.exports = {

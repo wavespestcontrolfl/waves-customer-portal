@@ -228,17 +228,33 @@ describe('notifyTechVisitPrepPhotos', () => {
 });
 
 describe('refreshPhotoCardDates', () => {
+  function liveConn(liveRows) {
+    return jest.fn(() => {
+      const c = {};
+      for (const m of ['join', 'whereIn', 'whereNotIn', 'where']) c[m] = jest.fn(() => c);
+      c.select = jest.fn(async () => liveRows);
+      return c;
+    });
+  }
+
   test('a card shows its visit\'s CURRENT date and visit key', async () => {
-    const conn = jest.fn(() => ({
-      whereIn: jest.fn(function () { return this; }),
-      select: jest.fn(async () => [{ id: 'svc-1', scheduled_date: '2026-10-09', visit_id: null }]),
-    }));
     const rows = [
-      { type: 'customer_visit_photos', payload: { scheduled_service_id: 'svc-1', visit_id: 'visit-9', scheduled_date: '2026-10-02' } },
-      { type: 'visit_assigned', payload: { x: 1 } },
+      { type: 'customer_visit_photos', technician_id: 'tech-1', payload: { scheduled_service_id: 'svc-1', visit_id: 'visit-9', scheduled_date: '2026-10-02' } },
+      { type: 'visit_assigned', technician_id: 'tech-1', payload: { x: 1 } },
     ];
-    await notice.refreshPhotoCardDates(rows, conn);
-    expect(rows[0].payload).toEqual({ scheduled_service_id: 'svc-1', visit_id: null, scheduled_date: '2026-10-09' });
-    expect(rows[1].payload).toEqual({ x: 1 });
+    const out = await notice.refreshPhotoCardDates(rows, liveConn([{ id: 'svc-1', scheduled_date: '2026-10-09', visit_id: null, technician_id: 'tech-1' }]));
+    expect(out).toHaveLength(2);
+    expect(out[0].payload).toEqual({ scheduled_service_id: 'svc-1', visit_id: null, scheduled_date: '2026-10-09' });
+    expect(out[1].payload).toEqual({ x: 1 });
+  });
+
+  test('a card whose visit stopped qualifying (or changed tech) between the two reads is dropped', async () => {
+    const rows = [
+      { type: 'customer_visit_photos', technician_id: 'tech-1', payload: { scheduled_service_id: 'svc-gone' } },
+      { type: 'customer_visit_photos', technician_id: 'tech-1', payload: { scheduled_service_id: 'svc-moved' } },
+      { type: 'visit_assigned', technician_id: 'tech-1', payload: { x: 1 } },
+    ];
+    const out = await notice.refreshPhotoCardDates(rows, liveConn([{ id: 'svc-moved', scheduled_date: '2026-10-02', visit_id: null, technician_id: 'tech-2' }]));
+    expect(out.map((r) => r.type)).toEqual(['visit_assigned']);
   });
 });

@@ -93,8 +93,8 @@ router.get('/', async (req, res, next) => {
       .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN COALESCE((payload->>'stage')::int, 0) ELSE 0 END DESC")
       .orderBy('created_at', 'desc')
       .limit(20);
-    const parsed = rows.map(parseRow);
-    if (photoAlerts.isEnabled()) await photoAlerts.refreshPhotoCardDates(parsed, db);
+    let parsed = rows.map(parseRow);
+    if (photoAlerts.isEnabled()) parsed = await photoAlerts.refreshPhotoCardDates(parsed, db);
     res.json({ notifications: parsed });
   } catch (err) { next(err); }
 });
