@@ -11,6 +11,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const migration = require('../models/migrations/20260929130000_customers_last_seen_at');
 const pageViewsMigration = require('../models/migrations/20260929120000_customer_page_views');
+const pushOpenUniqueMigration = require('../models/migrations/20260929200000_customer_page_views_push_open_unique');
+const { recordPageView } = require('../services/customer-page-views');
 const { stampLastSeen, recordPushOpen, LAST_SEEN_THROTTLE_MINUTES } = require('../services/customer-activity');
 
 const HUMAN_REQ = { ip: '203.0.113.9', headers: { 'user-agent': 'Mozilla/5.0 (iPhone) Safari/604.1' }, get: () => 'Mozilla/5.0 (iPhone) Safari/604.1' };
@@ -39,6 +41,7 @@ const settle = () => new Promise((r) => setTimeout(r, 200));
     });
     await migration.up(mockPg);
     await pageViewsMigration.up(mockPg);
+    await pushOpenUniqueMigration.up(mockPg);
     process.env.GATE_PORTAL_ACTIVITY = 'true';
   });
 
@@ -135,5 +138,58 @@ const settle = () => new Promise((r) => setTimeout(r, 200));
     await settle();
     expect(await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c })).toHaveLength(0);
     expect((await mockPg('customers').where({ id: c }).first('last_seen_at')).last_seen_at).toBeNull();
+  });
+
+  test('concurrent forever push:open inserts for one notification leave exactly one row', async () => {
+    const c = randomUUID();
+    await mockPg('customers').insert({ id: c, first_name: 'H' });
+    const subjectId = `notification:${randomUUID()}`;
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const results = await Promise.all(Array.from({ length: 8 }, (_, i) => recordPageView({
+      req: { ...HUMAN_REQ, ip: `198.51.100.${i + 1}` },
+      page: 'push:open',
+      customerId: c,
+      subjectType: 'ios',
+      subjectId,
+      dedupeForever: true,
+    })));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    // losers of the race are swallowed by ON CONFLICT, not surfaced as failed inserts
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c, subject_id: subjectId })).toHaveLength(1);
+  });
+
+  test('the unique index is scoped to push:open: portal tab views for one subject can still repeat', async () => {
+    const c = randomUUID();
+    await mockPg('customers').insert({ id: c, first_name: 'I' });
+    const row = { customer_id: c, page: 'portal:home', subject_type: 'customer', subject_id: c };
+    await mockPg('customer_page_views').insert([row, row]);
+    expect(await mockPg('customer_page_views').where({ page: 'portal:home', customer_id: c })).toHaveLength(2);
+    await expect(mockPg('customer_page_views').insert([
+      { customer_id: c, page: 'push:open', subject_id: 'notification:dup' },
+      { customer_id: c, page: 'push:open', subject_id: 'notification:dup' },
+    ])).rejects.toThrow(/customer_page_views_push_open_uniq/);
+  });
+
+  test('the unique-index migration removes pre-existing duplicate push:open rows (keeping the earliest) before indexing, and is re-runnable', async () => {
+    const c = randomUUID();
+    await mockPg('customers').insert({ id: c, first_name: 'J' });
+    await pushOpenUniqueMigration.down(mockPg);
+    await mockPg('customer_page_views').insert([
+      { customer_id: c, page: 'push:open', subject_id: 'notification:x', subject_type: 'late', viewed_at: mockPg.raw("now() - interval '1 hour'") },
+      { customer_id: c, page: 'push:open', subject_id: 'notification:x', subject_type: 'early', viewed_at: mockPg.raw("now() - interval '5 hours'") },
+      { customer_id: c, page: 'push:open', subject_id: 'notification:y', subject_type: 'only' },
+      { customer_id: c, page: 'push:open', subject_id: null, subject_type: 'nosubj1' },
+      { customer_id: c, page: 'push:open', subject_id: null, subject_type: 'nosubj2' },
+    ]);
+    await pushOpenUniqueMigration.up(mockPg);
+    await pushOpenUniqueMigration.up(mockPg);
+    const rows = await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c }).select('subject_id', 'subject_type');
+    expect(rows.filter((r) => r.subject_id === 'notification:x')).toEqual([{ subject_id: 'notification:x', subject_type: 'early' }]);
+    expect(rows.filter((r) => r.subject_id === 'notification:y')).toHaveLength(1);
+    expect(rows.filter((r) => r.subject_id === null)).toHaveLength(2);
+    const idx = await mockPg.raw("SELECT 1 FROM pg_indexes WHERE schemaname = ? AND indexname = 'customer_page_views_push_open_uniq'", [schema]);
+    expect(idx.rows).toHaveLength(1);
   });
 });

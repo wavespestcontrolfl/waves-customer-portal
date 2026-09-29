@@ -57,6 +57,17 @@ describe('recordPageView', () => {
     expect(mockRaw.mock.calls[1][1][9]).toBe(false);
   });
 
+  test('a forever push:open insert carries ON CONFLICT against the partial unique index; nothing else does', async () => {
+    await recordPageView({ req: mkReq(), page: 'push:open', customerId: 'cust-1', subjectType: 'ios', subjectId: 'notification:abc', dedupeForever: true });
+    await recordPageView({ req: mkReq(), page: 'push:open', customerId: 'cust-1', subjectType: 'ios', dedupeForever: true });
+    await recordPageView({ req: mkReq(), page: 'track', customerId: 'cust-1', subjectType: 'scheduled_service', subjectId: '1', dedupeForever: true });
+    await recordPageView({ req: mkReq(), page: 'track', customerId: 'cust-1', subjectType: 'scheduled_service', subjectId: '1' });
+    expect(mockRaw.mock.calls[0][0].replace(/\s+/g, ' ')).toContain(
+      "ON CONFLICT (customer_id, page, subject_id) WHERE page = 'push:open' AND subject_id IS NOT NULL DO NOTHING",
+    );
+    for (const i of [1, 2, 3]) expect(mockRaw.mock.calls[i][0]).not.toMatch(/ON CONFLICT/);
+  });
+
   test('a caller-supplied dedupe window replaces the default; a bad one falls back', async () => {
     await recordPageView({ req: mkReq(), page: 'track', subjectType: 'scheduled_service', subjectId: 'a', dedupeMinutes: 60 });
     await recordPageView({ req: mkReq(), page: 'track', subjectType: 'scheduled_service', subjectId: 'a', dedupeMinutes: -5 });

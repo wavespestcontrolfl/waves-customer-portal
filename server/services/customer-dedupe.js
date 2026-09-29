@@ -1063,6 +1063,13 @@ function promoteWinnerAsPrimaryRule(winner, loser) {
   );
 }
 
+// Epoch ms of a Date or timestamp string, or null when empty / unparseable.
+function timestampMs(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
   const winnerPriorValues = {};
   const backfills = {};
@@ -1224,6 +1231,22 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
     // the r15 fix). The restore pass keeps a literal `false`; only null and
     // undefined priors are skipped.
     winnerPriorValues.termite_stations_rented = false;
+  }
+  // Portal activity stamp (GATE_PORTAL_ACTIVITY): the loser's customer_page_views
+  // rows repoint to the winner, so the winner's customers.last_seen_at must
+  // absorb a newer (or only) loser value — GREATEST(winner, loser). It is not a
+  // BACKFILL_FIELDS candidate: a non-empty older winner value would never be
+  // replaced by the generic fill-if-empty rule. The winner's own prior value is
+  // journaled (when it had one) so the undo restores it; a null prior vacates
+  // to null through the generic clear. Never runs a backwards step: an equal
+  // or older loser value leaves the winner untouched.
+  const loserSeenMs = timestampMs(loser.last_seen_at);
+  if (loserSeenMs !== null) {
+    const winnerSeenMs = timestampMs(winner.last_seen_at);
+    if (winnerSeenMs === null || loserSeenMs > winnerSeenMs) {
+      if (winnerSeenMs !== null) winnerPriorValues.last_seen_at = winner.last_seen_at;
+      backfills.last_seen_at = loser.last_seen_at;
+    }
   }
   return { backfills, winnerPriorValues };
 }
@@ -4921,7 +4944,9 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
         continue;
       }
-      if (backfillValueUnchanged(winner[field], value)) {
+      // mergeWrittenValueUnchanged also matches a timestamp column read back as a
+      // Date against the journal's ISO string (last_seen_at).
+      if (mergeWrittenValueUnchanged(winner[field], value)) {
         winnerPatch[field] = null;
       } else {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });

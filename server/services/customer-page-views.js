@@ -37,6 +37,8 @@ const logger = require('./logger');
 const { isBotUserAgent } = require('../utils/bot-ua');
 
 const DEDUPE_MINUTES = 10;
+// Page value whose (customer, subject) pair is unique by partial index (see the migration).
+const PUSH_OPEN_PAGE = 'push:open';
 const UA_MAX = 500;
 
 // Mirrors estimate-public.js (private there, 28k-line file): comma list of
@@ -122,6 +124,13 @@ function recordPageView({
     // so the same page + customer + subject is never written twice, whatever
     // the ip or how much later a duplicate arrives. Needs a subject id.
     const forever = dedupeForever === true && subjId != null;
+    // The NOT EXISTS check alone is racy (two concurrent beacons both pass it), so a
+    // forever push open is also backed by the partial unique index from migration
+    // 20260929200000; ON CONFLICT swallows the loser of that race. The conflict
+    // target must repeat the index predicate exactly.
+    const conflictClause = forever && page === PUSH_OPEN_PAGE
+      ? `ON CONFLICT (customer_id, page, subject_id) WHERE page = '${PUSH_OPEN_PAGE}' AND subject_id IS NOT NULL DO NOTHING`
+      : '';
 
     return Promise.resolve(db.raw(
       `INSERT INTO customer_page_views (customer_id, page, subject_type, subject_id, ip_hash, user_agent)
@@ -136,7 +145,8 @@ function recordPageView({
              AND ip_hash IS NOT DISTINCT FROM ?::text
              AND viewed_at > now() - (?::int * interval '1 minute')
            ))
-       )`,
+       )
+       ${conflictClause}`,
       [custId, page, subjType, subjId, ipHash, ua, page, subjId, custId, forever, subjType, ipHash, windowMinutes],
     )).then((res) => !!(res && (res.rowCount === undefined || res.rowCount > 0)))
       .catch((err) => {
