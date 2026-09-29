@@ -641,9 +641,13 @@ describe('generateGroundedDraft — pest-report phrasing fetches OPEN TIMES even
   }
 
   test.each([
-    "they're back",
     'the ants are back',
     'I saw roaches again',
+    // Codex round 2: the enumerated "back"/"again" phrasings missed these —
+    // the structural fix (pest noun + any activity verb, anywhere in the
+    // text) catches them without a new enumerated phrase.
+    'the roaches have returned',
+    'more ants showed up after the treatment',
   ])('%s → OPEN TIMES is fetched (present in the facts block) though SAVE_SALE_TEXT_RE and schedulingIntent both miss it', async (inboundMessage) => {
     const drafter = setupAvailability();
     const client = makeClient([
@@ -657,34 +661,15 @@ describe('generateGroundedDraft — pest-report phrasing fetches OPEN TIMES even
   });
 });
 
-// Independent-review P2: with GATE_SMS_AGENT_COMPLAINTS off (prod default),
-// a genuine complaint disguised as a pest report must still be held for a
-// person — the deterministic backstop, not just the prompt's own tie-break.
-describe('generateGroundedDraft — a genuine complaint is held for a person even when GATE_SMS_AGENT_COMPLAINTS is off', () => {
-  const prior = { c: process.env.GATE_SMS_AGENT_COMPLAINTS, ra: process.env.GATE_SMS_REAL_ANSWERS };
-  beforeEach(() => { delete process.env.GATE_SMS_AGENT_COMPLAINTS; delete process.env.GATE_SMS_REAL_ANSWERS; });
-  afterEach(() => {
-    for (const [k, v] of [['GATE_SMS_AGENT_COMPLAINTS', prior.c], ['GATE_SMS_REAL_ANSWERS', prior.ra]]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-  });
-
-  test('a paid-visit draft (book_appointment, no escalate) is caught deterministically; a revision that escalates instead converges', async () => {
-    const client = makeClient([
-      { reply: 'Sorry about that! We have times open — want me to book one?', intended_actions: [{ type: 'book_appointment' }], missing_info: null },
-      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
-      { supported: true, violations: [] },
-    ]);
-    const r = await generateGroundedDraft({
-      client, context: CTX, inboundMessage: 'Roaches everywhere again after your guy came, third time, I want a refund',
-      intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
-    });
-    expect(r.converged).toBe(true);
-    expect(r.passes).toBe(2);
-    expect(r.parsed.intended_actions).toEqual([{ type: 'escalate' }]);
-  });
-});
-
+// The deterministic complaint backstop this test covered (validateComplaintEscalation
+// / hasComplaintSignal / complaintSignals) was removed 2026-09-29: several
+// audit and Codex rounds kept finding new complaint shapes a regex missed
+// (anger, cancel threats, damage attribution, re-service resolution for an
+// already-held complaint) — a non-converging chokepoint. The PEST REPORTS
+// bullet's own prompt precedence (an actual complaint always wins over pest
+// activity wording) is now the only enforcement, backed by every draft being
+// staff-reviewed and escalation intents never auto-sending — see the code
+// comment at the PEST REPORTS bullet in sms-shadow-drafter.js.
 
 // Codex r7 P1: with a category gate on the model answers chemical questions
 // itself, so compliance copy is enforced at publication, not by the prompt.

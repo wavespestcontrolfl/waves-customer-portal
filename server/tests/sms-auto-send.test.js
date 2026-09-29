@@ -196,13 +196,17 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
     jest.resetModules();
   });
 
-  test('the candidate query matches PROMPT_VERSION, the bare REAL_ANSWERS_PROMPT_VERSION, or any +category-suffixed variant of it', () => {
+  test('the candidate query matches PROMPT_VERSION, or any v12-real-answers-family variant by prefix (bare, numeric-bumped, or +category-suffixed) (Codex round-2)', () => {
     // A fixed 2-value whereIn (the round-1 fix) would stop matching the
     // moment a per-category gate joins the master one, since
     // currentPromptVersion() then suffixes the version with the active
     // category tags (pre-push audit P1 round 2) — this must be a LIKE-
     // prefix match instead, covering every such variant without
-    // enumerating them.
+    // enumerating them. An exact match against REAL_ANSWERS_PROMPT_VERSION
+    // (round 1's fix) ALSO stopped matching the moment that constant's own
+    // numeric suffix bumps (round 2) — the filter must match the whole v12
+    // real-answers FAMILY by prefix (REAL_ANSWERS_PROMPT_BASE_PREFIX), not
+    // one exact identity.
     jest.resetModules();
     const whereCalls = [];
     const orWhereCalls = [];
@@ -230,8 +234,13 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
     const versionWhere = whereCalls.find(([col]) => col === 'md.prompt_version');
     expect(versionWhere).toEqual(['md.prompt_version', drafter.PROMPT_VERSION]);
     expect(orWhereCalls).toEqual([
-      ['md.prompt_version', drafter.REAL_ANSWERS_PROMPT_VERSION],
-      ['md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_VERSION}+%`],
+      ['md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_BASE_PREFIX}%`],
     ]);
+    // The base prefix strips the constant's own numeric suffix, so a LIKE
+    // against it matches the bare pre-bump identity, the current
+    // post-bump identity, and either one +category-suffixed — without
+    // enumerating any of them (Codex round-2).
+    expect(drafter.REAL_ANSWERS_PROMPT_BASE_PREFIX).toBe('house_voice_v12_real_answers');
+    expect(drafter.REAL_ANSWERS_PROMPT_VERSION.startsWith(drafter.REAL_ANSWERS_PROMPT_BASE_PREFIX)).toBe(true);
   });
 });

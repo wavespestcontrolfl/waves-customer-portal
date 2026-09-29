@@ -919,11 +919,20 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
   // push audit P1 round 2): currentPromptVersion() suffixes
   // REAL_ANSWERS_PROMPT_VERSION with whichever per-category gates are also
   // on (e.g. '...+complaints'), so an exact 2-value list would stop
-  // matching the moment any category gate joins the master one — the
-  // prefix recognizes every such variant without enumerating them. This is
-  // a DISCOVERY filter (no single row to compare against yet), so it's a
-  // membership check rather than the per-row "whichever version this draft
-  // actually used" the claim/reload sites use.
+  // matching the moment any category gate joins the master one. Codex
+  // round-2 finding: an EXACT match against the CURRENT
+  // REAL_ANSWERS_PROMPT_VERSION also stopped matching the moment that
+  // constant's own numeric suffix bumps (e.g. 'house_voice_v12_real_answers'
+  // → '...answers2') — drafts written in the minutes before such a deploy
+  // under the PREVIOUS identity were orphaned. The gratitude copy is
+  // identical across every v12 real-answers variant regardless of that
+  // suffix or any category tag, so this matches the whole v12 real-answers
+  // FAMILY by prefix (REAL_ANSWERS_PROMPT_BASE_PREFIX, e.g.
+  // 'house_voice_v12_real_answers%' — covers the bare identity, any numeric
+  // bump, and any +category suffix on either) plus the exact v11 identity.
+  // This is a DISCOVERY filter (no single row to compare against yet), so
+  // it's a membership check rather than the per-row "whichever version this
+  // draft actually used" the claim/reload sites use.
   const q = db('message_drafts as md')
     .join('sms_log as s', 'md.sms_log_id', 's.id')
     .where({
@@ -936,8 +945,7 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
       // subquery convention this codebase already uses elsewhere
       // (availability.js's whereNotExists(function linkedVisit() {...})).
       this.where('md.prompt_version', drafter.PROMPT_VERSION)
-        .orWhere('md.prompt_version', drafter.REAL_ANSWERS_PROMPT_VERSION)
-        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_VERSION}+%`);
+        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_BASE_PREFIX}%`);
     })
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)

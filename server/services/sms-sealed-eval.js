@@ -135,19 +135,17 @@ function isV12PromptVersion(promptVersion) {
 }
 
 // Follow-up #4 (Codex r7): compatibility is the FULL fact contract of the
-// prompt version, not just the base v12 lines. A category gate that adds its
-// OWN fact to the block (none currently do — billing disputes/chemical-
-// medical/legal only change PROMPT WORDING via realAnswersHandoffBullets,
-// and complaints' old FREE RE-SERVICE marker moved to the base contract
-// above) would register here, keyed to its tag, so an exam stamped with
-// that tag grades only items frozen with it — otherwise it would score
-// category behavior on inputs live drafts never lack. Kept as a map (not
-// deleted) so a future category fact has somewhere to go.
-const CATEGORY_FACT_MARKERS = Object.freeze({});
+// prompt version, not just the base v12 lines. No category gate adds its own
+// fact to the block — billing disputes/chemical-medical/legal only change
+// PROMPT WORDING via realAnswersHandoffBullets, and complaints' old FREE
+// RE-SERVICE marker moved to the base contract above (2026-09-29) — so the
+// contract for every v12 variant, tagged or not, is simply the base set
+// (the CATEGORY_FACT_MARKERS map this once read from was always empty in
+// practice; removed 2026-09-29 rather than kept for a category fact that
+// has never materialized).
 function requiredFactMarkers(promptVersion) {
   if (!isV12PromptVersion(promptVersion)) return [];
-  const tags = String(promptVersion).split('+')[1] || '';
-  return [...V12_BASE_FACT_MARKERS, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
+  return V12_BASE_FACT_MARKERS;
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
 // carry must be ABSENT too — an item frozen before FREE RE-SERVICE rendered
@@ -155,7 +153,7 @@ function requiredFactMarkers(promptVersion) {
 // not grade the current base contract, which now requires it. Every version
 // has one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must
 // not replay items frozen with the v12 SLA or re-service lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([...V12_BASE_FACT_MARKERS, ...Object.values(CATEGORY_FACT_MARKERS)]);
+const CONTRACT_FACT_MARKERS = V12_BASE_FACT_MARKERS;
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));

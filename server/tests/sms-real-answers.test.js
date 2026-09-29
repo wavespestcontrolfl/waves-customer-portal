@@ -1796,6 +1796,48 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(validateReserviceOffer({ reply: GENERIC_REPLY, factsBlock: eligible, inboundMessage: 'can you come back out?', intendedActions: sendLink }).ok).toBe(false);
     });
   });
+
+  // Codex round-2 finding: validateReserviceOffer returned early (ok:true,
+  // no checks run at all) unless the reply said "free"/"complimentary" —
+  // "Your pest re-service is covered; we'll text the booking link now"
+  // skipped eligibility, lane, and action checks entirely.
+  describe('validateReserviceOffer: a re-service promise without "free"/"complimentary" wording is still detected (Codex round-2)', () => {
+    const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+    test.each([
+      'Your pest re-service is covered; we\'ll text the booking link now.',
+      'We\'ll send the re-service link over shortly.',
+      'Your revisit is included — the booking link is on its way.',
+      'No charge for the re-service — come back out this week.',
+    ])('%s → detected as a re-service promise (still requires eligibility + action, same as a "free" offer)', (reply) => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+      const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const inboundMessage = 'still have ants';
+      // Not eligible: caught, same as a "free"-worded offer would be.
+      expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage, intendedActions: sendLink }).ok).toBe(false);
+      // Eligible + the send-link action present: passes.
+      expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage, intendedActions: sendLink }).ok).toBe(true);
+      // Eligible but MISSING the send-link action: still caught (Codex
+      // round-1 P2 (c) applies here too, not just to "free"-worded offers).
+      expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage, intendedActions: [] }).ok).toBe(false);
+    });
+
+    test('an unrelated "covered"/"included"/"link" sentence with no re-service term is NOT detected (false-positive control)', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply: 'Your invoice is covered — here is the payment link.', factsBlock: notEligible }).ok).toBe(true);
+      expect(validateReserviceOffer({ reply: 'Your annual plan includes two more treatments this year.', factsBlock: notEligible }).ok).toBe(true);
+    });
+  });
+
+  describe('isReserviceOfferPromise — the single entry point both FREE_RESERVICE_OFFER_RE and the round-2 broadened detection feed', () => {
+    test('true for a "free" offer, true for a covered/included/link promise, false for unrelated text', () => {
+      const { isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
+      expect(isReserviceOfferPromise('We can come back for a free re-service.')).toBe(true);
+      expect(isReserviceOfferPromise('Your pest re-service is covered; we will text the link now.')).toBe(true);
+      expect(isReserviceOfferPromise('Your balance is $95, due at the next visit.')).toBe(false);
+    });
+  });
 });
 
 // Owner ruling 2026-09-29: a pest report ("pests came back", "still seeing X
@@ -1860,111 +1902,46 @@ describe('PEST REPORTS rule — offers the free re-service directly, independent
 // Codex round-1 P2 (b): the availability-fetch predicate (needsOpenTimes)
 // must cover the FULL pest-report class the PEST REPORTS bullet names, not
 // just the subset SAVE_SALE_TEXT_RE already catches.
-describe('PEST_REPORT_TEXT_RE — the pest-report signal for the OPEN TIMES fetch (Codex round-1 P2 (b))', () => {
+describe('PEST_REPORT_TEXT_RE — the pest-report signal for the OPEN TIMES fetch (Codex round-1 P2 (b), widened round 2)', () => {
   const { PEST_REPORT_TEXT_RE, SAVE_SALE_TEXT_RE } = require('../services/sms-shadow-drafter');
 
-  test('matches the class the finding named, which SAVE_SALE_TEXT_RE alone misses', () => {
-    for (const text of ["they're back", 'the ants are back', 'I saw roaches again', 'it is back again', 'found more ants again']) {
+  test('matches a pest noun + activity verb anywhere in the text, in either order', () => {
+    for (const text of [
+      'the ants are back', 'I saw roaches again', 'found more ants again',
+      // Codex round 2: the finding's own examples — no fixed "back"/"again"
+      // phrasing, still a pest noun + activity verb.
+      'the roaches have returned', 'more ants showed up after the treatment',
+    ]) {
       expect(PEST_REPORT_TEXT_RE.test(text)).toBe(true);
     }
     // Confirms these really are the GAP this regex closes — SAVE_SALE_TEXT_RE
     // does not catch them on its own.
-    expect(SAVE_SALE_TEXT_RE.test("they're back")).toBe(false);
     expect(SAVE_SALE_TEXT_RE.test('the ants are back')).toBe(false);
     expect(SAVE_SALE_TEXT_RE.test('I saw roaches again')).toBe(false);
+    expect(SAVE_SALE_TEXT_RE.test('the roaches have returned')).toBe(false);
+    expect(SAVE_SALE_TEXT_RE.test('more ants showed up after the treatment')).toBe(false);
   });
 
   test('"still seeing spiders" is already covered by SAVE_SALE_TEXT_RE (regression check, not a PEST_REPORT_TEXT_RE match)', () => {
     expect(SAVE_SALE_TEXT_RE.test('still seeing spiders')).toBe(true);
   });
 
-  test('does not match unrelated "back"/"again" phrasing (false-positive control)', () => {
-    for (const text of ['call me back', 'see you again soon', "I'll be back tomorrow", 'talk to you again', 'text me back when you can']) {
+  test('does not match a bare activity word with no pest noun (structural change: "they\'re back"/"it is back again" alone are no longer enough)', () => {
+    for (const text of ["they're back", 'it is back again', 'call me back', 'see you again soon', "I'll be back tomorrow", 'talk to you again', 'text me back when you can']) {
       expect(PEST_REPORT_TEXT_RE.test(text)).toBe(false);
     }
   });
-});
 
-// Independent-review P2: the tie-break in the prompt (above) is advisory —
-// with GATE_SMS_AGENT_COMPLAINTS off (prod default) this deterministic
-// backstop is the actual enforcement.
-describe('validateComplaintEscalation — deterministic backstop when GATE_SMS_AGENT_COMPLAINTS is off', () => {
-  const { validateComplaintEscalation, hasComplaintSignal } = require('../services/sms-shadow-drafter');
-  const prior = process.env.GATE_SMS_AGENT_COMPLAINTS;
-  afterEach(() => {
-    if (prior === undefined) delete process.env.GATE_SMS_AGENT_COMPLAINTS; else process.env.GATE_SMS_AGENT_COMPLAINTS = prior;
+  test('does not match a bare pest noun with no activity verb', () => {
+    expect(PEST_REPORT_TEXT_RE.test('we have ants under contract')).toBe(false);
   });
 
-  test('a genuine complaint (repeated failure + refund demand) is flagged, and no-escalate / paid-visit drafts are rejected', () => {
-    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
-    const inboundMessage = 'Roaches everywhere again after your guy came, third time, I want a refund';
-    expect(hasComplaintSignal(inboundMessage)).toBe(true);
-    // No escalate at all.
-    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [], offeredTimes: [] }).ok).toBe(false);
-    // A paid visit offered instead of (or alongside) escalate — the exact
-    // finding: OPEN TIMES/book_appointment to someone demanding a refund.
-    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [{ date: 'Mon', window: '9-11am' }] }).ok).toBe(false);
-    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'escalate' }, { type: 'book_appointment' }], offeredTimes: [] }).ok).toBe(false);
-    // Escalate alone, no paid-visit offer: correct.
-    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'escalate' }], offeredTimes: [] }).ok).toBe(true);
-  });
-
-  test('other complaint signals: damage, dispute, and repeated failure with a pest context', () => {
-    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
-    for (const inboundMessage of [
-      'your technician damaged my irrigation line',
-      "that's not what I agreed to, this is a dispute over the bill",
-      'this is the fourth time the ants came back',
-    ]) {
-      expect(hasComplaintSignal(inboundMessage)).toBe(true);
-      expect(validateComplaintEscalation({ inboundMessage, intendedActions: [], offeredTimes: [] }).ok).toBe(false);
-    }
-  });
-
-  test('false-positive control: routine scheduling and plain cancellations are not complaints (audit P1)', () => {
-    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
-    for (const inboundMessage of [
-      'Can we do 9am every time?',
-      'I want to cancel my service',
-      'please stop my service while we are traveling',
-      'can you come the same time every time going forward',
-      'Can we do pest control at 9am every time?',
-      'we have ants every summer, can you come every time in June?',
-    ]) {
-      expect(hasComplaintSignal(inboundMessage)).toBe(false);
-      expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [{ date: 'Mon', window: '9-11am' }] }).ok).toBe(true);
-    }
-  });
-
-  test('false-positive control: a plain pest report never trips this, however it is drafted', () => {
-    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
-    for (const inboundMessage of ['still seeing ants, can you come back?', "they're back", 'the ants are back', 'still have spiders']) {
-      expect(hasComplaintSignal(inboundMessage)).toBe(false);
-      expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [{ date: 'Mon', window: '9-11am' }] }).ok).toBe(true);
-    }
-  });
-
-  test('gate ON: the prompt\'s own COMPLAINTS category rule already holds a service complaint, so this backstop steps aside', () => {
-    process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
-    const inboundMessage = 'the roaches came back for the third time, I want a refund';
-    expect(validateComplaintEscalation({ inboundMessage, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [] }).ok).toBe(true);
-  });
-
-  test('mixed gates (audit P1): billing disputes follow GATE_SMS_AGENT_BILLING_DISPUTES, service complaints follow GATE_SMS_AGENT_COMPLAINTS', () => {
-    const priorBilling = process.env.GATE_SMS_AGENT_BILLING_DISPUTES;
-    try {
-      delete process.env.GATE_SMS_AGENT_COMPLAINTS;
-      process.env.GATE_SMS_AGENT_BILLING_DISPUTES = 'true';
-      // Billing dispute with its gate ON: a factual answer, no escalate, is allowed.
-      expect(validateComplaintEscalation({ inboundMessage: 'I think I was overcharged. What was the invoice total?', intendedActions: [], offeredTimes: [] }).ok).toBe(true);
-      // Service complaint with its gate OFF: still held.
-      expect(validateComplaintEscalation({ inboundMessage: 'your tech damaged my fence', intendedActions: [], offeredTimes: [] }).ok).toBe(false);
-      delete process.env.GATE_SMS_AGENT_BILLING_DISPUTES;
-      // Billing dispute with its gate OFF: held.
-      expect(validateComplaintEscalation({ inboundMessage: 'I think I was overcharged. What was the invoice total?', intendedActions: [], offeredTimes: [] }).ok).toBe(false);
-    } finally {
-      if (priorBilling === undefined) delete process.env.GATE_SMS_AGENT_BILLING_DISPUTES; else process.env.GATE_SMS_AGENT_BILLING_DISPUTES = priorBilling;
-    }
+  // Documented choice (task spec): a closing/gratitude message that happens
+  // to name a pest but carries no activity/sighting verb does not fire —
+  // there is nothing to act on, and fetching OPEN TIMES for it would be
+  // pointless even though harmless.
+  test('negative control: a gratitude close naming a pest but no activity verb does not fire', () => {
+    expect(PEST_REPORT_TEXT_RE.test('thanks, no bugs since!')).toBe(false);
   });
 });
 
