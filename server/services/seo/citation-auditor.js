@@ -10,9 +10,15 @@
  *
  * States (seo_citations.status, CHECK-constrained by migration
  * 20260929230000_seo_citations_audit_states):
- *   unverified     no listing URL recorded, or never checked
+ *   unverified     no listing URL recorded, or never checked; also a page that
+ *                  was fetched but whose shown address could not be confirmed
+ *                  (status_detail.reason = 'address_unconfirmed' — directory
+ *                  pages often show OTHER businesses' addresses, so this is
+ *                  never "mismatched" unless JSON-LD states our own address)
  *   verified       fetched; name and phone match, plus the address when the
- *                  page shows one
+ *                  page shows one (an address-like string on the page must match
+ *                  the office whose phone matched; a page with none is judged on
+ *                  name + phone)
  *   mismatched     fetched; a field differs — status_detail.mismatches lists
  *                  each { field, expected, seen }
  *   fetch-blocked  the page could not be read: 403/429/5xx or any non-2xx,
@@ -110,15 +116,24 @@ function extractNap(html) {
   return { text, phones: [...phones], title: title.replace(/\s+/g, ' ').trim(), ldName, ldAddress };
 }
 
-// Address: judged only when the page shows one. A structured (JSON-LD) address that
-// lacks our street is a mismatch; otherwise our street either appears in the text
-// (checked) or the page shows no address we can read (not checked).
+// Street-address-like strings in visible text: number + street name + a common suffix.
+const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
+const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?`, 'gi');
+
+// Address: our street (number + first street word) anywhere in the text confirms it.
+// Otherwise a structured (JSON-LD) address that lacks our street is a mismatch. Otherwise
+// address-like strings that are not ours leave it unconfirmed (a sidebar may list other
+// businesses, so that is not a mismatch); none at all means the page shows no address.
 function judgeAddress(nap, expected) {
   const streetRe = streetRegex(expected.address);
   const inText = streetRe ? streetRe.test(nap.text) : false;
-  if (inText || !nap.ldAddress || !streetRe) return { inText, checked: inText, mismatch: null };
-  const mismatch = streetRe.test(nap.ldAddress) ? null : { field: 'address', expected: expected.address, seen: nap.ldAddress };
-  return { inText: false, checked: true, mismatch };
+  if (inText || !streetRe) return { inText, checked: inText, mismatch: null, unconfirmed: null };
+  if (nap.ldAddress) {
+    const mismatch = streetRe.test(nap.ldAddress) ? null : { field: 'address', expected: expected.address, seen: nap.ldAddress };
+    return { inText: false, checked: true, mismatch, unconfirmed: null };
+  }
+  const seen = nap.text.match(ADDRESS_LIKE_RE);
+  return { inText: false, checked: false, mismatch: null, unconfirmed: seen ? seen[0].trim() : null };
 }
 
 /**
@@ -165,6 +180,7 @@ function classifyListing(page, candidates) {
     return { status: 'mismatched', nap: observed, detail: { ...base, mismatches } };
   }
   if (!phoneOk) return blocked('phone_not_found', { final_url: page.finalUrl }); // name shown, phone not readable
+  if (address.unconfirmed) return { status: 'unverified', nap: observed, detail: { ...base, reason: 'address_unconfirmed', seen: address.unconfirmed } };
   return { status: 'verified', nap: observed, detail: base };
 }
 
@@ -183,6 +199,7 @@ class CitationAuditor {
   async audit(seams = {}) {
     logger.info('Citation audit running...');
     const rows = await db('seo_citations').whereNot('status', 'missing');
+    const audited = [];
     for (const row of rows) {
       let res;
       try {
@@ -190,7 +207,14 @@ class CitationAuditor {
       } catch (err) {
         res = { status: 'fetch-blocked', nap: null, detail: { reason: `audit_error: ${err.message}` } };
       }
-      await db('seo_citations').where('id', row.id).update({
+      // Conditional on the row still being what was fetched: a staff edit (URL, office,
+      // missing/unverified) made mid-sweep must not be overwritten by this result.
+      let stillSame = db('seo_citations').where({ id: row.id, listing_url: row.listing_url, location_id: row.location_id, status: row.status })
+        .whereNot('status', 'missing');
+      stillSame = row.updated_at
+        ? stillSame.whereRaw('abs(extract(epoch from updated_at) * 1000 - ?) < 1', [new Date(row.updated_at).getTime()]) // pg keeps microseconds, JS ms
+        : stillSame.whereNull('updated_at');
+      const changed = await stillSame.update({
         status: res.status,
         status_detail: JSON.stringify(res.detail),
         nap_name: res.nap ? res.nap.nap_name : null,
@@ -200,11 +224,12 @@ class CitationAuditor {
         last_checked: etDateString(),
         updated_at: new Date(),
       });
-      row.status = res.status;
+      if (changed) audited.push({ status: res.status });
+      else logger.warn(`Citation audit: row ${row.id} changed during the sweep; result discarded`);
     }
-    const counts = statusCounts(rows);
-    logger.info(`Citation audit: ${JSON.stringify(counts)} (${rows.length} checked)`);
-    return { total: rows.length, ...counts };
+    const counts = statusCounts(audited);
+    logger.info(`Citation audit: ${JSON.stringify(counts)} (${audited.length} of ${rows.length} written)`);
+    return { total: audited.length, skipped: rows.length - audited.length, ...counts };
   }
 
   async getDashboard() {

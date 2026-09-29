@@ -1545,6 +1545,8 @@ function citationDetail(c) {
           `${m.field}: expected ${m.expected}, saw ${[].concat(m.seen ?? "nothing").join(" / ")}`
       )
       .join("; ");
+  if (d.reason === "address_unconfirmed")
+    return `Name and phone match, but the address shown could not be confirmed (saw ${d.seen})`;
   if (c.status === "fetch-blocked" || d.reason === "no_listing_url")
     return (
       CITATION_BLOCK_REASON[d.reason] ||

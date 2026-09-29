@@ -52,6 +52,35 @@ describe('classifyListing', () => {
     expect(r.detail.mismatches).toEqual([{ field: 'address', expected: BRAND.address, seen: '99 Old Rd, Tampa, 33601' }]);
   });
 
+  test('a wrong visible address next to the right name and phone is NOT verified (no JSON-LD)', () => {
+    const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p><p>99 Old Rd, Tampa, FL 33601</p>`), candidatesFor({}));
+    expect(r.status).toBe('unverified');
+    expect(r.detail).toMatchObject({ reason: 'address_unconfirmed', seen: '99 Old Rd' });
+  });
+
+  test('a sidebar of other businesses\' addresses is not a mismatch — it stays unverified unless JSON-LD says so', () => {
+    const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p><aside>Nearby: 410 Main Street, Bradenton; 22 Palm Avenue, Sarasota</aside>`), candidatesFor({}));
+    expect(r.status).toBe('unverified');
+    expect(r.detail.reason).toBe('address_unconfirmed');
+    expect(r.detail.seen).toBe('410 Main Street');
+  });
+
+  test('our address anywhere on the page confirms it even beside other addresses', () => {
+    const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p><aside>410 Main Street, Bradenton</aside><footer>${BRAND.address}</footer>`), candidatesFor({}));
+    expect(r.status).toBe('verified');
+    expect(r.detail.address_checked).toBe(true);
+  });
+
+  test('a brand row must match the address of the office whose phone matched', () => {
+    const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${PARRISH.phone}</p><p>${BRAND.address}</p>`), candidatesFor({}));
+    expect(r.status).toBe('unverified');
+    expect(r.detail).toMatchObject({ reason: 'address_unconfirmed', office: 'parrish' });
+  });
+
+  test('no address-like string at all: name + phone decide', () => {
+    expect(classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p><p>Serving Manatee and Sarasota counties since 2019.</p>`), candidatesFor({})).status).toBe('verified');
+  });
+
   test('mismatched name when a phone is shown but our name is not', () => {
     const r = classifyListing({ ...page('<h1>Acme Bug Co</h1><p>(941) 318-7612</p>'), html: `<html><head><title>Acme Bug Co</title></head><body><h1>Acme Bug Co</h1><p>(941) 318-7612</p>${filler}</body></html>` }, expected);
     expect(r.status).toBe('mismatched');
@@ -123,15 +152,28 @@ describe('classifyListing', () => {
 describe('audit()', () => {
   let store;
   let updates;
+  const T0 = new Date('2026-09-29T12:00:00.000Z');
+  const rows = (list) => list.map((r) => ({ location_id: null, updated_at: T0, ...r }));
+  // In-memory seo_citations: supports just the calls the auditor makes, and evaluates the
+  // conditional UPDATE's WHERE against the LIVE store so a test can edit a row mid-sweep.
   beforeEach(() => {
     updates = [];
     db.mockImplementation((table) => {
       expect(table).toBe('seo_citations');
-      return {
-        whereNot: async (col, val) => store.filter((r) => r[col] !== val),
-        where: (col, id) => ({ update: async (patch) => { updates.push({ id, patch }); } }),
-        orderBy: () => ({ orderBy: async () => store }),
+      const filters = [];
+      const q = {
+        where: (o) => { filters.push((r) => Object.entries(o).every(([k, v]) => (r[k] ?? null) === (v ?? null))); return q; },
+        whereNot: (col, val) => { filters.push((r) => r[col] !== val); return q; },
+        whereNull: (col) => { filters.push((r) => r[col] == null); return q; },
+        whereRaw: (_sql, [ms]) => { filters.push((r) => r.updated_at != null && Math.abs(new Date(r.updated_at).getTime() - ms) < 1); return q; },
+        then: (resolve, reject) => Promise.resolve(store.filter((r) => filters.every((f) => f(r))).map((r) => ({ ...r }))).then(resolve, reject),
+        update: async (patch) => {
+          const hit = store.filter((r) => filters.every((f) => f(r)));
+          hit.forEach((r) => { updates.push({ id: r.id, patch }); Object.assign(r, patch); });
+          return hit.length;
+        },
       };
+      return q;
     });
   });
   const fetchFn = (routes) => async (url) => {
@@ -143,7 +185,7 @@ describe('audit()', () => {
   const html = (status, body, headers = { 'content-type': 'text/html' }) => ({ status, body: `<html><head><title>x</title></head><body>${body}${filler}</body></html>`, headers });
 
   test('writes each state; rows with no URL stay unverified and are never fetched; human "missing" rows are skipped', async () => {
-    store = [
+    store = rows([
       { id: 'ok', listing_url: 'https://ok.example/l', location_id: 'venice', status: 'unverified' },
       { id: 'bad', listing_url: 'https://bad.example/l', status: 'unverified' },
       { id: 'yelp', listing_url: 'https://yelp.example/l', status: 'unverified' },
@@ -151,7 +193,7 @@ describe('audit()', () => {
       { id: 'inner', listing_url: 'https://inner.example/l', status: 'unchecked' },
       { id: 'none', listing_url: null, status: 'unchecked' },
       { id: 'human', listing_url: 'https://human.example/l', status: 'missing' },
-    ];
+    ]);
     const routes = {
       'https://ok.example/l': html(200, `<h1>Waves Pest Control</h1><p>${WAVES_LOCATIONS.find((l) => l.id === 'venice').phone}</p>`),
       'https://bad.example/l': html(200, '<h1>Waves Pest Control</h1><p>(941) 555-0142</p>'),
@@ -176,11 +218,11 @@ describe('audit()', () => {
     expect(JSON.parse(byId.none.status_detail)).toEqual({ reason: 'no_listing_url' });
     expect(byId.human).toBeUndefined();
     expect(Object.values(byId).map((p) => p.status)).not.toContain('missing');
-    expect(result).toEqual({ total: 6, unverified: 1, verified: 1, mismatched: 1, 'fetch-blocked': 3, missing: 0 });
+    expect(result).toEqual({ total: 6, skipped: 0, unverified: 1, verified: 1, mismatched: 1, 'fetch-blocked': 3, missing: 0 });
   });
 
   test('a throwing check lands fetch-blocked and does not stop the sweep', async () => {
-    store = [{ id: 'a', listing_url: 'https://a.example/l', status: 'unverified' }, { id: 'b', listing_url: 'https://b.example/l', status: 'unverified' }];
+    store = rows([{ id: 'a', listing_url: 'https://a.example/l', status: 'unverified' }, { id: 'b', listing_url: 'https://b.example/l', status: 'unverified' }]);
     const spy = jest.spyOn(require('../services/seo/contact-finder')._internals, 'fetchPage')
       .mockRejectedValueOnce(new Error('boom'))
       .mockResolvedValueOnce(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>`));
@@ -188,6 +230,38 @@ describe('audit()', () => {
     spy.mockRestore();
     expect(updates.map((u) => u.patch.status)).toEqual(['fetch-blocked', 'verified']);
     expect(result['fetch-blocked']).toBe(1);
+  });
+
+  describe('a staff edit made between the read and the write wins', () => {
+    const goodPage = `<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>`;
+    const run = async (edit) => {
+      store = rows([{ id: 'r', listing_url: 'https://old.example/l', status: 'unverified' }]);
+      const fetchOld = async () => {
+        edit(store[0]); // staff act while the fetch is in flight
+        return { ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => `<html><head><title>x</title></head><body>${goodPage}${filler}</body></html>` };
+      };
+      const result = await auditor.audit({ fetchFn: fetchOld, resolveHostFn: async () => true });
+      return { result, row: store[0] };
+    };
+
+    test.each([
+      ['marked missing', (r) => { r.status = 'missing'; r.updated_at = new Date(T0.getTime() + 5000); }],
+      ['URL changed', (r) => { r.listing_url = 'https://new.example/l'; r.status = 'unverified'; r.updated_at = new Date(T0.getTime() + 5000); }],
+      ['office changed', (r) => { r.location_id = 'venice'; r.updated_at = new Date(T0.getTime() + 5000); }],
+      ['any edit that only moves updated_at', (r) => { r.updated_at = new Date(T0.getTime() + 5000); }],
+    ])('%s: the stale result is discarded, not written over it', async (_label, edit) => {
+      const { result, row } = await run(edit);
+      expect(updates).toEqual([]);
+      expect(row.status).not.toBe('verified');
+      expect(result).toMatchObject({ total: 0, skipped: 1 });
+      expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('changed during the sweep'));
+    });
+
+    test('an untouched row is written, matching a microsecond-precision updated_at within a millisecond', async () => {
+      const { result, row } = await run((r) => { r.updated_at = new Date(T0.getTime() + 0.4); });
+      expect(row.status).toBe('verified');
+      expect(result).toMatchObject({ total: 1, skipped: 0, verified: 1 });
+    });
   });
 });
 
@@ -220,6 +294,7 @@ describe('getDashboard() and updateCitation()', () => {
     test('changing the URL or office resets the row to unverified for the next audit', async () => {
       await auditor.updateCitation('1', { listing_url: 'https://dir.example/waves', location_id: 'parrish' });
       expect(patches[0]).toMatchObject({ listing_url: 'https://dir.example/waves', location_id: 'parrish', status: 'unverified', nap_consistent: null });
+      expect(patches[0].updated_at).toBeInstanceOf(Date); // the sweep's conditional write keys on it
     });
 
     test('the fields the editor sends: URL is trimmed, blank clears it, priority is validated', async () => {
