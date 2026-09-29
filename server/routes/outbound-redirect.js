@@ -56,11 +56,13 @@ router.get('/:code', async (req, res) => {
     const link = await lookupDestination(code);
     if (!link) return res.status(404).type('html').send(notFoundPage());
 
+    // Express routes HEAD through GET: a HEAD probe redirects like any other
+    // request but is never a click.
     const ua = req.headers['user-agent'];
-    if (!isBotUserAgent(ua)) {
+    if (req.method === 'GET' && !isBotUserAgent(ua)) {
       void recordClick({
         link,
-        context: verifyContext(req.query),
+        context: verifyContext(req.query, code),
         ip: req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip,
         userAgent: ua,
       }).catch((err) => logger.error(`[outbound-redirect] click log failed: ${err.code || 'error'}`));

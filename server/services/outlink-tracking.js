@@ -86,10 +86,12 @@ function signingKey() {
   return crypto.createHmac('sha256', secret).update('outlink-context-v1').digest();
 }
 
-function contextSignature({ k = '', c = '', v = '', p = '', s = '' }) {
+// The destination code is part of the signed payload, so a valid context
+// cannot be replayed onto a different registered code.
+function contextSignature({ k = '', c = '', v = '', p = '', s = '' }, code = '') {
   const key = signingKey();
-  if (!key) return null;
-  return crypto.createHmac('sha256', key).update([k, c, v, p, s].join('|')).digest('hex').slice(0, 24);
+  if (!key || !code) return null;
+  return crypto.createHmac('sha256', key).update([code, k, c, v, p, s].join('|')).digest('hex').slice(0, 24);
 }
 
 function cleanContext(ctx = {}) {
@@ -104,7 +106,7 @@ function cleanContext(ctx = {}) {
 
 function goUrl(code, ctx) {
   const parts = cleanContext(ctx);
-  const g = contextSignature(parts);
+  const g = contextSignature(parts, code);
   const qs = new URLSearchParams();
   for (const name of ['k', 'c', 'v', 'p', 's']) if (parts[name]) qs.set(name, parts[name]);
   if (g) qs.set('g', g);
@@ -112,13 +114,15 @@ function goUrl(code, ctx) {
   return portalUrl(`/go/${code}${query ? `?${query}` : ''}`);
 }
 
-// Verify the signed context from a click's query string. Anything that does
-// not verify yields null — the caller still redirects, without attribution.
-function verifyContext(query = {}) {
+// Verify the signed context from a click's query string, against the code in
+// the path it arrived on. Anything that does not verify (bad signature, or a
+// context signed for another code) yields null — the caller still redirects,
+// without attribution.
+function verifyContext(query = {}, code = '') {
   const pick = (name) => (typeof query[name] === 'string' ? query[name] : '');
   const parts = { k: pick('k'), c: pick('c'), v: pick('v'), p: pick('p'), s: pick('s') };
   const g = pick('g');
-  const expected = contextSignature(parts);
+  const expected = contextSignature(parts, code);
   if (!expected || !g || g.length !== expected.length) return null;
   try {
     if (!crypto.timingSafeEqual(Buffer.from(g), Buffer.from(expected))) return null;

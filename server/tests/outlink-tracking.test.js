@@ -298,6 +298,40 @@ describe('GET /go/:code', () => {
     expect(mockTables.outbound_link_clicks[0]).toMatchObject({ template_key: null, customer_id: null, scheduled_service_id: null });
   });
 
+  test('HEAD redirects like GET but records no click', async () => {
+    const u = await registered();
+    const res = await fetch(`${base}${u.pathname}${u.search}`, {
+      method: 'HEAD', redirect: 'manual', headers: { 'user-agent': 'Mozilla/5.0 (iPhone) Safari' },
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(AMAZON);
+    await tick(); await tick();
+    expect(mockTables.outbound_link_clicks).toHaveLength(0);
+  });
+
+  test('a signed context replayed onto a different registered code still redirects but is not attributed', async () => {
+    mockTables.scheduled_services.push({ id: SERVICE, prep_token: TOKEN, customer_id: CUSTOMER });
+    const u = await registered();
+    // Register a second destination and replay the first link's signed query onto it.
+    const other = await svc.applyOutlinkTracking({
+      blocks: [{ type: 'paragraph', content: `[Chewy](${CHEWY})` }],
+      templateKey: 'prep.flea', prepToken: TOKEN, customerId: CUSTOMER, surface: 'email',
+    });
+    const otherCode = new URL(goLinks(other.blocks[0].content)[0]).pathname;
+    expect(otherCode).not.toBe(u.pathname);
+    const res = await get(otherCode + u.search);
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(CHEWY);
+    await tick(); await tick();
+    expect(mockTables.outbound_link_clicks).toHaveLength(1);
+    expect(mockTables.outbound_link_clicks[0]).toMatchObject({ template_key: null, customer_id: null, scheduled_service_id: null });
+    // control: the link's own signed context does attribute on its own code
+    const own = await get(u.pathname + u.search);
+    expect(own.status).toBe(302);
+    await tick(); await tick();
+    expect(mockTables.outbound_link_clicks[1]).toMatchObject({ template_key: 'prep.flea', customer_id: CUSTOMER });
+  });
+
   test('unknown code: generic 404, no click row', async () => {
     const res = await get(`/go/${'0'.repeat(20)}`);
     expect(res.status).toBe(404);

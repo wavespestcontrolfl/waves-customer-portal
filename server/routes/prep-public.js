@@ -358,12 +358,24 @@ router.get('/:token', async (req, res) => {
     let source = null;
     let guide = null;
     let upcomingVisits = [];
+    let renderedBlocks = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       source = await resolvePrepSource(token);
       if (!source) return res.status(404).json({ error: 'Not found' });
       guide = await renderGuideForSource(source);
       if (!guide) return res.status(404).json({ error: 'Not found' });
       upcomingVisits = await fetchUpcomingFamilyVisits(source.customerId, source.familyType);
+      // Outside links → /go/<code> click logging (GATE_OUTLINK_TRACKING; page
+      // only — the PDF twin keeps direct links). Registration + rewriting is
+      // part of the render phase: it runs BEFORE the stamp so the stamp stays
+      // the last awaited step. Fails open to the original blocks.
+      ({ blocks: renderedBlocks } = await applyOutlinkTracking({
+        blocks: guide.renderedBlocks,
+        templateKey: source.templateKey,
+        prepToken: token,
+        customerId: source.customerId,
+        surface: 'page',
+      }));
       if (!source.stampView) break;
       let stamped;
       try {
@@ -380,16 +392,6 @@ router.get('/:token', async (req, res) => {
     const {
       customerFirstName, typeLabel, serviceDate, techName, propertyAddress,
     } = guide;
-    // Outside links → /go/<code> click logging (GATE_OUTLINK_TRACKING; page
-    // only — the PDF twin keeps direct links). Fails open to the original.
-    const { blocks: renderedBlocks } = await applyOutlinkTracking({
-      blocks: guide.renderedBlocks,
-      templateKey: source.templateKey,
-      prepToken: token,
-      customerId: source.customerId,
-      surface: 'page',
-    });
-
     const ipHash = req.ip
       ? crypto.createHash('sha256').update(req.ip).digest('hex').slice(0, 16)
       : null;

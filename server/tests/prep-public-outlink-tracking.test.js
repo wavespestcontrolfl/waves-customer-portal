@@ -4,6 +4,8 @@
  * the interpolated originals (direct links). Nothing is sent to a customer.
  */
 const mockLinks = [];
+const mockOrder = [];
+const mockState = { source: 'project', failRegister: false };
 jest.mock('../models/db', () => {
   const PROJECT = {
     id: '44444444-4444-4444-8444-444444444444', customer_id: '11111111-1111-4111-8111-111111111111', prep_template_key: 'prep.flea',
@@ -12,17 +14,27 @@ jest.mock('../models/db', () => {
   const fn = jest.fn((table) => {
     const q = {
       where: () => q,
+      whereNotNull: () => q,
       whereIn: () => q,
       first: async () => {
-        if (table === 'projects') return PROJECT;
+        if (table === 'projects') return mockState.source === 'project' ? PROJECT : null;
+        if (table === 'scheduled_services') {
+          return mockState.source === 'service'
+            ? { id: '66666666-6666-4666-8666-666666666666', customer_id: PROJECT.customer_id, service_type: 'Flea', scheduled_date: '2026-08-01', prep_template_key: 'prep.flea' }
+            : null;
+        }
         if (table === 'customers') return { id: PROJECT.customer_id, first_name: 'Sam', last_name: 'Example' };
         return null;
       },
       select: async () => (table === 'outbound_links' ? mockLinks : []),
-      update: async () => 1,
+      update: async () => { mockOrder.push('stamp'); return 1; },
       insert: (rows) => {
         const list = Array.isArray(rows) ? rows : [rows];
-        const run = () => { if (table === 'outbound_links') list.forEach((r) => { if (!mockLinks.some((x) => x.code === r.code)) mockLinks.push(r); }); };
+        const run = () => {
+          if (table === 'outbound_links') {
+            mockOrder.push('register');
+            if (mockState.failRegister) throw new Error('registration down');
+          } if (table === 'outbound_links') list.forEach((r) => { if (!mockLinks.some((x) => x.code === r.code)) mockLinks.push(r); }); };
         return {
           onConflict: () => ({ ignore: async () => run() }),
           then: (ok, err) => Promise.resolve().then(run).then(ok, err),
@@ -66,7 +78,13 @@ beforeAll((done) => {
   server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}`; done(); });
 });
 afterAll((done) => { server.close(done); });
-beforeEach(() => { mockLinks.length = 0; delete process.env.GATE_OUTLINK_TRACKING; });
+beforeEach(() => {
+  mockLinks.length = 0;
+  mockOrder.length = 0;
+  mockState.source = 'project';
+  mockState.failRegister = false;
+  delete process.env.GATE_OUTLINK_TRACKING;
+});
 
 describe('prep page payload', () => {
   test('gate off: blocks carry the original links', async () => {
@@ -88,5 +106,27 @@ describe('prep page payload', () => {
     expect(content).not.toContain(TOKEN); // bearer prep token never rides in the URL
     expect(content).toContain('p=44444444-4444-4444-8444-444444444444');
     expect(content).toContain('s=page');
+  });
+
+  test('visit source: link registration + rewrite finish BEFORE the view stamp, which is last', async () => {
+    process.env.GATE_OUTLINK_TRACKING = 'true';
+    mockState.source = 'service';
+    const res = await fetch(`${base}/api/public/prep/${TOKEN}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.blocks[0].content).toMatch(/\/go\/[a-f0-9]{20}\?/);
+    expect(mockOrder).toEqual(['register', 'stamp']);
+  });
+
+  test('visit source: a registration failure fails open to the original links and still stamps after', async () => {
+    process.env.GATE_OUTLINK_TRACKING = 'true';
+    mockState.source = 'service';
+    mockState.failRegister = true;
+    const res = await fetch(`${base}/api/public/prep/${TOKEN}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.blocks[0].content).toContain(AMAZON);
+    expect(body.blocks[0].content).not.toContain('/go/');
+    expect(mockOrder).toEqual(['register', 'stamp']);
   });
 });
