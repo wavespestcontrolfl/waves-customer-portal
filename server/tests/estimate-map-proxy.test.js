@@ -352,6 +352,34 @@ describe('GET /:token/map/satellite', () => {
   });
 });
 
+describe('map proxy rate limit', () => {
+  test('30/min per client; IPv6 addresses in one /64 share a bucket', async () => {
+    dbRows = { estimates: estimateRow({ satellite_url: STORED_KEYED }) };
+    const app = express();
+    app.set('trust proxy', true);
+    app.use('/estimates', estimatePublicRouter);
+    const server = app.listen(0);
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const hit = (ip) => fetch(`${baseUrl}/estimates/${TOKEN}/map/satellite`, { headers: { 'X-Forwarded-For': ip } });
+    try {
+      for (let i = 0; i < 30; i += 1) {
+        const res = await hit(`2001:db8:1:2::${i + 1}`);
+        expect(res.status).toBe(200);
+        await res.arrayBuffer();
+      }
+      // Different address, same /64 -> same bucket -> limited.
+      const limited = await hit('2001:db8:1:2:ffff::9');
+      expect(limited.status).toBe(429);
+      // A different /64 is unaffected.
+      const other = await hit('2001:db8:9:9::1');
+      expect(other.status).toBe(200);
+      await other.arrayBuffer();
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('GET /:token/map/overlay', () => {
   test('gate on + cached polygon: streams the overlay, URL rebuilt from the cached row', async () => {
     isEnabled.mockImplementation((name) => name === 'estimateShowYourWork');

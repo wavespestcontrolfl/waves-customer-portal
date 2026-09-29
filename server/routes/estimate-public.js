@@ -162,6 +162,7 @@ const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance
 const { buildEstimateConsultationOffer } = require('../services/estimate-consultation-offer');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
 const estimateMapImage = require('../services/estimate-map-image');
+const { ipFallbackKey } = require('../middleware/rate-limit-key');
 const {
   parcelOverlayEnabled,
   buildParcelOverlayParam,
@@ -28220,6 +28221,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 const mapImageLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
+  // Shared key: collapses an IPv6 client's /64 to one bucket (raw req.ip
+  // would let it rotate addresses inside its subnet to dodge the limit).
+  keyGenerator: (req) => ipFallbackKey(req.ip),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please try again in a minute.' },
