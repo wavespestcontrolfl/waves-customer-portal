@@ -2557,9 +2557,11 @@ async function listLapsedEvidenceClosedCallIds(conn) {
       WHERE ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
-          -- A callback kept by the customer phoning in: the evidence call
-          -- was relinked to another customer (or is gone), so it no longer
-          -- proves this customer's promise.
+          -- A close resting on a call (the customer phoning in): the evidence
+          -- call was relinked to another customer (or is gone), so it no
+          -- longer proves this customer's promise. Only closes the portal made
+          -- on association reach this scan (closes, closed_by above): a
+          -- callback's DIRECT call proof carries no marker and never does.
           OR ((cc.fulfillment ->> 'record_type') = 'call_log'
               AND (ev.id IS NULL OR ev.customer_id::text IS DISTINCT FROM (cc.fulfillment ->> 'judged_customer_id')))
           OR ((cc.fulfillment ->> 'kind') = ?

@@ -709,6 +709,20 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: booked.id, basis: 'visit_booked_for_same_customer_within_14_days' });
   });
 
+  test('the lapse scan never lists a DIRECT call proof: an unlinked promise returned by a staff call to a linked customer stays closed without flapping', async () => {
+    // The promise call has no customer, so the direct lookup matches the
+    // callback by phone; the staff call back itself is linked to a customer.
+    const w = await world({ kind: 'callback', customer: false });
+    const [other] = await db('customers').insert({ first_name: `Linked${w.n}`, phone: `+1555557${w.n}` }).returning('id');
+    made.customerIds.push(other.id);
+    const back = await outboundCall(w, { customer_id: other.id });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+    const closed = await row(w.commitment.id);
+    expect(closed.fulfillment).toMatchObject({ record_id: back.id, strength: 'direct', record_type: 'call_log' });
+    expect(closed.fulfillment.closed_by).toBeUndefined();
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+  });
+
   // ── A callback is kept by the customer phoning in and talking with a person ──
   const CB_BASIS = 'caller_called_in_and_talked_with_staff_within_14_days';
   const outcomeOf = (outcome) => ({ call_outcome: outcome });
