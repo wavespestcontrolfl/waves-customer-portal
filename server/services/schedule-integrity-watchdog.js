@@ -670,6 +670,8 @@ async function visitsStillGapped(visitIds) {
 
 // Prepay: key = prepay-coverage:<visit>:<issue>:<evidence hash>.
 const prepayVisitOf = (key) => key.split(':')[1];
+// The visit and the issue: the evidence hash is what a replacement changes.
+const prepaySubjectOf = (key) => key.split(':').slice(1, 3).join(':');
 async function closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, horizonDay }) {
   const prepayAbsent = await absentOf(PREPAY_PREFIX);
   if (!prepayAbsent.length) return 0;
@@ -682,14 +684,16 @@ async function closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, hor
   // A completed/rescheduled visit stays open only while its gap is still there.
   const gapped = await visitsStillGapped(statusRows
     .filter((r) => PREPAY_HOLD_OPEN_STATUSES.includes(r.status)).map((r) => String(r.id)));
-  // A visit that still has a live prepay key was superseded by a new
-  // evidence key rather than resolved — closed only once that replacement
-  // was delivered this run. One the cap held back has no bell yet: the old
-  // warning stays until it does, or the review would be lost if the visit
-  // completed first (the scan drops completed visits).
-  const prepayVisitsOf = (keys) => new Set([...keys].filter((k) => k.startsWith(PREPAY_PREFIX)).map(prepayVisitOf));
-  const replacedVisits = prepayVisitsOf(liveKeys);
-  const deliveredVisits = prepayVisitsOf(deliveredKeys);
+  // A visit whose SAME issue still has a live prepay key was superseded by a
+  // new evidence key rather than resolved — closed only once every live key
+  // for that visit and issue was delivered this run. One the cap held back
+  // has no bell yet: the old warning stays until it does, or the review would
+  // be lost if the visit completed first (the scan drops completed visits).
+  // Matched per issue: a visit can carry several prepay issues at once, and
+  // delivering one must not clear another's old warning.
+  const livePrepay = [...liveKeys].filter((k) => k.startsWith(PREPAY_PREFIX));
+  const replacedSubjects = new Set(livePrepay.map(prepaySubjectOf));
+  const undeliveredSubjects = new Set(livePrepay.filter((k) => !deliveredKeys.has(k)).map(prepaySubjectOf));
   const byReason = { 'visit did not run': [], superseded: [], 'moved past the look-ahead window': [], 'gap resolved': [] };
   for (const key of prepayAbsent) {
     const id = prepayVisitOf(key);
@@ -698,7 +702,9 @@ async function closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, hor
     if (known && PREPAY_HOLD_OPEN_STATUSES.includes(status)) {
       if (!gapped.has(id)) byReason['gap resolved'].push(key);
     } else if (!known || NEVER_RAN_STATUSES.includes(status)) byReason['visit did not run'].push(key);
-    else if (replacedVisits.has(id)) { if (deliveredVisits.has(id)) byReason.superseded.push(key); }
+    else if (replacedSubjects.has(prepaySubjectOf(key))) {
+      if (!undeliveredSubjects.has(prepaySubjectOf(key))) byReason.superseded.push(key);
+    }
     // Out of the scan by date, not fixed: it re-rings once back in the window.
     else if (horizonDay && dayById.get(id) > horizonDay) byReason['moved past the look-ahead window'].push(key);
     else byReason['gap resolved'].push(key);
@@ -867,6 +873,7 @@ module.exports = {
   hasAnnualPrepaidStamp,
   seriesRootId,
   _completedUnpricedRoots: completedUnpricedRoots,
+  _closeResolvedAlerts: closeResolvedAlerts,
   _private: episodeHelpers,
   UPCOMING_WINDOW_DAYS,
   MAX_ALERTS_PER_RUN,

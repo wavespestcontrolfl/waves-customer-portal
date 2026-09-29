@@ -766,6 +766,29 @@ describe('alert episodes (ALERT_EPISODES)', () => {
       expect(closedBy()).toEqual({ superseded: [oldKey] });
     });
 
+    test('supersede is matched per visit AND issue: one delivered replacement never clears another issue\'s old warning', async () => {
+      const { _closeResolvedAlerts } = require('../services/schedule-integrity-watchdog');
+      makeDbMock({ staleRows: [{ id: V(7), status: 'scheduled' }, { id: V(8), status: 'scheduled' }] });
+      const oldAnnual = key(V(7), 'annual_coverage_unverified:oldhash');
+      const oldManual = key(V(7), 'manual_series_stamp_missing:oldhash');
+      const newAnnual = key(V(7), 'annual_coverage_unverified:newhash');
+      const newManual = key(V(7), 'manual_series_stamp_missing:newhash');
+      // V(8): its manual-stamp issue is gone; only an annual issue is live.
+      const oldManual8 = key(V(8), 'manual_series_stamp_missing:oldhash');
+      const liveAnnual8 = key(V(8), 'annual_coverage_unverified:hash');
+      openKeysByPrefix({ 'prepay-coverage:': [oldAnnual, oldManual, oldManual8] });
+      await _closeResolvedAlerts({
+        now: NOW,
+        liveKeys: new Set([newAnnual, newManual, liveAnnual8]),
+        // The cap stopped the loop after the annual replacement.
+        deliveredKeys: new Set([newAnnual, liveAnnual8]),
+        overdueUnpricedRoots: new Set(),
+        horizonDay: '2099-12-31',
+        skipPrefixes: [],
+      });
+      expect(closedBy()).toEqual({ superseded: [oldAnnual], 'gap resolved': [oldManual8] });
+    });
+
     test('a replacement the per-run cap held back keeps the old warning open; the run that delivers it closes the old one', async () => {
       const row = unpricedChild({ id: V(7), estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100,
         annual_prepay_term_id: 'term-1', prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-01T12:00:00Z']] });
