@@ -2,15 +2,20 @@
  * server/services/scheduling/self-serve-notice.js — the self-serve notice
  * window (owner ruling 2026-09-23) that replaces the old "max 3
  * self-bookings per calendar day" cap: through a self-serve surface, a
- * customer can't book or move a visit starting within
- * SELF_SERVE_NOTICE_HOURS (default 24h) of now.
+ * customer can't book a slot starting within SELF_SERVE_NOTICE_HOURS
+ * (default 24h) of now, or move a visit that itself currently starts within
+ * SELF_SERVE_MOVE_NOTICE_HOURS (default 24h, independent of the book
+ * variable — split out 2026-09-28) of now.
  */
 const {
   DEFAULT_NOTICE_HOURS,
+  DEFAULT_MOVE_NOTICE_HOURS,
   selfServeNoticeMinutes,
+  selfServeMoveNoticeMinutes,
   earliestSelfServeStart,
   violatesSelfServeNotice,
   visitInsideNoticeWindow,
+  visitInsideMoveNoticeWindow,
 } = require('../services/scheduling/self-serve-notice');
 
 describe('selfServeNoticeMinutes', () => {
@@ -180,5 +185,105 @@ describe('SELF_SERVE_NOTICE_HOURS blank values (Codex r1 P2)', () => {
     expect(selfServeNoticeMinutes()).toBe(0);
     process.env.SELF_SERVE_NOTICE_HOURS = ' 0 ';
     expect(selfServeNoticeMinutes()).toBe(0);
+  });
+});
+
+describe('selfServeMoveNoticeMinutes — independent of SELF_SERVE_NOTICE_HOURS', () => {
+  const savedMove = process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+  const savedBook = process.env.SELF_SERVE_NOTICE_HOURS;
+  afterEach(() => {
+    if (savedMove === undefined) delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    else process.env.SELF_SERVE_MOVE_NOTICE_HOURS = savedMove;
+    if (savedBook === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
+    else process.env.SELF_SERVE_NOTICE_HOURS = savedBook;
+  });
+
+  test('defaults to 24 hours (1440 minutes) when unset', () => {
+    delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    expect(DEFAULT_MOVE_NOTICE_HOURS).toBe(24);
+    expect(selfServeMoveNoticeMinutes()).toBe(24 * 60);
+  });
+
+  test('an empty or whitespace value is UNSET — the 24-hour default applies', () => {
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = '';
+    expect(selfServeMoveNoticeMinutes()).toBe(24 * 60);
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = '   ';
+    expect(selfServeMoveNoticeMinutes()).toBe(24 * 60);
+  });
+
+  test('reads a custom SELF_SERVE_MOVE_NOTICE_HOURS at call time', () => {
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = '12';
+    expect(selfServeMoveNoticeMinutes()).toBe(12 * 60);
+  });
+
+  test('an explicit numeric zero disables the move window', () => {
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = '0';
+    expect(selfServeMoveNoticeMinutes()).toBe(0);
+  });
+
+  test('falls back to the default on garbage or negative input', () => {
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = 'not-a-number';
+    expect(selfServeMoveNoticeMinutes()).toBe(24 * 60);
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = '-3';
+    expect(selfServeMoveNoticeMinutes()).toBe(24 * 60);
+  });
+
+  test('is completely independent of SELF_SERVE_NOTICE_HOURS — NO fallback to it', () => {
+    // The production incident this PR fixes: setting the book var to 1h
+    // must NOT move the move window at all.
+    process.env.SELF_SERVE_NOTICE_HOURS = '1';
+    delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    expect(selfServeNoticeMinutes()).toBe(1 * 60);
+    expect(selfServeMoveNoticeMinutes()).toBe(24 * 60);
+
+    // And setting the move var must not affect the book var either.
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = '3';
+    expect(selfServeNoticeMinutes()).toBe(1 * 60);
+    expect(selfServeMoveNoticeMinutes()).toBe(3 * 60);
+  });
+});
+
+describe('visitInsideMoveNoticeWindow — mirrors visitInsideNoticeWindow against the move window', () => {
+  const now = new Date('2027-06-01T12:00:00Z'); // 08:00 EDT
+  const savedMove = process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+  const savedBook = process.env.SELF_SERVE_NOTICE_HOURS;
+  afterEach(() => {
+    if (savedMove === undefined) delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    else process.env.SELF_SERVE_MOVE_NOTICE_HOURS = savedMove;
+    if (savedBook === undefined) delete process.env.SELF_SERVE_NOTICE_HOURS;
+    else process.env.SELF_SERVE_NOTICE_HOURS = savedBook;
+  });
+
+  test('default 24h: a row inside the window is inside it, one outside is not', () => {
+    delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-01', window_start: '20:00' }, now)).toBe(true);
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-10', window_start: '09:00' }, now)).toBe(false);
+  });
+
+  test('a null row fails closed', () => {
+    expect(visitInsideMoveNoticeWindow(null, now)).toBe(true);
+  });
+
+  test('a UTC-midnight Date scheduled_date reads its ET calendar day literally', () => {
+    const scheduledDate = new Date('2027-06-01T00:00:00.000Z');
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: scheduledDate, window_start: '20:00' }, now)).toBe(true);
+  });
+
+  test('SELF_SERVE_NOTICE_HOURS=1 (the production incident) does NOT shrink the move window — a visit 3h out stays inside it', () => {
+    process.env.SELF_SERVE_NOTICE_HOURS = '1';
+    delete process.env.SELF_SERVE_MOVE_NOTICE_HOURS;
+    // 2027-06-01 11:00 ET is 3h out from 08:00 ET `now` — inside the
+    // default 24h move window even though the book window is 1h.
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-01', window_start: '11:00' }, now)).toBe(true);
+    // The book window (violatesSelfServeNotice / selfServeNoticeMinutes)
+    // would allow that same 3h-out start.
+    expect(violatesSelfServeNotice({ date: '2027-06-01', startTime: '11:00' }, now)).toBe(false);
+  });
+
+  test('a custom SELF_SERVE_MOVE_NOTICE_HOURS changes only the move boundary', () => {
+    process.env.SELF_SERVE_MOVE_NOTICE_HOURS = '2';
+    // Same-day 2h+1min out clears a 2-hour move notice.
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-01', window_start: '10:01' }, now)).toBe(false);
+    expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-01', window_start: '09:59' }, now)).toBe(true);
   });
 });

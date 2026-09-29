@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdminLayoutV2 from "./AdminLayoutV2";
 import { adminFetch } from "../utils/admin-fetch";
 import { loadEmailDrafts, updateEmailDrafts } from "../lib/emailDrafts";
+import { registerLeaveGuard } from "../lib/navigation-guard";
 
 vi.mock("../hooks/useIsMobile", () => ({ default: () => false }));
 vi.mock("../hooks/useFeatureFlag", () => ({
@@ -115,6 +116,42 @@ describe("AdminLayoutV2", () => {
     await screen.findByText("Signed out");
     expect(loadEmailDrafts(1).drafts.replies).toEqual({});
     expect(updateEmailDrafts(session, () => ({ replies: { fixture: "Late result" } }))).toBeNull();
+  });
+
+  // Sign-out calls navigate() from a plain button — no popstate, no <a
+  // href> click — so a page's own in-app draft guard (CustomersPageV2's
+  // guardLink/guardHistory) never sees it. It must go through the shared
+  // registry instead (client/src/lib/navigation-guard.js), the same one a
+  // draft-bearing page like CustomersPageV2 registers itself with.
+  it("asks the shared navigation guard before sign-out, and honors a decline", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    function DraftChild() {
+      const [open, setOpen] = React.useState(false);
+      React.useEffect(() => {
+        if (!open) return undefined;
+        return registerLeaveGuard(() => window.confirm("Discard the open draft?"));
+      }, [open]);
+      return <button onClick={() => setOpen(true)}>Open draft</button>;
+    }
+    render(<MemoryRouter initialEntries={["/admin/dashboard"]}><Routes>
+      <Route element={<AdminLayoutV2 />}><Route path="/admin/dashboard" element={<DraftChild />} /></Route>
+      <Route path="/admin/login" element={<div>Signed out</div>} />
+    </Routes></MemoryRouter>);
+    await screen.findByRole("button", { name: "Open draft" });
+    fireEvent.click(screen.getByRole("button", { name: "Open draft" }));
+
+    // Declined: sign-out is blocked, credentials and the page are untouched.
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Signed out")).not.toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBe("test-token");
+
+    // Confirmed: the same click now signs out.
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    await screen.findByText("Signed out");
+    expect(localStorage.getItem("waves_admin_token")).toBeNull();
   });
 
   it("sends an unauthenticated alias to login without mounting its child", async () => {
