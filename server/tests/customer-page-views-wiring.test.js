@@ -206,17 +206,57 @@ describe('customer page view wiring', () => {
     expect(mockRecord).not.toHaveBeenCalled();
   });
 
-  test('track: privacy headers are mounted ahead of the global /api limiter', () => {
+  test('track: the pre-parser guard is mounted ahead of the global /api limiter and body parsers', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../index.js'), 'utf8');
-    const headers = src.indexOf("app.use('/api/public/track', (req, res, next) => {");
+    const guard = src.indexOf("app.use('/api/public/track', require('./middleware/track-public-preparser').trackPublicPreparser);");
     const limiter = src.indexOf("app.use('/api/', limiter);");
-    expect(headers).toBeGreaterThan(-1);
-    expect(limiter).toBeGreaterThan(-1);
-    expect(headers).toBeLessThan(limiter);
-    const block = src.slice(headers, headers + 300);
-    expect(block).toContain("'Cache-Control', 'private, no-store'");
-    expect(block).toContain("'X-Robots-Tag', 'noindex, nofollow'");
-    expect(block).toContain("'Referrer-Policy', 'no-referrer'");
+    const json = src.indexOf('app.use(express.json(');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(limiter);
+    expect(guard).toBeLessThan(json);
+  });
+
+  describe('track pre-parser guard', () => {
+    const { trackPublicPreparser } = require('../middleware/track-public-preparser');
+    const run = (method, path, headers = {}) => {
+      const res = {
+        headers: {}, statusCode: 200,
+        set: jest.fn((k, v) => { res.headers[k] = v; return res; }),
+        status: jest.fn((c) => { res.statusCode = c; return res; }),
+        json: jest.fn(() => res),
+      };
+      const request = { method, path, headers: { ...headers } };
+      const next = jest.fn();
+      trackPublicPreparser(request, res, next);
+      return { res, next, request };
+    };
+    const PRIVACY = { 'Cache-Control': 'private, no-store', 'X-Robots-Tag': 'noindex, nofollow', 'Referrer-Policy': 'no-referrer' };
+
+    test('stamps privacy headers on every request', () => {
+      for (const [m, p] of [['GET', `/${TOKEN}`], ['POST', `/${TOKEN}/stops-ahead`], ['POST', '/bad/view']]) {
+        expect(run(m, p).res.headers).toEqual(PRIVACY);
+      }
+    });
+
+    test('POST /:token/view with a malformed token is a 404 before any parsing', () => {
+      const { res, next } = run('POST', '/nope/view', { 'content-type': 'application/json' });
+      expect(res.statusCode).toBe(404);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    test('POST /:token/view with a valid token drops Content-Type so the body is never parsed', () => {
+      const { next, request } = run('POST', `/${TOKEN}/view`, { 'content-type': 'application/json' });
+      expect(next).toHaveBeenCalled();
+      expect(request.headers['content-type']).toBeUndefined();
+    });
+
+    test('other track routes are untouched', () => {
+      const a = run('GET', '/nope');
+      expect(a.next).toHaveBeenCalled();
+      const b = run('POST', `/${TOKEN}/stops-ahead`, { 'content-type': 'application/json' });
+      expect(b.next).toHaveBeenCalled();
+      expect(b.request.headers['content-type']).toBe('application/json');
+    });
   });
 
   test('track: POST /:token/view is rate-limited like stops-ahead (router-level limiter)', () => {

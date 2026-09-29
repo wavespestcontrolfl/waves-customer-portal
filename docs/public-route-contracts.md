@@ -2482,6 +2482,22 @@ target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
 per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
 legacy 5-char codes still resolve).
+`/go/:code` (outside-link click redirect for prep-guide links to third-party
+sites — 302 to the registered destination / generic 404 with no enumeration
+leak; `noindex`, `no-store`, `Referrer-Policy: no-referrer` on EVERY status
+(302/404/429/500 — set before the limiter); mounts OUTSIDE
+the global `/api/` limiter so it carries its own 120/min per-key limiter (the
+`/l` budget). **Not an open redirect**: the destination is ONLY a
+pre-registered `outbound_links` row looked up by a 20-hex code that is the
+sha256 of the target URL (row must hash back to its code, http(s) only);
+nothing in the request names or changes the target. The query carries only an
+HMAC-signed attribution context (template key, customer id, visit or project
+id, surface — row ids only, NEVER the bearer prep token, which would land in
+the request log; it is resolved to ids at render time) — an invalid signature is ignored, never trusted. Human clicks log
+to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs still redirect but
+log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
+is on, but the route stays live regardless of the gate so links already sent
+keep working. Destinations are never tagged or altered.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
 (`server/routes/og-preview.js`, link-preview images, owner 2026-09-27: the
 picture iMessage/SMS/email crawlers show under a texted or emailed customer
@@ -3047,9 +3063,12 @@ page calls it once per token on its first successful load, never on the 30 s
 poll. A lookup failure on `/view` is logged code-only (`logViewFailure`,
 never `err.message`, which can carry the bound token) and still answers 204;
 it is never forwarded to the global error handler. The privacy headers are
-also stamped by an `app.use('/api/public/track', …)` mount in
-`server/index.js` AHEAD of the global `/api/` limiter, so a limiter 429 on the
-bearer URL carries them too. Neither companion may grow beyond its single
+also stamped by the `trackPublicPreparser` mount
+(`server/middleware/track-public-preparser.js`) in `server/index.js` AHEAD of
+the global `/api/` limiter and the shared body parsers, so a limiter 429 on the
+bearer URL carries them too. The same guard answers `/view`'s malformed-token
+404 before any body parsing and drops the request Content-Type so the ignored
+body is never parsed (a malformed / oversized body cannot become a 400/413). Neither companion may grow beyond its single
 bounded write).
 `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
 + `POST /:token/confirm`; the destination the 24h reminder and booking
