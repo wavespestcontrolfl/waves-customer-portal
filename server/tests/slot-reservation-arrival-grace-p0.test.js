@@ -16,10 +16,20 @@
  *      (utils/slot-offer-token.js), never a fresh live env read — so a
  *      grace change between OFFER and RESERVE never affects an in-flight
  *      offer either.
+ *
+ * Codex round 3: the first cut of part 2 bumped the slotId's canonical
+ * string and wire shape UNCONDITIONALLY, so an ungraced (grace 0) offer —
+ * every offer before this lane existed, and the overwhelming majority
+ * afterward — broke at deploy, mid-checkout, for real customers. Fixed to
+ * be per-offer opt-in: an ungraced offer signs/appends the EXACT v2 shape
+ * origin/main always produced (see slot-offer-token.test.js for the
+ * byte-for-byte comparison); only a genuinely graced offer takes the new
+ * v3 shape. Covered here too, end to end through the same reconstruction
+ * reserveSlot's own verifySlotOffer call makes.
  */
 const fs = require('fs');
 const path = require('path');
-const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, verifySlotOffer } = require('../utils/slot-offer-token');
 
 // Balance parens from a `verifyArrivalCapacity(` occurrence to its matching
 // close — same approach as verify-arrival-capacity-grace-callers-guard.test.js.
@@ -102,12 +112,26 @@ describe('reserveSlot applies the grace baked into the offer token, not a live r
     expect(splitSignedSlotId(slotId).arrivalGrace).toBe(0);
   });
 
-  test('a pre-v3 (two-segment) offer — from before this lane — fails to split at all, never silently defaults through as valid', () => {
-    const offer = signSlotOffer({
+  // Codex round 3 on #5314: the FIRST cut of this fix bumped the canonical
+  // string and slotId shape unconditionally, so an ungraced (grace 0) offer
+  // — the overwhelming common case, and the ONLY case before this lane
+  // existed — broke at deploy, mid-checkout, for real customers. An ungraced
+  // offer must verify exactly as it did on origin/main: the 2-segment
+  // `<base>.<exp>.<sig>` shape, reconstructed and checked the same way
+  // reserveSlot's own verifySlotOffer call does.
+  test('an ungraced offer keeps the origin/main 2-segment shape and verifies through the exact reserveSlot reconstruction', () => {
+    const payload = {
       surface: 'estimate', scopeId: 'est-1', date: '2027-06-01',
       startMinutes: 600, technicianId: 'tech-1', durationMinutes: 60,
+    };
+    const offer = signSlotOffer(payload); // no arrivalGrace at all
+    const slotId = appendOfferToSlotId('2027-06-01_10-00_tech-1', offer);
+    expect((slotId.match(/\./g) || []).length).toBe(2); // base.exp.sig — no grace segment
+    const parsed = splitSignedSlotId(slotId);
+    expect(parsed).toEqual({
+      baseSlotId: '2027-06-01_10-00_tech-1', exp: offer.exp, arrivalGrace: 0, sig: offer.sig,
     });
-    const legacyShapeId = `2027-06-01_10-00_tech-1.${offer.exp}.${offer.sig}`;
-    expect(splitSignedSlotId(legacyShapeId)).toBeNull();
+    // The exact reconstruction reserveSlot's own verifySlotOffer call makes.
+    expect(verifySlotOffer({ ...payload, exp: parsed.exp, arrivalGrace: parsed.arrivalGrace }, parsed.sig)).toBe(true);
   });
 });

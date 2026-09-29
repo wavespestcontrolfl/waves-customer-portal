@@ -872,10 +872,24 @@ ONLY `verifyArrivalCapacity` caller that passes `arrivalGraceMinutes`
 file's own `commitReservation` never do), and it reads the EXACT grace that
 justified the offer, not a fresh live env read: `arrivalGrace` rides as its
 own field in the estimate surface's signed slot offer
-(`utils/slot-offer-token.js` — canonical string bumped to v3, the value also
-carried in cleartext inside the slotId, `<base>.<exp>.<arrivalGrace>.<sig>`,
-so `reserveSlot` can read it back and `verifySlotOffer` still catches any
-tamper). `signCustomerFacingSlots` signs a non-zero grace only for a slot
+(`utils/slot-offer-token.js`), carried in cleartext inside the slotId so
+`reserveSlot` can read it back and `verifySlotOffer` still catches any
+tamper. **Opt-in PER OFFER, not a blanket format bump** (Codex round 3,
+#5314 — the first cut bumped the canonical string and slotId shape for
+EVERY offer unconditionally, which broke every in-flight estimate offer at
+deploy even with grace dark, violating "default 0 = byte-identical to
+before this lane" for the wire format itself): an ungraced offer
+(`arrivalGrace` 0 or omitted — every `/book` offer, and every estimate
+offer while capacity/grace is off or the date is excluded) signs and
+appends the EXACT `<base>.<exp>.<sig>` v2 shape this module always
+produced, byte for byte identical to origin/main's minting for the same
+inputs — it verifies under both the old and new code, so an offer straddling
+this deploy never breaks. Only a genuinely graced offer (`arrivalGrace` > 0)
+takes the new `<base>.<exp>.<arrivalGrace>.<sig>` v3 shape, since only it
+needs somewhere for the extra field to ride; a graced offer in flight at
+the exact deploy instant fails once, the same accepted trade the file's
+original v1→v2 bump made for every offer — but that window is now only the
+rare graced case. `signCustomerFacingSlots` signs a non-zero grace only for a slot
 carrying `routeMode: 'arrival_windows'` (stamped by `classifySlot` from
 find-time's own `route_mode`, stripped before the slot ever reaches the
 client) — the one marker proving a slot actually passed through
