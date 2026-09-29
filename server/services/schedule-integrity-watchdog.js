@@ -331,17 +331,15 @@ async function runInner({ now = new Date() } = {}) {
       throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
     }
     // A deduped result (the standing row already exists and either matched
-    // or was just refreshed) is not a NEW alert for this run's count — nor is
-    // one written quiet, or not written at all, because its subject had
-    // already moved on (admin-alert-relevance.js ringTimeCheck): nothing rang.
-    if (created.deduped || created.suppressed || require('./admin-alert-relevance').quietedAtRingTime(created)) return false;
+    // or was just refreshed) is not a NEW alert for this run's count.
+    if (created.deduped) return false;
     alerted += 1;
     return true;
   };
 
   // Unpriced series ring FIRST: they are same-day money loss (a visit can
   // complete and invoice at $0 today).
-  const unpricedAlerts = Array.from(unpricedByRoot, ([root, v]) => {
+  const alerts = Array.from(unpricedByRoot, ([root, v]) => {
     const d = v.service_date;
     return [
       `unpriced-series:${root}`,
@@ -351,7 +349,6 @@ async function runInner({ now = new Date() } = {}) {
       { scheduled_service_id: v.id, series_root_id: root, customer_id: v.customer_id || null, next_visit_date: d },
     ];
   });
-  const alerts = [...unpricedAlerts];
 
   // Class 2 — recurring-lawn customers invisible to the Monday irrigation
   // email (owner directive 2026-08-05: check daily). The email's audience is
@@ -417,7 +414,7 @@ async function runInner({ now = new Date() } = {}) {
   }));
 
   // Preserve the morning lawn-email class before adding coverage-review volume.
-  const prepayAlerts = prepayGaps.map(({ row, issue }) => {
+  alerts.push(...prepayGaps.map(({ row, issue }) => {
     const evidenceKey = createHash('sha256').update(JSON.stringify([
       row.row_revision, row.service_type, row.prepaid_amount, row.prepaid_method, row.prepaid_at, row.annual_prepay_term_id,
       row.manual_series_payment_evidence, row.manual_series_allocation_evidence,
@@ -433,8 +430,7 @@ async function runInner({ now = new Date() } = {}) {
       }[issue],
       { scheduled_service_id: row.id, customer_id: row.customer_id, issue },
     ];
-  });
-  alerts.push(...prepayAlerts);
+  }));
 
   // Morning lawn-email gaps must page before any historical acceptance backlog.
   let acceptedGaps = [];
@@ -445,7 +441,7 @@ async function runInner({ now = new Date() } = {}) {
     acceptedScheduleCheckFailed = true;
     logger.error(`[schedule-integrity] accepted-plan check failed: ${err.message}`);
   }
-  const acceptedAlerts = acceptedGaps.map((gap) => [
+  alerts.push(...acceptedGaps.map((gap) => [
       // Stable per estimate+family — NOT the evidenceKey (that hashes every
       // family row's row_revision/scheduled_date and churns on every
       // routine edit, which minted a fresh row daily for the same standing
@@ -459,36 +455,11 @@ async function runInner({ now = new Date() } = {}) {
       { estimate_id: gap.estimateId, customer_id: gap.customerId, issues: gap.issues,
         expected_pattern: gap.pattern, expected_visits: gap.expectedVisits, appointment_ids: gap.appointmentIds },
       { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}`, refreshOnDedupe: true, dedupeVersion: gap.evidenceKey },
-  ]);
-  alerts.push(...acceptedAlerts);
+  ]));
 
-  let capHit = false;
   for (const alert of alerts) {
-    if (capped()) { capHit = true; break; }
+    if (capped()) break;
     await ring(...alert);
-  }
-
-  // A gap this scan no longer finds was fixed, or its evidence changed and
-  // the scan raised a new key above: its standing bell is retired rather than
-  // left unread beside the fix (admin-alert-relevance.js, ADMIN_ALERT_RELEVANCE).
-  // Only after a complete scan whose every current key was raised: a failed
-  // accepted-plan check proves nothing, and a run stopped at its cap has not
-  // yet raised the replacements. Advisory — a failure never fails the run.
-  const cleared = { unpricedSeries: 0, prepayCoverage: 0, acceptedSchedule: 0 };
-  if (!capHit) {
-    try {
-      const { retireKeysNoLongerRaised } = require('./admin-alert-relevance');
-      const reason = 'The schedule watchdog no longer finds this gap';
-      // The unpriced-series bell stands for EVERY unpriced upcoming visit of
-      // its series root; only this scan of the whole root can say it is gone.
-      cleared.unpricedSeries = await retireKeysNoLongerRaised({ prefix: 'unpriced-series:', liveKeys: unpricedAlerts.map(([key]) => key), reason: 'The schedule watchdog no longer finds an unpriced upcoming visit in this series', now });
-      cleared.prepayCoverage = await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: prepayAlerts.map(([key]) => key), reason, now });
-      if (!acceptedScheduleCheckFailed) {
-        cleared.acceptedSchedule = await retireKeysNoLongerRaised({ prefix: 'accepted-schedule:', liveKeys: acceptedAlerts.map(([key]) => key), reason, now });
-      }
-    } catch (err) {
-      logger.warn(`[schedule-integrity] clearing fixed gaps failed: ${err.message}`);
-    }
   }
 
   return {
@@ -502,7 +473,6 @@ async function runInner({ now = new Date() } = {}) {
     acceptedScheduleGaps: acceptedGaps.length,
     acceptedScheduleCheckFailed,
     alerted,
-    cleared,
   };
 }
 

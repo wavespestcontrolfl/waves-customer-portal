@@ -268,7 +268,7 @@ function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
 // its own complexity down; `service` is `this` from the caller.
 // A caller with NO ringGate still gets one when its row is in
 // admin-alert-relevance.js's class table (ADMIN_ALERT_RELEVANCE, default on):
-// a row whose customer/visit/invoice/lead has already moved on is written
+// a row whose visit, series move or lead has already moved on is written
 // activity-only with metadata.retired, through this same seam.
 function createPlainAdmin(service, { category, title, body, createOpts, ringGate, callerTrx }) {
   const relevance = typeof ringGate === 'function' ? null
@@ -279,10 +279,6 @@ function createPlainAdmin(service, { category, title, body, createOpts, ringGate
   const gate = relevance ? relevance.gate : ringGate;
   const gated = async (conn) => {
     const ring = await gate(conn);
-    // A re-arm class whose subject has already moved on is not written at
-    // all (admin-alert-relevance.js ringTimeCheck): success without a row,
-    // the same sentinel an internal-test suppression returns.
-    if (!ring && relevance?.skip()) return { id: null, suppressed: true };
     // A ring stamps its own rungAt (admin-alerts-ring-v2 follow-up):
     // findPriorRungRow's 7-day baseline reads this, not created_at, so a
     // later refresh of a DIFFERENT row can find this one as "the prior

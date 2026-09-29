@@ -1,7 +1,9 @@
 // Admin alert relevance (owner ruling 2026-09-28: "we don't want garbage"): an
-// unread admin bell clears itself when the customer / visit / invoice / estimate
-// / lead it is about has moved on, and a fresh row that has ALREADY moved on is
-// written activity-only through notifyAdmin's existing ringGate seam.
+// unread admin bell clears itself when the visit / series move / lead it is
+// about has moved on, and a fresh row that has ALREADY moved on is written
+// activity-only through notifyAdmin's existing ringGate seam. The rule table is
+// deliberately narrow (stale_visit, series_move, new_lead); alerts whose emitter
+// re-raises a stable key are the emitter's to clear and must stay untouched.
 //
 // The fake db below is a thenable knex-chain stub over in-memory mockTables: it
 // honors where({..}), whereNull, whereIn, where('id','>',x) and the notification
@@ -51,10 +53,8 @@ jest.mock('../models/db', () => {
       if (text === 'link IS NOT DISTINCT FROM ?') conds.push((r) => (r.link ?? null) === (args[0] ?? null));
       if (text === 'metadata IS NOT DISTINCT FROM ?::jsonb') conds.push((r) => canon(meta(r)) === canon(args[0] == null ? null : JSON.parse(args[0])));
       if (text === "metadata->'retired'->>'at' = ?") conds.push((r) => meta(r)?.retired?.at === args[0]);
-      // Clear-on-absence: bell-visible, under a key prefix, not a key raised this run.
+      // The candidate query's bell-visible filter.
       if (text === "COALESCE(metadata->>'feed', '') <> 'activity'") conds.push((r) => meta(r)?.feed !== 'activity');
-      if (text === "left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?") conds.push((r) => String(meta(r)?.dedupeKey || '').slice(0, args[0]) === args[1]);
-      if (text === "NOT (metadata->>'dedupeKey' = ANY(?::text[]))") conds.push((r) => !args[0].includes(meta(r)?.dedupeKey));
       return b;
     };
     const hit = () => (mockTables[table] || []).filter((r) => conds.every((c) => c(r)));
@@ -71,14 +71,8 @@ jest.mock('../models/db', () => {
         applied = hit();
         applied.forEach((r) => {
           const { metadata, ...rest } = patch;
-          // COALESCE(read_at, ?): a person's read stands, an unread row takes the bound time.
-          if (rest.read_at && rest.read_at.__raw && /COALESCE\(read_at/.test(rest.read_at.__raw)) rest.read_at = r.read_at ?? rest.read_at.bindings[0];
           Object.assign(r, rest);
-          if (metadata && metadata.__raw && /jsonb_build_object\('retired'/.test(metadata.__raw)) {
-            // Clear-on-absence: the stamp takes the row's own key, and the key is freed.
-            const meta = parse(r.metadata);
-            r.metadata = JSON.stringify({ ...meta, retired: { ...JSON.parse(metadata.bindings[0]), dedupeKey: meta.dedupeKey ?? null }, dedupeKey: null });
-          } else if (metadata && metadata.__raw && /- 'retired'/.test(metadata.__raw)) {
+          if (metadata && metadata.__raw && /- 'retired'/.test(metadata.__raw)) {
             const { retired: _dropped, ...kept } = parse(r.metadata);
             r.metadata = JSON.stringify({ ...kept, ...(metadata.bindings?.[0] ? JSON.parse(metadata.bindings[0]) : {}) });
           } else if (metadata && metadata.__raw) r.metadata = JSON.stringify({ ...parse(r.metadata), ...JSON.parse(metadata.bindings[0]) });
@@ -127,7 +121,7 @@ jest.mock('../models/db', () => {
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const {
-  runAdminAlertRelevanceSweep, classify, loadSubjects, subjectFor, refsFromRow, ringTimeCheck, retireKeysNoLongerRaised,
+  runAdminAlertRelevanceSweep, classify, loadSubjects, subjectFor, refsFromRow, ringTimeCheck,
 } = require('../services/admin-alert-relevance');
 const { adminAlertRelevanceLive } = require('../config/feature-gates');
 
@@ -135,34 +129,24 @@ const TODAY = '2026-09-28';
 const NOW = new Date('2026-09-28T16:00:00Z');
 const uid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const CUST = uid(1);
-const CUST2 = uid(8);
 const VISIT = uid(2);
 const PARENT = uid(3);
 const INV = uid(4);
-const INV2 = uid(5);
 const EST = uid(6);
 const LEAD = uid(7);
+const OPEN_VISIT = uid(9);
 
 let seq = 0;
 const note = (over = {}) => ({
   id: uid(100 + (seq += 1)), recipient_type: 'admin', read_at: null, created_at: new Date('2026-09-27T12:00:00Z'),
   link: null, ...over, metadata: JSON.stringify(over.metadata || {}),
 });
-// A churn stamp means the churned stage unless a test says otherwise (a
-// reactivated customer keeps a stale churned_at on a live stage).
-const customer = (over = {}) => ({ id: CUST, pipeline_stage: over.churned_at ? 'churned' : 'active_customer', churned_at: null, deleted_at: null, ...over });
-const visit = (over = {}) => ({
-  id: VISIT, customer_id: CUST, status: 'pending', is_recurring: true, recurring_parent_id: null,
-  estimated_price: null, primary_line_price: null, prepaid_amount: null, prepaid_method: null,
-  first_application_invoice_id: null, first_application_invoice_status: null,
-  parent_estimated_price: null, parent_primary_line_price: null, ...over,
-});
-const invoice = (over = {}) => ({ id: INV, customer_id: CUST, status: 'draft', ...over });
+const visit = (over = {}) => ({ id: VISIT, customer_id: CUST, status: 'pending', ...over });
 
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.ADMIN_ALERT_RELEVANCE;
-  mockTables = { notifications: [], customers: [customer()], scheduled_services: [], 'scheduled_services as ss': [], invoices: [], leads: [], estimates: [] };
+  mockTables = { notifications: [], scheduled_services: [], 'scheduled_services as ss': [], leads: [], estimates: [] };
   mockQueries = [];
   mockHooks = {};
   mockFailTable = null;
@@ -177,6 +161,12 @@ async function reasonFor(row) {
   return { cls: cls.key, reason: cls.rule(subjectFor(row, data, TODAY)) || null };
 }
 
+const staleNote = (id, over = {}) => note({ id, category: 'alert', metadata: { dedupeKey: `stale-visit:${id}`, scheduled_service_id: VISIT, customer_id: CUST, ...over } });
+const leadNote = (extra = {}) => note({
+  category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD }, ...extra },
+});
+const lead = (over = {}) => ({ id: LEAD, status: 'new', converted_at: null, deleted_at: null, created_at: new Date('2026-09-27T10:00:00Z'), customer_id: CUST, estimate_id: null, ...over });
+
 describe('kill switch', () => {
   test.each([[undefined, true], ['', true], ['on', true], ['true', true], ['off', false], ['OFF', false], [' False ', false], ['0', false], ['false', false]])(
     'ADMIN_ALERT_RELEVANCE=%j -> live=%s', (value, live) => {
@@ -189,28 +179,32 @@ describe('subject references are parsed defensively', () => {
   test('metadata keys, payload and link params all resolve; bad ids never throw', () => {
     const refs = refsFromRow(note({
       link: `/admin/dispatch?tab=schedule&appointment=${VISIT}&invoice=${INV}&estimateId=${EST}&lead=${LEAD}&customerId=${CUST}`,
-      metadata: { divergingSiblingIds: [PARENT, 'not-a-uuid', 42, null], stampedInvoiceId: INV2 },
+      metadata: { conflicts: [{ id: PARENT, date: '2026-10-12' }, { id: 'not-a-uuid' }, null], preservedOccurrences: [{ id: 42 }, null] },
     }));
-    expect(refs).toMatchObject({ customerId: CUST, visitId: VISIT, estimateId: EST, leadId: LEAD });
+    expect(refs).toMatchObject({ visitId: VISIT, estimateId: EST, leadId: LEAD });
     expect(refs.visitIds).toEqual([VISIT, PARENT]);
-    expect(refs.invoiceIds).toEqual([INV, INV2]);
-    expect(refsFromRow(note({ metadata: { payload: { leadId: LEAD, customerId: CUST } } }))).toMatchObject({ leadId: LEAD, customerId: CUST });
+    // Customers and invoices are not subjects of any class in the table.
+    expect(refs).not.toHaveProperty('customerId');
+    expect(refs).not.toHaveProperty('invoiceIds');
+    expect(refsFromRow(note({ metadata: { payload: { leadId: LEAD, customerId: CUST } } }))).toMatchObject({ leadId: LEAD });
     const junk = refsFromRow({ link: 'http://[bad', metadata: '{not json', category: 'alert' });
-    expect(junk).toMatchObject({ customerId: null, visitId: null, estimateId: null, leadId: null, visitIds: [], invoiceIds: [] });
-    expect(refsFromRow({ metadata: { customerId: { $ne: 1 }, scheduledServiceId: ['x'] } })).toMatchObject({ customerId: null, visitId: null });
+    expect(junk).toMatchObject({ visitId: null, estimateId: null, leadId: null, visitIds: [] });
+    expect(refsFromRow({ metadata: { scheduledServiceId: ['x'], estimateId: { $ne: 1 } } })).toMatchObject({ visitId: null, estimateId: null });
   });
 
   test('a batch reads each table once, and a row with only bad ids reads nothing', async () => {
-    mockTables.scheduled_services = [];
     mockTables['scheduled_services as ss'] = [visit(), visit({ id: PARENT })];
-    mockTables.invoices = [invoice()];
+    mockTables.leads = [lead({ estimate_id: EST })];
+    mockTables.estimates = [{ id: EST, status: 'draft', archived_at: null, sent_at: null, customer_id: CUST }];
     await loadSubjects([
-      note({ category: 'alert', metadata: { dedupeKey: 'unpriced-series:a', scheduled_service_id: VISIT, customer_id: CUST } }),
-      note({ category: 'alert', metadata: { dedupeKey: 'stale-visit:b', scheduled_service_id: PARENT, customer_id: CUST } }),
+      note({ category: 'alert', metadata: { dedupeKey: 'stale-visit:a', scheduled_service_id: VISIT } }),
+      note({ category: 'alert', metadata: { dedupeKey: 'stale-visit:b', scheduled_service_id: PARENT } }),
+      leadNote(),
       note({ category: 'billing', metadata: { invoiceId: INV } }),
     ]);
     const counts = mockQueries.reduce((a, q) => ({ ...a, [q.table]: (a[q.table] || 0) + 1 }), {});
-    expect(counts).toEqual({ 'scheduled_services as ss': 1, invoices: 1, customers: 1 });
+    // Visits, leads, the lead's estimate, and the lead customer's latest booked visit.
+    expect(counts).toEqual({ 'scheduled_services as ss': 1, leads: 1, estimates: 1, scheduled_services: 1 });
     mockQueries = [];
     await loadSubjects([note({ metadata: { scheduledServiceId: 'nope', customerId: 'nope' } })]);
     expect(mockQueries).toEqual([]);
@@ -218,93 +212,39 @@ describe('subject references are parsed defensively', () => {
 });
 
 describe('class rules', () => {
-  const divergence = (metadata = {}) => note({
-    category: 'billing', link: `/admin/invoices?invoice=${INV}`,
-    metadata: { dedupeKey: `first_application_sibling_divergence:${EST}:${INV}:x`, alertKind: 'diverged', customerId: CUST, invoiceId: INV, stampedInvoiceId: INV, ...metadata },
-  });
-
-  test('first-application divergence: retires only when the customer left AND the invoice is an unsent draft or void', async () => {
-    mockTables.customers = [customer({ churned_at: new Date() })];
-    for (const status of ['draft', 'void']) {
-      mockTables.invoices = [invoice({ status })];
-      expect(await reasonFor(divergence())).toMatchObject({ cls: 'first_application_divergence', reason: expect.stringContaining('Customer left') });
-    }
-    mockTables.customers = [customer({ deleted_at: new Date() })];
-    mockTables.invoices = [invoice()];
-    expect((await reasonFor(divergence())).reason).toEqual(expect.any(String));
-  });
-
-  test('first-application divergence: money paid, processing, sent or refunded keeps ringing — and so do other alert kinds', async () => {
-    mockTables.customers = [customer({ churned_at: new Date() })];
-    for (const status of ['paid', 'prepaid', 'processing', 'sent', 'viewed', 'refunded', 'scheduled', 'sending']) {
-      mockTables.invoices = [invoice({ status })];
-      expect((await reasonFor(divergence())).reason).toBeNull();
-    }
-    mockTables.invoices = [invoice()];
-    for (const alertKind of ['paid_never_ran', 'payment_pending_never_ran', undefined]) {
-      expect((await reasonFor(divergence({ alertKind }))).reason).toBeNull();
-    }
-    // Governing replacement is a draft but the stamped invoice was actually sent: one live money invoice keeps it ringing.
-    mockTables.invoices = [invoice({ id: INV }), invoice({ id: INV2, status: 'sent' })];
-    expect((await reasonFor(divergence({ stampedInvoiceId: INV2 }))).reason).toBeNull();
-    // Invoice row missing or not referenced: cannot prove no money is involved.
-    mockTables.invoices = [];
-    expect((await reasonFor(divergence())).reason).toBeNull();
-    mockTables.invoices = [invoice()];
-    expect((await reasonFor({ ...divergence({ invoiceId: null, stampedInvoiceId: null }), link: '/admin/estimates' })).reason).toBeNull();
-  });
-
-  test('first-application divergence: a customer who is still here — or merely paused — keeps it ringing', async () => {
-    mockTables.invoices = [invoice()];
-    mockTables.customers = [customer()];
-    expect((await reasonFor(divergence())).reason).toBeNull();
-    mockTables.customers = [customer({ paused_at: new Date(), status: 'paused' })];
-    expect((await reasonFor(divergence())).reason).toBeNull();
-  });
-
-  const prepay = (customerId = CUST) => note({ category: 'alert', metadata: { dedupeKey: `prepay-coverage:${VISIT}:annual_coverage_unverified:x`, scheduled_service_id: VISIT, customer_id: customerId } });
-
-  test('an unpriced-series bell is not judged here: it stands for every unpriced visit of its series root and names one, so only the watchdog\'s own scan of the root clears it', async () => {
-    const unpriced = note({ category: 'alert', metadata: { dedupeKey: `unpriced-series:${PARENT}`, scheduled_service_id: VISIT, customer_id: CUST, series_root_id: PARENT } });
-    expect(classify(unpriced)).toBeNull();
+  test.each([
+    ['unpriced-series:', 'alert', { series_root_id: PARENT }],
+    ['prepay-coverage:', 'alert', {}],
+    ['accepted-schedule:', 'alert', { estimate_id: EST }],
+    ['first_application_sibling_divergence:', 'billing', { alertKind: 'diverged', invoiceId: INV, stampedInvoiceId: INV }],
+    ['estimate_hot_view:', 'estimate_hot_view', { estimateId: EST }],
+  ])('%s rows are their emitter\'s to clear: not classified, and the sweep never touches them', async (prefix, category, extra) => {
+    const row = note({ category, metadata: { dedupeKey: `${prefix}${VISIT}:x`, scheduled_service_id: VISIT, customer_id: CUST, ...extra } });
+    expect(classify(row)).toBeNull();
+    // Even with every record it names closed or gone, nothing here retires it.
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
-    mockTables.customers = [customer({ churned_at: new Date() })];
-    mockTables.notifications = [unpriced];
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 0 });
-    expect(unpriced.read_at).toBeNull();
+    mockTables.estimates = [{ id: EST, status: 'accepted', archived_at: new Date(), sent_at: null, customer_id: CUST }];
+    mockTables.notifications = [row];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0, byClass: {} });
+    expect(row.read_at).toBeNull();
+    expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 
-  test('customer left is the live churned stage: a legacy churned row with no date has left; a reactivated customer who still carries an old churn date has not', async () => {
-    mockTables['scheduled_services as ss'] = [visit()];
-    mockTables.customers = [customer({ pipeline_stage: 'churned' })];
-    expect((await reasonFor(prepay())).reason).toEqual('Customer left');
-    mockTables.customers = [customer({ churned_at: new Date('2026-06-01T12:00:00Z'), pipeline_stage: 'active_customer' })];
-    expect((await reasonFor(prepay())).reason).toBeNull();
-  });
-
-  test('a merged-away (soft-deleted) profile frozen in the alert is not "customer left" when the live visit now belongs to the survivor', async () => {
-    mockTables.customers = [customer(), customer({ id: CUST2, deleted_at: new Date() })];
-    mockTables['scheduled_services as ss'] = [visit({ customer_id: CUST })];
-    expect((await reasonFor(prepay(CUST2))).reason).toBeNull();
-  });
-
-  test.each([['stale-visit:', 'stale_visit', false], ['prepay-coverage:', 'prepay_coverage', true]])('%s alerts retire when the visit closed; customer left retires it too: %p', async (prefix, key, leftRetires) => {
-    const row = note({ category: 'alert', metadata: { dedupeKey: `${prefix}${VISIT}:x`, scheduled_service_id: VISIT, customer_id: CUST } });
+  test('stale visit: retires only when its visit is closed, never-ran or gone — nothing about the customer', async () => {
+    const row = staleNote(uid(400));
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
-    expect(await reasonFor(row)).toEqual({ cls: key, reason: null });
-    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    expect(await reasonFor(row)).toEqual({ cls: 'stale_visit', reason: null });
+    for (const status of ['completed', 'cancelled', 'skipped']) {
+      mockTables['scheduled_services as ss'] = [visit({ status })];
+      expect((await reasonFor(row)).reason).toEqual(expect.stringContaining('no longer open'));
+    }
+    // The visit row is gone.
+    mockTables['scheduled_services as ss'] = [];
     expect((await reasonFor(row)).reason).toEqual(expect.stringContaining('no longer open'));
-    mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
-    mockTables.customers = [customer({ churned_at: new Date() })];
-    // The stale-visit emitter is gone, so nothing could raise it again: churn alone never settles it.
-    expect((await reasonFor(row)).reason).toBe(leftRetires ? 'Customer left' : null);
-  });
-
-  test('accepted recurring plan review retires only when the customer left', async () => {
-    const row = note({ category: 'alert', metadata: { dedupeKey: `accepted-schedule:${EST}:pest`, customer_id: CUST, estimate_id: EST } });
-    expect(await reasonFor(row)).toEqual({ cls: 'accepted_schedule', reason: null });
-    mockTables.customers = [customer({ deleted_at: new Date() })];
-    expect((await reasonFor(row)).reason).toBe('Customer left');
+    // A rescheduled visit is still open; a bell that names no visit is never judged closed.
+    mockTables['scheduled_services as ss'] = [visit({ status: 'rescheduled' })];
+    expect((await reasonFor(row)).reason).toBeNull();
+    expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'stale-visit:z' } }))).reason).toBeNull();
   });
 
   const move = (metadata = {}) => note({
@@ -324,9 +264,8 @@ describe('class rules', () => {
       .toEqual(expect.stringContaining('passed'));
     mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' })];
     expect((await reasonFor(move({ overlapDates: [], conflicts: [{ id: VISIT, date: '2026-10-05' }] }))).reason).toEqual(expect.stringContaining('closed'));
-    // Never on churn alone: the card is written once, so a reactivated customer would keep its work with no card.
+    // Never on the customer's account: the card is written once per move, and only the visits and dates decide it.
     mockTables['scheduled_services as ss'] = [visit()];
-    mockTables.customers = [customer({ churned_at: new Date() })];
     expect((await reasonFor(move())).reason).toBeNull();
   });
 
@@ -338,36 +277,16 @@ describe('class rules', () => {
   });
 
   test('series move: cancelling only the moved visit keeps the alert while a conflict or preserved occurrence it named is still open', async () => {
-    const named = move({ overlapDates: [], conflicts: [{ id: PARENT, date: '2026-10-12' }], preservedOccurrences: [{ id: uid(9), date: '2026-11-09' }] });
-    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'pending' }), visit({ id: uid(9), status: 'completed' })];
+    const named = move({ overlapDates: [], conflicts: [{ id: PARENT, date: '2026-10-12' }], preservedOccurrences: [{ id: OPEN_VISIT, date: '2026-11-09' }] });
+    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'pending' }), visit({ id: OPEN_VISIT, status: 'completed' })];
     expect((await reasonFor(named)).reason).toBeNull();
-    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'cancelled' }), visit({ id: uid(9), status: 'completed' })];
+    mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' }), visit({ id: PARENT, status: 'cancelled' }), visit({ id: OPEN_VISIT, status: 'completed' })];
     expect((await reasonFor(named)).reason).toEqual(expect.stringContaining('closed'));
   });
 
   test('a schedule_conflict row that is not a series move is not in the table', () => {
     expect(classify(note({ category: 'schedule_conflict', metadata: { scheduledServiceId: VISIT } }))).toBeNull();
   });
-
-  test.each([['accepted', true], ['declined', true], ['expired', true], ['viewed', false], ['sent', false]])(
-    'estimate hot view: status %s -> retired=%s', async (status, retired) => {
-      mockTables.estimates = [{ id: EST, status, archived_at: null, sent_at: null, customer_id: CUST }];
-      const row = note({ category: 'estimate_hot_view', link: `/admin/estimates?estimateId=${EST}`, metadata: { dedupeKey: `estimate_hot_view:${EST}`, estimateId: EST } });
-      expect((await reasonFor(row)).reason !== null).toBe(retired);
-    });
-
-  test('estimate hot view: an archived estimate retires; a missing one is unknown', async () => {
-    const row = note({ category: 'estimate_hot_view', metadata: { estimateId: EST } });
-    mockTables.estimates = [{ id: EST, status: 'viewed', archived_at: new Date(), sent_at: null, customer_id: CUST }];
-    expect((await reasonFor(row)).reason).toEqual(expect.stringContaining('archived'));
-    mockTables.estimates = [];
-    expect((await reasonFor(row)).reason).toBeNull();
-  });
-
-  const leadNote = (extra = {}) => note({
-    category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD }, ...extra },
-  });
-  const lead = (over = {}) => ({ id: LEAD, status: 'new', converted_at: null, deleted_at: null, created_at: new Date('2026-09-27T10:00:00Z'), customer_id: CUST, estimate_id: null, ...over });
 
   test.each([
     ['new', false], ['contacted', false], ['open', false], ['qualified', false],
@@ -456,31 +375,37 @@ describe('pushIsMovedOn (the push verdict for the trigger dispatcher)', () => {
 });
 
 describe('runAdminAlertRelevanceSweep', () => {
-  const staleNote = (id, over = {}) => note({ id, category: 'alert', metadata: { dedupeKey: `stale-visit:${id}`, scheduled_service_id: VISIT, customer_id: CUST, ...over } });
+  // Reads of the visits table, in order: 1 = the batch, 2 = the fresh read
+  // before the write, 3 = the final judgement after it. The hook runs before
+  // the read it counts, so a change made on read N is seen by read N.
+  const onVisitRead = (fn) => {
+    let reads = 0;
+    mockHooks['scheduled_services as ss'] = () => { reads += 1; fn(reads); };
+  };
 
   test('retires only unread matching rows whose subject moved on; stamps the reason and touches nothing else', async () => {
-    mockTables['scheduled_services as ss'] = [visit({ status: 'completed', customer_id: CUST2 })];
-    const divergenceMeta = { dedupeKey: `first_application_sibling_divergence:${EST}:${INV}:z`, dedupeVersion: 'fp::g2', autoCleared: false, recurrenceGeneration: 2, alertKind: 'diverged', invoiceId: INV, stampedInvoiceId: INV, customerId: CUST };
-    mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') }), customer({ id: CUST2 })];
-    mockTables.invoices = [invoice()];
-    const stale = staleNote(uid(501), { customer_id: CUST2 });
-    const divergence = note({ id: uid(502), category: 'billing', metadata: divergenceMeta });
-    const alreadyRead = { ...staleNote(uid(503), { customer_id: CUST2 }), read_at: new Date('2026-09-27T13:00:00Z') };
-    const paid = note({ id: uid(504), category: 'billing', metadata: { ...divergenceMeta, dedupeKey: `${divergenceMeta.dedupeKey}2`, alertKind: 'paid_never_ran' } });
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' }), visit({ id: OPEN_VISIT, status: 'on_site' })];
+    mockTables.leads = [lead({ status: 'won' })];
+    const staleMeta = { dedupeKey: `stale-visit:${uid(501)}`, dedupeVersion: 'fp::g2', autoCleared: false, recurrenceGeneration: 2, scheduled_service_id: VISIT, customer_id: CUST };
+    const stale = note({ id: uid(501), category: 'alert', metadata: staleMeta });
+    const leadRow = { ...leadNote(), id: uid(502) };
+    const leadBefore = JSON.parse(leadRow.metadata);
+    const alreadyRead = { ...staleNote(uid(503)), read_at: new Date('2026-09-27T13:00:00Z') };
+    const stillOpen = staleNote(uid(504), { scheduled_service_id: OPEN_VISIT });
     const contact = note({ id: uid(505), category: 'inbound_sms', metadata: { customerId: CUST } });
-    mockTables.notifications = [stale, divergence, alreadyRead, paid, contact];
+    mockTables.notifications = [stale, leadRow, alreadyRead, stillOpen, contact];
 
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
-    expect(result).toEqual({ skipped: false, scanned: 4, retired: 2, byClass: { stale_visit: 1, first_application_divergence: 1 } });
+    expect(result).toEqual({ skipped: false, scanned: 4, retired: 2, byClass: { stale_visit: 1, new_lead: 1 } });
     expect(stale.read_at).toBeInstanceOf(Date);
-    expect(JSON.parse(stale.metadata).retired).toEqual({ by: 'alert-relevance', reason: 'Visit is no longer open', at: NOW.toISOString() });
     // Pure read + retired marker: every emitter-owned key survives as it was,
-    // except that a re-arm class's key moves into the stamp.
-    expect(JSON.parse(divergence.metadata)).toEqual({ ...divergenceMeta, dedupeKey: null,
-      retired: { by: 'alert-relevance', reason: expect.stringContaining('Customer left'), at: NOW.toISOString(), dedupeKey: divergenceMeta.dedupeKey } });
+    // dedupe key included.
+    expect(JSON.parse(stale.metadata)).toEqual({ ...staleMeta, retired: { by: 'alert-relevance', reason: 'Visit is no longer open', at: NOW.toISOString() } });
+    expect(leadRow.read_at).toBeInstanceOf(Date);
+    expect(JSON.parse(leadRow.metadata)).toEqual({ ...leadBefore, retired: { by: 'alert-relevance', reason: 'Lead is won', at: NOW.toISOString() } });
     expect(alreadyRead.read_at).toEqual(new Date('2026-09-27T13:00:00Z'));
     expect(JSON.parse(alreadyRead.metadata).retired).toBeUndefined();
-    for (const untouched of [paid, contact]) { expect(untouched.read_at).toBeNull(); expect(JSON.parse(untouched.metadata).retired).toBeUndefined(); }
+    for (const untouched of [stillOpen, contact]) { expect(untouched.read_at).toBeNull(); expect(JSON.parse(untouched.metadata).retired).toBeUndefined(); }
   });
 
   test('the candidate query is unread, admin and bell-visible, with no age cut-off (a refreshed bell keeps its first created_at)', async () => {
@@ -501,57 +426,47 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(old.read_at).toBeInstanceOf(Date);
   });
 
-  const divergenceRow = (id) => note({ id, category: 'billing', metadata: { dedupeKey: `first_application_sibling_divergence:${EST}:${INV}:z`, alertKind: 'diverged', invoiceId: INV, stampedInvoiceId: INV, customerId: CUST } });
-  const churnedWithDraft = () => {
-    mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
-    mockTables.invoices = [invoice()];
-  };
-
-  test('the retirement is judged on a fresh read: a payment that starts after the batch read keeps the divergence alert ringing', async () => {
-    churnedWithDraft();
-    const row = divergenceRow(uid(550));
+  test('the retirement is judged on a fresh read: a visit that reopens after the batch read keeps the stale-visit alert ringing', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(550));
     mockTables.notifications = [row];
-    let invoiceReads = 0;
-    mockHooks.invoices = () => { invoiceReads += 1; if (invoiceReads === 2) mockTables.invoices[0].status = 'processing'; };
+    onVisitRead((n) => { if (n === 2) mockTables['scheduled_services as ss'][0].status = 'on_site'; });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
     expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 
   test('a change that lands between the write and the final judgement puts the bell back exactly as it was', async () => {
-    churnedWithDraft();
-    const row = divergenceRow(uid(551));
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(551));
     const before = JSON.parse(row.metadata);
     mockTables.notifications = [row];
-    let invoiceReads = 0;
-    mockHooks.invoices = () => { invoiceReads += 1; if (invoiceReads === 3) mockTables.invoices[0].status = 'processing'; };
+    onVisitRead((n) => { if (n === 3) mockTables['scheduled_services as ss'][0].status = 'on_site'; });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
     expect(JSON.parse(row.metadata)).toEqual(before);
   });
 
-  test('re-arm put-back: a change between the write and the final judgement restores the dedupe key with the bell', async () => {
-    const key = `estimate_hot_view:${EST}`;
-    mockTables.estimates = [{ id: EST, status: 'viewed', archived_at: new Date('2026-09-28T12:00:00Z'), sent_at: null, customer_id: CUST }];
-    const row = note({ id: uid(556), category: 'estimate_hot_view', metadata: { dedupeKey: key, estimateId: EST, customerId: CUST } });
+  test('the put-back also holds for a lead reopened in that window', async () => {
+    mockTables.leads = [lead({ status: 'won' })];
+    const row = leadNote();
+    const before = JSON.parse(row.metadata);
     mockTables.notifications = [row];
-    let estimateReads = 0;
-    mockHooks.estimates = () => { estimateReads += 1; if (estimateReads === 3) mockTables.estimates[0].archived_at = null; };
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 0 });
+    let leadReads = 0;
+    mockHooks.leads = () => { leadReads += 1; if (leadReads === 3) mockTables.leads[0].status = 'contacted'; };
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
-    expect(JSON.parse(row.metadata)).toEqual({ dedupeKey: key, estimateId: EST, customerId: CUST });
+    expect(JSON.parse(row.metadata)).toEqual(before);
   });
 
   test('the retire writes an explicit millisecond read_at (never NOW(), whose microseconds a read-back would lose) and the put-back matches it exactly', async () => {
-    churnedWithDraft();
-    const row = divergenceRow(uid(557));
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(557));
     mockTables.notifications = [row];
     const retireWrites = [];
-    let invoiceReads = 0;
-    mockHooks.invoices = () => {
-      invoiceReads += 1;
-      if (invoiceReads === 3) { retireWrites.push(row.read_at); mockTables.invoices[0].status = 'processing'; }
-    };
+    onVisitRead((n) => {
+      if (n === 3) { retireWrites.push(row.read_at); mockTables['scheduled_services as ss'][0].status = 'on_site'; }
+    });
     await runAdminAlertRelevanceSweep({ now: NOW });
     expect(retireWrites[0]).toBeInstanceOf(Date);
     expect(retireWrites[0]).not.toBe('NOW');
@@ -559,24 +474,22 @@ describe('runAdminAlertRelevanceSweep', () => {
   });
 
   test('a person who reads the bell in that window keeps their read: nothing is put back over it', async () => {
-    churnedWithDraft();
-    const row = divergenceRow(uid(552));
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(552));
     mockTables.notifications = [row];
     const theirRead = new Date('2026-09-28T16:00:01Z');
-    let invoiceReads = 0;
-    mockHooks.invoices = () => {
-      invoiceReads += 1;
-      if (invoiceReads === 3) { mockTables.invoices[0].status = 'processing'; row.read_at = theirRead; }
-    };
+    onVisitRead((n) => {
+      if (n === 3) { mockTables['scheduled_services as ss'][0].status = 'on_site'; row.read_at = theirRead; }
+    });
     await runAdminAlertRelevanceSweep({ now: NOW });
     expect(row.read_at).toBe(theirRead);
   });
 
   test('no row locks anywhere: the sweep never takes FOR SHARE / FOR UPDATE (invoice settlement takes the visit FOR UPDATE NOWAIT)', async () => {
-    mockTables['scheduled_services as ss'] = [visit({ status: 'completed', recurring_parent_id: PARENT, first_application_invoice_id: INV, first_application_invoice_status: 'draft' })];
-    mockTables.notifications = [staleNote(uid(553)), divergenceRow(uid(554))];
-    churnedWithDraft();
-    await runAdminAlertRelevanceSweep({ now: NOW });
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    mockTables.leads = [lead({ status: 'won' })];
+    mockTables.notifications = [staleNote(uid(553)), { ...leadNote(), id: uid(554) }];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 2 });
     expect(mockQueries.some((q) => q.calls.some(([m]) => m === 'forShare' || m === 'forUpdate'))).toBe(false);
   });
 
@@ -584,9 +497,9 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
     const row = staleNote(uid(560));
     mockTables.notifications = [row];
-    mockHooks.customers = () => {
-      mockTables.notifications[0] = { ...row, metadata: JSON.stringify({ ...JSON.parse(row.metadata), dedupeVersion: 'refreshed' }) };
-    };
+    onVisitRead((n) => {
+      if (n === 1) mockTables.notifications[0] = { ...row, metadata: JSON.stringify({ ...JSON.parse(row.metadata), dedupeVersion: 'refreshed' }) };
+    });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(mockTables.notifications[0].read_at).toBeNull();
   });
@@ -605,7 +518,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     const row = staleNote(uid(520));
     mockTables.notifications = [row];
     const readAt = new Date('2026-09-28T15:59:00Z');
-    mockHooks.customers = () => { row.read_at = readAt; };
+    onVisitRead((n) => { if (n === 1) row.read_at = readAt; });
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toMatchObject({ scanned: 1, retired: 0, byClass: {} });
     expect(row.read_at).toBe(readAt);
@@ -634,151 +547,49 @@ describe('runAdminAlertRelevanceSweep', () => {
   });
 
   test('a refresh that rewrote the bell between the fresh read and the write keeps it ringing: the retire lands only on the version it judged', async () => {
-    churnedWithDraft();
-    const row = divergenceRow(uid(570));
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' }), visit({ id: OPEN_VISIT, status: 'on_site' })];
+    const row = staleNote(uid(570));
     mockTables.notifications = [row];
-    const refreshed = { ...JSON.parse(row.metadata), invoiceId: INV2, stampedInvoiceId: INV2, dedupeVersion: 'paid-replacement' };
-    let invoiceReads = 0;
-    // During the fresh verdict's own read (the 2nd), the first-application
-    // sweep refreshes the same keyed row onto a paid governing replacement.
-    mockHooks.invoices = () => {
-      invoiceReads += 1;
-      if (invoiceReads === 2) {
-        row.metadata = JSON.stringify(refreshed);
-        mockTables.invoices.push(invoice({ id: INV2, status: 'paid' }));
-      }
-    };
+    const refreshed = { ...JSON.parse(row.metadata), scheduled_service_id: OPEN_VISIT, dedupeVersion: 'refreshed' };
+    // During the fresh verdict's own visit read (the 2nd), the emitter's
+    // refresh rewrites the same row onto a visit that is still open.
+    onVisitRead((n) => { if (n === 2) row.metadata = JSON.stringify(refreshed); });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
     expect(JSON.parse(row.metadata)).toEqual(refreshed);
   });
 
   test('a quiet refresh after the write is judged as it stands: the final verdict reads the bell again and puts it back when the new content has not moved on', async () => {
-    churnedWithDraft();
-    const row = divergenceRow(uid(571));
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(571));
     mockTables.notifications = [row];
-    const refreshed = { ...JSON.parse(row.metadata), invoiceId: INV2, stampedInvoiceId: INV2, dedupeVersion: 'paid-replacement' };
+    const refreshed = { ...JSON.parse(row.metadata), scheduled_service_id: OPEN_VISIT, dedupeVersion: 'refreshed' };
     let reads = 0;
     // 1st read: the fresh read before the write. 2nd: the read after it — a
-    // quiet refresh (read_at untouched, the stamp merged in) lands just before.
+    // quiet refresh (read_at untouched, the stamp merged in) lands just before,
+    // onto a visit that is still open.
     mockHooks['notifications:first'] = () => {
       reads += 1;
       if (reads === 2) {
         row.metadata = JSON.stringify({ ...refreshed, retired: JSON.parse(row.metadata).retired });
-        mockTables.invoices.push(invoice({ id: INV2, status: 'paid' }));
+        mockTables['scheduled_services as ss'].push(visit({ id: OPEN_VISIT, status: 'on_site' }));
       }
     };
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
     expect(row.read_at).toBeNull();
     expect(JSON.parse(row.metadata)).toEqual(refreshed);
   });
-
-  test('re-arm: a retired hot-view bell frees its rolling-dedupe key, so the customer back on a restored estimate rings the same day', async () => {
-    const key = `estimate_hot_view:${EST}`;
-    mockTables.estimates = [{ id: EST, status: 'viewed', archived_at: new Date('2026-09-28T12:00:00Z'), sent_at: null, customer_id: CUST }];
-    const row = note({ id: uid(572), category: 'estimate_hot_view', link: `/admin/estimates?estimateId=${EST}`, metadata: { dedupeKey: key, estimateId: EST, customerId: CUST, sessions: 3 } });
-    mockTables.notifications = [row];
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 1, byClass: { estimate_hot_view: 1 } });
-    expect(JSON.parse(row.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: key, reason: expect.stringContaining('archived') } });
-    // Unarchived; the customer is back on it inside the 24-hour window.
-    mockTables.estimates[0].archived_at = null;
-    const again = await NotificationService.notifyAdmin('estimate_hot_view', 'Reading their estimate again', 'body', {
-      bell: true, link: `/admin/estimates?estimateId=${EST}`, dedupeKey: key, dedupeWindowMs: 24 * 3600000,
-      metadata: { estimateId: EST, customerId: CUST, sessions: 4 },
-    });
-    expect(again.deduped).toBe(false);
-    const fresh = mockTables.notifications.find((r) => r.id !== row.id);
-    expect(fresh.read_at == null).toBe(true);
-    expect(JSON.parse(fresh.metadata).feed).toBeUndefined();
-  });
-});
-
-describe('retireKeysNoLongerRaised (an emitter\'s clear-on-absence)', () => {
-  const standing = (id, key, extra = {}) => note({ id, category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT, ...extra } });
-  const REASON = 'The schedule watchdog no longer finds this gap';
-
-  test('retires every bell under the prefix whose key the scan did not raise: an unread one is marked read, a read one keeps its read_at, each is re-armed', async () => {
-    const live = standing(uid(580), 'prepay-coverage:v1:annual_coverage_unverified:aaa');
-    const gone = standing(uid(581), 'prepay-coverage:v1:annual_coverage_unverified:old');
-    const theirs = { ...standing(uid(582), 'prepay-coverage:v2:x:y'), read_at: new Date('2026-09-28T10:00:00Z') };
-    const other = standing(uid(583), 'accepted-schedule:e1:pest_control');
-    const quiet = standing(uid(584), 'prepay-coverage:v3:x:y', { feed: 'activity' });
-    mockTables.notifications = [live, gone, theirs, other, quiet];
-    expect(await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: ['prepay-coverage:v1:annual_coverage_unverified:aaa'], reason: REASON, now: NOW })).toBe(3);
-    expect(gone.read_at).toBeInstanceOf(Date);
-    // Re-armed: the key moves into the stamp, so the same gap raised again later is a new bell.
-    expect(JSON.parse(gone.metadata)).toMatchObject({
-      dedupeKey: null, retired: { by: 'alert-relevance', reason: REASON, at: NOW.toISOString(), dedupeKey: 'prepay-coverage:v1:annual_coverage_unverified:old' },
-    });
-    for (const r of [live, other]) {
-      expect(r.read_at).toBeNull();
-      expect(JSON.parse(r.metadata).retired).toBeUndefined();
-    }
-    // A person read it first: their read stands, but the key is freed so a recurrence rings.
-    expect(theirs.read_at).toEqual(new Date('2026-09-28T10:00:00Z'));
-    expect(JSON.parse(theirs.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: 'prepay-coverage:v2:x:y' } });
-    expect(JSON.parse(quiet.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: 'prepay-coverage:v3:x:y' } });
-  });
-
-  test('a reactivated customer\'s accepted-plan gap rings again: cleared while they were churned (absent from the scan), the same key and evidence raised after reactivation is a fresh bell', async () => {
-    const key = `accepted-schedule:${EST}:pest_control`;
-    const raise = () => NotificationService.notifyAdmin('alert', 'Accepted recurring plan needs schedule review', 'body', {
-      bell: true, link: `/admin/customers?customerId=${CUST}`, dedupeKey: key, refreshOnDedupe: true, dedupeVersion: 'evidence-1',
-      metadata: { estimate_id: EST, customer_id: CUST, issues: ['missing_schedule'] },
-    });
-    mockTables.customers = [customer()];
-    expect((await raise()).deduped).toBe(false);
-    // Churned: the scan leaves the customer out, so the run clears the bell on absence.
-    expect(await retireKeysNoLongerRaised({ prefix: 'accepted-schedule:', liveKeys: [], reason: REASON, now: NOW })).toBe(1);
-    // Reactivated with no schedule edit: the same key and the same evidence version.
-    const again = await raise();
-    expect(again.deduped).toBe(false);
-    expect(mockTables.notifications).toHaveLength(2);
-    expect(mockTables.notifications.map((r) => JSON.parse(r.metadata))).toEqual(expect.arrayContaining([expect.objectContaining({ dedupeKey: key, rungAt: expect.any(String) })]));
-  });
-
-  test('the sweep re-arms an accepted-plan or prepaid-coverage bell it retires because the customer left', async () => {
-    mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
-    mockTables['scheduled_services as ss'] = [visit()];
-    const plan = standing(uid(586), `accepted-schedule:${EST}:pest_control`, { estimate_id: EST, customer_id: CUST });
-    const prepay = standing(uid(587), `prepay-coverage:${VISIT}:annual_coverage_unverified:abc`, { customer_id: CUST });
-    mockTables.notifications = [plan, prepay];
-    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 2, byClass: { accepted_schedule: 1, prepay_coverage: 1 } });
-    for (const [row, key] of [[plan, `accepted-schedule:${EST}:pest_control`], [prepay, `prepay-coverage:${VISIT}:annual_coverage_unverified:abc`]]) {
-      expect(JSON.parse(row.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: key, reason: 'Customer left' } });
-    }
-  });
-
-  test('switch off: nothing is touched', async () => {
-    process.env.ADMIN_ALERT_RELEVANCE = 'off';
-    const gone = standing(uid(585), 'prepay-coverage:v9:x:y');
-    mockTables.notifications = [gone];
-    expect(await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: [], reason: REASON, now: NOW })).toBe(0);
-    expect(gone.read_at).toBeNull();
-  });
 });
 
 describe('ring time, through the existing ringGate seam', () => {
-  const raise = (opts = {}, metaOver = {}, dedupeKey = `first_application_sibling_divergence:${EST}:${INV}:${VISIT}`) => NotificationService.notifyAdmin(
-    'billing', 'First-application invoice may need to be split by hand', 'body', {
-      link: `/admin/invoices?invoice=${INV}`, bell: true, dedupeKey, dedupeVersion: 'fp1::g0', refreshOnDedupe: true,
-      metadata: { estimateId: EST, anchorId: VISIT, divergingSiblingIds: [VISIT], customerId: CUST, invoiceId: INV, stampedInvoiceId: INV, alertKind: 'diverged', autoCleared: false, recurrenceGeneration: 0, ...metaOver },
-      ...opts,
-    });
+  const raise = (opts = {}) => NotificationService.notifyAdmin('new_lead', 'New lead', 'body', {
+    link: `/admin/leads?lead=${LEAD}`, ...opts, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } },
+  });
   const stored = () => mockTables.notifications.map((r) => JSON.parse(r.metadata));
 
-  test('a fresh divergence row whose customer already left and whose invoice is a draft writes nothing (a re-arm class): nothing rings, nothing piles up', async () => {
-    mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
-    mockTables.invoices = [invoice()];
-    expect(await raise()).toMatchObject({ id: null, suppressed: true, deduped: false });
-    expect(mockTables.notifications || []).toHaveLength(0);
-  });
-
-  test('a fresh row of a class that does not re-arm (a new lead already worked) lands activity-only with the retired stamp', async () => {
-    mockTables.leads = [{ id: LEAD, status: 'won', converted_at: null, deleted_at: null, created_at: new Date('2026-09-27T10:00:00Z'), customer_id: CUST, estimate_id: null }];
-    const created = await NotificationService.notifyAdmin('new_lead', 'New lead', 'body', {
-      link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } },
-    });
+  test('a fresh row whose lead was already worked lands activity-only with the retired stamp (never skipped, never rung)', async () => {
+    mockTables.leads = [lead({ status: 'won' })];
+    const created = await raise();
     expect(created.id).toEqual(expect.any(String));
     expect(stored()).toHaveLength(1);
     expect(stored()[0]).toMatchObject({ quiet: true, feed: 'activity', retired: { by: 'alert-relevance', reason: expect.stringContaining('won'), at: expect.any(String) } });
@@ -786,47 +597,46 @@ describe('ring time, through the existing ringGate seam', () => {
     expect(mockTables.notifications[0].read_at).toBeUndefined();
   });
 
-  test('the same row for a customer who is still here rings as before (rungAt stamped, no quiet)', async () => {
-    mockTables.invoices = [invoice()];
+  test('a series-move card whose flagged dates have all passed lands activity-only too', async () => {
+    await NotificationService.notifyAdmin('schedule_conflict', 'Series moved', 'body', {
+      link: '/admin/dispatch?tab=schedule', metadata: { seriesMoveId: 'move-1', overlapDates: ['2020-01-05'], conflicts: [], preservedOccurrences: [] },
+    });
+    expect(stored()[0]).toMatchObject({ quiet: true, feed: 'activity', retired: { by: 'alert-relevance', reason: expect.stringContaining('passed') } });
+  });
+
+  test('a lead still being worked rings as before (rungAt stamped, no quiet)', async () => {
+    mockTables.leads = [lead()];
     await raise();
     expect(stored()[0]).toMatchObject({ rungAt: expect.any(String) });
     expect(stored()[0].quiet).toBeUndefined();
     expect(stored()[0].retired).toBeUndefined();
   });
 
-  test('money paid keeps ringing even for a customer who left', async () => {
-    mockTables.customers = [customer({ churned_at: new Date() })];
-    mockTables.invoices = [invoice({ status: 'paid' })];
-    await raise();
-    expect(stored()[0].quiet).toBeUndefined();
-  });
-
   test('switch off = today\'s behavior: a plain insert, no subject reads, no transaction', async () => {
     process.env.ADMIN_ALERT_RELEVANCE = 'off';
-    mockTables.customers = [customer({ churned_at: new Date() })];
-    mockTables.invoices = [invoice()];
-    await NotificationService.notifyAdmin('billing', 'x', 'y', { metadata: { alertKind: 'diverged', customerId: CUST, invoiceId: INV } });
+    mockTables.leads = [lead({ status: 'won' })];
+    await raise();
     expect(stored()[0].quiet).toBeUndefined();
-    expect(mockQueries.filter((q) => ['customers', 'invoices'].includes(q.table))).toEqual([]);
+    expect(mockQueries.filter((q) => ['leads', 'scheduled_services as ss', 'estimates'].includes(q.table))).toEqual([]);
+    expect(mockTrxs).toHaveLength(0);
   });
 
   test('a caller that passes its own ringGate keeps it — the relevance check never overrides it', async () => {
-    mockTables.customers = [customer({ churned_at: new Date() })];
-    mockTables.invoices = [invoice()];
+    mockTables.leads = [lead({ status: 'won' })];
     await raise({ ringGate: async () => true });
     expect(stored()[0]).toMatchObject({ rungAt: expect.any(String) });
     expect(stored()[0].retired).toBeUndefined();
   });
 
   test('a row outside the class table takes the untouched plain path (no subject reads)', async () => {
-    mockTables.customers = [customer({ churned_at: new Date() })];
-    await NotificationService.notifyAdmin('service', 'Something else', 'body', { dedupeKey: 'other:1', metadata: { customerId: CUST } });
-    expect(stored()[0]).toEqual({ dedupeKey: 'other:1', customerId: CUST });
-    expect(mockQueries.filter((q) => q.table === 'customers')).toEqual([]);
+    mockTables.leads = [lead({ status: 'won' })];
+    await NotificationService.notifyAdmin('service', 'Something else', 'body', { dedupeKey: 'other:1', metadata: { customerId: CUST, payload: { leadId: LEAD } } });
+    expect(stored()[0]).toEqual({ dedupeKey: 'other:1', customerId: CUST, payload: { leadId: LEAD } });
+    expect(mockQueries.filter((q) => q.table === 'leads')).toEqual([]);
   });
 
   test('a failed subject read rings (fail open) on a savepoint, never aborting the caller\'s transaction', async () => {
-    mockFailTable = 'customers';
+    mockFailTable = 'leads';
     await raise();
     expect(stored()[0]).toMatchObject({ rungAt: expect.any(String) });
     expect(stored()[0].quiet).toBeUndefined();
@@ -835,67 +645,11 @@ describe('ring time, through the existing ringGate seam', () => {
     expect(mockTrxs[0].transaction).toHaveBeenCalledTimes(1);
   });
 
-  test.each([
-    ['accepted-plan review, customer left', 'alert', `accepted-schedule:${EST}:pest_control`, { estimate_id: EST, customer_id: CUST },
-      () => { mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })]; },
-      () => { mockTables.customers = [customer()]; }],
-    ['estimate hot view, estimate archived', 'estimate_hot_view', `estimate_hot_view:${EST}`, { estimateId: EST, customerId: CUST },
-      () => { mockTables.estimates = [{ id: EST, status: 'viewed', archived_at: new Date('2026-09-28T12:00:00Z'), sent_at: null, customer_id: CUST }]; },
-      () => { mockTables.estimates[0].archived_at = null; }],
-  ])('a re-arm class already moved on writes no row at all, run after run (nothing piles up), and rings once the subject is back: %s', async (_label, category, key, meta, gone, back) => {
-    gone();
-    const emit = () => NotificationService.notifyAdmin(category, 'Title', 'body', { bell: true, dedupeKey: key, metadata: meta });
-    for (let run = 0; run < 3; run += 1) expect(await emit()).toMatchObject({ id: null, suppressed: true, deduped: false });
-    expect(mockTables.notifications || []).toHaveLength(0);
-    back();
-    const rang = await emit();
-    expect(rang.deduped).toBe(false);
-    expect(mockTables.notifications).toHaveLength(1);
-    expect(stored()[0]).toMatchObject({ dedupeKey: key, rungAt: expect.any(String) });
-    expect(stored()[0].quiet).toBeUndefined();
-  });
-
   test('ringTimeCheck is null when the switch is off or the row is not in the table', () => {
     expect(ringTimeCheck({ category: 'inbound_sms', metadata: {} })).toBeNull();
-    process.env.ADMIN_ALERT_RELEVANCE = '0';
     expect(ringTimeCheck({ category: 'billing', metadata: { dedupeKey: 'first_application_sibling_divergence:x' } })).toBeNull();
-  });
-
-  // Interplay with the first-application sweep (owner-lane requirement): the
-  // sweep re-raises every still-diverged group through notifyAdmin with the
-  // same key and a fingerprint version that holds neither the invoice status
-  // nor the customer's stage, and only metadata.autoCleared counts as
-  // resolved there. A relevance retire therefore re-arms: every emitter-owned
-  // field stays, except the key, which moves into the stamp.
-  test('after a retire, re-raises write nothing while the customer is gone and the invoice unsent; once the invoice is sent, the same key and version ring a fresh bell', async () => {
-    mockTables.invoices = [invoice()];
-    await raise();
-    expect(stored()[0].rungAt).toEqual(expect.any(String));
-    const original = mockTables.notifications[0];
-    const before = JSON.parse(original.metadata);
-
-    mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
-    const sweep = await runAdminAlertRelevanceSweep({ now: NOW });
-    expect(sweep.byClass).toEqual({ first_application_divergence: 1 });
-    expect(original.read_at).toBeInstanceOf(Date);
-    const after = JSON.parse(original.metadata);
-    const { retired, dedupeKey, ...rest } = after;
-    expect(retired).toMatchObject({ by: 'alert-relevance', dedupeKey: before.dedupeKey });
-    expect(dedupeKey).toBeNull();
-    const { dedupeKey: _key, ...beforeRest } = before;
-    expect(rest).toEqual(beforeRest);
-    for (const key of ['dedupeVersion', 'autoCleared', 'recurrenceGeneration', 'invoiceId', 'stampedInvoiceId']) expect(after[key]).toEqual(before[key]);
-
-    // Same group, same state, every 15 minutes: nothing is written, nothing rings.
-    for (let tick = 0; tick < 2; tick += 1) expect(await raise()).toMatchObject({ id: null, suppressed: true });
-    expect(mockTables.notifications).toHaveLength(1);
-    expect(original.read_at).toBeInstanceOf(Date);
-
-    // The combined invoice is sent while the group still diverges: money is live, so the re-raise rings.
-    mockTables.invoices = [invoice({ status: 'sent' })];
-    const live = await raise();
-    expect(live.deduped).toBe(false);
-    expect(mockTables.notifications).toHaveLength(2);
-    expect(JSON.parse(mockTables.notifications[1].metadata)).toMatchObject({ dedupeKey: before.dedupeKey, rungAt: expect.any(String) });
+    expect(ringTimeCheck({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: {} })).not.toBeNull();
+    process.env.ADMIN_ALERT_RELEVANCE = '0';
+    expect(ringTimeCheck({ category: 'new_lead', link: `/admin/leads?lead=${LEAD}`, metadata: { payload: { leadId: LEAD } } })).toBeNull();
   });
 });

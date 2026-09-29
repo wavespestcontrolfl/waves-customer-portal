@@ -1,52 +1,43 @@
 /**
- * Admin alert relevance — an unread admin bell clears itself when the customer,
- * visit, invoice, estimate or lead it is about has moved on (owner ruling
- * 2026-09-28: "we don't want garbage"; live with the ADMIN_ALERT_RELEVANCE
- * kill switch, rule 14: auto-applied, audit-trailed, no bell).
+ * Admin alert relevance — an unread admin bell clears itself when the visit,
+ * series move or lead it is about has moved on (owner ruling 2026-09-28: "we
+ * don't want garbage"; live with the ADMIN_ALERT_RELEVANCE kill switch, rule
+ * 14: auto-applied, audit-trailed, no bell).
  *
  * Why this is a sweep and not another hook (AGENTS.md "extend the existing
  * mechanism"): the retire helpers that exist today — supersedeMissedCallAdmin,
  * markInboundSmsReadAdmin, first-application-sibling-split's clearStandingAlerts
  * — are per-class event hooks: each fires from the one code path its author
  * knew moves that subject on. Subjects move on through paths no hook sees (a
- * customer churned or a visit closed by a direct database edit, a lead quoted
- * from another surface), and every new alert class would need its own hook.
- * This module judges the LIVE record instead. It does not replace those hooks
- * (their classes are untouched); it only adds the classes below, and the two
- * entry points share ONE rule table:
+ * visit closed by a direct database edit, a lead quoted from another surface),
+ * and every new alert class would need its own hook. This module judges the
+ * LIVE record instead. It does not replace those hooks (their classes are
+ * untouched); it only adds the classes below, and the two entry points share
+ * ONE rule table:
  *   - runAdminAlertRelevanceSweep: periodic (scheduler.js, every 10 minutes)
  *     retirement of unread rows whose subject has moved on. Unread rows never
  *     age out of it (a refreshed bell keeps its first created_at). Each
- *     retirement is judged on a fresh read right before it is written and
- *     once more after it; a change that landed in between puts the bell back.
- *     No row locks, ever: this sweep is advisory and must never block or fail
- *     a money path (invoice settlement takes the visit FOR UPDATE NOWAIT).
+ *     retirement is judged on a fresh read right before it is written, lands
+ *     only on the version judged, and is judged once more after it; a change
+ *     that landed in between puts the bell back. No row locks, ever: this
+ *     sweep is advisory and must never block or fail a money path (invoice
+ *     settlement takes the visit FOR UPDATE NOWAIT).
  *   - ringTimeCheck: the ringGate notifyAdmin's existing seam already runs
  *     inside the insert's transaction — a fresh row that has ALREADY moved on
- *     is written activity-only instead of ringing, or, for a re-arm class,
- *     not written at all (notification-service.js createPlainAdmin; the
- *     dedupe/refresh path is untouched).
+ *     is written activity-only instead of ringing (notification-service.js
+ *     createPlainAdmin; the dedupe/refresh path is untouched).
  *
  * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
- * — never dedupeVersion/autoCleared/invoiceId, so every emitter's own dedupe
- * and recovery logic still sees the row exactly as a human dismissal. The one
- * exception is a class marked `rearm` (first-application divergence, estimate
- * hot view, prepaid-coverage and accepted-plan reviews — every class whose
- * emitter re-raises a stable key): its emitter dedupes on a key the subject's
- * return need not change (forever, or a rolling day), so the key moves into
- * the stamp (`retired.dedupeKey`, `dedupeKey: null`) and a condition that
- * comes back (an invoice sent, an estimate restored, a customer reactivated)
- * raises a fresh bell instead of finding this row.
- * An emitter that knows its whole current set can also clear on absence
- * (retireKeysNoLongerRaised), re-arming the same way: the schedule-integrity
- * watchdog does for its unpriced-series, prepay and accepted-plan bells. The
- * unpriced-series bell is cleared ONLY that way — it stands for every
- * unpriced visit of a series root and names one, so only the watchdog's own
- * scan of the whole root can say it is gone; a money-loss page is never
- * cleared by a narrower check here.
- * A genuine state change can still re-bell a refreshOnDedupe row once; the
- * next sweep retires it again if its subject is still gone. Read-only apart
- * from notification rows.
+ * — the row reads exactly like a human dismissal to anything else.
+ *
+ * The table holds only classes whose emitter never re-raises the same alert
+ * on a stable dedupe key: a new lead (one event per lead), a series-move card
+ * (written once per move), a stale-visit bell (its emitter is gone). An alert
+ * whose emitter re-raises a stable key — the first-application split, the
+ * schedule watchdog's price / prepay / plan reviews, the estimate hot view —
+ * is its emitter's to clear, with the emitter's own recurrence rules: a
+ * retire from outside would either keep the key (and swallow the bell when
+ * the subject comes back) or free it (and fight the emitter's dedupe).
  *
  * Never applies to customer-initiated contact bells (inbound_sms, inbound_email,
  * missed_call, voicemail_callback, review) or money-owed/failed/refund alerts:
@@ -59,7 +50,6 @@ const logger = require('./logger');
 const { adminAlertRelevanceLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
-const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
 
 const RETIRED_BY = 'alert-relevance';
 const PAGE_SIZE = 200;
@@ -73,9 +63,6 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // pending reschedule request parks the same row).
 const CLOSED_VISIT_STATUSES = new Set([...VISIT_NEVER_RAN_STATUSES, 'completed']);
 const CANCELLED_VISIT_STATUSES = new Set(['cancelled', 'canceled']);
-// An unsent draft (a restored voided invoice is 'draft' too) or void: no money
-// is owed, collected or in flight, so nothing on it can need a refund.
-const NO_MONEY_INVOICE_STATUSES = new Set(['draft', 'void']);
 // leads.status values that mean staff worked the lead (admin-leads.js
 // LEAD_STATUSES + the non-engaged set in lead-statuses.js). 'new' and
 // 'contacted' are NOT worked — an automatic first reply sets 'contacted'.
@@ -103,20 +90,15 @@ function refsFromRow(row) {
   const meta = parseMeta(row.metadata);
   const payload = parseMeta(meta.payload);
   const params = linkParams(row.link);
-  // The alert's own visit first, then every other visit it names: the
-  // divergence set, and a series move's windowless conflicts and preserved
-  // occurrences (each { id, date }).
-  const visitIds = [first(meta.scheduledServiceId, meta.scheduled_service_id, meta.anchorId, params.get('appointment')),
-    ...arr(meta.divergingSiblingIds), ...arr(meta.conflicts).map((c) => c?.id),
-    ...arr(meta.preservedOccurrences).map((c) => c?.id)].map(uuidOrNull).filter(Boolean);
-  const invoiceIds = [first(meta.invoiceId, meta.invoice_id, params.get('invoice')), meta.stampedInvoiceId]
+  // The alert's own visit first, then every other visit it names: a series
+  // move's windowless conflicts and preserved occurrences (each { id, date }).
+  const visitIds = [first(meta.scheduledServiceId, meta.scheduled_service_id, params.get('appointment')),
+    ...arr(meta.conflicts).map((c) => c?.id), ...arr(meta.preservedOccurrences).map((c) => c?.id)]
     .map(uuidOrNull).filter(Boolean);
   return {
     meta,
-    customerId: uuidOrNull(first(meta.customerId, meta.customer_id, payload.customerId, payload.customer_id, params.get('customerId'))),
     visitId: visitIds[0] || null,
     visitIds: [...new Set(visitIds)],
-    invoiceIds: [...new Set(invoiceIds)],
     estimateId: uuidOrNull(first(meta.estimateId, meta.estimate_id, payload.estimateId, params.get('estimateId'))),
     leadId: uuidOrNull(first(payload.leadId, meta.leadId, params.get('lead'))),
   };
@@ -127,39 +109,27 @@ function refsFromRow(row) {
 function resolveRefs(row, data) {
   const refs = refsFromRow(row);
   const visit = refs.visitId ? data.visits.get(refs.visitId) : undefined;
-  const invoices = refs.invoiceIds.map((id) => data.invoices.get(id));
   const lead = refs.leadId ? data.leads.get(refs.leadId) : undefined;
   const estimateId = refs.estimateId || (lead?.estimate_id ? String(lead.estimate_id) : null);
   const estimate = estimateId ? data.estimates.get(estimateId) : undefined;
-  // The LIVE record's customer wins over the id frozen in the alert: a merge
-  // repoints the visit / invoice / estimate / lead to the surviving profile and
-  // soft-deletes the old one, which must not read as "customer left".
-  const customerId = first(visit?.customer_id, invoices.find(Boolean)?.customer_id,
-    estimate?.customer_id, lead?.customer_id, refs.customerId) || null;
   const affectedVisits = refs.visitIds.map((id) => data.visits.get(id));
-  return { refs, visit, affectedVisits, invoices, lead, estimate, customerId: customerId ? String(customerId) : null };
+  return { refs, visit, affectedVisits, lead, estimate };
 }
 
-const emptyData = () => ({
-  visits: new Map(), invoices: new Map(), leads: new Map(), estimates: new Map(), customers: new Map(), leadVisits: new Map(),
-});
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
-// batch (the estimate and customer ids are only known once visits, invoices
-// and leads are loaded, so those two run second). Plain reads — never a lock.
+// batch (a lead's estimate is only known once the lead is loaded, so estimates
+// run second). Plain reads — never a lock.
 async function loadSubjects(rows, conn = db) {
   const data = emptyData();
   const all = rows.map(refsFromRow);
   const ids = (pick) => [...new Set(all.flatMap(pick))];
   const visitIds = ids((r) => r.visitIds);
-  const invoiceIds = ids((r) => r.invoiceIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
   if (visitIds.length) {
     data.visits = byId(await conn('scheduled_services as ss').whereIn('ss.id', visitIds).select('ss.id', 'ss.customer_id', 'ss.status'));
-  }
-  if (invoiceIds.length) {
-    data.invoices = byId(await conn('invoices').whereIn('id', invoiceIds).select('id', 'status', 'customer_id'));
   }
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
@@ -167,14 +137,10 @@ async function loadSubjects(rows, conn = db) {
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
-  const customerIds = [...new Set(resolved.map((r) => r.customerId).filter(Boolean))];
   const leadCustomerIds = [...new Set([...data.leads.values()].map((l) => l.customer_id && String(l.customer_id)).filter(Boolean))];
   if (estimateIds.length) {
     data.estimates = byId(await conn('estimates').whereIn('id', estimateIds)
       .select('id', 'status', 'archived_at', 'sent_at', 'customer_id'));
-  }
-  if (customerIds.length) {
-    data.customers = byId(await conn('customers').whereIn('id', customerIds).select('id', 'pipeline_stage', 'churned_at', 'deleted_at'));
   }
   if (leadCustomerIds.length) {
     // A booking someone made: never a child the system generated on its own
@@ -191,23 +157,14 @@ async function loadSubjects(rows, conn = db) {
 
 function subjectFor(row, data, todayET) {
   const resolved = resolveRefs(row, data);
-  const customer = resolved.customerId ? data.customers.get(resolved.customerId) : undefined;
   return {
     ...resolved,
     meta: resolved.refs.meta,
     todayET,
-    customer,
-    // Paused customers are NOT left: only churned or soft-deleted ones. Churned
-    // is the LIVE stage — churned_at is history a reactivated customer can
-    // still carry (customer-stages.js; email-division eligibility reads the
-    // stage the same way).
-    customerLeft: !!customer && (customer.pipeline_stage === 'churned' || !!customer.deleted_at),
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
   };
 }
 
-const CUSTOMER_LEFT = 'Customer left';
-const customerLeft = (s) => (s.customerLeft ? CUSTOMER_LEFT : null);
 // The referenced visit is finished, never-ran, or gone.
 const visitClosed = (s) => (s.refs.visitId && (!s.visit || CLOSED_VISIT_STATUSES.has(String(s.visit.status)))
   ? 'Visit is no longer open' : null);
@@ -226,9 +183,9 @@ function seriesMoveMovedOn(s) {
     && s.affectedVisits.every((v) => !v || CLOSED_VISIT_STATUSES.has(String(v.status)))) {
     return 'Every visit it named is closed';
   }
-  // Never "customer left": the card is written once per move (conflict_card_at),
-  // so a customer reactivated with the visits still standing would keep
-  // dispatch work with no card. Only the visits and dates themselves settle it.
+  // Never on the customer's account alone: the card is written once per move
+  // (conflict_card_at), so a customer reactivated with the visits still
+  // standing would keep dispatch work with no card.
   return null;
 }
 
@@ -248,39 +205,13 @@ function newLeadMovedOn(s) {
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
-  { // first-application-sibling-split.js raiseDivergenceAlert; never the paid/processing refund + wait kinds.
-    // Its sweep re-raises the same key with a fingerprint that holds neither the invoice status
-    // nor the customer's stage, so a retire re-arms: an invoice later sent, or the customer back, rings
-    key: 'first_application_divergence', categories: ['billing'], prefix: 'first_application_sibling_divergence:', rearm: true,
-    rule: (s) => (s.customerLeft && s.meta.alertKind === 'diverged' && s.invoices.length
-      && s.invoices.every((i) => i && NO_MONEY_INVOICE_STATUSES.has(String(i.status)))
-      ? 'Customer left and the combined invoice is an unsent draft or void' : null),
-  },
-  { // emitter removed in #5223; unread rows remain
-    // Its emitter is gone, so nothing could raise it again: only the visit itself settles it.
+  { // emitter removed in #5223; unread rows remain. Only the visit itself settles it.
     key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: visitClosed,
   },
-  { // schedule-integrity-watchdog.js prepaid-coverage + manual-series-stamp reviews — a
-    // forever dedupe on an evidence key a reactivation need not change, so a retire re-arms it
-    key: 'prepay_coverage', categories: ['alert'], prefix: 'prepay-coverage:', rule: (s) => customerLeft(s) || visitClosed(s), rearm: true,
-  },
-  { // schedule-integrity-watchdog.js accepted-plan review — a stable key refreshed only when
-    // its schedule evidence changes, so a reactivated customer's gap needs the key back
-    key: 'accepted_schedule', categories: ['alert'], prefix: 'accepted-schedule:', rule: customerLeft, rearm: true,
-  },
-  { // admin-dispatch.js applySeriesMoveEffects
+  { // admin-dispatch.js applySeriesMoveEffects — one card per move
     key: 'series_move', categories: ['schedule_conflict'], match: (meta) => !!meta.seriesMoveId, rule: seriesMoveMovedOn,
   },
-  { // estimate-hot-view-alert.js — a 24-hour rolling dedupe on a stable key, and an
-    // archived or closed estimate can be restored, so a retire re-arms it too
-    key: 'estimate_hot_view', categories: ['estimate_hot_view'], rearm: true,
-    rule: (s) => {
-      if (!s.estimate) return null;
-      if (TERMINAL_ESTIMATE_STATUSES.includes(String(s.estimate.status).toLowerCase())) return `Estimate is ${s.estimate.status}`;
-      return s.estimate.archived_at ? 'Estimate is archived' : null;
-    },
-  },
-  { // notification-triggers.js new_lead
+  { // notification-triggers.js new_lead — one event per lead, no dedupe key
     key: 'new_lead', categories: ['new_lead'], match: (meta, row) => !!refsFromRow(row).leadId, rule: newLeadMovedOn,
   },
 ];
@@ -329,19 +260,17 @@ const sameVersion = (q, row) => q.where('category', row.category)
   .whereRaw('link IS NOT DISTINCT FROM ?', [row.link ?? null])
   .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [row.metadata == null ? null : JSON.stringify(parseMeta(row.metadata))]);
 
-// The bell as it read before this module's stamp: no `retired`, and a re-arm
-// class's key back in place.
+// The bell as it read before this module's stamp.
 function unretired(metadata) {
-  const { retired, ...meta } = parseMeta(metadata);
-  return retired?.dedupeKey && meta.dedupeKey == null ? { ...meta, dedupeKey: retired.dedupeKey } : meta;
+  const { retired: _stamp, ...meta } = parseMeta(metadata);
+  return meta;
 }
 
 // Judges one row on a fresh read and retires it only if it is still moved on
 // and still the version judged, then judges it once more AFTER the write, on
 // the bell as it stands then (a quiet refresh rewrites content without
 // touching read_at): a change that landed between the read and the write (a
-// payment starting on a churned customer's draft, a lead reopened) puts the
-// bell back — unless a person has read it since (their read_at wins), or a
+// visit reopened, a lead reopened) puts the bell back — unless a person has read it since (their read_at wins), or a
 // refresh rang it again (the emitter's). No row locks: see the module header.
 // A change after the final judgement is a new event its emitter raises.
 async function retireIfStillMovedOn(row, cls, todayET, now) {
@@ -350,15 +279,13 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   if (!current || !sameRow(current, row)) return null;
   const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
   if (!reason) return null;
-  const { dedupeKey } = parseMeta(current.metadata);
-  const rearm = cls.rearm && dedupeKey ? { dedupeKey: null } : {};
-  const stamp = { by: RETIRED_BY, reason, at: now.toISOString(), ...(rearm.dedupeKey === null ? { dedupeKey } : {}) };
+  const stamp = { by: RETIRED_BY, reason, at: now.toISOString() };
   // An explicit millisecond instant, not NOW(): Postgres keeps microseconds,
   // which a JS Date read back would truncate, and the put-back below must
   // match the exact read_at this write stored.
   const readAt = new Date();
   const [retired] = await sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at'), current)
-    .update({ read_at: readAt, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp, ...rearm })]) })
+    .update({ read_at: readAt, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]) })
     .returning(['id']);
   if (!retired) return null;
   const stillOurs = (q) => q.where({ id: row.id, read_at: readAt }).whereRaw("metadata->'retired'->>'at' = ?", [stamp.at]);
@@ -366,34 +293,8 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   if (!latest) return null;
   const judged = { ...latest, metadata: unretired(latest.metadata) };
   if (cls.rule(subjectFor(judged, await loadSubjects([judged]), todayET))) return reason;
-  await stillOurs(db('notifications'))
-    .update({ read_at: null, metadata: db.raw("(metadata - 'retired') || ?::jsonb", [JSON.stringify(rearm.dedupeKey === null ? { dedupeKey } : {})]) });
+  await stillOurs(db('notifications')).update({ read_at: null, metadata: db.raw("metadata - 'retired'") });
   return null;
-}
-
-// An emitter's clear-on-absence (schedule-integrity-watchdog.js): after a
-// COMPLETE scan, every bell under `prefix` whose key the scan no longer raised
-// — the gap was fixed, or its evidence changed and the scan raised a new key
-// beside it — is retired with the sweep's own stamp and re-armed, as a
-// `rearm` class is: the key moves into the stamp, so the same gap raised again
-// later (a price removed again, a customer reactivated) is a new bell. That
-// includes a bell a person already read (their read_at stands): the
-// resolution is the scan's, not theirs. No row locks.
-async function retireKeysNoLongerRaised({ category = 'alert', prefix, liveKeys, reason, now = new Date() }) {
-  if (!adminAlertRelevanceLive()) return 0;
-  const stamp = { by: RETIRED_BY, reason, at: now.toISOString() };
-  // Every row still holding a key the scan did not raise — read by a person
-  // or not — has its key moved into the stamp, so the gap recurring later is a
-  // new bell; a person's read_at stands, an unread bell is marked read.
-  const retired = await db('notifications').where({ recipient_type: 'admin', category })
-    .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [prefix.length, prefix])
-    .whereRaw("NOT (metadata->>'dedupeKey' = ANY(?::text[]))", [liveKeys])
-    .update({
-      read_at: db.raw('COALESCE(read_at, ?)', [new Date()]),
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('retired', ?::jsonb || jsonb_build_object('dedupeKey', metadata->'dedupeKey'), 'dedupeKey', NULL)", [JSON.stringify(stamp)]),
-    })
-    .returning(['id']);
-  return retired.length;
 }
 
 // A backlog bigger than one run (MAX_PAGES pages) is walked across runs: a
@@ -437,11 +338,8 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
 // Ring-time seam for notification-service.js createPlainAdmin: null when the
 // row is not in the table (or the switch is off), else the `ringGate` notifyAdmin
 // already runs inside the insert's transaction plus the retired stamp to write
-// when it declines. A re-arm class declined there writes no row at all
-// (`skip`): a quiet row would either keep its key — and swallow the bell when
-// the subject comes back — or free it and add one row per emitter run while
-// the subject stays gone. A failed read rings (fail open) — on a savepoint, so
-// the caller's transaction is never left aborted.
+// when it declines. A failed read rings (fail open) — on a savepoint, so the
+// caller's transaction is never left aborted.
 function ringTimeCheck({ category, link, metadata }) {
   try {
     const row = { category, link, metadata };
@@ -457,7 +355,6 @@ function ringTimeCheck({ category, link, metadata }) {
           const data = await (typeof conn.transaction === 'function' ? conn.transaction(run) : run(conn));
           const reason = cls.rule(subjectFor(row, data, etDateString(new Date())));
           if (reason) retired = { by: RETIRED_BY, reason, at: new Date().toISOString() };
-          if (reason && cls.rearm) logger.info(`[alert-relevance] ${cls.key} not raised: ${reason}`);
           return !reason;
         } catch (err) {
           logger.warn(`[alert-relevance] ring-time check failed for ${cls.key}: ${err.message}`);
@@ -465,7 +362,6 @@ function ringTimeCheck({ category, link, metadata }) {
         }
       },
       stamp: () => (retired ? { retired } : {}),
-      skip: () => Boolean(retired) && Boolean(cls.rearm),
     };
   } catch (err) {
     // Relevance is advisory: it must never break writing the bell itself.
@@ -504,7 +400,6 @@ async function pushIsMovedOn({ bellRow, bellWritten, pushTo, category, link, met
 
 module.exports = {
   runAdminAlertRelevanceSweep,
-  retireKeysNoLongerRaised,
   quietedAtRingTime,
   pushIsMovedOn,
   ringTimeCheck,
