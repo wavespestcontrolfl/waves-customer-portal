@@ -390,7 +390,7 @@ describe('one engine per row (Codex #5320 r1)', () => {
 
 describe('service labels (Codex #5320 r2/r5: the canonical classifier)', () => {
   test.each([
-    ['WDO Inspection Service'], ['Quarterly Pest Control'], ['Lawn + Pest Combo'], ['Palm Injection Service'], ['Termite Bait Monitoring'],
+    ['WDO Inspection Service'], ['Quarterly Pest Control'], ['Lawn + Pest Combo'], ['Lawn & Pest Program'], ['Palm Injection Service'], ['Termite Bait Monitoring'],
   ])('%s is never a plant read', (label) => {
     const { isTreeShrubOnlyServiceType: ts, isLawnOnlyServiceType: lawn } = require('../services/visit-prep-plant-applicability');
     expect(ts(label) || lawn(label)).toBe(false);
@@ -407,6 +407,8 @@ describe('service labels (Codex #5320 r2/r5: the canonical classifier)', () => {
     ['Weed Control Service', 'lawn'],
     ['Sod Replacement', 'lawn'],
     ['Ornamental Care Program', 'tree_shrub'],
+    ['Lawn Pest Control', 'lawn'],
+    ['Lawn Pest Knockdown Service', 'lawn'],
   ])('%s → %s', (label, kind) => {
     expect(kind === 'tree_shrub' ? isTreeShrubOnlyServiceType(label) : isLawnOnlyServiceType(label)).toBe(true);
   });

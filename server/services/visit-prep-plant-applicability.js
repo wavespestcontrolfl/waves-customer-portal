@@ -30,9 +30,12 @@ const { isPestStop, liveStopServiceTypes } = require('./visit-prep-pest-applicab
 // detectServiceCategory — "Weed Control Service" and "Sod Replacement" are
 // lawn, "Ornamental Care Program" is tree & shrub; Codex #5320 r5). This
 // lane only adds its exclusions: a combined service, or one naming another
-// line (pest, mosquito, termite, rodent, WDO), is never read here, and palm
+// line (mosquito, termite, rodent, WDO, or pest joined to it), is never read here, and palm
 // services stay out (the read's subject is lawn or tree_shrub only).
-const OTHER_LINE_TOKENS = ['pest', 'mosquito', 'termite', 'rodent', 'wdo', ' + ', ' & pest'];
+// 'pest' alone is NOT an exclusion: "Lawn Pest Control" is a lawn-line
+// product (utils/service-line-infer.js) and the plant engine reads lawn
+// pests (Codex #5320 r6). Only a genuinely combined label is excluded.
+const OTHER_LINE_TOKENS = ['mosquito', 'termite', 'rodent', 'wdo', ' + ', ' & pest', ' and pest', 'pest &', 'pest and'];
 
 function normalizedLabel(serviceType) {
   return String(serviceType || '').toLowerCase().replace(/[_-]+/g, ' ');
