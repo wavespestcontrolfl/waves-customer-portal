@@ -377,11 +377,30 @@ suite('invoice-mode public accept — real Postgres route + real converter + rea
     const { customerId, estimateId, token } = await fixture(mockTransaction);
     const { reservedId } = await reserveAnchorVisit(mockTransaction, { customerId, estimateId });
 
-    const res = await putAccept(token);
+    // Pin the branch (Codex r1 P2 on #5350): the converter would also find
+    // the seeded row by source_estimate_id and the route's post-conversion
+    // fallback would attach + stamp it, so the end state alone cannot tell
+    // the pre-linked branch from the no-pre-link one. Only the pre-linked
+    // branch mints the invoice ALREADY carrying the reserved visit
+    // (InvoiceService.create's scheduledServiceId = acceptLinkedSsId).
+    // Spy, never replace: the real create still runs.
+    const InvoiceService = require('../services/invoice');
+    const createSpy = jest.spyOn(InvoiceService, 'create');
+    let res;
+    let mintCalls;
+    try {
+      res = await putAccept(token);
+      // Read before mockRestore(), which clears the recorded calls.
+      mintCalls = createSpy.mock.calls.map(([params]) => params);
+    } finally {
+      createSpy.mockRestore();
+    }
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.invoiceMode).toBe(true);
+    expect(mintCalls).toHaveLength(1);
+    expect(mintCalls[0].scheduledServiceId).toBe(reservedId);
 
     // Exactly ONE invoice-mode invoice exists for this estimate.
     const invoices = await mockTransaction('invoices').where({ customer_id: customerId });
