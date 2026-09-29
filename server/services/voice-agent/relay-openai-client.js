@@ -287,13 +287,33 @@ function buildOpenAIRequest(params = {}) {
 /** Anthropic-shape usage from a Responses `usage` block (see file header). */
 function mapUsage(usage) {
   if (!usage || typeof usage !== 'object') return undefined;
-  const cached = Number(usage.input_tokens_details?.cached_tokens) || 0;
-  const totalInput = Number(usage.input_tokens) || 0;
+  const validCount = (value) => Number.isInteger(value) && value >= 0;
+  const details = usage.input_tokens_details;
+  const detailsValid = details == null || (typeof details === 'object' && !Array.isArray(details));
+  const cachedPresent = detailsValid && details != null && Object.prototype.hasOwnProperty.call(details, 'cached_tokens');
+  const cached = cachedPresent ? details.cached_tokens : 0;
+  const valid = validCount(usage.input_tokens)
+    && validCount(usage.output_tokens)
+    && detailsValid
+    && validCount(cached)
+    && cached <= usage.input_tokens;
+  // Preserve the distinction between no usage block (undefined above) and a
+  // provider block whose required counters are missing or malformed. The
+  // replay sees this object, extracts null counters and marks the model round
+  // incomplete instead of silently recording a free zero-token round.
+  if (!valid) {
+    return {
+      input_tokens: null,
+      cache_read_input_tokens: null,
+      cache_creation_input_tokens: null,
+      output_tokens: null,
+    };
+  }
   return {
-    input_tokens: Math.max(0, totalInput - cached),
+    input_tokens: usage.input_tokens - cached,
     cache_read_input_tokens: cached,
     cache_creation_input_tokens: 0,
-    output_tokens: Number(usage.output_tokens) || 0,
+    output_tokens: usage.output_tokens,
   };
 }
 
