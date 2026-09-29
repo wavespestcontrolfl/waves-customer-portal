@@ -401,35 +401,98 @@ describe('selfServeArrivalGraceMinutes (SELF_SERVE_ARRIVAL_GRACE_MINUTES, A1)', 
 });
 
 describe('annotateProjectedArrivals (A2 — the cascade fix)', () => {
+  // Every stop below starts well after SHIFT.startMinutes (480, 08:00) and
+  // carries no coords (driveMin(HQ, stop) fail-opens to 0), so the new
+  // round-4 HQ-seed floor (max(startMin, SHIFT.startMinutes + driveHome))
+  // is a no-op here — 480+0 never binds against an 08:00-or-later start.
+  // These tests are therefore unchanged in INTENT from before that fix;
+  // only the absolute minute-of-day values moved off midnight, which the
+  // fix's floor now makes meaningful. The HQ-seed's own effect (both the
+  // day-open floor and the drive term) is covered in its own describe
+  // block below with real numbers.
   test('an isolated stop is on time; a chain of back-to-back stops compounds lateness forward', () => {
     // Three coordless (buffer-only) stops, default 15-min buffer, no padding
     // on any of them (windowMinutes === expectedMinutes) — each leg's
     // required gap is a clean 15.
-    const A = { id: 'A', startMin: 0, endMin: 50, windowMinutes: 50, expectedMinutes: 50 };
-    const B = { id: 'B', startMin: 60, endMin: 110, windowMinutes: 50, expectedMinutes: 50 };
-    const C = { id: 'C', startMin: 120, endMin: 170, windowMinutes: 50, expectedMinutes: 50 };
+    const A = { id: 'A', startMin: 480, endMin: 530, windowMinutes: 50, expectedMinutes: 50 }; // 08:00
+    const B = { id: 'B', startMin: 540, endMin: 590, windowMinutes: 50, expectedMinutes: 50 }; // 09:00
+    const C = { id: 'C', startMin: 600, endMin: 650, windowMinutes: 50, expectedMinutes: 50 }; // 10:00
     const out = annotateProjectedArrivals([A, B, C]).map((s) => ({ id: s.id, arrivalMin: s.arrivalMin }));
-    // A: no prior neighbour -> on time.
-    // B: A effectively ends at 50; +15 required = 65 > B's own 60 start -> 5 min late.
-    // C: B (late) effectively ends at 65+50=115; +15 required = 130 > C's own
-    //    120 start -> 10 min late — B's OWN 5 minutes of lateness compounds
+    // A: no prior neighbour -> on time (its own 08:00 start already clears
+    //    the HQ-seed floor of 480 + 0 drive = 480).
+    // B: A effectively ends at 530; +15 required = 545 > B's own 540 start -> 5 min late.
+    // C: B (late) effectively ends at 545+50=595; +15 required = 610 > C's own
+    //    600 start -> 10 min late — B's OWN 5 minutes of lateness compounds
     //    into a full 10 for C, not the 5 a first-stop-only model would give.
-    expect(out).toEqual([{ id: 'A', arrivalMin: 0 }, { id: 'B', arrivalMin: 65 }, { id: 'C', arrivalMin: 130 }]);
+    expect(out).toEqual([{ id: 'A', arrivalMin: 480 }, { id: 'B', arrivalMin: 545 }, { id: 'C', arrivalMin: 610 }]);
   });
 
   test('input order does not matter — the chain always sorts by start first', () => {
-    const A = { id: 'A', startMin: 0, endMin: 50, windowMinutes: 50, expectedMinutes: 50 };
-    const B = { id: 'B', startMin: 60, endMin: 110, windowMinutes: 50, expectedMinutes: 50 };
-    const C = { id: 'C', startMin: 120, endMin: 170, windowMinutes: 50, expectedMinutes: 50 };
-    expect(annotateProjectedArrivals([C, A, B]).map((s) => s.arrivalMin)).toEqual([0, 65, 130]);
+    const A = { id: 'A', startMin: 480, endMin: 530, windowMinutes: 50, expectedMinutes: 50 };
+    const B = { id: 'B', startMin: 540, endMin: 590, windowMinutes: 50, expectedMinutes: 50 };
+    const C = { id: 'C', startMin: 600, endMin: 650, windowMinutes: 50, expectedMinutes: 50 };
+    expect(annotateProjectedArrivals([C, A, B]).map((s) => s.arrivalMin)).toEqual([480, 545, 610]);
   });
 
   test('a coordless stop stays buffer-only (fail-open) inside the chain', () => {
-    const A = { id: 'A', startMin: 0, endMin: 50, windowMinutes: 50, expectedMinutes: 50, lat: null, lng: null };
-    const B = { id: 'B', startMin: 55, endMin: 100, windowMinutes: 45, expectedMinutes: 45, lat: null, lng: null };
-    // required(A,B) = 0 drive + 15 buffer = 15; A ends at 50, so B's real
-    // arrival floors at 65, 10 minutes past its own 55 start.
-    expect(annotateProjectedArrivals([A, B])[1].arrivalMin).toBe(65);
+    const A = { id: 'A', startMin: 480, endMin: 530, windowMinutes: 50, expectedMinutes: 50, lat: null, lng: null };
+    const B = { id: 'B', startMin: 535, endMin: 580, windowMinutes: 45, expectedMinutes: 45, lat: null, lng: null };
+    // required(A,B) = 0 drive + 15 buffer = 15; A ends at 530, so B's real
+    // arrival floors at 545, 10 minutes past its own 535 start.
+    expect(annotateProjectedArrivals([A, B])[1].arrivalMin).toBe(545);
+  });
+});
+
+// The HQ-seed fix itself (Codex round 4 P1 on #5310): the FIRST stop in the
+// chain floors at max(startMin, SHIFT.startMinutes + driveMin(HQ, stop)) —
+// mirroring find-time.js's own hqStartArrivalFloor formula exactly (same
+// SHIFT.startMinutes anchor, same HQ coords) — rather than assuming that
+// stop itself starts on time.
+describe('annotateProjectedArrivals — the first stop is seeded from its own HQ arrival, not assumed on time (Codex round 4 on #5310)', () => {
+  test('a coordless first stop still floors at the fixed day-open anchor (SHIFT.startMinutes), even with 0 drive', () => {
+    const early = { id: 'early', startMin: 420, endMin: 460, windowMinutes: 40, expectedMinutes: 40, lat: null, lng: null }; // 07:00, before day-open
+    // 420 (07:00) < 480 (day-open) + 0 (no coords) -> floors at 480.
+    expect(annotateProjectedArrivals([early])[0].arrivalMin).toBe(480);
+  });
+
+  test('a first stop with real coords floors at day-open PLUS the real HQ drive (offer/commit parity with find-time\'s hqStartArrivalFloor)', () => {
+    // Same coordinates the leading-gap parity suite (find-time-hq-leading-gap-grace.test.js)
+    // uses, mocked to the identical 56-minute HQ->stop drive there — this is
+    // the deliberately UNMOCKED version, using the real haversine/mileage
+    // model, so the exact minute value below is re-derived independently
+    // rather than assumed equal; it only needs to be the SAME formula
+    // (SHIFT.startMinutes + driveMin(HQ, stop)), not a specific number.
+    const { HQ, driveMin } = require('../services/auto-dispatch/geo');
+    const stopCoords = { lat: 27.4, lng: -82.4 };
+    const realDriveHome = driveMin(HQ, stopCoords);
+    expect(realDriveHome).toBeGreaterThan(0); // sanity: these coords are genuinely apart from HQ
+    const stop = {
+      id: 'stop', startMin: 480, endMin: 540, windowMinutes: 60, expectedMinutes: 60, ...stopCoords,
+    }; // offered at exactly 08:00 (day-open) — a graced leading-gap offer
+    expect(annotateProjectedArrivals([stop])[0].arrivalMin).toBe(480 + realDriveHome);
+  });
+
+  test('offer/commit parity: the SAME 56-minute HQ->stop drive find-time-hq-leading-gap-grace.test.js mocks produces the SAME seed here', () => {
+    // Mirrors that suite's own header comment: haversine mocked to a
+    // constant 20 miles -> 56 minutes via the real (unmocked)
+    // milesToDriveMinutes model, day-open 08:00 (480) -> hqStartArrivalFloor
+    // there is 480 + 56 = 536. This test proves travel-gap.js's own
+    // first-stop seed computes the IDENTICAL 536 from the SAME inputs
+    // (SHIFT.startMinutes, the real milesToDriveMinutes calibration) — the
+    // whole point of round 4's fix being "the SAME day-open source and HQ
+    // coords find-time's HQ_START uses".
+    jest.resetModules();
+    jest.doMock('../services/route-optimizer', () => ({
+      ...jest.requireActual('../services/route-optimizer'),
+      haversine: () => 20,
+    }));
+    let isolatedTravelGap;
+    jest.isolateModules(() => {
+      isolatedTravelGap = require('../services/scheduling/travel-gap');
+    });
+    const stop = { id: 'stop', startMin: 480, endMin: 540, windowMinutes: 60, expectedMinutes: 60, lat: 27.4, lng: -82.4 };
+    expect(isolatedTravelGap.annotateProjectedArrivals([stop])[0].arrivalMin).toBe(536);
+    jest.dontMock('../services/route-optimizer');
   });
 });
 
@@ -601,6 +664,28 @@ describe('arrival grace — day-end bound at commit (Codex round 3 on #5310)', (
     expect(travelGapConflicts(candidate(31, 90), [before]).map((c) => c.reason)).toEqual(['day_end']);
   });
 
+  // Codex round 4 pre-push audit (Claude fallback) P1: travelGapConflicts
+  // used to bail to [] the instant `stops` was empty, BEFORE the day-end
+  // check ever ran — a graced candidate on a day with NO other stops at
+  // all (the ONLY stop that day) hit no check whatsoever at commit, while
+  // find-time's own HQ_END sentinel already refuses this exact shape at
+  // offer time (an empty day's one gap is HQ_START -> HQ_END directly).
+  test('an empty day (no other stops at all) still gets the day-end check — a 90-minute job starting at 17:00 would finish at 18:30', () => {
+    // arrivalFloor: no before/after neighbour at all, so it falls to the
+    // HQ-seed floor max(1020, 480 + 0 drive) = 1020 (candidate's own start
+    // already clears day-open here). 1020 + 90 + 0 = 1110 > 1080.
+    const conflicts = travelGapConflicts(candidate(90, 90), []);
+    expect(conflicts.map((c) => ({ stop: c.stop, reason: c.reason }))).toEqual([{ stop: null, reason: 'day_end' }]);
+  });
+
+  test('an empty day, within bound (a 60-minute job finishing at 18:00) — no conflict', () => {
+    expect(travelGapConflicts(candidate(60, 90), [])).toEqual([]);
+  });
+
+  test('an empty day, grace 0 — byte-identical, still returns [] (this function never had a day-end check before this lane, and grace 0 still gates it off)', () => {
+    expect(travelGapConflicts(candidate(90, 0), [])).toEqual([]);
+  });
+
   test('grace 0 is byte-identical: the day-end check never even runs, whatever the duration', () => {
     // Same 45-minute job that was refused above at grace 90 — at grace 0,
     // candidateForAfterSide is `candidate` unchanged (no projected
@@ -618,5 +703,127 @@ describe('arrival grace — day-end bound at commit (Codex round 3 on #5310)', (
   test('a real stop AFTER the candidate exempts it entirely — it is not the day\'s last stop', () => {
     const after = { id: 'after', startMin: 1200, endMin: 1260, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null }; // 20:00-21:00, well past "close" so it would never itself be offered, but its mere presence proves the day-end branch is skipped once there IS a later stop
     expect(travelGapConflicts(candidate(45, 90), [before, after]).map((c) => c.reason)).not.toContain('day_end');
+  });
+});
+
+// Combined allocations (Codex round 4 P2 on #5310): a version-2 combined
+// visit's members are each expanded (occupiedRows/stopCreditResolver, in
+// buildDayStops/buildTravelGapStops) to the SAME allocation-summed
+// {startMin, endMin, expectedMinutes} — duplicates of one physical stop,
+// not consecutive ones. Chaining them as separate stops applied a full
+// travel-gap buffer BETWEEN simultaneous co-located members, projecting a
+// later candidate's required start well past what the tech's actual route
+// needs and hiding genuinely open slots.
+describe('annotateProjectedArrivals coalesces combined-allocation members into one logical stop (Codex round 4 P2 on #5310)', () => {
+  // A 2-member 09:00-11:00 combined visit (540-660), no coords, no padding
+  // (windowMinutes === expectedMinutes on each member) — exactly what
+  // buildDayStops/buildTravelGapStops hand this function once
+  // stopCreditResolver has summed the members' own credit onto each.
+  const member1 = {
+    id: 'm1', startMin: 540, endMin: 660, windowMinutes: 120, expectedMinutes: 120, lat: null, lng: null, allocationKey: 'alloc-1',
+  };
+  const member2 = {
+    id: 'm2', startMin: 540, endMin: 660, windowMinutes: 120, expectedMinutes: 120, lat: null, lng: null, allocationKey: 'alloc-1',
+  };
+
+  test('both members of the group share ONE projected arrival — not a buffer chained between them', () => {
+    const out = annotateProjectedArrivals([member1, member2]);
+    // 540 clears the HQ-seed floor (480 + 0 drive) — on time, on both.
+    expect(out.map((s) => s.arrivalMin)).toEqual([540, 540]);
+  });
+
+  test('a later candidate at 11:15 (675) — exactly 15 minutes (the plain buffer) after the group\'s REAL 11:00 end — is not hidden (grace 90)', () => {
+    // Buggy math (member1 on time at 540/660; member2 chained AFTER member1
+    // with a spurious 15-min buffer between "simultaneous" stops) would
+    // project member2's own arrival at 660+15=675, effective end
+    // 675+120=795, demanding the candidate clear 795+15=810 — 675 (135
+    // minutes late) exceeds even a 90-minute grace, hiding a slot the real
+    // route has no problem with. Fixed: both members share arrivalMin 540,
+    // effective end 660, so the candidate only needs to clear 660+15=675 —
+    // exactly on time (0 minutes late), well inside grace.
+    const candidate = {
+      startMin: 675, endMin: 735, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null, graceMinutes: 90,
+    }; // 11:15-12:15
+    expect(travelGapConflicts(candidate, [member1, member2])).toEqual([]);
+  });
+
+  test('grace 0 is byte-identical: allocationKey grouping never runs (annotateProjectedArrivals is never called)', () => {
+    const candidate = {
+      startMin: 675, endMin: 735, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null, graceMinutes: 0,
+    };
+    // Unaffected either way at grace 0 — travelGapConflicts falls back to
+    // the plain (ungrouped) pairwise check, exactly as before this fix.
+    expect(travelGapConflicts(candidate, [member1, member2])).toEqual([]);
+  });
+
+  test('an allocationKey that does not match anything else never groups (ordinary rows stay pairwise)', () => {
+    const solo1 = { id: 's1', startMin: 540, endMin: 600, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+    const solo2 = { id: 's2', startMin: 600, endMin: 660, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+    const out = annotateProjectedArrivals([solo1, solo2]);
+    // Ordinary consecutive stops: solo2 still chains normally off solo1
+    // (540+60=600, +15 buffer = 615 > solo2's own 600 start -> 15 late).
+    expect(out.map((s) => s.arrivalMin)).toEqual([540, 615]);
+  });
+});
+
+// Grouped visits (visit_id, Codex round 4 P2 on #5310 proactive scan): a
+// service-visit group's members are NOT pre-expanded to a shared span or
+// summed credit the way a v2 allocation's are (occupiedRows only expands
+// allocationKey rows) — the SAME "duplicate rows, one real stop" chaining
+// bug, with a DIFFERENT (un-pre-summed, possibly staggered-window) input
+// shape, so it needs its own combine step (combinedStopEntity's visit_id
+// branch: MIN start to MAX end, SUM of each member's own expected minutes).
+describe('annotateProjectedArrivals coalesces visit_id groups too, including staggered (overlapping, not identical) member windows', () => {
+  // Two grouped members at the SAME property (no coords, kept simple), a
+  // 9:00-10:00 first member and a 9:30-11:00 second member — a real
+  // visit-group shape (visit-groups.js: "same customer, property, date,
+  // OVERLAPPING window", never required to be identical the way a v2
+  // allocation's shared window_start is).
+  const m1 = { id: 'v1a', startMin: 540, endMin: 600, expectedMinutes: 60, lat: null, lng: null, visit_id: 'visit-1' }; // 09:00-10:00
+  const m2 = { id: 'v1b', startMin: 570, endMin: 660, expectedMinutes: 90, lat: null, lng: null, visit_id: 'visit-1' }; // 09:30-11:00
+
+  test('both members share ONE projected arrival, combined bounds MIN-start/MAX-end, expected minutes SUMMED (150, clamped to the 120-minute combined window)', () => {
+    const out = annotateProjectedArrivals([m1, m2]);
+    expect(out.map((s) => s.arrivalMin)).toEqual([540, 540]); // on time (540 clears the 480 HQ-seed floor)
+  });
+
+  test('a later candidate at 09:36 (676) — 1 minute past the group\'s REAL 15-min-buffered end (660+15=675) — is not hidden (grace 40)', () => {
+    // Buggy (ungrouped) math: m2 chains off m1 as a separate stop (arrival
+    // 615, effective end 615+90=705), demanding the candidate clear
+    // 705+15=720 — 720-676=44 minutes late, over even a 40-minute grace.
+    // Fixed: the group's own combined effective end is 540+min(150,120)=660,
+    // so the candidate only needs to clear 660+15=675 — exactly on time.
+    const candidate = { startMin: 676, endMin: 706, expectedMinutes: 30, lat: null, lng: null, graceMinutes: 40 };
+    expect(travelGapConflicts(candidate, [m1, m2])).toEqual([]);
+  });
+
+  test('grace 0 is byte-identical: visit_id grouping never runs (annotateProjectedArrivals is never called)', () => {
+    const candidate = { startMin: 676, endMin: 706, expectedMinutes: 30, lat: null, lng: null, graceMinutes: 0 };
+    expect(travelGapConflicts(candidate, [m1, m2])).toEqual([]);
+  });
+
+  test('a solo visit_id (no other member sharing it) never groups with an unrelated stop', () => {
+    const solo = { id: 'solo-visit', startMin: 540, endMin: 600, expectedMinutes: 60, lat: null, lng: null, visit_id: 'visit-2' };
+    const unrelated = { id: 'other', startMin: 600, endMin: 650, expectedMinutes: 50, lat: null, lng: null };
+    const out = annotateProjectedArrivals([solo, unrelated]);
+    // Ordinary chain: unrelated still measured against solo normally
+    // (600+60=660... wait solo's own window is 540-600 already, expected 60
+    // = no padding, effective end 600; +15 buffer = 615 > unrelated's own
+    // 600 start -> 15 late), proving no accidental grouping with a
+    // DIFFERENT visit_id (or none at all).
+    expect(out.map((s) => s.arrivalMin)).toEqual([540, 615]);
+  });
+
+  test('visit_id takes precedence over allocationKey when (implausibly) both are set on the same row — matches groupRouteStops\' own key precedence', () => {
+    const a = {
+      id: 'x1', startMin: 540, endMin: 600, expectedMinutes: 60, lat: null, lng: null, visit_id: 'v-both', allocationKey: 'alloc-should-be-ignored',
+    };
+    const b = {
+      id: 'x2', startMin: 540, endMin: 600, expectedMinutes: 60, lat: null, lng: null, visit_id: 'v-both', allocationKey: 'a-different-alloc-key',
+    };
+    // Grouped by visit_id (both 'v-both') despite mismatched allocationKeys
+    // — proves visit_id is checked first, not allocationKey.
+    const out = annotateProjectedArrivals([a, b]);
+    expect(out.map((s) => s.arrivalMin)).toEqual([540, 540]);
   });
 });

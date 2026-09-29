@@ -28,7 +28,7 @@ const {
   effectiveEndMinutes, requiredGapMinutes, paddingMinutesOf,
 } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
-const { occupiedRows } = require('./visit-capacity');
+const { occupiedRows, allocationKey } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
 const { customerWindowAdmits } = require('./customer-windows');
@@ -593,6 +593,19 @@ function buildDayStops(services, {
         ...(creditResolver ? {
           expectedMinutes: creditResolver(s, endMin - startMin),
         } : {}),
+        // Version-2 combined-allocation identity (Codex round 4 P2 on
+        // #5310) — stamped from the RAW row here (allocationKey needs
+        // reservation_service_mix/customer_id/technician_id/scheduled_date/
+        // window_start, none of which survive onto this transformed shape)
+        // so annotateProjectedArrivals can coalesce simultaneous members
+        // into one logical stop instead of chaining a buffer between them.
+        // null for every ordinary (non-combined) row — harmless, matches
+        // annotateProjectedArrivals' own no-op default.
+        allocationKey: allocationKey(s),
+        // Grouped-visit identity (Codex round 4 P2 on #5310 proactive scan)
+        // — the OTHER "duplicate rows, one real stop" shape (day-quality.js's
+        // own `stop.visit_id ? ... : allocationKey(stop)`).
+        visit_id: s.visit_id ?? null,
       };
     })
     .sort((a, b) => a.startMin - b.startMin);
@@ -1086,6 +1099,13 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       // it, buildDayStops treated raw members as independent stops and
       // never expanded through their real combined span (Codex r5 P1).
       'scheduled_services.reservation_service_mix',
+      // Grouped-visit identity (Codex round 4 P2 on #5310 proactive scan):
+      // a visit_id-grouped stop is one physical stop across multiple rows
+      // too — the SAME "duplicate rows, one real stop" shape day-quality.js
+      // already treats this way (its own `stop.visit_id ? ... : allocationKey(stop)`
+      // grouping) — annotateProjectedArrivals needs it for the identical
+      // reason allocationKey is selected above.
+      'scheduled_services.visit_id',
       'scheduled_services.lat as svc_lat',
       'scheduled_services.lng as svc_lng',
       'customers.first_name',

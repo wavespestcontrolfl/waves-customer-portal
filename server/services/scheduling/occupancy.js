@@ -402,6 +402,11 @@ const CONFLICT_COLUMNS = [
   'window_start', 'window_end', 'status', 'service_type', 'service_key_snapshot',
   'estimated_duration_minutes', 'reservation_expires_at', 'source_estimate_id',
   'reservation_service_mix',
+  // Grouped-visit identity (Codex round 4 P2 on #5310 proactive scan) —
+  // buildTravelGapStops needs this so annotateProjectedArrivals can treat
+  // a visit_id group's members as one physical stop, the same "duplicate
+  // rows, one real stop" reason reservation_service_mix is selected above.
+  'visit_id',
   // Seeded-placeholder identity (recurring child, still pending, never
   // customer-confirmed) — the rebooker's beyond-horizon series check reads
   // these to tell a disposable seeded row from a real booking.
@@ -768,6 +773,15 @@ function buildTravelGapStops(rows) {
       hold: row.reservation_expires_at != null && row.customer_id == null,
       windowMinutes: endMin - startMin,
       expectedMinutes: stopExpectedMinutes(row, endMin - startMin),
+      // Version-2 combined-allocation identity (Codex round 4 P2 on
+      // #5310) — same rationale as find-time.js's buildDayStops: lets
+      // annotateProjectedArrivals coalesce simultaneous members into one
+      // logical stop instead of chaining a buffer between them.
+      allocationKey: allocationKey(row),
+      // Grouped-visit identity (Codex round 4 P2 on #5310 proactive scan)
+      // — same reason, the OTHER "duplicate rows, one real stop" shape
+      // (day-quality.js's own `stop.visit_id ? ... : allocationKey(stop)`).
+      visit_id: row.visit_id ?? null,
       row,
     });
   }

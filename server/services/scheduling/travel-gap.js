@@ -109,6 +109,11 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const { ARRIVAL_WINDOW_MINUTES } = require('../../utils/sms-time-format');
 const { etDateString } = require('../../utils/datetime-et');
 const { currentDayEndMinutes } = require('./customer-windows');
+// The one fixed day-open anchor every scheduling engine shares (Codex round
+// 4 on #5310) — find-time.js's own DAY_START_HOUR default (8*60) IS this
+// same value; SHIFT is the neutral module both files can read without a
+// cycle (find-time.js requires travel-gap.js, so the reverse is refused).
+const { SHIFT } = require('./policy');
 const logger = require('../logger');
 
 const DEFAULT_TRAVEL_BUFFER_MINUTES = 15;
@@ -332,30 +337,105 @@ function isHoldStop(stop) {
  * candidate itself) by `startMin` and walks the chain forward:
  *   arrivalMin_i = max(startMin_i, effectiveEndMinutes(stop_{i-1}) +
  *     requiredGapMinutes(stop_{i-1}, stop_i))
- * — the first stop is on time (no prior neighbour). Each returned copy
+ * — seeded (Codex round 4 P1 on #5310) at the FIRST stop's own real HQ
+ * arrival floor, max(startMin, SHIFT.startMinutes + driveMin(HQ, stop)) —
+ * mirrors find-time.js's `hqStartArrivalFloor` exactly (same fixed
+ * day-open anchor, `SHIFT.startMinutes`, the same 08:00 every scheduling
+ * engine shares; same HQ coords) — NOT an assumed on-time arrival. That
+ * first stop may itself have been booked with grace on its own HQ→stop
+ * leg (round 2's leading-gap fix on find-time's OFFER side already accounts
+ * for this per candidate; this chain is the COMMIT-side mirror of the same
+ * fact for every stop already on the calendar). Seeding it optimistically
+ * understated lateness for every later stop chained off it — a candidate
+ * projected from an artificially-early first stop could exceed the grace
+ * bound, the 120-minute promise, or the day-end bound (round 3's fix)
+ * despite a real route that never actually clears them. Each returned copy
  * carries `arrivalMin`, which effectiveEndMinutes/paddingMinutesOf above
  * then read for THAT stop's own effective end and padding, so a second or
  * third graced booking is measured from where the tech will REALLY be
  * (chained lateness through the day), not from a stop's stored, never-
  * adjusted end. The HQ start/end legs are never real stops and must not be
  * passed in here (find-time.js's toPackingBoundAnchor never builds one for
- * them). A coordless leg still gets a buffer-only required gap (driveMin's
- * own fail-open), so it neither vanishes from nor short-circuits the chain.
+ * them) — the HQ leg is folded into the FIRST real stop's own seed instead,
+ * exactly as find-time's own hqStartArrivalFloor is folded into its first
+ * gap rather than modeled as a stop. A coordless leg (either side) still
+ * gets a buffer-only required gap / zero HQ drive (driveMin's own
+ * fail-open), so it neither vanishes from nor short-circuits the chain.
  * Callers that never see a graced candidate never call this at all
  * (travelGapConflicts below gates it on `candidate.graceMinutes > 0`), so a
  * stop's `arrivalMin` is never set at grace 0 — byte-identical.
+ *
+ * Multi-row physical stops (Codex round 4 P2 on #5310, proactive scan): two
+ * DIFFERENT mechanisms represent one physical stop as several
+ * scheduled_services rows, and chaining their members as ordinary separate
+ * stops applied a full requiredGapMinutes buffer BETWEEN simultaneous,
+ * co-located rows — pushing a later real candidate's projected lateness
+ * past what the tech's actual route would produce and hiding genuinely
+ * open slots at both offer and commit:
+ *   - A version-2 combined (multi-service) allocation is one row PER
+ *     SERVICE, each already expanded by occupiedRows/stopCreditResolver
+ *     (find-time.js's buildDayStops, occupancy.js's buildTravelGapStops)
+ *     to the SAME allocation-summed {startMin, endMin, expectedMinutes} —
+ *     every member is a full DUPLICATE of the combined stop, so the group
+ *     just reuses one member's own (already-correct) shape verbatim.
+ *   - A service-visit group (`visit_id`, docs/design/visit-group-scope.md)
+ *     is "same customer, property, date, OVERLAPPING window" — members are
+ *     NOT pre-expanded to a shared span or summed credit the way an
+ *     allocation's are, so the group recomputes its own combined bounds
+ *     (earliest member start to latest member end) and sums each member's
+ *     own expected minutes (arrival-route.js's groupRouteStops documents
+ *     the same "sum of members' work, one journey" contract for its
+ *     separate capacity-mode simulation — this is the SQL-overlap model's
+ *     mirror of that fact, not a port of its own offset/intersection math).
+ * Both identities are stamped by the caller from the RAW row (allocationKey
+ * needs reservation_service_mix/customer_id/technician_id/scheduled_date/
+ * window_start; visit_id is the row's own column — neither survives onto
+ * this transformed shape). A row can carry visit_id XOR allocationKey, never
+ * both (arrival-route.js's own groupRouteStops key precedence: `row.visit_id
+ * || allocationKey(row)`) — visit_id checked first here for the same
+ * precedence. Consecutive same-key stops (allocation members are guaranteed
+ * adjacent after sorting — one shared window_start; visit-group members
+ * are adjacent whenever their overlapping windows actually overlap, the
+ * only case worth coalescing) are grouped into ONE logical stop for the
+ * chain — the group shares a single `arrivalMin` (they arrive together)
+ * and the NEXT stop's gap is measured against the group's own combined
+ * effective end once, not once per member. Neither key set (every ordinary
+ * row, and every caller from before this fix) never groups — byte-identical.
  */
+function combinedStopEntity(members, isVisitGroup) {
+  if (!isVisitGroup) return members[0]; // v2 allocation: every member IS the combined {startMin,endMin,expectedMinutes} duplicate already.
+  // visit_id group: members are raw, un-summed rows — combine their own
+  // bounds/credit here (SUM of work, MIN start to MAX end — the "one
+  // journey" contract groupRouteStops documents for the capacity-mode
+  // simulation, applied to this module's own shape).
+  const startMin = Math.min(...members.map((m) => m.startMin));
+  const endMin = Math.max(...members.map((m) => m.endMin));
+  const expectedMinutes = members.reduce(
+    (sum, m) => sum + (Number.isFinite(m.expectedMinutes) ? m.expectedMinutes : Math.max(0, m.endMin - m.startMin)), 0,
+  );
+  return { startMin, endMin, expectedMinutes, lat: members[0].lat, lng: members[0].lng };
+}
+
 function annotateProjectedArrivals(stops) {
   const sorted = [...stops].sort((a, b) => a.startMin - b.startMin);
+  const groups = [];
+  for (const stop of sorted) {
+    const key = (stop.visit_id != null ? `visit:${stop.visit_id}` : null) || stop.allocationKey || null;
+    const last = groups[groups.length - 1];
+    if (key && last?.key === key) last.members.push(stop);
+    else groups.push({ key, isVisitGroup: stop.visit_id != null, members: [stop] });
+  }
   let prev = null;
-  return sorted.map((stop) => {
+  const arrivalByStop = new Map();
+  for (const group of groups) {
+    const lead = combinedStopEntity(group.members, group.isVisitGroup);
     const arrivalMin = prev
-      ? Math.max(stop.startMin, effectiveEndMinutes(prev) + requiredGapMinutes(prev, stop))
-      : stop.startMin;
-    const annotated = { ...stop, arrivalMin };
-    prev = annotated;
-    return annotated;
-  });
+      ? Math.max(lead.startMin, effectiveEndMinutes(prev) + requiredGapMinutes(prev, lead))
+      : Math.max(lead.startMin, SHIFT.startMinutes + driveMin(HQ, coordsOf(lead)));
+    for (const member of group.members) arrivalByStop.set(member, arrivalMin);
+    prev = { ...lead, arrivalMin };
+  }
+  return sorted.map((stop) => ({ ...stop, arrivalMin: arrivalByStop.get(stop) }));
 }
 
 /**
@@ -445,7 +525,15 @@ function projectGraceForCandidate(candidate, { validStops, before, liveNeighbour
 
 function travelGapConflicts(candidate, stops) {
   if (!candidate || ![candidate.startMin, candidate.endMin].every(Number.isFinite)) return [];
-  if (!Array.isArray(stops) || stops.length === 0) return [];
+  // Codex round 4 (Claude fallback audit on #5310): NOT `|| stops.length ===
+  // 0` — an empty day still needs the day-end check below (a graced
+  // candidate on a day with no other stops at all is exactly the shape
+  // find-time's own HQ_END sentinel refuses at offer time; bailing out here
+  // skipped it entirely at commit, breaking offer/commit parity for the
+  // empty-day case). Every other classification/projection step below
+  // already degrades to empty results on an empty `stops` array, so this
+  // is grace-0 byte-identical (concat of two empty arrays either way).
+  if (!Array.isArray(stops)) return [];
   const {
     overlaps, validStops, before, after, liveNeighbourHolds,
   } = classifyStopsAroundCandidate(candidate, stops);
@@ -465,31 +553,35 @@ function travelGapConflicts(candidate, stops) {
   // sentinel already refuses to OFFER a graced candidate whose real arrival
   // cannot finish its own work and drive home before the customer day
   // closes — every real day's virtual route ends at HQ_END, so ANY
-  // candidate that ends up the day's LAST real stop is bound by it at offer
-  // time. This module's commit-time predicate had no equivalent: it only
-  // ever compares the candidate against OTHER real stops, so a candidate
-  // with no real stop after it never hit any check here at all — a
-  // request built outside the offer path (or one whose timing shifted
-  // between offer and commit) could commit a graced arrival that finishes
-  // past close. Mirrors the sentinel's formula exactly, grounded only in
-  // what this module can see (real stops) — the leading HQ-to-first-stop
-  // leg is find-time's own domain (already covered there; this module has
-  // no dayOpen/HQ_START concept to duplicate it with) — `arrivalFloor` is
-  // the candidate's own real (chained/projected) arrival established by any
-  // BEFORE-side neighbour above (`candidateForAfterSide.arrivalMin`), or
-  // its own stored start when there is none, `ownDuration` is its FULL
-  // (uncredited) work — never the expected-minutes credit — and `driveHome`
-  // is the same drive-to-HQ estimator find-time's own detour scoring uses.
-  // Grace 0 is BYTE-IDENTICAL (never evaluated at all): `candidateForAfterSide`
-  // is `candidate` unchanged then, and every existing caller's own
-  // stored-window day-end check (slot-reservation.js et al.) already covers
-  // that case — adding this unconditionally would be a BRAND NEW rejection
-  // path this module has never had, not a mirror of one.
+  // candidate that ends up the day's LAST real stop (including the day's
+  // ONLY stop, on an otherwise empty day) is bound by it at offer time.
+  // This module's commit-time predicate had no equivalent: it only ever
+  // compared the candidate against OTHER real stops, so a candidate with no
+  // real stop after it — including one with NO real stops on the date at
+  // all — never hit any check here at all (Claude-fallback pre-push audit
+  // P1: an empty `stops` array used to bail out of this whole function
+  // before reaching here at all — fixed above). Mirrors the sentinel's
+  // formula exactly, grounded only in what this module can see (real
+  // stops): `arrivalFloor` is the candidate's own real (chained/projected)
+  // arrival established by any BEFORE-side neighbour above
+  // (`candidateForAfterSide.arrivalMin`), or — when there is no real stop
+  // before it EITHER, so the candidate is effectively the day's first stop
+  // too — the SAME HQ-seed floor annotateProjectedArrivals' own first-stop
+  // case above uses (max(startMin, SHIFT.startMinutes + driveMin(HQ,
+  // candidate))), never a bare, optimistic `candidate.startMin`.
+  // `ownDuration` is its FULL (uncredited) work — never the expected-minutes
+  // credit — and `driveHome` is the same drive-to-HQ estimator find-time's
+  // own detour scoring uses. Grace 0 is BYTE-IDENTICAL (never evaluated at
+  // all): `candidateForAfterSide` is `candidate` unchanged then, and every
+  // existing caller's own stored-window day-end check (slot-reservation.js
+  // et al.) already covers that case — adding this unconditionally would be
+  // a BRAND NEW rejection path this module has never had, not a mirror of one.
   const hasAfterSideNeighbour = after.length > 0
     || liveNeighbourHolds.some((hold) => hold.startMin > candidate.startMin);
   if (candidate.graceMinutes > 0 && !hasAfterSideNeighbour) {
     const arrivalFloor = Number.isFinite(candidateForAfterSide.arrivalMin)
-      ? candidateForAfterSide.arrivalMin : candidate.startMin;
+      ? candidateForAfterSide.arrivalMin
+      : Math.max(candidate.startMin, SHIFT.startMinutes + driveMin(HQ, coordsOf(candidate)));
     const ownDuration = candidate.endMin - candidate.startMin;
     const driveHome = driveMin(coordsOf(candidate), HQ);
     if (arrivalFloor + ownDuration + driveHome > currentDayEndMinutes()) {
