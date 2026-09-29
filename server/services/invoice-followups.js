@@ -1983,7 +1983,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // AND the ladder live, the same pair it honours): until then that cron
   // still owns this stamp, and an ungated stamp here would change live
   // lifecycle stages the moment this merges.
-  if (ladderThrough90Live() && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
+  // Never for a bank-verification nudge (mdPending): that customer is
+  // completing a payment, and the legacy path treated a pending
+  // microdeposit as a dunning stop (Codex #5294 r2 P1).
+  if (ladderThrough90Live() && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true' && !mdPending
     && (step.id === 'd60_reminder' || step.id === 'd90_final_notice')) {
     try {
       await markAtRiskForLongOverdue(row.customer_id);

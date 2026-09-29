@@ -192,6 +192,34 @@ test('legacy retirement off: a delivered Day 60 touch leaves the stage alone (th
   expect(atRiskChain.update).not.toHaveBeenCalled();
 });
 
+test('a Day 60 touch diverted to the bank-verification nudge (pending microdeposits) never stamps at_risk', async () => {
+  const StripeService = require('../services/stripe');
+  const mdSpy = jest.spyOn(StripeService, 'isInvoiceAwaitingMicrodepositVerification').mockResolvedValue(true);
+  try {
+    const atRiskChain = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+      customers: [chain({ first: customer() }), atRiskChain],
+      invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 4, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ result: 1 }),
+        chain(),
+        chain({ result: 1 }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(mdSpy).toHaveBeenCalled();
+    expect(atRiskChain.update).not.toHaveBeenCalled();
+  } finally {
+    mdSpy.mockRestore();
+  }
+});
+
 test('a deduped Day 60 replay (every leg already delivered — freshDelivery false) still stamps at_risk', async () => {
   const ContactLedger = require('../services/collections/contact-ledger');
   ContactLedger.claimAttempt.mockResolvedValue({ delivered: true, allowed: true });

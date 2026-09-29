@@ -766,13 +766,27 @@ class BalanceReminder {
       const InvoiceFollowUps = require('../invoice-followups');
       const sequencelessOwned = !InvoiceFollowUps.latePaymentCheckerRetiredLive()
         || InvoiceFollowUps.adoptOrphanInvoicesLive();
-      if (process.env.GATE_DUNNING_LADDER_90 === 'true' && sequencelessOwned) {
+      // Legacy `unpaid`-status invoices are covered by neither the checker
+      // nor adoption (both read sent/viewed/overdue), so while any exists
+      // this stays the owner (Codex #5294 r2 P1; prod had none 2026-09-28).
+      // An unreadable count keeps it running.
+      let legacyUnpaidOpen = true;
+      try {
+        legacyUnpaidOpen = !!(await db('invoices').where({ status: 'unpaid' }).first('id'));
+      } catch (err) {
+        logger.warn(`[balance-reminders] legacy unpaid-invoice check failed, latePaymentCheck keeps running: ${err.message}`);
+      }
+      if (legacyUnpaidOpen) {
+        logger.warn('[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: legacy unpaid-status invoices still need it');
+      } else if (process.env.GATE_DUNNING_LADDER_90 === 'true' && sequencelessOwned) {
         logger.info('[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js (or orphan adoption) own these');
         return;
       }
-      logger.warn(process.env.GATE_DUNNING_LADDER_90 === 'true'
-        ? '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live'
-        : '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
+      if (!legacyUnpaidOpen) {
+        logger.warn(process.env.GATE_DUNNING_LADDER_90 === 'true'
+          ? '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live'
+          : '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
+      }
     }
     const customers = await db("customers")
       .where({ active: true })

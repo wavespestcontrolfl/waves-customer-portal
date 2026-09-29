@@ -304,11 +304,22 @@ describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-vi
 });
 
 describe('latePaymentCheck', () => {
+  // The retirement's one read: are any legacy `unpaid`-status invoices open?
+  // Answers none by default; any other table throws "unexpected table",
+  // proving the legacy body ran.
+  function mockUnpaidCheck(row) {
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return firstChain(row);
+      throw new Error(`unexpected table ${table}`);
+    });
+  }
+  beforeEach(() => mockUnpaidCheck(undefined));
+
   test('both gates on: retires — returns without querying or sending, logs the retirement line', async () => {
     process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     await expect(balanceReminder.latePaymentCheck()).resolves.toBeUndefined();
-    expect(db).not.toHaveBeenCalled();
+    expect(db.mock.calls).toEqual([['invoices']]);
     expect(logger.info).toHaveBeenCalledWith(LATE_RETIRED_LOG);
     expect(logger.warn).not.toHaveBeenCalledWith(LATE_IGNORED_WARN);
   });
@@ -335,12 +346,29 @@ describe('latePaymentCheck', () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
     try {
       await expect(balanceReminder.latePaymentCheck()).resolves.toBeUndefined();
-      expect(db).not.toHaveBeenCalled();
+      expect(db.mock.calls).toEqual([['invoices']]);
       expect(logger.info).toHaveBeenCalledWith(LATE_RETIRED_LOG);
     } finally {
       delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
       delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
     }
+  });
+
+  test('an open legacy unpaid-status invoice keeps latePaymentCheck running (neither replacement reads that status)', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    mockUnpaidCheck({ id: 'inv-unpaid' });
+    await expect(balanceReminder.latePaymentCheck()).rejects.toThrow('unexpected table customers');
+    expect(logger.warn).toHaveBeenCalledWith('[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: legacy unpaid-status invoices still need it');
+    expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
+  });
+
+  test('an unreadable unpaid-status check keeps latePaymentCheck running', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    db.mockImplementation((table) => { throw new Error(`unexpected table ${table}`); });
+    await expect(balanceReminder.latePaymentCheck()).rejects.toThrow('unexpected table customers');
+    expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
   });
 
   test('legacy-off alone (ladder gate unset): warns and runs the legacy body unchanged', async () => {
