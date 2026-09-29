@@ -485,6 +485,14 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
   };
 }
 
+// The instant the first-visit default rating (owner ruling 2026-09-24)
+// shipped — server/services/pest-pressure/first-visit.js, #4741 / #4767. A
+// legacy row (client_pest_rating_defaulted IS NULL — written before the
+// 2026-09-29 column existed) can only be the untouched default if it is
+// dated at or after this instant; before it, no default existed to confuse
+// it with.
+const FIRST_VISIT_DEFAULT_SHIPPED_AT = '2026-09-24T10:21:12Z';
+
 /** Average client_pest_rating per visit_number, partitioned by service_line
  * (visit_number is assigned per line — a pest visit #2 and a mosquito visit
  * #2 are different cohorts and must never be averaged together), rounded
@@ -502,16 +510,41 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
  * customer-submitted rating (reports-public.js writes 'customer') is not,
  * and neither is a legacy row with no source — every canonical reader
  * (pest-pressure/components/client-rating.js, customer-view.js) treats a
- * missing source as the customer's. The min-20 cohort floor applies to this
- * filtered set. An untouched first-visit prefill of 5 is NOT excluded: the
- * completion request's clientPestRatingPrefilled flag is never persisted (it
- * is stored as a plain client_pest_rating 5 / source 'technician', the same
- * as a 5 the tech chose), so no stored field can tell the two apart. */
+ * missing source as the customer's. The min-20 cohort floor applies AFTER
+ * every filter below.
+ *
+ * Owner ruling 2026-09-29: the untouched first-visit default rating (owner
+ * ruling 2026-09-24 — a customer's first visit on a line starts the
+ * technician rating at 5, and a tech who never touches it leaves it at 5)
+ * must NOT count here — it never reflects the technician's own judgment. A
+ * 5 the tech deliberately chose (including re-entering 5 on purpose) still
+ * counts. This does not change the Pest Pressure engine, the report's pest
+ * pressure score, or the recap — the 2026-09-24 ruling stands unchanged
+ * there, and the recap already hides the default from the customer.
+ * Enforcement is two-layered:
+ *   1. client_pest_rating_defaulted = true (completion write, this ruling's
+ *      column) is always excluded — the completion transaction itself
+ *      confirmed it was the untouched default.
+ *   2. A row where the flag IS NULL (written before this column existed)
+ *      cannot be told apart from a chosen rating by any stored field except
+ *      shape: a first visit (visit_number = 1) rated exactly 5, timestamped
+ *      (client_pest_rating_at, falling back to the service date when that
+ *      column is null) at or after the default's ship instant
+ *      (FIRST_VISIT_DEFAULT_SHIPPED_AT), is excluded on suspicion — it
+ *      could be either. A legacy NULL-flag row from before that instant is
+ *      kept: no default existed yet, so a first-visit 5 there can only be a
+ *      chosen rating. */
 async function getActivityRatingAverages({ conn = db } = {}) {
   const query = conn('service_records')
     .where('status', 'completed')
     .whereNotNull('client_pest_rating').whereNotNull('visit_number').whereNotNull('service_line')
-    .whereRaw("LOWER(COALESCE(client_pest_rating_source, '')) = 'technician'");
+    .whereRaw("LOWER(COALESCE(client_pest_rating_source, '')) = 'technician'")
+    .where((qb) => qb.whereNull('client_pest_rating_defaulted').orWhere('client_pest_rating_defaulted', false))
+    .whereNot((qb) => qb
+      .whereNull('client_pest_rating_defaulted')
+      .where('visit_number', 1)
+      .where('client_pest_rating', 5)
+      .whereRaw('COALESCE(client_pest_rating_at, service_date) >= ?::timestamptz', [FIRST_VISIT_DEFAULT_SHIPPED_AT]));
   applyCustomerVisibleServiceRecordFilter(query);
   query.whereRaw(
     `COALESCE(service_records.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,
@@ -537,5 +570,5 @@ async function getActivityRatingAverages({ conn = db } = {}) {
 module.exports = {
   PRODUCT_FAMILIES: FAMILIES, PRODUCT_LABELS: LABELS, FAMILY_ORDER, PRIMARY_FAMILY_RANK, PEST_KEYWORDS,
   classifyProduct, rankVisibleProducts, parsePestsNamed, treatmentTargets, treatmentTargetKey, nutrientsListed, expandElidedSpeciesLists, allCustomerFacingStrings,
-  readVisitProducts, readVisitSummary, getActivityRatingAverages,
+  readVisitProducts, readVisitSummary, getActivityRatingAverages, FIRST_VISIT_DEFAULT_SHIPPED_AT,
 };
