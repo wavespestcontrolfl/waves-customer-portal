@@ -2664,7 +2664,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // line. Runs under `database` (the caller's own transaction) so the
 // enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
-  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, database = db,
+  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, templateKey = null, database = db,
 }) {
   // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
   // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
@@ -2704,6 +2704,8 @@ async function queuePendingChannelReplay({
       // which keep finalizeDeferredCompletionSend's SMS-only stamp).
       partial_fanout_retry: true,
       original_block_code: originalBlockCode,
+      // The frozen body's template row; the scheduler replay forwards it.
+      ...(templateKey ? { template_key: templateKey } : {}),
       // sendViaSMSAndEmail's nested leg: the wrapper's own sendInvoiceEmail
       // already owns (and sent) this notice's Email, so the replay must keep
       // Email out of its fan-out exactly like the nested call did; the
@@ -5947,6 +5949,10 @@ const InvoiceService = {
     // variant). If the row is missing/disabled, we skip the SMS rather than
     // falling back to inline copy.
     let body = null;
+    // Tracks whichever of the three rows below actually rendered — never
+    // guessed, so a caught template-lookup error below (body stays null)
+    // leaves this null too.
+    let renderedTemplateKey = null;
     try {
       const templates = require("../routes/admin-sms-templates");
       const tplOpts = {
@@ -5980,6 +5986,7 @@ const InvoiceService = {
           first_visit_clause: firstVisitClause,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
       }
       // Upfront invoices — the setup + first-application invoice auto-sent at
       // estimate acceptance, or any invoice billed before its service date —
@@ -5996,6 +6003,7 @@ const InvoiceService = {
           service_type: serviceType,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_upfront";
       }
       if (!body) {
         // Either an ordinary invoice, or the prepay template was missing/disabled
@@ -6007,6 +6015,7 @@ const InvoiceService = {
           service_date: formattedDate || "today",
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent";
       }
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
@@ -6118,6 +6127,7 @@ const InvoiceService = {
       if (updated && pendingChannelToQueue) {
         const queueOutcome = await queuePendingChannelReplay({
           invoiceId, customerId: customer.id, toPhone: customer.phone || "", body,
+          templateKey: renderedTemplateKey,
           database: trx, ...pendingChannelToQueue,
         });
         pendingChannelQueued = queueOutcome.queued === true;
@@ -6184,6 +6194,10 @@ const InvoiceService = {
           original_message_type: "invoice",
           billingDeliveryCategory: "invoice",
           notificationEventKey: `invoice:${invoiceId}:sent`,
+          // Which of the three invoice_sent* rows actually rendered
+          // (never inferred — the messageType above is the fixed
+          // kill-switch key, not the rendering row).
+          ...(renderedTemplateKey ? { templateKey: renderedTemplateKey } : {}),
         },
         ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
         // The canonical sender owns push-first / push+SMS / Twilio routing.
@@ -6301,6 +6315,7 @@ const InvoiceService = {
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
         err.smsBody = body;
+        if (renderedTemplateKey) err.smsTemplateKey = renderedTemplateKey;
         err.toPhone = customer.phone;
         throw err;
       }
@@ -6844,6 +6859,7 @@ const InvoiceService = {
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
+        if (err.smsTemplateKey) sms.heldTemplateKey = err.smsTemplateKey;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
     }
@@ -6892,6 +6908,8 @@ const InvoiceService = {
               billingDeliveryCategory: "invoice",
               notificationEventKey: `invoice:${invoiceId}:sent`,
               hasEmailLeg: true,
+              // The held body's template row; the scheduler replay forwards it.
+              ...(sms.heldTemplateKey ? { template_key: sms.heldTemplateKey } : {}),
               original_block_code: sms.code,
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
@@ -6921,6 +6939,7 @@ const InvoiceService = {
       }
     }
     delete sms.heldBody;
+    delete sms.heldTemplateKey;
     delete sms.heldToPhone;
 
     // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a
@@ -7946,6 +7965,7 @@ const InvoiceService = {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",
         notificationEventKey: `invoice:${invoiceId}:receipt`,
+        templateKey: "invoice_receipt",
       },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.

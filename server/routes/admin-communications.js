@@ -4122,17 +4122,19 @@ router.get('/template-performance', async (req, res, next) => {
   try {
     const days = Math.min(Math.max(parsePositiveInt(req.query.days) || 30, 1), 365);
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    // The exact rendered row (metadata.templateKey) when the sender recorded
+    // it; otherwise the message-type alias the older rows carry.
     const rows = await db('messaging_audit_log')
       .where({ channel: 'sms' })
       .where('created_at', '>=', since)
-      .select(db.raw("COALESCE(metadata->>'original_message_type', purpose, 'unknown') as template_key"))
+      .select(db.raw("COALESCE(metadata->>'templateKey', metadata->>'original_message_type', purpose, 'unknown') as template_key"))
       .select(db.raw("COALESCE(metadata->>'sms_variant_key', '') as variant_key"))
       .count('* as attempts')
       .sum({ segments: 'segment_count' })
       .select(db.raw("SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) as sent"))
       .select(db.raw("SUM(CASE WHEN blocked_code IS NOT NULL THEN 1 ELSE 0 END) as blocked"))
       .select(db.raw("SUM(CASE WHEN provider_error IS NOT NULL THEN 1 ELSE 0 END) as provider_failures"))
-      .groupByRaw("COALESCE(metadata->>'original_message_type', purpose, 'unknown'), COALESCE(metadata->>'sms_variant_key', '')")
+      .groupByRaw("COALESCE(metadata->>'templateKey', metadata->>'original_message_type', purpose, 'unknown'), COALESCE(metadata->>'sms_variant_key', '')")
       .orderBy('attempts', 'desc');
 
     res.json({
