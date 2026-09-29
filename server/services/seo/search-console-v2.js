@@ -188,8 +188,13 @@ class SearchConsoleService {
     } catch (err) {
       return { error: `Could not list Search Console properties: ${err.message}` };
     }
+    // sites.list also returns properties this account only has
+    // siteUnverifiedUser / siteRestrictedUser on; sitemaps.submit needs owner
+    // or full user, so only those count — and when both representations are
+    // listed, the one with enough permission wins.
+    const canSubmit = (entry) => ['siteOwner', 'siteFullUser'].includes(entry?.permissionLevel);
     const bySiteUrl = new Map(sites.map((s) => [String(s.siteUrl || '').toLowerCase(), s]));
-    const match = bySiteUrl.get(urlPrefix.toLowerCase()) || bySiteUrl.get(domainProp.toLowerCase());
+    const match = [bySiteUrl.get(urlPrefix.toLowerCase()), bySiteUrl.get(domainProp.toLowerCase())].find(canSubmit);
     if (!match) return { error: 'not_accessible', checked: [urlPrefix, domainProp] };
     return { siteUrl: match.siteUrl, permissionLevel: match.permissionLevel || null };
   }

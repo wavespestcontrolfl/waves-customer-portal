@@ -118,6 +118,22 @@ describe('resolveAccessibleProperty', () => {
     expect(result.siteUrl).toBe('https://www.wavespestcontrol.com/');
   });
 
+  test('a property listed without submit permission is not accessible; the permitted representation wins', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    const onlyUnverified = jest.fn().mockResolvedValue({
+      data: { siteEntry: [{ siteUrl: 'https://bradentonflpestcontrol.com/', permissionLevel: 'siteUnverifiedUser' }] },
+    });
+    expect((await loadWithSitesList(onlyUnverified).resolveAccessibleProperty('bradentonflpestcontrol.com')).error).toBe('not_accessible');
+
+    const both = jest.fn().mockResolvedValue({
+      data: { siteEntry: [
+        { siteUrl: 'https://bradentonflpestcontrol.com/', permissionLevel: 'siteRestrictedUser' },
+        { siteUrl: 'sc-domain:bradentonflpestcontrol.com', permissionLevel: 'siteFullUser' },
+      ] },
+    });
+    expect((await loadWithSitesList(both).resolveAccessibleProperty('bradentonflpestcontrol.com')).siteUrl).toBe('sc-domain:bradentonflpestcontrol.com');
+  });
+
   test('the property lookup is bounded by the configured GSC request timeout (Codex r4 on #5275)', async () => {
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
     const list = jest.fn().mockResolvedValue({ data: { siteEntry: [] } });
