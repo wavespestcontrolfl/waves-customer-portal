@@ -2185,6 +2185,36 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(workup.possibilities.map((p) => p.slug)).toContain('fixture-drought');
     });
 
+    test('Codex #5307 r4: with three earlier possibilities, the referee\'s third answer still takes the last displayed slot', () => {
+      const index = engine.conditionIndexFor('lawn', null);
+      const approved = index.filter((e) => e.review?.status === 'owner_approved' || e.review?.owner_approved).map((e) => e.slug);
+      expect(approved.length).toBeGreaterThanOrEqual(4);
+      const [a, b, c, d] = approved;
+      const cond = (slug, confidence) => engine.resolveConditionCandidate({
+        slug, confidence, elements_visible: [], signs_visible: [], symptoms_visible: [],
+      }, index);
+      const earlier = [cond(a, 0.5), cond(b, 0.45), cond(c, 0.4)];
+      const conditions = { possibilities: earlier, index };
+      const escalation = {
+        conditionFlags: {
+          triggered: true, disagreed: false, blockPrettySure: false, openaiAnswered: true, disagreementPair: null,
+        },
+        possibilities: earlier,
+        conditionIndex: index,
+        json: { conditions: [{ slug: a, confidence: 0.5, elements_visible: [], signs_visible: [], symptoms_visible: [] }] },
+      };
+      const refereeJson = { conditions: [{ slug: d, confidence: 0.9, elements_visible: [], signs_visible: [], symptoms_visible: [] }] };
+      const merged = engine._test.mergeConditionsScope(conditions, escalation, refereeJson);
+      expect(merged.outcome).toBe('third_answer');
+      const workup = engine.buildWorkup({
+        subject: 'lawn', possibilities: merged.possibilities, conditionFlags: merged.flags, currentMonth: 6, photosCount: 1,
+      });
+      const shown = workup.possibilities.map((p) => p.slug);
+      expect(shown[0]).toBe(a);
+      expect(shown).toContain(d);
+      expect(shown).toHaveLength(3);
+    });
+
     test('Codex #5307 r3: with no earlier answer the referee is never called, and a lone referee vote never confirms', async () => {
       process.env.GATE_PLANT_ID_REFEREE = 'true';
       try {

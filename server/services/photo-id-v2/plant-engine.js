@@ -1127,6 +1127,18 @@ function workupAnswerFor(namedAnswer, observedTerms, subject) {
  * round 2) — a disagreement or an unanswered trigger changes the
  * customer-facing answer, not just an admin-only log line.
  */
+/** The top three possibilities the workup displays. A referee-only third
+ * answer ranks last (`refereeRank`) but still holds the last displayed slot
+ * when it would otherwise fall off the list (Codex #5307 r4) — the same
+ * reserved slot `appendRefereeCandidate` gives an identity third answer.
+ * The leader and the order of the rest never change. */
+function displayedPossibilities(ranked) {
+  const shown = ranked.slice(0, 3);
+  const refereeOnly = ranked.find((p) => p.refereeOnly);
+  if (refereeOnly && shown.length === 3 && !shown.includes(refereeOnly)) shown[2] = refereeOnly;
+  return shown;
+}
+
 function buildWorkup(ctx) {
   const {
     subject, possibilities = [], currentMonth, chips = {}, photosCount = 0, quality = DEFAULT_QUALITY, conditionFlags = {},
@@ -1149,8 +1161,7 @@ function buildWorkup(ctx) {
   // vote never outranks an earlier read), everything else by confidence.
   const allApprovedPossibilities = gate.unusable ? [] : possibilities.filter((p) => isApproved(p.entry))
     .sort((a, b) => (refereeRank(a) - refereeRank(b)) || (b.confidence - a.confidence));
-  const approvedPossibilities = allApprovedPossibilities
-    .slice(0, 3)
+  const approvedPossibilities = displayedPossibilities(allApprovedPossibilities)
     .map((p) => ({ ...p, localCtx: { currentMonth, chips, context: ctx.context || {} } }));
 
   const { plant, weeds, accountTurf } = workupSubjectFor(ctx, gate.blocked);
