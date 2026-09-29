@@ -65,15 +65,39 @@ function redactMapsKeyFromUrl(raw) {
 }
 
 // Last-resort scrub over an outgoing payload (object/array/string): any
-// maps.googleapis.com URL loses its key param and any literal occurrence of
-// the configured server key is blanked. Defense in depth behind the
-// purpose-built proxy paths — catches a keyed URL sitting in an unrelated
-// blob (estimate_data, enriched profile) that no builder knew about.
+// maps.googleapis.com URL loses its key param, any `key=AIza...` token and any
+// bare Google API key shape is removed regardless of separator, and any literal
+// occurrence of the configured server key is blanked. Defense in depth behind
+// the purpose-built proxy paths — catches a keyed URL sitting in an unrelated
+// blob (estimate_data, authored text, enriched profile) that no builder knew
+// about, INCLUDING a key that differs from the currently configured one (a
+// rotated or staff-pasted key).
+//
+// Entity/escape aware: after HTML escaping a param separator is `&amp;`
+// (`&#38;`, `&#x26;`), which a URL parser reads as a param named `amp;key`, so
+// each escaped separator form is handled explicitly, as are JSON `&` /
+// `\x26`. Callers should ALSO scrub source values BEFORE escaping (sendEstimatePage
+// does), so this string pass is the backstop, not the only line.
+const KEY_SEPARATOR = String.raw`(?:&amp;|&#0*38;|&#x0*26;|\\u0026|\\x26|&)`;
+const KEY_VALUE = String.raw`[^&#\s"'<>\\]*`;
+const GOOGLE_KEY_SHAPE = /AIza[0-9A-Za-z_-]{20,}/g;
+
+function stripKeyParamsFromMapsUrlText(url) {
+  return url
+    // `?key=X` (first param): keep the `?`, drop a following separator.
+    .replace(new RegExp(String.raw`\?key=${KEY_VALUE}(?:${KEY_SEPARATOR})?`, 'gi'), '?')
+    // `<sep>key=X` (any later param, any escape form of the separator).
+    .replace(new RegExp(`${KEY_SEPARATOR}key=${KEY_VALUE}`, 'gi'), '')
+    .replace(/[?]$/, '');
+}
+
 function scrubMapsKeysFromString(text) {
   let out = String(text);
   if (/maps\.googleapis\.com/i.test(out)) {
-    out = out.replace(/https?:\/\/maps\.googleapis\.com\/[^\s"'<>\\]*/gi, (m) => redactMapsKeyFromUrl(m));
+    out = out.replace(/https?:\/\/maps\.googleapis\.com\/[^\s"'<>]*/gi, (m) => stripKeyParamsFromMapsUrlText(m));
   }
+  // Any `key=AIza...` token (any separator, any host) and any bare key shape.
+  out = out.replace(/key=AIza[0-9A-Za-z_-]{20,}/gi, '').replace(GOOGLE_KEY_SHAPE, '');
   const key = serverMapsKey();
   if (key && key.length >= 8 && out.includes(key)) out = out.split(key).join('');
   return out;
@@ -84,7 +108,10 @@ function scrubMapsKeysDeep(value, depth = 0) {
   if (typeof value === 'string') return scrubMapsKeysFromString(value);
   if (Array.isArray(value)) return value.map((v) => scrubMapsKeysDeep(v, depth + 1));
   if (typeof value === 'object') {
-    if (value instanceof Date || Buffer.isBuffer(value)) return value;
+    // Only plain JSON-ish objects are rebuilt; Dates, Buffers, Maps and other
+    // class instances pass through untouched.
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
     const out = {};
     for (const [k, v] of Object.entries(value)) out[k] = scrubMapsKeysDeep(v, depth + 1);
     return out;

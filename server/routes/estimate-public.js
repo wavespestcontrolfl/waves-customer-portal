@@ -8235,8 +8235,17 @@ function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) 
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
     .set('Content-Type', 'text/html; charset=utf-8')
-    // Defense in depth: no server Maps key in any SSR HTML, whatever blob it rode in on.
-    .send(estimateMapImage.scrubMapsKeysFromString(renderPage(token, estimate, estData, membership, opts)));
+    // Scrub the SOURCE values before renderPage HTML-escapes them (an escaped
+    // `&amp;key=` is no longer a param boundary), then scrub the finished HTML
+    // (entity-aware) as a backstop: no Maps key in any SSR HTML, whatever blob
+    // it rode in on, and whether or not it matches the configured key.
+    .send(estimateMapImage.scrubMapsKeysFromString(renderPage(
+      token,
+      estimateMapImage.scrubMapsKeysDeep(estimate),
+      estimateMapImage.scrubMapsKeysDeep(estData),
+      estimateMapImage.scrubMapsKeysDeep(membership),
+      estimateMapImage.scrubMapsKeysDeep(opts),
+    )));
 }
 
 // Existing-customer estimate treatment — waived WaveGuard setup fee and no
@@ -28412,6 +28421,7 @@ module.exports = router;
 // Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.mapImagePreGuard = mapImagePreGuard;
+module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.selectTierCeiling = selectTierCeiling;

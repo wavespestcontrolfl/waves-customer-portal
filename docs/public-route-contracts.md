@@ -1750,8 +1750,12 @@ surface gets a map image — /data, the SSR page, the PDF render pass and the
 show-your-work payload carry these paths and never a maps.googleapis.com URL,
 because that URL carried the server's Google Maps key, the same key Geocoding
 and Routes use, which cannot be referrer-restricted; `/data` and the SSR HTML
-also run a last-line scrub that strips any maps.googleapis.com `key=` and
-blanks the literal key, and stored `estimates.satellite_url` rows that already
+also run a last-line scrub that strips any maps.googleapis.com `key=` (raw or
+HTML/JSON-escaped separators: `&amp;`, `&#38;`, `&#x26;`, `\u0026`), any
+`key=AIza...` token or bare Google-key shape (so a rotated or staff-pasted key
+that differs from the configured one is caught too) and blanks the literal key
+— the SSR path scrubs its SOURCE values before renderPage escapes them, then
+scrubs the finished HTML as a backstop, and stored `estimates.satellite_url` rows that already
 hold a keyed URL are redacted on output — no migration). A small guard (`mapImagePreGuard`) is mounted in
 `server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter,
 scoped to exactly what Express routes to these two handlers (GET and HEAD,

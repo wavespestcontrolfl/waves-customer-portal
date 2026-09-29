@@ -647,6 +647,62 @@ describe('public payloads never carry the server Maps key', () => {
   });
 });
 
+describe('scrub covers escaped and differently-keyed URLs', () => {
+  const OTHER = 'AIzaSyOTHERKEY0123456789abcdefghijklmn';
+  const BASE = 'https://maps.googleapis.com/maps/api/staticmap?center=1,2&zoom=3';
+
+  test('entity, JSON and query-first forms all lose the key', () => {
+    const forms = [
+      `${BASE}&key=${OTHER}`,
+      `${BASE}&amp;key=${OTHER}`,
+      `${BASE}&#38;key=${OTHER}`,
+      `${BASE}&#x26;key=${OTHER}&amp;size=640x640`,
+      `${BASE}\\u0026key=${OTHER}`,
+      `https://maps.googleapis.com/maps/api/staticmap?key=${OTHER}&amp;center=1,2`,
+      `https://maps.googleapis.com/maps/api/staticmap?key=${OTHER}`,
+      `see this: key=${OTHER} in prose`,
+      `bare ${OTHER} shape`,
+    ];
+    for (const f of forms) {
+      const out = mapImage.scrubMapsKeysFromString(f);
+      expect(out).not.toContain(OTHER);
+      expect(out).not.toMatch(/key=/i);
+    }
+    expect(mapImage.scrubMapsKeysFromString(`${BASE}&amp;key=${OTHER}&amp;size=640x640`)).toContain('&amp;size=640x640');
+  });
+
+  test('sendEstimatePage: an authored field with a differently-keyed, HTML-escaped URL never reaches the HTML', () => {
+    const authored = `https://maps.googleapis.com/maps/api/staticmap?center=27.3,-82.5&zoom=19&key=${OTHER}`;
+    const html = [];
+    const res = {
+      set() { return res; },
+      send(body) { html.push(body); return res; },
+    };
+    estimatePublicRouter.sendEstimatePage(
+      res,
+      'syw-token',
+      renderEstimate({ address: `1 Test St ${authored}`, customerName: `Pat ${authored}` }),
+      renderEstimateData({ note: authored }),
+      null,
+    );
+    expect(html).toHaveLength(1);
+    expect(html[0]).toContain('1 Test St');
+    expect(html[0]).not.toContain(OTHER);
+    expect(html[0]).not.toContain('test-maps-key');
+    expect(html[0]).not.toMatch(/maps\.googleapis\.com[^"'<\s]*key=/i);
+    expect(html[0]).not.toMatch(/amp;key=/i);
+  });
+
+  test('scrubMapsKeysDeep leaves Dates and class instances alone', () => {
+    const when = new Date('2026-01-01T00:00:00Z');
+    const map = new Map([['a', 1]]);
+    const out = mapImage.scrubMapsKeysDeep({ when, map, n: [1, { s: 'x' }] });
+    expect(out.when).toBe(when);
+    expect(out.map).toBe(map);
+    expect(out.n[1].s).toBe('x');
+  });
+});
+
 describe('estimate-map-image helpers', () => {
   test('publicSatelliteUrl', () => {
     const { publicSatelliteUrl } = mapImage;
