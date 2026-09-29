@@ -586,3 +586,145 @@ describe('stopPhotoViewUrls', () => {
     expect(urls.map((u) => u.id)).toEqual(['photo-A']);
   });
 });
+
+// GATE_VISIT_PREP_PLANT_READ — the lawn / tree & shrub sibling of the pest
+// read's own facts coverage above. These tests exercise ONLY the additive
+// plant path; none of them touch GATE_VISIT_PREP_PEST_READ, so the pest
+// suite above is unaffected.
+describe('plantReadFactsFromResult', () => {
+  const { plantReadFactsFromResult } = visitPrep._internal;
+
+  test('a done row carries only fixed engine/catalog fields, kind=plant', () => {
+    const facts = plantReadFactsFromResult('done', {
+      subject_type: 'lawn',
+      v2: {
+        answer: { level: 'entry', wording: 'likely', headline: 'Likely: Brown Patch' },
+        subject: { plant: { common_name: 'St. Augustinegrass' } },
+        possibilities: [{
+          common_name: 'Brown Patch', fits: ['Roughly circular brown patch'], not_yet: ['A smoke-ring edge'], safety_line: null, safety: null,
+        }],
+        next_step_hint: { kind: 'inspection', text: 'A technician checks this on your next visit.' },
+        referral: null,
+      },
+    });
+    expect(facts).toEqual({
+      status: 'done',
+      kind: 'plant',
+      subjectType: 'lawn',
+      wordingTier: 'likely',
+      headline: 'Likely: Brown Patch',
+      plantCommonName: 'St. Augustinegrass',
+      conditionName: 'Brown Patch',
+      fits: ['Roughly circular brown patch'],
+      notYet: ['A smoke-ring edge'],
+      nextStepText: 'A technician checks this on your next visit.',
+      referralKind: null,
+      safetyLine: null,
+      hazards: null,
+    });
+  });
+
+  test('a symptom-level (unnamed) answer carries no conditionName', () => {
+    const facts = plantReadFactsFromResult('done', {
+      subject_type: 'lawn',
+      v2: {
+        answer: { level: 'symptom', wording: null, headline: 'Brown patches in the lawn' },
+        subject: { plant: null },
+        possibilities: [],
+        next_step_hint: { kind: 'unclear', text: "We can't tell from these photos; a technician can take a look on your next visit." },
+        referral: null,
+      },
+    });
+    expect(facts.conditionName).toBeNull();
+    expect(facts.wordingTier).toBeNull();
+    expect(facts.headline).toBe('Brown patches in the lawn');
+  });
+
+  test('a done row with no stored result reads as failed, never an empty result', () => {
+    expect(plantReadFactsFromResult('done', null)).toEqual({ status: 'failed' });
+  });
+
+  test('non-done statuses pass through untouched', () => {
+    for (const s of ['none', 'pending', 'failed', 'unsupported']) {
+      expect(plantReadFactsFromResult(s, null)).toEqual({ status: s });
+    }
+  });
+});
+
+describe('customerFlaggedFacts — plant read integration (GATE_VISIT_PREP_PLANT_READ)', () => {
+  beforeEach(() => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PLANT_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+  });
+  afterEach(() => {
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+    delete process.env.GATE_VISIT_PREP_PLANT_READ;
+    delete process.env.GATE_VISIT_FACTS;
+  });
+
+  test('a lawn stop with a DONE plant read serves the plant shape from read_result', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        {
+          id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: 'Brown spots', read_status: 'done', read_ref: null,
+          read_result: JSON.stringify({
+            subject_type: 'lawn',
+            v2: {
+              answer: { level: 'entry', wording: 'likely', headline: 'Likely: Brown Patch' },
+              subject: { plant: { common_name: 'St. Augustinegrass' } },
+              possibilities: [{ common_name: 'Brown Patch', fits: ['Roughly circular brown patch'], not_yet: [] }],
+              next_step_hint: { kind: 'inspection', text: 'A technician checks this on your next visit.' },
+              referral: null,
+            },
+          }),
+        },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read.status).toBe('done');
+    expect(facts[0].read.kind).toBe('plant');
+    expect(facts[0].read.conditionName).toBe('Brown Patch');
+  });
+
+  test('a stop reclassified to pest after a plant read shows unsupported, not a stale plant line', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
+      visit_prep_submissions: [
+        {
+          id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_result: JSON.stringify({ subject_type: 'lawn', v2: { answer: { level: 'entry', wording: 'likely' }, possibilities: [{ common_name: 'Brown Patch' }] } }),
+        },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a PENDING plant read on a currently-lawn stop shows pending', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_result: null },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'pending' });
+  });
+
+  test('plant-read gate off: stored plant reads are not served at all', async () => {
+    delete process.env.GATE_VISIT_PREP_PLANT_READ;
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_result: JSON.stringify({ subject_type: 'lawn', v2: {} }) },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0]).not.toHaveProperty('read');
+  });
+});

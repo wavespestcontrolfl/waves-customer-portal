@@ -531,6 +531,24 @@ async function createVisitPrepSubmission({
     });
   }
 
+  // Sibling of the pest read above (GATE_VISIT_PREP_PLANT_READ) — the lawn /
+  // tree & shrub counterpart, its own independent fire-and-forget call, so
+  // it never disturbs the pest-read or tech-alert hooks. A stop applicable
+  // to the pest read is never ALSO applicable here (visit-prep-plant-
+  // applicability.js's "pest wins"), so the two triggers never race to
+  // claim the same submission.
+  if (result.created && require('../config/feature-gates').visitPrepPlantReadLive()) {
+    const readArgs = { submissionId: result.submissionId, svc: result.current, photos: result.photos };
+    setImmediate(() => {
+      try {
+        require('./visit-prep-plant-read').triggerVisitPrepPlantRead(readArgs)
+          .catch((err) => logger.error(`[visit-prep] plant read trigger failed for submission ${readArgs.submissionId}: ${err.message}`));
+      } catch (err) {
+        logger.error(`[visit-prep] plant read could not start for submission ${readArgs.submissionId}: ${err.message}`);
+      }
+    });
+  }
+
   return { created: result.created, stored: result.stored, summary: result.summary, svc: result.current };
 }
 
@@ -680,6 +698,59 @@ function answerName(v2) {
 
 const asList = (value) => (Array.isArray(value) ? value : []);
 
+// The plant sibling of readFactsFromContract, for a DONE row produced by
+// GATE_VISIT_PREP_PLANT_READ (visit-prep-plant-read.js) — built ONLY from
+// fixed engine/catalog fields, the same discipline: a wording tier (a fixed
+// enum), APPROVED catalog common names (the identified turf/plant species,
+// and the named condition when the workup names one), the catalog's own
+// `fits`/`not_yet` strings for the top possibility (plant-engine.js
+// visibleStringsFor/notYetFor — catalog-authored text, not model prose),
+// a fixed next-step template, a referral kind, and the catalog's own
+// `safety_line`/boolean safety flags. No product or rate guidance.
+// `resultRow` is the parsed `read_result` jsonb ({ v2, internal,
+// subject_type }) — the SAME split (v2 customer/tech-safe, internal
+// admin-only) the pest read keeps, just stored together since nothing else
+// ever reads this column back. Carries `kind: 'plant'` so the tech UI can
+// tell it apart from a pest read's shape — an ADDITIVE field, never added
+// to readFactsFromContract's own pest shape (an existing, tested contract).
+// The top possibility and the workup's identified plant — both optional,
+// normalized to plain objects once here so the fields below read them with
+// ordinary dot access instead of a repeated chain of `?.`s (kept complexity
+// low; split out of plantReadFactsFromResult for the same reason
+// answerName() is split out of readFactsFromContract above).
+function plantTopFields(v2) {
+  const top = (Array.isArray(v2.possibilities) && v2.possibilities[0]) || {};
+  const plant = (v2.subject && v2.subject.plant) || {};
+  const answerLevel = (v2.answer || {}).level;
+  return {
+    conditionName: answerLevel === 'entry' ? (top.common_name || null) : null,
+    fits: asList(top.fits),
+    notYet: asList(top.not_yet),
+    plantCommonName: plant.common_name || null,
+    safetyLine: top.safety_line || plant.safety_line || null,
+    hazards: top.safety || plant.safety || null,
+  };
+}
+
+function plantReadFactsFromResult(status, resultRow) {
+  if (status === 'done' && !resultRow) return { status: 'failed' };
+  if (status !== 'done') return { status };
+  const v2 = resultRow.v2 || {};
+  const answer = v2.answer || {};
+  const nextStep = v2.next_step_hint || {};
+  const referral = v2.referral || {};
+  return {
+    status,
+    kind: 'plant',
+    subjectType: resultRow.subject_type || v2.subject_type || null,
+    wordingTier: answer.wording || null,
+    headline: answer.headline || null,
+    nextStepText: nextStep.text || null,
+    referralKind: referral.kind || null,
+    ...plantTopFields(v2),
+  };
+}
+
 function readFactsFromContract(status, contract) {
   // A 'done' row whose stored result is gone or unreadable (a purge, the
   // FK's ON DELETE SET NULL) is shown as failed, never as an empty "done"
@@ -712,15 +783,24 @@ function readFactsFromContract(status, contract) {
 const FINAL_CHECK_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
 
 // The stop's final member set and, when asked, whether it is still a pest
-// stop, from one consistent snapshot. A conn without transactions (unit-test
-// fakes) runs the same reads directly.
-async function finalStopSnapshot(svc, conn, needPest) {
+// stop and/or still a lawn/tree & shrub stop, from one consistent snapshot.
+// A conn without transactions (unit-test fakes) runs the same reads
+// directly.
+async function finalStopSnapshot(svc, conn, needPest, needPlant) {
   const run = async (c) => {
     const current = await stillOnTechStop(svc, c);
     const stillPest = needPest
       ? await require('./visit-prep-pest-applicability').membersArePest([...current], c)
       : true;
-    return { current, stillPest };
+    // Sibling of stillPest for GATE_VISIT_PREP_PLANT_READ — 'lawn' |
+    // 'tree_shrub' | null, so a stop reclassified away from a plant subject
+    // (or into a pest one, which owns the read instead) never shows a
+    // stale plant read (Codex-#5305-r16/r17-style freshness, applied to
+    // the plant sibling).
+    const plantSubject = needPlant
+      ? await require('./visit-prep-plant-applicability').subjectForMembers([...current], c)
+      : null;
+    return { current, stillPest, plantSubject };
   };
   // Inside a caller's transaction (or a test fake) the reads already share
   // that connection; only a pool-level conn opens the snapshot.
@@ -734,7 +814,7 @@ async function customerFlaggedFacts(svc, conn = db) {
   const submissions = await conn('visit_prep_submissions')
     .whereIn('scheduled_service_id', ids)
     .orderBy('created_at', 'asc')
-    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note', 'read_status', 'read_ref');
+    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note', 'read_status', 'read_ref', 'read_result');
   if (submissions.length === 0) return null;
   const photos = await conn('visit_prep_photos')
     .whereIn('submission_id', submissions.map((s) => s.id))
@@ -757,6 +837,7 @@ async function customerFlaggedFacts(svc, conn = db) {
   // customer's note and photos are still served, just without a read
   // (Codex #5305 r14 P2).
   let readsLive = require('../config/feature-gates').visitPrepPestReadLive();
+  let plantReadsLive = require('../config/feature-gates').visitPrepPlantReadLive();
   const contractsByRef = new Map();
   if (readsLive) {
     try {
@@ -771,41 +852,57 @@ async function customerFlaggedFacts(svc, conn = db) {
     }
   }
 
-  // Membership and pest-ness are read in ONE repeatable-read snapshot (the
-  // FINAL_CHECK_SNAPSHOT pattern of estimate-consultation-offer.js), so the
-  // member set that filters what is served and the member set judged pest
-  // are the same rows at the same instant (Codex #5305 r16/r17 P1). Checked
-  // for running reads too, so "Photo read pending" never outlives a
-  // reclassification (r13). The applicability module never loads the
-  // vision engine here.
+  // Membership and pest-ness/plant-ness are read in ONE repeatable-read
+  // snapshot (the FINAL_CHECK_SNAPSHOT pattern of
+  // estimate-consultation-offer.js), so the member set that filters what is
+  // served and the member set judged pest/plant are the same rows at the
+  // same instant (Codex #5305 r16/r17 P1, applied to the plant sibling
+  // too). Checked for running reads too, so "Photo read pending" never
+  // outlives a reclassification (r13). The applicability modules never
+  // load a vision engine here.
   const needPest = readsLive && submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
+  const needPlant = plantReadsLive && submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
   let snapshot;
   try {
-    snapshot = await finalStopSnapshot(svc, conn, needPest);
+    snapshot = await finalStopSnapshot(svc, conn, needPest, needPlant);
   } catch (err) {
-    if (!needPest) throw err;
+    if (!needPest && !needPlant) throw err;
     logger.warn(`[visit-prep] read applicability failed for ${svc.id}: ${err.message}`);
     readsLive = false;
-    snapshot = { current: await stillOnTechStop(svc, conn), stillPest: true };
+    plantReadsLive = false;
+    snapshot = { current: await stillOnTechStop(svc, conn), stillPest: true, plantSubject: null };
   }
-  const { current, stillPest } = snapshot;
+  const { current, stillPest, plantSubject } = snapshot;
   const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
   if (kept.length === 0) return null;
 
-  return kept.map((s) => ({
-    id: s.id,
-    sentAt: s.created_at instanceof Date ? s.created_at.toISOString() : new Date(s.created_at).toISOString(),
-    topic: s.topic || null,
-    locationOnProperty: s.location_on_property || null,
-    note: s.note || null,
-    photoIds: photoIdsBySubmission.get(s.id) || [],
-    // The read's own kill switch hides stored reads too (Codex #5305 r1 P1).
-    ...(readsLive ? {
-      read: stillPest
-        ? readFactsFromContract(effectiveReadStatus(s.read_status || 'none', s.created_at), s.read_ref ? contractsByRef.get(s.read_ref) : null)
-        : { status: 'unsupported' },
-    } : {}),
-  }));
+  return kept.map((s) => {
+    const entry = {
+      id: s.id,
+      sentAt: s.created_at instanceof Date ? s.created_at.toISOString() : new Date(s.created_at).toISOString(),
+      topic: s.topic || null,
+      locationOnProperty: s.location_on_property || null,
+      note: s.note || null,
+      photoIds: photoIdsBySubmission.get(s.id) || [],
+    };
+    const status = effectiveReadStatus(s.read_status || 'none', s.created_at);
+    // Each engine's own kill switch hides its stored reads too (Codex #5305
+    // r1 P1, applied to the plant sibling): a stop currently judged pest
+    // renders the pest shape; one currently judged lawn/tree_shrub renders
+    // the plant shape (its own read_result column, untouched by the pest
+    // read); a stop that matches neither right now — reclassified away, or
+    // both features off — shows 'unsupported' whenever at least one of the
+    // two features is live at all, exactly as the pest-only read did before
+    // this lane existed.
+    if (readsLive && stillPest) {
+      entry.read = readFactsFromContract(status, s.read_ref ? contractsByRef.get(s.read_ref) : null);
+    } else if (plantReadsLive && plantSubject) {
+      entry.read = plantReadFactsFromResult(status, s.read_result ? parseJsonMaybe(s.read_result) : null);
+    } else if (readsLive || plantReadsLive) {
+      entry.read = { status: 'unsupported' };
+    }
+    return entry;
+  });
 }
 
 module.exports = {
@@ -822,6 +919,6 @@ module.exports = {
   customerFlaggedFacts,
   techStopMemberIds,
   _internal: {
-    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg, readFactsFromContract, effectiveReadStatus,
+    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg, readFactsFromContract, plantReadFactsFromResult, effectiveReadStatus,
   },
 };

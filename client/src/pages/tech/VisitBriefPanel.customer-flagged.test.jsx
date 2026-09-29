@@ -162,6 +162,21 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     )).toBeInTheDocument();
   });
 
+  it('shows the plant (lawn/tree & shrub) read as an AI suggestion built only from fixed fields', () => {
+    renderPanel({ customerFlagged: [{
+      ...CUSTOMER_FLAGGED[0],
+      read: {
+        status: 'done', kind: 'plant', wordingTier: 'likely', headline: 'Likely: Brown Patch',
+        plantCommonName: 'St. Augustinegrass', conditionName: 'Brown Patch',
+        fits: ['Roughly circular brown patch'], notYet: ['A smoke-ring edge'],
+        nextStepText: 'A technician checks this on your next visit.', referralKind: null, safetyLine: null,
+      },
+    }] });
+    expect(screen.getByText(
+      'Photo read (AI suggestion, not confirmed): Likely: Brown Patch. Plant: St. Augustinegrass. Fits: Roughly circular brown patch. Not yet seen: A smoke-ring edge. A technician checks this on your next visit.',
+    )).toBeInTheDocument();
+  });
+
   it('shows "Photo read pending" while a read runs, and nothing for unsupported/failed/none', () => {
     renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] });
     expect(screen.getByText('Photo read pending')).toBeInTheDocument();

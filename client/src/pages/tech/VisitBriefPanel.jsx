@@ -236,10 +236,30 @@ function formatVisitPrepReadLine(read) {
   return parts.join(' ');
 }
 
+// GATE_VISIT_PREP_PLANT_READ — the lawn / tree & shrub counterpart of the
+// pest read above. `entry.read.kind === 'plant'` carries ONLY fixed
+// server-computed fields too (see visit-prep.js's plantReadFactsFromResult):
+// a wording tier, APPROVED catalog common names, a fixed headline template,
+// the catalog's own `fits`/`notYet` strings, the catalog's own fixed
+// `safetyLine`, and fixed next-step/referral text. Same rule as the pest
+// line: every label here is this module's own, no free model text.
+function formatVisitPrepPlantReadLine(read) {
+  if (!read || read.status !== 'done') return null;
+  const parts = [];
+  parts.push(`${read.headline || "We couldn't tell from these photos"}.`);
+  if (read.plantCommonName && read.plantCommonName !== read.conditionName) parts.push(`Plant: ${read.plantCommonName}.`);
+  if (read.fits?.length) parts.push(`Fits: ${read.fits.join('; ')}.`);
+  if (read.notYet?.length) parts.push(`Not yet seen: ${read.notYet.join('; ')}.`);
+  if (read.safetyLine) parts.push(read.safetyLine);
+  if (read.nextStepText) parts.push(read.nextStepText);
+  if (read.referralKind) parts.push(`Refer: ${String(read.referralKind).replace(/_/g, ' ')}.`);
+  return parts.join(' ');
+}
+
 function VisitPrepReadLine({ read }) {
   if (!read) return null;
   if (read.status === 'done') {
-    const line = formatVisitPrepReadLine(read);
+    const line = read.kind === 'plant' ? formatVisitPrepPlantReadLine(read) : formatVisitPrepReadLine(read);
     if (!line) return null;
     return <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read (AI suggestion, not confirmed): {line}</p>;
   }
