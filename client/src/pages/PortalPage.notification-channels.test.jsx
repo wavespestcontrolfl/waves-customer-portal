@@ -60,9 +60,85 @@ it('offers App on both reminder rows and saves each existing channel field', asy
   expect(reminder24()).toHaveValue('push');
 });
 
+it('uses one delivery control for optional reports and weather alerts, retaining the report channel when off', async () => {
+  prefs = { ...prefs, serviceCompleted: true, serviceCompleteChannel: 'push', weatherAlerts: true };
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  const reports = await screen.findByRole('combobox', { name: 'Delivery method for Service reports' });
+  const weather = screen.getByRole('combobox', { name: 'Delivery method for Weather & property alerts' });
+  await waitFor(() => expect(within(reports).getByRole('option', { name: 'App', exact: true })).toBeEnabled());
+  expect(screen.queryByRole('switch', { name: 'Service reports', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('switch', { name: 'Weather & property alerts', exact: true })).not.toBeInTheDocument();
+  expect(within(reports).getAllByRole('option').map(option => option.textContent)).toEqual(['Text', 'App', 'Off']);
+  expect(within(weather).getAllByRole('option').map(option => option.textContent)).toEqual(['App', 'Off']);
+
+  fireEvent.change(reports, { target: { value: 'off' } });
+  await waitFor(() => expect(reports).toBeEnabled());
+  expect(reports).toHaveValue('off');
+  expect(prefs).toMatchObject({ serviceCompleted: false, serviceCompleteChannel: 'push' });
+  fireEvent.change(reports, { target: { value: 'sms' } });
+  await waitFor(() => expect(reports).toBeEnabled());
+  expect(reports).toHaveValue('sms');
+  expect(prefs).toMatchObject({ serviceCompleted: true, serviceCompleteChannel: 'sms' });
+
+  fireEvent.change(weather, { target: { value: 'off' } });
+  await waitFor(() => expect(weather).toBeEnabled());
+  expect(weather).toHaveValue('off');
+  fireEvent.change(weather, { target: { value: 'push' } });
+  await waitFor(() => expect(weather).toBeEnabled());
+  expect(weather).toHaveValue('push');
+  expect(api.updateNotificationPrefs.mock.calls).toEqual([
+    [{ serviceCompleted: false }],
+    [{ serviceCompleteChannel: 'sms', serviceCompleted: true }],
+    [{ weatherAlerts: false }],
+    [{ weatherAlerts: true }],
+  ]);
+  expect(prefs).toMatchObject({ smsEnabled: false, emailEnabled: false });
+});
+
+it.each(['offline', 'ignored'])('restores optional report and weather choices after an %s save', async (failure) => {
+  const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    prefs = { ...prefs, serviceCompleted: false, serviceCompleteChannel: 'push', weatherAlerts: true };
+    api.updateNotificationPrefs.mockImplementation(async () => {
+      if (failure === 'offline') throw new Error('offline');
+      return { success: true, preferences: { ...prefs } };
+    });
+    render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+    const reports = await screen.findByRole('combobox', { name: 'Delivery method for Service reports' });
+    const weather = screen.getByRole('combobox', { name: 'Delivery method for Weather & property alerts' });
+    fireEvent.change(reports, { target: { value: 'sms' } });
+    await waitFor(() => expect(reports).toBeEnabled());
+    expect(reports).toHaveValue('off');
+    fireEvent.change(weather, { target: { value: 'off' } });
+    await waitFor(() => expect(weather).toBeEnabled());
+    expect(weather).toHaveValue('push');
+    expect(prefs).toMatchObject({ serviceCompleted: false, serviceCompleteChannel: 'push', weatherAlerts: true });
+  } finally { errorLog.mockRestore(); }
+});
+
+it('keeps a stored App report choice visible without offering a new App choice on an unavailable device', async () => {
+  prefs = { ...prefs, serviceCompleted: true, serviceCompleteChannel: 'push' };
+  api.getCustomerPushStatus.mockResolvedValue({ available: true, enabled: true, registered: true, fresh: false });
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  const reports = await screen.findByRole('combobox', { name: 'Delivery method for Service reports' });
+  expect(reports).toHaveValue('push');
+  expect(within(reports).getByRole('option', { name: 'App', exact: true })).toBeDisabled();
+  expect(within(reports).getByRole('option', { name: 'Off', exact: true })).toBeEnabled();
+  fireEvent.change(reports, { target: { value: 'off' } });
+  await waitFor(() => expect(reports).toBeEnabled());
+  expect(reports).toHaveValue('off');
+  expect(prefs.serviceCompleteChannel).toBe('push');
+});
+
 it('scopes the visit App shortcut away from billing without enabling a muted category or text/email', async () => {
   prefs.serviceReminder72h = false;
   render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  await screen.findByText('Connected to your Waves app.');
+  expect(screen.queryByRole('button', { name: 'Use app for visit updates' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('switch', { name: 'App notifications for my account' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Manage app notification settings' }));
+  expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
+  expect(screen.getByRole('switch', { name: 'App notifications for my account' })).toBeVisible();
   const shortcut = await screen.findByRole('button', { name: 'Use app for visit updates' });
   await waitFor(() => expect(shortcut).toBeEnabled());
   fireEvent.click(shortcut);
@@ -243,6 +319,7 @@ it('requires a fresh connected app before selecting App for reminders', async ()
   api.getCustomerPushStatus.mockResolvedValue({ available: true, enabled: true, registered: true, fresh: false });
   render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
   await screen.findByText(/Open the app to refresh its connection/);
+  expect(screen.getByRole('switch', { name: 'App notifications for my account' })).toBeVisible();
   expect(within(reminder72()).getByRole('option', { name: 'App', exact: true })).toBeDisabled();
   expect(within(reminder24()).getByRole('option', { name: 'App', exact: true })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Use app for visit updates' })).toBeDisabled();
@@ -255,6 +332,30 @@ it('keeps the existing reminder options when app preferences are unavailable', a
   expect(within(reminder72()).queryByRole('option', { name: 'App', exact: true })).not.toBeInTheDocument();
   expect(within(reminder24()).queryByRole('option', { name: 'App', exact: true })).not.toBeInTheDocument();
   expect(api.getCustomerPushStatus).not.toHaveBeenCalled();
+});
+
+it('reveals help for every service notification without changing preferences', async () => {
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  await screen.findByRole('combobox', { name: 'Delivery method for request updates' });
+  const explanations = [
+    ['Appointment updates', 'Bookings, changes and cancellations'],
+    ['3-day reminder', 'A reminder three days before your visit'],
+    ['Day-before reminder', 'A reminder the day before your visit'],
+    ['On the way', 'Live technician tracking'],
+    ['Technician arrival', 'An alert when your technician reaches the property'],
+    ['Service reports', 'Choose text or app alerts; app may fall back to text. Off stops all report notifications, including emails. Reports remain in Documents.'],
+    ['Weather & property alerts', 'Rain and lawn advisories in the app. Choose Off to stop these alerts.'],
+    ['Request updates', 'Updates when your service request is received or changes'],
+  ];
+  for (const [label, description] of explanations) {
+    const summary = screen.getByText(label, { selector: 'summary span' }).closest('summary');
+    const details = summary.closest('details');
+    expect(details).not.toHaveAttribute('open');
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute('open');
+    expect(screen.getByText(description)).toBeVisible();
+  }
+  expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
 });
 
 

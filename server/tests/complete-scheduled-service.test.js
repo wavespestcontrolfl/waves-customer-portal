@@ -889,6 +889,14 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     expect(noticeBlock).toMatch(/const failResult = throwIfDeliveryUnverified\(await sendCustomerMessage\(\{/);
   });
 
+  test('the decline notice threads the rendered template key (payment_failed) into the send metadata', () => {
+    expect(noticeBlock).toMatch(/templateKey: 'payment_failed'/);
+  });
+
+  test('the completion SMS threads sentSmsType — whichever of the report/invoice/paid/prepaid/service_complete rungs actually rendered — as templateKey', () => {
+    expect(source).toMatch(/const smsMetadata = \{ original_message_type: sentSmsType,.*templateKey: sentSmsType \};/);
+  });
+
   test('restoreSendClaim is called through ONE shared, checked helper — never an unchecked bare await (Codex pre-push P1, round 1 of the owner\'s audit)', () => {
     // restoreSendClaim catches its own DB errors and resolves false rather
     // than throwing — an unchecked await would silently treat a transient
@@ -959,6 +967,14 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     expect(noticeBlock.slice(deliveredAt, markDeliveredAt + 400)).toMatch(
       /claimToken: declineSendClaim\.invoice\.send_claim_token/,
     );
+  });
+
+  test('a replayed decline bell finalizes with its original time and no fresh invoice activity', () => {
+    expect(noticeBlock).toMatch(/noticeLegs = \(failResult\.channelResults \|\| failResult\.deduped === true\)\s*&& require\('\.\/messaging\/billing-prior-delivery'\)\.settledLegTimes\(failResult\)/);
+    expect(noticeBlock).toMatch(/noticeSentAt = failResult\.deduped \? noticeLegs\?\.eventAt : new Date\(\)/);
+    expect(noticeBlock).toMatch(/paymentFailedNoticeSentAt =\s*noticeSentAt\?\.toISOString\(\) \|\| recordStructuredNotes\.paymentFailedNoticeSentAt/);
+    expect(noticeBlock).toMatch(/sms: noticeLegs \? noticeLegs\.smsAccepted : true,\s*email: noticeLegs\?\.emailAccepted \|\| false/);
+    expect(noticeBlock).toMatch(/claimToken: declineSendClaim\.invoice\.send_claim_token,\s*deduped: failResult\.deduped === true,\s*eventVisibleAt: noticeSentAt,\s*smsEventVisibleAt: noticeLegs\?\.smsAccepted && !noticeLegs\.freshSms \? noticeLegs\.smsAt : undefined,\s*emailEventVisibleAt: noticeLegs\?\.emailAccepted && !noticeLegs\.freshEmail \? noticeLegs\.emailAt : undefined/);
   });
 
   test('markDeliverySent itself requires and releases a passed claimToken atomically, in ONE merged decision, and never finalizes a row it does not own', () => {

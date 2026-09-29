@@ -15,6 +15,12 @@ jest.mock('../services/billing-channel-email-authority', () => ({
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
   markSendFailed: jest.fn(async () => true),
+  markDelivered: jest.fn(async () => true),
+  claimAttempt: jest.fn(async () => ({ allowed: true })),
+}));
+jest.mock('../services/customer-credit', () => ({
+  autoApplyAccountCreditIfEnabled: jest.fn(async () => ({ applied: 0 })),
+  reverseAppliedCredit: jest.fn(async () => ({ reversed: 0 })),
 }));
 
 jest.mock('../services/logger', () => ({
@@ -145,6 +151,7 @@ describe('invoice follow-up email sidecar', () => {
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
     jest.clearAllMocks();
+    require('../services/collections/contact-ledger').claimAttempt.mockReset().mockResolvedValue({ allowed: true });
     BillingEmailAuthority.loadBillingEmailContext.mockReset().mockResolvedValue({
       category: 'invoice',
       recipient: { email: 'billing@example.com', name: 'Taylor' },
@@ -630,19 +637,39 @@ describe('invoice follow-up email sidecar', () => {
     await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
   });
 
-  test.each([false, true])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
-    const prefs = { email_enabled: true, ...(appSelected ? { invoice_channels: ['push'] } : {}) };
+  test.each([false, true, 'prior', 'bell', 'prior+old-email', 'prior+old-text', 'prior+fresh-email', 'legacy-old-email'])('advances a selected App (%s) or legacy email sequence', async (appSelected) => {
+    const visibleAt = new Date('2026-05-20T14:00:00Z');
+    const textAt = new Date('2026-05-21T14:00:00Z');
+    const prior = String(appSelected).startsWith('prior');
+    const oldText = appSelected === 'prior+old-text';
+    const legacyOldEmail = appSelected === 'legacy-old-email';
+    const withEmail = String(appSelected).includes('email');
+    const repaired = legacyOldEmail || (prior && appSelected !== 'prior+fresh-email');
+    if (legacyOldEmail) EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
+    if (prior) sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    if (oldText) sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: textAt });
+    if (appSelected === 'prior+old-email') {
+      const ledger = require('../services/collections/contact-ledger');
+      ledger.claimAttempt.mockResolvedValueOnce({ allowed: false, delivered: true });
+      ledger.recordContact.mockResolvedValueOnce({ id: 'email-old', metadata: {}, occurred_at: visibleAt });
+    }
+    if (appSelected === 'bell') sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', bellPersisted: true });
+    const prefs = { email_enabled: true, ...(appSelected && !legacyOldEmail
+      ? { invoice_channels: withEmail ? ['email', 'push'] : oldText ? ['push', 'sms'] : ['push'] } : {}) };
     const emailInteraction = chain();
     const finalInteraction = chain();
     const sequenceUpdate = chain();
+    const credit = require('../services/customer-credit');
+    const creditCase = legacyOldEmail || appSelected === 'prior+fresh-email';
+    if (creditCase) credit.autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
     setDbQueues({
-      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
-      customers: [chain({ first: customer({ phone: null }) })],
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(legacyOldEmail ? { last_touch_at: visibleAt } : {})] })],
+      customers: [chain({ first: customer({ phone: oldText ? '+19415550101' : null }) })],
       // Two invoice reads per fired step: credit re-read + email eligibility.
       // Claim-txn row lock read + the credit path's own invoice read (it
       // bails at its payment_plans probe in this harness) + the pre-dun
       // refresh + the email-eligibility read.
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      invoices: [chain({ first: invoice(legacyOldEmail ? { credit_applied: '70.00' } : {}) }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
       customer_interactions: [emailInteraction, finalInteraction],
       // Claim → cadence advance → claim clear (see the sidecar test above).
@@ -656,9 +683,12 @@ describe('invoice follow-up email sidecar', () => {
 
     await InvoiceFollowUps.runPending();
 
-    if (appSelected) {
-      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', to: null }));
+    if (appSelected && !legacyOldEmail) {
+      if (appSelected === 'prior+fresh-email') expect(EmailTemplates.sendTemplate).toHaveBeenCalled();
+      else expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1', to: oldText ? '+19415550101' : null,
+      }));
     } else {
       expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'invoice.followup_3_day' }));
       expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -667,6 +697,143 @@ describe('invoice follow-up email sidecar', () => {
       step_index: 1,
       status: 'active',
     }));
+    expect(sequenceUpdate.update.mock.calls[0][0].last_touch_at).toEqual(repaired ? (oldText ? textAt : visibleAt) : new Date());
+    if (oldText) expect(require('../services/collections/contact-ledger').markDelivered)
+      .toHaveBeenCalledWith(expect.anything(), { occurredAt: textAt });
+    if (appSelected === 'prior+fresh-email') expect(finalInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({ interaction_type: 'email_outbound' }));
+    if (legacyOldEmail) {
+      expect(credit.autoApplyAccountCreditIfEnabled).toHaveBeenCalled();
+      expect(credit.reverseAppliedCredit).toHaveBeenCalledWith({ invoiceId: 'inv-1', amount: 50, createdBy: 'system:dun_undelivered' });
+    }
+    if (appSelected === 'prior+fresh-email') expect(credit.reverseAppliedCredit).not.toHaveBeenCalled();
+    if (repaired) {
+      if (!legacyOldEmail) expect(require('../services/collections/contact-ledger').markDelivered).toHaveBeenCalled();
+      expect(emailInteraction.insert).not.toHaveBeenCalled();
+      expect(finalInteraction.insert).not.toHaveBeenCalled();
+      expect(require('../services/collections/contact-ledger').markSendFailed).not.toHaveBeenCalled();
+    }
+  });
+
+  test.each([['selected', ['email']], ['legacy', null]])('%s provider-deduped Email repairs this step and contact from stored sentAt', async (_kind, channels) => {
+    const priorStepAt = new Date('2026-05-10T14:00:00Z');
+    const acceptedAt = new Date('2026-05-20T14:00:00Z');
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true,
+      message: { provider_message_id: 'sg-original', sent_at: acceptedAt } });
+    const sequenceUpdate = chain();
+    const interaction = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow({ last_touch_at: priorStepAt })] })],
+      customers: [chain({ first: customer({ phone: null }) })],
+      invoices: Array.from({ length: 5 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: channels ? { invoice_channels: channels } : { email_enabled: true } }),
+        chain({ first: channels ? { invoice_channels: channels } : { email_enabled: true } })],
+      customer_interactions: [interaction],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0,
+          next_touch_at: '2026-05-26T13:00:00Z', anchor_at: null } }),
+        chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      step_index: 1, last_touch_at: acceptedAt,
+    }));
+    expect(require('../services/collections/contact-ledger').markDelivered)
+      .toHaveBeenCalledWith(expect.anything(), { occurredAt: acceptedAt });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(interaction.insert).not.toHaveBeenCalled();
+  });
+
+  test('a prior App bell with uncertain Email keeps this credit draw held for replay', async () => {
+    const credit = require('../services/customer-credit');
+    credit.autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent',
+      reason: 'app_event_already_visible', eventVisibleAt: new Date('2026-05-20T14:00:00Z') });
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('provider timeout'),
+      { providerOutcome: { deliveryOutcome: 'uncertain' } }));
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      customers: [chain({ first: customer({ phone: null }) })],
+      invoices: Array.from({ length: 5 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: { invoice_channels: ['email', 'push'] } }), chain({ first: { invoice_channels: ['email', 'push'] } })],
+      customer_interactions: [chain()],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0,
+          next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ next_touch_at: expect.any(Date) }));
+    expect(sequenceUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
+    expect(credit.reverseAppliedCredit).not.toHaveBeenCalled();
+  });
+
+  test('a prior Email with a newly queued SMS keeps the credit for the owed text', async () => {
+    const credit = require('../services/customer-credit');
+    credit.autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true,
+      code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-05-27T12:00:00.000Z' });
+    const smsLog = chain();
+    const sequenceUpdate = chain();
+    const priorAt = new Date('2026-05-20T14:00:00Z');
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow({ last_touch_at: priorAt })] })],
+      customers: [chain({ first: customer() })],
+      invoices: [chain({ first: invoice({ credit_applied: '70.00' }) }),
+        chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain()],
+      sms_log: [smsLog],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0,
+          next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(smsLog.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'scheduled', scheduled_for: new Date('2026-05-27T12:00:00.000Z'),
+    }));
+    expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1, last_touch_at: priorAt }));
+    expect(credit.reverseAppliedCredit).not.toHaveBeenCalled();
+  });
+
+  test('a prior Email with uncertain legacy SMS keeps the credit for a possibly delivered text', async () => {
+    const credit = require('../services/customer-credit');
+    credit.autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false,
+      deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', retryable: false, deferred: false });
+    const sequenceUpdate = chain();
+    const priorAt = new Date('2026-05-20T14:00:00Z');
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow({ last_touch_at: priorAt })] })],
+      customers: [chain({ first: customer() })],
+      invoices: [chain({ first: invoice({ credit_applied: '70.00' }) }),
+        chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain()],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0,
+          next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms', customerId: 'cust-1' }));
+    expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1, last_touch_at: priorAt }));
+    expect(credit.reverseAppliedCredit).not.toHaveBeenCalled();
   });
 
   test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'])('%s with a failed enqueue holds the current follow-up step for retry', async (code) => {

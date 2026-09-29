@@ -33,6 +33,14 @@ const FALLBACK_RECURRENCE_GAP_DAYS = 91;
 
 const DEFAULT_WEEKEND_SHIFT = 'forward';
 
+// The root statuses findActiveRecurringSeries excludes, exported so
+// another candidate-root scan (the pest-rides-lawn preview report's own
+// heuristic, Codex P2 round #2 on PR #5290) applies the SAME status list
+// rather than a hand-rolled one that could silently drift from this one. A
+// 'rescheduled' parent stays IN the candidate set deliberately — see the
+// comment on findActiveRecurringSeries' own query below.
+const EXCLUDED_ROOT_STATUSES = ['cancelled'];
+
 // Seasonal mosquito: 9 visits at monthly gaps that NEVER land Nov-Jan (owner
 // 2026-07-27). Nine in-season months (Feb-Oct) means a February start runs
 // Feb->Oct exactly; a mid/off-season start still gets all 9 by rolling across
@@ -745,6 +753,8 @@ async function findActiveRecurringSeries(conn, {
     // same-family billable series over them (codex #3504 r16). Whether
     // the series is still active is decided below by the ongoing flag /
     // upcoming-row probe, exactly as for pending/confirmed parents.
+    // Kept as the literal: a source pin (wizard-nonpest-series r15/r16)
+    // reads it. EXCLUDED_ROOT_STATUSES above must stay equal to it.
     .whereNotIn('status', ['cancelled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
@@ -1499,6 +1509,7 @@ module.exports = {
   preferenceRowBlocksWeekends,
   etDateDiffDays,
   findActiveRecurringSeries,
+  EXCLUDED_ROOT_STATUSES,
   duplicateGuardFamilyKey,
   scheduledServiceColumns,
   seriesCreateLockKeys,

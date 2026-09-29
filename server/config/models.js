@@ -117,8 +117,26 @@ function anthropicAcceptsEffort(model, level) {
 // a no-thinking reply ends the turn with no text. Sonnet 5 also thinks by
 // default, but its lanes' caps were already tuned against it in production
 // (previsit brief 1000 → 2000 → 3000), so it is left out and this stays
-// inert for today's traffic.
-const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+// inert for today's traffic. Sonnet 5.5 and later cannot turn thinking off
+// (even `between_tools` returns progress-update thinking blocks), so they
+// take the floor like Opus 5.5.
+const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
+
+// NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
+// thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
+// `thinking: { type: 'disabled' }` — the voice-relay override tests and the
+// live inbound/sandbox chain both rely on picking it with that literal still
+// sent. Opus 5.5 and later minors/majors (5-5, 5-6, 6, 7, …), Sonnet 5.5 and
+// later (its floor is `between_tools`), plus Fable and Mythos, are the ones
+// that 400 on it outright. One id shape per family, so a future minor needs a
+// change here only, never at either call site that reads this.
+const ANTHROPIC_THINKING_REQUIRED_RE = /^claude-opus-5-[0-9]|^claude-opus-[6-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
+// What a CALLER needs to know before building a request: can `thinking` be
+// sent as `{ type: 'disabled' }` at all? The two voice-relay lanes that
+// always send it check this before picking a model.
+function anthropicThinkingAlwaysOn(model) {
+  return ANTHROPIC_THINKING_REQUIRED_RE.test(String(model || ''));
+}
 
 // Code defaults for every env-overridable selector, in one place so the admin
 // switchboard can say what a selector returns to when its Railway override is
@@ -135,6 +153,11 @@ const DEFAULTS = Object.freeze({
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
   VOICE_JUDGE: 'claude-opus-4-8',
+  // Newsletter writer + event-curation scoring (owner ruling 2026-09-27):
+  // Opus 5.5 at effort 'max' — Opus 5.5 defaults to 'medium', so the
+  // newsletterWriter policy pins effort explicitly rather than relying on
+  // the model's own default.
+  NEWSLETTER: 'claude-opus-5-5',
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
@@ -188,6 +211,13 @@ const CALL_EXTRACTION_ANTHROPIC = process.env.MODEL_CALL_EXTRACTION_ANTHROPIC ||
 // re-baselines every scorecard, so it moves only when MODEL_VOICE_JUDGE is
 // set deliberately.
 const VOICE_JUDGE = process.env.MODEL_VOICE_JUDGE || DEFAULTS.VOICE_JUDGE;
+
+// Newsletter writer + event-curation scoring (owner ruling 2026-09-27:
+// stop skipping the weekly issue — auto-curation was starving at 0-5
+// approved events/week). Own selector rather than riding FLAGSHIP/WORKHORSE
+// so this one lane can move to Opus 5.5 without affecting every other
+// FLAGSHIP/WORKHORSE call site.
+const NEWSLETTER = process.env.MODEL_NEWSLETTER || DEFAULTS.NEWSLETTER;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
@@ -289,8 +319,22 @@ const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || DEFAULTS.
 // shown disabled).
 const MODEL_CATALOG = {
   'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  // Opus 5.5 (see the flip-order note atop this file) — thinking is always
+  // on (anthropicThinkingAlwaysOn), and most direct tier callers size
+  // max_tokens for a no-thinking reply, so like Fable it is offered only to
+  // DEEP / EXTREME selectors (deep.js sizes and strips thinking). `voice`
+  // admits it to the voice relay's sandbox / eval-harness thinking-on path
+  // (relay-conversation.js) — never production inbound or collections.
+  'claude-opus-5-5': { label: 'Claude Opus 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep', voice: { thinking: 'adaptive' } },
   'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy' },
   'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  // Sonnet 5.5 (released 2026-09-28) rejects `thinking: { type: 'disabled' }`
+  // (anthropicThinkingAlwaysOn); its lowest setting is `between_tools`, which
+  // `voice.thinking` hands the voice relay's sandbox / eval-harness path so a
+  // test call keeps up-front thinking off. `requires: 'deep'` keeps it off the
+  // WORKHORSE / FAST / VOICE pickers, whose call sites were not migrated —
+  // same containment as Opus 5.5 above.
+  'claude-sonnet-5-5': { label: 'Claude Sonnet 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep', voice: { thinking: 'between_tools' } },
   // Fable's thinking blocks + refusal semantics are handled only by
   // services/llm/deep.js, so only DEEP / EXTREME selectors may take it.
   'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep' },
@@ -477,6 +521,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE_JUDGE }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  newsletterWriter: Object.freeze({
+    name: 'newsletterWriter',
+    // Owner ruling 2026-09-27: the newsletter is WRITTEN by Opus 5.5 at
+    // effort 'max', and community-event curation scoring rides the same
+    // model/effort (event-curation.js). `effort` on a route is honored only
+    // on the Anthropic leg (services/llm/call.js#dispatch); a caller that
+    // needs a lighter interactive path (the admin Compose UI) overrides it
+    // per-call rather than moving the whole policy off 'max'.
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: NEWSLETTER, effort: 'max' }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
 });
 
 module.exports = {
@@ -484,6 +539,8 @@ module.exports = {
   ANTHROPIC_EFFORT_CAPABLE_RE,
   anthropicAcceptsEffort,
   ANTHROPIC_THINKING_FLOOR_RE,
+  ANTHROPIC_THINKING_REQUIRED_RE,
+  anthropicThinkingAlwaysOn,
   DEEP,
   EXTREME,
   FLAGSHIP,
@@ -495,6 +552,7 @@ module.exports = {
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,
+  NEWSLETTER,
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,

@@ -818,114 +818,6 @@ function blankToRenderedText(s) {
   return blankExpressions(blankMarkdownLinkDestinations(blankTags(blankHiddenContent(blankComments(s)))));
 }
 
-// A cited competitor price must actually BE cited. The grammar alone —
-// party plus pricing verb — let "Other companies charge a $199 cancellation
-// fee" through with no source and no date, which is an invented figure as
-// far as the reader is concerned (Codex). The manifest's global rule is
-// "all dollar figures re-verified at publish + dated in-post ('as of
-// [date]')", so the amount's paragraph must carry BOTH a citation link and a
-// date. Absent either, the draft parks for review.
-// The date must be GOVERNED by "as of" — a bare "June 2026 was rainy" is not
-// a verification date, and accepting one let a stale price publish (Codex).
-const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,40}?\b(?:19|20)\d{2}\b/i;
-// Hosts that can EVIDENCE a claim: the curated citation list, curated
-// competitor-fact sources, and editorially-approved external domains. Our own
-// hub and spoke domains are deliberately absent.
-function citationOnlyHosts({ operatorCitations = false } = {}) {
-  const hosts = new Set(TRUSTED_CITATION_HOSTS.map(normalizeHost));
-  for (const d of String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(',')) {
-    const h = normalizeHost(d);
-    if (h) hosts.add(h);
-  }
-  if (operatorCitations) {
-    // Archive.org includes user-uploaded files; retain its existing operator
-    // scope instead of granting it to every mined draft.
-    hosts.add('archive.org');
-    for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
-  }
-  return hosts;
-}
-
-// URLs a READER can actually follow from this paragraph. An image
-// destination and an UNUSED reference definition are both stripped from the
-// rendered page, so neither is a citation — accepting them let an unrelated
-// "![image](…)" or a dangling "[unused]: …" stand in for the source (Codex).
-function visibleCitationUrls(citationParaRaw, renderedPara, citationDoc) {
-  // A code span renders literal text, not a link, and "\[" is an escaped
-  // bracket — neither produces something a reader can click, so neither is a
-  // citation (Codex). Blanked length-preservingly so offsets are unaffected.
-  const citationPara = String(citationParaRaw || '')
-    .replace(/(`+)(?:[^`]|(?!\1)`)*\1/g, blankSpan)
-    .replace(/\\[[\]()]/g, '  ');
-  const out = [];
-  const push = (u) => { if (u) out.push(String(u).replace(/[).,;:!?]+$/, '')); };
-  // Inline links — NOT images.
-  const inline = /(!)?\[[^\]\n]*\]\(\s*<?\s*(https?:\/\/[^)\s>]+)/g;
-  let m;
-  while ((m = inline.exec(citationPara)) !== null) { if (!m[1]) push(m[2]); }
-  // Autolinks and bare URLs the reader sees in the rendered text.
-  const bare = /https?:\/\/[^\s<>()"'\]]+/gi;
-  while ((m = bare.exec(renderedPara)) !== null) push(m[0]);
-  // Reference LINKS resolve to their definition; reference IMAGES do not.
-  // Full "[text][ref]", COLLAPSED "[ref][]" and SHORTCUT "[ref]" — the last
-  // two carry the label in the FIRST bracket, so reading only the second one
-  // parked compliant intercepts on formatting alone (Codex).
-  const refUse = /(!)?\[([^\]\n]*)\](?:\[([^\]\n]*)\])?/g;
-  const usedRefs = new Set();
-  while ((m = refUse.exec(citationPara)) !== null) {
-    if (m[1]) continue; // image
-    if (citationPara[m.index + m[0].length] === '(') continue; // inline link
-    // A DEFINITION line ("[label]: https://…") is not a use of itself —
-    // counting it made a dangling definition self-referencing (Codex).
-    if (citationPara[m.index + m[0].length] === ':') continue;
-    const label = ((m[3] || '').trim() || (m[2] || '').trim());
-    if (label) usedRefs.add(label.toLowerCase());
-  }
-  if (usedRefs.size) {
-    // Definitions are conventionally collected at the END of the document,
-    // so they are looked up DOC-WIDE — only the reference USE has to sit in
-    // the price's paragraph (Codex).
-    const defs = /^[ \t]*\[([^\]\n]+)\]:[ \t]*(https?:\/\/\S+)/gm;
-    while ((m = defs.exec(citationDoc)) !== null) {
-      if (usedRefs.has(m[1].trim().toLowerCase())) push(m[2]);
-    }
-  }
-  return out;
-}
-
-// Reads RENDERED text: a date or URL parked in a comment or a reference
-// definition is invisible to the customer and cannot satisfy a sourcing
-// rule that exists for their benefit (Codex).
-function priceParagraphIsSourced(citationText, renderedText, index, opts = {}) {
-  // SENTENCE scope, not paragraph. A citation anywhere in the paragraph let
-  // an unrelated link — a chinch-bug study next to a competitor fee —
-  // authorize the price (Codex). The briefs' own mandated shape puts the
-  // source in the sentence: "Aptive charges a $199 fee as of July 2026
-  // ([source](…))." Reference DEFINITIONS are still resolved doc-wide.
-  const para = (text) => sentenceAround(String(text || ''), index).text;
-  // The URL comes from text with link DESTINATIONS intact — rendered text
-  // blanks them, so an ordinary "[ConsumerAffairs](https://…)" citation
-  // could never qualify (Codex). Hidden content is still blanked there, so
-  // a URL buried in a comment does not count. The DATE must be rendered.
-  // The URL must be a CITATION the gate would actually accept — an
-  // allowlisted host or a source this brief named. Any-URL-will-do let an
-  // unrelated link stand in for the source (Codex).
-  // CITATION hosts only. allowedLinkHosts also carries every hub and spoke
-  // domain — navigation destinations, not third-party evidence — so a link
-  // to our own calculator was standing in as the source for a competitor's
-  // price (Codex).
-  const allowedHosts = citationOnlyHosts(opts);
-  const exact = allowedExactSourceUrls(opts.requiredSourceUrls);
-  const urls = visibleCitationUrls(para(citationText), para(renderedText), String(citationText || ''));
-  const cited = urls.some((u) => {
-    const raw = u.replace(/[).,;:!?]+$/, '');
-    if (exact.has(normalizeSourceUrl(raw) || '\u0000')) return true;
-    try { return hostAllowed(normalizeHost(new URL(raw).hostname), allowedHosts); } catch { return false; }
-  });
-  if (!cited) return false;
-  return AS_OF_DATE_RE.test(para(renderedText));
-}
-
 // Any markup in the amount's paragraph disqualifies the prose exemption.
 // Blunt by design: "<" opens a tag or comment, "{" an MDX expression, "&"
 // an entity. Over-matching costs an exemption; under-matching publishes a
@@ -993,7 +885,7 @@ function isInsideTableMarkup(text, index) {
  * ONE price policy. Exported for seo-completion-gate (its previous private
  * copy had drifted: no comma support, no regulatory exemption).
  */
-function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false, operatorCitations = false, requiredSourceUrls = [] } = {}) {
+function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false, evidenceUrls = [], boundSourceUrls = [] } = {}) {
   const s = String(text || '');
   // Attribution is decided against what READERS SEE. Comments and tag
   // attributes are stripped at render, so "{/* other companies charge */} $89
@@ -1002,9 +894,6 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
   // exemption (Codex r6/r7). Detection still runs on the original text — a
   // price hidden in markup stays flagged (conservative in both directions).
   const proseText = blankToRenderedText(s);
-  // Link destinations intact, hidden content still gone — used only to look
-  // for the citation URL behind the price.
-  const citationText = blankTags(blankHiddenContent(blankComments(s)));
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
   while ((match = priceRe.exec(s)) !== null) {
@@ -1020,8 +909,8 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // Allowed when the surrounding copy points at the calculator / quote / a
     // "varies" framing rather than asserting a hard price. NOT on an
     // intercept draft: those are exactly the posts that quote competitor
-    // figures, and the framing words let one through unsourced, straight
-    // past the source-and-date requirement (Codex).
+    // figures, so every amount there must pass the attribution test below —
+    // framing words alone must not wave a first-party price through (Codex).
     if (!thirdPartyCitations
       && /\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
     // Regulatory fines are not Waves service pricing. Allow ordinance/citation
@@ -1030,6 +919,13 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // A price ATTRIBUTED to a named competitor is reporting, not our price
     // list (owner ruling 2026-08-01) — "cancel your pest control contract"
     // posts have to name the other company's cancellation fee to be useful.
+    // It is stated PLAINLY: no citation link and no as-of / verified label
+    // (owner ruling 2026-09-28: "list them, we don't have to link to their
+    // site, or say verified or not verified"). That ruling retired the old
+    // in-post source-and-date requirement; a blog post never links a
+    // competitor's site at all (competitor-links.js). The source still has
+    // to exist: it moved to the draft's unpublished evidence channel
+    // (competitorPriceEvidenced — Codex r9 on #5191).
     //
     // PROSE ONLY. A table-cell exemption was built and then REMOVED (owner
     // ruling 2026-08-01, second): deciding ownership inside Markdown/JSX
@@ -1068,15 +964,14 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // two bugs, one where invisible text ATTRIBUTES a price and one where
     // it SPLITS the first-party marker that should block it, and the two
     // want opposite handling. Requiring plain prose closes both at once.
-    // The cost is only a lost exemption — a sourced competitor price in a
-    // marked-up paragraph parks for review, and sourced price sentences are
-    // plain prose in practice.
+    // The cost is only a lost exemption — a competitor price in a
+    // marked-up paragraph parks for review, and competitor price sentences
+    // are plain prose in practice.
     if (thirdPartyCitations
       && !isMarkdownTableRow(s, tokenIndex)
       && !isInsideTableMarkup(s, tokenIndex)
       && !paragraphHasMarkup(s, tokenIndex)
-      && priceParagraphIsSourced(citationText, proseText, tokenIndex, { operatorCitations, requiredSourceUrls })
-      && isThirdPartyPriceCitation(proseText, tokenIndex, s)) continue;
+      && competitorPriceEvidenced(thirdPartyPriceOwners(proseText, tokenIndex, s), { evidenceUrls, boundSourceUrls })) continue;
     return match[0].trim();
   }
   return null;
@@ -1085,15 +980,33 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
 function priceFinding(body, opts = {}) {
   const hit = findHardcodedPrice(body, opts);
   if (!hit) return null;
-  return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
+  // On a competitor-intercept draft the redraft has a second way out, so it
+  // is spelled out: most of these are a sourced competitor figure whose
+  // source was never listed.
+  const competitorWay = opts.thirdPartyCitations
+    ? ' A COMPETITOR\'s price may stay only in a plain-prose sentence that names the company, with the page it came from listed under "Evidence sources" in notes_for_reviewer (the company\'s own page, or a BBB/ConsumerAffairs page about it) — otherwise drop the figure.'
+    : '';
+  return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.${competitorWay}`);
+}
+
+// The URLs in a draft's notes_for_reviewer (editorial-evidence reads them the
+// same way for the review). Unreadable → none, which only withholds the
+// competitor-price exemption.
+function priceEvidenceUrls(draft) {
+  try {
+    return require('./editorial-evidence').notesEvidenceUrls(draft);
+  } catch {
+    return [];
+  }
 }
 
 // Third-party price attribution (owner ruling 2026-08-01). A dollar figure
-// is reporting — not a Waves price claim — when the surrounding copy names
-// WHOSE price it is and that party isn't us. Two ways to qualify:
-//   1. a curated competitor brand name / alias sits in the window, or
-//   2. a generic third-party framing ("other companies charge…", "the
-//      previous provider's fee").
+// is reporting — not a Waves price claim — when its sentence names WHOSE
+// price it is: a curated competitor brand name / alias. Since the owner
+// ruling of 2026-09-28 a competitor price carries no link and no as-of date,
+// so an anonymous framing ("other companies charge…", "the industry
+// average is…") would publish a figure nobody can check; it is not exempt
+// (Codex r2 on #5191). The writer names the company or drops the figure.
 // First-person framing anywhere in the window disqualifies it outright, so
 // "we charge $199" can never ride in on a competitor mention elsewhere in
 // the sentence. Waves prices stay banned everywhere — link the calculator.
@@ -1123,18 +1036,13 @@ function hasFirstPartyMarker(sentence) {
 // $129" must not let the Orkin predicate own the second amount (pre-push
 // Codex P0). Splitting here only ever NARROWS the exemption.
 const CLAUSE_SPLIT_RE = /[,;:—–]|\b(?:but|while|whereas|however|though|although|yet|meanwhile|and|or|plus)\b/gi;
-// Explicit third-party SUBJECTS only. Deliberately excludes vague nouns like
-// "the industry" or "a typical charge" — those describe a market, not a party
-// that owns a price, and they let ordinary marketing copy through
-// ("The industry-leading quarterly plan costs $129" — pre-push Codex P0).
-const GENERIC_THIRD_PARTY_RE = /\b(competitors?|other (?:companies|providers|firms)|national (?:chains?|companies|brands?)|big(?:-| )box (?:companies|chains?|providers?)|another company|(?:previous|current|prior|former|existing) (?:provider|company|contractor|exterminator)|most (?:companies|providers)|many (?:companies|providers)|industry average)\b/i;
 
 // A third party OWNS the amount only in an explicit pricing construction —
 // naming them earlier in the clause is not enough ("Avoid Orkin by choosing
 // quarterly pest control for $129" — pre-push Codex P0). Two shapes, both
 // requiring the third party to be the SUBJECT:
 //   (A) <party> …short filler… <pricing verb> … $amount
-//       "Orkin charges a $199 fee", "other companies typically charge $25"
+//       "Orkin charges a $199 fee", "Aptive typically charges $25"
 //   (B) <party>'s <price noun> is/was/starts at … $amount
 //       "Orkin's cancellation fee is $199"
 // Bare copulas ("is"/"are") are NOT accepted in shape A: "Orkin is expensive
@@ -1196,11 +1104,6 @@ function attributionBindsToAmount(between) {
 // plan price is $129" (pre-push Codex P0) while keeping "Orkin's cancellation
 // fee is $199".
 const POSSESSIVE_PRICE_RE = /^(?:'s|’s)\s+(?:[A-Za-z-]+\s+){0,2}(?:fee|fees|price|prices|pricing|rate|rates|charge|charges|cost|costs|quote|quotes|minimum)\s+(?:is|was|are|were|starts?\s+at|runs?|comes?\s+to)\s*$/i;
-//   (C) benchmark subject + copula: "the industry average is $145". The
-//       phrase names a market statistic, so it can never denote a Waves
-//       price — a bare copula is safe here (it is not in shape A).
-const BENCHMARK_SUBJECT_RE = /^(?:industry average)$/i;
-const BENCHMARK_COPULA_RE = /^[^.!?]{0,20}?\b(?:is|was|are|were|runs?|comes? to|sits? at|hovers? around)\b[^.!?]{0,15}?$/i;
 
 function buildNameAlternation(names) {
   // Longest-first so "Truly Nolen of America" wins over "Truly Nolen".
@@ -1443,8 +1346,15 @@ function clauseAround(sentence, localIndex) {
 // disqualifier is SENTENCE-wide (deliberately broader than the attribution
 // scope): any mention of us anywhere in the sentence blocks the exemption.
 function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
+  return thirdPartyPriceOwners(text, amountIndex, vetoText).length > 0;
+}
+
+// The competitor names that own the amount under the test above (empty when
+// none does). findHardcodedPrice needs WHO, to look for that company's
+// evidence.
+function thirdPartyPriceOwners(text, amountIndex, vetoText) {
   const { text: sentence, offset: sentenceOffset } = sentenceAround(text, amountIndex);
-  if (!sentence) return false;
+  if (!sentence) return [];
   // The first-party VETO reads the sentence DECODED — "O&#117;r service is
   // different; Orkin charges $89" renders as "Our service…" and the raw text
   // hid the marker (Codex r9 P0). Decoding is safe here because the sentence
@@ -1466,12 +1376,13 @@ function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
   const paraStart = (() => { const i = vt.lastIndexOf('\n\n', amountIndex); return i === -1 ? 0 : i + 2; })();
   const paraEndRaw = vt.indexOf('\n\n', amountIndex);
   const paragraph = vt.slice(paraStart, paraEndRaw === -1 ? vt.length : paraEndRaw);
-  if (hasFirstPartyMarker(cellIdentity(paragraph))) return false;
+  if (hasFirstPartyMarker(cellIdentity(paragraph))) return [];
   const localAmountIndex = amountIndex - sentenceOffset;
   const { text: clause, offset: clauseOffset } = clauseAround(sentence, localAmountIndex);
-  if (!clause) return false;
+  if (!clause) return [];
   const clauseAmountIndex = localAmountIndex - clauseOffset;
-  for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
+  const owners = [];
+  for (const re of competitorNamePatterns()) {
     if (!re) continue;
     const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
     let m;
@@ -1480,14 +1391,75 @@ function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
       const between = clause.slice(m.index + m[0].length, clauseAmountIndex);
       // (A) the party is the subject of a pricing predicate that owns THIS
       // amount — every linking token whitelisted (see attributionBindsToAmount).
-      if (attributionBindsToAmount(between)) return true;
       // (B) possessive price noun: "Orkin's cancellation fee is $199".
-      if (POSSESSIVE_PRICE_RE.test(between)) return true;
-      // (C) benchmark subject + copula: "the industry average is $145".
-      if (BENCHMARK_SUBJECT_RE.test(m[0].trim()) && BENCHMARK_COPULA_RE.test(between)) return true;
+      if (attributionBindsToAmount(between) || POSSESSIVE_PRICE_RE.test(between)) owners.push(m[0]);
     }
   }
-  return false;
+  return owners;
+}
+
+// Evidence for a competitor price (Codex r9 on #5191). The owner ruling of
+// 2026-09-28 keeps the source OFF the page — no link, no verified label — but
+// a figure nobody sourced must not publish, so the source rides the draft's
+// unpublished evidence channel instead: a URL under "Evidence sources" in
+// notes_for_reviewer, or a source the operator's brief binds (the brief is
+// operator-authored, so its sources are evidence already). A URL evidences
+// the company that OWNS the amount only:
+//   - a page on one of that company's own hosts (its curated
+//     competitor-facts record), or
+//   - a page whose PATH names the company (its name or an alias, letters and
+//     digits only) on a public-record host — the trusted citation hosts and
+//     any .gov (BBB, ConsumerAffairs, an AG release) — or bound by the brief
+//     ("consumeraffairs.com/homeowners/aptive-environmental-llc.html" for
+//     Aptive's $199 fee in the B1/B3 briefs).
+// Every owner the clause names needs its own evidence. A name with no curated
+// record (a detection-only brand) can only be evidenced by path.
+const nameKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const EVIDENCE_NAME_KEY_MIN = 4;
+
+function competitorEvidenceTarget(ownerName) {
+  const key = nameKey(ownerName);
+  let record = null;
+  try {
+    const { COMPETITORS } = require('./competitor-facts');
+    record = (Array.isArray(COMPETITORS) ? COMPETITORS : []).find((c) => (
+      [c?.name, ...(c?.aliases || []), ...(c?.aliasesCS || [])].some((n) => nameKey(n) === key)
+    )) || null;
+  } catch { /* no records — path evidence only */ }
+  const names = record ? [record.name, ...(record.aliases || []), ...(record.aliasesCS || [])] : [];
+  const keys = [...new Set([key, ...names.map(nameKey)])].filter((k) => k.length >= EVIDENCE_NAME_KEY_MIN);
+  let hosts = [];
+  try { hosts = record ? require('./competitor-links').competitorRecordHosts(record) : []; } catch { hosts = []; }
+  return { hosts, keys };
+}
+
+// A public-record host: the trusted citation hosts (BBB, ConsumerAffairs, …)
+// and any .gov. Shared with editorial-evidence, which hands such a notes URL
+// to the review for the same reason this accepts it.
+function isPublicRecordHost(host) {
+  return hostAllowed(normalizeHost(host), new Set(TRUSTED_CITATION_HOSTS.map(normalizeHost)));
+}
+
+function urlEvidences(rawUrl, { hosts, keys }, { bound }) {
+  let url;
+  try { url = new URL(String(rawUrl || '').trim()); } catch { return false; }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+  const host = normalizeHost(url.hostname);
+  if (hosts.some((h) => host === h || host.endsWith(`.${h}`))) return true;
+  if (!bound && !isPublicRecordHost(host)) return false;
+  let path = url.pathname;
+  try { path = decodeURIComponent(path); } catch { /* keep the raw path */ }
+  const pathKey = nameKey(path);
+  return keys.some((k) => pathKey.includes(k));
+}
+
+function competitorPriceEvidenced(owners, { evidenceUrls = [], boundSourceUrls = [] } = {}) {
+  if (!owners.length) return false;
+  return owners.every((owner) => {
+    const target = competitorEvidenceTarget(owner);
+    return evidenceUrls.some((u) => urlEvidences(u, target, { bound: false }))
+      || boundSourceUrls.some((u) => urlEvidences(u, target, { bound: true }));
+  });
 }
 
 function isRegulatoryPenaltyAmount(amount, context) {
@@ -1571,29 +1543,13 @@ function normalizeHost(host) {
 }
 
 // Established educational, regulatory and consumer-reference sources. This
-// baseline applies to both mined and operator-directed content; competitor
-// websites still require operator provenance or an exact brief source URL.
+// baseline applies to both mined and operator-directed content. Competitor
+// websites are never linkable (owner ruling 2026-09-28): COMPETITOR_LINK
+// sends a draft that links one back, and the publisher refuses to commit one.
 const TRUSTED_CITATION_HOSTS = [
   'ufl.edu', 'epa.gov', 'cdc.gov', 'fdacs.gov', 'myfloridalicense.com',
   'consumeraffairs.com', 'bbb.org',
 ];
-
-// Hosts of the curated competitor-facts `source` URLs — the exact pages an
-// operator directive like "Orkin published terms/plan pages" resolves to.
-function curatedCompetitorSourceHosts() {
-  const hosts = new Set();
-  try {
-    const { COMPETITORS } = require('./competitor-facts');
-    for (const c of Array.isArray(COMPETITORS) ? COMPETITORS : []) {
-      for (const attr of Object.values(c?.attributes || {})) {
-        const src = attr?.source;
-        if (!src) continue;
-        try { hosts.add(normalizeHost(new URL(src).hostname)); } catch { /* not a URL */ }
-      }
-    }
-  } catch { /* competitor-facts unavailable — fall through to the base allowlist */ }
-  return hosts;
-}
 
 // Scheme and host are case-INSENSITIVE; the PATH is not. Lowercasing the
 // whole URL made "/Payload.js" and "/payload.js" the same resource, so a
@@ -2546,6 +2502,98 @@ function tolerantStaticJson(text) {
   } catch (_) { return undefined; }
 }
 
+// Extract only statically authored props that the approved Astro blog
+// components render as reader-facing copy. Destinations, CSS/config props,
+// and dynamic expressions stay opaque. Prefix every value so prop text that
+// looks like Markdown cannot fabricate headings or list structure for a
+// downstream rendered-text check.
+const MDX_DISPLAY_SCALARS = Object.freeze({
+  appphone: ['caption'],
+  bottomlinebox: ['verdict', 'recommendation'],
+  honestrejection: ['audience', 'reason'],
+  inlinecta: ['headline', 'description', 'ctaLabel', 'phone', 'eyebrow'],
+  pestevidencegrid: ['title', 'caption'],
+  homezonemap: ['title', 'caption'],
+  seasonalpressurechart: ['title', 'caption', 'eyebrow', 'legendNormal', 'legendPeak', 'peakSummary'],
+  spideridboard: ['title', 'eyebrow', 'footnote', 'caption'],
+  comparisontable: ['caption'],
+});
+const MDX_DISPLAY_COLLECTIONS = Object.freeze({
+  pestevidencegrid: { items: ['label', 'note'] },
+  homezonemap: { zones: ['label', 'note'] },
+  seasonalpressurechart: { seasons: ['name', 'months', 'level', 'note'] },
+  spideridboard: { species: ['name', 'sciName', 'where', 'hunt', 'eggSac', 'source.label'] },
+});
+const MDX_DISPLAY_COMPONENT_NAMES = new Map([
+  ['AppPhone', 'appphone'],
+  ['BottomLineBox', 'bottomlinebox'],
+  ['HonestRejection', 'honestrejection'],
+  ['InlineCTA', 'inlinecta'],
+  ['PestEvidenceGrid', 'pestevidencegrid'],
+  ['HomeZoneMap', 'homezonemap'],
+  ['SeasonalPressureChart', 'seasonalpressurechart'],
+  ['SpiderIdBoard', 'spideridboard'],
+  ['ComparisonTable', 'comparisontable'],
+]);
+
+function staticJsxAttrValue(attr) {
+  if (attr.literal !== null) return attr.literal;
+  const scalar = staticStringOfExpr(attr.expr);
+  if (scalar !== null) return scalar;
+  if (!attr.expr || !/^\{[\s\S]*\}$/.test(attr.expr)) return undefined;
+  return tolerantStaticJson(attr.expr.slice(1, -1))?.value;
+}
+
+function nestedDisplayValue(row, path) {
+  return path.split('.').reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), row);
+}
+
+function collectionDisplayValues(tagName, props) {
+  const values = [];
+  for (const [prop, fields] of Object.entries(MDX_DISPLAY_COLLECTIONS[tagName] || {})) {
+    const rows = props.get(prop);
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) values.push(...fields.map((field) => nestedDisplayValue(row, field)));
+  }
+  return values;
+}
+
+function comparisonDisplayValues(props) {
+  const columns = props.get('columns');
+  const rows = props.get('rows');
+  if (!Array.isArray(columns)) return [];
+  const values = [...columns];
+  const optionCount = Math.max(0, columns.length - 1);
+  if (!Array.isArray(rows)) return values;
+  for (const row of rows) values.push(row?.label, ...(Array.isArray(row?.values) ? row.values.slice(0, optionCount) : []));
+  return values;
+}
+
+function componentDisplayValues(tag) {
+  const props = new Map(eachJsxAttr(tag.attrs).map((attr) => [attr.name, staticJsxAttrValue(attr)]));
+  const values = (MDX_DISPLAY_SCALARS[tag.name] || []).map((prop) => props.get(prop));
+  values.push(...collectionDisplayValues(tag.name, props));
+  if (tag.name === 'comparisontable') values.push(...comparisonDisplayValues(props));
+  return values;
+}
+
+function projectMdxDisplayText(text) {
+  const source = String(text || '');
+  const expressionView = blankExpressions(source);
+  const values = [];
+  for (const tag of eachTag(expressionView)) {
+    if (tag.isClose) continue;
+    const opener = /^<([A-Za-z][\w-]*)/.exec(source.slice(tag.start, tag.end + 1));
+    const name = MDX_DISPLAY_COMPONENT_NAMES.get(opener?.[1]);
+    if (!name) continue;
+    const attrsStart = tag.start + opener[0].length;
+    values.push(...componentDisplayValues({ ...tag, name, attrs: source.slice(attrsStart, tag.end) }));
+  }
+  return values.filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => `Component display text: ${value.replace(/\s+/g, ' ').trim()}`)
+    .join('\n');
+}
+
 function spiderSpeciesRowsValid(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return false;
   for (const r of rows) {
@@ -2939,8 +2987,11 @@ function allowedLinkHosts({ operatorCitations = false } = {}) {
   return new Set([
     ...HUB_DOMAINS,
     ...SPOKE_SITE_KEYS,
-    ...citationOnlyHosts({ operatorCitations }),
-  ].map(normalizeHost));
+    ...TRUSTED_CITATION_HOSTS,
+    ...String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(','),
+    // Archive.org includes user-uploaded files; operator scope only.
+    ...(operatorCitations ? ['archive.org'] : []),
+  ].map(normalizeHost).filter(Boolean));
 }
 
 
@@ -3015,8 +3066,9 @@ const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 // left `//127.0.0.1/x` and `//localhost/x` clean. The dotted-TLD arm keeps
 // prose slashes ("and//or", path fragments) from tripping; `<` in the
 // prefix class covers Markdown's angle-bracketed destination form and `>`
-// in the terminator lookahead closes it.
-const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=<])\/\/(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|localhost\b|[a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?=[/:\s"')\]>]|$)/i;
+// in the terminator lookahead closes it. Optional userinfo before the host:
+// a browser sends "//user@host/x" to host (Codex r7 on #5191).
+const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=<])\/\/(?:[^\s/?#\\"'<>]*@)?(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|localhost\b|[a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?=[/:\s"')\]>]|$)/i;
 const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
 // tel: destinations — validated against the Waves phone allowlist, exactly
 // like mailto recipients are validated against the business domain. The
@@ -3170,7 +3222,15 @@ function isLiteralExpression(expr) {
   return true;
 }
 
-function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
+// photoAllowedUrls (Codex P1, 2026-09-28): licensed identification-photo /
+// source-page / license URLs are a SEPARATE exact-URL allowance from
+// requiredSourceUrls — they may only ever exempt a link from
+// DISALLOWED_EXTERNAL_LINK, never stand in as sourcing evidence for a
+// factual or price claim. Kept as its own parameter (merged into the SAME
+// exactUrls set used below) rather than folded into requiredSourceUrls, so
+// callers outside this function (priceFinding, findHardcodedPrice) can
+// never receive them by accident.
+function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [], photoAllowedUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
   // MDX ESM: an "import"/"export" statement at the start of a line is
@@ -3295,7 +3355,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     }
   }
   const allowed = allowedLinkHosts({ operatorCitations });
-  const exactUrls = allowedExactSourceUrls(requiredSourceUrls);
+  const exactUrls = allowedExactSourceUrls([...requiredSourceUrls, ...photoAllowedUrls]);
   // Host trust never bypasses the executable-markup checks above or the
   // affiliate check below. A URL in an MDX expression still needs an exact
   // brief source even when its domain is a trusted citation source.
@@ -3392,6 +3452,19 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a protocol-relative URL ("${proto[0].trim()}") — use a relative internal path or an allowlisted absolute URL.`);
   }
   return null;
+}
+
+// `frontmatter`: every string in it is checked on its own, a URL-valued
+// field (next_steps[].href) included.
+function competitorLinkFinding(text, frontmatter = null) {
+  let urls = [];
+  try {
+    urls = require('./competitor-links').competitorLinkUrlsIn(frontmatter, text);
+  } catch (err) {
+    return finding('P1', 'COMPETITOR_LINK', `Competitor-link check unavailable (${err.message}) — held for review rather than risk publishing a link to a competitor's site.`);
+  }
+  if (!urls.length) return null;
+  return finding('P1', 'COMPETITOR_LINK', `Draft links to a competitor's site ("${urls[0].slice(0, 80)}"${urls.length > 1 ? ` and ${urls.length - 1} more` : ''}) — owner ruling: never link a competitor's website. Keep the wording, drop the link.`);
 }
 
 // ── MDX component gate ──────────────────────────────────────────────
@@ -4273,7 +4346,9 @@ const VISIBILITY_ATTR_RE = /\s(?:hidden|aria-hidden|style|class|className|popove
 // category (a legacy `<a>` must not license a NEW, differently-hidden
 // anchor). Matches use a global clone of each rule.
 function unsupportedBodySyntaxConstructs(body) {
-  const text = String(body || '');
+  // Exact licensed-photo attribution lines are catalog text (their Commons
+  // URLs carry %28/%29), judged verbatim by the photo gate — Codex r7.
+  const text = require('./licensed-photo-library').blankLibraryPhotoAttributions(String(body || ''));
   const out = [];
   for (const [name, re] of UNSUPPORTED_BODY_SYNTAX) {
     const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
@@ -4960,10 +5035,12 @@ const PAGE_CITY_SLUGS = new Set([
   'north-port', 'palmetto', 'parrish', 'port-charlotte',
 ]);
 
-function normalizeInternalPath(dest) {
-  let p = String(dest || '').trim().toLowerCase().split('#')[0].split('?')[0];
+function normalizeInternalPath(dest, { keepCase = false } = {}) {
+  let p = String(dest || '').trim();
+  if (!keepCase) p = p.toLowerCase();
+  p = p.split('#')[0].split('?')[0];
   if (!p.startsWith('/')) return null;
-  if (p !== '/' && !p.endsWith('/') && !/\.[a-z0-9]{2,5}$/.test(p)) p += '/';
+  if (p !== '/' && !p.endsWith('/') && !/\.[a-z0-9]{2,5}$/i.test(p)) p += '/';
   return p;
 }
 
@@ -5005,8 +5082,55 @@ function hubHostSet() {
   return hosts;
 }
 
+// Absolute fleet URLs share one origin contract: HTTP(S), a standard port,
+// no embedded credentials, and an explicitly allowed fleet host. Callers may
+// then compare the returned pathname without erasing unsafe origin details.
+function safeFleetUrlPath(value, allowedHosts = hubHostSet()) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    const standardPort = !parsed.port
+      || (parsed.protocol === 'https:' && parsed.port === '443')
+      || (parsed.protocol === 'http:' && parsed.port === '80');
+    if (!/^https?:$/.test(parsed.protocol)
+      || !standardPort
+      || parsed.username
+      || parsed.password
+      || !allowedHosts.has(parsed.hostname.toLowerCase())) return null;
+    return parsed.pathname || '/';
+  } catch {
+    return null;
+  }
+}
+
 // Every internal-route candidate in the text, normalized. Shared by the
 // gate and by the refresh grandfathering pass over the prior live body.
+// Every internal link destination the body RENDERS — the same text
+// preparation and extraction internalRouteFinding uses (the PR poller
+// rechecks related-post liveness on it at merge time, Codex r2 on #5272),
+// plus reference-style links resolved through the multi-line-aware
+// definition parser (Codex r4 on #5272: `[ants][fire]` + a `[fire]:`
+// definition whose destination sits on the next line).
+function renderedInternalDestinations(body) {
+  // Block context (blockquote depth, list membership) is kept for the
+  // definition parser: a definition started by a container transition
+  // ("> [fire]:") resolves as the publisher resolves it (Codex r6 on #5272).
+  const { text: base, depths, inList } = blankNonRenderedMarkdownWithDepths(String(body || ''));
+  const text = blankExpressionStringLiterals(base, { attrValues: false });
+  // Definitions are metadata: an UNUSED "[fire]: /path/" renders nothing, so
+  // destinations are collected with definitions blanked, and a definition
+  // counts only through a reference that resolves to it (Codex r9 on #5272).
+  const rendered = blankReferenceDefinitions(text, { depths, inList });
+  const dests = collectInternalDestinations(rendered).map((d) => d.dest);
+  const defs = markdownReferenceDefinitions(text, { depths, inList });
+  for (const span of eachMarkdownLink(rendered)) {
+    if (span.isImage || span.kind === 'inline' || span.kind === 'malformed') continue;
+    const tail = span.kind === 'reference' ? rendered.slice(span.refStart, span.refEnd + 1) : '';
+    const label = normalizeReferenceLabel(tail || rendered.slice(span.labelStart + 1, span.labelEnd));
+    if (label && defs.has(label)) dests.push(defs.get(label));
+  }
+  return [...new Set(dests)];
+}
+
 function collectInternalDestinations(text) {
   const s = String(text || '');
   const dests = [];
@@ -5019,7 +5143,7 @@ function collectInternalDestinations(text) {
   const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
   while ((m = rel.exec(s)) !== null) {
     if (attrMasked[m.index] !== s[m.index]) continue;
-    dests.push(m[1] || m[2] || m[3] || m[4]);
+    dests.push({ dest: m[1] || m[2] || m[3] || m[4], host: null, safeOrigin: true });
   }
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
@@ -5037,11 +5161,18 @@ function collectInternalDestinations(text) {
     const raw = m[0].replace(/[),.;:!?'"\]]+$/, '');
     try {
       const u = new URL(raw);
-      if (hubHosts.has(u.hostname.toLowerCase())) dests.push(u.pathname || '/');
+      if (hubHosts.has(u.hostname.toLowerCase())) {
+        dests.push({
+          dest: u.pathname || '/',
+          host: u.hostname.toLowerCase(),
+          safeOrigin: safeFleetUrlPath(raw, hubHosts) != null,
+        });
+      }
     } catch { /* malformed URL — the external gate owns it */ }
   }
   const normalized = [];
-  for (const dest of dests) {
+  for (const item of dests) {
+    const { dest, host, safeOrigin } = item;
     // Resolve dot segments FIRST — browsers resolve "/images/../x/" to
     // "/x/", so the /images/ exemption must see the resolved path or a
     // dot-segment link reopens the dead-route class.
@@ -5050,7 +5181,7 @@ function collectInternalDestinations(text) {
     // Anchor-only and in-repo image references are not routes.
     if (resolved.startsWith('/images/')) continue;
     const norm = normalizeInternalPath(resolved);
-    if (norm) normalized.push({ dest, norm });
+    if (norm) normalized.push({ dest, norm, exact: normalizeInternalPath(resolved, { keepCase: true }), host, safeOrigin });
   }
   return normalized;
 }
@@ -5087,7 +5218,7 @@ function isKnownGoodInternalRoute(dest) {
 // that preserves one legacy /old/ link must not thereby earn a free pass to
 // ADD more links to that dead route; only up to the prior body's count of
 // each route is preserved-legacy (see uncatalogedComponentFinding).
-function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null) {
+function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null, relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = []) {
   // Non-rendered content carries no live links: a fenced or commented
   // example (<InlineCTA ctaHref="/example-only/">, a code-block href) must
   // not flag UNKNOWN_INTERNAL_ROUTE — the same masking the component
@@ -5117,8 +5248,50 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
     if (allowanceCity && !PAGE_CITY_SLUGS.has(allowanceCity)) continue;
     allowed.add(norm);
   }
+  // Related-post paths match with their canonical case: blog slugs are
+  // lowercase and static routes need not resolve another casing, so
+  // "/Termite/Swarmers/" must not ride the allowance for "/termite/swarmers/".
+  const relatedList = Array.isArray(relatedPostLinks) ? relatedPostLinks : [];
+  const relatedPaths = new Set(relatedList.map((link) => normalizeInternalPath(link, { keepCase: true })).filter(Boolean));
+  const relatedLower = new Set(relatedList.map((link) => normalizeInternalPath(link)).filter(Boolean));
+  // Frozen related paths that failed the publish-time liveness recheck
+  // (unpublished, noindexed or moved since compose): always denied.
+  const staleRelated = new Set((Array.isArray(staleRelatedPostLinks) ? staleRelatedPostLinks : [])
+    .map((link) => normalizeInternalPath(link)).filter(Boolean));
+  const allowedRelatedHosts = new Set();
+  for (const value of Array.isArray(relatedPostHosts) ? relatedPostHosts : []) {
+    let host = String(value || '').trim().toLowerCase();
+    try { host = new URL(host.includes('://') ? host : `https://${host}`).hostname.toLowerCase(); } catch { continue; }
+    const bare = host.replace(/^www\./, '');
+    if (!SPOKE_SITE_KEYS.includes(bare)) continue;
+    allowedRelatedHosts.add(bare);
+    allowedRelatedHosts.add(`www.${bare}`);
+  }
   const seenCounts = new Map();
-  for (const { dest, norm } of collectInternalDestinations(text)) {
+  for (const { dest, norm, exact, host, safeOrigin } of collectInternalDestinations(text)) {
+    if (staleRelated.has(norm)) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}", which is no longer live (unpublished, noindexed or moved since this brief was composed).`);
+    }
+    if (relatedLower.has(norm) && !relatedPaths.has(exact)) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}" with different capitalization than the verified route; use the exact path from the brief.`);
+    }
+    if (relatedPaths.has(exact)) {
+      // A relative candidate renders on the current publish host. An absolute
+      // candidate must name that same frozen host; a path match alone must not
+      // turn a hub allowance into permission for a spoke URL (or vice versa).
+      // relatedPostLinksLive=false means the publish target drifted after
+      // this list was frozen (e.g. SPOKE_BLOG_NETWORK_ENABLED flipped after
+      // compose) — the path was verified live on the FROZEN host only, so
+      // every reference to it, relative or absolute, is quarantined as
+      // denied here rather than falling through to the generic
+      // allowedInternalLinks check below, which does no host verification
+      // at all and could otherwise admit it via draft.checked_existing_routes
+      // as a dead hub link (Codex #4984 r6+ P1).
+      if (relatedPostLinksLive && (!host || (safeOrigin && allowedRelatedHosts.has(host)))) continue;
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', host
+        ? `Draft links related-post path "${dest}" on host "${host}", which is not the brief's frozen publish host.`
+        : `Draft links related-post path "${dest}", which is no longer a live target after the publish routing changed since this brief was composed.`);
+    }
     if (allowed.has(norm)) continue;
     const seen = (seenCounts.get(norm) || 0) + 1;
     seenCounts.set(norm, seen);
@@ -5126,6 +5299,150 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
     const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
     if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) continue;
     return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links to "${dest}", which is not on the internal-route allowlist, a brief-mandated link, or a known city-service URL pattern — invented internal routes ship as dead links. Use the allowlisted targets or the brief's internal_links_to_add.`);
+  }
+  return null;
+}
+
+// Every rendered Markdown image occurrence for libraryPhotoAttributionUrls
+// below — inline (`![alt](dest)`), full/collapsed reference
+// (`![alt][ref]`, `![alt][]`), and shortcut (bare `![alt]`, not followed by
+// `(` or `[`, resolved via a same-named reference definition). Fail-closed
+// direction only (see the P1 note below): a missed image form under-allows
+// its attribution links, it never over-allows an attacker URL.
+const BODY_IMAGE_INLINE_RE = /!\[[^\]]*\]\(([^)\s]+)[^)]*\)/g;
+const BODY_IMAGE_REFERENCE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
+const BODY_IMAGE_SHORTCUT_RE = /!\[([^\]]*)\](?!\(|\[)/g;
+
+// Source-page + license-deed URLs of every licensed-library photo the
+// rendered body embeds (licensed-photo-library.libraryPhotoBySrc). Codex r5
+// on #5216 (pre-push fallback review): the quality gate's own
+// checkPhotoSlotsLicensedOnly (collectBodyImageOccurrences) is the
+// authoritative "does the publisher accept this photo" answer, and it now
+// reuses the publisher's own bodyImageRefs — full/collapsed reference and
+// shortcut forms included, not just inline. This scan widens to match that
+// (on top of the original inline-only regex) so their attribution links are
+// allowed here too, instead of hard-failing a fully compliant draft as
+// DISALLOWED_EXTERNAL_LINK. It stays a LOCAL regex scan, not a require of
+// astro-publisher: this module is required by astro-publisher at load time
+// AND is exercised, unlike the quality gate's identification-only path, on
+// EVERY evaluate() call — a hard runtime dependency here would throw in
+// every caller that stubs astro-publisher as a partial mock (dozens of
+// autonomous-runner tests). Under-matching only narrows the allowlist (fail
+// closed, never leaks an attacker-controlled URL — the pushed URLs always
+// come from the fixed catalog, not the body).
+function libraryPhotoAttributionUrls(body) {
+  const { libraryPhotoBySrc } = require('./licensed-photo-library');
+  const urls = [];
+  const rendered = blankNonRenderedMarkdown(String(body || ''));
+  for (const m of rendered.matchAll(BODY_IMAGE_INLINE_RE)) {
+    const photo = libraryPhotoBySrc(m[1]);
+    if (photo) urls.push(photo.source_page, photo.license_url);
+  }
+  const refDefs = markdownReferenceDefinitions(rendered);
+  const resolveByLabel = (rawLabel) => {
+    const label = normalizeReferenceLabel(rawLabel || '');
+    const dest = label && refDefs.get(label);
+    return dest && libraryPhotoBySrc(dest);
+  };
+  for (const m of rendered.matchAll(BODY_IMAGE_REFERENCE_RE)) {
+    const photo = resolveByLabel(m[2] || m[1]); // collapsed `![alt][]` resolves via alt
+    if (photo) urls.push(photo.source_page, photo.license_url);
+  }
+  for (const m of rendered.matchAll(BODY_IMAGE_SHORTCUT_RE)) {
+    const photo = resolveByLabel(m[1]);
+    if (photo) urls.push(photo.source_page, photo.license_url);
+  }
+  return urls;
+}
+
+// ── C2 frontmatter links: next_steps / related_posts (Codex r2 on #5216) ──
+// These fields render on the published post exactly like body links, so
+// they are judged by the SAME chokepoints body links go through — never a
+// parallel validator. evaluate() turns each next_steps entry into the body
+// link it renders as, "[label](href)", and feeds that block to every
+// customer-copy scan (compliance, price, brand, citation …) and to
+// internalRouteFinding. What the body guard cannot see is checked here:
+// the entry SHAPE (array, label + href, max 4) and the publish HOST of an
+// absolute href — internalRouteFinding reduces any fleet URL to its
+// pathname (hubHostSet deliberately holds every spoke), so a hub post's
+// "https://<spoke>/contact/" would otherwise pass as "/contact/".
+// A refresh never ships these (publishRefresh freezes frontmatter apart
+// from the editable meta fields), so evaluate() skips them there.
+const NEXT_STEPS_MAX = 4;
+// Characters that would let a label or href break out of the synthesized
+// "[label](href)" link and forge a different one.
+const NEXT_STEP_LABEL_UNSAFE_RE = /[[\]\r\n]/;
+const NEXT_STEP_HREF_UNSAFE_RE = /[\s()<>[\]]/;
+function publishHostSet(publishHosts) {
+  const hosts = new Set();
+  for (const value of Array.isArray(publishHosts) ? publishHosts : []) {
+    let host = String(value || '').trim().toLowerCase();
+    try { host = new URL(host.includes('://') ? host : `https://${host}`).hostname.toLowerCase(); } catch { continue; }
+    const bare = host.replace(/^www\./, '');
+    hosts.add(bare);
+    hosts.add(`www.${bare}`);
+  }
+  return hosts;
+}
+function nextStepsLinkMarkdown(frontmatter) {
+  const steps = Array.isArray(frontmatter?.next_steps) ? frontmatter.next_steps : [];
+  return steps
+    .filter((step) => step && typeof step.label === 'string' && typeof step.href === 'string')
+    .map((step) => `[${step.label.trim()}](${step.href.trim()})`)
+    .join('\n\n');
+}
+function nextStepEntryFinding(step, hosts) {
+  const label = typeof step?.label === 'string' ? step.label.trim() : '';
+  const href = typeof step?.href === 'string' ? step.href.trim() : '';
+  if (!label || !href) return finding('P0', 'NEXT_STEPS_INVALID', 'Every frontmatter next_steps entry needs a non-empty label and href.');
+  if (NEXT_STEP_LABEL_UNSAFE_RE.test(label) || NEXT_STEP_HREF_UNSAFE_RE.test(href)) {
+    return finding('P0', 'NEXT_STEPS_INVALID', `next_steps entry "${label}" carries link syntax or whitespace in its label/href — use plain label text and a bare path.`);
+  }
+  if (href.startsWith('/') && !href.startsWith('//')) return null; // renders on the publish host
+  // Absolute: the SAME fleet-origin contract as every other absolute link,
+  // but against ONLY the brief's resolved publish host — never the whole
+  // fleet.
+  if (!hosts.size || !safeFleetUrlPath(href, hosts)) {
+    return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `next_steps href "${href}" is not a path on this post's publish host — use a root-relative path like "/contact/".`);
+  }
+  return null;
+}
+function nextStepsFrontmatterFinding(frontmatter, { publishHosts = [] } = {}) {
+  const steps = frontmatter?.next_steps;
+  if (steps == null) return null;
+  if (!Array.isArray(steps)) return finding('P0', 'NEXT_STEPS_INVALID', 'frontmatter next_steps must be an array of { label, href } entries.');
+  if (steps.length > NEXT_STEPS_MAX) return finding('P0', 'NEXT_STEPS_INVALID', `frontmatter next_steps has ${steps.length} entries; the maximum is ${NEXT_STEPS_MAX}.`);
+  const hosts = publishHostSet(publishHosts);
+  for (const step of steps) {
+    const bad = nextStepEntryFinding(step, hosts);
+    if (bad) return bad;
+  }
+  return null;
+}
+// related_posts is the Astro rail's hand-picked id list: each entry must be
+// EXACTLY one of the brief's verified related-post paths, and it obeys the
+// same publish-time liveness result the body-link guard consumes
+// (staleRelatedPostLinks / relatedPostLinksLive from _deriveGuardrailOptions)
+// — a stale path, or any path once the publish routing drifted, is denied
+// with the same P0 the body guard raises for a body link to it.
+function relatedPostsFrontmatterFinding(frontmatter, { relatedPostLinks = [], relatedPostLinksLive = true, staleRelatedPostLinks = [] } = {}) {
+  const posts = frontmatter?.related_posts;
+  if (posts == null) return null;
+  if (!Array.isArray(posts)) return finding('P0', 'RELATED_POSTS_INVALID', 'frontmatter related_posts must be an array of related-post paths from the brief.');
+  const verified = new Set((Array.isArray(relatedPostLinks) ? relatedPostLinks : []).filter((v) => typeof v === 'string'));
+  const stale = new Set((Array.isArray(staleRelatedPostLinks) ? staleRelatedPostLinks : [])
+    .map((link) => normalizeInternalPath(link)).filter(Boolean));
+  for (const entry of posts) {
+    if (typeof entry !== 'string' || !entry.trim()) return finding('P0', 'RELATED_POSTS_INVALID', 'Every frontmatter related_posts entry must be a non-empty path string.');
+    if (!verified.has(entry)) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `frontmatter related_posts entry "${entry}" is not one of the brief's verified related posts (exact path required).`);
+    }
+    if (stale.has(normalizeInternalPath(entry))) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `frontmatter related_posts entry "${entry}" is no longer live (unpublished, noindexed or moved since this brief was composed).`);
+    }
+    if (!relatedPostLinksLive) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `frontmatter related_posts entry "${entry}" is no longer a live target after the publish routing changed since this brief was composed.`);
+    }
   }
   return null;
 }
@@ -5154,6 +5471,14 @@ const BLOCKED_SERVICE_ALIASES = new Map([
   ['palmetto-bug', 'cockroach'],
   ['stinging-insects', 'wasp'], // canonical blog tag "Stinging Insects"
   ['stinging-insect', 'wasp'],
+  // Lawn pests by name → the blocked lawn-pest id. A chinch-bug topic is a
+  // lawn-pest topic; without these a "chinch bugs" question or tag carries
+  // only the broad service 'lawn' and keeps its FAQ.
+  ['chinch-bug', 'lawn-pest'],
+  ['sod-webworm', 'lawn-pest'],
+  ['mole-cricket', 'lawn-pest'],
+  ['grub', 'lawn-pest'],
+  ['armyworm', 'lawn-pest'],
 ]);
 
 function blockedServiceCandidates(service) {
@@ -5524,7 +5849,9 @@ const REENTRY_SPELLED_NUM_SRC = `(?:(?:one|two|three|four|five|six|seven|eight|n
 // is a figure — a single-word endpoint would drop the compound half.
 // Seconds/days/weeks are figures too (Codex PR r8 audit): "do not
 // re-enter for 90 seconds", "keep pets off for one day".
-const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour|a\\s+(?:day|week)\\b)`;
+// Fractional hours are figures in every wording (codex PR #5187 r11): "a
+// quarter hour", "a quarter-hour", "three quarters of an hour".
+const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour|(?:(?:a|one)\\s+)?quarter(?:-|\\s+of\\s+an?\\s+|\\s+)hour|three[-\\s]quarters\\s+of\\s+an\\s+hour|a\\s+(?:day|week)\\b)`;
 // Copular/modal predicate grammar shared by the safety-subject patterns
 // (Codex PR r8 audit): "will be safe", "becomes safe", "should be safe"
 // are the same unconditional claim as "is safe". Bounded NON-NEGATING
@@ -5777,6 +6104,38 @@ const REENTRY_SAFETY_SRCS = [
   `\\b(?:\\d+|${REENTRY_SPELLED_NUM_SRC})[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+(?:re-?entry|wait(?:ing)?)\\b`,
   { src: `\\b(?:\\d+|${REENTRY_SPELLED_NUM_SRC})[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+dry(?:ing)?\\b`, needsTreatmentContext: true },
 ];
+// PERFORMANCE (#4905): reentrySafetyClaimFinding runs synchronously on every
+// live voice-call turn and email draft. It used to build a fresh `new
+// RegExp(src, 'gi')` — parsing the source string and allocating a new object
+// — for each of the ~50 sources above on EVERY call, discarding all ~50
+// objects immediately after. That per-call construction is real,
+// unavoidable work on top of whatever the match itself costs, repeated on
+// every single invocation forever. V8 also runs any regex it hasn't
+// executed (yet) in a slow bytecode interpreter before tiering up to fast
+// compiled code, and a short battery of ~50 moderately complex patterns
+// scanning a string while still in that slow tier is where the worst
+// documented latencies (tens of ms up to multiple seconds, content-
+// dependent) came from; a one-time warm-up call at server start didn't
+// reliably prevent it, since real traffic's constant unrelated regex
+// compilation (this file alone builds many other DYNAMIC, content-keyed
+// patterns per request) can still leave these specific ~50 patterns cold
+// when a live call reaches them. Compiling every pattern ONCE here, at
+// module load, and reusing the SAME RegExp objects on every call (resetting
+// `lastIndex` per use, exactly like the old per-call `new RegExp` did
+// implicitly) removes the repeated construction cost entirely — measured
+// at a many-fold lower steady-state per-call cost with no other behavior
+// change (same sources, same 'gi' flags, same per-call lastIndex-from-0
+// scan). It does not, on its own, guarantee every call is instant — the
+// first handful of executions after a process starts (or certain V8-
+// internal resets) still pay some interpreter-tier cost either way, which
+// is inherent to a plain-JS regex approach and shared by any
+// implementation — but it ends the PER-CALL, FOREVER-RECURRING cost this
+// function used to pay on every single turn.
+const REENTRY_SAFETY_PATTERNS = REENTRY_SAFETY_SRCS.map((entry) => (
+  typeof entry === 'string'
+    ? { re: new RegExp(entry, 'gi') }
+    : { re: new RegExp(entry.src, 'gi'), needsTreatmentContext: entry.needsTreatmentContext, needsTreatmentAntecedent: entry.needsTreatmentAntecedent }
+));
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
 // dry condition ("safe once dry" — condition before or after the claim,
@@ -6010,11 +6369,34 @@ function normalizeHardCopyText(text) {
     .replace(/(\*\*|__|~~|[*_`])/g, '');
 }
 
+// #4905: V8 compiles each pattern above to native code on its first runs in
+// a process — once for one-byte text and again for two-byte text (an em
+// dash, é, ñ). Across this battery that is about a second (seconds on a busy
+// host), and it used to land on the first live voice turn or email draft to
+// reach each path. The server runs this once at boot, before it listens. It
+// runs every pattern directly: reentrySafetyClaimFinding returns at its first
+// claim, so calling it cannot reach the rest. Returns the time spent (ms).
+const REENTRY_WARM_TEXTS = ['Warm up line, nothing to see here.', 'Warm up \u2014 nothing to see here, se\u00f1or.'];
+function warmReentrySafetyPatterns() {
+  const started = Date.now();
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (const text of REENTRY_WARM_TEXTS) {
+      for (const { re } of REENTRY_SAFETY_PATTERNS) {
+        re.lastIndex = 0;
+        re.test(text);
+        re.lastIndex = 0;
+      }
+      reentrySafetyClaimFinding(text);
+    }
+  }
+  return Date.now() - started;
+}
+
 function reentrySafetyClaimFinding(text) {
   const s = normalizeHardCopyText(text);
-  for (const entry of REENTRY_SAFETY_SRCS) {
-    const src = typeof entry === 'string' ? entry : entry.src;
-    const re = new RegExp(src, 'gi');
+  for (const entry of REENTRY_SAFETY_PATTERNS) {
+    const { re } = entry;
+    re.lastIndex = 0;
     let m;
     while ((m = re.exec(s)) !== null) {
       const before = s.slice(Math.max(0, m.index - 80), m.index);
@@ -6029,7 +6411,7 @@ function reentrySafetyClaimFinding(text) {
       // Drying forms with no intrinsic re-entry word only count as the
       // banned figure in pesticide context (Codex PR r5) — "Paint drying
       // takes 30 minutes" stays legal maintenance advice.
-      if (typeof entry === 'object' && entry.needsTreatmentContext && !REENTRY_TREATMENT_CONTEXT_RE.test(fullSentence)) {
+      if (entry.needsTreatmentContext && !REENTRY_TREATMENT_CONTEXT_RE.test(fullSentence)) {
         if (m.index === re.lastIndex) re.lastIndex += 1;
         continue;
       }
@@ -6039,7 +6421,7 @@ function reentrySafetyClaimFinding(text) {
       // r5, scoped PR r6): "The pesticide is applied outdoors. The
       // repaired screen prevents entry. It is safe for pets." keeps the
       // screen as the antecedent and stays legal.
-      if (typeof entry === 'object' && entry.needsTreatmentAntecedent) {
+      if (entry.needsTreatmentAntecedent) {
         const before220 = s.slice(Math.max(0, m.index - 220), m.index);
         const governing = before220.split(/[.!?\n]/).slice(-2).join(' ');
         if (!REENTRY_TREATMENT_CONTEXT_RE.test(governing)) {
@@ -6422,7 +6804,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], publishHosts = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6447,7 +6829,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   // gate 3c, the in-loop self-lints, the metadata handler — inherits one
   // behavior. DESCRIPTION FIELDS ONLY: a {{cityPhone}} in a title,
   // metaTitle, or hero alt has no sanctioned use and stays fully validated.
-  const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription']
+  const metaFields = ['title', 'metaTitle', 'meta_description', 'metaDescription']
     .concat(isRefresh ? [] : ['hero_image_alt'])
     .map((f) => {
       const v = frontmatter[f];
@@ -6460,6 +6842,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     .filter(Boolean)
     .map(String)
     .join('\n\n');
+  // C2 next_steps render as links on the post: each entry joins the
+  // customer-copy scans (and the internal-route gate below) as the exact
+  // body link it renders as, "[label](href)" — Codex r2 on #5216. Skipped
+  // on a refresh, which never ships draft frontmatter beyond the meta
+  // fields above.
+  const nextStepsLinks = isRefresh ? '' : nextStepsLinkMarkdown(frontmatter);
+  const editableMeta = [metaFields, nextStepsLinks].filter(Boolean).join('\n\n');
   const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
 
   // Refresh grandfathering surface: what the live prior body already
@@ -6480,6 +6869,14 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     }
   }
 
+  // Licensed identification photos (C3) are committed Astro files embedded
+  // by local path; their attribution line links the photo's source page and
+  // license deed. Those two exact URLs are allowed for each library photo
+  // the RENDERED body actually shows — the same library lookup the quality
+  // gate uses, so a new post, a refresh and a remediation revalidation all
+  // get the same answer with no brief data (Codex r3 on #5216).
+  const photoAllowedUrls = libraryPhotoAttributionUrls(body);
+
   const findings = [
     // Price must cover everything that ships: body AND meta. Third-party
     // price citations carry their OWN flag, stricter than operatorCitations:
@@ -6487,10 +6884,28 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // citation hosts, but only true competitor-intercept briefs may cite
     // competitor prices (Codex: seed lanes auto-publish informational posts
     // and must keep the full price guard).
-    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices, operatorCitations, requiredSourceUrls }),
+    // A competitor price needs its source in the draft's unpublished
+    // evidence (notes_for_reviewer) or the brief's bound sources.
+    priceFinding(publishableText, {
+      thirdPartyCitations: competitorPriceCitations,
+      forbidAllPrices,
+      evidenceUrls: competitorPriceCitations ? priceEvidenceUrls(draft) : [],
+      boundSourceUrls: requiredSourceUrls,
+    }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
-    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
+    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls, photoAllowedUrls })
+      // A renderer removes Markdown backslash-escapes before it builds a link
+      // ("[x](https\://host)" links host), so the escaped text is read
+      // unescaped too (Codex r8 on #5191).
+      || (publishableText.includes('\\')
+        ? externalLinkFinding(require('./competitor-links').unescapeMarkdown(publishableText), { operatorCitations, requiredSourceUrls, photoAllowedUrls })
+        : null),
+    // Owner rulings 2026-09-28: never a link to a competitor's own site, and
+    // refuse, don't rewrite. Body, meta and every frontmatter string: the
+    // writer's self-lint sends such a draft back for a redraft, and the
+    // publisher refuses to commit one (competitor-links.js).
+    competitorLinkFinding(publishableText, frontmatter),
     // Affiliate links: blog bodies reference registry product IDs through
     // <AffiliateLink> only (raw tracking URLs stay DISALLOWED_EXTERNAL_LINK
     // above, no bypass). affiliateComponentFindings owns registration,
@@ -6542,6 +6957,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // grandfather; the post's service (when the lane knows it) arms the
     // service-tying half too (see forbiddenCtaWordingFinding).
     forbiddenCtaWordingFinding(body, { targetIsBlog, isRefresh, priorBody, service }),
+    // next_steps labels render as CTA links too (Codex r7 on #5216); a
+    // refresh never ships them (nextStepsLinks is empty there).
+    nextStepsLinks ? forbiddenCtaWordingFinding(nextStepsLinks, { targetIsBlog, isRefresh: false, priorBody: null, service }) : null,
     // Component + internal-route allowlists are body-structure policies.
     // Refresh drafts GRANDFATHER what the live prior body already carried
     // (legacy links/components the refresh merely preserves must not park
@@ -6558,10 +6976,12 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     (isRefresh && !refreshPriorBody)
       ? finding('P1', 'REFRESH_PRIOR_BODY_UNAVAILABLE', 'Refresh draft arrived without the live prior body, so the component/internal-route gates cannot grandfather preserved-legacy content — routed to review (fail closed).')
       : uncatalogedComponentFinding(body, refreshExemptComponents),
-    (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
+    isRefresh ? null : nextStepsFrontmatterFinding(frontmatter, { publishHosts }),
+    isRefresh ? null : relatedPostsFrontmatterFinding(frontmatter, { relatedPostLinks, relatedPostLinksLive, staleRelatedPostLinks }),
+    (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(nextStepsLinks ? `${body}\n\n${nextStepsLinks}` : body, [
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
-    ], refreshExemptRoutes),
+    ], refreshExemptRoutes, relatedPostLinks, relatedPostHosts, relatedPostLinksLive, staleRelatedPostLinks),
     // Owner hard rule (2026-07-16): service/location metaTitles — the
     // intentional long near-me titles — are NEVER edited by automation. A
     // refresh draft that proposes a DIFFERENT metaTitle than the live page is
@@ -6584,6 +7004,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 }
 
 module.exports = {
+  warmReentrySafetyPatterns,
   evaluate,
   // affiliate-material detector for reuse channels (newsletter validator,
   // social share lanes) — affiliate links are web-only; runs regardless of
@@ -6597,6 +7018,10 @@ module.exports = {
   // generators/gates can never contradict the publish-time guard.
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
+  // Topic-name aliases onto blocked ids — the miner's specialty-topic
+  // derivation matches these names too, so it can never miss a topic the
+  // publish-time guard blocks.
+  BLOCKED_SERVICE_ALIASES,
   KEYWORD_DENSITY_MAX,
   // single source of truth for the raw-markdown-table policy — consumed by
   // content-quality-gate's no_raw_markdown_tables hard check so the two
@@ -6605,12 +7030,16 @@ module.exports = {
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
+  // next_steps as the "[label](href)" text they render as — the redaction
+  // gate scans the same synthesis the guardrails do.
+  nextStepsLinkMarkdown,
   maskJsxAttrQuotes,
   blankComments,
   blankNonRenderedMarkdownWithDepths,
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.
   blankDefinitelyHiddenContent,
+  projectMdxDisplayText,
   // quote-aware tag walker + balanced MDX-expression blanker — the ONE tag
   // scanner (astro-publisher's body-image scan masks with these, never a
   // parallel regex).
@@ -6619,6 +7048,7 @@ module.exports = {
   blankLinkDefinitionsAndTitles,
   blankMarkdownLinkDestinations,
   markdownReferenceDefinitions,
+  blankReferenceDefinitions,
   normalizeReferenceLabel,
   parseLinkDestination,
   eachMarkdownLink,
@@ -6634,9 +7064,12 @@ module.exports = {
   // first-party host set (hub + spoke fleet) — consumed by seo-completion-gate
   // to read absolute Waves URLs as the site-relative paths they are.
   hubHostSet,
+  safeFleetUrlPath,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
+  priceEvidenceUrls,
+  isPublicRecordHost,
   isThirdPartyPriceCitation,
   // single source of truth for the re-entry/safety compliance predicate
   // (AGENTS.md "Compliance language on any customer surface") — consumed by
@@ -6665,5 +7098,10 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
+  _internals: { closeOfExpressionAt, eachJsxAttr, decodeEntitiesForScan, renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
+    // #4905 perf regression guard (content-guardrails.test.js): exposes the
+    // precompiled reentry-safety RegExp objects so a test can confirm
+    // reentrySafetyClaimFinding reuses the SAME objects call over call
+    // instead of rebuilding them.
+    REENTRY_SAFETY_PATTERNS },
 };

@@ -87,6 +87,7 @@ jest.mock('../services/notification-service', () => ({
 }));
 
 const MODELS = require('../config/models');
+const { THINKING_FLOOR_TOKENS } = require('../services/llm/anthropic-wire');
 const logger = require('../services/logger');
 const db = require('../models/db');
 const {
@@ -269,12 +270,12 @@ describe('collections-conversation.js resolution is unaffected by the new envs',
     return q;
   }
 
-  function setDb() {
+  function setDb(target = db) {
     const queues = {
       call_log: [chain({ first: CALL_ROW }), chain(), chain(), chain()],
       collection_cases: [chain({ first: CASE_ROW })],
     };
-    db.mockImplementation((table) => {
+    target.mockImplementation((table) => {
       if (table === 'customers') return chain({ first: CUSTOMER });
       if (table === 'customer_dunning_sequences') return chain({ first: undefined });
       const queue = queues[table];
@@ -322,6 +323,57 @@ describe('collections-conversation.js resolution is unaffected by the new envs',
     expect(mockStreamCalls[0].model).toBe(MODELS.VOICE);
     expect(mockStreamCalls[0].model).not.toBe(process.env.VOICE_RELAY_INBOUND_MODEL);
     expect(mockStreamCalls[0].model).not.toBe(process.env.VOICE_RELAY_SANDBOX_MODEL);
+  });
+
+  // collections-conversation.js previously read VOICE_RELAY_MODEL/MODEL_VOICE
+  // with NO validation at all — a thinking-always-on id (Opus 5.5+) there
+  // would 400 on this lane's always-on `thinking: { type: 'disabled' }`
+  // every single call. It now guards against exactly that (reusing
+  // relay-conversation's own ALLOWED_OVERRIDE_MODEL_IDS), falling back to
+  // MODELS.DEFAULTS.VOICE with one logged warning — the module-level MODEL
+  // const is resolved once at require time, so this needs a fresh module
+  // registry under the bad env.
+  // The walk validates each link in order: a rejected VOICE_RELAY_MODEL
+  // falls to a valid configured MODEL_VOICE, and only then to the code default.
+  test.each([
+    ['unset MODEL_VOICE → the code default', undefined, () => MODELS.DEFAULTS.VOICE],
+    ['a valid custom MODEL_VOICE → that tier', 'claude-opus-5', () => 'claude-opus-5'],
+  ])('a thinking-always-on VOICE_RELAY_MODEL is rejected with a warning — %s', async (_label, modelVoice, expected) => {
+    process.env.VOICE_RELAY_MODEL = 'claude-opus-5-5';
+    if (modelVoice) process.env.MODEL_VOICE = modelVoice;
+    let FreshCollectionsConversation;
+    let isolatedLogger;
+    jest.isolateModules(() => {
+      // A fresh require inside isolateModules gets its OWN mock instance for
+      // ../services/logger (the factory re-runs), separate from the outer
+      // `logger` this file requires at top — captured here so the assertion
+      // below checks the instance collections-conversation.js actually used.
+      isolatedLogger = require('../services/logger');
+      // Same for ../models/db: configure the instance the fresh module
+      // actually requires, not the outer one beforeEach set up.
+      setDb(require('../models/db'));
+      FreshCollectionsConversation = require('../services/collections/outbound-voice/collections-conversation').CollectionsConversation;
+    });
+    delete process.env.VOICE_RELAY_MODEL;
+    delete process.env.MODEL_VOICE;
+
+    expect(isolatedLogger.warn).toHaveBeenCalledWith(expect.stringContaining('claude-opus-5-5'));
+
+    mockScriptedMessages.push({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Am I speaking with Pat?' }] });
+    const convo = new FreshCollectionsConversation({
+      callSid: 'CA1',
+      from: '+19412975749',
+      to: '+19415551234',
+      send: jest.fn(),
+      endSession: jest.fn(),
+      now: () => new Date('2026-08-12T15:00:00Z'), // Wed 11:00 ET — staffed hours
+    });
+    convo.handlePrompt('Hello?');
+    await convo._chain;
+
+    expect(mockStreamCalls).toHaveLength(1);
+    expect(mockStreamCalls[0].model).toBe(expected());
+    expect(mockStreamCalls[0].thinking).toEqual({ type: 'disabled' }); // still sent — and now safe to send
   });
 });
 
@@ -375,5 +427,284 @@ describe('effort is sent only to models that accept it', () => {
     expect(sent.length).toBeGreaterThanOrEqual(1);
     for (const p of sent) expect(p.output_config).toEqual({ effort: 'low' });
     expect(convo._versionStamps().effort).toBe('low');
+  });
+
+  // Sonnet 5 (the code default, MODELS.DEFAULTS.VOICE) is a thinking-capable
+  // model but NOT thinking-always-on — its request must stay byte-identical
+  // to before Opus 5.5 existed: `thinking: disabled` still sent, max_tokens
+  // still the plain lane constant.
+  test('the default (Sonnet 5) session request is unchanged: thinking disabled, max_tokens 1024', async () => {
+    const { convo, sent } = await runOneTurn('CA-sonnet-unchanged');
+    expect(convo.model).toBe('claude-sonnet-5');
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    for (const p of sent) {
+      expect(p.thinking).toEqual({ type: 'disabled' });
+      expect(p.max_tokens).toBe(1024);
+    }
+  });
+});
+
+// Sonnet 5.5 (`claude-sonnet-5-5`) — rejects `thinking: { type: 'disabled' }`;
+// its floor is `between_tools` (no up-front thinking), which the lane sends
+// instead. Same containment as Opus 5.5: sandbox / eval harness only.
+describe('Sonnet 5.5 sandbox candidate (between_tools floor)', () => {
+  const SONNET_55 = 'claude-sonnet-5-5';
+
+  test('catalog entry is deep-only with a between_tools voice floor, and the registry predicate agrees', () => {
+    expect(MODELS.MODEL_CATALOG[SONNET_55]).toMatchObject({ provider: 'anthropic', status: 'current', requires: 'deep', voice: { thinking: 'between_tools' } });
+    expect(MODELS.anthropicThinkingAlwaysOn(SONNET_55)).toBe(true);
+    expect(MODELS.anthropicThinkingAlwaysOn('claude-sonnet-5')).toBe(false);
+    expect(MODELS.anthropicAcceptsEffort(SONNET_55, 'low')).toBe(true);
+  });
+
+  test('sandbox and eval harness only — never production inbound or the shared chain', () => {
+    const { ALLOWED_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds } = require('../services/voice-agent/relay-conversation');
+    expect(ALLOWED_OVERRIDE_MODEL_IDS.has(SONNET_55)).toBe(false);
+    expect(ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS.has(SONNET_55)).toBe(true);
+    expect(allowedOverrideModelIds().has(SONNET_55)).toBe(false);
+    expect(allowedOverrideModelIds({ openaiContext: true }).has(SONNET_55)).toBe(true);
+    process.env.VOICE_RELAY_INBOUND_MODEL = SONNET_55;
+    expect(resolveSessionModel({ sandbox: false }).model).toBe(MODEL);
+    expect(resolveSessionModel({ sandbox: false, evalHarness: true })).toEqual({ model: SONNET_55, fallbackReason: null });
+  });
+
+  test('a sandbox request sends thinking between_tools at low effort with the thinking floor cap', async () => {
+    process.env.VOICE_RELAY_SANDBOX_MODEL = SONNET_55;
+    mockScriptedMessages.push({ content: [{ type: 'text', text: 'Sandbox reply.' }], stop_reason: 'end_turn' });
+    const convo = new RelayConversation({ callSid: 'CA-sonnet55-sandbox', from: '+19415551234', send: jest.fn(), sandbox: true });
+    expect(convo.model).toBe(SONNET_55);
+    await convo._runLoop('hello').catch(() => {});
+    expect(mockStreamCalls.length).toBeGreaterThanOrEqual(1);
+    for (const p of mockStreamCalls) {
+      expect(p.model).toBe(SONNET_55);
+      expect(p.thinking).toEqual({ type: 'between_tools' });
+      expect(p.output_config).toEqual({ effort: 'low' });
+      expect(p.max_tokens).toBe(THINKING_FLOOR_TOKENS); // progress-update thinking blocks spend from it (shared floor)
+      expect(p).not.toHaveProperty('tool_choice');
+    }
+  });
+});
+
+// Opus 5.5 (`claude-opus-5-5`) — thinking always on, rejects
+// `thinking: { type: 'disabled' }`. Reachable ONLY for a sandbox test call
+// or the eval/benchmark harness, never production inbound and never the
+// shared VOICE_RELAY_MODEL / MODEL_VOICE chain.
+describe('thinking-always-on Anthropic candidates (Opus 5.5+)', () => {
+  const OPUS_55 = 'claude-opus-5-5';
+
+  test('MODEL_CATALOG carries the entry and the registry predicate agrees', () => {
+    expect(MODELS.MODEL_CATALOG[OPUS_55]).toMatchObject({ provider: 'anthropic', status: 'current' });
+    expect(MODELS.anthropicThinkingAlwaysOn(OPUS_55)).toBe(true);
+    // Bare Opus 5 stays thinking-disable-able — the existing override tests
+    // above rely on picking it with `thinking: disabled` still sent.
+    expect(MODELS.anthropicThinkingAlwaysOn('claude-opus-5')).toBe(false);
+  });
+
+  test('excluded from the production allowlist and the shared VOICE_RELAY_MODEL/MODEL_VOICE chain', () => {
+    const { ALLOWED_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds } = require('../services/voice-agent/relay-conversation');
+    expect(ALLOWED_OVERRIDE_MODEL_IDS.has(OPUS_55)).toBe(false);
+    expect(ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS.has(OPUS_55)).toBe(true);
+    expect(allowedOverrideModelIds().has(OPUS_55)).toBe(false); // no context = production inbound reporting
+    expect(allowedOverrideModelIds({ openaiContext: true }).has(OPUS_55)).toBe(true);
+  });
+
+  test('production inbound override is rejected — falls back to the shared default with a stamped reason', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = OPUS_55;
+    const result = resolveSessionModel({ sandbox: false });
+    expect(result.model).toBe(MODEL);
+    expect(result.fallbackReason).toBe(`unknown_model_override:VOICE_RELAY_INBOUND_MODEL=${OPUS_55}`);
+  });
+
+  test('the shared VOICE_RELAY_MODEL/MODEL_VOICE chain never resolves to it either, sandbox or not', () => {
+    // SHARED_MODEL_CHAIN is captured at module load, so load a fresh
+    // instance with the env already set.
+    process.env.VOICE_RELAY_MODEL = OPUS_55;
+    let freshResolve;
+    try {
+      jest.isolateModules(() => {
+        freshResolve = require('../services/voice-agent/relay-conversation').resolveSessionModel;
+      });
+    } finally {
+      delete process.env.VOICE_RELAY_MODEL;
+    }
+    for (const sandbox of [false, true]) {
+      const result = freshResolve({ sandbox });
+      expect(result.model).not.toBe(OPUS_55);
+      expect(result.fallbackReason).toBe(`unknown_shared_model:VOICE_RELAY_MODEL=${OPUS_55}`);
+    }
+  });
+
+  test('a sandbox session accepts it with no gate required', () => {
+    process.env.VOICE_RELAY_SANDBOX_MODEL = OPUS_55;
+    const result = resolveSessionModel({ sandbox: true });
+    expect(result).toEqual({ model: OPUS_55, fallbackReason: null });
+  });
+
+  test('an eval-harness session accepts it too (the benchmark runner path)', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = OPUS_55;
+    const result = resolveSessionModel({ sandbox: false, evalHarness: true });
+    expect(result).toEqual({ model: OPUS_55, fallbackReason: null });
+  });
+
+  // Uses this file's shared stream-capturing @anthropic-ai/sdk mock (see
+  // `runOneTurn` above) — a sandbox session pinned to Opus 5.5 by
+  // VOICE_RELAY_SANDBOX_MODEL.
+  test('its request omits thinking, keeps effort low, and raises max_tokens to the shared floor', async () => {
+    process.env.VOICE_RELAY_SANDBOX_MODEL = OPUS_55;
+    mockScriptedMessages.push({ content: [{ type: 'text', text: 'Sandbox reply.' }], stop_reason: 'end_turn' });
+    const convo = new RelayConversation({ callSid: 'CA-opus55-sandbox', from: '+19415551234', send: jest.fn(), sandbox: true });
+    expect(convo.model).toBe(OPUS_55);
+    await convo._runLoop('hello').catch(() => {});
+    expect(mockStreamCalls.length).toBeGreaterThanOrEqual(1);
+    for (const p of mockStreamCalls) {
+      expect(p.model).toBe(OPUS_55);
+      expect(p).not.toHaveProperty('thinking');
+      expect(p.output_config).toEqual({ effort: 'low' });
+      expect(p.max_tokens).toBe(THINKING_FLOOR_TOKENS); // 8192 — raised off the plain 1024 lane constant
+    }
+  });
+
+  // The preserved-thinking history-editing check (KEY FACTS): a thinking
+  // block returned alongside a tool_use must be passed back UNCHANGED, in
+  // order (thinking first) into `this.messages` — the exact array the next
+  // round's request sends as `messages` (see the request build), so proving
+  // it lands there correctly proves it rides into the next request unchanged.
+  test('a thinking block accompanying a tool_use is preserved, in order, in history (block renderer)', async () => {
+    process.env.VOICE_RELAY_SANDBOX_MODEL = OPUS_55;
+    const convo = new RelayConversation({ callSid: 'CA-opus55-thinking', from: '+19415551234', send: jest.fn(), sandbox: true });
+    expect(convo.model).toBe(OPUS_55);
+    const msg = {
+      content: [
+        { type: 'thinking', thinking: 'internal reasoning', signature: 'sig-1' },
+        { type: 'tool_use', id: 't1', name: 'get_pricing', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    };
+    const { assistantMessage } = await convo._finalizeBlockRound(msg, '', false);
+    expect(convo.messages).toContainEqual(assistantMessage);
+    expect(assistantMessage.content[0]).toEqual({ type: 'thinking', thinking: 'internal reasoning', signature: 'sig-1' });
+    expect(assistantMessage.content[1]).toMatchObject({ type: 'tool_use', id: 't1' });
+  });
+
+  describe('signed thinking replay prefixes', () => {
+    afterEach(() => { delete process.env.GATE_VOICE_RELAY_INTERRUPT_CONTEXT; });
+
+    function thinkingConvo(callSid) {
+      process.env.VOICE_RELAY_SANDBOX_MODEL = OPUS_55;
+      return new RelayConversation({ callSid, from: '+19415551234', send: jest.fn(), sandbox: true });
+    }
+
+    test('keeps legal interleaved response blocks unchanged and appends sent-only guidance to the tool-result turn', async () => {
+      const convo = thinkingConvo('CA-opus55-interleaved');
+      jest.spyOn(convo, '_runStreamSendOrFail').mockReturnValue(null);
+      jest.spyOn(convo, '_executeToolBounded').mockResolvedValue('Price result.');
+      const content = [
+        { type: 'text', text: 'Let me check. That request is complete.' },
+        { type: 'thinking', thinking: 'reasoning', signature: 'sig-interleaved' },
+        { type: 'tool_use', id: 't1', name: 'get_pricing', input: {} },
+      ];
+      const msg = { content, stop_reason: 'tool_use' };
+      const entry = { planned: 'Let me check. ' };
+
+      const { assistantMessage } = convo._closeStreamedRoundSentOnly(
+        { entry }, msg, entry.planned, 'That request is complete.', true
+      );
+
+      expect(assistantMessage.content).toBe(content);
+      expect(assistantMessage.content).toEqual(content);
+      expect(entry.historyMessage).toBe(assistantMessage);
+      await expect(convo._runToolUseRound(msg, {}, { toolMs: 0, toolCount: 0 }, null)).resolves.toEqual({ done: false });
+      expect(convo.messages.at(-1)).toEqual({
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 't1', content: 'Price result.' },
+          expect.objectContaining({
+            type: 'text',
+            text: expect.stringContaining('Only this text'),
+          }),
+        ],
+      });
+    });
+
+    test('an interruption after a thinking tool follow-up does not rewrite either signed assistant response', () => {
+      process.env.GATE_VOICE_RELAY_INTERRUPT_CONTEXT = 'true';
+      const convo = thinkingConvo('CA-opus55-interrupt-followup');
+      const toolContent = [
+        { type: 'text', text: 'Let me check that. ' },
+        { type: 'thinking', thinking: 'tool reasoning', signature: 'sig-tool' },
+        { type: 'tool_use', id: 't1', name: 'get_pricing', input: {} },
+      ];
+      const followupContent = [
+        { type: 'thinking', thinking: 'follow-up reasoning', signature: 'sig-followup' },
+        { type: 'text', text: 'The follow-up answer.' },
+      ];
+      const toolMessage = { role: 'assistant', content: toolContent };
+      const followupMessage = { role: 'assistant', content: followupContent };
+      convo.messages.push(
+        toolMessage,
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Price result.' }] },
+        followupMessage,
+      );
+
+      convo._noteInterruptForModel(
+        { historyMessage: toolMessage, text: 'Let me check [interrupted]', played: 'Let me check', playedUnknown: false },
+        [{ historyMessage: followupMessage, text: '[not played — caller interrupted]' }],
+      );
+
+      expect(toolMessage.content).toBe(toolContent);
+      expect(toolMessage.content).toEqual(toolContent);
+      expect(followupMessage.content).toBe(followupContent);
+      expect(followupMessage.content).toEqual(followupContent);
+      expect(convo._consumeInterruptNote()).toContain('Let me check');
+    });
+
+    test('an abort before finalMessage resolves still records its unsigned sent prefix', () => {
+      const convo = thinkingConvo('CA-opus55-early-abort');
+      const entry = { planned: 'One moment please. ', interrupted: false };
+
+      const result = convo._closeStreamedRoundEarly({ entry }, null, 'interrupted');
+
+      expect(result).toEqual({ aborted: true });
+      expect(convo.messages).toContainEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'One moment please.' }],
+      });
+    });
+
+    test('a completed response interrupted before any stream entry carries an unsaid note into the next real caller turn', async () => {
+      delete process.env.GATE_VOICE_RELAY_INTERRUPT_CONTEXT;
+      const convo = thinkingConvo('CA-opus55-no-entry-interrupt');
+      const content = [
+        { type: 'thinking', thinking: 'amount reasoning', signature: 'sig-amount' },
+        { type: 'text', text: 'That will be $149.' },
+      ];
+      const result = convo._closeStreamedRoundEarly(
+        { entry: null },
+        { content, stop_reason: 'end_turn' },
+        'interrupted',
+      );
+      expect(result).toEqual({ aborted: true });
+      expect(convo.messages.at(-1).content).toBe(content);
+      expect(convo._pendingInterruptNote).toBeNull();
+
+      mockScriptedMessages.push({
+        content: [{ type: 'text', text: 'Of course — let me repeat that.' }],
+        stop_reason: 'end_turn',
+      });
+      await convo._runLoop('Can you repeat that?');
+
+      const request = mockStreamCalls.at(-1);
+      const callerTurn = request.messages.find((message) => {
+        const text = typeof message.content === 'string'
+          ? message.content
+          : message.content.filter((block) => block.type === 'text').map((block) => block.text).join(' ');
+        return message.role === 'user' && text.includes('Can you repeat that?');
+      });
+      const callerText = typeof callerTurn.content === 'string'
+        ? callerTurn.content
+        : callerTurn.content.filter((block) => block.type === 'text').map((block) => block.text).join(' ');
+      expect(callerText).toContain('None of the text in your preceding reply was sent to the caller');
+      expect(convo._pendingDeliveryNote).toBeNull();
+    });
   });
 });

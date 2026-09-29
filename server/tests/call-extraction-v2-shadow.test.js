@@ -102,8 +102,15 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v13');
-    expect(PROMPT_HASH).toMatch(/^v13-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v17');
+    expect(PROMPT_HASH).toMatch(/^v17-[a-f0-9]{12}$/);
+  });
+
+  test('includes the family_member relationship instructions (schema 1.18.0)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('"family_member"');
+    expect(prompt).toContain('my grandfather\'s house');
+    expect(prompt).toContain('spouse/partner arranging service at the SAME household');
   });
 
   test('includes the reschedule agreement and moved-appointment rules (schema 1.16.0)', () => {
@@ -115,6 +122,26 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('scheduling.caller_accepted_slot (when true');
     expect(prompt).toContain('ONE speaker\'s words from ONE turn');
     expect(prompt).toContain('quote only the words that state the agreed day and time');
+  });
+
+  test('includes the agreed-slot and moved-appointment verbatim-words rules (schema 1.17.0)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('agreed_slot_words: set ONLY when confirmed_start_at is set');
+    expect(prompt).toContain('only the hour, no minutes, no AM/PM');
+    expect(prompt).toContain('never take a part of the day that describes the OLD appointment');
+    expect(prompt).toContain('null for noon/midnight');
+    expect(prompt).toContain('moved_appointment_words: for reschedule_requested only');
+    expect(prompt).toContain('null whenever moved_appointment_date is null');
+    expect(prompt).toContain('When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values');
+  });
+
+  test('includes the sms_declined consent rule (schema 1.19.0, codex P1 on #5292)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('sms_declined: true only if the caller explicitly declines text messages');
+    expect(prompt).toContain('even if calls are fine');
+    expect(prompt).toContain('false otherwise, including when texting never came up');
+    // sms_consent_given's own wording is unchanged by this addition.
+    expect(prompt).toContain('sms_consent_given: true only if the caller explicitly agrees to receive text messages. Implied consent (giving a phone number) does NOT count.');
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
@@ -274,7 +301,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.16.0');
+    expect(SCHEMA_VERSION).toBe('1.19.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

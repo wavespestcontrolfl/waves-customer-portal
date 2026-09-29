@@ -124,7 +124,6 @@ describe('snapshot photoSummary', () => {
       serviceKey: 'rodent_trapping_check',
       serviceLabel: 'Rodent Trapping',
       values: { species: 'Roof rat', traps_checked: '4', captures: '1' },
-      nextStepChips: ['Continue trapping'],
       visitSequence: 2,
       activity: {
         indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 2,
@@ -140,7 +139,6 @@ describe('snapshot photoSummary', () => {
       serviceKey: 'rodent_trapping_check',
       serviceLabel: 'Rodent Trapping',
       values: { species: 'Roof rat' },
-      nextStepChips: ['Continue trapping'],
       visitSequence: 1,
       activity: null,
     });

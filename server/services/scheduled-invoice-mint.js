@@ -13,6 +13,14 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+// The ONE canonical "this visit never ran and never will" status set
+// (invoice-helpers.js — already shared by settlement/send/void refusal
+// across admin-invoices.js, invoice-manual-payment.js, invoice-email.js,
+// invoice-send-replay-eligibility.js and invoice.js itself). Mint-time
+// refusal reuses it rather than hand-rolling a second list: 'completed' is
+// deliberately absent (normal completion billing) and so is 'rescheduled'
+// (a pending reschedule REQUEST parks the same row — not yet terminal).
+const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 
 // Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
 // estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
@@ -37,6 +45,27 @@ function priceMovedBetween(callerSvc, lockedSvc, col) {
   return cents(callerSvc[col]) !== cents(lockedSvc[col]);
 }
 
+// Codex round-6 P1 (pre-push): a sibling-coverage recheck reads coverage
+// off the CALLER's pre-lock `svc.scheduled_date` (siblingCoverageRecheckInTrx,
+// admin-schedule.js — the sibling lookup matches on customer + estimate +
+// scheduled_date). If the visit is rescheduled to a different day between
+// the resolver's initial read and this locked transaction, both the
+// original verdict AND the "re-proven" recheck classify coverage against
+// the STALE day's siblings — a sibling invoice that genuinely covered the
+// OLD date says nothing about the visit's real new day, so an extras-only
+// invoice could mint on a now-uncovered visit. Same undefined-means-
+// not-selected contract as priceMovedBetween: a caller whose `svc` never
+// carried scheduled_date (none do today, but future pure/unit callers
+// might) skips the check rather than false-refusing.
+function scheduledDateMovedBetween(callerSvc, lockedSvc) {
+  if (callerSvc.scheduled_date === undefined) return false;
+  const dateOnly = (v) => {
+    if (v == null) return null;
+    return (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10);
+  };
+  return dateOnly(callerSvc.scheduled_date) !== dateOnly(lockedSvc.scheduled_date);
+}
+
 // The ONE advisory-lock namespace every scheduled-service invoice writer
 // keys on. Key derivation must stay byte-identical across the writers or
 // they silently stop contending — import these helpers, never re-declare
@@ -55,6 +84,25 @@ async function acquireScheduledInvoiceMintLock(trx, scheduledServiceId) {
     'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String(scheduledServiceId)],
   );
+}
+
+// Non-blocking sibling of the above, same key — for a caller that already
+// holds ONE visit's mint lock (or row lock) and needs another visit's mint
+// lock too, where waiting could deadlock against a second transaction
+// acquiring the same two locks in the opposite order (pre-push audit P1,
+// "the re-price block": the 'following' sibling propagation holds the
+// edited visit's mint lock while it takes each sibling's). pg_try_advisory_
+// xact_lock never blocks — it returns immediately, true if the lock was
+// free (now held, transaction-scoped like the blocking form) or already
+// held by THIS same transaction (re-entrant), false if another transaction
+// holds it. A caller that gets false must not proceed as if it held the
+// lock; it should refuse the whole operation and let the operator retry.
+async function tryAcquireScheduledInvoiceMintLock(trx, scheduledServiceId) {
+  const result = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired',
+    [SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String(scheduledServiceId)],
+  );
+  return result?.rows?.[0]?.acquired === true;
 }
 
 // Call under the existing mint lock. Packet creation takes those same locks
@@ -111,10 +159,21 @@ async function acquireScheduledMintLockChain(trx, {
     );
   }
   if (assertEligibleInTrx) await assertEligibleInTrx(trx);
-  return trx('scheduled_services')
+  // 'status' rides along on EVERY call regardless of the caller's own
+  // visitColumns (deduped) — this FOR UPDATE read is the ONE place every
+  // scheduled-price writer observes the visit under the mint lock, so it is
+  // also the ONE place that can catch a cancellation (or any other
+  // never-ran transition) that committed while this transaction waited on
+  // the advisory lock (Codex #5244 r7 P0: a cancel that wins the lock race
+  // must not be resumed past by a mint that started before it and never
+  // re-reads status). assertScheduledVisitLive throws BEFORE the caller's
+  // own price/replay checks so a terminal visit never reaches them.
+  const lockedSvc = await trx('scheduled_services')
     .where({ id: scheduledServiceId })
     .forUpdate()
-    .first(...visitColumns);
+    .first(...new Set([...visitColumns, 'status']));
+  if (lockedSvc) assertScheduledVisitLive(lockedSvc);
+  return lockedSvc;
 }
 
 // The ONE stale-price refusal every scheduled-price writer throws (codex
@@ -138,6 +197,40 @@ function scheduledPriceMovedError(lockedSvc) {
     e.currentPrimaryLinePriceCents = cents(lockedSvc.primary_line_price);
   }
   return e;
+}
+
+// The ONE terminal-visit refusal every scheduled-service invoice mint
+// throws (Codex #5244 r7 P0). A cancellation (or no-show/skip) that
+// acquires this same mint lock first and commits while a concurrent mint
+// waits behind it must not let that mint resume and bill a visit that will
+// never happen — same shape/status style as scheduledPriceMovedError:
+// terminal for retry loops (err.status), a stable machine-readable code.
+function scheduledVisitNotLiveError(status) {
+  const e = new Error(`Scheduled visit is ${status} — refusing to mint an invoice for it`);
+  e.status = 409;
+  e.statusCode = 409;
+  // isOperational (invoice-helpers.js's own visit_busy sets it too): this
+  // error can now surface through a plain create() caller with no
+  // dedicated `.status` catch (e.g. the manual admin-invoice route), which
+  // falls through to the shared errors.js handler — that handler renders a
+  // MASKED 500 for anything not flagged isOperational. A caller with its
+  // own `.status`/`.code` handling (the mint helpers, dispatch, Charge Now)
+  // is unaffected either way.
+  e.isOperational = true;
+  e.code = 'SCHEDULED_VISIT_NOT_LIVE';
+  e.visitStatus = status;
+  return e;
+}
+
+// Call on a visit row read UNDER the mint lock (the row must carry
+// 'status'). Throws scheduledVisitNotLiveError for any status in the
+// canonical VISIT_NEVER_RAN_STATUSES set (invoice-helpers.js) — never a
+// hand-rolled list, so a status added to that set for settlement/send/void
+// refusal also refuses a mint without a second edit. A missing row is the
+// caller's own "not found" concern, not this function's.
+function assertScheduledVisitLive(visitRow) {
+  const status = String(visitRow?.status || '').trim().toLowerCase();
+  if (VISIT_NEVER_RAN_STATUSES.includes(status)) throw scheduledVisitNotLiveError(status);
 }
 
 // Replay = the double-tap window returning the FIRST request's fresh
@@ -203,7 +296,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const lockedSvc = await acquireScheduledMintLockChain(trx, {
           scheduledServiceId: svc.id,
           assertEligibleInTrx,
-          visitColumns: ['id', 'customer_id', 'source_estimate_id', 'estimated_price', 'primary_line_price'],
+          visitColumns: ['id', 'customer_id', 'source_estimate_id', 'estimated_price', 'primary_line_price', 'scheduled_date'],
         });
         if (!lockedSvc) {
           const e = new Error('Scheduled service not found');
@@ -211,8 +304,16 @@ async function mintScheduledServiceInvoiceWithDeposit({
           throw e;
         }
         if (String(lockedSvc.customer_id) !== String(svc.customer_id)
-          || String(lockedSvc.source_estimate_id || '') !== String(sourceEstimateId || '')) {
-          const e = new Error('Scheduled service billing owner or estimate changed while minting');
+          || String(lockedSvc.source_estimate_id || '') !== String(sourceEstimateId || '')
+          // Codex round-6 P1: a sibling-coverage verdict (both the
+          // resolver's pre-lock read and this transaction's own recheck)
+          // classifies coverage against `svc.scheduled_date` — a reschedule
+          // between that read and this lock invalidates it exactly like a
+          // moved customer/estimate does, so it belongs in the SAME
+          // unconditional refusal (never bypassed by allowPriceMovement,
+          // matching customer/estimate above).
+          || scheduledDateMovedBetween(svc, lockedSvc)) {
+          const e = new Error('Scheduled service billing owner, estimate, or date changed while minting');
           e.status = 409;
           e.statusCode = 409;
           e.code = 'SCHEDULED_BILLING_SOURCE_MOVED';
@@ -230,8 +331,46 @@ async function mintScheduledServiceInvoiceWithDeposit({
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
           throw scheduledPriceMovedError(lockedSvc);
         }
-        if (recheckInTrx) await recheckInTrx(trx);
+        // Codex round-6 P1: the estimate-scoped ledger lock used to be taken
+        // AFTER recheckInTrx. siblingCoverageRecheckInTrx's own lookup
+        // (siblingInvoiceCoverageVerdict, lockRows: true → FOR UPDATE OF i)
+        // locks nothing when NO invoice row exists yet for the estimate —
+        // so two sibling visits under the SAME estimate, charged at the same
+        // moment while neither has an invoice, could both run the recheck,
+        // both see 'none' (nothing to lock, matching the pre-transaction
+        // snapshot), and both fall through to mint a collectible base
+        // invoice for the same trip. Acquiring the SAME estimate.deposit.
+        // ledger advisory lock (the ONE lock key every estimate-scoped
+        // writer already shares — see acquireEstimateDepositLedgerLock's own
+        // header) BEFORE the recheck serializes the two mints on the
+        // estimate itself: only one holds the lock at a time, so the second
+        // one's recheck (or its own pre-transaction resolver snapshot) sees
+        // the FIRST one's freshly committed invoice and refuses on the
+        // status change (SIBLING_COVERAGE_CHANGED) instead of minting
+        // beside it. Reuses acquireEstimateDepositLedgerLock verbatim —
+        // never a second, parallel lock key for the same purpose.
+        //
+        // Lock order, and why it can't deadlock against the OTHER advisory
+        // lock in this chain: acquireScheduledMintLockChain above already
+        // took [1] the SERVICE-scoped mint lock (['schedule.invoice.mint',
+        // svc.id], keyed by THIS visit) and [2] the customer KEY SHARE and
+        // [3] the visit row FOR UPDATE, all before this point. This lock is
+        // [4] the ESTIMATE-scoped ledger lock, keyed by source_estimate_id —
+        // a DIFFERENT key namespace ('estimate.deposit.ledger' vs
+        // 'schedule.invoice.mint'), so a mint for a DIFFERENT sibling visit
+        // under the same estimate never contends with [1] here at all (each
+        // visit has its own service-scoped key) and can only contend with
+        // [4] — a single lock, no second party to form a cycle with. Every
+        // other estimate-ledger-lock caller (invoice.js createFromService,
+        // estimate-converter.js's converter locks, visit-completion-invoice.js's
+        // packet path) takes [1]/mint-lock and the visit/customer locks
+        // FIRST and this ledger lock LAST too, so the relative order between
+        // the mint lock and the ledger lock is consistent everywhere — only
+        // the position of THIS caller's own recheckInTrx (which may itself
+        // take further invoice-row locks, e.g. sibling rows) moved, relative
+        // to a lock this transaction already owns exclusively by then.
         if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
+        if (recheckInTrx) await recheckInTrx(trx);
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;
@@ -284,10 +423,13 @@ module.exports = {
   SCHEDULED_SERVICE_INVOICE_MINT_LOCK,
   TERMINAL_INVOICE_STATUSES,
   acquireScheduledInvoiceMintLock,
+  tryAcquireScheduledInvoiceMintLock,
   assertScheduledInvoiceNotPacketOwned,
   acquireScheduledMintLockChain,
   findAdoptableScheduledInvoice,
   adoptScheduledInvoiceUnderMintLock,
   scheduledPriceMovedError,
+  scheduledVisitNotLiveError,
+  assertScheduledVisitLive,
   mintScheduledServiceInvoiceWithDeposit,
 };

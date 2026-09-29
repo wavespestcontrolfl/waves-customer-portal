@@ -408,8 +408,9 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   test('App readiness uses the caller transaction with a one-connection pool', async () => {
     await device(owner);
     const previous = mockPg;
+    // Allow proxy connection startup; max: 1 still detects a second acquisition inside the transaction.
     const limited = require('knex')({ client: 'pg', connection, searchPath: [schema],
-      acquireConnectionTimeout: 500, pool: { min: 0, max: 1 } });
+      acquireConnectionTimeout: 10000, pool: { min: 0, max: 1 } });
     mockPg = limited;
     try {
       await limited.transaction(async (trx) => {
@@ -1031,7 +1032,8 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
     await mockPg('sms_log').where({ from_phone: 'push' }).del();
     // The template changed since delivery: the proof must not claim text the customer never got.
-    expect(await routing.attemptPushFirst({ ...notice, body: 'Reminder: your invoice is still open.' })).toMatchObject({ delivered: true });
+    expect(await routing.attemptPushFirst({ ...notice, body: 'Reminder: your invoice is still open.' }))
+      .toMatchObject({ delivered: false, deliveryOutcome: 'not_sent' });
     expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(0);
     // The same payload as delivered does repair.
     expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });

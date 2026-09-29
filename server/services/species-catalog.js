@@ -142,11 +142,32 @@ function getNode(id) {
 }
 
 function listEntries(filter = {}) {
-  const { group, subgroup, kind } = filter || {};
+  const { group, subgroup, kind, section } = filter || {};
   let list = group ? (CATALOG.entriesByGroup.get(group) || []) : Array.from(CATALOG.entries.values());
   if (subgroup) list = list.filter((e) => e.subgroup === subgroup);
   if (kind) list = list.filter((e) => e.kind === kind);
+  if (section) list = list.filter((e) => sectionOf(e) === section);
   return list;
+}
+
+/**
+ * The section (`'pest' | 'plant' | 'condition'`) a catalog node lives under,
+ * climbing entry/subgroup → group → category the same way `lineage` does.
+ * Accepts either a node object (as returned by `getNode`/`listEntries`) or a
+ * bare id/slug. Returns `null` for an unknown node. A category with no
+ * declared `section` (shouldn't happen post-migration, but keeps this
+ * defensive rather than throwing) defaults to `'pest'` — every category this
+ * catalog shipped with before the plant/condition sections existed.
+ */
+function sectionOf(nodeOrSlug) {
+  const node = (nodeOrSlug && typeof nodeOrSlug === 'object' && nodeOrSlug.level)
+    ? nodeOrSlug
+    : getNode(nodeOrSlug);
+  if (!node) return null;
+  if (node.level === 'category') return node.section || 'pest';
+  const group = node.level === 'group' ? node : getGroup(node.group);
+  const category = group ? getCategory(group.category) : null;
+  return category ? (category.section || 'pest') : null;
 }
 
 /**
@@ -207,49 +228,6 @@ function lineage(id) {
   return rungs;
 }
 
-/** Generic guidance inherited only from the selected node's ancestors.
- * Descendants are never consulted: a broad or mixed answer cannot borrow a
- * narrower hazard, referral, or service contract. Nested safety flags merge
- * while a selected child may override the rest of the parent contract. */
-function genericGuidance(id) {
-  let merged = null;
-  for (const rung of lineage(id)) {
-    if (rung.level === 'entry') continue;
-    const guidance = getNode(rung.id)?.generic_guidance;
-    if (!guidance) continue;
-    const compatibility = guidance.compatibility;
-    const inheritedCompatibility = merged?.compatibility;
-    merged = Object.assign({}, merged || {}, guidance);
-    if (compatibility) {
-      merged.compatibility = Object.assign({}, inheritedCompatibility || {}, compatibility);
-      if (compatibility.safety) {
-        merged.compatibility.safety = Object.assign(
-          {}, inheritedCompatibility?.safety || {}, compatibility.safety,
-        );
-      }
-    }
-  }
-  return merged;
-}
-
-/**
- * The one photo that would narrow this node further.
- * Groups and subgroups carry their own `next_photo` (authored in
- * index.json). An entry has no top-level `next_photo` in the BRIEF schema —
- * its closest equivalent is the `next_photo` on its first look-alike pair,
- * which is what this falls back to. Returns null if neither is available.
- */
-function nextPhoto(id) {
-  const node = getNode(id);
-  if (!node) return null;
-  if (node.next_photo) return { ...node.next_photo, photo_can_confirm: node.next_photo.photo_can_confirm !== false };
-  if (node.level === 'entry' && Array.isArray(node.look_alikes) && node.look_alikes[0]) {
-    const pair = node.look_alikes[0];
-    return { ask: pair.next_photo, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
-  }
-  return null;
-}
-
 /**
  * Entries this entry is commonly confused with, resolved to their catalog
  * node where one exists yet (a look-alike may point at a `planned_slugs`
@@ -300,6 +278,30 @@ function normalizeName(value) {
 // their article.
 function withoutArticle(value) {
   return normalizeName(value).replace(/^(a|an|the) /, '');
+}
+
+// Whether a nickname identifies the entry itself: it spells one of the
+// entry's OWN names (the common name with or without its parenthetical, a
+// name inside that parenthetical, or a scientific name — case, spaces,
+// hyphens and a plural ending never matter), or it is a qualified form of
+// the common name that keeps every one of its words ("tomato hornworm" for
+// Hornworm). A nickname that drops or swaps words ("velvet ant" for Eastern
+// Velvet Ant, "palmetto bug") can't be told apart from a name several
+// species share, so it never identifies one.
+function identifiesEntry(entry, name) {
+  const key = (value) => normalizeName(value).replace(/ /g, '');
+  const common = String(entry.common_name || '');
+  const bare = common.replace(/\([^)]*\)/g, '');
+  const own = [common, bare, ...(common.match(/\(([^)]*)\)/g) || []),
+    ...String(entry.scientific_name || '').split('/').map((part) => part.replace(/\([^)]*\)/g, ''))]
+    .map(key).filter(Boolean);
+  const candidate = key(name);
+  if (own.some((o) => [o, `${o}s`, `${o}es`].includes(candidate) || [candidate, `${candidate}s`, `${candidate}es`].includes(o))) {
+    return true;
+  }
+  const words = new Set(normalizeName(name).split(' ').filter(Boolean).map(singularName));
+  const commonWords = normalizeName(bare).split(' ').filter(Boolean).map(singularName);
+  return commonWords.length > 0 && commonWords.every((w) => words.has(w));
 }
 
 // The deepest node every id's ladder passes through, or null when they only
@@ -417,6 +419,33 @@ function representativeTaxonPair(name, slug) {
   return [match ? match[1] : null, slug];
 }
 
+// A bare genus names the deepest node holding EVERY catalog entry of that
+// genus, computed from the entries' own scientific names — so one subgroup's
+// taxon can't claim a genus that also lives elsewhere (Solenopsis: fire ants
+// and the thief ant). A genus never names one species; an entry that IS the
+// genus ("Phyllophaga spp.") may.
+function bareGenusPairs() {
+  const members = new Map();
+  for (const e of CATALOG.entries.values()) {
+    if (e.kind === 'sign') continue;
+    for (const part of String(e.scientific_name || '').split('/')) {
+      const genus = part.trim().match(/^([A-Z][a-z]+)(?: [a-z]| spp?\.?$)/);
+      if (!genus) continue;
+      if (!members.has(genus[1])) members.set(genus[1], new Set());
+      members.get(genus[1]).add(e.slug);
+    }
+  }
+  const pairs = [];
+  for (const [genus, slugs] of members) {
+    const list = [...slugs];
+    const only = list.length === 1 ? getEntry(list[0]) : null;
+    let target = commonAncestor(list);
+    if (only) target = ['species', 'subspecies'].includes(only.rank) ? (only.subgroup || only.group) : only.slug;
+    if (target) pairs.push([genus, target]);
+  }
+  return pairs;
+}
+
 function buildNameIndices() {
   const scientificPairs = [];
   const aliasPairs = [];
@@ -442,14 +471,19 @@ function buildNameIndices() {
       // A grouped entry may name one representative species followed by
       // "and others". The leading binomial is still an exact taxon name.
       scientificPairs.push(representativeTaxonPair(part.trim(), e.slug));
-      // "Phyllophaga spp." also answers to its bare genus.
-      const genus = part.trim().match(/^([A-Z][a-z]+) spp?\.?$/);
-      if (genus) scientificPairs.push([genus[1], e.slug]);
     }
-    for (const alias of e.aliases || []) aliasPairs.push([alias, e.slug]);
+    // A nickname names THIS species only when it identifies it (see
+    // identifiesEntry). Any other nickname ("palmetto bug", "tree
+    // squirrel") resolves to the entry's GROUP — never a subgroup, which may
+    // itself claim a risk class ("venomous snakes") the nickname never
+    // established. One rule, instead of deciding species by species which
+    // nicknames are specific.
+    const nicknameTarget = (name) => (identifiesEntry(e, name) ? e.slug : e.group);
+    for (const alias of e.aliases || []) aliasPairs.push([alias, nicknameTarget(alias)]);
     commonPairs.push([e.common_name, e.slug]);
-    for (const a of e.aka || []) commonPairs.push([a, e.slug]);
+    for (const a of e.aka || []) commonPairs.push([a, nicknameTarget(a)]);
   }
+  scientificPairs.push(...bareGenusPairs());
   // Category names ("insect", "arachnid") name the category itself; a group
   // whose generic is just its category's name ("an insect") must not claim it.
   const categoryNames = new Set();
@@ -566,9 +600,8 @@ module.exports = {
   getCategory,
   getNode,
   listEntries,
+  sectionOf,
   lineage,
-  genericGuidance,
-  nextPhoto,
   lookAlikes,
   resolveName,
   resolveLegacySlug,

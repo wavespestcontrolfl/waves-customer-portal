@@ -2608,3 +2608,57 @@ the upload unresolved: no species is named and the report is a generic,
 inspection-first consultation. It supersedes the 2026-09-24 "Claude only when Gemini
 returns nothing" rule for this lane only; lawn and tree & shrub scoring keep
 it until they move to the photo ID v2 engine.
+
+## 2026-09-28 — Visit facts contract (2026-09-28)
+
+Owner rulings (2026-09-28), Step 1 of syncing the tech's Complete Service form
+with the customer service report: the tech sees no new field lists. "Found"
+(pests, where) and "Treated" (areas) are read-only summary lines filled from
+voice. Tips from your tech (`tip-library.js`) and the per-service
+Recommendations vocabulary (`service-completion-choices.js`,
+`GATE_SERVICE_REPORT_COMPLETION_CHOICES`) merge into one searchable,
+prefilled Recommendations list. The Next-steps chips stay retired
+(2026-09-27). The office note never reaches the report writer. WDO and
+pre-treat are out of scope. Per-product standard amounts are deferred
+("protocols later").
+
+`server/config/visit-facts-contract.js` is now the source of truth for which
+facts the form records and which the report reads. For each service line it
+records each fact's capture mode (tap / voice / prefill / derived / photo),
+where it is stored, which files write it, which report section reads it, and
+what the report shows when the fact is missing.
+`server/tests/visit-facts-contract.test.js` checks the registry against the
+code, and `docs/design/visit-facts-contract.md` explains it and lists the
+known gaps. Typed form facts are generated from `project-types.js`
+(`findingsFields`, with requiredness from `REQUIRED_FINDINGS_FIELDS`), not
+hand-listed. A report section may only make a claim that a registered fact
+supports. The typed forms' field rules stay in
+`specialty-service-completion-contract.md`. No runtime behavior changed.
+
+## 2026-09-28 — Pest-rides-the-lawn-rhythm: split, read-only preview first
+
+Owner decision 2026-09-28: the write engine ("pest rides the lawn rhythm" —
+scope doc `~/lawn-pest-rhythm-scope-20260928.md`, PR 1 rider core) drew five
+non-converging Codex review rounds on `feat/pest-rides-lawn-core-20260928`
+(now PR #5268, paused as a draft) — real findings each round (cross-hook
+locking order, cancellation-follow-through commit timing through a
+savepoint, the runaway-horizon bound, host tech/window join semantics), but
+never a clean round. Rather than keep iterating a write path against
+unlinked, dark-by-construction data, split the work: ship a READ-ONLY
+preview first, so the office can see exactly what the rule would do to real
+customers (which pairs, which dates move where, why any pair is blocked)
+before any row is ever actually moved.
+
+The preview (`server/services/rider-series-preview.js`,
+`scripts/rider-series-preview-report.js`) reuses the write engine's own
+settled pure date rule (`planRiderDates`, `computeRiderHorizon` — copied
+verbatim from the five-round-tested branch, not re-derived) and its settled
+read-side eligibility rules (customer gates, series gates via
+`admin-schedule.js#topupSeriesSkipReason`, reused read-only with no lock
+taken), reimplementing only the read/diff logic needed to answer "what would
+this pairing do" — no locking, no transaction staging, no writes of any
+kind. `docs/design/rider-series-scheduling.md` has the full rule set. The
+migration (`scheduled_services.rides_parent_id`, schema-only, already pushed
+and run on a preview database) is copied verbatim, unchanged, from the write
+engine's branch. The write engine itself resumes as PR #5268 once the
+office has reviewed the preview's output against real customers.

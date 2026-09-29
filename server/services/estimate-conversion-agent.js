@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { gateEnvValue } = require('../config/feature-gates');
 
 const WORKFLOW = 'estimate_conversion_sms';
 const SERVICE_SCHEDULING_WORKFLOW = 'service_scheduling_sms';
@@ -609,7 +610,7 @@ function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCod
  * phone re-lookup could aggregate a DIFFERENT account's facts into the prompt
  * (shared numbers) — lead-only estimate threads keep the template.
  */
-async function generateLlmReviewDraft({ customer, body, decision }) {
+async function generateLlmReviewDraft({ customer, body, decision, estimate, estimateLinked = true }) {
   if (process.env.AGENT_REVIEW_LLM_DRAFTS === 'false') return null;
   if (!customer) return null;
   try {
@@ -621,13 +622,31 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
       inboundMessage: body,
       intent: { intent: decision.intent, confidence: decision.confidence },
       schedulingIntent: hasSchedulingIntent(body),
+      // Real-answers OPEN TIMES (pre-push audit P1): without city,
+      // fetchOpenTimesBlock always returns null even for a matched
+      // customer with a known city, and GATE_SMS_REAL_ANSWERS's rewritten
+      // prompt would tell the model to offer times it was never given.
+      // Same customer row + convention draftShadowReply uses.
+      city: customer?.city || null,
+      // Pre-push audit P2: the ALREADY-RESOLVED estimate (resolveEstimateContext,
+      // above this call in processInboundSms) so the offered slots reflect
+      // THAT estimate's own service minutes — the same second argument
+      // check_availability itself passes to getAvailableSlots.
+      // A message linked to the estimate (its short code, or estimate or
+      // quote wording — Codex #5194 r2) is priced with it. An unlinked open
+      // estimate is one of the jobs the reply may be about: the drafter's
+      // service identity step decides between it, the customer's visits
+      // and any service they ask for ("can you add lawn service Tuesday?"
+      // is about lawn, never the estimate — Codex #5194 r3/r4).
+      estimateId: estimate?.id && estimateLinked ? estimate.id : null,
+      openEstimate: estimate?.id && !estimateLinked ? { id: estimate.id, service: estimate.service_interest || null } : null,
     });
     // Only a verified-clean draft may replace the template: unconverged means
     // the reply still asserts facts the context doesn't support after the
@@ -637,14 +656,41 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
       logger.warn(`[estimate-conversion-agent] LLM review draft leaked a redaction placeholder (customer=${customer.id}); using template`);
       return null;
     }
-    // House rule: no prices in customer SMS. This lane's draft lands in the
-    // composer's Use Draft button — same delivery boundary as suggest-mode,
-    // same deterministic guard (a priced draft falls back to the template).
-    if (parsed.reply && require('./sms-suggest-mode').hasPriceQuote(parsed.reply)) {
-      logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
-      return null;
+    // House rule: no UNGROUNDED prices in customer SMS. This lane's draft
+    // lands in the composer's Use Draft button — same delivery boundary as
+    // suggest-mode. With GATE_SMS_REAL_ANSWERS off, this stays the old
+    // blanket hasPriceQuote reject (byte-identical). With the gate on, the
+    // house-voice prompt is instructed to answer billing questions with
+    // exact grounded amounts (Codex r3: rejecting every hasPriceQuote match
+    // here discarded every verified v12 answer in favor of the template) —
+    // reuse the shared authoritative-amount guard so only a FABRICATED or
+    // unverifiable amount falls back; a real balance/invoice/dues figure
+    // passes.
+    if (parsed.reply) {
+      if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+        if (drafter.replyQuotesUngroundedAmount(parsed.reply, context)) {
+          logger.warn(`[estimate-conversion-agent] LLM review draft quoted an ungrounded amount (customer=${customer.id}); using template`);
+          return null;
+        }
+      } else if (require('./sms-suggest-mode').hasPriceQuote(parsed.reply)) {
+        logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
+        return null;
+      }
     }
-    return { reply: parsed.reply, model, promptVersion: drafter.PROMPT_VERSION, passes };
+    // The version THIS draft actually used (pre-push audit P1) — resolved
+    // per call inside generateGroundedDraft off the ACTUAL gate state, not
+    // the static drafter.PROMPT_VERSION (which stays house_voice_v11
+    // forever once GATE_SMS_REAL_ANSWERS goes live). Persisted onto
+    // agent_decisions.prompt_version below (processInboundSms), so this
+    // must record what generated THIS row, not a label that never moves.
+    // Pre-push audit P1: the actions this draft promises (payment link,
+    // booking, escalate for a follow-up) ride to the review card the same
+    // way the suggestion lane's do, so /agent-draft can show them.
+    return {
+      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
+      intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
+      factsGeneratedAt: factsGeneratedAt ?? null,
+    };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
     return null;
@@ -683,16 +729,34 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       if (existing) return null; // same semantics as the ignored insert: nothing new
     }
 
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision });
+    // Follow-up #8 (Codex r9): the resolved estimate reaches the drafter's
+    // availability lookup only when the inbound is routed as an ESTIMATE
+    // interaction — a reschedule of an existing visit is priced with that
+    // visit's service, not an unrelated open estimate's service_interest.
+    // Only the estimate's own short code pins it (Codex #5194 r2/r8): "about
+    // my estimate" or "can you quote lawn service?" leaves it one job the
+    // reply may be about, and the drafter's service identity step weighs it
+    // against the customer's visits and the service they name.
+    const estimateLinked = Boolean(shortCode);
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null, estimateLinked });
     // The house no-price rule applies to WHATEVER text lands in the composer
     // card — the deterministic scheduling templates echo raw inbound text, so
     // a customer's own "Tuesday for $50 works" would flow into the draft
     // whenever the LLM path is rejected or unavailable. NULL = the agent
     // offers no draft; the human writes the reply.
     const reviewDraftText = llmDraft ? (llmDraft.reply || null) : decision.suggestedMessage;
-    const reviewSuggestedMessage = reviewDraftText && require('./sms-suggest-mode').hasPriceQuote(reviewDraftText)
-      ? null
-      : reviewDraftText;
+    // llmDraft is only ever returned once its own reply already cleared the
+    // gate-aware amount guard above (grounded amount allowed on, blanket
+    // hasPriceQuote reject off) — re-running hasPriceQuote here would throw
+    // away that verified v12 answer (Codex r3). The deterministic template
+    // (decision.suggestedMessage) echoes raw inbound text and never passed
+    // any guard, so it keeps the unconditional hasPriceQuote reject
+    // regardless of gate state.
+    const reviewSuggestedMessage = llmDraft
+      ? reviewDraftText
+      : (reviewDraftText && require('./sms-suggest-mode').hasPriceQuote(reviewDraftText)
+        ? null
+        : reviewDraftText);
 
     const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
     const entityId = estimate?.id || lead?.id || customer?.id || null;
@@ -726,6 +790,23 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         review_draft: llmDraft
           ? { source: 'llm', passes: llmDraft.passes, no_reply: !llmDraft.reply }
           : { source: 'template' },
+        // Codex P2 (open-times send-time recheck): the minimum needed to
+        // revalidate quoted OPEN TIMES windows before this decision is ever
+        // sent — read back by verifyAgentDecisionForSend (admin-communications.js)
+        // at /sms and /schedule-sms time. Absent for template drafts and for
+        // any llm draft whose reply never quoted an open-times window.
+        ...(llmDraft?.openTimesSnapshot ? { open_times_snapshot: llmDraft.openTimesSnapshot } : {}),
+        // Same sanitized shape publishSuggestion persists, read back by
+        // GET /agent-draft (pre-push audit P1). Template drafts carry none.
+        ...(llmDraft && Array.isArray(llmDraft.intendedActions)
+          ? { intended_actions: require('./sms-suggest-mode').sanitizeIntendedActions(llmDraft.intendedActions) || [] }
+          : {}),
+        // Codex #5194 P2: the instant the drafter rendered FOLLOW-UP SLA
+        // RIGHT NOW, read back by slaDraftedAt (sms-followup-sla.js) at both
+        // send seams in place of this row's later created_at.
+        ...(llmDraft?.factsGeneratedAt instanceof Date && Number.isFinite(llmDraft.factsGeneratedAt.getTime())
+          ? { facts_generated_at: llmDraft.factsGeneratedAt.toISOString() }
+          : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
@@ -772,5 +853,6 @@ module.exports = {
     confidenceLabel,
     hasActiveServiceSchedulingThread,
     resolveRecentSmsThread,
+    generateLlmReviewDraft,
   },
 };

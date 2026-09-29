@@ -62,7 +62,7 @@ describe('visitMoneySummary', () => {
   it('collect-needed ONLY for kind invoice with a positive amount', () => {
     expect(visitMoneySummary(withPrediction('invoice', 95)).collectNeeded).toBe(true);
     expect(visitMoneySummary(withPrediction('invoice', 0)).collectNeeded).toBe(false);
-    for (const kind of ['auto_charge', 'payer', 'prepaid', 'covered_membership', 'covered_annual', 'no_charge']) {
+    for (const kind of ['auto_charge', 'payer', 'prepaid', 'covered_membership', 'covered_annual', 'no_charge', 'covered_sibling_invoice', 'sibling_needs_review']) {
       expect(visitMoneySummary(withPrediction(kind, 95)).collectNeeded).toBe(false);
     }
   });
@@ -76,6 +76,49 @@ describe('visitMoneySummary', () => {
     expect(visitMoneySummary(withPrediction('covered_membership', 0)).headline).toBe('Covered by plan — nothing to collect');
     expect(visitMoneySummary(withPrediction('covered_annual', 0)).headline).toBe('Covered by annual plan — nothing to collect');
     expect(visitMoneySummary(withPrediction('no_charge', 0)).headline).toBe('No charge');
+  });
+
+  // Codex round-6 P2: a same-day combined per-application trip (a sibling's
+  // first-application invoice already covers this visit) or an unresolved
+  // sibling lookup (needs_review/error, amount null) used to have no
+  // PREDICTION_COPY entry at all — headline fell through to null and the
+  // brief dropped the billing row entirely instead of saying anything.
+  it('covers the two sibling-coverage prediction kinds (never a dropped billing row)', () => {
+    expect(visitMoneySummary(withPrediction('covered_sibling_invoice', null)).headline)
+      .toBe('Covered by sibling invoice — nothing to collect');
+    expect(visitMoneySummary(withPrediction('sibling_needs_review', null)).headline)
+      .toBe('Combined-trip invoice needs review — do not collect');
+  });
+
+  // Codex round-7 P1: a covered_sibling_invoice prediction whose sibling
+  // invoice is still collectible (draft/sent/overdue/…) used to say
+  // "nothing to collect" no matter what — a technician could leave without
+  // collecting the combined trip invoice that remained due. This must flag
+  // collectNeeded (the SAME amber treatment as an ordinary `invoice` row)
+  // and headline the amount still due, never the settled-case copy.
+  it('a collectible sibling-coverage verdict flags collectNeeded and headlines the amount still due', () => {
+    const collectible = {
+      billingLane: {
+        prediction: { kind: 'covered_sibling_invoice', amount: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001' },
+        // The server's own canonical verdict (billing-lane.js
+        // siblingCoverageForSchedule) — the brief renders THAT, never a raw
+        // invoiceStatus.
+        siblingCoverage: { state: 'collect_on_combined_invoice', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 153.6, reason: null },
+      },
+    };
+    const summary = visitMoneySummary(collectible);
+    expect(summary.collectNeeded).toBe(true);
+    expect(summary.headline).toBe('Collect on invoice WPC-TEST-0001 ($153.60 due)');
+
+    const settled = {
+      billingLane: {
+        prediction: { kind: 'covered_sibling_invoice', amount: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001' },
+        siblingCoverage: { state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_settled' },
+      },
+    };
+    const settledSummary = visitMoneySummary(settled);
+    expect(settledSummary.collectNeeded).toBe(false);
+    expect(settledSummary.headline).toBe('Covered by sibling invoice — nothing to collect');
   });
 
   it('missing billingLane (older payload) fails toward NOT flagging', () => {

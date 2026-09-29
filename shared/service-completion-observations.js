@@ -50,6 +50,11 @@ const LAWN_VISIBLE_DISEASE_SYMPTOM_IDS = new Set([
 ]);
 const THROUGHOUT_INSPECTED_LAWN = 'Throughout inspected lawn';
 const LAWN_PEST_OBSERVATION_SCOPE = new Map();
+// The definite-live-pest label each allowlisted lawn pest observation names,
+// keyed by the exact observation string (filled in the same loop). The
+// report "Near you" line (GATE_REPORT_NEAR_YOU) names a pest only from these;
+// the "No live pests detected" absence rows are never added.
+const LAWN_DEFINITE_LIVE_PEST_OBSERVATION_LABELS = new Map();
 const LAWN_DISEASE_OBSERVATION_SCOPE = new Map();
 const lawnPestFindings = lawnCatalog.groups
   .flatMap(({ findings }) => findings)
@@ -62,11 +67,37 @@ for (const { label, statement } of lawnPestFindings) {
         location,
         state: label === 'No live pests detected' ? 'absent' : 'present',
       });
+      if (LAWN_DEFINITE_LIVE_PEST_LABELS.has(label)) {
+        LAWN_DEFINITE_LIVE_PEST_OBSERVATION_LABELS.set(observation, label);
+      }
     }
   }
 }
 const routineLiveLawnPests = catalog.lawn.find(([id]) => id === 'live-pests')?.[1];
 LAWN_PEST_OBSERVATION_SCOPE.set(routineLiveLawnPests, { location: null, state: 'present' });
+
+// Fixed lower-case plural customer noun for each definite-live-pest label
+// (owner ruling 2026-09-28, "Near you" line): strips the internal
+// " — observed" qualifier the chinch-bug label alone carries. One fixed map
+// so every "Near you" consumer reads the same customer-facing word instead
+// of re-deriving it.
+const LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS = new Map([
+  ['Chinch bugs — observed', 'chinch bugs'],
+  ['Tropical sod webworms', 'tropical sod webworms'],
+  ['Armyworms', 'armyworms'],
+  ['White grubs', 'white grubs'],
+  ['Mole crickets', 'mole crickets'],
+  ['Fire ants', 'fire ants'],
+  ['Turf scale or mealybugs', 'turf scale or mealybugs'],
+]);
+
+// The definite-live-pest label an allowlisted lawn pest observation names, or
+// null for anything else: the absence finding, the routine unnamed "live
+// pests" row, an unrelated observation, or text that only starts like a
+// catalog statement. Exact match only (codex P0 on #5177).
+function lawnDefiniteLivePestLabelForObservation(observation) {
+  return LAWN_DEFINITE_LIVE_PEST_OBSERVATION_LABELS.get(String(observation || '').trim()) || null;
+}
 
 const lawnDiseaseGroup = lawnCatalog.groups
   .find(({ label }) => label === 'Disease and fungus-like conditions');
@@ -161,6 +192,8 @@ function conflictingRoutineObservations(observations = [], { treeShrubLandscapeC
 module.exports = {
   ROUTINE_SERVICE_OBSERVATIONS,
   STRUCTURED_OBSERVATION_FINDING_DETAIL,
+  LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS,
+  lawnDefiniteLivePestLabelForObservation,
   observationsForRoutineService,
   conflictingRoutineObservations,
 };

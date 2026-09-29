@@ -488,7 +488,7 @@ async function repairPushProof({ appNotification, body, customerId, notification
   }
 }
 
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory, templateKey, templateVariantId }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
   let bell = {};
@@ -547,6 +547,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
       bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
+      // The event's original copy is already visible even if its commit
+      // acknowledgement was lost. Settle that episode without asserting
+      // delivery of this retry's copy or minting native-push proof for it.
+      if (billingDeliveryCategory && notificationEventKey && appNotification?.id
+        && appNotification.deduped === true && !appNotification.suppressed && !appNotification.refreshed) {
+        return { delivered: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appNotification.created_at };
+      }
       if (appNotification?.push?.reason === 'push_in_flight') {
         return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight', ...bell };
       }
@@ -610,6 +617,11 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // readers that scope by property (SMS commitment evidence) need
         // it on the proof row itself (Codex #4816 r40).
         ...proofScope,
+        // Same rendering-template evidence the SMS leg's sms_log row gets
+        // (services/twilio.js buildSmsLogRow) — never inferred, only
+        // carried through when the caller supplied it.
+        ...(templateKey ? { template_key: templateKey } : {}),
+        ...(templateVariantId ? { template_variant_id: templateVariantId } : {}),
         ...extra,
       }),
     });

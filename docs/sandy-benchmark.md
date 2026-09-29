@@ -194,11 +194,12 @@ the combined report is only written after every trial finishes.
 
 `--candidate-model` may also be a voice-eligible OpenAI id — one MODEL_CATALOG
 marks with a `voice` object (`server/config/models.js`; today gpt-6-sol,
-gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). Production inbound calls stay on
-Claude whatever the gate says: the relay accepts an OpenAI id only in a
-sandbox session or in the eval harness's own sessions (`evalHarness`, which
+gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). This gate never reaches production
+inbound calls: under it the relay accepts an OpenAI id only in a sandbox
+session or in the eval harness's own sessions (`evalHarness`, which
 `voice-relay-replay.js` alone sets), and the shared `VOICE_RELAY_MODEL` never
-takes one (collections reads it too). The runner never touches Sandy's
+takes one (collections reads it too). Production inbound has its own separate
+`GATE_VOICE_RELAY_OPENAI_INBOUND`, which eval-harness sessions never read. The runner never touches Sandy's
 sandbox line, so this only widens what a **benchmark candidate** may run on.
 The runner:
   - requires `OPENAI_API_KEY` in its OWN process environment up front (a
@@ -214,19 +215,44 @@ The runner:
     surface, but its own request/response translation and its own per-model
     reasoning effort (`MODEL_CATALOG[model].voice.reasoning`).
 
-**No silent Claude fallback.** An OpenAI leg that errors, times out, or is
-aborted rejects the SAME way a stalled Anthropic call does — it counts as a
-model failure/abort in the harness telemetry and runs through the relay's
-existing provider-failure handling. It never quietly re-runs the turn on
-Claude; a benchmark candidate that hits an OpenAI outage must show up as a
-failed/inconclusive run, not a clean pass on the wrong provider.
+**No Claude fallback in the harness.** Live calls (production inbound and
+the sandbox line) switch to Claude for the rest of the call when an OpenAI
+round fails for a provider reason; eval-harness sessions never do. An OpenAI
+leg that errors, times out, or is aborted rejects the SAME way a stalled
+Anthropic call does — it counts as a model failure/abort in the harness
+telemetry and runs through the relay's existing provider-failure handling. It
+never re-runs the turn on Claude; a benchmark candidate that hits an OpenAI
+outage must show up as a failed/inconclusive run, not a clean pass on the
+wrong provider.
+
+### Thinking-always-on Anthropic candidates (Opus 5.5+)
+
+`--candidate-model` may also be an Anthropic id whose thinking cannot be
+turned off (`MODELS.anthropicThinkingAlwaysOn` — Opus 5.5 and later, e.g.
+`claude-opus-5-5`, and Sonnet 5.5 and later, e.g. `claude-sonnet-5-5`). These never reach production inbound or the shared
+`VOICE_RELAY_MODEL`/`MODEL_VOICE` chain (`ALLOWED_OVERRIDE_MODEL_IDS`
+excludes them for exactly that reason — that lane always sends
+`thinking: { type: 'disabled' }`, which they reject), but every condition
+here runs through the eval harness (`evalHarness: true`), the same context
+flag that admits a sandbox/benchmark OpenAI candidate — so the runner's
+allowlist check and `buildConditions` both accept them with **no feature
+gate**: unlike an OpenAI candidate, they are plain Anthropic, just a
+different request shape (`low` effort; Opus 5.5 sends no `thinking` field
+with `max_tokens` raised by the same floor `anthropic-wire.js` uses
+elsewhere, while Sonnet 5.5 sends its catalog `voice.thinking` floor,
+`thinking: { type: 'between_tools' }` — no up-front thinking — with the
+same raised `max_tokens`, since its progress-update thinking blocks between
+tool calls spend from it). A candidate in
+this Set never sets `GATE_VOICE_RELAY_OPENAI`.
 
 ### Model-stamp verification (candidate conditions only)
 
 `--candidate-model` is checked against the relay's OWN catalog-eligible id
-sets (`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS` — Anthropic — and
+sets (`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS` — Anthropic,
+thinking-always-on ids excluded — `ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS` —
+the thinking-always-on Anthropic ids just above — and
 `OPENAI_VOICE_OVERRIDE_MODEL_IDS` — OpenAI, see "OpenAI candidates" above —
-both derived from `config/models.js` `MODEL_CATALOG`) before any condition
+all derived from `config/models.js` `MODEL_CATALOG`) before any condition
 runs at all — an unrecognized id is a usage error (exit 2), not four wasted
 API-billed conditions. That check alone does not prove the candidate model actually ran,
 though: each condition's run is also checked AFTER it completes. Every

@@ -520,6 +520,17 @@ function bulkLeadSelection(toolName, records, params) {
 // A tool whose scope is missing or invalid is refused here as well as by the
 // registry, so no caller can reach an unclassified reader or writer.
 const { validScope, scopeOf, UNCLASSIFIED } = require('./scope-policy');
+// The outside-write tools (Sentry/Cloudflare/Railway/GitHub/GSC, owner ruling
+// 2026-09-28) are declared scope:'none' in action-policy.json because they
+// touch no customer RECORD — but their unconfirmed preview does a live
+// provider read that returns free text with nothing to do with any customer
+// (a Sentry issue title/culprit, a GitHub PR title, a Cloudflare branch
+// name). Their read equivalents (get_sentry_top_issues, etc.) are scope
+// 'broad' and refused inside a customer-scoped task by readScopeRefusal;
+// 'broad' is not a valid WRITE scope (scope-policy.js/its registry test pin
+// that), so this refusal is instead an explicit check here, mirroring the
+// route_wide branch just below (Codex r3 P1 on #5275).
+const { OUTSIDE_WRITE_TOOL_NAMES } = require('./write-gates');
 
 // A request about one customer: a resolved target, an unresolved name, or a
 // phone/email literal that identifies the customer.
@@ -528,7 +539,9 @@ const customerSpecific = context => Boolean(context.targets?.length || context.n
 // Readers whose appointment selector is not named appointment_id: the
 // closeout readers take service_id and the gap reader tests candidate_service_id
 // (it loads that appointment's customer preferences, plan holds and location).
-const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
+// repair_closeout acts on that same service_id, so a customer-scoped task may
+// only repair its own customer's visit.
+const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', repair_closeout: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
 // Writers whose customer records ride under role-named ids: both halves of a
 // merge are customer records, read as the customer collection (readReferences
 // loads and version-stamps every one). The task must own ONE half directly;
@@ -631,6 +644,14 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // a request to a whole date or technician.
   if (scope === 'route_wide' && customerSpecific(context)) {
     return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
+  }
+  // Outside-write tools carry no customer selector to check below (their
+  // scope is 'none'), so without this they would be silently admitted inside
+  // a customer-scoped task even though their preview pulls in unrelated
+  // provider text — the same leak readScopeRefusal already blocks for their
+  // 'broad' read equivalents.
+  if (OUTSIDE_WRITE_TOOL_NAMES.has(toolName) && customerSpecific(context)) {
+    return { error: 'This action reaches an outside service, not this customer\'s records. Run it from a request that does not name a customer.', code: 'customer_scope_required' };
   }
   if (policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
     return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };

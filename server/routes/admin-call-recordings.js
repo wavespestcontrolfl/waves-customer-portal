@@ -371,7 +371,8 @@ router.get('/commitments/open', async (req, res, next) => {
       let changed = 0;
       for (const id of callIds) {
         const r = await refreshFulfillment(db, id).catch(() => ({}));
-        changed += (r.fulfilled || 0) + (r.hinted || 0) + (r.cleared || 0);
+        // reopened: a promise a booking kept lapsed and is owed again (codex #5081 r6 P2).
+        changed += ['fulfilled', 'hinted', 'cleared', 'reopened'].reduce((n, k) => n + (r[k] || 0), 0);
       }
       if (changed > 0) rows = await listOpenCommitments(db, reread);
     }
@@ -387,6 +388,31 @@ router.get('/commitments/open', async (req, res, next) => {
       actor_id: req.technicianId,
       enabled,
     });
+  } catch (err) { next(err); }
+});
+
+// GET /commitments/auto-closed — the Waves promises the portal closed on its
+// own in the last `days` days (default 7, max 30): kept on the proof it
+// stored, or dismissed because the customer left. The Owed tab lists them
+// with a one-click Reopen (the PATCH below). Same staff-wide auth as the
+// open feed; reads stay open whatever the switch says. Pages of 100:
+// has_more, and the next page is asked for with the before_at / before_id
+// the response returns.
+router.get('/commitments/auto-closed', async (req, res, next) => {
+  try {
+    const days = Math.max(1, Math.min(30, Number.parseInt(req.query.days, 10) || 7));
+    const { before_at: beforeAt, before_id: beforeId } = req.query;
+    let before = null;
+    if (beforeAt !== undefined || beforeId !== undefined) {
+      if (!UUID_RE.test(String(beforeId || '')) || Number.isNaN(Date.parse(String(beforeAt || '')))) {
+        return res.status(400).json({ error: 'before_at must be a timestamp and before_id a UUID' });
+      }
+      before = { at: new Date(String(beforeAt)).toISOString(), id: String(beforeId) };
+    }
+    const { listAutoClosedCommitments } = require('../services/call-commitments');
+    const page = await listAutoClosedCommitments(db, { days, before });
+    res.json({ commitments: page.commitments, days, has_more: Boolean(page.next),
+      next: page.next ? { before_at: page.next.at, before_id: page.next.id } : null });
   } catch (err) { next(err); }
 });
 
@@ -449,6 +475,9 @@ router.patch('/commitments/:id', async (req, res, next) => {
       due_at: req.body?.due_at,
       note: req.body?.note,
       reviewedBy: req.technicianId || null,
+      // A Reopen acts on the version the office was shown (the Owed tab's
+      // closed-automatically list): a newer verdict answers 409.
+      ...(req.body?.action === 'reopen' && req.body?.expected_at ? { expectedAt: req.body.expected_at } : {}),
     });
     res.json({ commitment: row });
   } catch (err) {
@@ -607,8 +636,21 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           : 'voice_message_rehome_failed: the recording is still in the previous customer\'s thread; retry the unlink');
       }
     }
+    // A promise kept by a booking for its promised slot was matched through
+    // the call's customer: re-judge the call's promises now that the link
+    // committed. Gate off writes nothing — the commitments sweep judges it
+    // once the gate is back (listSlotKeptCallIds). Best-effort: a failed
+    // refresh leaves it to that sweep.
+    let promisesReopened = 0;
+    if (require('../config/feature-gates').isEnabled('callCommitments')) {
+      const refreshed = await require('../services/call-commitments').refreshFulfillment(db, call.id).catch((e) => {
+        logger.warn(`[call-recordings] promise refresh after relink failed for call ${call.id}: ${e.message}`);
+        return {};
+      });
+      promisesReopened = refreshed.reopened || 0;
+    }
     logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
-    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, warnings });
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, promises_reopened: promisesReopened, warnings });
   } catch (err) { next(err); }
 });
 

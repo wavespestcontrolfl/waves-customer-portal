@@ -28,6 +28,7 @@ const {
   WRITE_TWO_STEP_TOOL_NAMES,
   LEGACY_BARE_WRITE_TOOL_NAMES,
   CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
+  OUTSIDE_WRITE_TOOL_NAMES,
 } = require('./write-gates');
 
 const CONTRACT_VERSION = 1;
@@ -59,7 +60,29 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'submit_review_reply',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
   'run_seo_pipeline',
+  // A charged late-cancel fee, a voided invoice, and a reversed inspection
+  // credit are all real money movement no portal path undoes (Codex
+  // round-1 P2) — the status flip alone is editable, but this tool's money
+  // effects are not, so the card must say so.
+  'cancel_appointment',
+  // The outside-write tools (Sentry/Cloudflare/Railway/GitHub/GSC, owner
+  // ruling 2026-09-28) act on services the portal doesn't own state for —
+  // there is no portal-side undo for any of them (codex r2 P2 on #5275):
+  // resolve/ignore/assign only exist as Sentry's own issue actions with no
+  // portal mirror to revert; a Cloudflare cache purge cannot be "unpurged"
+  // and a Pages build retry cannot be un-retried; a Railway redeploy/restart
+  // cannot be undone (the previous running instance is gone); a GitHub
+  // checks rerun cannot be un-run; a PR label and the "@codex review"
+  // comment are both public GitHub state, like submit_review_reply, once
+  // posted only followed up, never unsent; a GSC sitemap submission has no
+  // withdraw call. Pulling in the whole set (rather than hand-copying it)
+  // means a future outside-write tool inherits this by construction.
+  ...OUTSIDE_WRITE_TOOL_NAMES,
+  // No un-cancel tool exists — once cancelled, that queued attempt is gone
+  // for good (the original sender would need to queue a fresh one).
+  'cancel_queued_message',
 ]);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
@@ -102,6 +125,7 @@ const BILLING_TOOL_NAMES = new Set([
   'save_customer_estimate',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
   'approve_price',
   'create_pending_estimate',
   'create_agent_estimate_draft',
@@ -147,8 +171,21 @@ const ACTION_LABELS = {
   update_restock_request: 'Update a restock request',
   request_instant_payout: 'Request an INSTANT payout',
   request_standard_payout: 'Request a standard payout',
+  cancel_pending_payout: 'Cancel a pending payout',
+  cancel_queued_message: 'Cancel a queued message',
   run_seo_pipeline: 'Run the SEO pipeline',
   approve_seo_action: 'Approve an SEO action',
+  resolve_sentry_issue: 'Resolve a Sentry issue',
+  ignore_sentry_issue: 'Ignore a Sentry issue',
+  assign_sentry_issue: 'Assign a Sentry issue',
+  purge_cloudflare_cache: 'Purge Cloudflare cache',
+  retry_cloudflare_pages_build: 'Retry a Cloudflare Pages build',
+  redeploy_railway_service: 'Redeploy a Railway service',
+  restart_railway_service: 'Restart a Railway service',
+  rerun_failed_github_checks: 'Rerun failed GitHub checks',
+  add_github_pr_label: 'Add a GitHub PR label',
+  request_codex_review: 'Request a Codex review',
+  submit_gsc_sitemap: 'Submit a sitemap to Search Console',
 };
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in
@@ -429,7 +466,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
     if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
-    push('operational', 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card); no confirmation text is sent now');
+    // A booking with a time texts the booking confirmation exactly as a
+    // Schedule-screen booking does (owner 2026-09-27); a windowless one
+    // registers a non-delivering placeholder: its confirmation is marked
+    // handled, so setting a time later re-arms only the 72h/24h reminders.
+    push('operational', params?.time_window
+      ? 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card)'
+      : 'Registers placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h/24h reminders');
   }
   if (toolName === 'bulk_update_customers') {
     push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');
@@ -539,14 +582,28 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // The follow-through's money effects, from the rails' own previews.
     const c = preview.cancellation;
     const a = c.appointment || {};
-    push('operational', `Cancel ${a.service_type || 'visit'} on ${a.scheduled_date || '?'}${a.customer_name ? ` for ${a.customer_name}` : ''}`, {
+    // The window is shown so two same-day visits for the same customer are
+    // distinguishable on the card (Codex round-3 P1) — pinned automatically,
+    // since it rides on preview.cancellation.appointment (the impact object
+    // cancelImpactsMatch already compares whole). The address is shown too
+    // (Codex round-4 P1): switch_appointment_property can move a visit to a
+    // DIFFERENT saved property than the customer's primary one, so naming
+    // only the customer would leave the operator guessing which house this
+    // cancels — also pinned automatically, same reasoning.
+    push('operational', `Cancel ${a.service_type || 'visit'} on ${a.scheduled_date || '?'}${a.window ? `, ${a.window}` : ''}${a.customer_name ? ` for ${a.customer_name}` : ''}${a.address ? ` at ${a.address}` : ''}`, {
       before: a.status || null, after: 'cancelled',
     });
     // Wording states what the rails GUARANTEE, not the best case: a charge
     // may still land in review (office alerted), a hold may be parked for
     // the rebooked visit instead of released, and a void is skipped when
     // money is in flight or the invoice sits on a finalized statement.
-    if (c.fee?.applies) {
+    if (c.fee?.blocked_by_invoice) {
+      // visit-cancellation-followthrough.js throws before either card rail
+      // when an invoice still holds money after the void — no charge, no
+      // release, office alerted. Stated first so no fee sentence below can
+      // promise a charge the commit will skip.
+      push('billing', 'No late-cancel fee is charged and no card hold is released automatically — an invoice for this visit still holds money after the void, so the office is alerted to review the fee');
+    } else if (c.fee?.applies) {
       const amt = c.fee.amount != null ? `$${Number(c.fee.amount).toFixed(2)}` : 'the agreed';
       push('billing', c.fee.unresolved
         ? `A late-cancel fee MAY be charged to the card on file (${amt} — lane state could not be verified; unresolved outcomes go to office review)`
@@ -561,11 +618,34 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     }
     for (const inv of c.invoices || []) {
       const total = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : '';
-      const credit = Number(inv.credit_applied) > 0 ? `; $${Number(inv.credit_applied).toFixed(2)} account credit restored` : '';
-      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''}) — applied credits/deposits restored${credit}; skipped for office review if a payment is in flight or it sits on a finalized statement`);
+      const restored = [
+        Number(inv.credit_applied) > 0 ? `$${Number(inv.credit_applied).toFixed(2)} account credit` : null,
+        Number(inv.deposit_credit) > 0 ? `$${Number(inv.deposit_credit).toFixed(2)} deposit credit` : null,
+      ].filter(Boolean);
+      const restoredText = restored.length ? `; ${restored.join(' and ')} restored` : '';
+      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''})${restoredText} — skipped for office review if a payment is in flight, it sits on a finalized statement, or its amounts change first`);
     }
     if ((c.invoices || []).length) {
       push('billing', 'Only the invoices listed above are voided — anything created after this card is left for office review');
+    }
+    // Inspection-credit reversal (appointment-cancel-impact.js's read-only
+    // mirror of inspection-credit.reverseInspectionCreditForBooking): most
+    // cancels have nothing redeemed against them (null, nothing pushed). A
+    // redeemed offer either reverses for its exact amount, or is deferred to
+    // office review (an unresolved invoice / a lookup failure) — the SAME
+    // two outcomes the real reversal reaches; a rebind (a live alternate
+    // booking or series child still earns it) is a no-op the card need not
+    // disclose as a billing effect, so it is skipped here (it stays in the
+    // pinned structure). A reversal takes the credit back out of the
+    // customer's balance; when that balance was already spent the real
+    // reversal refuses and alerts the office, which the sentence states.
+    for (const credit of c.inspection_credit_reversal || []) {
+      const amt = `$${Number(credit.amount).toFixed(2)}`;
+      if (credit.deferred) {
+        push('billing', `A ${amt} inspection credit tied to this booking is NOT reversed at cancel — an invoice for this visit still holds money, so the office is alerted`);
+      } else if (credit.would_reverse) {
+        push('billing', `The ${amt} inspection credit this booking earned is taken back out of the customer's account balance (if it was already spent, the office is alerted to collect or write it off)`);
+      }
     }
   }
 
@@ -594,7 +674,19 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
-  if (!propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  // repair_closeout: one effect per planned step (server-owned labels), plus
+  // the open items the confirm will NOT touch — never a flattened dump of
+  // the plan object.
+  if (toolName === 'repair_closeout' && Array.isArray(preview?.steps)) {
+    push('customer', `Visit: ${preview.visit || preview.service_id} — ${preview.customer_name || preview.customer_id || 'customer unresolved'}`);
+    for (const st of preview.steps) {
+      push(['comms', 'billing'].includes(st.kind) ? st.kind : 'operational', String(st.effect || st.step));
+    }
+    if (Array.isArray(preview.manual) && preview.manual.length) {
+      push('operational', `Not touched (${preview.manual.length}): ${preview.manual.map((m) => m.fact).join(', ')}`);
+    }
+  }
+  if (toolName !== 'repair_closeout' && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -742,16 +834,57 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // attributed to one (GH r17 P2) — vendor/partner replies are outbound
   // mail, not customer contact.
   const emailReplyToCustomer = toolName === 'send_email_reply' && preview?.pinned_recipient?.linked_customer === true;
+  // A timed Intelligence Bar booking texts its confirmation (owner 2026-09-27).
+  const bookingConfirmationText = toolName === 'create_appointment' && !!params?.time_window;
+  // cancel_appointment's own SHARED status-writer hook (GATE_CANCEL_NOTICE_HOOK,
+  // job-status.js) may text the customer a cancellation notice — a real
+  // effect this card must disclose, never silently claim away (Codex
+  // round-1 P1/P2: the card must never say "no customer message" when the
+  // existing hook can still send one). 'none' means the hook definitely
+  // does not engage for this visit (off, nothing to claim, or an
+  // unconditional merged-slot suppression); anything else — today only
+  // 'may_send' — discloses it. See appointment-cancel-impact.js /
+  // job-status.js#previewCancellationNoticeVerdict for the exact rule.
+  const cancelCustomerNotice = toolName === 'cancel_appointment'
+    ? (preview?.cancellation?.customer_notice || 'none') : 'none';
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact);
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText
+      // A repair plan that queues a report email or receipt contacts the
+      // customer through the delivery workers.
+      || (toolName === 'repair_closeout' && preview?.notifies_customer === true)
+      || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
   if (notifiesCustomer) {
-    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day'
+    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day' || toolName === 'repair_closeout'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
+    if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
+      // Evidence-independent wording (Codex round-3 P1, fixing a round-3
+      // push finding: the FIRST draft of this line asserted precise,
+      // evidence/survivor-dependent mechanics — "right away if already
+      // delivered", "never sent if another live visit covers them" — built
+      // on exactly the mutable DB-backed conditions cancelCustomerNotice
+      // deliberately stopped checking (round-2/round-3b: a live survivor,
+      // or whether a reminders row exists, can both change before commit).
+      // An operator could be told a notice will "never" send when it
+      // actually does. This wording asserts nothing about WHEN or whether
+      // any specific condition rules it out — only that the hook may text
+      // the customer for this visit, matching what the verdict actually
+      // knows.
+      contactLabel = 'The customer MAY be texted a cancellation notice by the existing notice system, depending on conditions at the moment it processes the cancellation';
+    }
+    if (bookingConfirmationText) {
+      // Codex r2 on #5093 (P1): only the SMS leg holds for the 8 AM-8 PM
+      // send window (appointment-reminders.js reminderSendWindowHold — 'email'
+      // is never held, and the 'both' channel sends its email leg right away
+      // and defers only the text). The old wording said the WHOLE
+      // confirmation waited until 8 AM, which is false for an email-only or
+      // email+text customer.
+      contactLabel = 'Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; a text after 8 PM waits until 8 AM, but an email goes right away';
+    }
     // Derived from the PINNED recipient set for batch moves (GH r21 P2):
     // a stop pinned with no SMS recipient cannot be texted — the card
     // must not claim an impossible send and then warn about it after.
@@ -764,6 +897,31 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       }
     }
     push('comms', contactLabel);
+  }
+
+  // cancel_appointment's assigned-technician cancel notice
+  // (tech-visit-notifications.js#notifyVisitCancelled, wired unconditionally
+  // into every transitionJobStatus cancel) is staff comms, not a customer
+  // effect — disclosed separately from notifiesCustomer above (Codex round-5
+  // P2: a real side effect the card stayed silent about). 'none' means the
+  // gate is off, no technician is assigned, or the assigned technician IS
+  // the confirming actor (silent for their own cancel); 'may_notify'
+  // discloses it, in the same evidence-independent "may" register as the
+  // customer notice above rather than promising a certain send.
+  const cancelTechnicianNotice = toolName === 'cancel_appointment'
+    ? (preview?.cancellation?.technician_notice || 'none') : 'none';
+  if (cancelTechnicianNotice !== 'none') {
+    push('comms', 'The assigned technician MAY get a cancelled-visit notice (tech home card + push) by the existing tech-notifications system, depending on conditions at the moment it processes the cancellation');
+  }
+
+  // transitionJobStatus auto-resolves this visit's open overdue-family
+  // dispatch alerts (tech_late / unassigned_overdue) inside the cancel
+  // (dispatch-alerts.js#autoResolveOverdueAlertsForJob). Alert creation does
+  // not lock the visit, so a count frozen at proposal can't be exact at
+  // commit (Codex round-10 P2) — disclosed as a standing conditional effect
+  // instead (Codex round-9 P2 asked for the disclosure).
+  if (toolName === 'cancel_appointment') {
+    push('operational', 'Closes any open running-late / unassigned-overdue dispatch alert for this visit at the moment it is cancelled');
   }
 
   // Canonical order (kind, then label) so the contract — and therefore its
@@ -788,9 +946,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // PaymentIntent cannot be restored, and the customer's payment link is
     // dead (codex #4348 r7 P2).
     irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
+      // The Bill action writes a 'billed' visit disposition no portal path
+      // removes (voiding the draft leaves the visit "already handled").
+      || (toolName === 'repair_closeout' && Array.isArray(preview?.steps) && preview.steps.some((st) => st.step === 'bill_visit'))
       || preview?.financial_effects?.revertible_from_queue === false
       || cancelsStripeCheckoutSession(preview),
     notifies_customer: notifiesCustomer,
+    notifies_technician: cancelTechnicianNotice !== 'none',
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)
@@ -804,6 +966,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     ...(preview?.pinned_recipient ? { pinned_recipient: preview.pinned_recipient } : {}),
     ...(preview?.pinned_customer ? { pinned_customer: preview.pinned_customer } : {}),
     ...(preview?.pinned_appointment ? { pinned_appointment: preview.pinned_appointment } : {}),
+    // The exact structured effect set (fee amount, invoice ids/credit_applied,
+    // inspection-credit offer ids/amounts) — not just its formatted text
+    // above — so two different effect sets that happen to render identical
+    // sentences (rare, but possible with a rounded dollar amount) can never
+    // hash alike. cancel_appointment's commit path recomputes this same
+    // shape (appointment-cancel-impact.js) and refuses on any mismatch.
+    ...(toolName === 'cancel_appointment' && preview?.cancellation ? { pinned_cancellation: preview.cancellation } : {}),
     ...(preview?.pinned_approval ? { pinned_approval: preview.pinned_approval } : {}),
     ...(preview?.pinned_estimate ? { pinned_estimate: preview.pinned_estimate } : {}),
     // The card caps/truncates preview lines for presentation only — the

@@ -15,8 +15,10 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 // one extra product the tech can add manually.
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
-  { id: 'talstar', name: 'Talstar P', category: 'Insecticide' },
-  { id: 'surfactant', name: 'Non-ionic Surfactant', category: 'adjuvant' },
+  // House mix names per the 2026-09-27 ruling (#5049): Talstar P → Atticus
+  // Talak 7.9 F, bare surfactant → LESCO 90/10. Ids kept so assertions hold.
+  { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
 ];
 
@@ -28,16 +30,16 @@ const CONTEXT_SERVICE = {
   serviceKey: 'pest_re_service', status: 'confirmed',
 };
 
-function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = CONTEXT_SERVICE, eligible = true } = {}) {
+function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = CONTEXT_SERVICE, eligible = true, products = CATALOG } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
-    if (path.endsWith('/pest-recap/context')) {
+    if (path.split('?')[0].endsWith('/pest-recap/context')) {
       return {
         ok: true,
         eligible,
         service,
-        products: CATALOG,
+        products,
         existingRecord: null,
       };
     }
@@ -59,8 +61,10 @@ describe('FastCompleteSheet', () => {
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
     expect(await screen.findByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Talstar P — 4 oz/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Non-ionic Surfactant — 0.25 oz/ })).toBeTruthy();
+    // A liquid's bare "oz" is a fluid ounce, and a dose under 1 fl oz reads in
+    // measuring spoons (0.25 fl oz = 1½ tsp) — never in mL.
+    expect(screen.getByRole('button', { name: /Atticus Talak 7\.9 F — 4 fl oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant — 1½ tsp/ })).toBeTruthy();
   });
 
   test('tapping a prefilled tile strikes it through (off) instead of removing it; tapping again restores it', async () => {
@@ -90,8 +94,8 @@ describe('FastCompleteSheet', () => {
 
     // Deselect every default product — now nothing is selected at all.
     fireEvent.click(screen.getByRole('button', { name: /Taurus SC/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Talstar P/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Non-ionic Surfactant/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Atticus Talak 7\.9 F/ }));
+    fireEvent.click(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant/ }));
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     expect(submit.disabled).toBe(true);
 
@@ -107,7 +111,7 @@ describe('FastCompleteSheet', () => {
     expect(submit.disabled).toBe(false);
   });
 
-  test('a perimeter spray records its linear feet in oz; Other needs a name', async () => {
+  test('a perimeter spray records its linear feet and the house rate; Other needs a name', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
@@ -130,9 +134,10 @@ describe('FastCompleteSheet', () => {
     const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
     const taurus = body.products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 140, areaUnit: 'linear_ft', applicationArea: 'Outside' });
-    // At perimeter spray the shared resolver gives the 4-oz house default,
-    // rate and amount both in oz — what the full form seeds.
-    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz', amountUnit: 'oz' });
+    // At perimeter spray the shared resolver gives the 4-oz house default
+    // rate — what the full form seeds. The amount keeps the fl oz the tile
+    // showed: a liquid is never recorded in a bare oz.
+    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz', amountUnit: 'fl_oz' });
     expect(taurus.targets).toEqual(['Ants', 'Palmetto bugs']);
     expect(body.products.map((p) => p.productId).sort()).toEqual(['surfactant', 'talstar', 'taurus']);
   }, 15000);
@@ -419,15 +424,21 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByText('> label max 0.8')).toBeTruthy();
   });
 
-  test('only the house mix is offered; any other product goes to the full form', async () => {
+  test('only the house mix starts on the sheet; with no product list, + Other product opens the full form', async () => {
     const request = makeRequest();
-    const onFullForm = vi.fn();
-    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onFullForm={onFullForm} />);
-
+    const { unmount } = render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
     await screen.findByRole('button', { name: /Taurus SC/ });
     expect(screen.queryByRole('button', { name: /Advion/ })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    expect(onFullForm).toHaveBeenCalled();
+    unmount();
+
+    // The picker has nothing to offer when the catalog did not load, so the
+    // button keeps its old way out (FastCompleteSheet.products.test.jsx pins
+    // the picker itself).
+    const onFullForm = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={makeRequest({ products: [] })} onClose={() => {}} onFullForm={onFullForm} />);
+    fireEvent.click(await screen.findByRole('button', { name: '+ Other product' }));
+    expect(onFullForm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog', { name: 'Add a product' })).toBeNull();
   });
 
   test('a schedule row that went stale (another customer) is not completed here, and closing asks for a refresh', async () => {

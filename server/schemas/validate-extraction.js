@@ -86,7 +86,39 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // land on "other", which also covers strangers, so no rule could single them
 // out. Feeds isAuthorizedWdoArrangerBooking (call-triage-flags.js). Older
 // payloads still validate.
-const SCHEMA_VERSION = '1.16.0';
+// 1.17.0: additive — scheduling.agreed_slot_words (object|null: day/hour/
+// period, each verbatim words from the transcript) and
+// scheduling.moved_appointment_words (string|null). Owner decision
+// 2026-09-27: the extraction now records the agreed time and the moved
+// appointment's date as VERBATIM WORDS pinned to the existing
+// confirmed_start_at / moved_appointment_date evidence quotes, so the
+// reschedule applier only checks the quote is real and contains those words
+// instead of parsing speech itself (call-reschedule-agreement.js). Nothing
+// consumes them yet outside that gated consumer. Optional/nullable: older
+// payloads still validate.
+// 1.18.0: additive enum widening — caller.relationship_to_property gains
+// family_member (owner ruling 2026-09-28: a relative of the homeowner or
+// resident — grandchild, child, parent, sibling, in-law — arranging service
+// at THAT relative's home, e.g. "my grandfather's house", is authorized when
+// staff confirmed a time on the call). Live miss (call f5a54dbd, 2026-09-28):
+// the caller booked a paper-wasp knockdown at "my grandfather's house",
+// confirmed Sun Oct 4 11am, and was blocked on caller_not_authorized because "other"
+// covers both family and strangers alike. A spouse/partner still uses
+// spouse_partner, not this value. Feeds isAuthorizedFamilyMemberBooking
+// (call-triage-flags.js). Older payloads still validate.
+// 1.19.0: additive — consent.sms_declined (boolean|null). Codex P1 on
+// #5292: the dry-run removal of the sms_consent_given===false staging check
+// (owner ruling — that field is true only on an explicit yes, so false
+// means "never asked", not "refused", and blocked 151/159 real new-lead
+// calls) also stopped catching an explicit "no" to "may I text you?",
+// which the model recorded the SAME way (sms_consent_given=false).
+// sms_declined is the dedicated field: true ONLY on an explicit decline,
+// judged separately from sms_consent_given. Optional/nullable in BOTH
+// schemas (AGENTS.md: extraction schema changes never add to `required`) —
+// a pre-1.19 row, which never has the field at all, still validates. The
+// booking-link staging check (call-booking-link-text.js) fails CLOSED
+// whenever the field is absent or not a boolean: 'sms_refusal_unrecorded'.
+const SCHEMA_VERSION = '1.19.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

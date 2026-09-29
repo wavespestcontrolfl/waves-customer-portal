@@ -36,7 +36,11 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   keeps `caller_not_authorized` off this list too, in both the enforce path
   and this shadow bridge. A `home_buyer` (schema 1.15.0: a buyer under
   contract, not the owner yet) ordering their own WDO inspection is covered
-  the same way (owner ruling 2026-09-26). Every other third-party
+  the same way (owner ruling 2026-09-26). A `family_member` (schema 1.18.0: a
+  relative of the homeowner/resident — grandchild, child, parent, sibling,
+  in-law — booking service AT THAT RELATIVE'S home) with a confirmed time is
+  also authorized, for any service type — `isAuthorizedFamilyMemberBooking`
+  (owner ruling 2026-09-28, live miss call f5a54dbd). Every other third-party
   relationship is unchanged.
 - **Disclaimed caller ID** — `callback_number_needed` (schema 1.14.0, live miss
   2026-09-25, call 6fee5f34: "this is our office line... they don't pick up, I

@@ -34,6 +34,7 @@ const {
   nonServiceCaller,
   isSubstantiveText,
   hasPriorContact,
+  nanpStoredPhoneClause,
   _private,
 } = require('../services/outbound-call-reason');
 
@@ -590,7 +591,7 @@ describe('hasPriorContact', () => {
     const leadsQ = state.queries.find((q) => q.table === 'leads');
     for (const [q, column] of [[callQ, 'from_phone'], [smsQ, 'from_phone'], [leadsQ, 'phone']]) {
       const clause = q.raws.find((r) => String(r[0]).includes('regexp_replace'));
-      expect(clause[0]).toBe(_private.nanpStoredPhoneClause(column));
+      expect(clause[0]).toBe(nanpStoredPhoneClause(column));
       expect(clause[0]).toContain("~ '^1{0,1}\\d{10}$'");
       expect(clause[1]).toEqual(['9415550101']);
     }
@@ -603,7 +604,7 @@ describe('hasPriorContact', () => {
   // SQL at all; a REAL, connection-less knex instance does.
   test('nanpStoredPhoneClause compiles under REAL knex with exactly the bindings supplied (mocked db cannot catch a binding-count mismatch)', () => {
     for (const column of ['phone', 'from_phone', 'c.phone']) {
-      const clause = _private.nanpStoredPhoneClause(column);
+      const clause = nanpStoredPhoneClause(column);
       // No bare `?` other than the one real placeholder — a second bare
       // `?` (e.g. an unescaped regex quantifier) is exactly what broke
       // knex's binding count on push.
@@ -845,8 +846,42 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
-  test('a probe failure fails CLOSED (no prior contact), never throws', async () => {
+  // codex #5018 pre-push P1: this used to catch a probe failure internally
+  // and fail closed (return false, read by every caller as "no prior
+  // contact"). Under the supported DB_POOL_MAX=2, a caller already holding
+  // the pool's other slot (a cron lock, a phone-locked handoff transaction)
+  // starved these probes into a connection-acquire timeout, which then read
+  // as a genuine negative and PERMANENTLY skipped an eligible send — an
+  // infra hiccup is not a "no" answer. It must now propagate, so each
+  // caller's own retry/defer path (every current caller has one) decides.
+  test('a probe failure now PROPAGATES (never silently fails closed to false)', async () => {
     db.mockImplementation(() => { throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' }); });
-    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).rejects.toThrow('down');
+  });
+
+  // codex #5018 pre-push P1: every probe must run on a caller-supplied
+  // connection (a transaction, or the same pool slot a handoff already
+  // occupies) instead of always reaching for the shared pool — required so
+  // a caller holding the pool's other slot under DB_POOL_MAX=2 doesn't
+  // starve these probes into a timeout. The default `db` mock must never be
+  // touched when a `conn` is supplied.
+  test('every probe runs on a supplied conn, never the shared db pool', async () => {
+    const heldConnection = jest.fn((table) => {
+      const rowsFor = {
+        call_log: [],
+        sms_log: [],
+        leads: [],
+      };
+      const chain = {};
+      ['where', 'whereNull', 'whereNot', 'whereIn', 'whereRaw', 'orderBy', 'limit', 'modify'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.first = jest.fn(async () => (rowsFor[table] || [])[0]);
+      chain.select = jest.fn(async () => rowsFor[table] || []);
+      return chain;
+    });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0, conn: heldConnection })).resolves.toBe(false);
+    expect(heldConnection).toHaveBeenCalledWith('call_log');
+    expect(heldConnection).toHaveBeenCalledWith('sms_log');
+    expect(heldConnection).toHaveBeenCalledWith('leads');
+    expect(db).not.toHaveBeenCalled();
   });
 });

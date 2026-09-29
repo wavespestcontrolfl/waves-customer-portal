@@ -20,6 +20,11 @@
  */
 
 const db = require('../models/db');
+
+// A row version as a claim bound: `updated_at < stored + 1ms` (millisecond
+// truncation on the way through the driver would otherwise miss an exact
+// match). Used by every dispatch claim that validated a row first.
+const noLaterThan = (value) => new Date(new Date(value).getTime() + 1);
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const crypto = require('crypto');
@@ -31,8 +36,9 @@ const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
-const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
+const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
+const { pestInsiderProofLive } = require('../config/feature-gates');
 const NewsletterSubscribers = require('./newsletter-subscribers');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
@@ -362,6 +368,38 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
     .whereIn(col('status'), RETRYABLE_DELIVERY_STATUSES);
 }
 
+// The rows a Resume would actually mail: retryable ledger rows with no
+// success signal whose subscriber is still active, not globally suppressed
+// and not an archived customer — the resume precheck's own predicate, in
+// one place. `sendId` is a value, or (with `correlate`) a column reference
+// such as `newsletter_sends.id` when the caller embeds this as an EXISTS
+// subquery.
+function outstandingEligibleDeliveries(sendId, { database = db, correlate = false } = {}) {
+  const base = database('newsletter_send_deliveries')
+    .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
+    .where({ 'newsletter_subscribers.status': 'active' });
+  // A correlated caller passes a column reference; whereColumn quotes it as
+  // an identifier, so nothing is ever interpolated into SQL (pre-push audit).
+  const scoped = correlate
+    ? base.whereColumn('newsletter_send_deliveries.send_id', sendId)
+    : base.where({ 'newsletter_send_deliveries.send_id': sendId });
+  return excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(scoped, 'newsletter_send_deliveries')));
+}
+
+// Whether a campaign still has recipients a Resume would mail. THE predicate
+// behind "correctable" (codex round 14 on #5187): a fully delivered campaign
+// has a ledger too, and its archive must stay what its recipients received,
+// so a ledger row alone never makes a campaign correctable — and neither do
+// rows whose recipients Resume would exclude and terminalize anyway
+// (unsubscribed, globally suppressed, archived; codex round 17 P2).
+async function hasOutstandingDeliveries(sendId, database = db) {
+  // Relinked first, like the resume precheck (codex round 18 P2): a row whose
+  // archived link has a live twin is outstanding, not excluded.
+  await NewsletterSubscribers.relinkArchivedLinkedSubscribers(database);
+  const row = await outstandingEligibleDeliveries(sendId, { database }).first('newsletter_send_deliveries.id');
+  return Boolean(row);
+}
+
 /**
  * THE terminal-skip write. A recipient that fails the eligibility predicate
  * (status active + not globally suppressed + no archived customer link)
@@ -454,6 +492,24 @@ async function sendCampaign(sendId, opts = {}) {
 
   const send = await db('newsletter_sends').where({ id: sendId }).first();
   if (!send) throw new Error('not found');
+  // A version-bound caller (the scheduler tick, the manual send) learns that
+  // the row changed BEFORE any pre-claim gate reads it (codex round 18 P2): a
+  // draft edited after the caller validated it (bodies cleared, segment
+  // emptied) reports VERSION_CHANGED and stays an editable draft, instead of
+  // failing a body or segment gate the caller records as a dispatch failure.
+  // The atomic claim below re-checks the same version.
+  if (opts.expect && !opts.preclaimed) {
+    const changed = send.status !== (opts.expect.status || 'scheduled')
+      || (opts.expect.updatedAt && !(new Date(send.updated_at) < noLaterThan(opts.expect.updatedAt)))
+      || (opts.expect.proofApprovedAt
+        && !(send.proof_approved_at && new Date(send.proof_approved_at) < noLaterThan(opts.expect.proofApprovedAt)));
+    if (changed) {
+      const claimedElsewhere = !['draft', 'scheduled'].includes(send.status);
+      const err = new Error(claimedElsewhere ? 'already sent or in progress' : 'row changed since it was validated');
+      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : 'VERSION_CHANGED';
+      throw err;
+    }
+  }
   if (!send.html_body && !send.text_body) throw new Error('body required');
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
@@ -584,15 +640,60 @@ async function sendCampaign(sendId, opts = {}) {
     // scheduler tick can both pick up the same row and double-send.
     // The race-loser is tagged so dispatch-side catch handlers can skip
     // the 'failed' flip because the row is actively sending under the winner.
-    const claimed = await db('newsletter_sends')
-      .where({ id: send.id })
-      .whereIn('status', ['draft', 'scheduled'])
+    let claim = db('newsletter_sends').where({ id: send.id });
+    if (opts.expect) {
+      // Version-bound claim (the scheduler tick): the row must still be the
+      // exact scheduled version the tick read and validated — same status,
+      // no later edit (updated_at), no later approval. A PATCH landing
+      // between the tick's read and this claim rewrites the content and
+      // moves updated_at (and returns the row to draft), so the claim finds
+      // nothing and edited, unapproved content is never broadcast. The +1ms
+      // absorbs sub-millisecond precision the driver drops on read.
+      claim = claim.where({ status: opts.expect.status || 'scheduled' });
+      if (opts.expect.updatedAt) claim = claim.where('updated_at', '<', noLaterThan(opts.expect.updatedAt));
+      if (opts.expect.proofApprovedAt) {
+        claim = claim.whereNotNull('proof_approved_at').where('proof_approved_at', '<', noLaterThan(opts.expect.proofApprovedAt));
+      }
+    } else {
+      claim = claim.whereIn('status', ['draft', 'scheduled']);
+    }
+    const claimed = await claim
       .update({ status: 'sending', sending_claim_token: claimToken, updated_at: new Date() })
       .returning('id');
     if (!claimed.length) {
-      const err = new Error('already sent or in progress');
-      err.code = 'ALREADY_CLAIMED';
+      // A version-bound claim finds nothing for two different reasons: the
+      // content was edited (the row is still draft/scheduled — nothing went
+      // out, VERSION_CHANGED), or another claimant (a tick, a second click)
+      // already took the row (sending/sent/failed — ALREADY_CLAIMED, the
+      // winner owns the outcome). Re-read to tell them apart, so a caller
+      // never reports "not sent" for a campaign the winner is sending
+      // (pre-push audit P1). A failed re-read falls back to VERSION_CHANGED.
+      let claimedElsewhere = !opts.expect;
+      if (opts.expect) {
+        try {
+          const current = await db('newsletter_sends').where({ id: send.id }).first('status');
+          claimedElsewhere = !!current?.status && !['draft', 'scheduled'].includes(current.status);
+        } catch (readErr) {
+          logger.warn(`[newsletter] claim re-read for ${send.id} failed: ${readErr.message}`);
+        }
+      }
+      const err = new Error(claimedElsewhere ? 'already sent or in progress' : 'row changed since it was validated');
+      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : 'VERSION_CHANGED';
       throw err;
+    }
+  }
+
+  // The delivery ledger is the audience boundary: a campaign that already
+  // has delivery rows is resumed, never re-seeded — on EVERY path. A
+  // partially delivered campaign returned to draft (an invalid resume, codex
+  // round 11) and sent again through the normal Send path must reach only
+  // its outstanding ledger rows, never subscribers who joined the segment
+  // since the first pass. Checked after the claim, so the row is ours.
+  if (!opts.existingDeliveriesOnly) {
+    const ledgerRow = await db('newsletter_send_deliveries').where({ send_id: send.id }).first('id');
+    if (ledgerRow) {
+      logger.info(`[newsletter] send ${send.id} already has a delivery ledger — sending to its outstanding rows only, not re-seeding the segment`);
+      opts = { ...opts, existingDeliveriesOnly: true };
     }
   }
 
@@ -1089,33 +1190,96 @@ async function prepareResumeCampaign(sendId) {
     err.code = 'STILL_SENDING';
     throw err;
   }
-
-  // Are there outstanding non-success deliveries to resume? If delivery
-  // rows exist and all of them are already terminal-success, bail early so
-  // the operator knows. If no rows exist yet, the first attempt failed
-  // before pre-seeding and sendCampaign should reseed from subscribers.
+  // A resume mails the rest of the list from what is stored NOW. A campaign
+  // persisted before a stricter claim scan shipped, or one edited after its
+  // first attempt failed, must pass the same validation the manual and
+  // scheduled paths run — before anything is claimed (codex round 8 P1).
+  // Read before validation: whether anyone has received this campaign decides
+  // what an invalid copy may do to its state (below).
   const deliveryTotal = await db('newsletter_send_deliveries')
     .where({ send_id: send.id })
     .count('* as c')
     .first();
   const totalDeliveries = Number(deliveryTotal?.c || 0);
+  const leaseCutoff = new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000);
+
+  const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
+  // A promoted legacy flagship has newsletter_type NULL; the manual and
+  // scheduled paths classify it by its calendar link and validate it as the
+  // flagship type — so does the resume path (codex round 12 P1): its
+  // outstanding recipients must never receive stored copy the current scan
+  // rejects.
+  const typedSend = requiresClaimValidation(send.newsletter_type)
+    ? send
+    : ((send.newsletter_type === null && await isFlagshipSend(send)) ? { ...send, newsletter_type: FLAGSHIP_TYPE_KEY } : null);
+  if (typedSend) {
+    const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
+    const lockedPrices = await lockedPricesForSend(typedSend, db);
+    const { errors } = validateNewsletterDraft(typedSend, { recipientCount: 1, lockedPrices });
+    if (errors.length > 0) {
+      // Nothing is claimed, and the campaign KEEPS its delivered state: a
+      // 'failed' or 'sent' row stays publicly readable (newsletter-feed.js
+      // serves sending/sent/failed — the web version the first batch
+      // received stays up) and is corrected in place through PATCH's
+      // correct-and-resume path; the next Resume re-validates the corrected
+      // copy and, through sendCampaign's ledger guard (codex round 11),
+      // reaches only the recipients still outstanding (codex round 12 P2 —
+      // a return to 'draft' made that link a 404). A live 'sending' owner
+      // was refused above; a STALE one moves to 'failed' with its claim
+      // token revoked — readable and editable, and a stuck original worker
+      // learns through its heartbeat ownership check that it no longer owns
+      // the campaign — as a compare-and-set on the inspected state and lease
+      // (pre-push audit P1).
+      let outcome = 'correct the copy and resume again';
+      if (totalDeliveries === 0 && (send.status === 'failed' || reclaimingStaleSend)) {
+        // Nobody received a zero-ledger campaign (the first attempt failed
+        // before any delivery row was seeded), so there is no web version
+        // to keep and no ledger to resume: it goes back to an editable draft
+        // with its approval cleared (codex round 13 P2) — compare-and-set on
+        // the inspected state and lease, like every other transition here.
+        const reset = db('newsletter_sends').where({ id: send.id, status: send.status });
+        if (reclaimingStaleSend) reset.where('updated_at', '<=', leaseCutoff);
+        const returned = (await reset.update({
+          status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null,
+          sending_claim_token: null, updated_at: new Date(),
+        })) > 0;
+        outcome = returned ? 'returned to draft for editing (nobody received it)' : 'it changed state meanwhile and was left as is';
+      } else if (reclaimingStaleSend) {
+        const released = (await db('newsletter_sends')
+          .where({ id: send.id, status: 'sending' })
+          .where('updated_at', '<=', leaseCutoff)
+          .update({ status: 'failed', sending_claim_token: null, updated_at: new Date() })) > 0;
+        if (released) outcome = 'its stale send claim was released; correct the copy and resume again';
+      }
+      const err = new Error(`campaign no longer passes validation; ${outcome}: ${errors.join('; ')}`);
+      err.code = 'VALIDATION_FAILED';
+      err.errors = errors;
+      throw err;
+    }
+  }
+
+  // Are there outstanding non-success deliveries to resume? If delivery
+  // rows exist and all of them are already terminal-success, bail early so
+  // the operator knows. If no rows exist yet, the first attempt failed
+  // before pre-seeding and sendCampaign should reseed from subscribers.
   if (totalDeliveries === 0 && send.status !== 'failed' && !reclaimingStaleSend) {
     const err = new Error('no outstanding deliveries to resume');
     err.code = 'NOTHING_TO_RESUME';
     throw err;
   }
   if (totalDeliveries > 0) {
+    // Repair stale archived links first, as every audience read does: a
+    // retryable row whose subscriber still points at an archived profile
+    // with a live same-email twin is outstanding once relinked, and must not
+    // be counted out (and terminalized below) before sendCampaign's own
+    // sweep would have relinked it (codex round 18 P2).
+    await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
     // Mirror the retry refetch's suppression + archived-customer exclusions so
     // the "anything left to resume?" count matches what sendCampaign will
     // actually send — otherwise a campaign whose only outstanding rows are
     // suppressed/archived would falsely report work remaining (and repeatedly
     // claim a resume that then selects nobody).
-    const outstanding = await excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(
-      db('newsletter_send_deliveries')
-        .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
-        .where({ 'newsletter_send_deliveries.send_id': send.id, 'newsletter_subscribers.status': 'active' }),
-      'newsletter_send_deliveries',
-    )))
+    const outstanding = await outstandingEligibleDeliveries(send.id)
       .count('* as c')
       .first();
     if (Number(outstanding?.c || 0) === 0) {
@@ -1151,8 +1315,15 @@ async function prepareResumeCampaign(sendId) {
   const claimQuery = db('newsletter_sends')
     .where({ id: send.id, status: send.status });
   if (reclaimingStaleSend) {
-    claimQuery.where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000));
+    claimQuery.where('updated_at', '<=', leaseCutoff);
   }
+  // The claim is bound to the exact row version this function validated
+  // (codex round 13 P1): a correction saved between the validation above
+  // and this claim leaves the claim empty, so the corrected, not yet
+  // validated copy is never mailed to the outstanding recipients — the
+  // operator resumes again and the new copy is validated first. The same
+  // bound the manual and scheduled dispatch paths carry.
+  if (send.updated_at) claimQuery.where('updated_at', '<', noLaterThan(send.updated_at));
   // A fresh owner token every (re)claim: a stale-reclaim rotates the token,
   // which is exactly what tells the stuck original worker (via its next
   // heartbeat ownership check) that it no longer owns the campaign.
@@ -1161,8 +1332,18 @@ async function prepareResumeCampaign(sendId) {
     .update({ status: 'sending', scheduled_for: null, sending_claim_token: claimToken, updated_at: new Date() })
     .returning('id');
   if (!claimed.length) {
-    const err = new Error('campaign was claimed by another worker');
-    err.code = 'ALREADY_CLAIMED';
+    // Edited (the row still holds the status we inspected) vs claimed by
+    // another worker (it moved on) — a lost claim is never reported as an
+    // edit or the other way round.
+    let current = null;
+    try { current = await db('newsletter_sends').where({ id: send.id }).first('status'); } catch (readErr) {
+      logger.warn(`[newsletter] resume claim re-read for ${send.id} failed: ${readErr.message}`);
+    }
+    const edited = current?.status === send.status;
+    const err = new Error(edited
+      ? 'campaign changed after it was validated; resume again to validate the new copy'
+      : 'campaign was claimed by another worker');
+    err.code = edited ? 'VERSION_CHANGED' : 'ALREADY_CLAIMED';
     throw err;
   }
 
@@ -1207,6 +1388,14 @@ async function processScheduledSends() {
       // is deliberately re-enabled.
       if (row.proof_approved_at && process.env.GATE_NEWSLETTER_PROOF_APPROVAL !== 'true') {
         logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
+        continue;
+      }
+      // Same rule for the type-specific switch: a proof-approved Pest
+      // Insider issue stays queued while GATE_PEST_INSIDER_PROOF is off. A
+      // Pest Insider issue scheduled by hand has no proof_approved_at and is
+      // unaffected.
+      if (row.proof_approved_at && row.newsletter_type === 'pest-insider-monthly' && !pestInsiderProofLive()) {
+        logger.warn(`[newsletter-scheduler] send ${row.id} is a proof-approved Pest Insider issue but GATE_PEST_INSIDER_PROOF is off — leaving it scheduled`);
         continue;
       }
       const eventSelection = await validateFlagshipEventSelection(row);
@@ -1283,7 +1472,12 @@ async function processScheduledSends() {
           continue;
         }
       }
-      await sendCampaign(row.id);
+      // The claim is bound to the version this tick read and validated: an
+      // edit (or re-approval) landing in between leaves the claim empty and
+      // the row is picked up again, re-validated, on a later tick.
+      await sendCampaign(row.id, {
+        expect: { status: 'scheduled', updatedAt: row.updated_at, proofApprovedAt: row.proof_approved_at },
+      });
       processed++;
     } catch (err) {
       // ALREADY_CLAIMED = another tick / manual send picked up this row
@@ -1291,6 +1485,10 @@ async function processScheduledSends() {
       // to failed or we'd overwrite an in-flight campaign.
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter-scheduler] send ${row.id} already claimed by another worker — skipping`);
+        continue;
+      }
+      if (err.code === 'VERSION_CHANGED') {
+        logger.info(`[newsletter-scheduler] send ${row.id} changed after this tick validated it — not dispatching this version`);
         continue;
       }
       if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
@@ -1346,6 +1544,8 @@ async function markEventsFeatured(send) {
   if (!Array.isArray(ids) || ids.length === 0) return;
 
   const { classifyFreshness } = require('./event-freshness');
+  let occurrences = send.event_occurrences || {};
+  if (typeof occurrences === 'string') { try { occurrences = JSON.parse(occurrences); } catch { occurrences = {}; } }
 
   // Lock + read + write each event row inside a transaction (SELECT ... FOR
   // UPDATE) so two sends that ship the same event can't both read the same
@@ -1363,6 +1563,11 @@ async function markEventsFeatured(send) {
       await trx('events_raw').where({ id }).update({
         times_featured: nextFeatured,
         last_featured_at: new Date(),
+        // The occurrence that shipped, so the calendar-year rule compares its
+        // own year (the send time can fall in the prior December). Prefer the
+        // occurrence locked into the draft: a feed may have advanced this row
+        // in place since the email was rendered.
+        last_featured_occurrence_at: occurrences[String(id)] || row.start_at || null,
         // The editorial star is consumed by shipping: drop featured back to
         // approved so the eligibility override can't re-admit the same
         // event in the next issue.
@@ -1375,4 +1580,7 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+module.exports = {
+  applyRetryableDeliveryFilter,
+  outstandingEligibleDeliveries,
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };

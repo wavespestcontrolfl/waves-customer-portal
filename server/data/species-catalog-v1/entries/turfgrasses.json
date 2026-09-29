@@ -1,0 +1,833 @@
+[
+  {
+    "slug": "st-augustinegrass",
+    "kind": "turfgrass",
+    "common_name": "St. Augustinegrass",
+    "aka": [
+      "st augustine"
+    ],
+    "aliases": [
+      "st augustinegrass",
+      "st augustine grass",
+      "st augustine",
+      "stenotaphrum secundatum",
+      "floratam"
+    ],
+    "scientific_name": "Stenotaphrum secundatum",
+    "rank": "species",
+    "group": "turfgrasses",
+    "subgroup": null,
+    "site_category": "Lawn grasses",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Wide, coarse blades with a blunt, rounded (boat-shaped) tip, not a point",
+      "Spreads only by above-ground runners (stolons) that root at the nodes \u2014 no underground rhizomes",
+      "Thick, dense, carpet-like turf in full sun; thins out fast in heavy shade on standard varieties",
+      "Blades fold flat and are noticeably wider than most other lawn grasses"
+    ],
+    "look_alikes": [
+      {
+        "slug": "centipedegrass",
+        "difference": "St. Augustine has wide, blunt blades on thick runners; centipedegrass is finer-bladed, pale apple-green, on shorter, thinner stolons.",
+        "next_photo": "A close-up of a single blade tip next to a coin, showing whether it is wide and blunt or narrow.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "seashore-paspalum",
+        "difference": "St. Augustine blades are wider and blunt-tipped; seashore paspalum has finer, pointed, blue-green blades and tolerates salt spray.",
+        "next_photo": "A close-up of the blade tip (rounded vs. pointed) and the overall color (deep green vs. blue-green).",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "bermudagrass",
+        "difference": "St. Augustine has wide, blunt blades and only surface runners; bermudagrass has fine, pointed blades and also spreads by underground rhizomes.",
+        "next_photo": "A close-up of a blade tip (blunt vs. pointed) plus a small dug-up patch showing whether there are underground rhizomes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "grass"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Florida's most common home lawn grass, known for its thick feel and better-than-average shade tolerance among warm-season grasses. A handful of pests and diseases target it specifically, so knowing this is what's growing helps narrow down brown or thinning patches.",
+      "fact": "St. Augustinegrass spreads only by surface runners, not underground rhizomes, which is part of why a damaged patch can take a while to fill back in on its own.",
+      "blurb": "Florida's most common lawn grass \u2014 thick, wide-bladed, and a bit more shade-tolerant than most warm-season turf."
+    },
+    "tech_notes": "Confirm cultivar only if relevant to shade or chinch bug resistance history (Floratam vs. Palmetto/CitraBlue); most homeowner lawns are Floratam or an unnamed standard type.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh010"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c45f968a3271dc41a6e70a0c74fc30d3e578a758cd844a682bad95a3744d4fa6"
+    },
+    "role": "lawn_grass",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "turf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "stolons"
+      ],
+      "id_cues": [
+        "Blade tip is blunt and rounded, almost boat-shaped, not pointed",
+        "Roll a runner between your fingers \u2014 thick, round, rooting at each node along the soil surface",
+        "No rhizomes: lift a runner and the whole thing comes up, roots only at the nodes",
+        "Blades are noticeably wider (6-10 mm) than bahia, bermuda, or centipede, unless it's a dwarf cultivar"
+      ],
+      "common_problems": [
+        "chinch-bug",
+        "gray-leaf-spot",
+        "large-patch",
+        "take-all-root-rot",
+        "white-grub",
+        "sod-webworm"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "bahiagrass",
+    "kind": "turfgrass",
+    "common_name": "Bahiagrass",
+    "aka": [],
+    "aliases": [
+      "bahiagrass",
+      "bahia grass",
+      "bahia",
+      "paspalum notatum",
+      "argentine bahia",
+      "pensacola bahia"
+    ],
+    "scientific_name": "Paspalum notatum",
+    "rank": "species",
+    "group": "turfgrasses",
+    "subgroup": null,
+    "site_category": "Lawn grasses",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "A distinctive V- or Y-shaped seed stalk with two branches and purple anthers, standing well above the mowed turf",
+      "Open, somewhat sparse turf rather than a dense carpet, with visible gaps between plants",
+      "Coarser, lighter-green blades than St. Augustine, growing from a low, dense base",
+      "Thick, shallow rhizomes just under the soil surface"
+    ],
+    "look_alikes": [
+      {
+        "slug": "st-augustinegrass",
+        "difference": "Bahiagrass is sparser with a tall Y-shaped seed stalk and no surface runners; St. Augustine is a dense mat of wide, blunt runners, no seed stalk when mowed.",
+        "next_photo": "A wide shot showing whether tall Y-shaped seed stalks are present, plus a close-up of a blade tip.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "crabgrass",
+        "difference": "Bahiagrass is a perennial with a Y-shaped seed stalk and thick rhizomes; crabgrass is a sprawling annual with several finger-like seed branches and no rhizomes.",
+        "next_photo": "A close-up of the seed head (two branches vs. several finger-like branches) and whether the base has a mat of rhizomes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "grass"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tough, low-input lawn grass often used on large lots or areas without irrigation because it tolerates drought and poor, sandy soil well. It never forms as dense a carpet as St. Augustine, so some open turf between plants is normal, not a sign of a problem.",
+      "fact": "Its tall, Y-shaped seed stalks pop back up fast after mowing, which is why bahia lawns often get mowed just to keep the seed heads down rather than to shape the grass itself.",
+      "blurb": "A tough, low-water lawn grass with a tell-tale Y-shaped seed stalk; open turf between plants is normal, not a problem."
+    },
+    "tech_notes": "Distinguish Argentine (denser, shorter seed heads) from Pensacola (narrower blades, taller, more abundant seed heads) if cultivar matters to the customer's expectations.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh006",
+      "https://ask.ifas.ufl.edu/publication/ag342"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "6e35940a0ee4b1be5888458a65cadcdad54847d1ca96738f9ca5c995d8502dfd"
+    },
+    "role": "lawn_grass",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "turf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "rhizomes"
+      ],
+      "id_cues": [
+        "Tall, forked (Y-shaped) seed stalk with purple anthers, standing above the mowed height",
+        "Open, somewhat sparse stand rather than a solid mat, even when healthy",
+        "Dig near the base \u2014 thick, shallow rhizomes just under the surface",
+        "Coarser, lighter-green blades than St. Augustine or centipede"
+      ],
+      "common_problems": [
+        "mole-cricket",
+        "dollar-spot",
+        "mower-scalping"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "zoysiagrass",
+    "kind": "turfgrass",
+    "common_name": "Zoysiagrass",
+    "aka": [],
+    "aliases": [
+      "zoysiagrass",
+      "zoysia grass",
+      "zoysia",
+      "empire zoysia"
+    ],
+    "scientific_name": "Zoysia spp.",
+    "rank": "genus",
+    "group": "turfgrasses",
+    "subgroup": null,
+    "site_category": "Lawn grasses",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Dense, stiff, carpet-like turf that feels notably firm and springy underfoot",
+      "Spreads by both surface runners (stolons) and underground rhizomes",
+      "Leaf texture ranges from coarse to very fine depending on variety, but is always stiffer than St. Augustine",
+      "Slow to green up in spring compared to other warm-season grasses"
+    ],
+    "look_alikes": [
+      {
+        "slug": "bermudagrass",
+        "difference": "Zoysiagrass is stiffer and much slower-growing, rarely needing weekly mowing; bermudagrass is soft, fast-growing, and quickly spreads into beds if left unmowed.",
+        "next_photo": "Not reliably separable from a photo alone at fine-textured cultivars \u2014 a technician compares growth rate over a week and blade stiffness.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "centipedegrass",
+        "difference": "Zoysiagrass is dark green and stiff-bladed with rhizomes; centipedegrass is pale apple-green, softer, and spreads only by surface stolons with no rhizomes.",
+        "next_photo": "A close-up of blade color (dark green vs. pale green) and a dug-up section showing rhizomes or their absence.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "grass"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A dense, stiff-bladed lawn grass chosen for its firm, carpet-like feel, though it costs more to establish and is slower to recover from damage than St. Augustine. It stays greener under wear than most Florida lawns but is genuinely slow to fill in bare spots.",
+      "fact": "Zoysiagrass leaves contain more silica and lignin than other lawn grasses, which is part of why it feels so much stiffer underfoot and is tougher on mower blades.",
+      "blurb": "A dense, stiff, carpet-like lawn grass \u2014 slower to green up and slower to heal than St. Augustine."
+    },
+    "tech_notes": "Check thatch depth on established zoysia \u2014 a common cause of scalping complaints and disease pressure. Large patch is the most consistently reported disease locally.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh011"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "7409545e58404f40cac3992ba8c3316eb399d511bfefdd2c4140c8415af4ce5f"
+    },
+    "role": "lawn_grass",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "turf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "stolons",
+        "rhizomes"
+      ],
+      "id_cues": [
+        "Feels noticeably stiff and dense underfoot compared to St. Augustine or bahia",
+        "Dig a small plug \u2014 both surface runners and underground rhizomes are present",
+        "Very slow to green up after winter dormancy compared to other lawn grasses nearby",
+        "Leaf texture varies from coarse to fine by cultivar, but always feels stiffer than St. Augustine"
+      ],
+      "common_problems": [
+        "large-patch",
+        "dollar-spot",
+        "turf-rust",
+        "hunting-billbug",
+        "white-grub",
+        "sod-webworm"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "bermudagrass",
+    "kind": "turfgrass",
+    "common_name": "Bermudagrass",
+    "aka": [],
+    "aliases": [
+      "bermudagrass",
+      "bermuda grass",
+      "bermuda",
+      "cynodon dactylon"
+    ],
+    "scientific_name": "Cynodon dactylon",
+    "rank": "species",
+    "group": "turfgrasses",
+    "subgroup": null,
+    "site_category": "Lawn grasses",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Fine, pointed blades in dense, fast-growing turf that needs full sun",
+      "Spreads aggressively by both surface runners and underground rhizomes, often creeping into beds and driveway cracks",
+      "Noticeably faster growth than surrounding St. Augustine or bahia, needing more frequent mowing",
+      "Forms a thin, wiry mat that can crowd out a shaded or weakened St. Augustine lawn"
+    ],
+    "look_alikes": [
+      {
+        "slug": "st-augustinegrass",
+        "difference": "Bermudagrass has fine, pointed blades and spreads by rhizomes too; St. Augustine has wide, blunt blades, only surface runners. A wiry patch is usually bermuda.",
+        "next_photo": "A close-up of a blade tip (pointed vs. blunt) and a dug-up patch showing underground rhizomes.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "torpedograss",
+        "difference": "Bermudagrass has fine, soft blades throughout; torpedograss has stiffer, coarser blades and sharply pointed rhizome tips that can pierce bare skin.",
+        "next_photo": "Wearing sturdy gloves, a close-up of a dug-up rhizome tip \u2014 a hard, sharp point that can pierce skin (torpedograss) versus a blunt, thin rhizome (bermuda).",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "zoysiagrass",
+        "difference": "Bermudagrass is soft and fast-growing, quickly overtaking anything left unmowed for a week; zoysiagrass is stiffer and much slower-growing.",
+        "next_photo": "Not reliably separable from a single photo \u2014 a technician compares growth rate over about a week.",
+        "photo_can_confirm": false
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "grass"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fine-bladed, full-sun grass some homeowners plant on purpose, but that more often shows up as a fast, wiry patch invading a thinning St. Augustine lawn \u2014 a classic bermudagrass-invades-St.-Augustine situation. A technician evaluates coverage and turf type before recommending an approach.",
+      "fact": "Bermudagrass spreads by both surface runners and underground rhizomes at once, which is part of why a small patch can cover a whole bed or lawn section within a season.",
+      "blurb": "A fine, fast-spreading grass \u2014 a normal lawn choice on its own, but a tough weed once it invades a St. Augustine lawn."
+    },
+    "tech_notes": "When present as an invader in St. Augustine, evaluate coverage percentage and customer tolerance before recommending renovation vs. spot management; no single treatment removes established bermuda from an intact St. Augustine stand without also affecting the desired grass.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh007"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c3bff8fd46c6622d0ce7a3fad6c4b32e6d5a01d81adade9e9aac6707106db6e4"
+    },
+    "role": "lawn_grass",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "turf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "stolons",
+        "rhizomes"
+      ],
+      "id_cues": [
+        "Fine, pointed blades noticeably softer and narrower than St. Augustine",
+        "Dig at the edge of a patch \u2014 both surface runners and underground rhizomes are present",
+        "Grows noticeably faster than the surrounding lawn between mowings",
+        "Forms a thin, wiry mat, often first visible along driveway or bed edges before spreading inward"
+      ],
+      "common_problems": [
+        "sting-nematode",
+        "mole-cricket",
+        "sod-webworm",
+        "dollar-spot",
+        "large-patch",
+        "leaf-spot-melting-out"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "centipedegrass",
+    "kind": "turfgrass",
+    "common_name": "Centipedegrass",
+    "aka": [],
+    "aliases": [
+      "centipedegrass",
+      "centipede grass",
+      "eremochloa ophiuroides"
+    ],
+    "scientific_name": "Eremochloa ophiuroides",
+    "rank": "species",
+    "group": "turfgrasses",
+    "subgroup": null,
+    "site_category": "Lawn grasses",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Naturally pale, apple-green color, lighter than any other common Florida lawn grass",
+      "Medium-textured blades, 3-5 mm wide, with a hairy leaf margin toward the base",
+      "Low, slow-growing turf that spreads only by surface stolons \u2014 no rhizomes",
+      "Tends toward yellowing in cool weather or on higher-pH soil, even when otherwise healthy"
+    ],
+    "look_alikes": [
+      {
+        "slug": "st-augustinegrass",
+        "difference": "Centipedegrass is finer-bladed and noticeably paler apple-green; St. Augustine has wide, blunt, deep-green blades on thick runners.",
+        "next_photo": "A side-by-side color comparison in the same light, plus a close-up of blade width.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "iron-deficiency-turf",
+        "difference": "Centipedegrass is uniformly pale apple-green all the time; iron deficiency shows as yellowing between green veins on turf that is normally deeper green.",
+        "next_photo": "A close-up of a single blade \u2014 green veins visible in yellow tissue (deficiency) or evenly pale all over (normal centipede color).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "grass"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A low-input lawn grass that is naturally pale apple-green rather than deep green, which is normal, not a nutrient problem. It grows slowly and needs less mowing than St. Augustine, but is slower to recover from bare spots and sensitive to high soil pH in parts of Southwest Florida.",
+      "fact": "Its name comes from the short, jointed stolons that are said to resemble a centipede's body as they creep across the ground.",
+      "blurb": "A slow-growing, naturally pale-green lawn grass \u2014 its light color is normal, not a deficiency."
+    },
+    "tech_notes": "Rule out true iron/nutrient chlorosis (vein pattern, blotchy or striped) against the grass's normal uniform pale color before recommending any nutrition correction; confirm soil pH history if decline is reported.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh009"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "SWFL prevalence: confirmed via the cited UF/IFAS source (ask.ifas.ufl.edu/lh009), which states centipedegrass is \"well adapted to the climate and soils of Central and Northern Florida\" and is \"the most common home lawn grass in the Florida Panhandle,\" and warns \"if soil pH is high, centipedegrass may not be an appropriate choice\" \u2014 consistent with SWFL's higher-pH coastal soils. Range kept \"occasional\" rather than \"common.\"",
+      "approval_hash": "dfe4c48bab93b99a3edb7df0551bc637b90113f83ada881a8f2eb7ef2292cff7"
+    },
+    "role": "lawn_grass",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "turf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "stolons"
+      ],
+      "id_cues": [
+        "Pale, apple-green color that looks light even when the lawn is healthy",
+        "Blades 3-5 mm wide with fine hairs near the base of the leaf margin",
+        "Dig at the edge of a patch \u2014 surface stolons only, no rhizomes",
+        "Low, slow-growing habit that rarely needs mowing more than every 1-2 weeks"
+      ],
+      "common_problems": [
+        "take-all-root-rot",
+        "large-patch",
+        "dollar-spot",
+        "iron-deficiency-turf"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "seashore-paspalum",
+    "kind": "turfgrass",
+    "common_name": "Seashore Paspalum",
+    "aka": [],
+    "aliases": [
+      "seashore paspalum",
+      "paspalum vaginatum"
+    ],
+    "scientific_name": "Paspalum vaginatum",
+    "rank": "species",
+    "group": "turfgrasses",
+    "subgroup": null,
+    "site_category": "Lawn grasses",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Fine to medium blue-green blades, tapering to a sharp point",
+      "Dense, carpet-like turf that spreads by both surface runners and underground rhizomes",
+      "Stays green in salt-exposed soil (near canals, seawalls, or coastal spray) where other grasses would burn or thin",
+      "Blades often have a slight blue-green bloom, more blue-toned than St. Augustine or bahia"
+    ],
+    "look_alikes": [
+      {
+        "slug": "st-augustinegrass",
+        "difference": "Seashore paspalum has fine, pointed, blue-green blades and thrives on salty soil; St. Augustine has wide, blunt blades that thin under salt exposure.",
+        "next_photo": "A close-up of blade width and tip shape, plus the location (near seawall/canal vs. a typical yard).",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "bermudagrass",
+        "difference": "Both spread by runners and rhizomes; paspalum has a blue-green cast, planted near water for salt; bermudagrass is yellow-green and grows anywhere sunny.",
+        "next_photo": "Not reliably separable from a photo alone \u2014 a technician checks the site's salt exposure history and growth pattern.",
+        "photo_can_confirm": false
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "grass"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A salt-tolerant lawn grass most often chosen for waterfront properties, canal banks, and areas that get regular salt spray, where it will stay green longer than most other Florida turf. It needs the same careful mowing height as other fine-bladed grasses \u2014 cutting it too short stresses it and invites disease.",
+      "fact": "It's one of the few turfgrasses that can be irrigated with brackish or even seawater in a pinch, which is why it shows up so often right along canals and seawalls in coastal Southwest Florida.",
+      "blurb": "A salt-tolerant lawn grass for waterfront yards and canal banks, where most other turf would burn back."
+    },
+    "tech_notes": "Avoid recommending scalping on seashore paspalum \u2014 cutting below its recommended height stresses the turf and can trigger disease; check mower height setting on any complaint of thinning or disease on this grass.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/LH005",
+      "https://ufdcimages.uflib.ufl.edu/IR/00/00/17/53/00001/EP15300.pdf"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "235ac96e08a45078cf924e758643fb2c27b252d9714584c96fa78d8302660833"
+    },
+    "role": "lawn_grass",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "turf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "stolons",
+        "rhizomes"
+      ],
+      "id_cues": [
+        "Blue-green blades with a slight waxy bloom, tapering to a sharp point",
+        "Dig near the base \u2014 both surface runners and underground rhizomes are present",
+        "Stays green in soil exposed to salt spray or brackish irrigation where other grasses burn or thin",
+        "Fine to medium texture, denser and more carpet-like than bahia"
+      ],
+      "common_problems": [
+        "mole-cricket",
+        "dollar-spot",
+        "large-patch"
+      ],
+      "frond_pattern_note": null
+    }
+  }
+]

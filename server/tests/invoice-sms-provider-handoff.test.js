@@ -148,6 +148,19 @@ describe('invoice SMS provider handoff', () => {
     ))).toBe(false);
   });
 
+  test('threads the rendered template key (invoice_sent, no prepay/upfront variant) through to sendCustomerMessage metadata', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SM123',
+    });
+
+    await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+      original_message_type: 'invoice',
+      templateKey: 'invoice_sent',
+    });
+  });
+
   test('a combined send stamps its accepted Text leg without finalizing before Email starts', async () => {
     const invoiceQueries = [];
     db.mockImplementation((table) => {
@@ -486,6 +499,111 @@ describe('invoice SMS provider handoff', () => {
         .some((change) => typeof change.status === 'string' && !change.status.startsWith('CASE WHEN'));
     }
 
+    test.each(['prior', 'bell', 'bell+email', 'prior+email', 'prior+old-email', 'prior+old-text'])('settled App %s finalizes once and preserves unfinished siblings', async (mode) => {
+      const activityInserts = [], smsLogInserts = [], visibleAt = new Date(Date.now() - 86400000);
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts, smsLogInserts });
+      db.mockImplementation(mock);
+      const push = mode.startsWith('bell') ? { sent: false, deliveryOutcome: 'uncertain', bellPersisted: true }
+        : { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt };
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', channelResults: {
+        push, ...(['prior', 'bell'].includes(mode) ? {} : mode === 'prior+old-email' ? { email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: visibleAt } } : mode === 'prior+old-text' ? { sms: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: visibleAt } } : { email: { sent: false, deliveryOutcome: 'not_sent', retryable: true } }),
+      } });
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result.sent).toBe(true);
+      expect(result.pendingChannelQueued === true).toBe(['bell+email', 'prior+email'].includes(mode));
+      expect(claimWasRestored(invoiceQueries)).toBe(false);
+      const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
+      expect(stamp.sms_sent_at).toEqual(mode.startsWith('bell') ? expect.any(Date) : 'COALESCE(sms_sent_at, ?::timestamptz)');
+      if (!mode.startsWith('bell')) expect(db.raw).toHaveBeenCalledWith('COALESCE(sms_sent_at, ?::timestamptz)', [visibleAt]);
+      if (mode === 'prior+old-email') {
+        expect(stamp.email_sent_at).toBe('COALESCE(email_sent_at, ?::timestamptz)');
+        expect(db.raw).toHaveBeenCalledWith('COALESCE(email_sent_at, ?::timestamptz)', [visibleAt]);
+      }
+      if (mode === 'prior+old-text') expect(db.raw).toHaveBeenCalledWith('COALESCE(sms_sent_at, ?::timestamptz)', [visibleAt]);
+      if (!mode.startsWith('bell')) {
+        expect(result.deduped).toBe(true);
+        expect(stamp.sent_at).toBe('COALESCE(sent_at, ?::timestamptz)');
+        expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [visibleAt]);
+        expect(activityInserts).toHaveLength(0);
+      }
+    });
+
+    test('old App and later old Email repair their own stamps while aggregate time follows the latest original event', async () => {
+      const appAt = new Date('2026-05-20T14:00:00Z');
+      const emailAt = new Date('2026-05-21T14:00:00Z');
+      const activityInserts = [];
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', deduped: true,
+        channelResults: {
+          push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+          email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: emailAt },
+        } });
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true, deduped: true, eventVisibleAt: emailAt });
+
+      const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
+      expect(stamp).toMatchObject({
+        sent_at: 'COALESCE(sent_at, ?::timestamptz)',
+        sms_sent_at: 'COALESCE(sms_sent_at, ?::timestamptz)',
+        email_sent_at: 'COALESCE(email_sent_at, ?::timestamptz)',
+      });
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [emailAt]);
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(sms_sent_at, ?::timestamptz)', [appAt]);
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(email_sent_at, ?::timestamptz)', [emailAt]);
+      expect(activityInserts).toHaveLength(0);
+    });
+
+    test.each([
+      ['stored acceptance', new Date('2026-05-20T14:00:00Z'), new Date('2026-05-20T14:00:00Z')],
+      ['unusable evidence', 'invalid', null],
+    ])('deduped Email uses %s when repairing a missing invoice stamp', async (_label, sentAt, expectedAt) => {
+      const activityInserts = [];
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', deduped: true,
+        channelResults: { email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt } } });
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true, deduped: true });
+
+      const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
+      expect(stamp.email_sent_at).toBe('COALESCE(email_sent_at, ?::timestamptz)');
+      expect(stamp.sent_at).toBe('COALESCE(sent_at, ?::timestamptz)');
+      expect(stamp).not.toHaveProperty('sms_sent_at');
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(email_sent_at, ?::timestamptz)', [expectedAt]);
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [expectedAt]);
+      expect(activityInserts).toHaveLength(0);
+    });
+
+    test.each(['fresh', 'retryable'])('old Email plus %s Text keeps its sibling outcome', async (textOutcome) => {
+      const originalAt = new Date('2026-05-20T14:00:00Z');
+      const activityInserts = [], smsLogInserts = [];
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts, smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockResolvedValue({ sent: textOutcome === 'fresh', deliveryOutcome: textOutcome === 'fresh' ? 'accepted' : 'not_sent',
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: originalAt },
+          sms: textOutcome === 'fresh' ? { sent: true, deliveryOutcome: 'accepted' }
+            : { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_CHANNEL_FAILED' },
+        } });
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
+      if (textOutcome === 'fresh') {
+        expect(result.deduped).not.toBe(true);
+        expect(stamp.sent_at).toEqual(expect.any(Date));
+        expect(activityInserts).toHaveLength(1);
+      } else {
+        expect(result).toMatchObject({ deduped: true, pendingChannel: 'sms', pendingChannelQueued: true });
+        expect(stamp.sent_at).toBe('COALESCE(sent_at, ?::timestamptz)');
+        expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [originalAt]);
+        expect(activityInserts).toHaveLength(0);
+        expect(smsLogInserts).toHaveLength(1);
+      }
+    });
+
     test('an accepted Email leg is finalized and never restores the claim when the Text leg still needs a retryable retry', async () => {
       const activityInserts = [];
       const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts });
@@ -792,6 +910,8 @@ describe('invoice SMS provider handoff', () => {
         // partial_fanout_attempt: a replay just re-fans-out everything.
         partial_fanout_retry: true,
         original_block_code: 'BILLING_CHANNEL_FAILED',
+        // The frozen body's template row, forwarded by the scheduler replay.
+        template_key: 'invoice_sent',
         replay_purpose: 'payment_link',
         refresh_customer_phone: true,
         resolve_from_by_customer: true,

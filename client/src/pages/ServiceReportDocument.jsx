@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
@@ -251,7 +251,7 @@ const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 // that consolidation necessary; this local pass stays as a backstop for any
 // path that reaches the document without going through that boundary, and
 // must never become the primary enforcement point again.
-function sanitizeReentryCopy(value) {
+export function sanitizeReentryCopy(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
@@ -1025,6 +1025,40 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
+            pestV2.expectations is built server-side (pest-report-v2.js) with
+            forecastHeavyRain always false for this render (mode !== 'live'
+            in reports-public.js) — the NWS forecast piece never reaches a
+            permanent PDF; everything here is already PDF-safe as delivered. */}
+        {pestV2?.expectations?.rain?.lines?.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>Rain and your treatment</SectionHeader>
+            {pestV2.expectations.rain.lines.map((line) => (
+              <p key={line} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{line}</p>
+            ))}
+          </div>
+        )}
+        {pestV2?.expectations?.spiders?.expectation && (
+          <div className="doc-keep">
+            <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
+            {pestV2.expectations.spiders.whatWeDid && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.whatWeDid}</p>
+            )}
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.expectation}</p>
+            {pestV2.expectations.spiders.nextStep && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.nextStep}</p>
+            )}
+          </div>
+        )}
+        {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>What to expect</SectionHeader>
+            {pestV2.expectations.whatToExpect.lines.map((line) => (
+              <Bullet key={line}>{line}</Bullet>
+            ))}
+          </div>
+        )}
+
         {/* A promised revisit is a commitment — dropping it from the permanent
             artifact leaves the customer with no record of it. */}
         {v2?.followUp && (v2.followUp.headline || v2.followUp.reason) && (
@@ -1260,6 +1294,17 @@ export default function ServiceReportDocument({ data, token }) {
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}
+                            {/* Owner-approved product wording
+                                (GATE_REPORT_PRODUCT_COPY, 2026-09-28) is
+                                LIVE-VIEW ONLY (codex P1 2026-09-28): the
+                                server strips `report_copy` from every
+                                pdf/static/sms_preview payload before it
+                                reaches this document (the PDF cache key
+                                doesn't vary on the gate), so there is
+                                nothing to render here — see
+                                stripLiveOnlyReportProductCopy in
+                                report-data.js and ReportViewPage.jsx for the
+                                live-view rendering of this field. */}
                             {/* Legacy lawn reports (no reportV2) carry approved
                                 watering-in guidance ONLY here — dropping it
                                 loses a required instruction. */}
@@ -1631,6 +1676,13 @@ export default function ServiceReportDocument({ data, token }) {
                 autodetection is optional, and this is the only route to the
                 analysis this record intentionally omits */}
             <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+            <br />
+            {/* Owner ask 2026-09-28: every record of service links to the
+                public Products & Safety page. The footer prints on every
+                record, product rows or not; the URL shows in full so a
+                printed copy carries it. */}
+            Every product we use and our safety protocol:{' '}
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: NAVY, textDecoration: 'underline' }}>{WAVES_PRODUCTS_SAFETY_URL}</a>
             <br />
             This report is provided for your records. This is not an invoice.
             {/* Claim tamper-evidence only when photos are actually displayed

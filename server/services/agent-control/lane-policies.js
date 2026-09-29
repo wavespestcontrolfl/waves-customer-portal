@@ -77,6 +77,11 @@ const LANE_RUNTIME = {
   'sms-commitment-fulfillment': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'sms-commitment-fulfillment', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  // GATE_REVIEW_DAY0_CONTEXT: classifies a Day-0 review-ask topic from a
+  // customer's texts + completion notes and stores it on review_sequences —
+  // no customer-visible output of its own, so internal_write like sms_intent.
+  review_topic: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  sms_service_identity: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
   // queue retries later — no cross-provider chain, no deterministic answer.
   contact_correction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M3' },
@@ -281,6 +286,7 @@ const LANE_RUNTIME = {
   // SDK call in ledgerCall (all were direct_sdk, Codex r14).
   codex_remediation: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
   footprint_claim: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
+  business_name_confirm: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // offline (Codex r16): classifyQueryIntent calls Anthropic only and drops to keyword rules on a miss (seo-diagnosis-tools.js).
   seo_intent: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   // M3 (Codex r16): the Monday cron runs generateWeeklyReport unattended, persists seo_advisor_reports and texts the owner — same shape as agent_bi.
@@ -296,6 +302,7 @@ const LANE_RUNTIME = {
   // M3: the gated runner submits allowlisted listings with no per-item approval and records evidence in seo_link_attempts (Codex r12).
   signup_worker: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
   link_investigator: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
+  internal_link_judge: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // event, not daily (Codex r17): the 3am tick returns before the prober when GATE_SEO_INTELLIGENCE is off, and each provider
   // skips without credentials — a dark or unconfigured lane must not page as gone-silent.
   mentions_prober: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'search', fallback_class: 'measurement', eval_family: null, ...LONG_BATCH },
@@ -312,9 +319,19 @@ const LANE_RUNTIME = {
   // draft_for_human + M2 (Codex r18): a Veo clip is only made for a draft campaign run and lands in the approval queue.
   video_gen: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, maturity: 'M2', ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },
-  // events_editorial (main 2026-09-03): curation + normalizing copy on the two-provider contentDraft policy; cron batch.
-  // customer_visible: curation can flip events_raw.admin_status to approved, making model-selected events publishable with no human (pre-push P1).
-  events_editorial: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
+  // events_editorial (main 2026-09-03; split 2026-09-27 — see events_curation
+  // below): normalizing (freshness/type classification, venue cleanup) on
+  // the two-provider contentDraft policy; cron batch. Never flips
+  // admin_status, so this stays internal_write (events_curation is the
+  // customer-visible half).
+  events_editorial: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
+  // events_curation (split from events_editorial 2026-09-27, owner ruling:
+  // move scoring to the newsletterWriter policy — Opus 5.5 effort max —
+  // and stop penalizing missing price / unclear age so the weekly issue
+  // stops starving at 0 approved events). customer_visible: curation can
+  // flip events_raw.admin_status to approved, making model-selected events
+  // publishable with no human (pre-push P1, unchanged by the split).
+  events_curation: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
   // M3 (Codex r16): the 8am cron runs generateDailyAdvice unattended, persists ad_advisor_reports and texts the owner.
   ads_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3' },
 
@@ -345,6 +362,8 @@ const LANE_RUNTIME = {
   // ── Customer portal ──
   // M3 (Codex r17): processIntakeMessage returns the reply to the public intake route and records it sent_to_customer with its session audit.
   ask_waves: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M3' },
+  // #4899: a yes swaps the Ask Waves reply for the emergency script, so the verdict is customer-visible.
+  ask_waves_emergency_check: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M3' },
   // offline + M3: single Anthropic client, canned error copy; tools run without approval and every call is persisted to agent_messages (Codex r12).
   // direct_sdk: that client is the raw SDK — agent_messages is an audit trail, not the adapter call ledger (Codex r14).
   portal_assistant: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },

@@ -13,6 +13,8 @@ jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction:
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
 jest.mock('../services/twilio-failure-alerts', () => ({ maskSid: (s) => String(s || '').slice(-4) }));
+const mockRecordGap = jest.fn(async () => []);
+jest.mock('../services/agent-gap-reports', () => ({ recordGap: (...args) => mockRecordGap(...args) }));
 
 const { notifyAdmin: triggerNotification } = require('../services/notification-service');
 const transfer = require('../services/voice-agent/relay-transfer');
@@ -110,6 +112,24 @@ describe('executeTool transfer_to_office', () => {
     expect(ctx.say).toHaveBeenCalledWith(expect.stringMatching(/connect you with a Waves team member/));
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
     expect(triggerNotification).not.toHaveBeenCalled();
+    // Gap reports: get_invoice_history failed on this call, so the handoff is
+    // an outage talking — no gap.
+    expect(mockRecordGap).not.toHaveBeenCalled();
+  });
+
+  test('a transfer Sandy marks not_supported, with no failed tool, records what the caller wanted', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { ctx, writes } = ctxFor({ handoffFacts: () => ({ verificationTier: 'full', from: '+19415551234', tools: [{ name: 'get_account_overview', ok: true }], turnCount: 2 }) });
+    await executeTool('transfer_to_office', { intent: 'pool service', summary: 'Wants a quote for pool cleaning', not_supported: true }, ctx);
+    expect(mockRecordGap).toHaveBeenCalledWith({ source: 'phone-agent', summary: writes[0].summary, attempted: 'Handed to the office' });
+  });
+
+  test('an ordinary by-design transfer (no not_supported) records no gap', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { ctx } = ctxFor({ handoffFacts: () => ({ verificationTier: 'full', from: '+19415551234', tools: [], turnCount: 2 }) });
+    await executeTool('transfer_to_office', { intent: 'cancel service', summary: 'Wants to cancel' }, ctx);
+    expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
+    expect(mockRecordGap).not.toHaveBeenCalled();
   });
 
   test('a long summary is clamped to twenty words', () => {
@@ -127,6 +147,7 @@ describe('executeTool transfer_to_office', () => {
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
     await new Promise((r) => setImmediate(r));
     expect(triggerNotification).not.toHaveBeenCalled();
+    expect(mockRecordGap).not.toHaveBeenCalled(); // never rang the office — no gap
   });
 
   test('full write failed, fallback REJECTED (0 rows — ownership lost meanwhile) ⇒ ABORT', async () => {
@@ -175,6 +196,16 @@ describe('executeTool transfer_to_office', () => {
     await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx);
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
+    expect(mockRecordGap).not.toHaveBeenCalled(); // a dry run is not a gap
+  });
+
+  test('the provider-failure recovery transfer records no gap (an outage, not a missing feature)', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { RECOVERY_INTENT } = require('../services/voice-agent/relay-transfer');
+    const { ctx } = ctxFor();
+    await executeTool('transfer_to_office', { intent: RECOVERY_INTENT, summary: 'Sandy had repeated system trouble on this call', not_supported: true }, ctx);
+    expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
+    expect(mockRecordGap).not.toHaveBeenCalled();
   });
 
   test('one transfer per call — a second call is a no-op', async () => {

@@ -199,7 +199,12 @@ class AvailabilityEngine {
         // ENTIRELY for every estimate-linked call (Codex r4 P1: this also
         // silently undid the r3 P1 global-stop merge and the original r1
         // mirror for that whole class of caller). Read the real column.
-        let candidateServiceType = 'General Pest Control';
+        // opts.serviceType (PR #5119 Codex r3): a caller with no estimate
+        // but a known service — the SMS drafter's live reschedule path
+        // names the customer's own next visit — so the expected-minutes
+        // credit is that service's, not the General Pest default. An
+        // estimate's service_interest still wins when both are present.
+        let candidateServiceType = (typeof opts.serviceType === 'string' && opts.serviceType.trim()) || 'General Pest Control';
         if (estimateId) {
           const est = await db('estimates').where('id', estimateId).first('customer_id', 'service_interest');
           if (!pinCustomerId) pinCustomerId = est?.customer_id || null;

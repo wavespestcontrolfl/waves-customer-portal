@@ -626,15 +626,26 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
   // isAllowedOverrideModel): this process never sets
   // GATE_VOICE_RELAY_OPENAI on itself (see above), so a gate-aware check
   // here would always reject a perfectly good OpenAI candidate whose actual
-  // gate only turns on in the child conditions.
-  const { ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
-  const candidateAllowlisted = ALLOWED_OVERRIDE_MODEL_IDS.has(candidateModel) || OPENAI_VOICE_OVERRIDE_MODEL_IDS.has(candidateModel);
+  // gate only turns on in the child conditions. ANTHROPIC_SANDBOX_OVERRIDE_
+  // MODEL_IDS (Opus 5.5+ — thinking always on, never on the production
+  // ALLOWED_OVERRIDE_MODEL_IDS) needs no gate, unlike the OpenAI ids: every
+  // condition here runs through the eval harness (`evalHarness: true` —
+  // voice-relay-replay.js), the same `openaiContext` the relay's own
+  // resolveSessionModel admits it under, so a candidate from this Set is
+  // never silently rejected and duplicated onto the current-* baseline.
+  const {
+    ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS,
+  } = require('../services/voice-agent/relay-conversation');
+  const candidateAllowlisted = ALLOWED_OVERRIDE_MODEL_IDS.has(candidateModel)
+    || ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS.has(candidateModel)
+    || OPENAI_VOICE_OVERRIDE_MODEL_IDS.has(candidateModel);
   if (!candidateAllowlisted) {
     throw new Error(
       `--candidate-model="${candidateModel}" is not an allowlisted model id. `
       + 'Allowed (server/config/models.js MODEL_CATALOG): Anthropic text models excluding requires:"deep" ids '
-      + `(${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')}), or a voice-eligible OpenAI id `
-      + `(${[...OPENAI_VOICE_OVERRIDE_MODEL_IDS].join(', ')})`,
+      + `(${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')}), a thinking-always-on Anthropic id `
+      + `(${[...ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS].join(', ') || 'none in the catalog today'}), `
+      + `or a voice-eligible OpenAI id (${[...OPENAI_VOICE_OVERRIDE_MODEL_IDS].join(', ')})`,
     );
   }
   const trials = resolveTrials(ARGS);

@@ -22,6 +22,7 @@ const { shortenOrPassthrough } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
 const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { estimateOptedOutOfEngagement } = require('./estimate-comms-eligibility');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -189,21 +190,18 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
 
   // estimate_data.noEngagementAutomation — the durable zero-comms opt-out
   // stamped by publish-without-delivery mints (report click-to-estimate).
-  // Same key the engagement engine, legacy follow-up cron, and auto-renew
-  // enforce; duplicated locally like theirs and pinned in lockstep by
-  // estimate-followup-engagement-optout.test.js. The extension ITSELF is
+  // The ONE shared rule (estimate-comms-eligibility.js) the engagement
+  // engine, legacy follow-up cron, auto-renew and the email_template
+  // automation executor also read. The extension ITSELF is
   // allowed — the token holder asked for more time — but the SMS/email
   // announcing it is exactly the automated outreach the marker forbids
   // (in-hook audit on #3391 round 9: the public extension-request flow
   // called this non-silently, so an expired mint's token holder could
   // trigger an automatic text+email). Forced here so EVERY caller —
   // public route, admin, future ones — inherits the guard.
-  try {
-    const data = typeof estimate.estimate_data === 'string'
-      ? JSON.parse(estimate.estimate_data)
-      : estimate.estimate_data;
-    if (data?.noEngagementAutomation === true) silent = true;
-  } catch { /* unparseable blob: keep the caller's choice, like auto-renew */ }
+  // An unparseable blob keeps the caller's choice (the shared rule reads it
+  // as not opted out).
+  if (estimateOptedOutOfEngagement(estimate)) silent = true;
 
   const parsedDays = Number.parseInt(days, 10);
   if (!Number.isFinite(parsedDays) || parsedDays < 1 || parsedDays > 180) {

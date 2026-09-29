@@ -1,0 +1,1025 @@
+[
+  {
+    "slug": "powdery-mildew",
+    "kind": "disease",
+    "common_name": "Powdery Mildew",
+    "aka": [],
+    "aliases": [
+      "powdery mildew",
+      "erysiphales",
+      "white mildew"
+    ],
+    "scientific_name": "Erysiphales",
+    "rank": "order",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "White to gray powdery coating on leaf surfaces that can be rubbed off",
+      "Leaves yellow, curl or drop when the coating is heavy",
+      "Worse in shaded, crowded plantings with still air"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      11,
+      12,
+      1,
+      2,
+      3,
+      4
+    ],
+    "peak_months": [
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A white to gray powdery coating that rubs off the leaves suggests powdery mildew. It is usually cosmetic on established plants, though heavy coating can stunt or drop leaves on susceptible varieties. Better light and air circulation are the main fix; a technician can advise if it keeps returning.",
+      "fact": "Unlike most fungi, powdery mildew thrives in dry air and can infect leaves without any free water on the surface."
+    },
+    "tech_notes": "Worse in shade with poor air movement; check for coating on both leaf surfaces and on flower buds in heavy cases. Leaves may yellow, curl or drop when the coating is heavy.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/pests-and-diseases/diseases/powdery-mildew/"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f8f83562ea624a6a86396a0a9ef745cd5a31fe0c6ee1c58e8a17296d299d73ff"
+    },
+    "condition": {
+      "hosts": [
+        "shrubs",
+        "trees"
+      ],
+      "signs": [
+        "White to gray powdery coating on leaf surfaces that can be rubbed off"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A close-up of the leaf showing the white to gray powdery coating.",
+        "elements": [
+          "White to gray powdery coating on leaf surfaces that can be rubbed off"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "viburnum-downy-mildew",
+          "difference": "Powdery mildew coats the leaf top with white powder; downy mildew on viburnum shows angular spots with grayish growth mainly on the leaf underside.",
+          "next_observation": "A photo of both the leaf top and the underside.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "spider-mites",
+          "difference": "Powdery mildew leaves a white powder that rubs off; spider mite damage shows fine stippling and webbing with no powder.",
+          "next_observation": "A close-up of the leaf surface checking for webbing versus powder.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "shade"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "New growth often looks better within a few weeks once air circulation and light improve."
+    }
+  },
+  {
+    "slug": "viburnum-downy-mildew",
+    "kind": "disease",
+    "common_name": "Viburnum Downy Mildew",
+    "aka": [],
+    "aliases": [
+      "viburnum downy mildew",
+      "downy mildew",
+      "plasmopara viburni"
+    ],
+    "scientific_name": "Plasmopara viburni",
+    "rank": "species",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Angular, yellow to brown spots on the leaf, often with grayish fuzzy growth on the underside",
+      "Spots follow the leaf veins, giving them a blocky, angular edge",
+      "Heavily spotted leaves may drop, but new growth is usually unaffected"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      11,
+      12,
+      1,
+      2,
+      3,
+      4
+    ],
+    "peak_months": [
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Angular, yellow-brown spots on sweet viburnum with grayish growth underneath are commonly called downy mildew, but look-alike fungi cause the same spots. A photo cannot confirm the exact cause; a technician looks at the pattern. Either way it is usually cosmetic and rarely needs more than better air circulation.",
+      "fact": "UF/IFAS nursery trials found look-alike fungi causing 'downy mildew' symptoms on viburnum so often that some seasons showed no true downy mildew at all, even though the spots looked classic."
+    },
+    "tech_notes": "Check the leaf underside for grayish sporulation within the angular spots; overhead irrigation and tight spacing favor it. UF/IFAS 2026 nursery trials found Cercospora, Colletotrichum, Corynespora, Phyllosticta, Phoma and Pestalotiopsis species can all produce near-identical symptoms, so do not assume the causal organism from appearance alone.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/orangeco/2018/01/24/on-the-lookout-downy-mildew-on-viburnum-awabuki/",
+      "https://blogs.ifas.ufl.edu/hillsboroughco/2026/04/07/managing-foliar-leaf-spots-in-viburnum-production-what-florida-nursery-trials-reveal/"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Whether classic-looking spots are truly Plasmopara viburni versus a look-alike fungus is unresolved (UF/IFAS 2026 Florida nursery trials found several look-alike species and some seasons with no true downy mildew at all), which is moot for the customer now that confirmable_by is technician and copy no longer claims a photo settles it.",
+      "approval_hash": "b1c1d6653c59d881322585333dec2b8407c68d468d69f4f87cdd3ea2b043d522"
+    },
+    "condition": {
+      "hosts": [
+        "sweet-viburnum"
+      ],
+      "signs": [
+        "Angular, yellow to brown spots on the leaf, often with grayish fuzzy growth on the underside"
+      ],
+      "symptoms": [
+        "Heavily spotted leaves may drop, but new growth is usually unaffected"
+      ],
+      "required_signature": {
+        "text": "A photo cannot confirm the exact fungus; several look-alike species cause identical spots, so a technician looks at the pattern and plant history.",
+        "elements": [
+          "Angular, yellow to brown spots on the leaf, often with grayish fuzzy growth on the underside"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "powdery-mildew",
+          "difference": "Downy mildew on viburnum shows angular spots with grayish growth mainly underneath; powdery mildew coats the leaf top with white powder.",
+          "next_observation": "A photo of both the leaf top and the underside.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "shade"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "New growth is usually unaffected and often looks normal within a few weeks."
+    }
+  },
+  {
+    "slug": "anthracnose",
+    "kind": "disease",
+    "common_name": "Anthracnose",
+    "aka": [],
+    "aliases": [
+      "anthracnose",
+      "colletotrichum"
+    ],
+    "scientific_name": "Colletotrichum spp.",
+    "rank": "genus",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Dark, sunken lesions on leaves, often with a yellow halo or concentric rings",
+      "Leaf margins burn brown and curl or pucker in advanced cases",
+      "Twig and branch dieback in severe or repeated infections"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots",
+      "wilting-dieback"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Dark, sunken leaf lesions with a yellow halo or concentric rings can suggest anthracnose, but other fungal leaf spots look nearly identical and a yellow halo does not identify the fungus on its own. A technician checks the pattern, any twig dieback and plant stress before recommending a next step.",
+      "fact": "Anthracnose spores are sticky and spread mainly by splashing rain or irrigation water, not by wind, which is why it often worsens after a wet stretch."
+    },
+    "tech_notes": "Spores spread by water splash, not wind; check for twig dieback to gauge severity beyond leaf spotting.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep659"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e9955265a448ba48929496ca4561fdecfa351e06e8446cb0052e8622ee2ca505"
+    },
+    "condition": {
+      "hosts": [
+        "shrubs",
+        "trees"
+      ],
+      "signs": [
+        "Dark, sunken lesions on leaves, often with a yellow halo or concentric rings"
+      ],
+      "symptoms": [
+        "Twig and branch dieback in severe or repeated infections"
+      ],
+      "required_signature": {
+        "text": "A photo cannot confirm this; a technician distinguishes anthracnose from other fungal leaf spots by the pattern, plant history and any twig dieback present.",
+        "elements": [
+          "Dark, sunken lesions on leaves, often with a yellow halo or concentric rings"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "leaf-spot-fungi",
+          "difference": "Anthracnose and other fungal leaf spots can look alike; a yellow halo or twig dieback is not exclusive to anthracnose and does not identify it alone.",
+          "next_observation": "A technician distinguishes the two from the pattern, plant history and any dieback present.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "salt-injury",
+          "difference": "Salt injury browns leaf tips and margins, often worse on the side facing onshore wind or salt spray; anthracnose causes scattered lesions with a yellow halo.",
+          "next_observation": "A wider photo of the whole plant checking whether the burn follows the side facing onshore wind or salt spray.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "warm_wet",
+        "wounding"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "New growth usually looks better within a few weeks once wet weather passes and dead twigs are pruned out."
+    }
+  },
+  {
+    "slug": "leaf-spot-fungi",
+    "kind": "disease",
+    "common_name": "Fungal Leaf Spots",
+    "aka": [],
+    "aliases": [
+      "leaf spot",
+      "leaf spots",
+      "cercospora"
+    ],
+    "scientific_name": "Cercospora spp.",
+    "rank": "genus",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, round to angular leaf spots, tan to brown with a darker purple-red border",
+      "Heavily spotted older leaves may yellow and drop while new growth stays clean",
+      "Worse after warm, rainy stretches with wet foliage"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Small, round to angular tan or brown spots with a darker border suggest a fungal leaf spot. It is usually cosmetic and limited to older leaves. Avoiding overhead watering and clearing fallen leaves are the main fix; a technician can advise if it keeps returning.",
+      "fact": "This fungal group includes over a thousand species, most of which only ever infect one or a few closely related plants."
+    },
+    "tech_notes": "Favored by overhead irrigation and frequent rain; usually limited to older, lower foliage. Heavily spotted older leaves may yellow and drop while new growth stays clean.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/orangeco/2018/09/28/fall-leafs-spots-on-ornamental-plants/",
+      "https://ask.ifas.ufl.edu/publication/PP267"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e9bb2a20e4da4b20233f36773b98ae695a642be1ec7fe39eea6934acc52c4264"
+    },
+    "condition": {
+      "hosts": [
+        "shrubs"
+      ],
+      "signs": [
+        "Small, round to angular leaf spots, tan to brown with a darker purple-red border"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A close-up of the leaf spots showing the tan to brown center and darker purple-red border.",
+        "elements": [
+          "Small, round to angular leaf spots, tan to brown with a darker purple-red border"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "anthracnose",
+          "difference": "Leaf spot fungi and anthracnose can look alike; dieback is not exclusive to anthracnose and a yellow halo does not identify either one from a photo alone.",
+          "next_observation": "A technician distinguishes the two from the pattern, plant history and any dieback present.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "salt-injury",
+          "difference": "Salt injury browns tips and margins, worse facing onshore wind or spray; leaf spot fungi cause scattered round spots across the leaf, not just the margin.",
+          "next_observation": "A wider photo of the whole plant checking whether the burn follows the side facing onshore wind or salt spray.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "warm_wet",
+        "frequent_irrigation"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "New growth is usually unaffected; older spotted leaves may drop over a few weeks."
+    }
+  },
+  {
+    "slug": "phytophthora-root-rot",
+    "kind": "disease",
+    "common_name": "Phytophthora Root Rot",
+    "aka": [],
+    "aliases": [
+      "phytophthora root rot",
+      "root rot"
+    ],
+    "scientific_name": "Phytophthora spp.",
+    "rank": "genus",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Canopy thins with reduced vigor and twig dieback, often starting on one side of the plant",
+      "Leaves yellow and drop, and the plant may wilt despite moist soil",
+      "Worse in poorly drained soil or after heavy, frequent watering"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback",
+      "yellowing"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A thinning canopy, yellowing leaves and wilting despite moist soil can suggest a root rot, but a photo cannot confirm it. A technician digs at the root crown to check whether the root cortex sloughs off, and checks the drainage before recommending a next step.",
+      "fact": "Phytophthora is technically not a true fungus; it is a water mold that spreads best through waterlogged soil, which is why drainage matters so much for this disease."
+    },
+    "tech_notes": "Confirm by checking whether the fibrous root cortex sloughs off the white root core when squeezed; rule out drought and over-mulching first.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/hs261",
+      "https://ask.ifas.ufl.edu/publication/PP123"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "The root-cortex-sloughing diagnostic description is the most detailed UF/IFAS source found but is written for citrus (HS261), a genus-level Phytophthora trait rather than a woody-ornamental-specific fact sheet; PP123 confirms overwatering as a general catalyst for Phytophthora/Fusarium root and crown disease on ornamentals but does not detail the sloughing symptom itself.",
+      "approval_hash": "e6500ff795ff04ea49fb31f2de7fedb3ea290baea33a09e7c2ace4e13c24b142"
+    },
+    "condition": {
+      "hosts": [
+        "shrubs",
+        "trees"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Canopy thins with reduced vigor and twig dieback, often starting on one side of the plant",
+        "Leaves yellow and drop, and the plant may wilt despite moist soil"
+      ],
+      "required_signature": {
+        "text": "A photo cannot confirm this; a technician digs at the root crown to check whether the root cortex sloughs off the white root core.",
+        "elements": [
+          "Canopy thins with reduced vigor and twig dieback, often starting on one side of the plant"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "transplant-shock",
+          "difference": "Transplant shock affects a recently moved plant and often improves within months; root rot can affect an established plant and worsens with wet soil.",
+          "next_observation": "A technician checks the roots and confirms how recently the plant was planted.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "deep-planting-mulch-volcano",
+          "difference": "A buried root flare confirms deep planting, but does not rule out root rot at the same time; a technician checks the roots regardless.",
+          "next_observation": "A technician digs at the roots to check for rot even when the flare is visibly buried.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "poor_drainage",
+        "frequent_irrigation",
+        "warm_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Recovery depends on how much root and trunk tissue is affected and can take months once drainage is corrected."
+    }
+  },
+  {
+    "slug": "citrus-greening",
+    "kind": "disease",
+    "common_name": "Citrus Greening",
+    "aka": [
+      "huanglongbing",
+      "hlb"
+    ],
+    "aliases": [
+      "citrus greening",
+      "huanglongbing",
+      "hlb",
+      "candidatus liberibacter asiaticus"
+    ],
+    "scientific_name": "Candidatus Liberibacter asiaticus",
+    "rank": "species",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Blotchy, asymmetrical yellow mottling on leaves that does not mirror on both sides of the leaf",
+      "Lopsided, small, bitter fruit that stays green at the blossom end while the stem end colors",
+      "Individual shoots or branches turn bright yellow"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "yellowing",
+      "wilting-dieback"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "extension_office"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Blotchy, asymmetrical yellow mottling and small, lopsided, bitter fruit can suggest citrus greening, a bacterial disease that cannot be cured. A lab test confirms it. Your extension office explains ways to support nearby citrus; removal is the owner's call with a licensed professional.",
+      "fact": "Citrus greening is spread by the Asian citrus psyllid, a tiny insect that picks up the bacterium from an infected tree and carries it to the next one it feeds on."
+    },
+    "tech_notes": "Confirmed by PCR through FDACS Division of Plant Industry or the UF/IFAS Plant Diagnostic Center; check for the Asian citrus psyllid on new flush.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/CG086"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d43d99000cc7f2cbcfae01641d41a5110aeac4780585c1b851ea6950a4301c8b"
+    },
+    "condition": {
+      "hosts": [
+        "citrus"
+      ],
+      "signs": [
+        "Blotchy, asymmetrical yellow mottling on leaves that does not mirror on both sides of the leaf",
+        "Lopsided, small, bitter fruit that stays green at the blossom end while the stem end colors"
+      ],
+      "symptoms": [
+        "Individual shoots or branches turn bright yellow"
+      ],
+      "required_signature": {
+        "text": "A photo of the blotchy mottling or lopsided fruit can raise concern, but only a lab PCR test confirms citrus greening.",
+        "elements": [
+          "Blotchy, asymmetrical yellow mottling on leaves that does not mirror on both sides of the leaf"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "citrus-canker",
+          "difference": "Citrus greening shows blotchy, asymmetrical yellow mottling and lopsided bitter fruit; citrus canker shows raised, corky lesions with a yellow halo.",
+          "next_observation": "A close-up comparing leaf mottling versus raised corky lesions.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "asian-citrus-psyllid",
+          "difference": "The psyllid is the insect that spreads greening; finding it or its notched nymphs on new shoots shows exposure risk, not confirmed infection.",
+          "next_observation": "A close-up of new shoot tips checking for the insect, alongside a lab test of the tree.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once a tree is infected; nutrition and irrigation support general tree condition but do not reverse the disease."
+    }
+  },
+  {
+    "slug": "citrus-canker",
+    "kind": "disease",
+    "common_name": "Citrus Canker",
+    "aka": [],
+    "aliases": [
+      "citrus canker",
+      "xanthomonas citri"
+    ],
+    "scientific_name": "Xanthomonas citri",
+    "rank": "species",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Raised, corky lesions with sunken centers and a yellow halo on leaves, fruit and stems",
+      "Lesions appear on both sides of the leaf, unlike most leaf spots",
+      "Heavily infected leaves and fruit drop early"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": true
+    },
+    "safety_line": "Florida citrus is under a statewide quarantine covering nursery stock and fruit movement; your county extension office handles confirming a suspected case.",
+    "range": "occasional",
+    "active_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "extension_office"
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Raised, corky lesions with a yellow halo on leaves, fruit and stems can suggest citrus canker, regulated under a statewide quarantine that mainly governs moving citrus nursery stock and fruit, not home-tree removal. A photo alone does not confirm it; your extension office arranges a proper look.",
+      "fact": "Florida dropped its tree-by-tree citrus canker eradication program in 2006 and moved to a statewide USDA quarantine that regulates how citrus nursery stock and fruit can be moved."
+    },
+    "tech_notes": "Do not mail samples; contact the local UF/IFAS Extension office to have an agent examine the tree and advise on reporting.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.fdacs.gov/Agriculture-Industry/Pests-and-Diseases/Plant-Pests-and-Diseases/Citrus-Health-Response-Program/Citrus-Pests-and-Diseases/Citrus-Canker-FAQ"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Reporting a suspected case through the county extension office is recommended, not a stated legal requirement for homeowners per FDACS's homeowner FAQ, which is why action routes to a specialist referral rather than a reporting mandate.",
+      "approval_hash": "a5a214748797aade5e63c12f98d7e275354d439239fb83169665469346799169"
+    },
+    "condition": {
+      "hosts": [
+        "citrus"
+      ],
+      "signs": [
+        "Raised, corky lesions with sunken centers and a yellow halo on leaves, fruit and stems"
+      ],
+      "symptoms": [
+        "Lesions appear on both sides of the leaf, unlike most leaf spots"
+      ],
+      "required_signature": {
+        "text": "A photo of raised, corky lesions with a yellow halo can raise concern, but confirmation goes through your county extension office.",
+        "elements": [
+          "Raised, corky lesions with sunken centers and a yellow halo on leaves, fruit and stems"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "citrus-greening",
+          "difference": "Citrus canker shows raised, corky lesions with a yellow halo; citrus greening shows blotchy, asymmetrical yellow mottling and lopsided bitter fruit.",
+          "next_observation": "A close-up comparing raised corky lesions versus leaf mottling.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "warm_wet",
+        "wounding"
+      ],
+      "outcome": "regulated",
+      "recovery_note": "Existing lesions do not clear up; your extension office explains what to expect for the tree going forward."
+    }
+  },
+  {
+    "slug": "oleander-leaf-scorch",
+    "kind": "disease",
+    "common_name": "Oleander Leaf Scorch",
+    "aka": [],
+    "aliases": [
+      "oleander leaf scorch",
+      "xylella fastidiosa",
+      "oleander scorch"
+    ],
+    "scientific_name": "Xylella fastidiosa",
+    "rank": "species",
+    "group": "ornamental-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Scalloped yellowing along the leaf margin, followed by browning and scorch at the tip or edge",
+      "Scorch starts on one branch and spreads through the canopy over one to two years",
+      "Branches die back after their leaves scorch"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback",
+      "yellowing"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "arborist"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Scalloped yellowing that spreads into scorch and branch dieback over one to two years can suggest oleander leaf scorch, a bacterial disease that cannot be cured. A lab test confirms it. An arborist can advise on pruning; removal is the owner's call with a licensed professional.",
+      "fact": "The bacterium behind oleander leaf scorch lives in the plant's water-conducting tissue and is spread by insects, such as spittlebugs and sharpshooters, that feed there."
+    },
+    "tech_notes": "Prune infected limbs 2-3 feet below visible symptoms on newly infected plants; full removal is typically recommended once most of the canopy is affected.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep574"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Current establishment/severity of oleander leaf scorch specifically in Sarasota-Charlotte-Manatee-Lee-Collier is not separately confirmed; the UF/IFAS source describes the disease generally for Florida oleander, so range is set to occasional as an estimate.",
+      "approval_hash": "c4b9bd2f74c48af3b0bbc4b336cb40b604a76f4f0972b3688c79c3218787475e"
+    },
+    "condition": {
+      "hosts": [
+        "oleander"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Scalloped yellowing along the leaf margin, followed by browning and scorch at the tip or edge",
+        "Scorch starts on one branch and spreads through the canopy over one to two years"
+      ],
+      "required_signature": {
+        "text": "A photo of scalloped yellowing and marginal scorch spreading through the canopy can raise concern, but only a lab test confirms the bacterium.",
+        "elements": [
+          "Scalloped yellowing along the leaf margin, followed by browning and scorch at the tip or edge"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "salt-injury",
+          "difference": "Both can look one-sided in a photo; leaf scorch spreads from one branch over months to years, while salt injury tracks wind or spray exposure.",
+          "next_observation": "A technician tracks whether the browning spreads from one branch over time, or tests for the bacterium.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "wounding"
+      ],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once scorch spreads through the canopy; pruning infected limbs well below the symptoms may slow spread on a newly affected plant."
+    }
+  }
+]

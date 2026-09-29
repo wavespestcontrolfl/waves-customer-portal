@@ -43,6 +43,7 @@ import GlobalCommandPalette from "./admin/GlobalCommandPalette";
 import { clearEmailDrafts } from "../lib/emailDrafts";
 import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
 import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
+import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -205,6 +206,11 @@ export default function AdminLayoutV2() {
   }, [authStatus, location.pathname, location.search]);
 
   const handleLogout = () => {
+    // Sign-out navigates by calling navigate() from a plain button — no
+    // popstate, no <a href> click — so it reaches neither CustomersPageV2's
+    // own guardLink/guardHistory nor any other page's in-app draft guard.
+    // Ask the shared registry (client/src/lib/navigation-guard.js) first.
+    if (!confirmLeaveIfGuarded()) return;
     clearEmailDrafts();
     clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");
@@ -503,7 +509,6 @@ export default function AdminLayoutV2() {
               </h2>
               {visibleItems.map((item) => {
                 const { path, icon: Icon, label } = item;
-                const destination = item.id === "communications" && unreadConversations > 0 ? `${path}?needsResponse=true` : path;
                 const isActive = isAdminNavItemActive(
                   item,
                   location.pathname,
@@ -512,7 +517,7 @@ export default function AdminLayoutV2() {
                 return (
                   <Link
                     key={path}
-                    to={destination}
+                    to={path}
                     aria-current={isActive ? "page" : undefined}
                     onClick={(e) => {
                       if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
@@ -520,12 +525,12 @@ export default function AdminLayoutV2() {
                       // query to strip) triggers no route change, so no
                       // beacon consumes the mark — don't leave a stale one
                       // for the next unmarked navigation to inherit.
-                      if (`${location.pathname}${location.search}` !== destination) {
+                      if (`${location.pathname}${location.search}` !== path) {
                         markUsageSource("sidebar");
                       }
                       if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                         e.preventDefault();
-                        navigate(destination);
+                        navigate(path);
                       }
                     }}
                     style={{
@@ -709,7 +714,6 @@ export default function AdminLayoutV2() {
               (item) => !item.adminOnly || user?.role === "admin",
             ).map((item) => {
               const { path, icon: Icon, label } = item;
-              const destination = item.id === "communications" && unreadConversations > 0 ? `${path}?needsResponse=true` : path;
               const active = isAdminNavItemActive(
                 item,
                 location.pathname,
@@ -718,17 +722,17 @@ export default function AdminLayoutV2() {
               return (
                 <Link
                   key={path}
-                  to={destination}
+                  to={path}
                   onClick={(e) => {
                     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                     // Same stale-mark guard as the sidebar: a no-op re-tap
                     // fires no route change and must not leave a mark.
-                    if (`${location.pathname}${location.search}` !== destination) {
+                    if (`${location.pathname}${location.search}` !== path) {
                       markUsageSource("tabbar");
                     }
                     if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                       e.preventDefault();
-                      navigate(destination);
+                      navigate(path);
                     }
                   }}
                   aria-current={active ? "page" : undefined}

@@ -10,7 +10,7 @@
  *     A second failure skips silently — never pending_review.
  */
 
-function makeDbMock() {
+function makeDbMock({ currentMetadata = {} } = {}) {
   const updates = [];
   const dbMock = jest.fn((table) => {
     const chain = {
@@ -21,11 +21,18 @@ function makeDbMock() {
         onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })) })),
       })),
       where: jest.fn(function where(...args) { chain._wheres.push(args); return chain; }),
-      update: jest.fn((patch) => { updates.push({ table, wheres: chain._wheres, patch }); return Promise.resolve(1); }),
+      whereRaw: jest.fn(function whereRaw(...args) { chain._wheres.push(['raw', ...args]); return chain; }),
+      update: jest.fn((patch) => {
+        updates.push({ table, wheres: chain._wheres, patch });
+        const superseded = table === 'opportunity_queue'
+          && chain._wheres.some(([kind, sql]) => kind === 'raw' && String(sql).includes('page_edit_superseded'))
+          && currentMetadata.page_edit_superseded;
+        return Promise.resolve(superseded ? 0 : 1);
+      }),
     };
     return chain;
   });
-  dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+  dbMock.raw = jest.fn((sql, bindings = []) => ({ __raw: sql, bindings }));
   dbMock._updates = updates;
   return dbMock;
 }
@@ -39,7 +46,7 @@ const STUB_CORPUS = [{
   body: '---\ntitle: Seasonal Ant Pressure in SWFL\nslug: /pest-control/seasonal-ant-pressure/\nprimary_keyword: seasonal ant pressure\n---\n\n## Why ants surge\n',
 }];
 
-function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, uniquenessGate, qualityGate, dbMock = makeDbMock() }) {
+function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, uniquenessGate, qualityGate, publisher, dbMock = makeDbMock() }) {
   jest.resetModules();
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/content/internal-link-planner', () => ({
@@ -58,6 +65,8 @@ function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, u
   else jest.dontMock('../services/content/uniqueness-gate');
   if (qualityGate) jest.doMock('../services/content/content-quality-gate', () => qualityGate);
   else jest.dontMock('../services/content/content-quality-gate');
+  if (publisher) jest.doMock('../services/content-astro/astro-publisher', () => publisher);
+  else jest.dontMock('../services/content-astro/astro-publisher');
   jest.dontMock('../services/content/comparison-table-gate');
   jest.dontMock('../services/content/claims-ledger-validator');
   const runner = require('../services/content/autonomous-runner');
@@ -185,7 +194,9 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(queue.skip).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
     expect(retryWrite).toBeTruthy();
-    expect(String(retryWrite.patch.signal_metadata)).toContain('HARDCODED_PRICE');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('gate_retry');
+    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[1]).findings)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'HARDCODED_PRICE' })]));
   });
 
   test('aggregate quality-gate MISS (no infra error) also gets the redraft-then-skip disposition', async () => {
@@ -202,7 +213,18 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
       uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
       // A real quality MISS: ok:false with hard failures and NO `.error`
       // (an `.error` shape is a gate infra fault and must still park).
-      qualityGate: { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['word_count'], soft_failures: [], total_score: 40, min_total_score: 80 }) },
+      qualityGate: { evaluate: jest.fn().mockReturnValue({
+        ok: false,
+        hard_failures: ['word_count'],
+        soft_failures: [
+          { name: 'citability_named_sources', reason: 'no source' },
+          { name: 'citability_concrete_specifics', reason: 'no measurement' },
+          { name: 'citability_comparison', reason: 'no table' },
+          { name: 'citability_how_to_choose', reason: 'no criteria' },
+        ],
+        total_score: 40,
+        min_total_score: 80,
+      }) },
     });
 
     const result = await runner.runNext();
@@ -212,7 +234,142 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(queue.defer).toHaveBeenCalledWith('opp_agg', expect.any(Date), { claimToken: claimedAt });
     expect(queue.pendingReview).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
-    expect(String(retryWrite.patch.signal_metadata)).toContain('QUALITY_GATE');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('gate_retry');
+    const gateRetry = JSON.parse(retryWrite.patch.signal_metadata.bindings[1]);
+    expect(gateRetry.findings)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'QUALITY_GATE' })]));
+    expect(gateRetry.advisory_messages.map((message) => message.code)).toEqual([
+      'CITABILITY_NAMED_SOURCES',
+      'CITABILITY_CONCRETE_SPECIFICS',
+      'CITABILITY_COMPARISON',
+      'CITABILITY_HOW_TO_CHOOSE',
+    ]);
+  });
+
+  test('a claimed backfill superseded during drafting cannot erase the marker or defer itself to pending', async () => {
+    const queue = makeQueue({
+      id: 'opp_gate_superseded',
+      bucket: 'citability_backfill',
+      action_type: 'refresh_existing_page',
+      claimed_at: claimedAt,
+      // Stale claim snapshot: ordinary ownership landed after this read.
+      signal_metadata: {},
+    });
+    const dbMock = makeDbMock({
+      currentMetadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+    });
+    const { runner } = loadRunner({
+      queue,
+      dbMock,
+      briefBuilder: { compose: jest.fn().mockResolvedValue({
+        id: 'brief_gate_superseded',
+        action_type: 'refresh_existing_page',
+        page_type: 'refresh',
+        target_url: 'https://wavespestcontrol.com/blog/termite-guide/',
+        human_review_required: false,
+      }) },
+      dispatcher: makeDispatcher(),
+      contentGuardrails: failingGuardrails,
+    });
+    runner._deriveGuardrailOptions = jest.fn().mockResolvedValue({});
+
+    const result = await runner.runNext();
+
+    expect(result).toMatchObject({ outcome: 'skipped_gate_fail', skip_reason: 'content_guardrails_failed' });
+    expect(queue.defer).not.toHaveBeenCalled();
+    expect(queue.skip).toHaveBeenCalledWith('opp_gate_superseded', 'content_guardrails_failed', { claimToken: claimedAt });
+    const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
+    expect(retryWrite.wheres).toEqual(expect.arrayContaining([
+      ['raw', expect.stringContaining('page_edit_superseded')],
+    ]));
+    expect(retryWrite.patch.signal_metadata.__raw).toContain('jsonb_set');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('gate_retry');
+  });
+
+  test('a citability backfill early-gate retry carries its open planned gaps, judged against the live page', async () => {
+    const queue = makeQueue({
+      id: 'opp_gate_backfill', bucket: 'citability_backfill', action_type: 'refresh_existing_page',
+      claimed_at: claimedAt, signal_metadata: { citability_gaps: ['named_sources'] },
+    });
+    const publisher = {
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Experts say termites swarm after rain for 3 days.', frontmatter: {}, source_file: 'src/content/blog/termite/swarms.mdx' }),
+      resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/termite/swarms.mdx' }),
+    };
+    const { runner, dbMock } = loadRunner({
+      queue,
+      publisher,
+      briefBuilder: { compose: jest.fn().mockResolvedValue({
+        id: 'brief_gate_backfill', action_type: 'refresh_existing_page', page_type: 'refresh',
+        target_url: 'https://www.wavespestcontrol.com/termite/swarms/', human_review_required: false,
+        gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['named_sources'] },
+      }) },
+      dispatcher: makeDispatcher(),
+      // The quality gate's rendered-body helpers live in the real module.
+      contentGuardrails: { ...jest.requireActual('../services/content/content-guardrails'), evaluate: failingGuardrails.evaluate },
+    });
+    runner._deriveGuardrailOptions = jest.fn().mockResolvedValue({});
+
+    const result = await runner.runNext();
+
+    expect(result).toMatchObject({ outcome: 'deferred_gate_retry', skip_reason: 'content_guardrails_failed' });
+    expect(queue.defer).toHaveBeenCalledWith('opp_gate_backfill', expect.any(Date), { claimToken: claimedAt });
+    expect(queue.complete).not.toHaveBeenCalled();
+    const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
+    const gateRetry = JSON.parse(retryWrite.patch.signal_metadata.bindings[1]);
+    expect(gateRetry.findings.map((f) => f.code)).toEqual(['HARDCODED_PRICE', 'CITABILITY_BACKFILL_GAPS_CLEARED']);
+    expect(gateRetry.findings[1].message).toMatch(/^planned_gaps_unresolved:named_sources\(/);
+    expect(gateRetry.advisory_messages.map((m) => m.code)).toEqual(expect.arrayContaining(['CITABILITY_CONCRETE_SPECIFICS']));
+  });
+
+  test('an unattended blog delays one infrastructure retry, then skips without a writer directive', async () => {
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+    const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: false, error: 'scanner unavailable' }) };
+    const firstQueue = makeQueue({
+      id: 'opp_infra_first', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {},
+    });
+    const first = loadRunner({
+      queue: firstQueue, briefBuilder: makeBriefBuilder(), dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate,
+    });
+    const before = Date.now();
+
+    await expect(first.runner.runNext()).resolves.toMatchObject({
+      outcome: 'deferred_infrastructure_retry', skip_reason: 'gate_infrastructure_error',
+    });
+
+    const retryAt = firstQueue.defer.mock.calls[0][1];
+    expect(retryAt).toBeInstanceOf(Date);
+    expect(retryAt.getTime()).toBeGreaterThanOrEqual(before + 60 * 60 * 1000);
+    expect(firstQueue.defer).toHaveBeenCalledWith('opp_infra_first', retryAt, { claimToken: claimedAt });
+    const retryWrite = first.dbMock._updates.find((u) => u.table === 'opportunity_queue');
+    expect(retryWrite.wheres).toEqual(expect.arrayContaining([
+      ['raw', expect.stringContaining('page_edit_superseded')],
+      ['raw', expect.stringContaining('jsonb_exists'), ['infrastructure_retry']],
+    ]));
+    expect(retryWrite.patch.signal_metadata.__raw).toContain('ARRAY[?]::text[]');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('infrastructure_retry');
+    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[1])).toMatchObject({
+      retry_after: retryAt.toISOString(), skip_reason: 'gate_infrastructure_error',
+    });
+
+    const secondQueue = makeQueue({
+      id: 'opp_infra_second', action_type: 'new_supporting_blog', claimed_at: claimedAt,
+      signal_metadata: { infrastructure_retry: { skip_reason: 'gate_infrastructure_error' } },
+    });
+    const second = loadRunner({
+      queue: secondQueue, briefBuilder: makeBriefBuilder(), dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate,
+    });
+
+    await expect(second.runner.runNext()).resolves.toMatchObject({
+      outcome: 'skipped_gate_fail', skip_reason: 'gate_infrastructure_error',
+    });
+    expect(secondQueue.skip).toHaveBeenCalledWith('opp_infra_second', 'gate_infrastructure_error', { claimToken: claimedAt });
+    expect(secondQueue.defer).not.toHaveBeenCalled();
+    expect(secondQueue.pendingReview).not.toHaveBeenCalled();
   });
 
   test('second failure (gate_retry already recorded) skips silently — never pending_review', async () => {

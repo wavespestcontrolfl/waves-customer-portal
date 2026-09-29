@@ -35,6 +35,15 @@ const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 
+// The processing_status values that mean THIS call's own pipeline pass has
+// genuinely finished — the retry states (extraction_failed, no_transcription)
+// are deliberately excluded: they are unfinished work a later pass may still
+// complete (see the SLA-clamp comment at its own use below), so a caller
+// asking "has processing settled" must not treat them as done either.
+// Exported so other callers (promise-chaser-bell.js, Codex #5019 r11 P2)
+// reuse the SAME set rather than re-deriving their own notion of "terminal".
+const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
+
 /**
  * PR 2A: the RECORDED part of a stored transcript. A composite a prior pass
  * wrote is "[AI segment]\n…\n\n[Staff|Voicemail segment]\n<recorded>"; a
@@ -102,7 +111,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -7839,6 +7848,9 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 }
 
 const CallRecordingProcessor = {
+  // Re-used by promise-chaser-bell.js (Codex #5019 r11 P2) to gate its own
+  // "has this call's pipeline pass genuinely finished" check.
+  COMPLETED_STATUSES,
   // Re-used by the bounce audio-reverify lane (email-bounce-reverify.js) —
   // full pipeline incl. the letter-fidelity contact-dictation second pass,
   // plus the same hallucination guard the live pipeline applies.
@@ -7874,7 +7886,7 @@ const CallRecordingProcessor = {
     // re-run and newly read as a lead must not inject its original call
     // time into the SLA analytics. The retry states (extraction_failed,
     // no_transcription) are unfinished work and keep the real wait.
-    const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
+    // (COMPLETED_STATUSES is now the module-scope export above.)
     // …or the ROW says so: an operator adoption swaps the recording and puts
     // processing_status back to NULL (so the sweep owns the row) and stamps
     // the pre-swap state on metadata.adopted_recording — read here by EVERY
@@ -9612,6 +9624,15 @@ const CallRecordingProcessor = {
     // union of read-back reminders the office clears, never edited across
     // calls (no per-reason provenance). Schema-valid V2 only.
     const wdoArrangerAuthorizedThisPass = v2Result?.status === 'valid' && isAuthorizedWdoArrangerBooking(v2Result.extraction);
+    // Same idea, owner ruling 2026-09-28: a family_member caller (schema
+    // 1.18.0) with a confirmed time on the call is authorized for ANY
+    // service type (isAuthorizedFamilyMemberBooking). Live miss (call
+    // f5a54dbd, 2026-09-28): a paper-wasp knockdown at "my grandfather's
+    // house" blocked on caller_not_authorized because pre-1.18.0 schema
+    // forced the caller onto "other". A force-reprocess of that call under
+    // the new schema/relationship value must retire the stale card the same
+    // way the WDO-arranger reprocess does below.
+    const familyMemberAuthorizedThisPass = v2Result?.status === 'valid' && isAuthorizedFamilyMemberBooking(v2Result.extraction);
     let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
@@ -19618,12 +19639,19 @@ const CallRecordingProcessor = {
         }
       }
       // Owner ruling 2026-09-26 (codex #4890 r1 P1): a lender/realtor/home
-      // buyer ordering a confirmed WDO inspection is an authorized caller. A
-      // force-reprocess of a call an earlier pass carded caller_not_authorized
-      // must retire that card here — the finalizer only ever OPENS review
-      // state — or the visit books while the office still sees a "confirm the
-      // account holder" task. Same transaction and fence as the repairs above.
-      if (written > 0 && finalStatus === 'processed' && wdoArrangerAuthorizedThisPass) {
+      // buyer ordering a confirmed WDO inspection is an authorized caller.
+      // Owner ruling 2026-09-28: a family member of the homeowner/resident
+      // (grandchild, child, parent, sibling, in-law, etc.) booking at THAT
+      // RELATIVE'S home with a confirmed time is authorized too, for any
+      // service type. Either way, a force-reprocess of a call an earlier
+      // pass carded caller_not_authorized must retire that card here — the
+      // finalizer only ever OPENS review state — or the visit books while
+      // the office still sees a "confirm the account holder" task. Same
+      // transaction and fence as the repairs above.
+      if (written > 0 && finalStatus === 'processed' && (wdoArrangerAuthorizedThisPass || familyMemberAuthorizedThisPass)) {
+        const retirementNote = familyMemberAuthorizedThisPass
+          ? 'Superseded — a family member booking service at their relative’s home with a confirmed time is an authorized caller (owner ruling 2026-09-28).'
+          : 'Superseded — a lender, realtor or home buyer ordering a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).';
         const retired = await trx('triage_items')
           .where({ call_log_id: call.id, reason_code: 'caller_not_authorized' })
           .whereIn('status', ['open', 'in_progress'])
@@ -19631,7 +19659,7 @@ const CallRecordingProcessor = {
             status: 'resolved',
             resolved_at: new Date(),
             resolution_source: 'system',
-            resolution_note: 'Superseded — a lender, realtor or home buyer ordering a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).',
+            resolution_note: retirementNote,
           });
         if (retired > 0) {
           await trx('call_log')
@@ -20936,6 +20964,27 @@ CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 // not from_phone). It lived only under `_test` — every real caller outside
 // this file got `undefined`.
 CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
+
+// Production contract for call-booking-link-text.js's own outbound-return
+// prior-contact check (codex r7 P1, pre-push): that lane's own
+// customerPredatesThisCall only excludes a customer THIS call's own legacy
+// path created — it has no comparison against the customer ROW'S OWN
+// created_at, missing the exact TCPA-implied-consent timing gap this
+// helper's own predatesCall() already closed for every caller inside this
+// file. It lived only under `_test` too, same reason as
+// resolveCallContactPhone above — promoted here rather than reimplemented
+// a second time (CLAUDE.md rule 15).
+CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCustomerId;
+
+// Production contract for call-booking-link-text.js's own staging check
+// (codex #5018 r11 P2): duration_seconds/conversationSeconds prove only that
+// the clock ran, never that the caller and Waves actually spoke — a call
+// that connected and dropped in the first few seconds can still carry
+// enough ring/hold time to clear call_too_short. hasRealTwoWayConversation
+// (PR #5012) already exists for exactly this and lived only under `_test`,
+// same reason as the two promotions above — promoted rather than
+// reimplemented (CLAUDE.md rule 15).
+CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

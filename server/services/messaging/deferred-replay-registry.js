@@ -121,6 +121,12 @@ async function checkRecruitingApplicationEligibility(meta, conn, lock) {
   return { app };
 }
 
+// A deferred invoice-followup SMS that was a bank-verification re-nudge
+// (invoice-followups mdPending), not an overdue reminder.
+function followupReplayIsVerification(meta) {
+  return meta?.original_message_type === 'bank_verification_incomplete' || meta?.billingDeliveryCategory === 'payment_issue';
+}
+
 // Stage supersession: for the interview stages only, the application must
 // still be at 'interview', and this queued attempt must not have been
 // superseded by a newer attempt of the same stage in the ledger (Codex r7
@@ -348,6 +354,15 @@ const REGISTRY = {
             invoiceId: meta.invoice_id,
             channel: 'sms',
             purpose: 'late_payment',
+            // Shadow spacing only: a deferred bank-verification re-nudge is
+            // not an overdue reminder (Codex #5189 r6), so it names no rail;
+            // an overdue replay excludes its own standing reservation and
+            // the rest of its touch (the delivered email sibling).
+            ...(followupReplayIsVerification(meta) ? {} : {
+              source: 'invoice_followup_replay',
+              ...(meta.ledger_reservation_key ? { spacingExcludeKey: `followup-replay:${meta.ledger_reservation_key}` } : {}),
+              ...(meta.notificationEventKey ? { spacingExcludeEventKey: meta.notificationEventKey } : {}),
+            }),
             logTag: 'invoice-followup-replay',
           });
           if (!permitted) return { eligible: false, reason: 'collections-policy-denied' };
@@ -375,6 +390,11 @@ const REGISTRY = {
               followup_sequence_id: meta.followup_sequence_id || null,
               original_block_code: meta.original_block_code || null,
               replay: true,
+              // The touch this leg belongs to, so spacing groups it with its
+              // delivered email sibling (Codex #5189 r6).
+              ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+              // Spacing evidence skips a verification re-nudge (Codex #5189 r7).
+              ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
             },
           });
         }
@@ -409,6 +429,8 @@ const REGISTRY = {
           followup_sequence_id: meta.followup_sequence_id || null,
           original_block_code: meta.original_block_code || null,
           replay: true,
+          ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+          ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
         },
       });
     },
@@ -1612,7 +1634,9 @@ async function contactSlotStillAuthorized(meta, label) {
 // scheduler may finish this row.
 async function partialFanoutReplayOutcome(meta, result) {
   const channelResults = result?.channelResults;
-  const legs = channelResults && typeof channelResults === 'object' ? Object.values(channelResults) : [];
+  const { billingLegDeliveryState } = require('./billing-channel-routing');
+  const entries = channelResults && typeof channelResults === 'object' ? Object.entries(channelResults) : [];
+  const legs = entries.map(([, leg]) => leg);
   if (!legs.length) return result;
   const accepted = (leg) => leg?.sent === true && leg?.deliveryOutcome === 'accepted';
   // A leg accepted on THIS attempt needs its durable stamp NOW: the
@@ -1622,7 +1646,7 @@ async function partialFanoutReplayOutcome(meta, result) {
   // row sent. Idempotent (COALESCE-guarded) — stamping again at eventual
   // finalize is harmless. Never let a stamp-read failure surface as a
   // dispatch error — the send itself already succeeded.
-  if (meta.partial_fanout_retry === true && meta.invoice_id && legs.some(accepted)) {
+  if (meta.partial_fanout_retry === true && meta.invoice_id && entries.some(([channel, leg]) => billingLegDeliveryState(channel, leg || {}))) {
     try {
       await stampPartialFanoutDeliveryDurably(meta);
     } catch (err) {
@@ -1630,7 +1654,7 @@ async function partialFanoutReplayOutcome(meta, result) {
     }
   }
   const { isReplayHold } = require('./billing-channel-routing');
-  const pending = legs.filter((leg) => !accepted(leg));
+  const pending = entries.filter(([channel, leg]) => !billingLegDeliveryState(channel, leg || {})).map(([, leg]) => leg);
   // An uncertain leg means we don't know whether it already went out — the
   // SAME rule invoice.js's own enqueue-time check follows (a whole-notice
   // replay would retry it too, risking a double-send): ANY uncertain leg
@@ -1704,7 +1728,7 @@ async function stampPartialFanoutDeliveryDurably(meta) {
     // clobbers an earlier stamp with a later timestamp.
     await db('invoices').where({ id: meta.invoice_id }).whereNot({ status: 'void' }).update({
       ...(emailAccepted ? { email_sent_at: db.raw('COALESCE(email_sent_at, now())') } : {}),
-      ...(smsOrAppAccepted ? { sms_sent_at: db.raw('COALESCE(sms_sent_at, now())') } : {}),
+      ...(smsOrAppAccepted ? { sms_sent_at: db.raw('COALESCE(sms_sent_at, ?::timestamptz, now())', [textAccepted ? null : appAccepted?.created_at || null]) } : {}),
       updated_at: new Date(),
     });
     return { ok: true };
@@ -1773,7 +1797,11 @@ async function billingAppDurablyAccepted(notificationEventKey) {
     .whereIn('status', ['queued', 'sent', 'delivered'])
     .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
     .first('twilio_sid');
-  return !!row && !row.twilio_sid;
+  if (row && !row.twilio_sid) return true;
+  // A visible billing bell settles its event even without native acceptance.
+  return await db('notifications').where({ recipient_type: 'customer' })
+    .whereIn('category', ['invoice', 'payment_issue', 'billing', 'payment_receipt'])
+    .whereRaw("metadata->>'dedupeKey' = ?", [notificationEventKey]).first('created_at') || false;
 }
 
 // Shared: deferred invoice pay-link/dunning replays must confirm the
@@ -2040,6 +2068,14 @@ function requiresDurableFinalize(entryPoint) {
 // for these (same contract as finalize_pending: the obligation must be
 // durable BEFORE the hook runs, or a crash/throw between the flip and the
 // hook loses it where no sweep can see it).
+// True for any entry point this registry owns — the deferred-replay executor
+// drives the row, whether or not it registers an onTerminal hook (an
+// invoice_send_deferred row, for one, holds its invoice's send claim). The
+// Intelligence Bar never cancels such a row itself.
+function isDeferredReplayEntryPoint(entryPoint) {
+  return !!entryFor(entryPoint);
+}
+
 function requiresTerminalHook(entryPoint) {
   const entry = entryFor(entryPoint);
   return !!(entry && typeof entry.onTerminal === 'function');
@@ -2073,6 +2109,7 @@ module.exports = {
   sweepPendingTerminalHooks,
   requiresDurableFinalize,
   requiresTerminalHook,
+  isDeferredReplayEntryPoint,
   DURABLE_FINALIZE_ENTRY_POINTS,
   TERMINAL_HOOK_ENTRY_POINTS,
   _registry: REGISTRY,

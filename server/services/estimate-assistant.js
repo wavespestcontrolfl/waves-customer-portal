@@ -7,6 +7,27 @@ const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFro
 const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
+const { GUARANTEE_COPY, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
+const {
+  collapseMirroredRows,
+  hasPurchasedTrenchingWarranty,
+  isPreSlabTreatmentItem,
+  preSlabExtendedWarrantySelected,
+  preSlabSelectedWarrantyPart,
+  preSlabWarrantyDecision,
+  rawOneTimeWarrantyEvidenceItems,
+  reconcilePricedPreSlabWarrantyEvidence,
+  reconcileTrenchingWarrantyEvidence,
+  reconcilePricedTrenchingWarrantyEvidence,
+  trenchingServiceIdentity,
+} = require('../../shared/estimate-purchased-warranty.cjs');
+const { serviceKeysFromText } = require('./estimate-service-lines');
+const { RECURRING_TERMS_LANES, TERMITE_LANES } = require('./estimate-followup-copy');
+const { normalizeBondTermService } = require('./estimate-converter');
+
+// Neutral categories may retain their own satisfaction wording, but cannot
+// inherit residential membership promises from saved service prose.
+const { PLAN_TERMS_COPY, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -25,6 +46,10 @@ Answer questions about the customer's estimate, Waves services, WaveGuard, billi
 
 Rules:
 - Use only the estimate context for prices, services selected, schedules, discounts, billing terms, and property details.
+- Honor guarantees.noGuaranteeClaims. When true, do not infer an estimate-wide callback, satisfaction, re-treatment, or money-back guarantee. Proven service-specific purchasedTerms may still be described, without generalizing them to the estimate.
+- Recurring callbacks, money-back, and no-contract terms apply only when guarantees.recurringTermsEligible is true. A neutral category's written satisfaction wording may be described only for that service and never authorizes these recurring terms.
+- A row's purchasedTerms lists proven service-specific purchased benefits. Describe only those terms; they never authorize an estimate-wide guarantee.
+- When guarantees.serviceTerms is present, answer any guarantee, warranty, bond, or callback question by stating each listed service's terms under that service's name, whichever service the question mentions. A service that is not listed has no stated terms. Never apply a listed term to the whole estimate or to another service.
 - Use the supportContext for service procedures, products, label/safety references, and Waves admin knowledge. Do not expose internal cost notes.
 - Never give customer-facing product brand names. If product context is relevant, use active ingredients, treatment classes, and how the treatment works.
 - If neither the estimate context nor supportContext contains a specific fact, say you do not see it and suggest calling or texting Waves.
@@ -67,6 +92,12 @@ function normalizeServiceName(value) {
   if (/rodent|rat|mouse/.test(key)) return 'Rodent Control';
   if (/pest|roach|ant|spider|perimeter/.test(key)) return 'Pest Control';
   return raw || 'Service';
+}
+
+function normalizedServiceRowLabel(row = {}) {
+  const service = cleanText(row.service || row.serviceKey || row.service_key || row.key).toLowerCase();
+  if (service.startsWith('termite_bond')) return 'Termite Bond';
+  return normalizeServiceName(row.displayName || row.label || row.name || row.service || row.serviceKey);
 }
 
 function uniqueByLabel(rows) {
@@ -121,19 +152,154 @@ function parseEstimateData(estData) {
   return typeof estData === 'object' ? estData : {};
 }
 
-function serviceRowsFromEstimateData(estData = {}) {
-  const result = estData.result || estData.engineResult || estData || {};
-  const recurring = result.recurring || estData.recurring || {};
-  const services = Array.isArray(recurring.services) ? recurring.services : [];
-  return services.map((service) => ({
-    service: cleanText(service.service || service.key) || null,
-    label: normalizeServiceName(service.displayName || service.label || service.name || service.service),
+function guaranteeLanesForRow(row) {
+  const lanes = serviceKeysFromText(row.service, row.serviceKey, row.service_key, row.key, row.displayName, row.label, row.name);
+  return row.isCommercial === true
+    ? lanes.map((lane) => lane.startsWith('commercial_') ? lane : `commercial_${lane}`)
+    : lanes;
+}
+
+function termiteBondPurchasedTerms(row = {}, selectedTerms = []) {
+  const normalized = normalizeBondTermService(row);
+  const service = cleanText([
+    normalized.service, normalized.serviceKey, normalized.service_key, normalized.key,
+  ].find(Boolean)).toLowerCase();
+  const keyedMatch = service.match(/^termite_bond_(1|5|10)yr$/);
+  const keyedTerm = keyedMatch?.[1];
+  const rawTerms = ['bondTerm', 'selectedBondTerm']
+    .filter((key) => Object.prototype.hasOwnProperty.call(row, key))
+    .map((key) => row[key])
+    .concat(selectedTerms)
+    .map((value) => cleanText(value).toLowerCase());
+  if (service !== 'termite_bond' && !keyedMatch) return [];
+  if (rawTerms.some((value) => !/^(1|5|10)yr$/.test(value))) return [];
+  const termCandidates = [keyedTerm, ...rawTerms, normalized.bondYears, normalized.years]
+    .filter((value) => value !== undefined && value !== null && value !== '');
+  const years = Number(String(termCandidates[0]).replace(/yr$/, ''));
+  if (![1, 5, 10].includes(years)) return [];
+  if (termCandidates.some((value) => Number(String(value).replace(/yr$/, '')) !== years)) return [];
+  const paid = [
+    normalized.perTreatment, normalized.perApp, normalized.perVisit, normalized.monthly,
+    normalized.mo, normalized.annual, normalized.amount, normalized.price,
+  ]
+    .some((value) => Number.isFinite(Number(value)) && Number(value) > 0);
+  return paid ? [`Purchased termite bond: ${years}-year term with re-treatment coverage.`] : [];
+}
+
+function withTermiteBondPurchasedTerms(row, proofRow = row, selectedTerms = []) {
+  const normalizedProof = normalizeBondTermService(proofRow);
+  const service = cleanText([
+    normalizedProof.service, normalizedProof.serviceKey, normalizedProof.service_key, normalizedProof.key,
+  ].find(Boolean)).toLowerCase();
+  if (!service.startsWith('termite_bond')) return row;
+  const purchasedTerms = termiteBondPurchasedTerms(normalizedProof, selectedTerms);
+  return { ...row, service: row.service || service, purchasedTerms };
+}
+
+function rawRecurringServiceRows(estData = {}) {
+  // mergeServiceRows applies later matching values over earlier ones. Keep
+  // every container for identity/term evidence, while ordering the saved
+  // result last so its current display fields outrank historical engine data.
+  const containers = [...new Set([estData, estData.engineResult, estData.result]
+    .filter((value) => value && typeof value === 'object'))];
+  return containers.flatMap((result) => {
+    const recurring = result.recurring || {};
+    const nestedRecurring = result.results?.recurring || {};
+    return [
+      ...(Array.isArray(recurring.services) ? recurring.services : []),
+      ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
+      ...(Array.isArray(result.lineItems)
+        ? result.lineItems.filter((row) => {
+          const normalized = normalizeBondTermService(row);
+          const lanes = guaranteeLanesForRow(row);
+          const service = cleanText([
+            normalized.service, normalized.serviceKey, normalized.service_key, normalized.key,
+          ].find(Boolean)).toLowerCase();
+          const recurringValue = [row.monthly, row.mo, row.annual, row.perTreatment, row.perApp, row.perVisit]
+            .some((value) => Number.isFinite(Number(value)) && Number(value) > 0);
+          const commercial = lanes.some((lane) => lane.startsWith('commercial_'));
+          return service.startsWith('termite_bond')
+            || (service === 'termite_bait' && Object.prototype.hasOwnProperty.call(row, 'selectedBondTerm'))
+            || (commercial && (recurringValue || row.quoteRequired === true || row.requiresManualReview === true))
+            || (recurringValue && lanes.includes('rodent'))
+            // Ordinary termite work (no bond decision) still names its own
+            // service in the per-service terms, as "No guarantee.".
+            || (recurringValue && lanes.some((lane) => TERMITE_LANES.has(lane)));
+        })
+        : []),
+    ];
+  });
+}
+
+function bondTermConstraintsForRow(row = {}) {
+  const normalized = normalizeBondTermService(row);
+  const service = cleanText([
+    normalized.service, normalized.serviceKey, normalized.service_key, normalized.key,
+  ].find(Boolean)).toLowerCase();
+  if (!service.startsWith('termite_bond') && service !== 'termite_bait') return [];
+  const selected = Object.prototype.hasOwnProperty.call(row, 'selectedBondTerm')
+    ? [row.selectedBondTerm] : [];
+  if (service === 'termite_bait') return selected;
+  const terms = ['bondTerm', 'bondYears', 'years']
+    .filter((key) => Object.prototype.hasOwnProperty.call(row, key))
+    .filter((key) => key === 'bondTerm' || (row[key] != null && row[key] !== ''))
+    .map((key) => key === 'bondTerm' ? row[key] : `${row[key]}yr`);
+  const keyedTerm = service.match(/^termite_bond_(.+)$/)?.[1];
+  const prices = ['perTreatment', 'perApp', 'perVisit', 'monthly', 'mo', 'annual', 'amount', 'price']
+    .filter((key) => Object.prototype.hasOwnProperty.call(row, key))
+    .filter((key) => row[key] != null && String(row[key]).trim() !== '')
+    .map((key) => Number(row[key]));
+  const removedPrice = prices.length > 0 && !prices.some((value) => Number.isFinite(value) && value > 0);
+  return [...selected, ...terms, ...(keyedTerm ? [keyedTerm] : []), ...(removedPrice ? ['none'] : [])];
+}
+
+function selectedBondTermsFromEstimateData(parsedData, rawServices, frequency) {
+  const selectors = [
+    ['inputs', 'termiteBondTerm'],
+    ['engineInputs', 'services', 'termite', 'bondTerm'],
+    ['engineRequest', 'services', 'termite', 'bondTerm'],
+    ['engineInputs', 'options', 'termiteBondTerm'],
+    ['engineRequest', 'options', 'termiteBondTerm'],
+    ['result', 'results', 'tmBait', 'selectedBondTerm'],
+    // readV1Shape's top-level legacy form (result.tmBait) is current too.
+    ['result', 'tmBait', 'selectedBondTerm'],
+    ['results', 'tmBait', 'selectedBondTerm'],
+  ].flatMap((path) => {
+    const source = path.slice(0, -1).reduce((value, key) => value?.[key], parsedData);
+    const key = path[path.length - 1];
+    return source && Object.prototype.hasOwnProperty.call(source, key) ? [source[key]] : [];
+  });
+  if (selectors.length) return { terms: selectors, authoritative: true };
+  // Without an authoritative selector these unversioned snapshots must agree.
+  // Neither list order nor a frozen pricing projection can restore an explicit
+  // removal, a contradictory term, or a zero-price current bond decision.
+  const engineStats = parsedData.engineResult?.results?.tmBait;
+  const engineSelector = engineStats && Object.prototype.hasOwnProperty.call(engineStats, 'selectedBondTerm')
+    ? [engineStats.selectedBondTerm] : [];
+  const terms = [
+    ...rawServices,
+    ...(Array.isArray(frequency?.included) ? frequency.included : []),
+    ...(Array.isArray(frequency?.perServiceTreatments) ? frequency.perServiceTreatments : []),
+  ].flatMap(bondTermConstraintsForRow).concat(engineSelector);
+  return { terms, authoritative: false };
+}
+
+function serviceRowsFromEstimateData(services = [], bondSelection = { terms: [], authoritative: false }) {
+  const rows = services.map((service) => withTermiteBondPurchasedTerms({
+    service: cleanText(service.service || service.serviceKey || service.service_key || service.key) || null,
+    guaranteeLanes: guaranteeLanesForRow(service),
+    label: normalizedServiceRowLabel(service),
     cadence: cleanText(service.frequencyLabel || service.cadence || service.frequency),
     detail: cleanText(service.detail || service.description),
     monthly: Number(service.mo ?? service.monthly ?? service.monthlyTotal),
     visitsPerYear: Number(service.visitsPerYear ?? service.visits ?? service.apps),
     perApplication: Number(service.perTreatment ?? service.perApp ?? service.perVisit),
-  }));
+  }, service, bondSelection.terms));
+  // Once the saved selector states a term, contradicted historical bond rows
+  // no longer participate in merging. Otherwise their empty terms could
+  // replace the valid selected row. An explicit removal excludes every bond.
+  return rows.filter((row) => !bondSelection.authoritative
+    || !row.service?.startsWith('termite_bond') || row.purchasedTerms.length);
 }
 
 function waveGuardDiscountForTier(value) {
@@ -156,7 +322,7 @@ function waveGuardDiscountAppliesToService(service = {}) {
   return ['Pest Control', 'Lawn Care', 'Mosquito Control', 'Termite Service', 'Tree & Shrub Service'].includes(label);
 }
 
-function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
+function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null, selectedBondTerms) {
   const frequency = selectedFrequency || (Array.isArray(pricingBundle.frequencies) ? pricingBundle.frequencies[0] : null);
   const included = Array.isArray(frequency?.included) ? frequency.included : [];
   const perTreatments = Array.isArray(frequency?.perServiceTreatments) ? frequency.perServiceTreatments : [];
@@ -201,19 +367,22 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
     : 1;
 
   included.forEach((service) => {
-    const label = normalizeServiceName(service.label || service.service || service.key);
+    const label = normalizedServiceRowLabel(service);
     const current = byLabel.get(label) || { label };
-    byLabel.set(label, {
+    byLabel.set(label, withTermiteBondPurchasedTerms({
       ...current,
-      service: current.service || cleanText(service.service || service.key) || null,
+      service: current.service || cleanText(service.service || service.serviceKey || service.service_key || service.key) || null,
+      guaranteeLanes: [...new Set([...(current.guaranteeLanes || []), ...guaranteeLanesForRow(service)])],
       label,
       cadence: current.cadence || serviceCadence,
       detail: current.detail || cleanText(service.detail),
-    });
+      ...(service.bondTerm != null ? { bondTerm: service.bondTerm } : {}),
+      ...(service.bondYears != null ? { bondYears: service.bondYears } : {}),
+    }, service, selectedBondTerms));
   });
 
   perTreatments.forEach((service) => {
-    const label = normalizeServiceName(service.label || service.service);
+    const label = normalizedServiceRowLabel(service);
     const current = byLabel.get(label) || { label };
     const rawPerTreatment = Number(service.perTreatment);
     const rowMultiplier = waveGuardDiscountAppliesToService(service)
@@ -222,12 +391,15 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
     const perApplication = Number.isFinite(rawPerTreatment) && rawPerTreatment > 0
       ? Math.round(rawPerTreatment * rowMultiplier * 100) / 100
       : null;
-    byLabel.set(label, {
+    byLabel.set(label, withTermiteBondPurchasedTerms({
       ...current,
-      service: current.service || cleanText(service.service || service.key) || null,
+      service: current.service || cleanText(service.service || service.serviceKey || service.service_key || service.key) || null,
+      guaranteeLanes: [...new Set([...(current.guaranteeLanes || []), ...guaranteeLanesForRow(service)])],
       perApplication,
       visitsPerYear: Number(service.visitsPerYear),
-    });
+      ...(service.bondTerm != null ? { bondTerm: service.bondTerm } : {}),
+      ...(service.bondYears != null ? { bondYears: service.bondYears } : {}),
+    }, service, selectedBondTerms));
   });
 
   return [...byLabel.values()];
@@ -239,27 +411,132 @@ function mergeServiceRows(primaryRows = [], fallbackRows = [], options = {}) {
   const primaryLabels = new Set(primaryRows.map((row) => (
     row.oneTime
       ? (cleanText(row.label) || 'One-time service')
-      : normalizeServiceName(row.label)
+      : normalizedServiceRowLabel(row)
   )));
   [...fallbackRows, ...primaryRows].forEach((row) => {
     const label = row.oneTime
       ? (cleanText(row.label) || 'One-time service')
-      : normalizeServiceName(row.label);
-    if (!allowFallbackOnly && !primaryLabels.has(label)) return;
+      : normalizedServiceRowLabel(row);
     const current = byLabel.get(label) || { label };
+    const primaryOmitsLegacyTerms = row.oneTime && current.oneTime
+      && !Object.prototype.hasOwnProperty.call(row, 'purchasedTerms');
+    const currentService = cleanText(current.service).replace(/^trenching$/, 'termite_trenching');
+    const rowService = cleanText(row.service).replace(/^trenching$/, 'termite_trenching');
+    if (primaryOmitsLegacyTerms && currentService && rowService && currentService !== rowService) {
+      delete current.purchasedTerms;
+    }
+    const recurringPurchasedTerms = !row.oneTime && !current.oneTime
+      && (Array.isArray(current.purchasedTerms) || Array.isArray(row.purchasedTerms))
+      ? [...new Set([...(current.purchasedTerms || []), ...(row.purchasedTerms || [])])]
+      : null;
     byLabel.set(label, {
       ...current,
-      ...Object.fromEntries(Object.entries(row).filter(([, value]) => {
+      ...Object.fromEntries(Object.entries(row).filter(([key, value]) => {
+        // An authoritative row can remove a previously sold warranty. Its
+        // empty terms array must clear the saved benefit, not inherit it.
+        if (key === 'purchasedTerms') return Array.isArray(value);
+        // A pre-slab row's warranty selection is authoritative either way:
+        // false must survive the merge, or the row falls back to stale
+        // detail text that still names the removed extended warranty.
+        if (key === 'warrantyExtendedSelected') return typeof value === 'boolean' || value === null;
+        // Its status travels with it: null clears a sibling's lent text.
+        if (key === 'warrantyStatus') return value === null || Boolean(cleanText(value));
         if (typeof value === 'number') return Number.isFinite(value) && value > 0;
         return cleanText(value);
       })),
+      ...(recurringPurchasedTerms ? { purchasedTerms: recurringPurchasedTerms } : {}),
       label,
     });
   });
-  return uniqueByLabel([...byLabel.values()]);
+  // Apply the frozen projection only after current rows have replaced saved
+  // terms. An empty current bond decision must clear an older purchased bond
+  // even when the frozen pricing projection has no separate bond row.
+  return uniqueByLabel([...byLabel.values()].filter((row) => (
+    allowFallbackOnly || primaryLabels.has(row.label) || (row.purchasedTerms || []).length
+  )));
 }
 
-function oneTimeRowsFromPricing(pricingBundle = {}) {
+// A pre-slab job's warranty, worded as the page words it (routes/
+// estimate-public.js preSlabCustomerCopy): the engine prices a basic tier by
+// default and the extended 5-year tier as a paid add-on. Owner ruling
+// 2026-09-27: a selected pre-slab warranty is stated, never "no guarantee".
+function preSlabWarrantyTerms(item) {
+  return preSlabWarrantyTermsForDecision(preSlabWarrantyDecision(item));
+}
+function preSlabWarrantyTermsForDecision(decision) {
+  return decision === 'extended'
+    ? ['Extended 5-year warranty selected. Warranty terms depend on the selected warranty option.']
+    : ['Warranty terms depend on the selected warranty option. No extended warranty selected.'];
+}
+
+function purchasedTermsForRow(item) {
+  if (!hasPurchasedTrenchingWarranty(item)) return [];
+  const copy = resolveOneTimeServiceCopy(item, { noGuaranteeClaims: true });
+  return (copy?.includes || []).filter((line) => GUARANTEE_COPY.test(line));
+}
+
+function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
+  const primaryLabelsByService = new Map();
+  for (const row of primaryRows) {
+    const service = trenchingServiceIdentity(row);
+    if (!service) continue;
+    const labels = primaryLabelsByService.get(service) || new Set();
+    labels.add(cleanText(row.label));
+    primaryLabelsByService.set(service, labels);
+  }
+  const unmatchedFallbackRows = fallbackRows.filter((row) => {
+    const labels = primaryLabelsByService.get(trenchingServiceIdentity(row));
+    return !labels || labels.has(cleanText(row.label));
+  });
+  const primaryIdentityCounts = primaryRows.reduce((counts, row) => {
+    const key = `${trenchingServiceIdentity(row)}|${cleanText(row.label).toLowerCase()}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+    return counts;
+  }, new Map());
+  const duplicateIdentities = new Set([...primaryIdentityCounts]
+    .filter(([, count]) => count > 1).map(([key]) => key));
+  if (!duplicateIdentities.size) return mergeServiceRows(primaryRows, unmatchedFallbackRows);
+  const identityFor = (row) => `${trenchingServiceIdentity(row)}|${cleanText(row.label).toLowerCase()}`;
+  // Distinct priced jobs can legitimately share a customer-facing label. Their
+  // already-reconciled current terms must survive instead of being coalesced by
+  // the general label merger; ambiguous fallback rows cannot enrich either.
+  return [
+    ...primaryRows.filter((row) => duplicateIdentities.has(identityFor(row))),
+    ...mergeServiceRows(
+      primaryRows.filter((row) => !duplicateIdentities.has(identityFor(row))),
+      unmatchedFallbackRows.filter((row) => !duplicateIdentities.has(identityFor(row))),
+    ),
+  ];
+}
+
+// A pre-slab row's authoritative warranty selection travels with its
+// projection (warrantyExtendedSelected, else its warrantyStatus text), so
+// preSlabSelectedWarrantyPart reads the selection, never stale detail text
+// that still names the removed extended warranty (pre-push audit P1 on
+// 5c8876e256). Other rows carry nothing extra.
+// `evidence` is the row whose warranty decision governs (the priced row
+// itself, or the saved row reconcilePricedPreSlabWarrantyEvidence matched
+// it to when the priced row carries no decision), so the stated terms and
+// the kept detail part agree.
+function preSlabProjectionFields(item = {}, evidence = item) {
+  if (!isPreSlabTreatmentItem(item)) return {};
+  const decided = evidence && typeof evidence === 'object' ? evidence : item;
+  // One decision (preSlabWarrantyDecision) drives the terms, the stamped
+  // boolean and the status, so they can never disagree. The boolean is
+  // stamped whenever the evidence row decided, even by detail text only
+  // (pre-push audit P1 on ca460e0f0c). An UNDECIDED row is stamped null
+  // rather than left blank: mergeServiceRows lets null through for these
+  // two keys, so a priced row the reconciler could not decide never
+  // inherits a saved sibling's selection through the label merge.
+  const decision = preSlabWarrantyDecision(decided);
+  return {
+    warrantyTerms: preSlabWarrantyTermsForDecision(decision),
+    warrantyExtendedSelected: decision === 'unset' ? null : decision === 'extended',
+    warrantyStatus: decision === 'unset' ? null : (cleanText(decided.warrantyStatus) || null),
+  };
+}
+
+function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
   const items = Array.isArray(pricingBundle.oneTimeBreakdown?.items)
     ? pricingBundle.oneTimeBreakdown.items
     : [];
@@ -272,29 +549,32 @@ function oneTimeRowsFromPricing(pricingBundle = {}) {
         item.quoteRequired === true ? 'Quote required' : null,
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
+      const evidence = reconcilePricedTrenchingWarrantyEvidence(item, evidenceGroups, pricingBundle, items);
+      const preSlabEvidence = reconcilePricedPreSlabWarrantyEvidence(item, evidenceGroups, pricingBundle, items);
       return {
-        service: cleanText(item.service || item.key) || null,
+        service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
+        ...(trenchingServiceIdentity(item) === 'termite_trenching'
+          ? { purchasedTerms: purchasedTermsForRow(evidence) }
+          : {}),
+        ...preSlabProjectionFields(item, preSlabEvidence),
+        ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
       };
     });
 }
 
-function oneTimeRowsFromEstimateData(estData = {}) {
-  const result = estData.result || estData.engineResult || estData || {};
+function oneTimeRowsFromResult(result = {}) {
   const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
   const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
     ? result.results.oneTime
     : {};
-  const items = [
-    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
-    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
-    ...(Array.isArray(nestedOneTime.items) ? nestedOneTime.items : []),
-    ...(Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems : []),
-    ...(Array.isArray(result.specItems) ? result.specItems : []),
-  ];
+  // A row mirrored across containers is one job (collapseMirroredRows).
+  const items = collapseMirroredRows([
+    oneTime.items, oneTime.specItems, nestedOneTime.items, nestedOneTime.specItems, result.specItems,
+  ]);
   return items
     .filter((item) => item && item.onProg !== true && item.includedOnProgram !== true)
     .map((item) => ({ item, amount: Number(item.price ?? item.amount ?? item.total) }))
@@ -319,13 +599,58 @@ function oneTimeRowsFromEstimateData(estData = {}) {
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
       return {
-        service: cleanText(item.service || item.key) || null,
+        service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
+        ...preSlabProjectionFields(item),
+        ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
       };
     });
+}
+
+function oneTimeEvidenceGroupsFromEstimateData(estData = {}) {
+  const roots = [...new Set([estData.result, estData.engineResult]
+    .filter((value) => value && typeof value === 'object'))];
+  if (!roots.length) roots.push(estData);
+  return roots.map(rawOneTimeWarrantyEvidenceItems);
+}
+
+// The saved roots, current first: result, then an older engineResult, else
+// the raw save.
+function oneTimeRootsFromEstimateData(estData = {}) {
+  const roots = [...new Set([estData.result, estData.engineResult]
+    .filter((value) => value && typeof value === 'object'))];
+  if (!roots.length) roots.push(estData);
+  return roots;
+}
+
+// The one-time rows on the CURRENT saved root only (no fallback rows).
+function currentOneTimeRowsFromEstimateData(estData = {}) {
+  return oneTimeRowsFromResult(oneTimeRootsFromEstimateData(estData)[0]);
+}
+
+const oneTimeRowScopeKey = (row = {}) => `${cleanText(row.service).toLowerCase()}|${cleanText(row.label).toLowerCase()}`;
+
+function oneTimeRowsFromEstimateData(estData = {}) {
+  const roots = oneTimeRootsFromEstimateData(estData);
+  const evidenceGroups = oneTimeEvidenceGroupsFromEstimateData(estData);
+  const projectedCurrent = oneTimeRowsFromResult(roots[0]);
+  // A current pre-slab row takes its decision through the same reconciler
+  // the priced rows use (current rows, then itself, then older rows), BEFORE
+  // the merge with older rows, so the merge lends nothing the reconciler did
+  // not grant (tree-reviewer on #5195).
+  const currentRows = projectedCurrent.map((row) => (isPreSlabTreatmentItem(row)
+    ? { ...row, ...preSlabProjectionFields(row, reconcilePricedPreSlabWarrantyEvidence(row, evidenceGroups, {}, projectedCurrent)) }
+    : row));
+  const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult);
+  const mergedRows = mergeOneTimeServiceRows(currentRows, fallbackRows);
+  return mergedRows.map((row) => {
+    if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
+    const evidence = reconcileTrenchingWarrantyEvidence(row, evidenceGroups, mergedRows);
+    return { ...row, purchasedTerms: purchasedTermsForRow(evidence) };
+  });
 }
 
 function frequencyHasRecurringValue(frequency = {}) {
@@ -349,6 +674,7 @@ function serviceLine(row = {}) {
     parts.push(`${fmtMoney(row.perApplication)} per application`);
   }
   if (row.detail) parts.push(row.detail);
+  parts.push(...(row.purchasedTerms || []));
   return parts.filter(Boolean).join(' - ');
 }
 
@@ -495,26 +821,94 @@ function quoteRequiredFromContext(estimate = {}, pricingBundle = {}) {
     || cleanText(estimate.status) === 'quote_required';
 }
 
+// A row's service lanes; a commercial row (isCommercial) reads as its
+// commercial lane even where only the saved row carried that marker.
+function rowGuaranteeLanes(row = {}) {
+  return row.guaranteeLanes
+    || (row.isCommercial === true ? guaranteeLanesForRow(row) : serviceKeysFromText(row.service, row.label));
+}
+
+const RECURRING_PLAN_TERMS = 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.';
+const ONE_TIME_CALLBACK_TERMS = 'This one-time service may include a 30-day callback period when shown on the estimate.';
+
+// Whether one row carries the plan terms itself (owner ruling 2026-09-27:
+// each service carries its own terms; the page's serviceRowTermsScope):
+// residential pest, lawn, mosquito, tree & shrub or palm work, on an
+// estimate with no termite, unclassifiable or commercial scope.
+function rowCarriesOwnPlanTerms(row, { noGuaranteeClaims = false, commercialScope = false } = {}) {
+  if (noGuaranteeClaims === true || commercialScope === true || !row || row.isCommercial === true) return false;
+  const lanes = rowGuaranteeLanes(row);
+  return lanes.length > 0 && lanes.every((lane) => RECURRING_TERMS_LANES.includes(lane));
+}
+
+function assistantGuaranteeContext(noGuaranteeClaims, serviceMode, recurringRows, oneTimeRows, noEstimateWideGuarantee = false) {
+  const rowLanes = [...recurringRows, ...oneTimeRows].map((row) => {
+    const keys = rowGuaranteeLanes(row);
+    return keys.length ? keys : ['unknown'];
+  });
+  const lanes = [...new Set(rowLanes.flat())];
+  // The page's own rule (routes/estimate-public.js estimateCarriesPlanTerms):
+  // plan terms cover the estimate when EVERY service carries them, so a pest
+  // + lawn bundle carries them, and a rodent, commercial or unknown lane does
+  // not. The one-time 30-day callback follows the same scope, except a
+  // lawn-only job (the page's oneTimePriceCopy lawn branch).
+  // The page's own decision (noEstimateWideGuarantee: an authored proposal or
+  // an engine commercial mark the rows here may not show) can only narrow it.
+  const everyLaneCarriesTerms = noEstimateWideGuarantee !== true
+    && lanes.length > 0 && lanes.every((lane) => RECURRING_TERMS_LANES.includes(lane));
+  const recurringTermsEligible = !noGuaranteeClaims && serviceMode === 'recurring'
+    && recurringRows.length > 0 && everyLaneCarriesTerms;
+  const oneTimePestTerms = !noGuaranteeClaims && serviceMode === 'one_time'
+    && everyLaneCarriesTerms && !lanes.every((lane) => lane === 'lawn');
+  return {
+    noGuaranteeClaims: noGuaranteeClaims === true,
+    recurringTermsEligible,
+    recurring: recurringTermsEligible ? RECURRING_PLAN_TERMS : null,
+    oneTime: oneTimePestTerms ? ONE_TIME_CALLBACK_TERMS : null,
+    guidance: noGuaranteeClaims
+      ? 'Use this estimate’s written service scope and terms. Do not infer an estimate-wide callback, satisfaction, re-treatment, or money-back guarantee. State each service’s terms exactly as guarantees.serviceTerms lists them.'
+      : (recurringTermsEligible ? null : 'Use the service-specific written terms. Do not infer recurring callbacks, money-back, or no-contract terms from membership or category-specific satisfaction wording. State each service’s terms exactly as guarantees.serviceTerms lists them.'),
+  };
+}
+
 function buildEstimateAssistantContext({
   estimate = {},
   estData = {},
   pricingBundle = {},
   selectedFrequency = '',
   serviceMode = 'recurring',
+  noGuaranteeClaims = false,
+  noEstimateWideGuarantee = false,
+  // An authored proposal or an engine commercial row anywhere
+  // (estimateHasCommercialScope): no row carries the plan terms itself.
+  commercialScope = false,
 } = {}) {
   const parsedData = parseEstimateData(estData);
   const requestedMode = serviceMode === 'one_time' ? 'one_time' : 'recurring';
   const frequency = selectPricingFrequency(pricingBundle, estimate, parsedData, selectedFrequency);
-  const pricingRecurringRows = serviceRowsFromPricing(pricingBundle, frequency);
-  const estimateRecurringRows = serviceRowsFromEstimateData(parsedData);
+  // The bond selector updates these inputs and mapped stats while historical
+  // engineResult rows may remain. Explicit removal must also invalidate their
+  // purchased scope, including a frozen pricing row that still shows the bond.
+  const rawServices = rawRecurringServiceRows(parsedData);
+  const bondSelection = selectedBondTermsFromEstimateData(parsedData, rawServices, frequency);
+  const pricingRecurringRows = serviceRowsFromPricing(pricingBundle, frequency, bondSelection.terms);
+  const estimateRecurringRows = serviceRowsFromEstimateData(rawServices, bondSelection);
   const recurringServices = mergeServiceRows(
     pricingRecurringRows,
     estimateRecurringRows,
     { allowFallbackOnly: pricingRecurringRows.length === 0 },
   );
-  const oneTimeServices = mergeServiceRows(
-    oneTimeRowsFromPricing(pricingBundle),
+  const oneTimeEvidenceGroups = oneTimeEvidenceGroupsFromEstimateData(parsedData);
+  const pricedOneTimeRows = oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups);
+  const oneTimeServices = mergeOneTimeServiceRows(
+    pricedOneTimeRows,
     oneTimeRowsFromEstimateData(parsedData),
+  );
+  // Rows still in the current scope: priced now, or on the current saved
+  // result. oneTimeRowsFromEstimateData also keeps rows only an older
+  // engineResult retains; those were removed and must never be advertised.
+  const currentOneTimeKeys = new Set(
+    [...pricedOneTimeRows, ...currentOneTimeRowsFromEstimateData(parsedData)].map(oneTimeRowScopeKey),
   );
   const oneTimeTotal = Number(pricingBundle.anchorOneTimePrice || estimate.onetime_total || estimate.onetimeTotal);
   const hasOneTimeValue = (Number.isFinite(oneTimeTotal) && oneTimeTotal > 0) || oneTimeServices.length > 0;
@@ -532,6 +926,10 @@ function buildEstimateAssistantContext({
   const services = selectedMode === 'one_time'
     ? oneTimeServices
     : (recurringServices.length ? recurringServices : (oneTimeAvailable ? oneTimeServices : []));
+  // Classify before display-name merging: "Commercial Pest" and "Pest Control"
+  // share a short label but must not share recurring residential terms.
+  const guarantees = assistantGuaranteeContext(noGuaranteeClaims, selectedMode,
+    [...pricingRecurringRows, ...estimateRecurringRows], oneTimeServices, noEstimateWideGuarantee);
   const billingPeriod = periodLabelForFrequency(frequency);
   const billingAmount = billingAmountForFrequency(frequency);
   const serviceCadence = frequency?.billingFrequencyKey && frequency.billingFrequencyKey !== frequency.key
@@ -547,12 +945,16 @@ function buildEstimateAssistantContext({
   const firstName = cleanText(estimate.customer_name || estimate.customerName).split(' ')[0]
     || cleanText(estimate.customerFirstName);
   const quoteRequired = quoteRequiredFromContext(estimate, pricingBundle);
-  // Expose separately-billed one-time add-ons that have their own Ask Waves chip
-  // (German-roach cleanout, Bora-Care) even on a recurring estimate, so the
-  // assistant context carries the row the chip's question is about.
-  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(
-    (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row),
-  );
+  // Expose separately-billed add-ons with their own Ask Waves chip or proven
+  // purchased terms even when this recurring estimate offers no one-time plan.
+  // The plan selector must not hide the purchased scope of a billed add-on.
+  const isAssistantVisibleOneTimeAddOn = (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row)
+    || row.purchasedTerms?.length > 0
+    // A pre-slab add-on's warranty terms expose it only while it is still
+    // in the current scope (Codex #5195 r1: a fallback-only row from an
+    // older engineResult is a removed treatment).
+    || (row.warrantyTerms?.length > 0 && currentOneTimeKeys.has(oneTimeRowScopeKey(row)));
+  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(isAssistantVisibleOneTimeAddOn);
   const exposeOneTimeContext = !quoteRequired
     && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)
     && (hasOneTimeValue || oneTimeServices.length > 0);
@@ -567,21 +969,52 @@ function buildEstimateAssistantContext({
   const contextBillingText = selectedMode === 'one_time'
     ? (oneTimeBillingAmount ? fmtMoney(oneTimeBillingAmount) : null)
     : normalBillingAmountText;
+  // Each service keeps its own terms: a row that carries the plan terms
+  // itself keeps them in its detail even where the estimate as a whole
+  // does not. The detail is filtered by the page's shared scope rule
+  // (withoutClaimsOutsideScope): 'none' on a no-guarantee estimate, 'all'
+  // for a row that carries the plan terms, else 'satisfaction', where only
+  // "satisfaction guaranteed" survives and a generic written guarantee or
+  // warranty claim is dropped as the page drops it (pre-push audit P1 on
+  // d1da03b391). A pre-slab job's selected extended warranty is verified
+  // purchased coverage and is kept, as on the page.
   const rowWithSummary = (row) => {
+    const rowScope = noGuaranteeClaims ? 'none'
+      : (guarantees.recurringTermsEligible || rowCarriesOwnPlanTerms(row, { commercialScope }) ? 'all' : 'satisfaction');
+    const detail = rowScope === 'all' ? row.detail
+      : withoutClaimsOutsideScope(cleanText(row.detail), rowScope, preSlabSelectedWarrantyPart(row));
+    // Null warranty keys carried for the merge are not served.
+    const { warrantyExtendedSelected: _flag, warrantyStatus: _status, ...served } = row;
+    const projectedRow = {
+      ...served,
+      ...(typeof row.warrantyExtendedSelected === 'boolean' ? { warrantyExtendedSelected: row.warrantyExtendedSelected } : {}),
+      ...(cleanText(row.warrantyStatus) ? { warrantyStatus: cleanText(row.warrantyStatus) } : {}),
+    };
     const safeRow = quoteRequired
       ? {
-          ...row,
+          ...projectedRow,
           monthly: null,
           perApplication: null,
           amount: null,
-          detail: cleanText(row.detail).replace(/\$[\d,]+(?:\.\d{1,2})?/g, 'price pending inspection'),
+          detail: cleanText(detail).replace(/\$[\d,]+(?:\.\d{1,2})?/g, 'price pending inspection'),
         }
-      : row;
+      : { ...projectedRow, detail };
     return {
       ...safeRow,
       summary: serviceLine(safeRow),
     };
   };
+  const servicesContext = services.map(rowWithSummary);
+  const recurringServicesContext = recurringServices.map(rowWithSummary);
+  // When one-time work is not offered and an add-on alone exposes this
+  // context, only the add-ons are exposed: the merged list also retains
+  // rows only an older engineResult still carries (a removed termite-foam
+  // treatment), and those must not ride along (pre-push audit P1 on
+  // 5e030feff6).
+  const exposedOneTimeServices = oneTimeAvailable
+    ? oneTimeServices
+    : oneTimeServices.filter(isAssistantVisibleOneTimeAddOn);
+  const oneTimeItemsContext = exposeOneTimeContext ? exposedOneTimeServices.map(rowWithSummary) : null;
 
   return {
     company: COMPANY,
@@ -604,8 +1037,8 @@ function buildEstimateAssistantContext({
         : null,
       quoteRequired,
     },
-    services: services.map(rowWithSummary),
-    recurringServices: recurringServices.map(rowWithSummary),
+    services: servicesContext,
+    recurringServices: recurringServicesContext,
     setupFee,
     firstVisitFees,
     // Identity-only (no amounts) quote-required one-time rows that the
@@ -617,12 +1050,37 @@ function buildEstimateAssistantContext({
     oneTime: exposeOneTimeContext ? {
       amount: oneTimeContextAmount,
       amountText: oneTimeContextAmount ? fmtMoney(oneTimeContextAmount) : null,
-      items: oneTimeServices.map(rowWithSummary),
+      items: oneTimeItemsContext,
     } : null,
-    guarantees: {
-      recurring: 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.',
-      oneTime: 'One-time pest service may include a 30-day callback period when shown on the estimate.',
-    },
+    // Without estimate-wide terms, each service's own terms, listed once for
+    // the model and the fallback alike.
+    guarantees: guarantees.recurringTermsEligible
+      ? guarantees
+      : {
+        ...guarantees,
+        serviceTerms: serviceTermsFromRows(
+          [
+            servicesContext, recurringServicesContext, oneTimeItemsContext || [],
+            // Termite rows the display merge left out (a raw engine row behind
+            // a frozen pest projection) still state their own terms.
+            estimateRecurringRows.filter((row) => (row.guaranteeLanes || []).some((lane) => TERMITE_LANES.has(lane))
+              && !recurringServices.some((merged) => merged.label === row.label)),
+          ],
+          oneTimeItemsContext || [],
+          {
+            // A row that carries the plan terms itself states them under its
+            // own name: the recurring terms on a recurring plan, or the
+            // callback period on one-time work other than lawn.
+            ownTerms: (row) => {
+              if (!rowCarriesOwnPlanTerms(row, { noGuaranteeClaims, commercialScope })) return [];
+              if (row.oneTime === true) {
+                return rowGuaranteeLanes(row).every((lane) => lane === 'lawn') ? [] : [ONE_TIME_CALLBACK_TERMS];
+              }
+              return selectedMode === 'recurring' ? [RECURRING_PLAN_TERMS] : [];
+            },
+          },
+        ),
+      },
     contact: COMPANY,
   };
 }
@@ -1258,6 +1716,171 @@ function isBoraCareIntent(question = '') {
     || (/\bwood/.test(text) && /(treat|destroy|beetle|fungi|boring|decay)/.test(text));
 }
 
+// A satisfaction clause written in a row's own detail ("Satisfaction
+// guaranteed for the initial treatment only."), never a negated one. On a
+// no-guarantee estimate rowWithSummary has already removed these clauses.
+function writtenSatisfactionClause(detail) {
+  return cleanText(detail).split(/(?<=[.!?;])\s+/)
+    .find((part) => /\bsatisfaction guaranteed\b/i.test(part)
+      && !/\b(?:no|not|never|without|excluded|isn't|is not|doesn't|does not)\b/i.test(part)) || null;
+}
+
+// The per-service terms list for an estimate without estimate-wide terms
+// (AGENTS.md estimate truth scope, owner 2026-09-26/27). The assistant never
+// guesses from the wording of a question which service is meant; every
+// guarantee question gets this one list. A termite row states its purchased
+// terms (a selected bond, a purchased trenching warranty), a pre-slab job its
+// warranty option, or else "No guarantee.". Any other row states the
+// satisfaction clause written in its own detail, which rowWithSummary has
+// already removed on an estimate with termite work, as the page does. The
+// model context and the fallback answer read this one list.
+function serviceTermsFromRows(rowGroups = [], oneTimeRows = [], { ownTerms = () => [] } = {}) {
+  const oneTimeIdentities = new Set(oneTimeRows.map(trenchingServiceIdentity));
+  const seen = new Set();
+  // The same job is projected into several groups (services, recurring,
+  // one-time rows), so a repeated projection collapses across groups. Two
+  // identical current jobs inside one group (two $900 trenching jobs that
+  // both purchased the warranty) are distinct jobs: each occurrence keeps its
+  // place, so the positional naming below lists both (Codex #4982).
+  const groups = rowGroups.every(Array.isArray) ? rowGroups : [rowGroups];
+  const entries = groups.flatMap((group) => {
+    const occurrences = new Map();
+    return group.flatMap((row) => {
+      if (!row || typeof row !== 'object') return [];
+      // Engine frequency inclusions can carry a bare service-key placeholder
+      // for a separately priced add-on. It is not a distinct job.
+      const unpricedPlaceholder = !row.oneTime && !oneTimeRows.includes(row)
+        && oneTimeIdentities.has(trenchingServiceIdentity(row))
+        && cleanText(row.label).toLowerCase() === cleanText(row.service).toLowerCase()
+        && !row.purchasedTerms?.length
+        && ![row.amount, row.monthly, row.perApplication].some(Number.isFinite);
+      if (unpricedPlaceholder) return [];
+      const lanes = rowGuaranteeLanes(row);
+      const purchased = Array.isArray(row.purchasedTerms) ? row.purchasedTerms : [];
+      let terms;
+      if (lanes.some((lane) => TERMITE_LANES.has(lane))) {
+        // A bond is itself the purchase: a bond row with no purchase says nothing.
+        // Neither does an unpriced row labeled with its bare service key (the
+        // engine's inclusion placeholder for a separately priced add-on).
+        const bareKeyPlaceholder = cleanText(row.label).toLowerCase() === cleanText(row.service).toLowerCase()
+          && ![row.amount, row.monthly, row.perApplication].some((value) => Number.isFinite(value) && value > 0);
+        if (!purchased.length && (bareKeyPlaceholder || cleanText(row.service).toLowerCase().startsWith('termite_bond'))) {
+          return [];
+        }
+        const warranty = Array.isArray(row.warrantyTerms) ? row.warrantyTerms : [];
+        terms = purchased.length ? purchased : (warranty.length ? warranty : ['No guarantee.']);
+      } else {
+        const clause = writtenSatisfactionClause(row.detail);
+        terms = [...purchased, ...ownTerms(row), ...(clause ? [`The written detail says “${clause}”`] : [])];
+        if (!terms.length) return [];
+      }
+      const amount = Number(row.amount);
+      const entry = {
+        service: cleanText(row.label) || 'Service',
+        amount: Number.isFinite(amount) && amount > 0 ? amount : null,
+        terms,
+      };
+      const key = [row.service, entry.service, entry.amount, ...terms].map(cleanText).join('|').toLowerCase();
+      const occurrence = occurrences.get(key) || 0;
+      occurrences.set(key, occurrence + 1);
+      if (seen.has(`${key}#${occurrence}`)) return [];
+      seen.add(`${key}#${occurrence}`);
+      return [entry];
+    });
+  });
+  // Same-label jobs are named by price, and by position when the price repeats.
+  return entries.map((entry) => {
+    const sameLabel = entries.filter((other) => other.service === entry.service);
+    if (sameLabel.length === 1 || entry.amount === null) return { service: entry.service, terms: entry.terms };
+    const samePrice = sameLabel.filter((other) => other.amount === entry.amount);
+    const name = samePrice.length === 1
+      ? `${entry.service} at ${fmtMoney(entry.amount)}`
+      : `${entry.service} job ${samePrice.indexOf(entry) + 1} of ${samePrice.length} at ${fmtMoney(entry.amount)}`;
+    return { service: name, terms: entry.terms };
+  });
+}
+
+// An estimate without estimate-wide terms: termite or unclassifiable work
+// (noGuaranteeClaims), a recurring plan whose services don't share one
+// recurring-terms lane, or a one-time job with no one-time terms of its own
+// (only one-time pest carries the callback period).
+function withoutEstimateWideTerms(context = {}) {
+  const guarantees = context.guarantees || {};
+  if (guarantees.noGuaranteeClaims === true) return true;
+  return context.serviceMode === 'one_time'
+    ? !guarantees.oneTime
+    : guarantees.recurringTermsEligible !== true;
+}
+
+// A guarantee question on such an estimate, including recurrence wording
+// ("What if the termites come back?"). Only the deterministic per-service
+// answer takes it: the fallback answers it first, and answerEstimateQuestion
+// routes it there before the live models, so no model picks which service a
+// question means. servedModelAnswer covers any other wording.
+// Recurrence wording counts only with a pest as its subject: "When will you
+// return for the next treatment?" is a scheduling question.
+const RECURRING_PEST = '(?:termites|pests|bugs|(?:cock)?roach(?:es)?|ants|spiders|rodents|rats|mice|mosquito(?:e)?s|fleas|ticks|wasps|bees|beetles)';
+// Two tiers of guarantee wording. A question that NAMES a guarantee term
+// (any inflection: "Is this guaranteed?", "Am I covered?", "Is it
+// warrantied?") asks about terms whatever else it mentions, so only a
+// genuine price question leaves the deterministic answer; scheduling wording
+// does not ("Is my next visit covered by the warranty?"). Re-treatment and
+// recurrence wording can also be scheduling ("How often do you retreat the
+// lawn?"), so scheduling wording leaves it. "bond" stays exact: "licensed
+// and bonded" asks about the company, not a termite bond (Codex #4982).
+const EXPLICIT_GUARANTEE_PATTERN = /\b(?:guarant\w*|warrant\w*|call[- ]?backs?|money[- ]?back|satisf\w*|risk[- ]?free|bonds?|annual inspection|cover(?:age|ed))\b/i;
+const RECURRENCE_SUBJECT = `(?:${RECURRING_PEST}|they|it)`;
+const RECURRENCE_QUESTION_PATTERN = new RegExp(
+  '\\b(?:re-?treat\\w*|re-?service\\w*'
+  + `|${RECURRENCE_SUBJECT}(?:\\s+(?:ever|still|just|then))?\\s+(?:come|comes|coming|came)\\s+back`
+  + `|${RECURRENCE_SUBJECT}(?:\\s+(?:ever|still|just|then))?\\s+return(?:s|ed|ing)?`
+  + `|treat(?:ed|ing)?\\s+(?:them|it|the\\s+${RECURRING_PEST})\\s+again)\\b`,
+  'i',
+);
+// A price question asks for an amount of money: "How much does the 5-year
+// bond cost?", "What's the price of the warranty?", "How much is the bond?",
+// "How much for the 5-year bond?" (Codex #4982). "How much" alone is not one
+// ("How much warranty coverage do I get?", "How much is covered?", "How much
+// for coverage?"), and a dollar figure or cost that names a job ("Does the
+// cost of trenching include a warranty?") is still a guarantee question.
+const PRICE_QUESTION_PATTERN = new RegExp([
+  '\\bhow much\\b[^?.!]*\\b(?:costs?|prices?|charges?|fees?|run)\\b',
+  "\\bwhat(?:\\s+(?:does|do|is|would|will)|['’]s)\\b[^?.!]*\\b(?:costs?|prices?)\\b",
+  '\\bhow much (?:is|are|would|will|for)\\b(?![^?.!]*\\b(?:cover\\w*|guarant\\w*|warrant\\w*)\\b)',
+].join('|'), 'i');
+// Scheduling wording is a scheduling question: "How often do you retreat the
+// lawn?", "When will you treat the yard again?".
+const SCHEDULING_QUESTION_PATTERN = /\bhow often\b|\bwhat (?:day|time)\b|\bschedul\w*|\bappointment\b|\bnext (?:visit|treatment|service|application)\b|\bwhen (?:will|do|can|should|is|are) (?:you|the tech|your tech|someone|a tech)\b/i;
+function answersWithServiceTerms(question, context = {}) {
+  const q = cleanText(question);
+  if (!withoutEstimateWideTerms(context) || PRICE_QUESTION_PATTERN.test(q)) return false;
+  return EXPLICIT_GUARANTEE_PATTERN.test(q)
+    || (RECURRENCE_QUESTION_PATTERN.test(q) && !SCHEDULING_QUESTION_PATTERN.test(q));
+}
+
+// On an estimate without estimate-wide terms, a model answer that makes a
+// plan-terms claim (callbacks, money-back, satisfaction, no-contract, free
+// re-service) is never served: the deterministic answer for the same question
+// is. Setup and prepay refund wording is not a plan-terms claim.
+function servedModelAnswer(answer, source, question, context) {
+  if (withoutEstimateWideTerms(context) && PLAN_TERMS_COPY.test(answer)) {
+    return { answer: answerEstimateQuestionFallback(question, context), source: 'fallback' };
+  }
+  return { answer, source };
+}
+
+// The guarantee answer for an estimate without estimate-wide terms: the same
+// answer whatever the question's wording, listing each service's own terms.
+function serviceTermsAnswer(context = {}, phone, noGuaranteeAnswer) {
+  const oneTimeRows = Array.isArray(context.oneTime?.items) ? context.oneTime.items : [];
+  const entries = Array.isArray(context.guarantees?.serviceTerms)
+    ? context.guarantees.serviceTerms
+    : serviceTermsFromRows([context.services, context.recurringServices, oneTimeRows].filter(Array.isArray), oneTimeRows);
+  if (!entries.length) return noGuaranteeAnswer;
+  const lines = entries.map((entry) => `${entry.service}: ${entry.terms.join(' ').replace(/([^.!?”])$/, '$1.')}`);
+  return `This estimate’s written service scope and terms are what apply. ${lines.join(' ')} Each of those terms applies to that service only. I do not see an estimate-wide callback or money-back guarantee listed; call or text Waves at ${phone} if you want the team to confirm coverage for a specific service.`;
+}
+
 function answerEstimateQuestionFallback(question, context = {}) {
   const q = cleanText(question).toLowerCase();
   const phone = context.company?.phone || COMPANY.phone;
@@ -1265,6 +1888,18 @@ function answerEstimateQuestionFallback(question, context = {}) {
   const billingText = context.billing?.amountText;
   const services = listServices(context);
   const oneTimeText = context.oneTime?.amountText;
+  const noGuaranteeAnswer = `This estimate’s written service scope and terms are what apply. I do not see an estimate-wide callback or money-back guarantee listed; call or text Waves at ${phone} if you want the team to confirm coverage for a specific service.`;
+
+  // Runs first, ahead of the service-specific shortcuts (Bora-Care, the
+  // misting system) and the generic "included/coverage" branch. On an estimate
+  // without estimate-wide terms every guarantee question, "Does Bora-Care
+  // include a warranty?" too, gets each service's own terms (AGENTS.md, owner
+  // 2026-09-27). This answer states no price and offers no booking, so the
+  // shortcuts' own guards still hold.
+  const neutralRecurringTerms = context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true;
+  if (answersWithServiceTerms(q, context)) {
+    return serviceTermsAnswer(context, phone, noGuaranteeAnswer);
+  }
 
   // Bora-Care questions are answered first — above the include/coverage, safety,
   // and product branches — so phrasings like "does Bora-Care cover beetles?" or
@@ -1389,9 +2024,15 @@ function answerEstimateQuestionFallback(question, context = {}) {
   }
 
   if (/\b(waveguard|silver|bronze|gold|platinum|member|membership|guarantee|callback|risk)\b/.test(q)) {
-    if (context.serviceMode === 'one_time') {
-      return `This is a one-time service, not a recurring WaveGuard membership. ${context.guarantees?.oneTime || 'One-time pest service may include a 30-day callback period when shown on the estimate.'}`;
+    if (context.guarantees?.noGuaranteeClaims === true) {
+      return noGuaranteeAnswer;
     }
+    if (context.serviceMode === 'one_time') {
+      return context.guarantees?.oneTime
+        ? `This is a one-time service, not a recurring WaveGuard membership. ${context.guarantees.oneTime}`
+        : noGuaranteeAnswer;
+    }
+    if (neutralRecurringTerms) return noGuaranteeAnswer;
     return `${tier} is the WaveGuard membership level shown on this estimate. Recurring WaveGuard service includes the money-back guarantee shown here, member pricing, and ongoing service support from Waves.`;
   }
 
@@ -1457,6 +2098,9 @@ async function answerEstimateQuestion({
   pricingBundle,
   selectedFrequency,
   serviceMode,
+  noGuaranteeClaims = false,
+  noEstimateWideGuarantee = false,
+  commercialScope = false,
   database = db,
 } = {}) {
   const cleanQuestion = cleanText(question);
@@ -1466,6 +2110,9 @@ async function answerEstimateQuestion({
     pricingBundle,
     selectedFrequency,
     serviceMode,
+    noGuaranteeClaims,
+    noEstimateWideGuarantee,
+    commercialScope,
   });
   try {
     context.supportContext = await loadEstimateAiSupportContext({
@@ -1478,6 +2125,16 @@ async function answerEstimateQuestion({
   }
 
   if (context.billing?.quoteRequired) {
+    return {
+      answer: answerEstimateQuestionFallback(cleanQuestion, context),
+      source: 'fallback',
+    };
+  }
+
+  // Guarantee questions on an estimate without estimate-wide terms get the
+  // deterministic per-service answer, never a model's reading of which
+  // service the question means (owner ruling 2026-09-27).
+  if (answersWithServiceTerms(cleanQuestion, context)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',
@@ -1513,14 +2170,14 @@ async function answerEstimateQuestion({
   // deterministic template — the customer always gets an answer.
   try {
     const openAiAnswer = await answerWithOpenAI(cleanQuestion, context);
-    if (openAiAnswer) return { answer: openAiAnswer, source: 'openai' };
+    if (openAiAnswer) return servedModelAnswer(openAiAnswer, 'openai', cleanQuestion, context);
   } catch (err) {
     logger.warn(`[estimate-assistant] OpenAI answer failed: ${err.message}`);
   }
 
   try {
     const aiAnswer = await answerWithAnthropic(cleanQuestion, context);
-    if (aiAnswer) return { answer: aiAnswer, source: 'anthropic' };
+    if (aiAnswer) return servedModelAnswer(aiAnswer, 'anthropic', cleanQuestion, context);
   } catch (err) {
     logger.warn(`[estimate-assistant] AI answer failed: ${err.message}`);
   }

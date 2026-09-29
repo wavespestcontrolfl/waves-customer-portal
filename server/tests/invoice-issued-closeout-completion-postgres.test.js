@@ -70,11 +70,13 @@ describe('source contracts', () => {
   });
   test('the operator\'s resend-receipt route is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
-    expect(source).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,1200}receipt can only be sent for paid invoices[\s\S]{0,900}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId: req\.technicianId \|\| null \}\);[\s\S]{0,400}const \{ sendReceiptEmail \} = require/);
+    // After the receipt-job claim (a queued receipt cannot deliver during the
+    // closeout), before either leg.
+    expect(source).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,1200}receipt can only be sent for paid invoices[\s\S]{0,600}claimReceiptJobForOperatorSend\(id, \{ sawUnsent: !invoice\.receipt_sent_at \}\)[\s\S]{0,2000}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId: req\.technicianId \|\| null \}\);[\s\S]{0,400}if \(via === 'email' \|\| via === 'both'\) \{\s*emailResult = await sendReceiptEmail/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
-    expect(source).toMatch(/if \(smsDelivered\) \{[\s\S]{0,5000}?closeOutVisitForIssuedInvoice\(\{ invoiceId, trigger: "sent", actorTechnicianId \}\);[\s\S]{0,600}?return \{ sent: true, payUrl, finalizeError: err\.message \};/);
+    expect(source).toMatch(/if \(smsDelivered\) \{[\s\S]{0,5000}?closeOutVisitForIssuedInvoice\(\{ invoiceId, trigger: "sent", actorTechnicianId \}\);[\s\S]{0,600}?return \{ sent: true, payUrl, \.\.\.settledEvent, finalizeError: err\.message \};/);
   });
   test('every hand-payment writer reaches the closeout: /payments/reconcile after its commit, the prepaid receipt on both the newly-paid and already-paid legs (GitHub r4 P1)', () => {
     const reconcile = fs.readFileSync(path.join(__dirname, '../routes/admin-payments-reconcile.js'), 'utf8');
@@ -100,10 +102,22 @@ describe('source contracts', () => {
   });
   test('both delivery-side review decisions consult the record provenance (issuedCloseoutOwnsRecord) before enrolling (pre-push P1 r7)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
-    // sendViaSMSAndEmail: provenance check sits between the payment deferral and the enrollment.
-    expect(source).toMatch(/\} else if \(inv && await issuedCloseoutOwnsRecord\(inv\.service_record_id\)\) \{[\s\S]*?\} else if \(inv\) \{\s*\n\s*await ReviewService\.enrollPostService\(\{\s*\n\s*customerId: inv\.customer_id,/);
-    // markDeliverySent: same order on the durable linkage.
-    expect(source).toMatch(/\} else if \(await issuedCloseoutOwnsRecord\(linkage\.service_record_id\)\) \{[\s\S]*?\} else \{\s*\n\s*const ReviewService = require\("\.\/review-request"\);\s*\n\s*await ReviewService\.enrollPostService\(\{\s*\n\s*customerId: invoice\.customer_id,\s*\n\s*serviceRecordId: linkage\.service_record_id/);
+    const wrapper = source.slice(source.indexOf('async sendViaSMSAndEmail('), source.indexOf('async markDeliverySent('));
+    const finalizer = source.slice(source.indexOf('async markDeliverySent('), source.indexOf('async processScheduledSends('));
+    expect(wrapper).toContain('enrollReviewAfterInvoiceDelivery({');
+    expect(finalizer).toContain('enrollReviewAfterInvoiceDelivery({');
+    const helperSource = fs.readFileSync(path.join(__dirname, '../services/invoice-delivery-review.js'), 'utf8');
+    const quietCloseout = helperSource.indexOf('if (issuedCloseout?.closed)');
+    const freshRead = helperSource.indexOf("const fresh = await db('invoices')");
+    const paymentDeferral = helperSource.indexOf("if (invoice.service_record_id && !['paid', 'prepaid'].includes");
+    const provenance = helperSource.indexOf('if (await issuedCloseoutOwnsRecord(invoice.service_record_id))');
+    const enrollment = helperSource.indexOf('await ReviewService.enrollPostService({');
+    expect(quietCloseout).toBeGreaterThan(-1);
+    expect(freshRead).toBeGreaterThan(quietCloseout);
+    expect(helperSource.slice(quietCloseout, freshRead)).toContain('return;');
+    expect(paymentDeferral).toBeGreaterThan(freshRead);
+    expect(provenance).toBeGreaterThan(paymentDeferral);
+    expect(enrollment).toBeGreaterThan(provenance);
   });
   test('GitHub r7 P2 set: ownership re-read after the gate, revertMerge takes the gate, batch receipts retry the closeout, post-commit failures are released for resume', () => {
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -174,7 +188,9 @@ describe('source contracts', () => {
     const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const detailsTrxAt = schedule.indexOf("const commsPeek = await trx('scheduled_services')");
     const occupancyAt = schedule.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);', detailsTrxAt);
-    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
+    // The re-price block (owner 2026-09-28) takes the same lock at the same
+    // point for a price edit, so the condition now names both.
+    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
     const firstRowLockAt = schedule.indexOf('.forUpdate()', detailsTrxAt);
     const conversionVoidAt = schedule.indexOf('await voidConversionInvoicesRestoringCredits({ trx, ids: nonAccruedIds, voidUpdate });', detailsTrxAt);
     expect(detailsTrxAt).toBeGreaterThan(-1);

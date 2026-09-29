@@ -360,6 +360,18 @@ function planReductionGroups(rows) {
 // `serviceId` for the single-visit surfaces; `serviceIds` for the bulk
 // cancel, which hands over the whole batch so the writer can group by
 // series and treat several cancels of one plan as the plan reduction it is.
+// Whether cancelling `row` COULD add a make-up visit to its plan: the reseed
+// gate is live and the row is a counting plan-series visit. Deliberately
+// broader than the reseed's own decision (which also weighs the plan's
+// term and remaining visits): the Intelligence Bar refuses card-confirmed
+// cancels of any such visit (owner ruling 2026-09-28, bare visits only)
+// rather than preview the reseed. `row` needs is_recurring,
+// recurring_parent_id, is_callback, followup_included and status.
+function cancelMayReseedPlan(row) {
+  const { cancelReseedsRecurringLive } = require('../config/feature-gates');
+  return cancelReseedsRecurringLive() && isPlanSeriesRow(row) && isCountingSourceStatus(row?.status);
+}
+
 async function runPostCancelSeriesReseed({ db, serviceId, serviceIds, retryIds, source = 'cancel' } = {}) {
   const ids = [...new Set([...(serviceIds || []), serviceId].filter(Boolean).map(String))];
   // Rows a retried bulk request carried again that were ALREADY cancelled
@@ -390,6 +402,7 @@ async function runPostCancelSeriesReseed({ db, serviceId, serviceIds, retryIds, 
 
 module.exports = {
   runPostCancelSeriesReseed,
+  cancelMayReseedPlan,
   plannedVisitsPerYearForSeries,
   termWindowContaining,
   termWindowAtIndex,

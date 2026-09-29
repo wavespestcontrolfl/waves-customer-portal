@@ -17,7 +17,7 @@ const MODELS = require('../config/models');
 const config = require('../config');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { getNewsletterType } = require('../config/newsletter-types');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-et');
 const { FEEDBACK_HTML_TOKEN, FEEDBACK_TEXT_TOKEN } = require('./newsletter-feedback');
 const logger = require('./logger');
 const {
@@ -28,6 +28,7 @@ const {
 const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadSharedYearPool,
 } = require('./newsletter-event-selection');
 const { dispatchWithFallback } = require('./llm/call');
 
@@ -80,6 +81,37 @@ function formatEventBlock(events) {
  * is its own object so we can assemble Beehiiv-quality HTML with GIFs,
  * styled metadata blocks, and per-event sections server-side.
  */
+// Topics only — no figure, duration, temperature, date range or named-source
+// number lives here (codex round 14 P1, the same rule as the Pest Insider
+// rotation): a fact restated in a static prompt outlives its withdrawal from
+// the register, and the flagship lane has no claim scan to catch it. The
+// numbers reach the writer through factsPromptBlock alone.
+// pest-insider.test.js pins this.
+const FLAGSHIP_SEASONAL_CONTEXT = [
+  '- Jan–Feb: snowbird peak, dry lawns, red tide drift; winter termite flights only as the verified facts state them',
+  '- Mar: spring break, citrus bloom, native and Asian subterranean termite flight season (from the verified facts)',
+  '- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents, lovebugs (their flight season, from the verified facts)',
+  '- May: DeSoto Heritage Festival, lovebugs, rainy season starts — container mosquitoes after rain (egg-to-adult timeline and the dump-and-scrub rhythm, from the verified facts)',
+  '- Jun: hurricane season begins, daily thunderstorms, the summer fertilizer restrictions (dates and places only as the verified facts state them)',
+  '- Jul: Fourth of July, peak rainy season, chinch bugs (their season, from the verified facts), palmetto bugs indoors (why they wander in, from the verified facts)',
+  '- Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine',
+  '- Sep: hurricane peak, Siesta Key Crystal Classic, post-storm yard checklist; drywood termite flights (from the verified facts); native subterranean termites have ONE flight season and no second swarm after storms',
+  '- Oct: snowbirds return, rodent exclusion checklist (roof rat access and exclusion, from the verified facts — the source gives no rodent season), Halloween on barrier islands',
+  '- Nov: Sarasota Season of Sculpture, turkey trots, winter annuals',
+  '- Dec: boat parades, winter termite flights only as the verified facts state them, holiday pantry pests',
+  '- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms',
+].join('\n');
+
+async function loadFactsBlock({ required }) {
+  try {
+    return await require('./email-division/fact-register').factsPromptBlock();
+  } catch (err) {
+    if (required) throw err;
+    logger.warn(`[newsletter-draft] flagship facts block unavailable, drafting without pest facts: ${err.message}`);
+    return '';
+  }
+}
+
 function buildFlagshipSystemPrompt(voice, month) {
   return `You write the Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
 
@@ -87,19 +119,8 @@ This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven w
 
 CURRENT MONTH: ${month}
 
-SWFL SEASONAL CONTEXT (pick what's relevant):
-- Jan–Feb: snowbird peak, dry lawns, red tide drift
-- Mar: spring break, love bugs, citrus bloom
-- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents
-- May: DeSoto Heritage Festival, mosquito ramp, no-see-um peak
-- Jun: hurricane season begins, daily thunderstorms, nitrogen blackout on lawns
-- Jul: 4th of July, peak rainy season, German roach pressure, palmetto bugs
-- Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine
-- Sep: hurricane peak, Siesta Key Crystal Classic, termite swarms after storms
-- Oct: snowbirds return, rodent season begins, Halloween on barrier islands
-- Nov: Sarasota Season of Sculpture, turkey trots, winter annuals
-- Dec: boat parades, cooler weather drives indoor pest activity
-- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms
+SWFL SEASONAL CONTEXT (pick what's relevant — TOPICS ONLY; every pest fact, date, count or timeline you state must come from the VERIFIED FACTS block at the end of this prompt, or be left out):
+${FLAGSHIP_SEASONAL_CONTEXT}
 
 VOICE:
 - Irreverent but not mean. Energetic but not chaotic. A hype-y group-chat friend, single narrator.
@@ -194,66 +215,73 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
 // season, override any month via the Compose prompt). Built from the
 // SWFL pest calendar: each month carries the featured service (the ONE
 // pitch), the Lawn Corner beat, and the content angles that month owns.
+//
+// Every slate names TOPICS only — never a figure, a duration, a
+// temperature, a date or a named-source number (codex PR #5187 r11). The
+// numbers live in the fact register alone and reach the prompt through
+// factsPromptBlock, so a fact withdrawn from the register (deactivated or
+// flagged) stops reaching the writer; a figure restated here would outlive
+// it. pest-insider.test.js pins this.
 const PEST_INSIDER_ROTATION = {
   January: {
-    service: 'rodent control & pest inspections (cool weather drives rats/mice indoors; snowbirds reopening closed-up homes — the "welcome-back inspection")',
+    service: 'rodent control & pest inspections (snowbirds reopening closed-up homes — the "welcome-back inspection"; roof rat exclusion from the verified facts — the source gives no rodent season, so do not invent one)',
     lawn: 'dry-season lawn watering discipline + winter annuals',
-    beats: 'rodents seeking warmth; surprises in snowbird homes',
+    beats: 'surprises in snowbird homes; how roof rats get in (reach and jumping, from the verified facts); winter termite flights — only what the verified facts say about native subterranean flight season',
   },
   February: {
     service: 'termite protection & WDO inspections (pre-swarm prep — the single most important content window of the year starts NOW)',
     lawn: 'pre-emergent timing before spring weeds wake up',
-    beats: 'flying ants vs termites — the 10-second test; drywood vs subterranean',
+    beats: 'flying ants vs termites — the quick look test; drywood vs subterranean',
   },
   March: {
-    service: 'subterranean termite treatment (swarm season is ON)',
-    lawn: 'spring lawn wake-up: first mow height, aeration timing',
-    beats: 'termite swarmers after warm rain; love bug season opener (pure engagement — everyone in SWFL has opinions)',
+    service: 'subterranean termite treatment (swarm season is ON — native and Asian subterranean flight seasons, from the verified facts)',
+    lawn: 'spring lawn wake-up: first mow height for St. Augustine (from the verified facts), aeration timing',
+    beats: 'termite swarmers after warm rain; citrus bloom (pure engagement — everyone in SWFL has opinions)',
   },
   April: {
-    service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mounds wake with spring rain)',
+    service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mating flights after spring rain, from the verified facts)',
     lawn: 'weed pre-emergents last call + aeration',
-    beats: 'love bugs peak; spring buyers need WDO',
+    beats: 'lovebugs on the road (their flight season, from the verified facts); spring buyers need WDO',
   },
   May: {
-    service: 'mosquito treatment (rainy-season kickoff = mosquito explosion — the biggest add-on push of the year)',
-    lawn: 'rainy-season mowing rhythm; watch for early chinch activity',
+    service: 'mosquito treatment (rainy-season kickoff — container mosquitoes after rain: the egg-to-adult timeline and the dump-and-scrub rhythm, from the verified facts — the biggest add-on push of the year)',
+    lawn: 'rainy-season mowing and watering rhythm for St. Augustine (from the verified facts); watch for early chinch activity',
     beats: 'standing-water audit checklist ("walk your yard with this list"); Memorial Day backyard prep',
   },
   June: {
-    service: 'mosquito treatment (daily thunderstorms = standing water everywhere)',
-    lawn: 'chinch bugs starting on St. Augustine; nitrogen blackout begins',
-    beats: 'hurricane season opens — what storms do to pests (displaced rodents, mosquito boom in debris, fire ant rafts)',
+    service: 'mosquito treatment (daily thunderstorms = standing water everywhere; container mosquitoes, from the verified facts)',
+    lawn: 'chinch bugs on St. Augustine (their season, from the verified facts); the summer fertilizer restrictions — dates and places only as the verified facts state them',
+    beats: 'hurricane season opens — the post-storm yard checklist (standing water and container mosquitoes, from the verified facts; clear debris); say only what the register supports about pests after storms',
   },
   July: {
-    service: 'quarterly pest defense (German cockroach & palmetto bug peak indoor pressure; ghost ants in kitchens)',
-    lawn: 'chinch bug damage spreading — brown patches that aren\'t drought',
-    beats: 'ghost ants, palmetto bugs, post-storm pest surges',
+    service: 'quarterly pest defense (palmetto bugs indoors — why they wander in, from the verified facts; ghost ants in kitchens — where they nest, from the verified facts)',
+    lawn: 'chinch bug damage (their peak, from the verified facts) — brown patches that aren\'t drought; the coffee-can flotation test',
+    beats: 'ghost ants, palmetto bugs, the coffee-can chinch test',
   },
   August: {
     service: 'lawn pest control (chinch bugs shredding St. Augustine — before/after season)',
-    lawn: 'sod webworms move in; recovery plan for chinch damage',
+    lawn: 'recovery plan for chinch damage (mowing height and watering for St. Augustine, from the verified facts)',
     beats: 'peak hurricane risk — post-storm yard checklist; back-to-school',
   },
   September: {
-    service: 'termite inspection (post-storm swarms) + lawn recovery',
-    lawn: 'fall fertilization window opens as blackout ends',
-    beats: 'hurricane peak; termite swarms after storms',
+    service: 'termite & WDO inspection (drywood flight seasons from the verified facts — native subterranean termites have ONE flight season and no second swarm after storms) + lawn recovery',
+    lawn: 'fall fertilization window opens as the summer restrictions end (dates only as the verified facts state them)',
+    beats: 'hurricane peak; post-storm yard checklist (standing water and container mosquitoes, from the verified facts; clear debris) — say only what the register supports about pests after storms; drywood termite flights in fall — never a "second subterranean swarm after storms"',
   },
   October: {
-    service: 'rodent exclusion (season begins as nights cool)',
-    lawn: 'fall fertilization + winterizing the irrigation schedule',
-    beats: 'spooky season fun: spider myths debunked, which Florida bugs are ACTUALLY dangerous',
+    service: 'rodent exclusion (roof rat access and exclusion, from the verified facts — the source gives no rodent season)',
+    lawn: 'fall fertilization (as the summer restrictions end — dates only as the verified facts state them) + watering days — state a district restriction ONLY if the verified facts below carry a current one; if they do not, say nothing about a schedule',
+    beats: 'spooky season fun: spider myths, which Florida bugs are ACTUALLY dangerous — sourced facts only, no invented seasonality',
   },
   November: {
-    service: 'rodent control (attics fill as snowbirds return)',
+    service: 'rodent control (attic checks as snowbirds return — roof rat exclusion from the verified facts; the source gives no rodent season)',
     lawn: 'winter annuals in; last fertilization call',
     beats: 'pantry pests before holiday baking; firewood hitchhikers',
   },
   December: {
     service: 'pest inspections (pest-proof the house before holiday guests; gift-a-service for elderly parents)',
     lawn: 'cool-season lawn care + holiday lighting vs irrigation',
-    beats: 'Christmas tree hitchhikers; pantry pests; cooler weather drives indoor activity',
+    beats: 'Christmas tree hitchhikers; pantry pests; winter termite flights — only what the verified facts say about native subterranean flight season',
   },
 };
 
@@ -932,6 +960,9 @@ function lockEventFactsFromDb(aiEvents, dbEvents) {
       // spreading — only the DB-locked eventUrl below may render as a link.
       ...sanitizeCommentaryFields(ev),
       eventId: row.id,
+      // The locked occurrence, persisted on the send (event_occurrences) so
+      // the sender stamps the date the email shows.
+      startAt: row.start_at,
       date,
       dateStr,
       timeStr,
@@ -1643,6 +1674,28 @@ function buildFlagshipTextBody(draft) {
   return out.filter(Boolean).join('\n\n');
 }
 
+// Owner ruling 2026-09-27: newsletterWriter (Opus 5.5) thinks on every
+// request and spends that from max_tokens ahead of the JSON reply
+// (anthropic-wire.js THINKING_FLOOR_TOKENS=8192 is only a floor — 'max'
+// effort's actual thinking depth runs well past it), so the prior 8192-token
+// cap — sized for a non-thinking Sonnet reply — would starve the ~8k-token
+// Beehiiv-parity JSON reply. 32000 gives headroom for max-effort thinking
+// plus the full reply.
+const NEWSLETTER_WRITE_MAX_TOKENS = 32000;
+// Generous enough for max effort end to end; explicit so callAnthropic
+// passes { timeout } to the SDK (avoids the "streaming is strongly
+// recommended" error a large max_tokens with no explicit timeout can throw
+// on a non-streaming request) and so the fallback chain's own deadline math
+// runs off a real number instead of DEFAULT_FALLBACK_BUDGET_MS (4 min, too
+// short for 'max' effort). reserveFallbackBudget (passed at the call site)
+// splits this across legs instead of handing a stalled Opus leg the whole
+// budget, so the OpenAI fallback still gets real time.
+const NEWSLETTER_WRITE_TIMEOUT_MS = 10 * 60 * 1000;
+// Interactive admin-composer calls run inside a browser request, so they get
+// the dispatcher's standard 4-minute chain budget (what the composer had
+// before the Opus switch) instead of the autopilot's 10 minutes.
+const INTERACTIVE_DRAFT_TIMEOUT_MS = 4 * 60 * 1000;
+
 /**
  * Create a newsletter draft via Claude and persist it.
  *
@@ -1657,6 +1710,10 @@ function buildFlagshipTextBody(draft) {
  * @param {boolean} [opts.includeCTA] - Whether to include CTA
  * @param {string|Date} [opts.issueReference] - Issue Tuesday/target used for event policy windows
  * @param {import('knex').Knex.Transaction} [opts.trx] - Optional Knex transaction
+ * @param {string} [opts.effort] - Anthropic effort override for the
+ *   newsletterWriter policy's primary leg (default: the policy's own 'max').
+ *   Interactive routes pass 'high' so a synchronous HTTP request can't hang
+ *   the admin composer.
  * @returns {Promise<{send: Object, draft: Object}>}
  */
 async function createNewsletterDraft({
@@ -1671,6 +1728,15 @@ async function createNewsletterDraft({
   issueReference,
   trx,
   persist = true,
+  // Owner ruling 2026-09-27: the newsletter is WRITTEN by Opus 5.5. Autopilot
+  // (the weekly cron, pest-insider-autopilot.js) never passes this — it gets
+  // the policy's own 'max' effort. The interactive admin composer routes
+  // (routes/admin-newsletter.js /draft-ai, /calendar/:id/draft-from-plan)
+  // pass 'high' instead: a synchronous HTTP request can't afford a
+  // multi-minute max-effort call without risking the admin UI (and any
+  // upstream proxy) timing out on the operator.
+  effort,
+  timeoutMs = NEWSLETTER_WRITE_TIMEOUT_MS,
 }) {
   const knex = trx || db;
   // The issue's Tuesday (not "now") anchors both the seasonal-month framing
@@ -1706,7 +1772,7 @@ async function createNewsletterDraft({
           'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
           'e.image_url', 'e.categories', 'e.is_free', 'e.admin_status',
           'e.event_type', 'e.recurrence_type', 'e.freshness_status',
-          'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+          'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at',
           'e.price_text', 'e.family_friendly', 'e.audience_tags',
           'e.novelty_type', 'e.region_zone', 'e.score_breakdown',
           's.name as source_name',
@@ -1714,17 +1780,28 @@ async function createNewsletterDraft({
         .whereIn('e.id', safeIds)
         .whereIn('e.admin_status', ['approved', 'featured'])
         .whereNull('e.merged_into')
-        .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+        // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+        // 2026-09-27, second pass) — see newsletter-autopilot.js's
+        // buildDigestPlan for why: it used to be, which unconditionally
+        // defeated excludeRoutineRecurringFromQuery's own first-of-year
+        // admission for every routine row before that shared gate even ran.
+        .whereNotIn('e.freshness_status', ['expired'])
         .orderByRaw('e.freshness_score DESC NULLS LAST');
 
       const approvedRows = await excludeRoutineRecurringFromQuery(approvedQuery);
+      // One calendar-year identity pool for this batch, shared by both
+      // filters below (Codex P2, 2026-09-27: "Reuse the calendar-year pool
+      // across eligibility filters") instead of each loading its own copy.
+      const yearPool = await loadSharedYearPool(knex, approvedRows, editorialReference);
       const nonRepeatedRows = await filterRepeatedDateIdentities(approvedRows, {
         knex,
         reference: editorialReference,
+        yearPool,
       });
       const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, {
         knex,
         reference: editorialReference,
+        yearPool,
       });
       approvedEvents = dedupeDigestEvents(
         historicallyNewRows.filter((event) => isEligibleForFreshDigest(event, editorialReference)),
@@ -1748,9 +1825,22 @@ async function createNewsletterDraft({
   //    prompt (no events, no anchoring); everything else gets the
   //    flagship events prompt.
   const isPestInsider = typeConfig?.key === 'pest-insider-monthly';
-  const systemPrompt = isPestInsider
+  // Pest Insider is grounded in the email fact register: the verified facts
+  // and the rule binding the writer to them are part of its system prompt.
+  // A draft that cannot load its facts fails rather than being written
+  // ungrounded.
+  // Both lanes are grounded in the same live register: the flagship's
+  // seasonal context names topics only, so its pest facts too come from the
+  // block appended here and stop reaching the writer the moment a fact is
+  // withdrawn (codex round 14 P1). The Pest Insider IS its facts and fails
+  // closed without them; the weekly events guide is not — an empty or
+  // unreachable register logs, the block is omitted, and the prompt's own
+  // rule ("from the verified facts block, or left out") keeps pest facts
+  // out of that issue (pre-push audit P1 on e0dd938596).
+  const factsBlock = await loadFactsBlock({ required: isPestInsider });
+  const systemPrompt = (isPestInsider
     ? buildPestInsiderSystemPrompt(voice, month)
-    : buildFlagshipSystemPrompt(voice, month);
+    : buildFlagshipSystemPrompt(voice, month)) + factsBlock;
 
   // Homeowner Minute RETIRED from the flagship (owner 2026-07-30) —
   // homeownerMinuteTopic is accepted for caller compatibility but no
@@ -1761,16 +1851,23 @@ async function createNewsletterDraft({
 ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
 
-  // 3. Call the Sonnet → OpenAI Terra content policy. 8192 tokens — the Beehiiv-parity schema is richer
-  // (captions, scoop labels, checklists) and a 10-event lineup at 4096
-  // risked mid-JSON truncation.
-  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+  // 3. Call the newsletterWriter policy (Opus 5.5 effort 'max' → OpenAI
+  // Terra fallback; owner ruling 2026-09-27). `effort` overrides the
+  // policy's own 'max' only when the caller asked for a lighter interactive
+  // path (see the JSDoc above) — the fallback leg has no effort concept, so
+  // only the primary route needs the override.
+  const basePolicy = MODELS.TEXT_POLICIES.newsletterWriter;
+  const draftPolicy = effort && effort !== basePolicy.primary.effort
+    ? { ...basePolicy, primary: { ...basePolicy.primary, effort } }
+    : basePolicy;
+  const response = await dispatchWithFallback(draftPolicy, {
     laneId: 'newsletter',
-    maxTokens: 8192,
+    maxTokens: NEWSLETTER_WRITE_MAX_TOKENS,
+    timeoutMs,
     jsonMode: true,
     system: systemPrompt,
     text: userPrompt,
-  });
+  }, { reserveFallbackBudget: true });
   if (!response.ok || !response.json) throw new Error('Newsletter AI providers did not return valid JSON');
 
   // 4. The shared dispatcher parses JSON and crosses providers on malformed output.
@@ -1940,6 +2037,49 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   return { send, draft };
 }
 
+/**
+ * { [eventId]: start_at ISO } for drafted events, from their fact-locked
+ * startAt (lockEventFactsFromDb): the dates the rendered email shows.
+ */
+function lockedEventOccurrences(events) {
+  return Object.fromEntries((Array.isArray(events) ? events : [])
+    .filter((e) => e && e.eventId && e.startAt && !Number.isNaN(new Date(e.startAt).getTime()))
+    .map((e) => [String(e.eventId), new Date(e.startAt).toISOString()]));
+}
+
+// A drafted date further out than this is not an upcoming issue's event.
+const OCCURRENCE_MAX_AHEAD_DAYS = 120;
+
+/**
+ * The occurrence map saved with a send's event list. The Compose client
+ * carries the map the draft generator returned (`provided`, the dates the
+ * email was rendered with); only entries for listed ids with a plausible
+ * date are kept: from yesterday (ET) through OCCURRENCE_MAX_AHEAD_DAYS out,
+ * so a stale tab or a client bug can't write a far-off date into
+ * last_featured_occurrence_at, which the calendar-year rule reads. An id
+ * without one (a hand-picked list, an old client, an implausible date)
+ * falls back to the row's start_at at save time. The sender stamps
+ * last_featured_occurrence_at from this map.
+ */
+async function resolveEventOccurrences(knex, eventIds, provided, reference = new Date()) {
+  const ids = (Array.isArray(eventIds) ? eventIds : []).map(String).filter(Boolean);
+  const given = provided && typeof provided === 'object' && !Array.isArray(provided) ? provided : {};
+  const earliest = parseETDateTime(`${etDateString(addETDays(reference, -1))}T00:00:00`).getTime();
+  const latest = reference.getTime() + OCCURRENCE_MAX_AHEAD_DAYS * 24 * 60 * 60 * 1000;
+  const out = {};
+  for (const id of ids) {
+    const value = given[id];
+    const at = typeof value === 'string' ? new Date(value).getTime() : NaN;
+    if (!Number.isNaN(at) && at >= earliest && at <= latest) out[id] = new Date(at).toISOString();
+  }
+  const missing = ids.filter((id) => !out[id]);
+  if (missing.length) {
+    const rows = await knex('events_raw').whereIn('id', missing).select('id', 'start_at');
+    for (const r of rows) if (r.start_at) out[String(r.id)] = new Date(r.start_at).toISOString();
+  }
+  return JSON.stringify(out);
+}
+
 async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db }) {
   // Generate slug only at persistence time. This lets callers do paid/network
   // generation before opening a short advisory-locked DB transaction.
@@ -1966,11 +2106,17 @@ async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db
     // .times_featured (+ recompute freshness) for exactly the events that
     // actually shipped, on the first 'sent' transition.
     event_ids: JSON.stringify((draft.events || []).map((e) => e.eventId).filter(Boolean)),
+    // Locked occurrence per event, stamped as last_featured_occurrence_at at
+    // send (the row itself may be advanced in place before delivery).
+    event_occurrences: JSON.stringify(lockedEventOccurrences(draft.events)),
   }).returning('*');
   return send;
 }
 
 module.exports = {
+  INTERACTIVE_DRAFT_TIMEOUT_MS,
+  lockedEventOccurrences,
+  resolveEventOccurrences,
   resolveIssueReference,
   createNewsletterDraft,
   persistNewsletterDraft,
@@ -2003,6 +2149,7 @@ module.exports = {
   sanitizePestInsiderDraft,
   assemblePestInsiderNewsletter,
   PEST_INSIDER_ROTATION,
+  FLAGSHIP_SEASONAL_CONTEXT,
   // Greeting personalization — token + per-recipient value + archive strip
   GREETING_NAME_TOKEN,
   greetingWithNameToken,

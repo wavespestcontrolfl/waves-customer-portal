@@ -265,6 +265,45 @@ describe('emit_draft in-loop self-lint (W1)', () => {
     expect(captured.self_lint).toEqual({ redrafts: 2, cap_reached: true });
   });
 
+  test('a draft that links a competitor, in the body or a frontmatter field, is sent back — nothing rewrites it (owner rulings 2026-09-28)', async () => {
+    for (const [sid, frontmatter, body] of [
+      ['lint-8', { title: 'T' }, `${CLEAN_BODY} Compare [one local guide](https://www.turnerpest.com/ants).`],
+      ['lint-9', { title: 'T', next_steps: [{ label: 'See plans', href: 'https://or\tkin.com/plans' }] }, CLEAN_BODY],
+    ]) {
+      registerSessionLint(sid, {});
+      const r = await executeBriefTool('emit_draft', { frontmatter, body }, { sessionId: sid });
+      expect(r.draft_rejected).toBe(true);
+      expect(r.directives.join(' ')).toMatch(/competitor/i);
+      expect(getDraft(sid)).toBeNull();
+      clearDraft(sid);
+    }
+  });
+
+  test('a supporting-blog session redraft also carries the optional citability signals (5013 Codex r2 P2)', async () => {
+    registerSessionLint('lint-5', {}, { citabilityBrief: { page_type: 'supporting-blog' } });
+    const r = await executeBriefTool('emit_draft', {
+      frontmatter: { title: 'Bait vs. Spray for Ghost Ants' },
+      body: `${PRICED_BODY} Experts say ants like moisture.`,
+    }, { sessionId: 'lint-5' });
+    expect(r.draft_rejected).toBe(true);
+    const text = r.directives.join('\n');
+    expect(text).toMatch(/dollar amount/i);
+    expect(text).toMatch(/OPTIONAL CITABILITY SIGNALS/);
+    expect(text).toMatch(/no_named_source_attribution/);
+    expect(text).toMatch(/choice_framed_without_ComparisonTable/);
+    expect(text).toMatch(/no_how_to_choose_section/);
+  });
+
+  test('a session armed without a citability brief keeps hard-finding-only directives', async () => {
+    registerSessionLint('lint-1', {});
+    const r = await executeBriefTool('emit_draft', {
+      frontmatter: { title: 'Bait vs. Spray for Ghost Ants' },
+      body: `${PRICED_BODY} Experts say ants like moisture.`,
+    }, { sessionId: 'lint-1' });
+    expect(r.draft_rejected).toBe(true);
+    expect(r.directives.join('\n')).not.toMatch(/CITABILITY/);
+  });
+
   test('a clean draft captures with the lint audit riding the payload', async () => {
     registerSessionLint('lint-3', {});
     const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: CLEAN_BODY }, { sessionId: 'lint-3' });

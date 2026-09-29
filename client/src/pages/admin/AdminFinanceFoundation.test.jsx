@@ -429,6 +429,134 @@ describe("Finance workflow preservation", () => {
     expect(screen.getByText(newRow.description)).toBeInTheDocument();
     expect(screen.queryByText(oldRow.description)).not.toBeInTheDocument();
   });
+  it("sets up a Plaid connection: an existing CSV label continues its series the day after its last row", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: true, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({ transactions: [], hasMore: false }));
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () => response({
+      configured: true, tokenKey: true, env: "sandbox",
+      existingLabels: [{ label: "capone-checking", accountType: "bank", lastDate: "2026-09-10", rows: 42 }],
+      items: [{
+        id: "item-1", institutionName: "Synthetic Bank", status: "setup", lastSyncedAt: null, lastError: null,
+        accounts: [{
+          id: "acct-1", name: "Checking", mask: "0001", plaidType: "depository", plaidSubtype: "checking",
+          accountLabel: "synthetic-bank-checking-0001", accountType: "bank", syncFrom: "2026-01-01", enabled: true,
+        }],
+      }],
+    }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/items/item-1/setup", () =>
+      response({ success: true, sync: { inserted: 3, updated: 0, deleted: 0, flagged: 0, skips: { pending: 2 }, complete: true, matching: null, matchingError: null } }));
+    open(TaxPage);
+    await taxSection("Expenses", "Import");
+    const label = await screen.findByDisplayValue("synthetic-bank-checking-0001");
+    fireEvent.change(label, { target: { value: "capone-checking" } });
+    expect(await screen.findByText("42 rows already imported, last 2026-09-10")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("2026-09-11")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save and sync" }));
+    await screen.findByText("Synced: 3 new");
+    expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/items/item-1/setup").body).toEqual({
+      accounts: [{ id: "acct-1", accountLabel: "capone-checking", accountType: "bank", syncFrom: "2026-09-11", enabled: true }],
+    });
+  });
+  it("shows a bank correction on a reviewed row and applies it only once the row is unlinked", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: true, bankChanges: 2, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () =>
+      response({ configured: true, tokenKey: true, env: "sandbox", existingLabels: [], items: [] }));
+    const base = { txn_date: "2026-09-05", account_label: "card", account_type: "card", direction: "debit", amount: 10 };
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({
+      hasMore: false,
+      transactions: [
+        { ...base, id: "row-linked", description: "Linked purchase", status: "matched_expense",
+          suggestion: { plaidModified: { amount: 12.34, direction: "debit", txn_date: "2026-09-06", description: "FIXED" } } },
+        { ...base, id: "row-created", description: "Created purchase", status: "created_expense",
+          suggestion: { plaidModified: { amount: 8, direction: "debit", txn_date: "2026-09-04", description: "FIXED 3" } } },
+        { ...base, id: "row-open", description: "Open purchase", status: "unmatched",
+          suggestion: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" } } },
+        { ...base, id: "row-plain", description: "Plain purchase", status: "unmatched", suggestion: null },
+      ],
+    }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change", () => response({ success: true }));
+    open(TaxPage);
+    await taxSection("Expenses", "Import");
+    expect(await screen.findByText(/The bank changed this to \$12\.34 debit on 2026-09-06 — unlink to apply it\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Changed by bank 2" })).toBeInTheDocument();
+    expect(screen.getByText(/\$8\.00 debit on 2026-09-04 — edit the expense created from this row to match, then dismiss\./)).toBeInTheDocument();
+    const apply = screen.getAllByRole("button", { name: "Apply bank's change" });
+    expect(apply).toHaveLength(1); // only the unlinked row
+    // the unlinked row still holds the pre-correction values: the server
+    // refuses claims on it, so only the plain row offers Create expense
+    expect(screen.getAllByRole("button", { name: "Create expense" })).toHaveLength(1);
+    expect(
+      within(screen.getByText("Open purchase").closest("tr")).queryByRole("button", { name: "Create expense" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(apply[0]);
+    await waitFor(() =>
+      expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change")?.body)
+        .toEqual({ action: "apply", expected: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" }, plaidRemoved: null } }));
+  });
+  it("keeps bank-change Dismiss and Disconnect reachable after the Plaid feed is switched off", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: false, bankChanges: 1, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({
+      hasMore: false,
+      transactions: [{ id: "row-gone", txn_date: "2026-09-05", account_label: "card", account_type: "card", direction: "debit",
+        amount: 10, description: "Withdrawn purchase", status: "matched_expense", suggestion: { plaidRemoved: true } }],
+    }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/rows/row-gone/bank-change", () => response({ success: true }));
+    // a connection still in place: listed with Disconnect only
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () => response({
+      configured: true, tokenKey: true, env: "sandbox", existingLabels: [],
+      items: [{ id: "item-1", institutionName: "Synthetic Bank", status: "active", tokenReadable: true, lastSyncedAt: null, lastError: null,
+        accounts: [{ id: "acct-1", name: "Card", mask: "1234", accountLabel: "card", accountType: "card", syncFrom: "2026-09-01", enabled: true }] }],
+    }));
+    open(TaxPage);
+    await taxSection("Expenses", "Import");
+    expect(await screen.findByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+    expect(screen.getByText(/Live bank feeds are switched off/)).toBeInTheDocument();
+    for (const name of ["Connect a bank", "Sync now", "Edit accounts"])
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
+    await waitFor(() =>
+      expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-gone/bank-change")?.body)
+        .toEqual({ action: "dismiss", expected: { plaidModified: null, plaidRemoved: true } }));
+  });
+  it("resumes Plaid Link on the Bank Import tab after a bank's OAuth redirect", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: true, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({ transactions: [], hasMore: false }));
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () =>
+      response({ configured: true, tokenKey: true, env: "sandbox", existingLabels: [], items: [] }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/connect", () => response({ success: true, itemId: "item-9" }));
+    const create = vi.fn((config) => ({
+      open: () => config.onSuccess("public-sandbox-1", { institution: { name: "Synthetic Bank" } }),
+      destroy: () => {},
+    }));
+    vi.stubGlobal("Plaid", { create });
+    localStorage.setItem("waves_plaid_link_resume", JSON.stringify({ linkToken: "link-sandbox-1", itemId: null }));
+    window.history.pushState(null, "", "/admin/tax?oauth_state_id=state-1");
+    try {
+      open(TaxPage);
+      await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+      expect(create.mock.calls[0][0]).toMatchObject({
+        token: "link-sandbox-1",
+        receivedRedirectUri: `${window.location.origin}/admin/tax?oauth_state_id=state-1`,
+      });
+      expect(window.location.search).toBe("");
+      await waitFor(() =>
+        expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/connect")?.body)
+          .toEqual({ publicToken: "public-sandbox-1", institutionName: "Synthetic Bank" }));
+      expect(requests.some((r) => r.key === "POST /api/admin/tax/bank-import/plaid/link-token")).toBe(false);
+      await waitFor(() => expect(localStorage.getItem("waves_plaid_link_resume")).toBeNull());
+    } finally {
+      localStorage.removeItem("waves_plaid_link_resume");
+      window.history.replaceState(null, "", "/");
+    }
+  });
   it("keeps the bank-import gate closed on a failed status read", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>
       response({ error: "Read unavailable" }, 503),

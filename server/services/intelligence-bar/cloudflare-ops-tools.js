@@ -12,9 +12,15 @@
  * permission error and the others keep working — extend the token in the
  * Cloudflare dashboard rather than minting a second one.
  *
- * There are NO write operations here — no cache purges, DNS changes, or
- * deployment retries. Anything that mutates edge state must go through the
- * write-gate mechanism (issue #1568) and is intentionally not built.
+ * purge_cloudflare_cache / retry_cloudflare_pages_build (IB scope expansion
+ * item 1, owner ruling 2026-09-28) are the outside-write tools: structurally
+ * two-step (write-gates.js OUTSIDE_WRITE_TOOL_NAMES), full-access-only
+ * (ib-access.js ibFullAccess, enforced in routes/admin-intelligence-bar.js —
+ * not here). THIS PR IS PREVIEW ONLY: called with confirmed:true, both
+ * refuse — the commit path (an actual Cloudflare purge/retry POST) ships in
+ * a follow-up PR. CF_API_TOKEN is read-scoped today; a write needs Zone
+ * Cache Purge + Zone Settings Edit + Account Pages Edit added (see the IB
+ * scope doc's token checklist).
  */
 
 const logger = require('../logger');
@@ -62,7 +68,33 @@ Use for: "is the site throwing errors at the edge?", "traffic spike or attack on
       required: ['zone_name'],
     },
   },
+  {
+    name: 'purge_cloudflare_cache',
+    description: `Purge the ENTIRE Cloudflare edge cache for one zone (domain) — every cached asset re-fetches from origin on the next request. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Cloudflare.
+Use for: "purge the cache for bradentonflpestcontrol.com", "flush the CDN, the old page is still showing"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        zone_name: { type: 'string', description: 'Zone (domain) to purge, e.g. "wavespestcontrol.com"' },
+      },
+      required: ['zone_name'],
+    },
+  },
+  {
+    name: 'retry_cloudflare_pages_build',
+    description: `Retry the LATEST Cloudflare Pages deployment for one spoke-site project (only useful when it failed). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Cloudflare.
+Use for: "retry the bradenton site build", "that Pages deploy failed, kick it off again"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        project_name: { type: 'string', description: 'Pages project name to retry, e.g. "bradenton-pest-control"' },
+      },
+      required: ['project_name'],
+    },
+  },
 ];
+
+const NOT_YET_IMPLEMENTED_MESSAGE = 'Cloudflare write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
 
 const NOT_CONFIGURED_MESSAGE = 'Cloudflare access is not configured. Add the CF_API_TOKEN service variable (a scoped Cloudflare API token) in the Railway dashboard.';
 
@@ -133,14 +165,57 @@ async function getCloudflarePagesBuilds(input) {
   return { projects, total: projects.length, failing_builds: failing };
 }
 
+// Shared by the edge-error READ and (indirectly, via resolveZoneExact below)
+// the cache-purge WRITE preview — both need the zone's real id/name, not
+// just an operator-typed domain string. Reads may stay fuzzy; this one asks
+// Cloudflare's own exact `name=` filter and is fine for a read.
+async function resolveZone(zoneName) {
+  const zonesJson = await cfRequest(`/zones?name=${encodeURIComponent(zoneName)}`);
+  const zone = (zonesJson.result || [])[0];
+  if (!zone) throw new Error(`No Cloudflare zone found named "${zoneName}".`);
+  return zone;
+}
+
+const MAX_SUGGESTIONS = 5;
+
+// Exact (case-insensitive, trimmed) match ONLY — never a substring pick.
+// Used by every write tool's target resolution (pre-push audit #5275): a
+// fuzzy match could name one zone/project on the card while a later re-
+// resolve of the same raw string picks a different one (ordering isn't
+// guaranteed, and a new zone could start matching the same substring).
+// Reads (getCloudflareZones / getCloudflarePagesBuilds) may keep their
+// substring filter — this is for writes only. `%`/`_` in the input are
+// compared as literal characters, never SQL/LIKE wildcards, so a typed
+// wildcard can never widen the match.
+function resolveExactOrRefuse(items, rawNeedle, { label, getName }) {
+  const needle = String(rawNeedle || '').trim().toLowerCase();
+  const exact = items.filter((item) => getName(item).trim().toLowerCase() === needle);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    throw new Error(`Multiple Cloudflare ${label}s are exactly named "${rawNeedle}" — this should not happen; contact engineering. Candidates: ${exact.map(getName).join(', ')}.`);
+  }
+  const suggestions = items
+    .filter((item) => getName(item).toLowerCase().includes(needle))
+    .slice(0, MAX_SUGGESTIONS)
+    .map(getName);
+  const hint = suggestions.length ? ` Close matches: ${suggestions.join(', ')}.` : '';
+  throw new Error(`No Cloudflare ${label} found exactly named "${rawNeedle}".${hint}`);
+}
+
+// Full zone list + our own exact filter — never Cloudflare's `name=` filter
+// alone (undocumented exactness) and never the substring fallback the reads
+// use. Returns the one zone the write can safely name and act on.
+async function resolveZoneExact(zoneName) {
+  const zonesJson = await cfRequest(`/zones?per_page=${MAX_ZONES}`);
+  return resolveExactOrRefuse(zonesJson.result || [], zoneName, { label: 'zone', getName: (z) => z.name });
+}
+
 async function getCloudflareEdgeErrors(input) {
   const zoneName = String(input.zone_name || '').trim();
   if (!zoneName) throw new Error('zone_name is required.');
   const minutes = Math.min(Math.max(Number(input.minutes) || DEFAULT_ERROR_MINUTES, 5), MAX_ERROR_MINUTES);
 
-  const zonesJson = await cfRequest(`/zones?name=${encodeURIComponent(zoneName)}`);
-  const zone = (zonesJson.result || [])[0];
-  if (!zone) throw new Error(`No Cloudflare zone found named "${zoneName}".`);
+  const zone = await resolveZone(zoneName);
 
   const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
   const graphql = await cfRequest('/graphql', {
@@ -173,6 +248,61 @@ async function getCloudflareEdgeErrors(input) {
   };
 }
 
+// Unconfirmed: resolve the zone live so the card names the real zone, never
+// purges anything. Confirmed: the commit path (a Cloudflare purge POST) is
+// not built in this PR. Full access is enforced by the route (ib-access.js).
+async function purgeCloudflareCache(input) {
+  const zoneName = String(input.zone_name || '').trim();
+  if (!zoneName) throw new Error('zone_name is required.');
+  if (input.confirmed !== true) {
+    const zone = await resolveZoneExact(zoneName);
+    return {
+      preview: true,
+      tool: 'purge_cloudflare_cache',
+      // The pinned canonical identity (id + exact name) — never the
+      // operator's raw string — is what a future commit path must act on.
+      zone: { id: zone.id, zone: zone.name, status: zone.status, paused: Boolean(zone.paused) },
+      note: `Purge the ENTIRE Cloudflare edge cache for "${zone.name}" — every cached asset re-fetches from origin on the next request.`,
+    };
+  }
+  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+}
+
+// Unconfirmed: resolve the project's latest deployment live so the card
+// names the actual build that would be retried (and its current status),
+// never retries anything. Confirmed: refuses — see purgeCloudflareCache.
+async function retryCloudflarePagesBuild(input) {
+  const projectName = String(input.project_name || '').trim();
+  if (!projectName) throw new Error('project_name is required.');
+  if (input.confirmed !== true) {
+    const accountId = process.env.CF_ACCOUNT_ID;
+    if (!accountId) throw new Error('CF_ACCOUNT_ID is not set — required for Pages project lookups.');
+    const json = await cfRequest(`/accounts/${accountId}/pages/projects?per_page=${MAX_PAGES_PROJECTS}`);
+    const project = resolveExactOrRefuse(json.result || [], projectName, { label: 'Pages project', getName: (p) => p.name });
+    const dep = project.latest_deployment || null;
+    if (!dep) throw new Error(`Project "${project.name}" has no deployment to retry.`);
+    return {
+      preview: true,
+      tool: 'retry_cloudflare_pages_build',
+      project: project.name,
+      deployment: {
+        // The pinned exact deployment id — deployed_at (below) is stripped
+        // from the fingerprint as a volatile `_at` field, so without this
+        // the fingerprint bound to nothing distinguishing WHICH deployment
+        // is "latest": a new push landing between preview and confirm would
+        // go undetected as drift (codex r3 P1 on #5275).
+        id: dep.id || null,
+        latest_stage: dep.latest_stage?.name || null,
+        latest_status: dep.latest_stage?.status || 'NONE',
+        branch: dep.deployment_trigger?.metadata?.branch || null,
+        deployed_at: dep.created_on || null,
+      },
+      note: `Retry the latest Cloudflare Pages deployment for "${project.name}" (currently ${dep.latest_stage?.status || 'NONE'}).`,
+    };
+  }
+  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+}
+
 async function executeCloudflareOpsTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state, not a failure — an
   // { error } result would count against the shared admin circuit breaker
@@ -185,10 +315,20 @@ async function executeCloudflareOpsTool(toolName, input = {}) {
       case 'get_cloudflare_zones': return await getCloudflareZones(input);
       case 'get_cloudflare_pages_builds': return await getCloudflarePagesBuilds(input);
       case 'get_cloudflare_edge_errors': return await getCloudflareEdgeErrors(input);
+      case 'purge_cloudflare_cache': return await purgeCloudflareCache(input);
+      case 'retry_cloudflare_pages_build': return await retryCloudflarePagesBuild(input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
-    logger.error(`[intelligence-bar:cloudflare-ops] Tool ${toolName} failed:`, err);
+    // Outside-write refusals can echo operator/model-supplied target text
+    // (a zone, project, service, domain or assignee — possibly customer
+    // text), so those log the tool and status only; the operator still gets
+    // the full message (Codex r5 on #5275). Read tools keep full logs.
+    if (require('./write-gates').OUTSIDE_WRITE_TOOL_NAMES.has(toolName)) {
+      logger.error(`[intelligence-bar:cloudflare-ops] Tool ${toolName} failed (status=${err.status || 'n/a'})`);
+    } else {
+      logger.error(`[intelligence-bar:cloudflare-ops] Tool ${toolName} failed:`, err);
+    }
     return { error: err.message };
   }
 }

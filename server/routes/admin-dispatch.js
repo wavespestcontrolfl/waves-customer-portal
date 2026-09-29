@@ -17,8 +17,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
-const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
-const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { applyAssignable } = require('../services/technician-eligibility');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
 
@@ -78,7 +77,7 @@ const { addressKey } = require('../services/customer-properties');
 // — shared by /complete, /schedule-followup, and the shared status writer's
 // cancellation re-park hook. Route-local copies drifted (Codex r1–r2 on
 // PR #3091 found four leak shapes between them).
-const { typedFollowupVerdict, FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('../services/typed-followup-obligation');
+const { bookCompletionFollowup } = require('../services/completion-followup-booking');
 
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 
@@ -3078,6 +3077,32 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/default-products (owner ruling
+// 2026-09-26): the Complete Service drawer's product list, for a non-lawn
+// spray/granule/bait service, prefilled from the service's protocol visit
+// (server/config/protocols.json visit.completionDefaultProducts) — see
+// server/services/completion-product-defaults.js for the resolution and
+// each product's protocol-specified application method. Read-only and
+// fail-soft: any resolution error answers an empty product list (never
+// 500s the drawer open). No services.default_products fallback (Codex r2
+// P2, PR #5049): the client only ever seeds source 'protocol_visit', so a
+// second, unreachable source was dead code and was removed.
+//
+// Response: { serviceId, programKey, matchedVisit: {visit, reason, matched},
+//   source: 'protocol_visit' | 'excluded_lawn' | 'none',
+//   products: [{ id, name, category, formulation, defaultRatePer1000,
+//     rateUnit, defaultRate, defaultUnit, applicationMethod,
+//     completionApplicationMethod, epaRegNumber,
+//     source: { programKey, visit, origin } }],
+//   unresolved: ['<name with no matching active catalog row>'] }
+router.get('/:serviceId/default-products', async (req, res, next) => {
+  try {
+    const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
+    const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // Lightweight side-effects poll for the completion panel (codex P1 #3187
 // r11): while a committed completion's side effects run, the client polls
 // THIS read-only status instead of replaying the media-bearing completion
@@ -3351,10 +3376,13 @@ function recapStatusForReason(reason) {
 }
 
 // GET /:serviceId/pest-recap/context — service info + timeline + product catalog.
+// ?include=common_products adds the Fast Complete picker's most-used list.
 router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    const ctx = await PestRecap.buildRecapContext(req.params.serviceId);
+    const ctx = await PestRecap.buildRecapContext(req.params.serviceId, undefined, {
+      includeCommonProducts: req.query.include === 'common_products',
+    });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
     res.json(ctx);
   } catch (err) { next(err); }
@@ -3484,303 +3512,24 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 
 // POST /:serviceId/schedule-followup — book the suggested follow-up visit
-// for a typed specialty completion as a PENDING appointment (the normal
-// pending → confirmed dispatch flow is the admin confirmation step, so the
-// full scheduling validation stack isn't duplicated here). Idempotent per
-// source visit via followup_source_service_id — a retried CTA tap returns
-// the existing booking. The appointment is $0 + followup_included, which the
-// typed completion billing pre-gate bypasses (included program visit).
+// for a typed specialty completion as a PENDING appointment. The gates,
+// idempotency and write live in services/completion-followup-booking.js
+// (shared with the Intelligence Bar closeout repair); this route owns the
+// technician-ownership check and relays the service's answer verbatim.
 router.post('/:serviceId/schedule-followup', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
     const { date, windowStart = null, windowEnd = null, technicianId = null } = req.body || {};
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
-      return res.status(400).json({ error: 'date (YYYY-MM-DD) is required', code: 'followup_date_invalid' });
-    }
-    if (String(date) < etDateString()) {
-      return res.status(400).json({ error: 'Follow-up date must be today or later', code: 'followup_date_past' });
-    }
-
-    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-
-    const profile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-
-    // This is the server-side gate for the completion CTA, not a generic
-    // booking API — the source visit must be completed and its persisted
-    // completion must actually call for a follow-up (mirrors the /complete
-    // followupSuggestion logic, incl. the cockroach German-only rule on the
-    // stored snapshot). A stale or crafted POST can't mint included $0
-    // appointments for visits that never owed one (Codex P2).
-    if (svc.status !== 'completed') {
-      return res.status(409).json({
-        error: 'Follow-ups can only be booked from a completed visit.',
-        code: 'followup_source_not_completed',
-      });
-    }
-    // The completion must have actually run the typed flow: after cutover a
-    // service's older completions have no typed snapshot — they never earned
-    // the CTA, so they can't mint an included $0 follow-up (Codex P2). The
-    // snapshot type must match the profile that owes the follow-up.
-    const sourceRecord = await db('service_records')
-      .where({ scheduled_service_id: svc.id })
-      .orderBy('created_at', 'desc')
-      .first()
-      .catch(() => null);
-    const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
-    const preAuthFrozenVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;
-    const frozenVerdictPresent = !!(preAuthFrozenVerdict && typeof preAuthFrozenVerdict.required === 'boolean');
-    // Untyped alert-policy profiles (bed_bug post-20260731400000) book from
-    // the FROZEN verdict their completion persisted; the typed-snapshot
-    // gates below stay authoritative for typed profiles (codex P1 r1).
-    // A frozen verdict ALSO authorizes the lane by itself: ops deactivating,
-    // repointing, or clearing the alert policy after the completion must not
-    // reject the promise the completion already made — the frozen-promise
-    // contract below applies to this gate too (codex P2 r4).
-    const untypedAlertProfile = !profile?.findingsType
-      && (profile?.followupPolicy === 'alert' || frozenVerdictPresent);
-    if (!profile?.findingsType && !untypedAlertProfile) {
-      return res.status(409).json({
-        error: 'Follow-up booking from completion is only available for typed specialty services.',
-        code: 'followup_not_typed',
-      });
-    }
-    if (untypedAlertProfile) {
-      // Untyped completions always freeze their verdict; a legacy TYPED
-      // completion on the now-untyped profile still carries its snapshot.
-      // Neither present → the visit never earned the CTA — same "can't mint
-      // an included $0 follow-up" guarantee as the typed gate.
-      if (!frozenVerdictPresent && !snapshot) {
-        return res.status(409).json({
-          error: 'This visit was not completed through the follow-up flow.',
-          code: 'followup_no_typed_completion',
-        });
-      }
-    } else if (!frozenVerdictPresent && (!snapshot || String(snapshot.type || '') !== String(profile.findingsType))) {
-      // A frozen verdict bypasses the snapshot gate in BOTH directions: an
-      // untyped completion followed by a rollback/repoint that restores the
-      // typed pointer has a frozen promise but no snapshot — the mutable
-      // profile must not reject it (codex P2 r5). Without a frozen verdict
-      // the typed gate stays exactly as before.
-      return res.status(409).json({
-        error: 'This visit was not completed through the typed report flow.',
-        code: 'followup_no_typed_completion',
-      });
-    }
-    // The completion FROZE its final verdict into structured_notes — the
-    // CTA must book exactly the promise that was made, so a later profile
-    // change (interval, policy, deactivation) can neither reject the
-    // original CTA nor authorize a follow-up the completion withheld.
-    // Legacy records without a frozen verdict re-derive through the SAME
-    // shared override chain the completion ran (species rule incl. the
-    // cockroach_control exemption, two-treatment visit-2 stop, German
-    // "No"/window selection, palmetto "Yes" upgrade) — a stale or crafted
-    // POST still can't mint an included $0 follow-up the verdict withheld.
-    const frozenCtaVerdict = preAuthFrozenVerdict;
-    const suggestion = (frozenCtaVerdict && typeof frozenCtaVerdict.required === 'boolean')
-      ? frozenCtaVerdict
-      : typedFollowupVerdict({
-        scheduledService: svc,
-        profile: profile || {},
-        // Pre-freeze legacy records on a now-untyped profile re-derive
-        // through their own snapshot's type — the pointer was cleared, not
-        // the record (codex P1 r1). The snapshot-presence gate above makes
-        // this reachable only with a snapshot in the untyped case.
-        findingsType: profile?.findingsType || snapshot?.type || null,
-        values: snapshot?.values || {},
-      });
-    if (!suggestion?.required) {
-      return res.status(409).json({
-        error: 'This completed visit does not call for a follow-up appointment.',
-        code: 'followup_not_required',
-      });
-    }
-    // The CTA books exactly the program-interval date the completion computed;
-    // any other date is normal scheduling, not an included $0 follow-up
-    // (Codex P2 — this is not a generic booking API).
-    if (!suggestion.suggestedDate || String(date) !== String(suggestion.suggestedDate)) {
-      return res.status(409).json({
-        error: `Follow-up must be booked for the program-interval date${suggestion.suggestedDate ? ` (${suggestion.suggestedDate})` : ''}.`,
-        code: 'followup_date_mismatch',
-        suggestedDate: suggestion.suggestedDate || null,
-      });
-    }
-
-    const cols = await db('scheduled_services').columnInfo().catch(() => ({}));
-    if (!cols.followup_source_service_id || !cols.followup_included) {
-      return res.status(503).json({ error: 'Follow-up booking is not available yet (pending migration).', code: 'followup_columns_missing' });
-    }
-
-    // A booked follow-up clears the parked exception — resolve the
-    // completion-minted follow_up_needed alert(s) so they don't linger as
-    // stale bells for a visit that is now on the schedule. Called on EVERY
-    // path that answers "the follow-up exists" (fresh insert, idempotent
-    // retry, 23505 race winner): a crash or failed resolve after the insert
-    // must not strand the alert open forever (Codex r1 P2). Best-effort —
-    // the booking is the durable outcome and never fails on this.
-    const resolveOpenFollowupAlerts = async () => {
-      try {
-        const { resolveAlert } = require('../services/dispatch-alerts');
-        const openFollowupAlerts = await db('dispatch_alerts')
-          .where({ type: 'follow_up_needed', job_id: svc.id })
-          .whereNull('resolved_at')
-          .select('id');
-        for (const alert of openFollowupAlerts) {
-          await resolveAlert({ id: alert.id, resolvedBy: req.technicianId || null });
-        }
-      } catch (e) {
-        logger.warn(`[dispatch] follow-up alert resolve failed for ${svc.id}: ${e.message}`);
-      }
-    };
-
-    const existing = await db('scheduled_services')
-      .where({ followup_source_service_id: svc.id })
-      .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
-      .orderBy('created_at', 'desc')
-      .first();
-    if (existing) {
-      await resolveOpenFollowupAlerts();
-      return res.json({ success: true, alreadyScheduled: true, appointment: { id: existing.id, scheduledDate: serviceDateOnly(existing.scheduled_date), status: existing.status } });
-    }
-
-    // technicianId override is admin-only — a tech-authenticated caller
-    // could otherwise book the follow-up onto another technician's lane
-    // (Codex P2). Techs always inherit the source visit's technician.
-    const technicianOverride = req.techRole === 'admin' ? technicianId : null;
-    const insertData = {
-      customer_id: svc.customer_id,
-      technician_id: technicianOverride || svc.technician_id || null,
-      scheduled_date: date,
-      window_start: windowStart || svc.window_start || null,
-      window_end: windowEnd || svc.window_end || null,
-      service_type: svc.service_type,
-      status: 'pending',
-      notes: `Follow-up to ${serviceDateOnly(svc.scheduled_date)} visit (booked at completion)`,
-      is_recurring: false,
-      followup_included: true,
-      followup_source_service_id: svc.id,
-    };
-    if (cols.service_id && svc.service_id) insertData.service_id = svc.service_id;
-    // Same address as the source visit — carry its property identity so
-    // the follow-up can join a stop (maybeGroupRow refuses null-property
-    // rows, and a follow-up has no estimate for the linkage regroup —
-    // GH codex #3699 r6 P2).
-    if (cols.property_id && svc.property_id) insertData.property_id = svc.property_id;
-    if (cols.zone && svc.zone) insertData.zone = svc.zone;
-    if (cols.estimated_duration_minutes && svc.estimated_duration_minutes) insertData.estimated_duration_minutes = svc.estimated_duration_minutes;
-    if (cols.estimated_price) insertData.estimated_price = 0;
-    if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = false;
-    if (cols.time_window && svc.time_window) insertData.time_window = svc.time_window;
-
-    let appointment;
-    try {
-      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): comms-lock the
-      // customer around the insert — this path had no transaction, and a
-      // bare pg_advisory_xact_lock outside one releases at statement end
-      // and fences nothing (utils/customer-comms-lock.js).
-      // Ownership from the LOCKED source visit (r28): a merge-undo can
-      // reverse-repoint the source while this request waits on the key —
-      // inserting the pre-lock svc.customer_id would leave a follow-up on
-      // the kept customer pointing at the restored customer's visit. A
-      // moved owner aborts retryably (a second blocking comms acquire
-      // while holding the source row would deadlock against the undo).
-      [appointment] = await withCustomerCommsLock(db, svc.customer_id, async (trx) => {
-        const lockedSource = await trx('scheduled_services')
-          .where({ id: svc.id }).forUpdate().first('customer_id');
-        if (!lockedSource || !lockedSource.customer_id
-          || String(lockedSource.customer_id) !== String(svc.customer_id)) {
-          const err = new Error("This appointment's customer changed while booking the follow-up (a merge was undone) — reload the job and try again.");
-          err.statusCode = 409;
-          err.isOperational = true;
-          err.code = 'VISIT_OWNER_CHANGED';
-          throw err;
-        }
-        // Follow-up bookings inherit the source visit's tech (or an admin
-        // override). Assert on the writing trx: an inherited tech who has
-        // since been offboarded/de-listed lands the follow-up unassigned; an
-        // explicit override that is not assignable is a 422.
-        if (insertData.technician_id) {
-          try {
-            await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(date).slice(0, 10) });
-          } catch (eligErr) {
-            if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
-            logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);
-            insertData.technician_id = null;
-          }
-        }
-        const inserted = await trx('scheduled_services').insert(insertData).returning('*');
-        // Visit groups (visit-group-scope.md §2): stamp at scheduling —
-        // gate-checked + best-effort + self-refusing inside maybeGroupRow
-        // (savepoint on the trx; a grouping failure never poisons the
-        // follow-up booking).
-        if (inserted && inserted[0]) {
-          await require('../services/visit-groups').maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'dispatch' });
-        }
-        return inserted;
-      });
-    } catch (err) {
-      // Partial unique index on followup_source_service_id — a concurrent
-      // CTA tap lost the race; return the winner's booking idempotently.
-      if (err && err.code === '23505') {
-        const winner = await db('scheduled_services')
-          .where({ followup_source_service_id: svc.id })
-          .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
-          .orderBy('created_at', 'desc')
-          .first();
-        if (winner) {
-          await resolveOpenFollowupAlerts();
-          return res.json({
-            success: true,
-            alreadyScheduled: true,
-            appointment: { id: winner.id, scheduledDate: serviceDateOnly(winner.scheduled_date), status: winner.status },
-          });
-        }
-      }
-      throw err;
-    }
-    // profile can be null on the frozen-verdict lane (transient resolver
-    // failure) — a post-insert throw here would 500 AFTER the booking
-    // committed and permanently skip reminder registration on the retry
-    // (codex P2 r6).
-    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile?.findingsType || 'untyped'}) for ${date}`);
-    // Tech-facing "new visit" card (tech-visit-notifications.js): this
-    // writer inserts the assigned row itself, bypassing assignDispatchJob.
-    // Queued FIRST after commit (before the awaited alert resolution and
-    // reminder registration); silent when the booker IS the tech; only a
-    // FRESH booking — the alreadyScheduled returns above announced nothing.
-    if (appointment.technician_id) {
-      void require('../services/tech-visit-notifications').notifyTechVisitChange({
-        visitId: appointment.id, kind: 'assigned', technicianId: appointment.technician_id, actorId: req.technicianId || null,
-        snapshot: { date: appointment.scheduled_date, windowStart: appointment.window_start || null, windowEnd: appointment.window_end || null },
-      });
-    }
-    await resolveOpenFollowupAlerts();
-    // Without this the visit never enters appointment_reminders, so the
-    // 72h/24h reminder cron can't see it (the cron reads only that table).
-    // sendConfirmation:false — no immediate SMS; the customer was told about
-    // the follow-up in person at completion. Best-effort: never fails the booking.
-    try {
-      const AppointmentReminders = require('../services/appointment-reminders');
-      await AppointmentReminders.registerAppointment(
-        appointment.id,
-        svc.customer_id,
-        `${date}T${String(insertData.window_start || '08:00').slice(0, 5)}`,
-        svc.service_type,
-        'booking_followup',
-        { sendConfirmation: false },
-      );
-    } catch (e) {
-      logger.error(`[dispatch] Reminder registration failed for follow-up ${appointment.id}: ${e.message}`);
-    }
-    res.json({
-      success: true,
-      alreadyScheduled: false,
-      appointment: {
-        id: appointment.id,
-        scheduledDate: serviceDateOnly(appointment.scheduled_date),
-        status: appointment.status,
-      },
+    const { status, body } = await bookCompletionFollowup({
+      serviceId: req.params.serviceId,
+      date,
+      windowStart,
+      windowEnd,
+      technicianId,
+      isAdmin: req.techRole === 'admin',
+      actorId: req.technicianId || null,
     });
+    res.status(status).json(body);
   } catch (err) { next(err); }
 });
 
@@ -4790,7 +4539,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             : dueConflicts.length ? 'Series move left visits without a time window'
               : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
+          // A card-only pass stores only the conflicts it rings for: the
+          // successor owns the preserved and overlap work (admin-alert-relevance.js
+          // settles the card by the items it names).
+          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts,
+            overlapDates: cardOnly ? [] : overlapDates, preservedOccurrences: cardOnly ? [] : preserved } }
         );
         if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');

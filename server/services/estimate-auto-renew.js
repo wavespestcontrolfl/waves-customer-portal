@@ -20,7 +20,7 @@ const EmailTemplateAutomationExecutor = require('./email-template-automation-exe
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
-const { isEnabled } = require('../config/feature-gates');
+const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
@@ -38,21 +38,12 @@ function canFallbackFromAutomationEmailError(err) {
 
 // estimate_data.noEngagementAutomation — the durable zero-comms opt-out
 // stamped by publish-without-delivery mints (report click-to-estimate).
-// Same key the engagement engine and legacy follow-up cron enforce;
-// duplicated locally like theirs (shared-import would couple this sender's
-// load order to those modules) and pinned in lockstep by
-// estimate-followup-engagement-optout.test.js. A renewal here would both
-// EXTEND the estimate and EMAIL the customer — the lane promises neither.
-function estimateOptedOutOfAutoRenew(est) {
-  try {
-    const data = typeof est.estimate_data === 'string'
-      ? JSON.parse(est.estimate_data)
-      : est.estimate_data;
-    return data?.noEngagementAutomation === true;
-  } catch {
-    return false;
-  }
-}
+// ONE shared rule with the engagement engine, the legacy follow-up cron,
+// the extension flow and the email_template_automation executor
+// (estimate-comms-eligibility.js, a dependency-free leaf). A renewal here
+// would both EXTEND the estimate and EMAIL the customer — the lane promises
+// neither.
+const { estimateOptedOutOfEngagement: estimateOptedOutOfAutoRenew } = require('./estimate-comms-eligibility');
 
 const EstimateAutoRenew = {
   async checkAll() {
@@ -170,7 +161,14 @@ const EstimateAutoRenew = {
               };
               if (sendgrid.isConfigured()) {
                 try {
-                  if (isEnabled('emailTemplateAutomations')) {
+                  // Shadow must never change a LIVE send: only handing this
+                  // send to the executor at mode==='live' preserves today's
+                  // direct sendTemplate fallback below in shadow (and off) —
+                  // a shadow run finalizes 'shadow' (nothing dispatched), so
+                  // routing here on the boolean gate alone (true in shadow
+                  // too) would silently drop the customer's extension notice
+                  // (codex/coordinator finding on #5154).
+                  if (emailTemplateAutomationsMode() === 'live') {
                     const result = await EmailTemplateAutomationExecutor.processTrigger({
                       triggerEventKey: 'estimate.auto_renewed',
                       triggerEventId: `estimate_auto_renew:${est.id}`,

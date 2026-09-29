@@ -15,11 +15,20 @@ jest.mock('../services/customer-credit', () => ({ autoApplyAccountCreditIfEnable
 jest.mock('../services/invoice-followups', () => ({ scheduleForInvoice: jest.fn(), stopForInvoice: jest.fn() }));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null), issuedCloseoutOwnsRecord: () => false }));
 jest.mock('../services/inspection-credit', () => ({ reverseInspectionCreditForBooking: jest.fn(async () => null) }));
-jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: async () => null }));
+// Chokepoint B (Codex #4971): invoice writers (voidInvoice, the cancelled-
+// visit auto-void) take the renewal parent-decision gate at transaction
+// entry — no termite term here, so the gate takes nothing.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  syncTermForInvoicePayment: async () => null,
+  acquireTermiteGateAtEntry: async () => [],
+  acquireTermiteGateForCharge: async () => [],
+  acquireTermiteGateForStatement: async () => [],
+}));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async () => null }));
-jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false }));
+jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false, stampedZeroFreeLive: () => false }));
 const { randomUUID } = require('node:crypto');
 const Invoice = require('../services/invoice');
+const { settledLegTimes, scheduledPriorInvoiceEvidence } = require('../services/messaging/billing-prior-delivery');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const migration = require('../models/migrations/20260911000001_invoice_send_claim_token');
 
@@ -141,6 +150,58 @@ postgres('invoice send episode ownership', () => {
     } finally { sms.mockRestore(); }
   });
 
+  test.each([
+    ['direct', false, '2026-08-21T15:30:00Z'],
+    ['scheduled', true, '2026-08-21T15:30:00Z'],
+    ['direct missing witness', false, null],
+    ['scheduled missing witness', true, null],
+  ])('pending Email after %s old App/Text acceptance preserves its stored SMS time', async (_label, preclaimed, time) => {
+    const claimToken = randomUUID();
+    if (preclaimed) await trx('invoices').where({ id: invoiceId }).update({
+      status: 'sending', send_claim_token: claimToken,
+    });
+    const originalAt = time ? new Date(time) : null;
+    const sms = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({
+      sent: true, deduped: true, eventVisibleAt: originalAt,
+    });
+    require('../services/invoice-email').sendInvoiceEmail
+      .mockResolvedValueOnce({ ok: false, code: 'billing_prefs_unavailable', error: 'preferences unavailable' })
+      .mockResolvedValueOnce({ ok: true, messageId: 'synthetic-recovered-email' });
+    try {
+      const result = await Invoice.sendViaSMSAndEmail(invoiceId,
+        preclaimed ? { allowClaimed: true, claimToken } : {});
+      expect(result).toMatchObject({ ok: false,
+        ...(preclaimed ? {} : { code: 'INVOICE_EMAIL_RETRY_QUEUED' }),
+        sms: { ok: true, deduped: true }, email: { code: 'billing_prefs_unavailable' },
+      });
+      const parked = await read();
+      expect(parked.scheduled_send_error).toBe('BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED');
+      expect(parked.sms_sent_at).toEqual(originalAt);
+      expect(parked.sent_at).toBeNull();
+      // Simulate a later worker/process reload: the claim is reacquired from
+      // durable invoice state, with no in-memory dispatch result. The marker
+      // alone must retire the accepted App/Text leg even without a timestamp.
+      const retry = await Invoice.sendViaSMSAndEmail(invoiceId,
+        preclaimed ? { allowClaimed: true, claimToken } : {});
+      expect(retry).toMatchObject({ ok: true, sms: { ok: true, deduped: true },
+        email: { ok: true, messageId: 'synthetic-recovered-email' } });
+      expect(sms).toHaveBeenCalledTimes(1);
+      expect((await read()).status).toBe('sent');
+    } finally { sms.mockRestore(); }
+  });
+
+  test('fresh App acceptance wins the shared SMS stamp over a deduped old Text sibling', async () => {
+    const textAt = new Date('2026-08-21T15:30:00Z');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted',
+      channelResults: {
+        sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: textAt },
+        push: { sent: true, deliveryOutcome: 'accepted', bellPersisted: true },
+      },
+    });
+    expect(await Invoice.sendViaSMS(invoiceId)).toMatchObject({ sent: true });
+    expect((await read()).sms_sent_at.getTime()).toBeGreaterThan(textAt.getTime());
+  });
+
   test('cancellation leaves an in-flight claim for review and the terminal-visit boundary blocks dispatch', async () => {
     let original;
     const dispatch = jest.fn(async () => ({ sent: true }));
@@ -186,6 +247,26 @@ postgres('invoice send episode ownership', () => {
     expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
   });
 
+  test('a direct legacy fresh decline Text without channelResults still owns its SMS rail', async () => {
+    const token = randomUUID();
+    const result = { sent: true, channel: 'sms', deliveryOutcome: 'accepted' };
+    const legs = (result.channelResults || result.deduped === true) && settledLegTimes(result);
+    expect(legs).toBe(false);
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
+    await Invoice.markDeliverySent(invoiceId, {
+      sms: legs ? legs.smsAccepted : true,
+      email: legs?.emailAccepted || false,
+      source: 'payment_failed_notice', claimToken: token,
+      deduped: result.deduped === true,
+    });
+    const invoice = await read();
+    expect(invoice).toMatchObject({ status: 'sent', send_claim_token: null, email_sent_at: null });
+    expect(invoice.sent_at).toEqual(expect.any(Date));
+    expect(invoice.sms_sent_at).toEqual(expect.any(Date));
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first())
+      .toMatchObject({ count: '1' });
+  });
+
   test('successful direct send releases its token, and a resend mints a new one', async () => {
     const tokens = [];
     sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => {
@@ -218,6 +299,58 @@ postgres('invoice send episode ownership', () => {
     expect((await read()).sms_sent_at).toBeTruthy();
   });
 
+  test('prior Email and Text settlement uses each original rail time without a new invoice activity', async () => {
+    const emailAt = new Date('2026-09-08T14:00:00Z');
+    const textAt = new Date('2026-09-08T16:00:00Z');
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: true, deduped: true,
+      eventVisibleAt: textAt, emailEventVisibleAt: emailAt, smsEventVisibleAt: textAt });
+    const invoice = await read();
+    expect(invoice.status).toBe('sent');
+    expect(invoice.sent_at).toEqual(textAt);
+    expect(invoice.email_sent_at).toEqual(emailAt);
+    expect(invoice.sms_sent_at).toEqual(textAt);
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '0' });
+  });
+
+  test('missing or invalid original dedupe time never mints a retry-clock invoice stamp', async () => {
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: false, deduped: true,
+      eventVisibleAt: 'invalid-original-time', emailEventVisibleAt: null });
+    expect(await read()).toMatchObject({ status: 'sent', sent_at: null, email_sent_at: null, sms_sent_at: null });
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '0' });
+  });
+
+  test('an old Email time never substitutes for a missing App or Text rail time', async () => {
+    const emailAt = new Date('2026-09-08T14:00:00Z');
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: true, deduped: true,
+      eventVisibleAt: emailAt, emailEventVisibleAt: emailAt, smsEventVisibleAt: null });
+    expect(await read()).toMatchObject({ status: 'sent', sent_at: emailAt,
+      email_sent_at: emailAt, sms_sent_at: null });
+  });
+
+  test('legacy wrapper mixed fresh Email and old App stamps only the App rail at its original time', async () => {
+    const appAt = new Date('2026-09-08T14:00:00Z');
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: true, deduped: false,
+      smsEventVisibleAt: appAt });
+    const invoice = await read();
+    expect(invoice.status).toBe('sent');
+    expect(invoice.sms_sent_at).toEqual(appAt);
+    expect(invoice.sent_at.getTime()).toBeGreaterThan(appAt.getTime());
+    expect(invoice.email_sent_at.getTime()).toBeGreaterThan(appAt.getTime());
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '1' });
+  });
+
+  test('legacy wrapper mixed fresh Text and old Email stamps only the Email rail at its original time', async () => {
+    const emailAt = new Date('2026-09-08T14:00:00Z');
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: true, deduped: false,
+      emailEventVisibleAt: emailAt });
+    const invoice = await read();
+    expect(invoice.status).toBe('sent');
+    expect(invoice.email_sent_at).toEqual(emailAt);
+    expect(invoice.sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+    expect(invoice.sms_sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '1' });
+  });
+
   test('markDeliverySent with a passed claimToken finalizes and releases that exact claim atomically, in the SAME update (#4131 slice 5, Codex pre-push P1)', async () => {
     const token = randomUUID();
     await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
@@ -225,6 +358,108 @@ postgres('invoice send episode ownership', () => {
     expect(result).toMatchObject({ status: 'sent', send_claim_token: null });
     expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null });
     expect((await read()).sms_sent_at).toBeTruthy();
+  });
+
+  test('a previously visible decline bell uses its original time under the same claim and creates no new activity', async () => {
+    const token = randomUUID();
+    const priorAt = new Date('2026-08-21T15:30:00.000Z');
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
+    const result = await Invoice.markDeliverySent(invoiceId, {
+      sms: true, source: 'payment_failed_notice', claimToken: token,
+      deduped: true, eventVisibleAt: priorAt,
+    });
+    expect(result).toMatchObject({ status: 'sent', send_claim_token: null });
+    const settled = await read();
+    expect(settled.sent_at).toEqual(priorAt);
+    expect(settled.sms_sent_at).toEqual(priorAt);
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '0' });
+  });
+
+  test.each([
+    ['old App and later old Email', 'app_email', true],
+    ['old Email only', 'email_only', true],
+    ['old App with missing time and later old Email', 'missing_app_time', true],
+    ['old App beside fresh Email', 'fresh_email', false],
+    ['old Email beside fresh Text', 'fresh_text', false],
+  ])('claim-scoped decline finalization preserves each rail: %s', async (_label, shape, allOld) => {
+    const token = randomUUID();
+    const appAt = new Date('2026-08-21T15:30:00.000Z');
+    const emailAt = new Date('2026-08-22T15:30:00.000Z');
+    const oldApp = { sent: false, deduped: true, deliveryOutcome: 'not_sent',
+      reason: 'app_event_already_visible', eventVisibleAt: shape === 'missing_app_time' ? null : appAt };
+    const email = shape === 'fresh_email'
+      ? { ok: true, deliveryOutcome: 'accepted' }
+      : { ok: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt };
+    const result = { sent: true, deduped: allOld, channelResults: {
+      ...(shape === 'email_only' || shape === 'fresh_text' ? {} : { push: oldApp }),
+      ...(shape === 'fresh_text' ? { sms: { sent: true, deliveryOutcome: 'accepted' } } : {}),
+      email,
+    } };
+    const legs = settledLegTimes(result);
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
+    await Invoice.markDeliverySent(invoiceId, {
+      source: 'payment_failed_notice', claimToken: token,
+      sms: legs.smsAccepted, email: legs.emailAccepted, deduped: allOld,
+      eventVisibleAt: allOld ? legs.eventAt : new Date(),
+      smsEventVisibleAt: legs.smsAccepted && !legs.freshSms ? legs.smsAt : undefined,
+      emailEventVisibleAt: legs.emailAccepted && !legs.freshEmail ? legs.emailAt : undefined,
+    });
+    const invoice = await read();
+    expect(invoice).toMatchObject({ status: 'sent', send_claim_token: null });
+    if (allOld) expect(invoice.sent_at).toEqual(emailAt);
+    else expect(invoice.sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+    expect(invoice.email_sent_at).toEqual(shape === 'fresh_email' ? expect.any(Date) : emailAt);
+    expect(invoice.sms_sent_at).toEqual(
+      shape === 'fresh_text' ? expect.any(Date)
+        : shape === 'email_only' || shape === 'missing_app_time' ? null : appAt,
+    );
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first())
+      .toMatchObject({ count: allOld ? '0' : '1' });
+  });
+
+  test.each([
+    ['old App and later old Email', 'app_email', true],
+    ['old Email only', 'email_only', true],
+    ['old App missing time and old Email', 'missing_app_time', true],
+    ['old App with fresh Email', 'fresh_email', false],
+  ])('deferred decline %s persists rail evidence through a queue restart', async (_label, shape, allOld) => {
+    const appAt = new Date('2026-08-21T15:30:00.000Z');
+    const emailAt = new Date('2026-08-22T15:30:00.000Z');
+    const meta = { entry_point: 'autopay_completion_decline_deferred', invoice_id: invoiceId };
+    const result = { sent: true, deduped: allOld, deliveryOutcome: 'accepted', channelResults: {
+      ...(shape === 'email_only' ? {} : { push: { sent: false, deliveryOutcome: 'not_sent',
+        reason: 'app_event_already_visible', eventVisibleAt: shape === 'missing_app_time' ? null : appAt } }),
+      email: shape === 'fresh_email' ? { sent: true, deliveryOutcome: 'accepted' }
+        : { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+    } };
+    const [queue] = await trx('sms_log').insert({
+      customer_id: (await read()).customer_id, direction: 'outbound',
+      from_phone: '+12025550101', to_phone: '+12025550102',
+      message_body: 'Payment failed', message_type: 'payment_failed', status: 'sent',
+      metadata: JSON.stringify(meta),
+    }).returning('id');
+    const evidence = scheduledPriorInvoiceEvidence(meta, result, { created_at: new Date() });
+    expect(evidence.metadataSql).toContain("'invoice_delivery_legs_recorded', true");
+    await trx('sms_log').where({ id: queue.id }).update({ metadata: trx.raw(
+      `COALESCE(metadata, '{}'::jsonb)${evidence.metadataSql}`, evidence.bindings,
+    ) });
+    // The finalizer sees only reloaded durable JSON, never the dispatch result.
+    const stored = (await trx('sms_log').where({ id: queue.id }).first()).metadata;
+    expect(stored.mark_invoice_delivery).toBeUndefined();
+    expect(await require('../services/dispatch-completion-deferred')
+      .finalizeDeferredDeclineNotice(stored)).toEqual({ ok: true });
+    const invoice = await read();
+    expect(invoice.status).toBe('sent');
+    expect(invoice.sms_sent_at).toEqual(shape === 'email_only' || shape === 'missing_app_time' ? null : appAt);
+    if (shape === 'fresh_email') {
+      expect(invoice.email_sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+      expect(invoice.sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+    } else {
+      expect(invoice.email_sent_at).toEqual(emailAt);
+      expect(invoice.sent_at).toEqual(emailAt);
+    }
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first())
+      .toMatchObject({ count: allOld ? '0' : '1' });
   });
 
   test('markDeliverySent with a claimToken that no longer owns the row refuses to finalize — a replacement episode is never clobbered', async () => {
@@ -331,6 +566,37 @@ postgres('invoice send episode ownership', () => {
     });
     expect(await Invoice.sendViaSMSAndEmail(invoiceId)).toMatchObject({ ok: true });
     expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null });
+  });
+
+  test.each([
+    ['old Email only', false, '2026-08-20T14:00:00Z'],
+    ['old Email and fresh Text', true, null],
+  ])('%s uses original aggregate time only with no fresh sibling', async (_name, freshText, expectedTime) => {
+    const originalAt = new Date('2026-08-20T14:00:00Z');
+    const sms = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce(freshText
+      ? { sent: true } : { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'NO_PHONE' });
+    require('../services/invoice-email').sendInvoiceEmail.mockResolvedValueOnce({ ok: true, deduped: true, sentAt: originalAt });
+    try {
+      expect(await Invoice.sendViaSMSAndEmail(invoiceId)).toMatchObject({ ok: true, email: { deduped: true } });
+      const saved = await read();
+      expect(saved.status).toBe('sent');
+      if (expectedTime) expect(saved.sent_at).toEqual(originalAt);
+      else expect(saved.sent_at.getTime()).toBeGreaterThan(originalAt.getTime());
+    } finally { sms.mockRestore(); }
+  });
+
+  test('Email-pending retry retains the previously accepted Text time over an older Email', async () => {
+    const textAt = new Date('2026-08-22T14:00:00Z');
+    const emailAt = new Date('2026-08-20T14:00:00Z');
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'scheduled',
+      sms_sent_at: textAt, scheduled_send_error: 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED' });
+    const sms = jest.spyOn(Invoice, 'sendViaSMS');
+    require('../services/invoice-email').sendInvoiceEmail.mockResolvedValueOnce({ ok: true, deduped: true, sentAt: emailAt });
+    try {
+      expect(await Invoice.sendViaSMSAndEmail(invoiceId)).toMatchObject({ ok: true, sms: { deduped: true } });
+      expect(sms).not.toHaveBeenCalled();
+      expect((await read()).sent_at).toEqual(textAt);
+    } finally { sms.mockRestore(); }
   });
 
   // Ported from #4131's own invoice-send-claim-chokepoint-postgres.test.js

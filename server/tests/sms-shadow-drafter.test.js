@@ -110,6 +110,7 @@ describe('sms shadow drafter — response parsing', () => {
       intended_actions: [],
       auto_send_safe: true,
       missing_info: null,
+      offered_times: [],
     });
   });
 
@@ -168,6 +169,30 @@ describe('sms shadow drafter — response parsing', () => {
     expect(parseShadowResponse('no json here at all')).toBeNull();
     expect(parseShadowResponse('{"intended_actions":[]}')).toBeNull(); // missing reply
     expect(parseShadowResponse('{"reply": 7}')).toBeNull(); // non-string reply
+  });
+
+  describe('offered_times — the structural offered-slot declaration (owner-directed fix)', () => {
+    test('absent field → empty array, not undefined', () => {
+      expect(parseShadowResponse('{"reply":"hi"}').offered_times).toEqual([]);
+    });
+
+    test('a well-formed entry passes through', () => {
+      const parsed = parseShadowResponse(
+        '{"reply":"How about Tuesday 9-11?","offered_times":[{"date":"Tuesday, September 29","window":"9:00 AM - 11:00 AM"}]}'
+      );
+      expect(parsed.offered_times).toEqual([{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }]);
+    });
+
+    test('a malformed entry (non-string date/window, or missing one) is dropped, not crashed on', () => {
+      const parsed = parseShadowResponse(
+        '{"reply":"hi","offered_times":[{"date":42,"window":"9-11"},{"date":"Tuesday"},{},"not an object"]}'
+      );
+      expect(parsed.offered_times).toEqual([]);
+    });
+
+    test('a non-array offered_times → empty array', () => {
+      expect(parseShadowResponse('{"reply":"hi","offered_times":"Tuesday 9-11"}').offered_times).toEqual([]);
+    });
   });
 
   test('empty reply is a valid "no reply warranted" draft', () => {

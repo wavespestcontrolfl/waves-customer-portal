@@ -124,6 +124,33 @@ describe('proposePatches — threshold + cap + ordering', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][1]).toMatch(/facts_block_gap/);
   });
 
+  test('the proposer prompt names the LIVE drafter version via currentPromptVersion(), not the frozen PROMPT_VERSION (pre-push audit P1)', async () => {
+    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    try {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      const offDbi = makeProposerDb({
+        cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '7' }],
+        entries: entryRows,
+      });
+      await proposePatches({ dbi: offDbi, anthropicClient: {} });
+      const offPrompt = createDeepMessage.mock.calls[0][1].messages[0].content;
+      expect(offPrompt).toContain('drafter version house_voice_v11');
+
+      createDeepMessage.mockClear();
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      const onDbi = makeProposerDb({
+        cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '7' }],
+        entries: entryRows,
+      });
+      await proposePatches({ dbi: onDbi, anthropicClient: {} });
+      const onPrompt = createDeepMessage.mock.calls[0][1].messages[0].content;
+      expect(onPrompt).toContain('drafter version house_voice_v12_real_answers');
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+      else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    }
+  });
+
   test('repeat proposals fetch only evidence classified after the last proposal (fresh cohort)', async () => {
     const dbi = makeProposerDb({
       cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '6', last_proposed_at: '2026-07-11T00:00:00Z' }],
@@ -223,6 +250,29 @@ function makeReviewDb({ row } = {}) {
   return dbi;
 }
 
+describe('reviewPatchProposal — a proposal written for a superseded prompt version cannot be accepted (PR #5119 follow-up #3)', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  test('accept → 409 naming both versions; dismiss still allowed; a same-version proposal accepts', async () => {
+    const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    try {
+      const stale = { id: 'p1', status: 'pending', surface: 's', failure_mode: 'f', prompt_version: 'house_voice_v11' };
+      const out = await reviewPatchProposal({ id: 'p1', action: 'accept', reviewedBy: 'Adam', adminUserId: 'a1', dbi: makeReviewDb({ row: stale }) });
+      expect(out).toMatchObject({ ok: false, status: 409 });
+      expect(out.error).toMatch(/written for house_voice_v11; the live prompt is house_voice_v12_real_answers/);
+      const dismissed = await reviewPatchProposal({ id: 'p1', action: 'dismiss', reviewedBy: 'Adam', adminUserId: 'a1', dbi: makeReviewDb({ row: stale }) });
+      expect(dismissed).toMatchObject({ ok: true, status: 'dismissed' });
+      const current = { ...stale, prompt_version: 'house_voice_v12_real_answers' };
+      const accepted = await reviewPatchProposal({ id: 'p1', action: 'accept', reviewedBy: 'Adam', adminUserId: 'a1', dbi: makeReviewDb({ row: current }) });
+      expect(accepted).toMatchObject({ ok: true, status: 'accepted' });
+      // legacy rows with no version (pre-backfill) are not blocked
+      const legacy = { ...stale, prompt_version: null };
+      expect(await reviewPatchProposal({ id: 'p1', action: 'accept', reviewedBy: 'Adam', adminUserId: 'a1', dbi: makeReviewDb({ row: legacy }) })).toMatchObject({ ok: true });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('reviewPatchProposal — pending-only transitions with audit', () => {
   test('accept flips pending → accepted and writes the audit row in the same transaction', async () => {
     const dbi = makeReviewDb({ row: { id: 'p1', status: 'pending', surface: 's', failure_mode: 'f' } });
@@ -245,5 +295,31 @@ describe('reviewPatchProposal — pending-only transitions with audit', () => {
     const missing = makeReviewDb({ row: undefined });
     await expect(reviewPatchProposal({ id: 'nope', action: 'accept', dbi: missing })).resolves.toMatchObject({ ok: false, status: 404 });
     await expect(reviewPatchProposal({ id: 'p1', action: 'explode', dbi: missing })).resolves.toMatchObject({ ok: false, status: 400 });
+  });
+});
+
+
+// PR #5119 Codex r4: proposals are scoped to the LIVE prompt version — the
+// threshold count, the evidence and the per-cell watermark all filter on it,
+// and the proposal records which version it targets.
+describe('proposePatches — scoped to the live prompt version', () => {
+  test('cells rollup, watermark subquery and evidence fetch all filter on currentPromptVersion(); the proposal records it', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    const { createDeepMessage } = require('../services/llm/deep');
+    createDeepMessage.mockResolvedValue({ content: [{ text: 'Pattern… Proposed change… Expected effect…' }], model: 'm' });
+    const entryRows = Array.from({ length: 7 }, (_, i) => ({ id: `e-${i}`, intent: 'GENERAL', prompt_version: 'house_voice_v12_real_answers', verifier_missed: false, summary: `s${i}` }));
+    const dbi = makeProposerDb({ cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '7' }], entries: entryRows });
+    try {
+      const out = await require('../services/sms-pathology-ledger').proposePatches({ dbi, anthropicClient: {} });
+      expect(out.proposed).toBe(1);
+      const versionWheres = dbi.kvWheres.filter((w) => w[2] === 'house_voice_v12_real_answers').map((w) => w[0]);
+      expect(versionWheres).toEqual(expect.arrayContaining(['prompt_version', 'pe.prompt_version']));
+      expect(versionWheres.filter((c) => c === 'prompt_version').length).toBeGreaterThanOrEqual(2); // watermark subquery + evidence fetch
+      const inserted = dbi.inserts.find((r) => r && r.proposal);
+      expect(inserted.prompt_version).toBe('house_voice_v12_real_answers');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
