@@ -411,7 +411,7 @@ async function listAuditEvents(knex, { limit = 50 } = {}) {
     .select('id', 'actor_type', 'actor_id', 'action', 'resource_type', 'resource_id', 'metadata', 'created_at');
 }
 
-async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null, excludeCallbacks = false } = {}) {
+async function loadHistoryRows(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null, excludeCallbacks = false } = {}) {
   const q = knex('pest_pressure_scores as pps')
     .leftJoin('service_records as sr', 'sr.id', 'pps.service_record_id')
     .where('pps.customer_id', customerId)
@@ -453,7 +453,7 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
     'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
     'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
     'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
-    'pps.calculation_version', 'pps.calculated_at',
+    'pps.calculation_version', 'pps.calculated_at', 'pps.component_scores',
   );
   // The date bound alone leaks same-day sibling visits: viewing the earlier
   // report after a later same-day visit completes would chart the later
@@ -476,7 +476,7 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
         'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
         'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
         'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
-        'pps.calculation_version', 'pps.calculated_at',
+        'pps.calculation_version', 'pps.calculated_at', 'pps.component_scores',
       )
       .first();
     if (currentRow) {
@@ -510,13 +510,26 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
         'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
         'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
         'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
-        'pps.calculation_version', 'pps.calculated_at',
+        'pps.calculation_version', 'pps.calculated_at', 'pps.component_scores',
       ).catch(() => []);
       return [currentRow, ...earlierDays].slice(0, limit);
     }
     return rows.slice(0, limit);
   }
   return rows;
+}
+
+// Score history for one customer, newest first. Each row carries pressure_scale
+// ('technician_rating' | 'blended', see score-scale.js) instead of the raw
+// component_scores: #4741 (2026-09-24) made a technician tap the score
+// directly while older scores were blended, so consumers that chart or diff
+// two rows must only pair rows on the same scale.
+async function loadHistoryForCustomer(knex, customerId, options = {}) {
+  const rows = await loadHistoryRows(knex, customerId, options);
+  return (rows || []).map(({ component_scores: componentScores, ...row }) => ({
+    ...row,
+    pressure_scale: classifyScoreScale({ componentScores, at: row.service_date }),
+  }));
 }
 
 module.exports = {

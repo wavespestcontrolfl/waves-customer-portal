@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { scaleFromCutoverDate } = require('../pest-pressure/score-scale');
 
 async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
   if (!record?.id) return undefined;
@@ -31,9 +32,16 @@ async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
     .sort((a, b) => Date.parse(a.periodStart) - Date.parse(b.periodStart));
 
   if (!points.length) return undefined;
-  const latest = points[points.length - 1];
+  // #4741 (2026-09-24): an aggregate window that starts before the technician-
+  // tap cutover averages old blended scores, so it is not on the same scale as
+  // a window that starts after it. Chart only windows on the newest window's
+  // scale (a window is dated by its start; a straddling one counts as old).
+  const windowScale = (point) => scaleFromCutoverDate(`${String(point.periodStart).slice(0, 10)}T12:00:00Z`);
+  const newestScale = windowScale(points[points.length - 1]);
+  const sameScale = points.filter((point) => windowScale(point) === newestScale);
+  const latest = sameScale[sameScale.length - 1];
   return {
-    points,
+    points: sameScale,
     sampleSize: latest.sampleSize,
     customerSummary: `Nearby WaveGuard homes averaged ${latest.avgPressureIndex.toFixed(1)} this month.`,
   };

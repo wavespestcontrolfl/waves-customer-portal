@@ -6,7 +6,7 @@ const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const {
   SCALE_TECHNICIAN_RATING,
   SCALE_BLENDED,
-  scaleFromComponentScores,
+  loadScaleMap,
   scaleFromCutoverDate,
 } = require('../pest-pressure/score-scale');
 
@@ -175,22 +175,6 @@ function buildPressureTrendContextFromRows({
   };
 }
 
-// Which scale each stored pressure_index was recorded on, read from the score
-// row's provenance. Best-effort: a failed lookup leaves rows unmarked and
-// pressureScaleOf falls back to the cutover date.
-async function loadPressureScales(ids, knex) {
-  const scales = new Map();
-  if (!ids.length) return scales;
-  const scoreRows = await knex('pest_pressure_scores')
-    .whereIn('service_record_id', ids)
-    .select('service_record_id', 'component_scores')
-    .catch(() => []);
-  for (const row of Array.isArray(scoreRows) ? scoreRows : []) {
-    scales.set(String(row.service_record_id), scaleFromComponentScores(row.component_scores));
-  }
-  return scales;
-}
-
 async function buildPressureTrendContext({
   record,
   currentPressureIndexOverride,
@@ -244,7 +228,7 @@ async function buildPressureTrendContext({
     .catch(() => []);
 
   const ids = [...priorRows.map((row) => row.id), record.id].filter(Boolean);
-  const scales = await loadPressureScales(ids, knex);
+  const scales = await loadScaleMap(knex, ids);
   const withScale = (row) => (scales.has(String(row.id)) ? { ...row, pressure_scale: scales.get(String(row.id)) } : row);
   const findings = ids.length
     ? await knex('service_findings')

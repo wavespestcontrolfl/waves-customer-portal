@@ -88,8 +88,14 @@ function detectCadenceFromHistory(history) {
 
 function shapeHistory(historyRows) {
   if (!Array.isArray(historyRows) || historyRows.length === 0) return [];
-  return historyRows
-    .filter((row) => row && row.displayed_score !== null && row.displayed_score !== undefined && row.service_date)
+  const scored = historyRows
+    .filter((row) => row && row.displayed_score !== null && row.displayed_score !== undefined && row.service_date);
+  // #4741: the chart only plots readings on the newest reading's scale, so it
+  // never draws a jump that is really the tap-vs-blended scale change. Rows
+  // without a pressure_scale (older callers) are all kept.
+  const newestScale = scored[0] && scored[0].pressure_scale;
+  return scored
+    .filter((row) => !newestScale || !row.pressure_scale || row.pressure_scale === newestScale)
     .map((row) => ({
       serviceDate: formatDate(row.service_date),
       score: Number(row.displayed_score),
