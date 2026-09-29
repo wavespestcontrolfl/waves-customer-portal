@@ -50,19 +50,25 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 Customer page-view log (no payload, gate, or header change): the data GET of
 `/api/public/appointment/:token`, `/api/public/reschedule/:token`,
-`/api/public/reservice/:token`, `/api/public/secure-card/:token`,
-`/api/public/track/:token`, and `/api/public/inspection/:token` records one
-`customer_page_views` row once the token has resolved to a row (never for a
-malformed, unknown, expired-track, or dark-gated token; a resolved-but-closed
-page such as a completed visit or a closed card request still counts as a
-view), through `server/services/customer-page-views.js`. It is fire-and-forget
-(never awaited, never throws, never alters the response), skips bot/preview
-user agents, staff browsers (`waves_admin` marker cookie), and
-`WAVES_ADMIN_IPS`, and stores only a sha256 of the IP and a 500-char user
-agent. The same page + subject + ip hash is deduped inside a fixed lookback
-from its latest row: 10 minutes by default, 60 for the track page (its 30s
-poll hits the same endpoint), so a page left open past the window logs one
-more row per window.
+`/api/public/reservice/:token`, `/api/public/secure-card/:token`, and
+`/api/public/inspection/:token` records one `customer_page_views` row once
+the token has resolved to a row (never for a malformed, unknown, or
+dark-gated token; a resolved-but-closed page such as a completed visit or a
+closed card request still counts as a view), through
+`server/services/customer-page-views.js`. Those GETs are not contractually
+read-only (their entries below describe POST writes and, for secure-card,
+render-time stamps), and none names a sole write companion, so the view write
+rides the GET. `/api/public/track/:token` is the exception: its GET stays
+strictly read-only (see its entry), so its view is recorded by the dedicated
+`POST /api/public/track/:token/view` companion instead. The log is
+fire-and-forget (never awaited, never throws, never alters the response),
+skips bot/preview user agents, staff browsers (`waves_admin` marker cookie),
+and `WAVES_ADMIN_IPS`, and stores only a sha256 of the IP and a 500-char user
+agent. The same page + subject + ip hash is deduped inside a fixed 10-minute
+lookback from its latest row, so a page left open past the window logs one
+more row per window. A failed insert or lookup logs only the page name,
+subject type and error code, never the error message (a Knex message carries
+SQL text and bound values, which can include a bearer token).
 
 Invoice/receipt address preservation: a saved `invoices.customer_address_snapshot`
 supplies the displayed customer address on `/api/pay/:token`, `/invoice.pdf`,
@@ -3028,11 +3034,17 @@ tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
 `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
 to the report / receipt / rate surfaces. Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
-read-only; `POST /api/public/track/:token/stops-ahead` is the ONE write
-companion — same token gate + rate limit, ignores its body, and only
-persists the stops-ahead display-clamp floor (monotone LEAST,
-skip-unchanged) via `computeStopsAhead` before returning the displayable
-count; it must never grow beyond that single bounded metadata write).
+read-only; it has exactly TWO write companions, both bounded.
+`POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
+ignores its body, and only persists the stops-ahead display-clamp floor
+(monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
+displayable count. `POST /api/public/track/:token/view` — same token format
+gate, expiry fence (unknown / malformed / expired = the same generic 404, no
+write), privacy headers and router rate limit; ignores its body; records ONE
+`customer_page_views` row (`page: 'track'`, subject = the visit, bots / staff
+skipped, 10-minute dedupe) fire-and-forget and answers 204 with no body. The
+page calls it once per token on its first successful load, never on the 30 s
+poll. Neither companion may grow beyond its single bounded write).
 `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
 + `POST /:token/confirm`; the destination the 24h reminder and booking
 confirmation texts link to. Gated by `scheduled_services.reschedule_token`

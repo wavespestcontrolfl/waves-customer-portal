@@ -86,6 +86,19 @@ function hashIp(ip) {
 }
 
 /**
+ * Failure log line. Deliberately NEVER includes err.message: a Knex/pg error
+ * message carries the SQL text and bound values, which for a token page can
+ * include the bearer token (the secure-card lookup is keyed on it). Only the
+ * page name, the subject type and the driver error code are logged.
+ */
+function logViewFailure(what, page, subjectType, err) {
+  try {
+    const code = err && (typeof err.code === 'string' || typeof err.code === 'number') ? String(err.code).slice(0, 32) : 'unknown';
+    logger.warn(`[page-views] ${what} failed (page=${String(page || 'unknown').slice(0, 64)} subject=${String(subjectType || 'none').slice(0, 64)} code=${code})`);
+  } catch { /* never throw */ }
+}
+
+/**
  * Returns a promise that always resolves (true = row written, false =
  * skipped or failed). Callers should NOT await it on the response path.
  */
@@ -118,13 +131,13 @@ function recordPageView({
       [custId, page, subjType, subjId, ipHash, ua, page, subjType, subjId, ipHash, custId, windowMinutes],
     )).then((res) => !!(res && (res.rowCount === undefined || res.rowCount > 0)))
       .catch((err) => {
-        logger.warn(`[page-views] insert failed (${page}): ${err.message}`);
+        logViewFailure('insert', page, subjType, err);
         return false;
       });
   } catch (err) {
-    try { logger.warn(`[page-views] record failed: ${err.message}`); } catch { /* never throw */ }
+    logViewFailure('record', page, subjectType, err);
     return Promise.resolve(false);
   }
 }
 
-module.exports = { recordPageView, shouldRecord, hashIp, DEDUPE_MINUTES };
+module.exports = { recordPageView, logViewFailure, shouldRecord, hashIp, DEDUPE_MINUTES };

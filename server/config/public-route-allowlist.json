@@ -373,7 +373,8 @@
       "reason": "Tokenized live technician-tracking map linked from appointment SMS",
       "routes": [
         "GET /api/public/track/:token",
-        "POST /api/public/track/:token/stops-ahead"
+        "POST /api/public/track/:token/stops-ahead",
+        "POST /api/public/track/:token/view"
       ]
     },
     {
