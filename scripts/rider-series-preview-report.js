@@ -161,6 +161,9 @@ async function findCandidatePairs(trx) {
     // Null-safe: a legacy root with a NULL status is live, and a bare
     // NOT IN would drop it.
     .where((q) => { q.whereNull('s.status').orWhereNotIn('s.status', EXCLUDED_ROOT_STATUSES); })
+    // A root the tracker already cancelled is gone even if its status sync
+    // lagged (null-safe: no tracker state is fine).
+    .where((q) => { q.whereNull('s.track_state').orWhereNot('s.track_state', 'cancelled'); })
     .where((q) => {
       q.whereIn('s.recurring_pattern', [LAWN_PATTERN, PEST_PATTERN])
         .orWhere((c) => { c.where('s.recurring_pattern', 'custom').where('s.recurring_interval_days', 42); });
