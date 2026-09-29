@@ -810,4 +810,55 @@ describe('CustomersPageV2 workflow state', () => {
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(linkClicks).toHaveBeenCalledTimes(2);
   });
+
+  // A link/back-forward move that keeps the SAME panel mounted (view stays
+  // "directory", customerId and customer360 mode unchanged) must never
+  // prompt just because some other query param — healthRisk here — differs.
+  // The sidebar's "Customers" link from an at-risk filter is exactly this:
+  // the router keeps rendering CustomersPageV2 with the same queue panel
+  // underneath (only the health filter itself, applied ~1755-1764, changes).
+  it('does not prompt a link that only changes a filter param, and still prompts a link that changes the view', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    window.history.replaceState({ idx: 0 }, '', '/admin/customers?healthRisk=at_risk');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const linkClicks = vi.fn();
+
+    render(<MemoryRouter initialEntries={['/admin/customers?healthRisk=at_risk']}>
+      <a href="/admin/customers" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Customers</a>
+      <a href="/admin/customers?view=map" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Map</a>
+      <CustomersPageV2 />
+    </MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Dropping the health filter keeps the same queue panel mounted.
+    fireEvent.click(screen.getByRole('link', { name: 'Customers' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(linkClicks).toHaveBeenCalledOnce();
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // A view change is a real remount of the panel underneath.
+    fireEvent.click(screen.getByRole('link', { name: 'Map' }));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(linkClicks).toHaveBeenCalledOnce();
+  });
+
+  // Same story for browser Back/Forward: a pop that only changes healthRisk
+  // never discards the queue panel that stays mounted underneath it.
+  it('does not prompt browser Back when it only changes a filter param', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    window.history.replaceState({ idx: 0 }, '', '/admin/customers');
+    window.history.pushState({ idx: 1 }, '', '/admin/customers?healthRisk=at_risk');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><CustomersPageV2 /></BrowserRouter>);
+    await screen.findByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Open queue draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    act(() => { window.history.back(); });
+    await waitFor(() => expect(window.location.search).toBe(''));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+  });
 });
