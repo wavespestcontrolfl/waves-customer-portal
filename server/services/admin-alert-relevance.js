@@ -30,8 +30,9 @@
  * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
  * — never dedupeVersion/autoCleared/invoiceId, so every emitter's own dedupe
  * and recovery logic still sees the row exactly as a human dismissal. The one
- * exception is a class marked `rearm` (unpriced series, estimate hot view,
- * prepaid-coverage and accepted-plan reviews): its emitter dedupes on a key
+ * exception is a class marked `rearm` (first-application divergence, unpriced
+ * series, estimate hot view, prepaid-coverage and accepted-plan reviews —
+ * every class whose emitter re-raises a stable key): its emitter dedupes on a key
  * the subject's return need not change (forever, or a rolling day), so the
  * key moves into the stamp (`retired.dedupeKey`, `dedupeKey: null`) and a
  * condition that comes back (the price removed again, an estimate restored,
@@ -265,8 +266,10 @@ function newLeadMovedOn(s) {
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
-  { // first-application-sibling-split.js raiseDivergenceAlert; never the paid/processing refund + wait kinds
-    key: 'first_application_divergence', categories: ['billing'], prefix: 'first_application_sibling_divergence:',
+  { // first-application-sibling-split.js raiseDivergenceAlert; never the paid/processing refund + wait kinds.
+    // Its sweep re-raises the same key with a fingerprint that holds neither the invoice status
+    // nor the customer's stage, so a retire re-arms: an invoice later sent, or the customer back, rings
+    key: 'first_application_divergence', categories: ['billing'], prefix: 'first_application_sibling_divergence:', rearm: true,
     rule: (s) => (s.customerLeft && s.meta.alertKind === 'diverged' && s.invoices.length
       && s.invoices.every((i) => i && NO_MONEY_INVOICE_STATUSES.has(String(i.status)))
       ? 'Customer left and the combined invoice is an unsent draft or void' : null),

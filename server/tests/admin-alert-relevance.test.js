@@ -502,8 +502,10 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(result).toEqual({ skipped: false, scanned: 4, retired: 2, byClass: { stale_visit: 1, first_application_divergence: 1 } });
     expect(stale.read_at).toBeInstanceOf(Date);
     expect(JSON.parse(stale.metadata).retired).toEqual({ by: 'alert-relevance', reason: 'Visit is no longer open', at: NOW.toISOString() });
-    // Pure read + retired marker: every emitter-owned key survives as it was.
-    expect(JSON.parse(divergence.metadata)).toEqual({ ...divergenceMeta, retired: { by: 'alert-relevance', reason: expect.stringContaining('Customer left'), at: NOW.toISOString() } });
+    // Pure read + retired marker: every emitter-owned key survives as it was,
+    // except that a re-arm class's key moves into the stamp.
+    expect(JSON.parse(divergence.metadata)).toEqual({ ...divergenceMeta, dedupeKey: null,
+      retired: { by: 'alert-relevance', reason: expect.stringContaining('Customer left'), at: NOW.toISOString(), dedupeKey: divergenceMeta.dedupeKey } });
     expect(alreadyRead.read_at).toEqual(new Date('2026-09-27T13:00:00Z'));
     expect(JSON.parse(alreadyRead.metadata).retired).toBeUndefined();
     for (const untouched of [paid, contact]) { expect(untouched.read_at).toBeNull(); expect(JSON.parse(untouched.metadata).retired).toBeUndefined(); }
@@ -809,13 +811,21 @@ describe('ring time, through the existing ringGate seam', () => {
     });
   const stored = () => mockTables.notifications.map((r) => JSON.parse(r.metadata));
 
-  test('a fresh row whose customer already left and whose invoice is a draft lands activity-only with the retired stamp', async () => {
+  test('a fresh divergence row whose customer already left and whose invoice is a draft writes nothing (a re-arm class): nothing rings, nothing piles up', async () => {
     mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })];
     mockTables.invoices = [invoice()];
-    const created = await raise();
-    expect(created.deduped).toBe(false);
+    expect(await raise()).toMatchObject({ id: null, suppressed: true, deduped: false });
+    expect(mockTables.notifications || []).toHaveLength(0);
+  });
+
+  test('a fresh row of a class that does not re-arm (a new lead already worked) lands activity-only with the retired stamp', async () => {
+    mockTables.leads = [{ id: LEAD, status: 'won', converted_at: null, deleted_at: null, created_at: new Date('2026-09-27T10:00:00Z'), customer_id: CUST, estimate_id: null }];
+    const created = await NotificationService.notifyAdmin('new_lead', 'New lead', 'body', {
+      link: `/admin/leads?lead=${LEAD}`, metadata: { triggerKey: 'new_lead', payload: { leadId: LEAD } },
+    });
+    expect(created.id).toEqual(expect.any(String));
     expect(stored()).toHaveLength(1);
-    expect(stored()[0]).toMatchObject({ quiet: true, feed: 'activity', retired: { by: 'alert-relevance', reason: expect.stringContaining('Customer left'), at: expect.any(String) }, dedupeKey: expect.any(String), dedupeVersion: 'fp1::g0' });
+    expect(stored()[0]).toMatchObject({ quiet: true, feed: 'activity', retired: { by: 'alert-relevance', reason: expect.stringContaining('won'), at: expect.any(String) } });
     expect(stored()[0].rungAt).toBeUndefined();
     expect(mockTables.notifications[0].read_at).toBeUndefined();
   });
@@ -896,10 +906,12 @@ describe('ring time, through the existing ringGate seam', () => {
   });
 
   // Interplay with the first-application sweep (owner-lane requirement): the
-  // sweep re-raises every still-diverged group through notifyAdmin; only
-  // metadata.autoCleared counts as resolved there, so a relevance retire must
-  // read like a plain dismissal and change none of its keys.
-  test('after a retire, a re-raise with the SAME dedupeKey + version stays read; a NEW dedupeKey lands quiet', async () => {
+  // sweep re-raises every still-diverged group through notifyAdmin with the
+  // same key and a fingerprint version that holds neither the invoice status
+  // nor the customer's stage, and only metadata.autoCleared counts as
+  // resolved there. A relevance retire therefore re-arms: every emitter-owned
+  // field stays, except the key, which moves into the stamp.
+  test('after a retire, re-raises write nothing while the customer is gone and the invoice unsent; once the invoice is sent, the same key and version ring a fresh bell', async () => {
     mockTables.invoices = [invoice()];
     await raise();
     expect(stored()[0].rungAt).toEqual(expect.any(String));
@@ -911,22 +923,23 @@ describe('ring time, through the existing ringGate seam', () => {
     expect(sweep.byClass).toEqual({ first_application_divergence: 1 });
     expect(original.read_at).toBeInstanceOf(Date);
     const after = JSON.parse(original.metadata);
-    const { retired, ...rest } = after;
-    expect(retired.by).toBe('alert-relevance');
-    expect(rest).toEqual(before);
-    for (const key of ['dedupeKey', 'dedupeVersion', 'autoCleared', 'recurrenceGeneration', 'invoiceId', 'stampedInvoiceId']) expect(after[key]).toEqual(before[key]);
+    const { retired, dedupeKey, ...rest } = after;
+    expect(retired).toMatchObject({ by: 'alert-relevance', dedupeKey: before.dedupeKey });
+    expect(dedupeKey).toBeNull();
+    const { dedupeKey: _key, ...beforeRest } = before;
+    expect(rest).toEqual(beforeRest);
+    for (const key of ['dedupeVersion', 'autoCleared', 'recurrenceGeneration', 'invoiceId', 'stampedInvoiceId']) expect(after[key]).toEqual(before[key]);
 
-    // Same group, same state: notifyAdmin dedupes onto the retired row, which stays read.
-    const again = await raise();
-    expect(again.deduped).toBe(true);
-    expect(again.refreshed).toBeUndefined();
+    // Same group, same state, every 15 minutes: nothing is written, nothing rings.
+    for (let tick = 0; tick < 2; tick += 1) expect(await raise()).toMatchObject({ id: null, suppressed: true });
     expect(mockTables.notifications).toHaveLength(1);
     expect(original.read_at).toBeInstanceOf(Date);
 
-    // The diverging set changed (new dedupeKey): a fresh row, quiet because the customer left and the invoice is a draft.
-    const changed = await raise({}, { divergingSiblingIds: [VISIT, PARENT] }, `first_application_sibling_divergence:${EST}:${INV}:${VISIT},${PARENT}`);
-    expect(changed.deduped).toBe(false);
+    // The combined invoice is sent while the group still diverges: money is live, so the re-raise rings.
+    mockTables.invoices = [invoice({ status: 'sent' })];
+    const live = await raise();
+    expect(live.deduped).toBe(false);
     expect(mockTables.notifications).toHaveLength(2);
-    expect(JSON.parse(mockTables.notifications[1].metadata)).toMatchObject({ quiet: true, feed: 'activity', retired: { by: 'alert-relevance' } });
+    expect(JSON.parse(mockTables.notifications[1].metadata)).toMatchObject({ dedupeKey: before.dedupeKey, rungAt: expect.any(String) });
   });
 });
