@@ -18,6 +18,16 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
+// It writes customers, invoices, terms and visits, so only a disposable
+// database: CI's localhost waves_test, or this worktree's own QA database.
+function disposableDatabase(connection) {
+  const url = new URL(connection);
+  const localCi = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+  const ownedQa = process.env.WAVES_LOCAL_DEV === '1'
+    && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+  return localCi || ownedQa;
+}
+
 // Dates relative to today (ET): the preview judges "upcoming" against the real
 // clock, so fixed literals would go stale (AGENTS.md near-today rule).
 const day = (offset) => etDateString(addETDays(new Date(), offset));
@@ -39,6 +49,7 @@ maybeDescribe('Cancel plan prepay coverage (live Postgres, real renewals module)
   const priorGate = process.env.GATE_CANCEL_FLOW_V2;
 
   beforeAll(() => {
+    if (!disposableDatabase(process.env.DATABASE_URL)) throw new Error('Use disposable CI or this worktree\'s private QA database');
     process.env.GATE_CANCEL_FLOW_V2 = 'true';
     db = require('../models/db');
     cancellation = require('../services/admin-cancellation');
@@ -46,6 +57,7 @@ maybeDescribe('Cancel plan prepay coverage (live Postgres, real renewals module)
   afterAll(async () => {
     if (priorGate === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
     else process.env.GATE_CANCEL_FLOW_V2 = priorGate;
+    if (!db) return;
     for (const table of ['annual_prepay_terms', 'scheduled_services', 'invoices', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
     }
@@ -105,6 +117,48 @@ maybeDescribe('Cancel plan prepay coverage (live Postgres, real renewals module)
     const pest = preview.impact.families.find((f) => f.key === 'pest_control');
     expect(pest).toMatchObject({ upcomingVisits: 2, nextVisitDate: monday });
     expect(preview.impact.pulledVisitKeys.map((k) => k.split(':')[1]).sort()).toEqual([monday, friday]);
+  });
+
+  // An original termite annual plan anchored to its installation: one visit
+  // sold, and the installation (booked under a label the monitoring coverage
+  // text does not match) IS that visit, by term.installation_anchor_visit_id.
+  const anchoredTermiteCustomer = async () => {
+    const c = await customer();
+    n += 1;
+    const invoice = await insert('invoices', { customer_id: c.id, token: `${RUN}-${n}`, invoice_number: `${RUN}-${n}`, status: 'paid', paid_at: new Date('2026-01-02T12:00:00Z'), total: 300 });
+    const install = await visit(c, day(-99), { service_type: 'Termite Installation Setup', status: 'completed' });
+    const term = await insert('annual_prepay_terms', { customer_id: c.id, term_start: day(-100), term_end: day(265), status: 'active',
+      prepay_invoice_id: invoice.id, coverage_service_type: 'Termite Bait Station Monitoring', coverage_visit_count: 1, prepay_amount: 300,
+      installation_anchor_visit_id: install.id, installation_anchored_at: new Date() });
+    await db('scheduled_services').where({ id: install.id }).update({ annual_prepay_term_id: term.id });
+    return c;
+  };
+
+  test('an anchored termite plan counts its installation as the sold visit: nothing to refund now, and End of paid coverage no longer refuses', async () => {
+    const c = await anchoredTermiteCustomer();
+    const now = await cancellation.previewCancelPlan({ customerId: c.id, prepayDisposition: 'end_now_refund' });
+    expect(now.prepay.refund).toMatchObject({ needsManualCalc: false, includedVisits: 1, completedVisits: 1, remainingVisits: 0, amount: 0 });
+    const kept = await cancellation.previewCancelPlan({ customerId: c.id, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+    expect(kept).toMatchObject({ effectiveDate: 'end_of_coverage', effectiveOn: day(265) });
+  });
+
+  test('the post-sweep refund recount judges the visits the approved refund counted: a same-service one-off never takes a freed slot, a covered visit that completed still counts', async () => {
+    const { c, term, ahead } = await prepayCustomer();
+    // A separately billed one-off of the same service inside the window: not the plan's.
+    await visit(c, day(-50), { status: 'completed' });
+    const approved = await cancellation.computePrepayRefund({ ...term, customer_id: c.id });
+    expect(approved).toMatchObject({ completedVisits: 1, amount: 300 });
+    const { coverageRowsForTerm } = require('../services/annual-prepay-renewals');
+    const coveredIds = (await coverageRowsForTerm({ ...term, customer_id: c.id })).map((r) => r.id);
+    // The race the recount exists for: a covered visit completes before the sweep reaches it.
+    await db('scheduled_services').where({ id: ahead[0].id }).update({ status: 'completed' });
+    // The sweep cancels the rest.
+    await db('scheduled_services').whereIn('id', ahead.slice(1).map((v) => v.id)).update({ status: 'cancelled' });
+    await expect(cancellation.computePrepayRefund({ ...term, customer_id: c.id }, { coveredIds }))
+      .resolves.toMatchObject({ completedVisits: 2, remainingVisits: 2, amount: 200 });
+    // Derived again without the approved set, the freed slots adopt the one-off.
+    await expect(cancellation.computePrepayRefund({ ...term, customer_id: c.id }))
+      .resolves.toMatchObject({ completedVisits: 3, amount: 100 });
   });
 
   test('a scoped cancel of another family reads the term\'s covered rows instead of refusing; one over the covered family still refuses', async () => {
