@@ -1,4 +1,4 @@
-const { collapseGmailDotEquivalent } = require('../utils/email-equivalence');
+const { sameGmailInbox, gmailCanonicalMailbox } = require('../utils/email-equivalence');
 const { adoptV2PrimaryFields } = require('../utils/extraction-compat');
 const { applyEmailDisagreementHold } = require('../services/call-triage-flags');
 
@@ -12,30 +12,37 @@ function v2With(email) {
 }
 const adopt = (v1Email, v2Email) => adoptV2PrimaryFields({ email: v1Email }, v2With(v2Email));
 
-describe('collapseGmailDotEquivalent', () => {
-  test('dot-only Gmail pair collapses to the undotted address', () => {
-    expect(collapseGmailDotEquivalent(['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com'])).toBe('jqsample1990@gmail.com');
-    expect(collapseGmailDotEquivalent(['JQSample1990@GMAIL.com', 'j.q.sample1990@gmail.com'])).toBe('jqsample1990@gmail.com');
+describe('sameGmailInbox (built on the shared gmailCanonicalMailbox)', () => {
+  test('dot-only Gmail pair is one inbox', () => {
+    expect(sameGmailInbox(['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com'])).toBe('jqsample1990@gmail.com');
+    expect(sameGmailInbox(['JQSample1990@GMAIL.com', 'j.q.sample1990@gmail.com'])).toBe('jqsample1990@gmail.com');
+    expect(sameGmailInbox(['j.q.sample1990@googlemail.com', 'jqsample1990@googlemail.com'])).toBe('jqsample1990@gmail.com');
   });
-  test('googlemail dot-only pair collapses at googlemail.com', () => {
-    expect(collapseGmailDotEquivalent(['j.q.sample1990@googlemail.com', 'jqsample1990@googlemail.com'])).toBe('jqsample1990@googlemail.com');
+  test('dots before a +tag count; the tag must match exactly', () => {
+    expect(sameGmailInbox(['j.q.sample1990+home@gmail.com', 'jqsample1990+home@gmail.com'])).toBe('jqsample1990+home@gmail.com');
   });
-  test('dots before a +tag collapse; the tag is kept verbatim', () => {
-    expect(collapseGmailDotEquivalent(['j.q.sample1990+home@gmail.com', 'jqsample1990+home@gmail.com'])).toBe('jqsample1990+home@gmail.com');
-  });
-  test('three candidates collapse only when every one is dot-equivalent', () => {
-    expect(collapseGmailDotEquivalent(['j.qsample1990@gmail.com', 'jq.sample1990@gmail.com', 'jqsample1990@gmail.com'])).toBe('jqsample1990@gmail.com');
-    expect(collapseGmailDotEquivalent(['j.qsample1990@gmail.com', 'jqsample1990@gmail.com', 'jqsample1991@gmail.com'])).toBeNull();
+  test('three readings are one inbox only when all are', () => {
+    expect(sameGmailInbox(['j.qsample1990@gmail.com', 'jq.sample1990@gmail.com', 'jqsample1990@gmail.com'])).toBe('jqsample1990@gmail.com');
+    expect(sameGmailInbox(['j.qsample1990@gmail.com', 'jqsample1990@gmail.com', 'jqsample1991@gmail.com'])).toBeNull();
   });
   test('negatives', () => {
-    expect(collapseGmailDotEquivalent(['jqsample1990@gmail.com', 'jqsample1990@googlemail.com'])).toBeNull();
-    expect(collapseGmailDotEquivalent(['jqsample1990+a@gmail.com', 'jqsample1990@gmail.com'])).toBeNull();
-    // A dot INSIDE the tag is deliberate (codex #5323 r1 P2): never collapsed.
-    expect(collapseGmailDotEquivalent(['jane+lead.1@gmail.com', 'jane+lead1@gmail.com'])).toBeNull();
-    expect(collapseGmailDotEquivalent(['j.q.sample1990@example.com', 'jqsample1990@example.com'])).toBeNull();
-    expect(collapseGmailDotEquivalent(['j.q.sample1990@gmail.com', 'j.q.sample1991@gmail.com'])).toBeNull();
-    expect(collapseGmailDotEquivalent(['jqsample1990@gmail.com'])).toBeNull();
-    expect(collapseGmailDotEquivalent([])).toBeNull();
+    expect(sameGmailInbox(['jqsample1990@gmail.com', 'jqsample1990@googlemail.com'])).toBeNull();
+    expect(sameGmailInbox(['jqsample1990+a@gmail.com', 'jqsample1990@gmail.com'])).toBeNull();
+    expect(sameGmailInbox(['jane+lead.1@gmail.com', 'jane+lead1@gmail.com'])).toBeNull();
+    expect(sameGmailInbox(['j.q.sample1990@example.com', 'jqsample1990@example.com'])).toBeNull();
+    expect(sameGmailInbox(['j.q.sample1990@gmail.com', 'j.q.sample1991@gmail.com'])).toBeNull();
+    expect(sameGmailInbox(['jqsample1990@gmail.com'])).toBeNull();
+    expect(sameGmailInbox([])).toBeNull();
+  });
+  test.each([
+    ['leading dot', '.jqsample1990@gmail.com'],
+    ['trailing dot', 'jqsample1990.@gmail.com'],
+    ['consecutive dots', 'jq..sample1990@gmail.com'],
+  ])('invalid dot placement is never "the same inbox" (codex #5323 r4): %s', (_l, bad) => {
+    expect(sameGmailInbox([bad, 'jqsample1990@gmail.com'])).toBeNull();
+  });
+  test('the arbiter re-exports the same shared function', () => {
+    expect(require('../services/contact-quarantine-arbiter').gmailCanonicalMailbox).toBe(gmailCanonicalMailbox);
   });
 });
 
@@ -62,6 +69,14 @@ describe('the read-back card says a dot-only Gmail pair is one inbox (owner ruli
       { confirmation_question: 'Is it j q sample?' },
     );
     expect(out.dictationEmailPayload.confirmation_question).toContain('Both spellings are the same Gmail inbox');
+  });
+  test('a genuinely different decoder candidate keeps the decoder question (codex #5323 r4)', () => {
+    const out = applyEmailDisagreementHold(
+      { email: null, email_candidates: ['j.q.sample1990@gmail.com', 'jqsample1990@gmail.com'] },
+      { confirmation_question: 'Is it j q sample or j k sample?', email_candidates: [{ value: 'jksample1990@gmail.com' }] },
+    );
+    expect(out.dictationEmailPayload.gmail_same_inbox).toBeUndefined();
+    expect(out.dictationEmailPayload.confirmation_question).toBe('Is it j q sample or j k sample?');
   });
   test.each([
     ['letter difference', 'j.q.sample1990@gmail.com', 'j.q.sample1991@gmail.com'],

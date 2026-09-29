@@ -1,54 +1,60 @@
 'use strict';
 
 /**
- * Gmail dot-equivalence for the call's two email readings.
+ * Gmail dot-insensitivity — the one shared rule.
  *
- * Gmail (and googlemail.com) ignores dots in the mailbox name, so
- * `j.q.sample1990@gmail.com` and `jqsample1990@gmail.com` deliver to the same
- * inbox. When the V1 and V2 readings differ ONLY by such dots they are one
- * address, not a disagreement (owner ruling, 2026-09-29).
+ * Google is the one major provider that ignores dots in the mailbox name, so
+ * dot-variants on these domains are literally the same mailbox. Do NOT extend
+ * this to other providers (dots are significant elsewhere), and do NOT strip
+ * +tags (a tag is deliberate, not a mishear). Pure, no I/O.
  *
- * Deliberately narrow, and the same identity rule as
- * contact-quarantine-arbiter.js gmailCanonicalMailbox: dots are stripped only
- * from the mailbox name BEFORE any +tag (a tag is deliberate — "+lead.1" and
- * "+lead1" stay distinct), only on gmail.com / googlemail.com, and here only
- * when every reading names the SAME domain. Anything else is left alone.
- * Pure, no I/O. The caller still has to clear suppression and ownership for
- * the chosen spelling (call-recording-processor.js) before it is kept.
+ * gmailCanonicalMailbox is the candidate canonicalizer the contact
+ * quarantine arbiter weighs (moved here unchanged so every caller shares one
+ * rule). Delivery-mailbox identity for suppression/ownership SQL stays in
+ * customer-comms-lock.js (it also strips +tags, which is right for "same
+ * inbox" but not for "same candidate").
  */
 
-const GMAIL_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
+const GOOGLE_DOT_INSENSITIVE_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
 
-function splitGmail(value) {
-  const s = String(value == null ? '' : value).trim().toLowerCase();
-  const at = s.indexOf('@');
-  if (at <= 0 || at !== s.lastIndexOf('@')) return null;
-  const local = s.slice(0, at);
-  const domain = s.slice(at + 1);
-  if (!GMAIL_DOMAINS.has(domain)) return null;
+/**
+ * Canonical mailbox for Google's dot-insensitivity, or null when the rule
+ * does not apply. googlemail.com aliases gmail.com, so both collapse to the
+ * same canonical key.
+ */
+function gmailCanonicalMailbox(email) {
+  const [local, domain] = String(email || '').toLowerCase().split('@');
+  if (!local || !domain || !GOOGLE_DOT_INSENSITIVE_DOMAINS.has(domain)) return null;
+  // Strip dots only from the mailbox name BEFORE any +tag: the tag is the
+  // deliberate part (filters can key on its exact text), so tag spellings
+  // that differ by a dot stay distinct candidates for the model to weigh.
   const plusAt = local.indexOf('+');
-  const mailbox = (plusAt === -1 ? local : local.slice(0, plusAt)).replace(/\./g, '');
+  const mailbox = plusAt === -1 ? local : local.slice(0, plusAt);
   const tag = plusAt === -1 ? '' : local.slice(plusAt);
-  if (!mailbox) return null;
-  return { key: `${mailbox}${tag}`, domain };
+  return `${mailbox.replace(/\./g, '')}${tag}@gmail.com`;
+}
+
+// A valid dot-atom local part: no leading, trailing or consecutive dots. An
+// address that breaks this is not "the same inbox, spelled differently" — it
+// is a bad address that may bounce (codex #5323 r4 P2).
+function validDotPlacement(email) {
+  const local = String(email || '').split('@')[0];
+  return !!local && !local.startsWith('.') && !local.endsWith('.') && !local.includes('..');
 }
 
 /**
- * If EVERY value (2+) is a Gmail address on the same Gmail domain and they
- * differ only by dots in the mailbox name, returns the canonical address
- * (lowercase, mailbox undotted, tag unchanged, at that domain). Otherwise null.
+ * The read-back card's "same Gmail inbox" test: 2+ readings that share one
+ * gmailCanonicalMailbox, every one with valid dot placement, and all on the
+ * SAME Google domain (gmail.com vs googlemail.com stays a question for the
+ * office). Returns the shared canonical mailbox, or null.
  */
-function collapseGmailDotEquivalent(values) {
-  const list = Array.isArray(values) ? values : [];
-  if (list.length < 2) return null;
-  let first = null;
-  for (const v of list) {
-    const parts = splitGmail(v);
-    if (!parts) return null;
-    if (!first) first = parts;
-    else if (parts.key !== first.key || parts.domain !== first.domain) return null;
-  }
-  return `${first.key}@${first.domain}`;
+function sameGmailInbox(values) {
+  const list = (Array.isArray(values) ? values : []).map((v) => String(v || '').trim().toLowerCase());
+  if (list.length < 2 || !list.every(validDotPlacement)) return null;
+  const canon = new Set(list.map(gmailCanonicalMailbox));
+  const domains = new Set(list.map((v) => v.split('@')[1]));
+  if (canon.size !== 1 || canon.has(null) || domains.size !== 1) return null;
+  return [...canon][0];
 }
 
-module.exports = { collapseGmailDotEquivalent };
+module.exports = { gmailCanonicalMailbox, sameGmailInbox, GOOGLE_DOT_INSENSITIVE_DOMAINS };
