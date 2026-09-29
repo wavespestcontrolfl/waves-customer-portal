@@ -740,6 +740,18 @@ fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
+Every slot (both `/api/booking/availability`'s `days[].slots[]` and its
+top-level `slots[]`, and `/find-slots`'s identical shape — both build
+through the same `buildBookingAvailability`) also carries `arrival_window`
+(Codex round 3 on #5310): the canonical customer-facing 2-hour range display
+string, e.g. `"9:00 AM - 11:00 AM"`, built by `arrivalWindowLabel` from the
+SAME `arrivalWindowRange`/`formatSmsTimeRange` formula every confirmation
+SMS/email already renders (`utils/sms-time-format.js`). `PublicBookingPage.jsx`
+renders this field verbatim rather than recomputing the 2-hour math
+client-side, so the quoted range can never drift from what the confirmation
+text later promises. `null` only for a malformed `start_time` (never a
+partial/fabricated range); the page falls back to the bare start label in
+that case.
 Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
 2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
 commit — `/api/booking/confirm` here and the re-service commit below — prepares

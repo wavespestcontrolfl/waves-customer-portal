@@ -313,85 +313,65 @@ describe('rescheduleOnce — mid-route insertion certification (options.capacity
   });
 });
 
-// Arrival grace in capacity mode (Codex round 3 on #5310): the reschedule
-// counterpart to slot-reservation.js's enforceCapacityArrivalGrace, shared
-// via scheduling/capacity-arrival-grace.js. GATED on options.arrivalGraceMinutes
-// (mirroring withArrivalGrace just above it in rebooker.js) — reschedule()
-// serves staff/SMS/voice/auto-dispatch moves too, and none of those ever
-// set arrivalGraceMinutes (decision 6: byte-identical for every
-// non-self-serve caller), so the check must never fire purely because
-// grace happens to be configured for the target date.
-describe('rescheduleOnce — arrival grace in capacity mode (Codex round 3 on #5310)', () => {
-  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SELF_SERVE_ARRIVAL_GRACE_MINUTES'];
-  const savedEnv = {};
-  beforeAll(() => { for (const k of ENV_KEYS) savedEnv[k] = process.env[k]; });
-  afterAll(() => {
-    for (const k of ENV_KEYS) {
-      if (savedEnv[k] === undefined) delete process.env[k];
-      else process.env[k] = savedEnv[k];
-    }
-  });
-
+// Arrival grace in capacity mode (Codex round 2 on #5310; moved INTO
+// verifyArrivalCapacity itself in round 4, behind an explicit
+// `enforceArrivalGrace` opt-in every self-serve caller passes — see that
+// function's own comment in scheduling/arrival-route.js). This file mocks
+// verifyArrivalCapacity entirely (a bare jest.fn(), not a passthrough to the
+// real implementation — see the header comment), so it cannot exercise the
+// real throw/no-throw grace logic; that predicate is unit-tested directly in
+// arrival-route-grace.test.js via `_internals.checkArrivalGrace`, and proven
+// end-to-end against real Postgres in booking-capacity-commit-db.test.js.
+// This describe block's job is narrower and specific to rebooker.js: prove
+// reschedule() passes `enforceArrivalGrace: true` ONLY when THIS caller
+// opted in via options.arrivalGraceMinutes > 0 — reschedule() serves
+// staff/SMS/voice/auto-dispatch moves too, and none of those ever set
+// arrivalGraceMinutes (decision 6: byte-identical for every non-self-serve
+// caller), so the option must never flip to true purely because grace
+// happens to be configured for the target date.
+describe('rescheduleOnce passes enforceArrivalGrace based on THIS caller\'s own opt-in (Codex round 3 on #5310)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.raw = rawFactory('db.raw');
     findConflictingVisits.mockResolvedValue([]);
     prepareArrivalCapacity.mockResolvedValue({ options: {}, fingerprint: 'fp-1', travel: null });
+    verifyArrivalCapacity.mockResolvedValue({
+      feasible: true, arrivalDelayMinutes: 100, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
+    });
     persistArrivalOrder.mockResolvedValue(undefined);
     bookInsertionOffersLive.mockReturnValue(true);
-    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
   });
 
-  test('grace 90, options.arrivalGraceMinutes: 90, a 100-minute simulated arrival delay is refused (SLOT_UNAVAILABLE) and nothing is written', async () => {
-    verifyArrivalCapacity.mockResolvedValue({
-      feasible: true, arrivalDelayMinutes: 100, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
-    });
-    const { trxScheduled } = wireRescheduleMocks(service());
-
-    await expect(
-      SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true, arrivalGraceMinutes: 90 }),
-    ).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_UNAVAILABLE' });
-
-    expect(persistArrivalOrder).not.toHaveBeenCalled();
-    expect(trxScheduled.update).not.toHaveBeenCalled();
-  });
-
-  test('grace 90, options.arrivalGraceMinutes: 90, an 80-minute simulated arrival delay commits fine', async () => {
-    verifyArrivalCapacity.mockResolvedValue({
-      feasible: true, arrivalDelayMinutes: 80, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
-    });
+  test('options.arrivalGraceMinutes: 90 (self-serve reschedule-public) passes enforceArrivalGrace: true', async () => {
     wireRescheduleMocks(service());
 
-    const result = await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true, arrivalGraceMinutes: 90 });
+    await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true, arrivalGraceMinutes: 90 });
 
-    expect(result.success).toBe(true);
-    expect(persistArrivalOrder).toHaveBeenCalled();
+    expect(verifyArrivalCapacity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ enforceArrivalGrace: true }));
   });
 
-  test('grace configured for the date (90) but THIS caller never sets options.arrivalGraceMinutes — unchanged, a 100-minute delay still commits (byte-identical for staff/SMS/voice/auto-dispatch callers, decision 6)', async () => {
-    verifyArrivalCapacity.mockResolvedValue({
-      feasible: true, arrivalDelayMinutes: 100, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
-    });
+  test('options.arrivalGraceMinutes omitted (staff/SMS/voice/auto-dispatch) passes enforceArrivalGrace: false', async () => {
     wireRescheduleMocks(service());
 
-    const result = await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true });
+    await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true });
 
-    expect(result.success).toBe(true);
-    expect(persistArrivalOrder).toHaveBeenCalled();
+    expect(verifyArrivalCapacity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ enforceArrivalGrace: false }));
   });
 
-  test('grace 0 (env unset) with options.arrivalGraceMinutes: 90 passed anyway — unchanged, a 100-minute delay still commits (the reader itself zeroes grace when the gate is off)', async () => {
-    delete process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
-    verifyArrivalCapacity.mockResolvedValue({
-      feasible: true, arrivalDelayMinutes: 100, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
-    });
+  test('options.arrivalGraceMinutes: 0 also passes enforceArrivalGrace: false', async () => {
     wireRescheduleMocks(service());
 
-    const result = await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true, arrivalGraceMinutes: 90 });
+    await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true, arrivalGraceMinutes: 0 });
 
-    expect(result.success).toBe(true);
-    expect(persistArrivalOrder).toHaveBeenCalled();
+    expect(verifyArrivalCapacity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ enforceArrivalGrace: false }));
+  });
+
+  test('the retired per-caller helper is gone from this file', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
+    expect(src).not.toMatch(/enforceCapacityArrivalGrace/);
+    expect(src).not.toMatch(/capacity-arrival-grace/);
   });
 });
 

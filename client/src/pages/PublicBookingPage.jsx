@@ -67,16 +67,23 @@ function readCookie(name) {
 // (owner directive; matches sms-time-format arrivalWindowRange and
 // ReschedulePage). A slot's end_time/end_label is the job-duration block that
 // sizes scheduling — never show it as the arrival window.
-const ARRIVAL_WINDOW_MINUTES = 120;
-
-function arrivalEndLabel(start24) {
-  const [h, m] = String(start24 || '').split(':').map(Number);
-  if (Number.isNaN(h)) return null;
-  const total = (h * 60 + (m || 0) + ARRIVAL_WINDOW_MINUTES) % (24 * 60);
-  const hour = Math.floor(total / 60);
-  const suffix = hour >= 12 ? 'PM' : 'AM';
-  const hour12 = hour % 12 || 12;
-  return `${hour12}:${String(total % 60).padStart(2, '0')} ${suffix}`;
+//
+// Codex round 3 on #5310: this used to recompute the 2-hour range in the
+// browser (a duplicated ARRIVAL_WINDOW_MINUTES = 120 constant + its own
+// minute-math, retired here) instead of rendering the server's own
+// canonical value — a second copy of the same formula is exactly how this
+// PR's earlier rounds found commit-path callers silently drifting from the
+// shared rule. `slot.arrival_window` (routes/booking.js's arrivalWindowLabel,
+// the SAME arrivalWindowRange/formatSmsTimeRange every confirmation SMS/
+// email renders) is now sent on every slot from /availability and
+// /find-slots — this renders it verbatim. The bare start label is the only
+// fallback for a slot from an unexpected source that never carries the
+// field; it never re-derives an end time.
+function arrivalWindowDisplay(slot) {
+  if (!slot) return '';
+  // arrival_window already IS the full range ("9:00 AM - 11:00 AM"),
+  // starting from the same start_label — never concatenate the two.
+  return slot.arrival_window || slot.start_label || '';
 }
 
 // Capture paid-click attribution from the current URL + Meta cookies so a direct
@@ -1321,12 +1328,11 @@ export default function PublicBookingPage() {
                 {selectedSlot?.fullDate || selectedDayLabel} ·{' '}
                 {/* Full arrival window (A10, owner ruling 2026-09-28) —
                     never just the bare start; the 2-hour window is the
-                    promise (same rule as the confirmation card below). */}
-                {selectedSlot?.start_label}
-                {(() => {
-                  const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
-                  return end ? ` – ${end}` : '';
-                })()}
+                    promise (same rule as the confirmation card below).
+                    The server sends the canonical range (Codex round 3 on
+                    #5310) — the SAME formula every confirmation SMS/email
+                    renders — rendered verbatim rather than recomputed here. */}
+                {arrivalWindowDisplay(selectedSlot)}
               </div>
               <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 2 }}>
                 {service?.label}
@@ -1550,15 +1556,11 @@ export default function PublicBookingPage() {
               <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6 }}>
                 <div><strong style={{ color: COLORS.glassNavy }}>{service?.label}</strong></div>
                 <div>{selectedSlot?.fullDate || selectedDayLabel}</div>
-                {/* Arrival window = start + 2h (owner rule) — never the
-                    job-duration end_label the scheduler blocked out. */}
-                <div>
-                  {selectedSlot?.start_label}
-                  {(() => {
-                    const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
-                    return end ? ` – ${end}` : '';
-                  })()}
-                </div>
+                {/* Arrival window = the server's canonical 2-hour range
+                    (owner rule; Codex round 3 on #5310) — never the
+                    job-duration end_label the scheduler blocked out, and
+                    never recomputed here. */}
+                <div>{arrivalWindowDisplay(selectedSlot)}</div>
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>
@@ -1568,8 +1570,7 @@ export default function PublicBookingPage() {
                 stamp={(() => {
                   // Same day · full arrival window the recap above quotes —
                   // never the bare start (the window is the promise).
-                  const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
-                  const window = selectedSlot?.start_label ? `${selectedSlot.start_label}${end ? ` – ${end}` : ''}` : null;
+                  const window = arrivalWindowDisplay(selectedSlot) || null;
                   return [selectedSlot?.fullDate || selectedDayLabel, window].filter(Boolean).join(' · ') || null;
                 })()}
                 style={{ marginBottom: 20, borderRadius: 12, border: `1px solid ${COLORS.slate200}` }}

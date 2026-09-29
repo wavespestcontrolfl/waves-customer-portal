@@ -15,6 +15,7 @@ const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
+const { selfServeArrivalGraceMinutes } = require('./travel-gap');
 
 /** The customer's primary premise, aliased the way effectivePremise (and
  *  stampedAddressDiverges) expect. Every query that feeds the co-visit merge
@@ -535,7 +536,30 @@ async function prepareArrivalCapacity(options) {
   return { options, fingerprint: routeFingerprint(context), travel: context.travel };
 }
 
-async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, durationMinutes, serviceTypes } = {}) {
+// Arrival grace in CAPACITY mode (Codex round 2 on #5310, moved INTO this
+// chokepoint in round 4 after a THIRD undiscovered caller — booking.js's
+// createSelfBooking — was found silently skipping it: a per-caller helper
+// (capacity-arrival-grace.js) meant every new capacity-mode commit site had
+// to remember to call it, and one didn't). Capacity mode's own route
+// simulation only enforces the FIXED 120-minute arrival promise
+// (effectiveWindowRange, route-reorder-window-fit.js) — it has no concept
+// of the narrower, owner-configured self-serve grace bound. `enforceArrivalGrace`
+// is an explicit per-CALL opt-in (default false, so a caller that passes
+// nothing is byte-identical): every self-serve commit path (slot-reservation.js's
+// reserveSlot/commitReservation, booking.js's createSelfBooking) passes
+// `true` unconditionally — they ARE the self-serve surface, always — while
+// rebooker.js's mixed-caller reschedule() passes whether THIS options.arrivalGraceMinutes
+// was actually set (staff/SMS/voice/auto-dispatch moves never set it,
+// decision 6). Grace itself is resolved HERE, for `prepared.options.date`
+// (the SAME date this whole fit was simulated for) via the one canonical
+// reader — never passed in as a number, so there is exactly one place this
+// PR's grace math can drift from. Grace 0/dark (or the date being today,
+// or GATE_SLOT_TRAVEL_GAP off — all decided inside the reader) is a no-op:
+// the existing 120-minute bound (`fit.feasible` above) stays the ONLY
+// bound, byte-identical to before this check existed.
+async function verifyArrivalCapacity(prepared, {
+  conn, windowStart, windowEnd, durationMinutes, serviceTypes, enforceArrivalGrace = false,
+} = {}) {
   if (!prepared || (!capacityEnabled() && !prepared.options.preserveCapacity)) throw capacityError();
   // Callers hold selected and unassigned tech-day fences before row locks.
   // Completion writers lock stops without the tech-day fence. Hold relevant
@@ -556,8 +580,23 @@ async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, d
     ...(windowStart ? { windowStart } : {}), ...(windowEnd ? { windowEnd } : {}),
     ...(durationMinutes ? { durationMinutes } : {}), bufferMinutes: 0 });
   if (!fit.feasible) throw capacityError(fit.reason);
+  checkArrivalGrace(fit, prepared.options.date, enforceArrivalGrace);
   await assertCapacityEligibility(conn, context, serviceTypes);
   return fit;
+}
+
+// The grace half of verifyArrivalCapacity's check, pulled out as a pure
+// function purely so it can be unit-tested directly — `evaluateArrivalPlacement`,
+// `loadArrivalRouteContext` and the row locks above are all DB-coupled, so
+// verifyArrivalCapacity itself can only be proven end-to-end against real
+// Postgres (booking-capacity-commit-db.test.js). No caller ever calls this
+// directly; it exists only as `_internals.checkArrivalGrace` for tests.
+function checkArrivalGrace(fit, date, enforceArrivalGrace) {
+  if (!enforceArrivalGrace) return;
+  const grace = selfServeArrivalGraceMinutes({ date });
+  if (grace > 0 && Number.isFinite(fit.arrivalDelayMinutes) && fit.arrivalDelayMinutes > grace) {
+    throw capacityError('arrival_grace');
+  }
 }
 
 async function assertCapacityEligibility(conn, context, serviceTypes) {
@@ -634,5 +673,5 @@ module.exports = {
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
-  _internals: { clockOrder, storedOrderStale },
+  _internals: { clockOrder, storedOrderStale, checkArrivalGrace },
 };

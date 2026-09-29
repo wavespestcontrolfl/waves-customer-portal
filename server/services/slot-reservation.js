@@ -52,11 +52,6 @@ const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArr
 const { serviceDurationMinutes } = require('./service-library');
 const { expectedServiceMinutes, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 const { selfServeArrivalGraceMinutes } = require('./scheduling/travel-gap');
-// Arrival grace in CAPACITY mode (Codex round 2 on #5310; moved to its own
-// leaf module in round 3 so rebooker.js's reschedule commit path can share
-// it too, with no import cycle either way) — see
-// scheduling/capacity-arrival-grace.js for the full rationale.
-const { enforceCapacityArrivalGrace } = require('./scheduling/capacity-arrival-grace');
 
 // The candidate's own expected-minutes padding credit (owner ruling
 // 2026-09-23) for the travel-gap probes below (occupancy.js decides
@@ -1082,12 +1077,15 @@ async function reserveSlot({
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
       if (useCapacity && !holdPin) throw capacityError('address_changed');
+      // Arrival grace (Codex round 2 on #5310, moved into the chokepoint in
+      // round 4 — see verifyArrivalCapacity's own comment): reserveSlot IS
+      // the self-serve surface, always — `enforceArrivalGrace: true`
+      // unconditionally.
       const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
         conn: trx, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
         serviceTypes: serviceProfile.services.map(service => service.label || service.service),
+        enforceArrivalGrace: true,
       }) : null;
-      // Arrival grace (Codex round 2 on #5310) — see enforceCapacityArrivalGrace.
-      enforceCapacityArrivalGrace(capacityFit, date);
       // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
       // graduated visit carries it even if the profile can't be re-resolved
       // at commit; commitReservation backfills it when this returns null.
@@ -1837,12 +1835,15 @@ async function commitReservation({
       }
     }
 
+    // Arrival grace (Codex round 2 on #5310, moved into the chokepoint in
+    // round 4 — see verifyArrivalCapacity's own comment): commitReservation
+    // IS the self-serve surface, always — `enforceArrivalGrace: true`
+    // unconditionally.
     const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
       conn: client, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
       serviceTypes: serviceProfile?.services.map(service => service.label || service.service),
+      enforceArrivalGrace: true,
     }) : null;
-    // Arrival grace (Codex round 2 on #5310) — see enforceCapacityArrivalGrace.
-    enforceCapacityArrivalGrace(capacityFit, scheduledDate);
 
     if (windowEnd && !useCapacity) {
       const conflict = await client('scheduled_services')
@@ -2603,6 +2604,5 @@ module.exports = {
     notesWithServiceMix,
     catalogLinkForProfile,
     candidateExpectedMinutesFromRow,
-    enforceCapacityArrivalGrace,
   },
 };

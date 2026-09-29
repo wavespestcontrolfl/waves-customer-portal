@@ -24,6 +24,11 @@ const {
 } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
+// The ONE canonical arrival-window formatter (Codex round 3 on #5310) —
+// confirmations/SMS already use this; the public booking page's own
+// recap used to duplicate the 2-hour math client-side (client/src/pages/
+// PublicBookingPage.jsx's retired arrivalEndLabel/ARRIVAL_WINDOW_MINUTES).
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 
 // Self-serve arrival grace (A1) for a caller that may or may not be self-serve:
 // voice callers never set selfServeNotice, so they always get 0. With no
@@ -33,6 +38,17 @@ const { loadPackingAnchors } = require('../services/scheduling/packing-geometry'
 function selfServeGraceFor(selfServeNotice, date) {
   if (!selfServeNotice) return 0;
   return date ? selfServeArrivalGraceMinutes({ date }) : selfServeArrivalGraceMinutes();
+}
+
+// The canonical customer-facing arrival window display for a slot starting
+// at `startTime` (Codex round 3 on #5310) — "9:00 AM - 11:00 AM". The ONE
+// place this string is built for the public booking page, so its 2-hour
+// promise can never drift from arrivalWindowRange (the same formula every
+// confirmation SMS/email already renders). Returns null for a malformed
+// start rather than a broken partial string.
+function arrivalWindowLabel(startTime) {
+  const range = arrivalWindowRange(startTime);
+  return range ? formatSmsTimeRange(range) : null;
 }
 
 // Series-creator owner-move guard (Codex #4716 r3 P1): shared by every
@@ -1889,6 +1905,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       endTime24: slot.end_time,
       start: minToTime12(timeToMin(slot.start_time)),
       end: minToTime12(timeToMin(slot.end_time)),
+      // The canonical 2-hour arrival window display (Codex round 3 on
+      // #5310) — "9:00 AM - 11:00 AM", the SAME formula every confirmation
+      // SMS/email renders. The public booking page reads this verbatim
+      // instead of recomputing it client-side (docs/public-route-contracts.md).
+      arrival_window: arrivalWindowLabel(slot.start_time),
     });
   }
 
@@ -1936,7 +1957,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // stops_that_day is internal ranking state (reserviceAdjustedScore) —
     // strip it here so every caller's payload shape stays byte-for-byte
     // identical to before this field existed.
-    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, stops_that_day, ...slot }) => slot),
+    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, stops_that_day, ...slot }) => (
+      { ...slot, arrival_window: arrivalWindowLabel(slot.start_time) }
+    )),
     days,
     nearby: days.some(d => d.nearby),
     total_feasible: totalFeasible,
@@ -3958,6 +3981,12 @@ async function createSelfBooking(payload = {}) {
       const capacityServiceTypes = callbackVisit
         ? [resolvedServiceType]
         : normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]);
+      // Arrival grace (Codex round 3 P1 on #5310 — this call site had NO
+      // enforcement at all, the third caller a round found silently
+      // skipping the per-caller helper; moved into verifyArrivalCapacity
+      // itself in round 4 so a future caller can't repeat this): createSelfBooking
+      // IS the self-serve surface, always — `enforceArrivalGrace: true`
+      // unconditionally, same as slot-reservation.js's two callers.
       const capacityCommitFit = preparedCapacity
         ? await require('../services/scheduling/arrival-route').verifyArrivalCapacity(preparedCapacity, {
           conn: trx,
@@ -3965,6 +3994,7 @@ async function createSelfBooking(payload = {}) {
           windowEnd: endTime,
           durationMinutes: duration,
           serviceTypes: capacityServiceTypes,
+          enforceArrivalGrace: true,
         })
         : null;
 

@@ -104,10 +104,11 @@
  *     tie / hold-shadow rules) — only how far along its route that
  *     neighbour has actually gotten changes.
  */
-const { driveMin } = require('../auto-dispatch/geo');
+const { driveMin, HQ } = require('../auto-dispatch/geo');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { ARRIVAL_WINDOW_MINUTES } = require('../../utils/sms-time-format');
 const { etDateString } = require('../../utils/datetime-et');
+const { currentDayEndMinutes } = require('./customer-windows');
 const logger = require('../logger');
 
 const DEFAULT_TRAVEL_BUFFER_MINUTES = 15;
@@ -459,6 +460,46 @@ function travelGapConflicts(candidate, stops) {
     const isBeforeSide = stop.endMin <= candidate.startMin;
     const evalCandidate = isBeforeSide ? candidate : candidateForAfterSide;
     if (travelGapViolation(evalCandidate, annotate(stop))) neighbours.push({ stop, reason: 'travel_gap' });
+  }
+  // Day-end bound (Codex round 3 P1 on #5310): find-time.js's own HQ_END
+  // sentinel already refuses to OFFER a graced candidate whose real arrival
+  // cannot finish its own work and drive home before the customer day
+  // closes — every real day's virtual route ends at HQ_END, so ANY
+  // candidate that ends up the day's LAST real stop is bound by it at offer
+  // time. This module's commit-time predicate had no equivalent: it only
+  // ever compares the candidate against OTHER real stops, so a candidate
+  // with no real stop after it never hit any check here at all — a
+  // request built outside the offer path (or one whose timing shifted
+  // between offer and commit) could commit a graced arrival that finishes
+  // past close. Mirrors the sentinel's formula exactly, grounded only in
+  // what this module can see (real stops) — the leading HQ-to-first-stop
+  // leg is find-time's own domain (already covered there; this module has
+  // no dayOpen/HQ_START concept to duplicate it with) — `arrivalFloor` is
+  // the candidate's own real (chained/projected) arrival established by any
+  // BEFORE-side neighbour above (`candidateForAfterSide.arrivalMin`), or
+  // its own stored start when there is none, `ownDuration` is its FULL
+  // (uncredited) work — never the expected-minutes credit — and `driveHome`
+  // is the same drive-to-HQ estimator find-time's own detour scoring uses.
+  // Grace 0 is BYTE-IDENTICAL (never evaluated at all): `candidateForAfterSide`
+  // is `candidate` unchanged then, and every existing caller's own
+  // stored-window day-end check (slot-reservation.js et al.) already covers
+  // that case — adding this unconditionally would be a BRAND NEW rejection
+  // path this module has never had, not a mirror of one.
+  const hasAfterSideNeighbour = after.length > 0
+    || liveNeighbourHolds.some((hold) => hold.startMin > candidate.startMin);
+  if (candidate.graceMinutes > 0 && !hasAfterSideNeighbour) {
+    const arrivalFloor = Number.isFinite(candidateForAfterSide.arrivalMin)
+      ? candidateForAfterSide.arrivalMin : candidate.startMin;
+    const ownDuration = candidate.endMin - candidate.startMin;
+    const driveHome = driveMin(coordsOf(candidate), HQ);
+    if (arrivalFloor + ownDuration + driveHome > currentDayEndMinutes()) {
+      // No specific stop to blame — the candidate itself doesn't fit the
+      // day. `stop: null` so a caller mapping conflicts back to real rows
+      // (occupancy.js's findConflictingVisitsWithTravel) can tell this
+      // apart from a real neighbour and synthesize its own entry instead
+      // of dereferencing a row that doesn't exist.
+      neighbours.push({ stop: null, reason: 'day_end' });
+    }
   }
   return overlaps.concat(neighbours);
 }

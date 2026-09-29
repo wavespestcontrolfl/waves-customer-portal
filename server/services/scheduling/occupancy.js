@@ -803,9 +803,21 @@ async function findConflictingVisitsWithTravel({
 
   const stops = buildTravelGapStops(rows);
   // Tech-blind (see header) — every row on the date counts, grace or not.
-  const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row.id, reason]));
+  const conflicts = travelGapConflicts(candidate, stops);
+  // Day-end (Codex round 3 P1 on #5310): travelGapConflicts emits `stop: null`
+  // for this one — the candidate itself doesn't fit the day, not a
+  // collision with any real row, so there is no `.row.id` to map through
+  // the by-row lookup below. Synthesize a conflict entry instead (same
+  // precedent as findConflictingVisits' own arrivalWindow branch above,
+  // which already returns a non-DB-row conflict shaped from `fit.target`)
+  // — every caller of this function only ever checks `.length`, never a
+  // specific field, so a synthetic entry is safe wherever it can occur
+  // (grace > 0, self-serve only).
+  const dayEndHit = conflicts.find((c) => c.stop === null && c.reason === 'day_end');
+  const reasonByRow = new Map(conflicts.filter((c) => c.stop).map(({ stop, reason }) => [stop.row.id, reason]));
   // Query order (window_start asc), not conflict order.
-  return rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
+  const rowConflicts = rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
+  return dayEndHit ? [...rowConflicts, { id: null, conflict_reason: 'day_end' }] : rowConflicts;
 }
 
 /**

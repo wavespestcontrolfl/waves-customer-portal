@@ -47,13 +47,6 @@ function withArrivalGrace(travel, graceMinutes) {
   return { ...travel, graceMinutes: grace };
 }
 const { arrivalWindowRoutingEnabled, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
-// Arrival grace in CAPACITY mode (Codex round 3 on #5310): shared with
-// slot-reservation.js's reserve/commit capacity checks — see
-// scheduling/capacity-arrival-grace.js for the full rationale. `withArrivalGrace`
-// above only stamps grace onto the tech-blind occupancy `travel` pin;
-// verifyArrivalCapacity's OWN route simulation (below) needs this separate
-// check, the same way slot-reservation.js's capacityFit does.
-const { enforceCapacityArrivalGrace } = require('./scheduling/capacity-arrival-grace');
 const { guardedCoordSelects, preloadServiceLocations } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
 const {
@@ -1780,30 +1773,25 @@ class SmartRebooker {
       // row already carries its own service_type, and assertCapacityEligibility
       // falls back to [context.target] when serviceTypes is undefined —
       // both read fresh off the row lock above via loadArrivalRouteContext.
+      // Arrival grace (Codex round 2 on #5310, moved into verifyArrivalCapacity
+      // itself in round 4 — see its own comment): `enforceArrivalGrace`
+      // gated on THIS caller having opted in via options.arrivalGraceMinutes
+      // — reschedule() serves staff/SMS/voice/auto-dispatch moves too, and
+      // none of those ever pass arrivalGraceMinutes (decision 6 —
+      // byte-identical for every non-self-serve caller). Passing `true`
+      // unconditionally (as slot-reservation.js's two callers do, where
+      // EVERY caller is self-serve) would apply a stricter bound to a
+      // staff reschedule that never asked for it, purely because grace
+      // happens to be configured for that date.
       const capacityCommitFit = preparedCapacity
         ? await verifyArrivalCapacity(preparedCapacity, {
           conn: trx,
           windowStart: updates.window_start,
           windowEnd: occupancyGateEnd,
           durationMinutes: service.estimated_duration_minutes || undefined,
+          enforceArrivalGrace: Number(options.arrivalGraceMinutes) > 0,
         })
         : null;
-      // Arrival grace (Codex round 3 on #5310) — gated on THIS caller
-      // having opted in via options.arrivalGraceMinutes, exactly like
-      // withArrivalGrace above: reschedule() serves staff/SMS/voice/
-      // auto-dispatch moves too, and none of those ever pass
-      // arrivalGraceMinutes (decision 6 — byte-identical for every
-      // non-self-serve caller). Blindly re-deriving grace from the target
-      // date alone (as enforceCapacityArrivalGrace's own internal read
-      // does for slot-reservation.js, where EVERY caller is self-serve)
-      // would apply a stricter bound to a staff reschedule that never
-      // asked for it, purely because grace happens to be configured for
-      // that date. The TARGET (destination) date, never the date this
-      // move is running on; same-day strict (decision 2) is additionally
-      // enforced inside the reader itself.
-      enforceCapacityArrivalGrace(capacityCommitFit, newDateStr, {
-        optedIn: Number(options.arrivalGraceMinutes) > 0,
-      });
       // A reviewed move also pins the route whose destination was probed.
       // A tech CHANGE pins the observed prior technician in the CAS: the
       // pre-read is unlocked, and a dispatch reassignment A→B landing

@@ -2330,103 +2330,43 @@ describe('commitReservation enforces a configured close in capacity mode (Codex 
 });
 
 // Codex round 2 on #5310 P1 (GATE_SCHEDULING_CAPACITY is live in production):
-// capacity mode's reserve/commit paths never route through
-// findConflictingVisits at all (reserveSlot's ternary probes booked
-// interviews only; commitReservation skips the travel-gap probe entirely),
-// so `graceMinutes` was never evaluated there — verifyArrivalCapacity only
-// enforces the fixed 120-minute arrival promise. enforceCapacityArrivalGrace
-// is the single function both reserveSlot and commitReservation now call
-// right after computing `capacityFit`, re-checking the SAME
-// arrivalDelayMinutes the capacity simulation already produced against the
-// narrower, owner-configured grace bound — never re-deriving it.
-describe('enforceCapacityArrivalGrace — arrival grace in capacity mode (Codex round 2 on #5310)', () => {
-  const { enforceCapacityArrivalGrace } = slotReservation._internals;
-  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SELF_SERVE_ARRIVAL_GRACE_MINUTES'];
-  const saved = {};
-  beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
-  beforeEach(() => {
-    for (const k of ENV_KEYS) delete process.env[k];
-    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
-  });
-  afterAll(() => {
-    for (const k of ENV_KEYS) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
-    }
-  });
-  const FUTURE_DATE = '2099-01-01';
-
-  test('grace 90: a 100-minute simulated arrival delay is refused (SLOT_UNAVAILABLE, reason arrival_grace)', () => {
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: 100 }, FUTURE_DATE))
-      .toThrow(expect.objectContaining({ code: 'SLOT_UNAVAILABLE', reason: 'arrival_grace', statusCode: 409 }));
-  });
-
-  test('grace 90: an 80-minute simulated arrival delay is fine', () => {
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: 80 }, FUTURE_DATE)).not.toThrow();
-  });
-
-  test('grace 90: exactly 90 minutes late is the inclusive boundary — not a violation', () => {
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: 90 }, FUTURE_DATE)).not.toThrow();
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: 91 }, FUTURE_DATE)).toThrow();
-  });
-
-  test('grace 0 (dark/unset): capacity mode is untouched — even a 119-minute delay (inside the legacy 120-minute promise) never throws here', () => {
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: 119 }, FUTURE_DATE)).not.toThrow();
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: 119 }, FUTURE_DATE)).not.toThrow();
-  });
-
-  test('GATE_SLOT_TRAVEL_GAP off forces grace to 0 here too (the one reader) — a 100-minute delay is fine', () => {
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
-    delete process.env.GATE_SLOT_TRAVEL_GAP;
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: 100 }, FUTURE_DATE)).not.toThrow();
-  });
-
-  test('same-day (today, ET) stays strict per decision 2 — grace is forced to 0 for today\'s own commits even with a configured value', () => {
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
-    const { etDateString } = require('../utils/datetime-et');
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: 100 }, etDateString())).not.toThrow();
-  });
-
-  test('no capacity fit (non-capacity mode, capacityFit null) is always a no-op', () => {
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
-    expect(() => enforceCapacityArrivalGrace(null, FUTURE_DATE)).not.toThrow();
-  });
-
-  test('a non-finite arrivalDelayMinutes never throws (fail-open on a malformed fit)', () => {
-    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
-    expect(() => enforceCapacityArrivalGrace({ arrivalDelayMinutes: undefined }, FUTURE_DATE)).not.toThrow();
-    expect(() => enforceCapacityArrivalGrace({}, FUTURE_DATE)).not.toThrow();
-  });
-});
-
-// Source guard: both capacity commit sites actually call
-// enforceCapacityArrivalGrace immediately after computing their own
-// capacityFit — a unit test of the function alone (above) can't prove
-// reserveSlot/commitReservation are wired to it (verifyArrivalCapacity is a
-// real, Postgres-backed function imported by direct destructuring, not
-// spy-able after the fact — see the describe above this one).
-describe('enforceCapacityArrivalGrace is wired into BOTH capacity commit sites (source guard)', () => {
+// capacity mode's reserve/commit paths never routed through
+// findConflictingVisits at all, so `graceMinutes` was never evaluated —
+// verifyArrivalCapacity only enforced the fixed 120-minute arrival promise.
+// Round 4 (Codex round 3 on #5310 — a THIRD caller, booking.js's
+// createSelfBooking, was found silently skipping a per-caller helper) moved
+// the enforcement INTO verifyArrivalCapacity itself, behind an explicit
+// `enforceArrivalGrace` opt-in every self-serve caller now passes. The
+// actual throw/no-throw predicate (`_internals.checkArrivalGrace`) is
+// tested directly in arrival-route-grace.test.js — verifyArrivalCapacity
+// itself does real row locks and a DB-backed route simulation, so it can
+// only be proven end-to-end against real Postgres
+// (booking-capacity-commit-db.test.js). This file's job is narrower: prove
+// reserveSlot and commitReservation actually pass `enforceArrivalGrace: true`
+// (they ARE the self-serve surface, always — never gated on anything).
+describe('reserveSlot / commitReservation opt into arrival grace unconditionally (source guard, Codex round 3 on #5310)', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
 
-  test('reserveSlot calls it right after its own capacityFit', () => {
+  test('reserveSlot\'s capacityFit call passes enforceArrivalGrace: true', () => {
     const idx = src.indexOf('async function reserveSlot(');
     const fitIdx = src.indexOf('const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {', idx);
     expect(fitIdx).toBeGreaterThan(idx);
-    const afterFit = src.slice(fitIdx, fitIdx + 500);
-    expect(afterFit).toMatch(/enforceCapacityArrivalGrace\(capacityFit, date\);/);
+    const closeIdx = src.indexOf('}) : null;', fitIdx);
+    expect(src.slice(fitIdx, closeIdx)).toMatch(/enforceArrivalGrace: true,/);
   });
 
-  test('commitReservation calls it right after its own capacityFit', () => {
+  test('commitReservation\'s capacityFit call passes enforceArrivalGrace: true', () => {
     const idx = src.indexOf('async function commitReservation(');
     const fitIdx = src.indexOf('const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {', idx);
     expect(fitIdx).toBeGreaterThan(idx);
-    const afterFit = src.slice(fitIdx, fitIdx + 500);
-    expect(afterFit).toMatch(/enforceCapacityArrivalGrace\(capacityFit, scheduledDate\);/);
+    const closeIdx = src.indexOf('}) : null;', fitIdx);
+    expect(src.slice(fitIdx, closeIdx)).toMatch(/enforceArrivalGrace: true,/);
+  });
+
+  test('neither call site imports or references the retired per-caller helper', () => {
+    expect(src).not.toMatch(/enforceCapacityArrivalGrace/);
+    expect(src).not.toMatch(/capacity-arrival-grace/);
   });
 });

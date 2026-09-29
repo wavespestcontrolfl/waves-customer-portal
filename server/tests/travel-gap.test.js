@@ -559,3 +559,64 @@ describe('arrival grace — cascade / ordering (G9-G12 shapes)', () => {
     expect(travelGapConflicts(D(90), [A, B, C])).toEqual([]);
   });
 });
+
+// Day-end bound (Codex round 3 P1 on #5310): find-time.js's own HQ_END
+// sentinel already refuses to OFFER a graced candidate whose real arrival
+// cannot finish its own work and (when the offer counts one) drive home
+// before the customer day closes. travelGapConflicts had no equivalent —
+// it only ever compares a candidate against OTHER real stops, so a
+// candidate with no real stop after it (the day's last stop) never hit any
+// check here at all. currentDayEndMinutes() falls back to its fixed
+// 18:00 (1080) default in this file — nothing here ever populates
+// customer-windows.js's cache.
+describe('arrival grace — day-end bound at commit (Codex round 3 on #5310)', () => {
+  beforeEach(() => { process.env.SLOT_TRAVEL_BUFFER_MINUTES = '30'; });
+
+  // A real 16:00-17:00 stop (no padding), no coords. required(before, candidate)
+  // = 0 drive + 30 buffer = 30, so the candidate's own real (projected)
+  // arrival floors at max(candidate.startMin, 1020 + 30) = 1050 (17:30) —
+  // a 30-minute-late arrival the ordinary pairwise check tolerates fine at
+  // grace 90 (lateMin 30 <= 90), so nothing about the NEIGHBOUR check
+  // objects; only the day itself might run out of room.
+  const before = { id: 'before', startMin: 960, endMin: 1020, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null }; // 16:00-17:00
+  const candidate = (durationMinutes, graceMinutes) => ({
+    startMin: 1020, endMin: 1020 + durationMinutes, windowMinutes: durationMinutes, expectedMinutes: durationMinutes,
+    lat: null, lng: null, graceMinutes,
+  }); // 17:00 offered start
+
+  test('17:00 slot, projected arrival 17:30, a 45-minute job would finish at 18:15 — refused at commit (day-end, no specific stop to blame)', () => {
+    // arrivalFloor 1050 + ownDuration 45 + driveHome 0 = 1095 > 1080 (18:00).
+    const conflicts = travelGapConflicts(candidate(45, 90), [before]);
+    expect(conflicts.map((c) => ({ stop: c.stop, reason: c.reason }))).toEqual([{ stop: null, reason: 'day_end' }]);
+  });
+
+  test('the identical shape but a 25-minute job (finishes at 17:55) is within bound — no conflict', () => {
+    // arrivalFloor 1050 + ownDuration 25 + driveHome 0 = 1075 <= 1080.
+    expect(travelGapConflicts(candidate(25, 90), [before])).toEqual([]);
+  });
+
+  test('exactly at the boundary (finishes at 18:00) is fine; one minute over is refused', () => {
+    // 1050 + 30 = 1080 (== dayEnd, not a violation); 1050 + 31 = 1081.
+    expect(travelGapConflicts(candidate(30, 90), [before])).toEqual([]);
+    expect(travelGapConflicts(candidate(31, 90), [before]).map((c) => c.reason)).toEqual(['day_end']);
+  });
+
+  test('grace 0 is byte-identical: the day-end check never even runs, whatever the duration', () => {
+    // Same 45-minute job that was refused above at grace 90 — at grace 0,
+    // candidateForAfterSide is `candidate` unchanged (no projected
+    // lateness to check with), and this module has never had a day-end
+    // check of its own before this lane, so it stays silent here; the
+    // EXISTING stored-window day-end checks elsewhere (slot-reservation.js
+    // et al.) are the only authority at grace 0, unchanged by this fix.
+    // (The ordinary pairwise check against `before` still fires at grace 0
+    // — unrelated to this fix, and unaffected by it — since a 0-minute
+    // allowance can't absorb `before`'s own 30-minute required gap; only
+    // the absence of a 'day_end' reason is this test's own claim.)
+    expect(travelGapConflicts(candidate(45, 0), [before]).map((c) => c.reason)).not.toContain('day_end');
+  });
+
+  test('a real stop AFTER the candidate exempts it entirely — it is not the day\'s last stop', () => {
+    const after = { id: 'after', startMin: 1200, endMin: 1260, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null }; // 20:00-21:00, well past "close" so it would never itself be offered, but its mere presence proves the day-end branch is skipped once there IS a later stop
+    expect(travelGapConflicts(candidate(45, 90), [before, after]).map((c) => c.reason)).not.toContain('day_end');
+  });
+});

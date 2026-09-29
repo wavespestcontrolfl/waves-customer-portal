@@ -61,8 +61,11 @@ function jsonResponse(body, status = 200) {
 const futureDay = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 const availabilityPayload = () => ({
   capture_token: 'capture-1',
-  days: [{ date: futureDay(3), fullDate: 'Thursday, July 30', nearby: true, slots: [{ start_time: '09:00', start_label: '9:00 AM' }] }],
-  slots: [{ start_time: '09:00' }],
+  // arrival_window (Codex round 3 on #5310): the server's own canonical
+  // 2-hour range string — the SAME field routes/booking.js's
+  // arrivalWindowLabel sends on every real slot now.
+  days: [{ date: futureDay(3), fullDate: 'Thursday, July 30', nearby: true, slots: [{ start_time: '09:00', start_label: '9:00 AM', arrival_window: '9:00 AM - 11:00 AM' }] }],
+  slots: [{ start_time: '09:00', arrival_window: '9:00 AM - 11:00 AM' }],
 });
 
 function stubFetch({ config, confirmMode, browseDay } = {}) {
@@ -215,9 +218,59 @@ describe('PublicBookingPage arrival-window copy (A10, owner ruling 2026-09-28)',
     fireEvent.click(screen.getByRole('button', { name: /^Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
 
-    // Step 3's "Your selected time" card shows the FULL 2-hour arrival
-    // range, not just the bare start.
-    expect(await screen.findByText(/9:00 AM\s*–\s*11:00 AM/)).toBeInTheDocument();
+    // Step 3's "Your selected time" card shows the server's own arrival_window
+    // range VERBATIM (Codex round 3 on #5310) — not a client-recomputed one.
+    expect(await screen.findByText(/9:00 AM - 11:00 AM/)).toBeInTheDocument();
+  });
+
+  it('renders whatever arrival_window range the server sends, verbatim — proving the client no longer derives its own end time', async () => {
+    // A range that would NEVER come out of the client's own retired
+    // ARRIVAL_WINDOW_MINUTES=120 math (a slot starting at 09:00 would
+    // compute 11:00 AM, never 11:47 AM) — if this renders, the client is
+    // genuinely displaying the payload field, not recomputing anything.
+    const baseFetch = stubFetch();
+    const originalImpl = baseFetch.getMockImplementation();
+    baseFetch.mockImplementation(async (url, ...rest) => {
+      const res = await originalImpl(url, ...rest);
+      if (String(url).includes('/booking/availability')) {
+        const body = await res.json();
+        body.days[0].slots[0].arrival_window = '9:00 AM - 11:47 AM';
+        return jsonResponse(body);
+      }
+      return res;
+    });
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+    fireEvent.click(screen.getByRole('button', { name: /^Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
+
+    expect(await screen.findByText(/9:00 AM - 11:47 AM/)).toBeInTheDocument();
+    expect(screen.queryByText(/9:00 AM - 11:00 AM/)).not.toBeInTheDocument();
+  });
+
+  it('falls back to the bare start label (never a fabricated end time) when arrival_window is missing from an unexpected slot source', async () => {
+    const baseFetch = stubFetch();
+    const originalImpl = baseFetch.getMockImplementation();
+    baseFetch.mockImplementation(async (url, ...rest) => {
+      const res = await originalImpl(url, ...rest);
+      if (String(url).includes('/booking/availability')) {
+        const body = await res.json();
+        delete body.days[0].slots[0].arrival_window;
+        return jsonResponse(body);
+      }
+      return res;
+    });
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+    fireEvent.click(screen.getByRole('button', { name: /^Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
+
+    // The bare start renders, with no fabricated range after it.
+    expect(await screen.findByText((_, el) => el?.textContent === 'Thursday, July 30 · 9:00 AM')).toBeInTheDocument();
   });
 });
 
