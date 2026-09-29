@@ -33,15 +33,6 @@ const { executeToolCall } = require('./tools-expanded');
 const { AGENT_CONFIG } = require('./managed-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
 const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
-const { recordGap } = require('../agent-gap-reports');
-
-// One texting-AI gap report for an escalation its caller marked as the
-// assistant not knowing how to help. Fire-and-forget; never throws.
-function recordEscalationGap(customerMessage, reason) {
-  const summary = (reason && String(reason).trim()) || customerMessage;
-  const attempted = customerMessage && customerMessage !== reason ? `Customer text: ${customerMessage}` : 'Escalated to staff';
-  recordGap({ source: 'texting-ai', summary, attempted }).catch(() => {});
-}
 
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MANAGED_AGENT_ID = process.env.MANAGED_AGENT_ID;
@@ -297,10 +288,7 @@ class ManagedAssistant {
           const escResult = await this.escalate(
             conversation,
             toolInput.reason || 'AI-initiated escalation',
-            toolInput.reason || 'AI-initiated escalation',
-            // Only the agent's own "no category fits" escalation is a gap;
-            // every other category is a staff workflow by design.
-            { gap: toolInput.category === 'unsupported_or_uncertain' },
+            toolInput.reason || 'AI-initiated escalation'
           );
           // Send the tool result back so the agent knows it escalated
           await apiCall('POST', `/sessions/${sessionId}/events`, {
@@ -425,7 +413,7 @@ class ManagedAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false } = {}) {
+  async escalate(conversation, customerMessage, reason) {
     const customer = conversation.customer_id
       ? await db('customers').where('id', conversation.customer_id).first()
       : null;
@@ -446,13 +434,6 @@ class ManagedAssistant {
       priority,
       status: 'pending',
     }).returning('*');
-
-    // Gap reports (server/services/agent-gap-reports.js): the caller says
-    // whether this escalation is the assistant not knowing how to help
-    // (`gap`), since classifyEscalation's keyword buckets can't tell a
-    // missing feature from a staff workflow. Fire-and-forget — a failed write
-    // must never affect the escalation reply.
-    if (gap) recordEscalationGap(customerMessage, reason);
 
     // The ai_escalations row above is the source of truth. Once it exists,
     // the customer must get the escalation reply — session bookkeeping and

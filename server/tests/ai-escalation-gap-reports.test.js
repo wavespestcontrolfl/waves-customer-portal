@@ -1,11 +1,9 @@
 /**
  * Texting AI → gap reports (server/services/agent-gap-reports.js).
  *
- * escalate() in both ai-assistant/assistant.js and
- * ai-assistant/managed-assistant.js records a gap ONLY when its caller
- * passes { gap: true } — today only the managed agent's
- * unsupported_or_uncertain category (the older assistant has no category to
- * tell a missing feature from a staff workflow, so it never passes it). classifyEscalation's keyword
+ * escalate() in ai-assistant/assistant.js (the live texting and
+ * portal-chat assistant) records a gap ONLY when its caller passes
+ * { gap: true } — the escalate tool's optional not_supported flag. classifyEscalation's keyword
  * buckets play no part. The call is fire-and-forget: a rejected write must
  * never affect the escalation reply.
  */
@@ -20,7 +18,7 @@ jest.mock('../services/llm-dispatch-metrics', () => ({ recordSessionUsage: jest.
 
 // Both escalate() implementations run the same three queries (insert
 // ai_escalations → returning, update agent_sessions, insert agent_messages)
-// — one chainable stand-in covers assistant.js and managed-assistant.js alike.
+// — one chainable stand-in covers them.
 jest.mock('../models/db', () => jest.fn((table) => {
   const chain = {
     where: jest.fn(() => chain),
@@ -36,7 +34,6 @@ const conversation = { id: 'conv-1', customer_id: null, channel: 'portal_chat' }
 
 describe.each([
   ['assistant.js', () => require('../services/ai-assistant/assistant')],
-  ['managed-assistant.js', () => require('../services/ai-assistant/managed-assistant')],
 ])('%s escalate()', (_name, load) => {
   const target = load();
 
@@ -63,11 +60,6 @@ describe.each([
   test('a message the keyword classifier would bucket as a staff topic still records when the caller marks it a gap', async () => {
     await target.escalate(conversation, 'change the email on my account', 'Cannot update account email', { gap: true });
     expect(mockRecordGap).toHaveBeenCalledWith(expect.objectContaining({ summary: 'Cannot update account email' }));
-  });
-
-  test('when the reason IS the customer text (managed agent), attempted does not repeat it', async () => {
-    await target.escalate(conversation, 'Needs a pool quote', 'Needs a pool quote', { gap: true });
-    expect(mockRecordGap).toHaveBeenCalledWith({ source: 'texting-ai', summary: 'Needs a pool quote', attempted: 'Escalated to staff' });
   });
 
   test.each([

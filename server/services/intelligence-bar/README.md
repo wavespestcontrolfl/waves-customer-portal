@@ -81,10 +81,9 @@ anywhere in this list):
   ignored whenever there is anything to record already.
 - `texting-ai` — `recordGap()` called from `escalate()` in
   `services/ai-assistant/assistant.js` (the live texting and portal-chat
-  assistant) and `managed-assistant.js`, only when the caller passes
-  `{ gap: true }`: the escalate tool's optional `not_supported: true` in
-  `assistant.js`, and the managed agent's `unsupported_or_uncertain`
-  category. The keyword classifier plays no part.
+  assistant), only when the escalate tool sets its optional
+  `not_supported: true`. The keyword classifier plays no part.
+  (`managed-assistant.js` is not loaded at runtime and records nothing.)
 - `phone-agent` — `recordGap()` called from Sandy's human handoff
   (`voice-agent/relay-transfer.js`, right after a confirmed
   `transfer_to_office`) that Sandy marks `not_supported: true` (an optional
