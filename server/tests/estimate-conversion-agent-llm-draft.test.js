@@ -17,6 +17,7 @@ jest.mock('../services/logger', () => ({
 
 jest.mock('../services/sms-shadow-drafter', () => ({
   generateGroundedDraft: jest.fn(),
+  buildLiveEtaSnapshot: jest.fn(() => null),
   PROMPT_VERSION: 'house_voice_v8',
   // Real behavior mirrored for the gate-on tests below (Codex r3): true
   // when the reply carries an amount not present in context.billing's

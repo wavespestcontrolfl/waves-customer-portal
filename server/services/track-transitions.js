@@ -187,6 +187,31 @@ function operationalStatusForTrackState(trackState) {
   }[trackState] || trackState || null;
 }
 
+// The customer-facing tracker state — the ONE derivation the public
+// tracking page (track-public.js) keys its live-vehicle field off of, and
+// the canonical answer to "is this visit customer-facing en_route right
+// now" for anything else that renders live-tracking facts (e.g.
+// context-aggregator's LIVE ETA block, sms-eta-freshness's send-time
+// recheck). Never read scheduled_services.status alone for that question:
+// the admin-side status flip and this tracker flip are two separate writes
+// (server/routes/tech-track.js commits status='en_route' via
+// transitionJobStatus BEFORE calling markEnRoute below, and does not roll
+// the status back if that second write fails), so a visit can sit with
+// status='en_route' while track_state is still 'scheduled' — the tracking
+// page would show no live vehicle for it. Terminal OPERATIONAL statuses win
+// over track_state (several cancellation paths change status without
+// cancelling tracking, and completion tracking is best-effort after
+// commit): a stale track_state='en_route' must never keep reading as a live
+// vehicle once the visit has gone terminal. Everything else maps 1:1 from
+// the canonical track_state machine.
+function customerTrackState(row) {
+  if (!row) return null;
+  if (row.status === 'no_show') return 'no_show';
+  if (row.status === 'cancelled' || row.status === 'skipped') return 'cancelled';
+  if (row.status === 'completed') return 'complete';
+  return row.track_state || null;
+}
+
 function emitCustomerTrackRefresh(svc, trackState, updatedAt = new Date()) {
   if (!svc?.customer_id) return;
   const io = getIo();
@@ -1563,6 +1588,7 @@ module.exports = {
   portalOrigin,
   isFutureScheduledDate,
   isStaleLiveAttempt,
+  customerTrackState,
   _test: {
     operationalStatusForTrackState,
     classifyArrivalSend,

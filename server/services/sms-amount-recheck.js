@@ -55,7 +55,10 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
-    const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
+    // skipLiveEta (independent review finding #4, PR #5334): this recheck
+    // only ever reads ctx.billing — resolving LIVE ETA here would repeat a
+    // GPS + Distance Matrix lookup for a fact nothing below uses.
+    const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow, { skipLiveEta: true })) || {};
     // With real answers on, the drafter's clause-aware guard is the whole
     // rule (Codex #5194 r1 P1; r5: its checks are a superset of the pooled
     // one below): each amount binds to the meaning of its own clause, and

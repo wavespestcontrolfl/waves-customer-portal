@@ -31,8 +31,13 @@ jest.mock('../services/customer-tracking-eta', () => {
 
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
-const { resolveLiveEtaFact } = require('../services/context-aggregator');
-const { buildFactsBlock, buildSystemPrompt } = require('../services/sms-shadow-drafter');
+const {
+  resolveLiveEtaFact, liveEtaDestination, liveEtaDedupeKey, liveEtaEligible,
+} = require('../services/context-aggregator');
+const {
+  buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
+  replyClaimsEtaMinutes, buildLiveEtaSnapshot,
+} = require('../services/sms-shadow-drafter');
 const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
@@ -251,5 +256,126 @@ describe('adversarial verifier — ETA claims checked against LIVE ETA', () => {
     expect(prompt).toMatch(/minutes away/i);
     expect(prompt).toContain('LIVE ETA');
     expect(prompt).toMatch(/EXACT number of minutes/);
+  });
+});
+
+describe('liveEtaDestination / liveEtaDedupeKey — grouped-stop dedupe (independent review finding #1, PR #5334)', () => {
+  test('two siblings at the same physical stop (same tech, same destination) share one key', () => {
+    const customer = baseCustomer();
+    const a = baseRow({ id: 'svc-a', technician_id: 'tech-1' });
+    const b = baseRow({ id: 'svc-b', technician_id: 'tech-1' });
+    expect(liveEtaDedupeKey(a, customer)).toBe(liveEtaDedupeKey(b, customer));
+    expect(liveEtaDedupeKey(a, customer)).not.toBeNull();
+  });
+
+  test('a different technician never merges with another tech\'s stop', () => {
+    const customer = baseCustomer();
+    const a = baseRow({ id: 'svc-a', technician_id: 'tech-1' });
+    const b = baseRow({ id: 'svc-b', technician_id: 'tech-2' });
+    expect(liveEtaDedupeKey(a, customer)).not.toBe(liveEtaDedupeKey(b, customer));
+  });
+
+  test('a different resolved destination never merges, even for the same technician', () => {
+    const customer = baseCustomer();
+    const a = baseRow({ id: 'svc-a', technician_id: 'tech-1', service_lat: 27.4, service_lng: -82.5 });
+    const b = baseRow({ id: 'svc-b', technician_id: 'tech-1', service_lat: 27.9, service_lng: -82.1 });
+    expect(liveEtaDedupeKey(a, customer)).not.toBe(liveEtaDedupeKey(b, customer));
+  });
+
+  test('no technician, or no resolvable destination: null (never dedupes a row that would fail closed on its own)', () => {
+    const customer = baseCustomer();
+    expect(liveEtaDedupeKey(baseRow({ technician_id: null }), customer)).toBeNull();
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer({ latitude: null, longitude: null }))).toBeNull();
+  });
+});
+
+describe('liveEtaEligible — track_state gate (Codex round-1 finding, PR #5334)', () => {
+  const TODAY = '2026-09-29';
+  test('status en_route + track_state en_route, today: eligible', () => {
+    expect(liveEtaEligible({ status: 'en_route', track_state: 'en_route', scheduled_date: TODAY }, TODAY)).toBe(true);
+  });
+
+  test('status en_route but track_state still "scheduled" (the admin flip landed, the tracker flip did not — server/routes/tech-track.js): NOT eligible', () => {
+    expect(liveEtaEligible({ status: 'en_route', track_state: 'scheduled', scheduled_date: TODAY }, TODAY)).toBe(false);
+  });
+
+  test('a no_show/cancelled/completed status overrides a stale track_state="en_route": NOT eligible', () => {
+    expect(liveEtaEligible({ status: 'cancelled', track_state: 'en_route', scheduled_date: TODAY }, TODAY)).toBe(false);
+    expect(liveEtaEligible({ status: 'completed', track_state: 'en_route', scheduled_date: TODAY }, TODAY)).toBe(false);
+  });
+
+  test('not today: NOT eligible even with both states en_route', () => {
+    expect(liveEtaEligible({ status: 'en_route', track_state: 'en_route', scheduled_date: '2026-09-28' }, TODAY)).toBe(false);
+  });
+});
+
+describe('findEtaMinutesClaims / replyClaimsEtaMinutes / validateLiveEtaMinutes — deterministic minutes guard (independent review finding #3, PR #5334)', () => {
+  afterEach(() => { delete process.env[GATE]; });
+
+  test('arrival-scoped phrasing is detected: "X minutes away", "ETA is about X minutes", "arriving in X minutes"', () => {
+    expect(findEtaMinutesClaims('The tech is 12 minutes away.').map((c) => c.minutes)).toEqual([12]);
+    expect(findEtaMinutesClaims('ETA is about 9 minutes.').map((c) => c.minutes)).toEqual([9]);
+    expect(findEtaMinutesClaims('He\'s arriving in 15 minutes.').map((c) => c.minutes)).toEqual([15]);
+    expect(replyClaimsEtaMinutes('The tech is 12 minutes away.')).toBe(true);
+  });
+
+  test('unrelated durations never false-positive: "takes about 30 minutes to dry", "allow 30 minutes before letting pets out"', () => {
+    expect(findEtaMinutesClaims('The treatment takes about 30 minutes to dry.')).toHaveLength(0);
+    expect(findEtaMinutesClaims('Please allow 30 minutes before letting pets out.')).toHaveLength(0);
+    expect(replyClaimsEtaMinutes('The treatment takes about 30 minutes to dry.')).toBe(false);
+    expect(replyClaimsEtaMinutes('Please allow 30 minutes before letting pets out.')).toBe(false);
+  });
+
+  test('gate off: never runs (byte-identical to v11 — no LIVE ETA fact can exist anyway)', () => {
+    delete process.env[GATE];
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 99 minutes away.', factsBlock: 'LIVE ETA: about 12 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate on: an ETA claim matching the facts block passes', () => {
+    process.env[GATE] = 'true';
+    const result = validateLiveEtaMinutes({ reply: 'The tech is 12 minutes away.', factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate on: a reply with no minutes claim passes regardless of the facts', () => {
+    process.env[GATE] = 'true';
+    expect(validateLiveEtaMinutes({ reply: 'The tech is on the way!', factsBlock: 'LIVE ETA: about 12 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate on: an ETA claim with NO LIVE ETA fact in the facts block fails', () => {
+    process.env[GATE] = 'true';
+    const result = validateLiveEtaMinutes({ reply: 'The tech is 12 minutes away.', factsBlock: 'LIVE STATUS: tech marked en route to this visit' });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/no LIVE ETA/);
+  });
+
+  test('gate on: an ETA claim that does NOT match the facts number fails', () => {
+    process.env[GATE] = 'true';
+    const result = validateLiveEtaMinutes({ reply: 'The tech is 20 minutes away.', factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/20 minute/);
+    expect(result.violations[0]).toMatch(/12 minutes/);
+  });
+
+  test('an unrelated duration alongside a correct ETA claim never false-positives the whole reply', () => {
+    process.env[GATE] = 'true';
+    const result = validateLiveEtaMinutes({
+      reply: 'The tech is 12 minutes away. The treatment takes about 30 minutes to dry once he\'s done.',
+      factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)',
+    });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+});
+
+describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (independent review finding #2, PR #5334)', () => {
+  test('no scheduled_service ever backed a LIVE ETA fact: null', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaScheduledServiceIds: [] })).toBeNull();
+    expect(buildLiveEtaSnapshot({})).toBeNull();
+    expect(buildLiveEtaSnapshot(null)).toBeNull();
+  });
+
+  test('carries the exact ids context-aggregator collected, filtering out nullish entries', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaScheduledServiceIds: ['svc-1', 'svc-2'] }))
+      .toEqual({ scheduledServiceIds: ['svc-1', 'svc-2'] });
   });
 });

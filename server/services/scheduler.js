@@ -4341,14 +4341,50 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
-            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+            // LIVE ETA revalidation (independent review + Codex round-1
+            // finding, PR #5334): a minutes-away/ETA claim is a draft-time
+            // GPS snapshot — this scheduled reply can fire long after the
+            // visit stopped being en_route, or after the 15-minute freshness
+            // window on its own facts. Same shared check the immediate
+            // /sms send and the auto-send executor run (sms-eta-freshness),
+            // same fail-closed block+retire path, no new mechanism.
+            let etaStale = false;
+            let etaReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              try {
+                const { etaClaimBlockReason } = require('./sms-eta-freshness');
+                const etaDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot');
+                let etaSnapshot = etaDecision?.input_snapshot;
+                if (typeof etaSnapshot === 'string') {
+                  try { etaSnapshot = JSON.parse(etaSnapshot); } catch { etaSnapshot = null; }
+                }
+                const reason = await etaClaimBlockReason({
+                  liveEtaSnapshot: etaSnapshot?.live_eta_snapshot || null,
+                  factsGeneratedAt: etaSnapshot?.facts_generated_at || null,
+                  outgoingBody: msg.message_body,
+                });
+                if (reason) {
+                  etaStale = true;
+                  etaReason = reason;
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] LIVE ETA revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                etaStale = true;
+                etaReason = 'eta_recheck_failed';
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale || etaStale) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
                 : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
-                    : 'stale_sla_agent_decision';
+                    : slaStale
+                      ? 'stale_sla_agent_decision'
+                      : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4378,7 +4414,9 @@ function initScheduledJobs() {
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
-                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
+                        : slaStale
+                          ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
+                          : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });

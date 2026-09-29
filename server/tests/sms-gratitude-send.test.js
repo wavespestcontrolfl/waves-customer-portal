@@ -165,6 +165,10 @@ jest.mock('../services/sms-suggest-mode', () => ({
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v11',
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
+  // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend
+  // call, gratitude sends included — see sms-auto-send-open-times.test.js's
+  // identical mock comment. Fixed gratitude copy never claims an ETA.
+  replyClaimsEtaMinutes: jest.fn(() => false),
 }));
 jest.mock('../services/sms-graduation', () => ({
   evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true, blockers: [] })),

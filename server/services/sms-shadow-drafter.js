@@ -97,7 +97,14 @@ const PROMPT_VERSION = 'house_voice_v11';
 // cancellation). generateGroundedDraft stamps this version instead of
 // PROMPT_VERSION on a draft that actually used the rewritten prompt, so
 // judge/ledger rows tell the two cohorts apart.
-const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers';
+// Suffix bumped to "4" (Codex round-1 finding, PR #5334): the LIVE ETA
+// prompt rule + deterministic minutes guard change what a gate-on draft may
+// say, so it needs its own cohort identity — pooling its graduation/exam
+// evidence with the pre-LIVE-ETA v12 behavior would credit this change with
+// evidence that never examined it. Sibling PRs bump the same constant to
+// ...2 / ...3 for their own gate-on changes; a merge conflict on this line
+// resolves to the highest suffix.
+const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers4';
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -446,6 +453,79 @@ function validateReserviceOffer({ reply, factsBlock }) {
   const wrong = named.filter((lane) => !lanes.includes(lane));
   if (wrong.length) {
     return { ok: false, violations: [`the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
+  }
+  return { ok: true, violations: [] };
+}
+
+// LIVE ETA minutes-away claim (independent review finding, PR #5334):
+// scoped narrowly to arrival/away/ETA phrasing so an unrelated duration
+// ("the treatment takes about 30 minutes to dry", "allow 30 minutes before
+// letting pets out") never false-positives. "away"/"out" must sit RIGHT
+// after the number+unit (no words in between — "30 minutes before letting
+// pets out" has four words between "minutes" and "out" and never matches);
+// "eta"/"arriv*"/"on the way"/"en route"/"get there"/"show up"/"be there"
+// may instead sit shortly BEFORE it ("ETA is about 12 minutes", "he's
+// arriving in 12 minutes").
+const ETA_MINUTES_TOKEN_RE = /\b(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
+const ETA_MINUTES_AFTER_RE = /^\s*(?:away|out)\b/i;
+const ETA_MINUTES_BEFORE_RE = /\b(?:eta|arriv\w*|on (?:his|her|their) way|en route|get(?:ting)? there|show(?:ing)? up|be there)\b[^.?!\n]{0,15}$/i;
+function findEtaMinutesClaims(text) {
+  const claims = [];
+  const str = String(text || '');
+  const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
+  let m;
+  while ((m = re.exec(str))) {
+    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 8);
+    const before = str.slice(Math.max(0, m.index - 25), m.index);
+    if (ETA_MINUTES_AFTER_RE.test(after) || ETA_MINUTES_BEFORE_RE.test(before)) {
+      claims.push({ minutes: parseInt(m[1], 10), index: m.index });
+    }
+  }
+  return claims;
+}
+// The send-time freshness recheck (sms-eta-freshness.js) needs only "does
+// this outgoing body make an ETA-style minutes claim at all" — never the
+// factsBlock-derived correctness check below, which isn't available at
+// send time.
+function replyClaimsEtaMinutes(reply) {
+  return findEtaMinutesClaims(reply).length > 0;
+}
+
+// The send-time freshness snapshot for a drafted reply (independent review
+// finding, PR #5334): context.liveEtaScheduledServiceIds is the plain list
+// context-aggregator built (never rendered into any prompt — see the
+// comment there), persisted alongside facts_generated_at exactly like
+// open_times_snapshot so sms-eta-freshness.js can recheck — with no
+// GPS/Distance Matrix call of its own — that the SAME visit is still
+// customer-facing en_route before an outgoing minutes claim may go out.
+// null when this draft's facts carried no LIVE ETA at all; a missing
+// snapshot plus a minutes claim in the outgoing body fails closed there.
+function buildLiveEtaSnapshot(context) {
+  const ids = Array.isArray(context?.liveEtaScheduledServiceIds)
+    ? context.liveEtaScheduledServiceIds.filter((id) => id != null)
+    : [];
+  return ids.length ? { scheduledServiceIds: ids } : null;
+}
+
+// Deterministic backstop (independent review finding, PR #5334): today only
+// the LLM verifier checks that a stated ETA number matches LIVE ETA — this
+// runs alongside the other deterministic guards (validateReserviceOffer,
+// validateComplianceCopy) in the SAME revise/verify loop, and in single-pass
+// mode where no verifier would catch it at all. Any ETA-style minutes claim
+// must equal the LIVE ETA minutes the facts block actually carries, and must
+// not appear at all when the facts carry no LIVE ETA line.
+function validateLiveEtaMinutes({ reply, factsBlock }) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  const claims = findEtaMinutesClaims(reply);
+  if (!claims.length) return { ok: true, violations: [] };
+  const factsMatch = String(factsBlock || '').match(/LIVE ETA: about (\d+) minutes/);
+  const factsMinutes = factsMatch ? parseInt(factsMatch[1], 10) : null;
+  if (factsMinutes == null) {
+    return { ok: false, violations: ['the reply states a minutes-away ETA but the facts carry no LIVE ETA line — never compute, round, or invent one'] };
+  }
+  const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => m !== factsMinutes))];
+  if (wrong.length) {
+    return { ok: false, violations: [`the reply states ${wrong.join('/')} minute(s) away but LIVE ETA is ${factsMinutes} minutes — use that EXACT number`] };
   }
   return { ok: true, violations: [] };
 }
@@ -2046,7 +2126,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
-    for (const check of [reserviceCheck, complianceCheck]) {
+    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock });
+    for (const check of [reserviceCheck, complianceCheck, liveEtaCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
         timesCheck.violations.push(...check.violations);
@@ -2212,6 +2293,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const context = customer
       ? await ContextAggregator.getContextForCustomer(customer)
       : await ContextAggregator.getFullCustomerContext(fromPhone);
+    // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
+    const liveEtaSnapshot = buildLiveEtaSnapshot(context);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -2399,6 +2482,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // input_snapshot so slaDraftedAt can anchor the deadline to it
           // instead of the row's own (later) created_at.
           factsGeneratedAt,
+          // Independent review finding (PR #5334): the visit(s) this
+          // draft's LIVE ETA fact was drawn from — dispatchClaimedSend
+          // rechecks them are still en_route immediately before sending.
+          liveEtaSnapshot,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -2437,6 +2524,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               intendedActions: parsed.intended_actions,
               // Codex #5194 P2 — see the maybeAutoSend call's comment above.
               factsGeneratedAt,
+              // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
+              liveEtaSnapshot,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -2488,6 +2577,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             intendedActions: parsed.intended_actions,
             // Codex #5194 P2 — see the maybeAutoSend call's comment above.
             factsGeneratedAt,
+            // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
+            liveEtaSnapshot,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
@@ -2566,6 +2657,10 @@ module.exports = {
   billingAmountCents,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
+  validateLiveEtaMinutes,
+  findEtaMinutesClaims,
+  replyClaimsEtaMinutes,
+  buildLiveEtaSnapshot,
   replyBindsDeclaredDays,
   liveServiceType,
   serviceIdentityFor,

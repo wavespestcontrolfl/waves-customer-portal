@@ -67,6 +67,23 @@ async function amountsBlock({ decision, outgoingBody }) {
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 
+// LIVE ETA (independent review + Codex round-1 finding, PR #5334): a
+// minutes-away/ETA claim is a draft-time GPS snapshot that can sit in the
+// composer for hours — revalidate it against the SAME two conditions the
+// scheduler's queued-send path and the auto-send executor check (see
+// sms-eta-freshness.js): the visit is still customer-facing en_route AND
+// the draft's facts are still fresh. Fails closed on any missing evidence.
+async function etaBlock({ decision, outgoingBody }) {
+  const snapshot = parseInputSnapshot(decision.input_snapshot);
+  const { etaClaimBlockReason } = require('./sms-eta-freshness');
+  const reason = await etaClaimBlockReason({
+    liveEtaSnapshot: snapshot?.live_eta_snapshot || null,
+    factsGeneratedAt: snapshot?.facts_generated_at || null,
+    outgoingBody,
+  });
+  return reason ? `live ETA unsendable (${reason})` : null;
+}
+
 /**
  * Returns null when the body may go out, else a short reason string the
  * caller logs before superseding the decision.
@@ -74,7 +91,8 @@ async function amountsBlock({ decision, outgoingBody }) {
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
     || followupBlock({ decision, outgoingBody })
-    || (await amountsBlock({ decision, outgoingBody }));
+    || (await amountsBlock({ decision, outgoingBody }))
+    || (await etaBlock({ decision, outgoingBody }));
 }
 
 module.exports = { agentDecisionSendBlockReason, parseInputSnapshot };

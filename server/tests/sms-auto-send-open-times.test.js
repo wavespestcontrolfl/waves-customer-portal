@@ -27,6 +27,11 @@ jest.mock('../services/sms-suggest-mode', () => ({
 jest.mock('../services/sms-shadow-drafter', () => ({
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   openTimesStillOffered: jest.fn(async () => ({ ok: true })),
+  // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend
+  // call — false here means "this reply never claims an ETA", so it never
+  // reaches the DB/track-transitions leg. See sms-eta-freshness.test.js for
+  // that check's own coverage.
+  replyClaimsEtaMinutes: jest.fn(() => false),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));

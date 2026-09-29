@@ -47,6 +47,7 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-add
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 const { computeStopsAhead, isServiceDateToday } = require('../services/stops-ahead');
 const { gateEnvValue } = require('../config/feature-gates');
+const { customerTrackState } = require('../services/track-transitions');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -472,10 +473,7 @@ router.get('/:token', async (req, res, next) => {
     // stale track_state='en_route' kept streaming live tech GPS until
     // token expiry for a visit that was already cancelled. Everything
     // non-terminal maps 1:1 from the canonical track_state machine.
-    let customerState = row.track_state;
-    if (row.status === 'no_show') customerState = 'no_show';
-    else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
-    else if (row.status === 'completed') customerState = 'complete';
+    const customerState = customerTrackState(row);
 
     // "N stops before yours" (GATE_STOPS_AWAY): bare counts only — never
     // other customers' info. Scheduled state only (the en-route card's
@@ -623,10 +621,7 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
     }
     // Same terminal-status precedence as the GET: only the scheduled
     // customer state carries a planned count.
-    let customerState = row.track_state;
-    if (row.status === 'no_show') customerState = 'no_show';
-    else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
-    else if (row.status === 'completed') customerState = 'complete';
+    const customerState = customerTrackState(row);
     const stops = customerState === 'scheduled'
       ? await computeStopsAhead(db, row.id)
       : null;

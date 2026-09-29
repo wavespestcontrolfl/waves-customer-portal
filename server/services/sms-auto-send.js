@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, liveEtaSnapshot = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -256,6 +256,9 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
           ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+          // Independent review finding (PR #5334): the same live-ETA
+          // send-time snapshot publishSuggestion persists — see its comment.
+          ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
         }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
@@ -300,7 +303,13 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     });
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot };
+    return {
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot,
+      // Independent review finding (PR #5334): carried in-memory so
+      // dispatchClaimedSend's pre-send LIVE ETA recheck needs no round trip
+      // through the row it just inserted.
+      liveEtaSnapshot, factsGeneratedAt,
+    };
   });
 }
 
@@ -822,6 +831,27 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
           return outcome;
         }
       }
+    }
+    // LIVE ETA send-time recheck (independent review + Codex round-1
+    // finding, PR #5334): the SAME shared check the immediate /sms send and
+    // the scheduler's queued-send path run (sms-eta-freshness) — claim's
+    // liveEtaSnapshot/factsGeneratedAt are the in-memory copies claimAutoSend
+    // just inserted, so this needs no round trip through the row. A reply
+    // that makes a minutes-away/ETA claim with no backing snapshot, a stale
+    // draft, or a visit that is no longer customer-facing en_route fails
+    // closed — same supersede-via-failClaim mechanism every other refusal
+    // here uses, siblings reopened the same way.
+    const { etaClaimBlockReason } = require('./sms-eta-freshness');
+    const etaReason = await etaClaimBlockReason({
+      liveEtaSnapshot: claim.liveEtaSnapshot,
+      factsGeneratedAt: claim.factsGeneratedAt,
+      outgoingBody: reply,
+    });
+    if (etaReason) {
+      logger.warn(`[sms-auto-send] live ETA unsendable (decision ${claim.decisionId}): ${etaReason}`);
+      const outcome = await notSent(etaReason);
+      await reopenParked('Auto-send held: the live ETA it quoted is no longer current — suggestion reopened.');
+      return outcome;
     }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);

@@ -690,6 +690,10 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
+      // Independent review finding (PR #5334): same send-time freshness
+      // snapshot draftShadowReply persists — this lane shares the same
+      // agentDecisionSendBlockReason choke point at send time.
+      liveEtaSnapshot: drafter.buildLiveEtaSnapshot(context),
     };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
@@ -807,6 +811,8 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         ...(llmDraft?.factsGeneratedAt instanceof Date && Number.isFinite(llmDraft.factsGeneratedAt.getTime())
           ? { facts_generated_at: llmDraft.factsGeneratedAt.toISOString() }
           : {}),
+        // Independent review finding (PR #5334) — see generateLlmReviewDraft's comment above.
+        ...(llmDraft?.liveEtaSnapshot ? { live_eta_snapshot: llmDraft.liveEtaSnapshot } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),

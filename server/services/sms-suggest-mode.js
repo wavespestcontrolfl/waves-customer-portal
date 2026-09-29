@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null, liveEtaSnapshot = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -666,6 +666,13 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // callers that predate this field.
             ...(sanitizedIntendedActions !== null ? { intended_actions: sanitizedIntendedActions } : {}),
             ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+            // Independent review finding (PR #5334): the visit(s) this
+            // draft's LIVE ETA fact was drawn from, carried through so the
+            // send-time choke point (verifyAgentDecisionForSend /
+            // agent-decision-send-checks.js) can recheck a minutes-away
+            // claim is still current before the reviewer's Send goes out —
+            // never a probe, just the snapshot, exactly like open_times_snapshot.
+            ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',

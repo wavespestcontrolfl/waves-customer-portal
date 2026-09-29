@@ -16,9 +16,11 @@ jest.mock('../services/sms-followup-sla', () => ({
   followupPromiseBlockReason: jest.fn(() => null),
 }));
 jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
+jest.mock('../services/sms-eta-freshness', () => ({ etaClaimBlockReason: jest.fn(async () => null) }));
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+const { etaClaimBlockReason } = require('../services/sms-eta-freshness');
 const { agentDecisionSendBlockReason, parseInputSnapshot } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
@@ -29,6 +31,7 @@ beforeEach(() => {
   drafter.openTimesStillOffered.mockReset().mockResolvedValue({ ok: true });
   followupPromiseBlockReason.mockReset().mockReturnValue(null);
   outgoingAmountsStale.mockReset().mockResolvedValue({ stale: false });
+  etaClaimBlockReason.mockReset().mockResolvedValue(null);
 });
 
 test('parseInputSnapshot: string, object, malformed, absent', () => {
@@ -97,4 +100,39 @@ test('no snapshot → no availability call; an older-prompt decision skips the a
   await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
   expect(outgoingAmountsStale).not.toHaveBeenCalled();
+});
+
+// LIVE ETA (independent review + Codex round-1 finding, PR #5334): checked
+// last, after open times/follow-up/amounts all pass, and fed the decision's
+// own live_eta_snapshot + facts_generated_at straight from its snapshot.
+describe('LIVE ETA send-time recheck', () => {
+  test('a stale/blocked LIVE ETA refuses the send with its reason', async () => {
+    etaClaimBlockReason.mockResolvedValue('eta_claim_no_longer_en_route');
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'The tech is 12 minutes away.' }))
+      .resolves.toBe('live ETA unsendable (eta_claim_no_longer_en_route)');
+  });
+
+  test('a clean LIVE ETA recheck falls through to null like every other passing check', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'The tech is 12 minutes away.' })).resolves.toBeNull();
+  });
+
+  test('the recheck receives the decision\'s own live_eta_snapshot and facts_generated_at', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({
+        input_snapshot: JSON.stringify({ ...SNAP, live_eta_snapshot: { scheduledServiceIds: ['svc-1'] }, facts_generated_at: '2026-09-29T14:00:00.000Z' }),
+      }),
+      outgoingBody: 'The tech is 12 minutes away.',
+    });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({
+      liveEtaSnapshot: { scheduledServiceIds: ['svc-1'] },
+      factsGeneratedAt: '2026-09-29T14:00:00.000Z',
+      outgoingBody: 'The tech is 12 minutes away.',
+    }));
+  });
+
+  test('an earlier failing check (open times) short-circuits before the ETA recheck ever runs', async () => {
+    drafter.planOpenTimesRecheck.mockReturnValue({ action: 'refuse', reason: 'edited_offer_text' });
+    await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' });
+    expect(etaClaimBlockReason).not.toHaveBeenCalled();
+  });
 });
