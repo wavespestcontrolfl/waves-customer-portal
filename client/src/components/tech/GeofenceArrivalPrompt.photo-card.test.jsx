@@ -5,7 +5,7 @@
 // card, and the visit's date instead of a tap-through (the tech app only
 // opens today's route; Codex #5303 r1 P1).
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, waitFor, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import GeofenceArrivalPrompt from './GeofenceArrivalPrompt';
 
@@ -82,6 +82,16 @@ describe('GeofenceArrivalPrompt — visit-prep photo card', () => {
     const card = await screen.findByTestId('photo-notice');
     expect(card).toHaveTextContent("Visit on Fri, Oct 2. The photos are in that stop's Visit Brief.");
     expect(card.querySelectorAll('button')).toHaveLength(1);
+  });
+
+  it('a card already on screen takes the new date when its visit moves (same tech)', async () => {
+    const moved = { ...PHOTOS, payload: { ...PHOTOS.payload, scheduled_date: '2026-10-09' } };
+    stubFeed((poll) => (poll === 1 ? [PHOTOS] : [moved]));
+    render(<GeofenceArrivalPrompt />);
+    await act(async () => { await Promise.resolve(); });
+    expect(await screen.findByTestId('photo-notice')).toHaveTextContent('Visit on Fri, Oct 2.');
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    await waitFor(() => expect(screen.getByTestId('photo-notice')).toHaveTextContent('Visit on Fri, Oct 9.'));
   });
 
   it('an older card with no date still renders the copy and "Got it"', async () => {

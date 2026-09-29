@@ -142,11 +142,23 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       // burst) leaves this screen too — and is forgotten, so it can come
       // back if the feed lists it again. Timed cards stay client-owned.
       const listed = new Set(notifications.map((n) => n.id));
+      // A photo card's date is re-read from the live visit on every poll
+      // (visit-prep-tech-alert.js refreshPhotoCardDates), so a card already
+      // on screen takes the new payload when the visit moves (Codex #5303 r6).
+      const photoPayloads = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type)).map((n) => [n.id, n.payload]));
       setActive((prev) => {
         const gone = prev.filter((n) => KEPT_TYPES.has(n.type) && !listed.has(n.id));
         gone.forEach((n) => seenIds.current.delete(n.id));
-        if (gone.length === 0 && fresh.length === 0) return prev;
-        return [...prev.filter((n) => !gone.includes(n)), ...fresh];
+        let refreshed = false;
+        const kept = prev.filter((n) => !gone.includes(n)).map((n) => {
+          if (!photoPayloads.has(n.id)) return n;
+          const payload = photoPayloads.get(n.id);
+          if (JSON.stringify(payload) === JSON.stringify(n.payload)) return n;
+          refreshed = true;
+          return { ...n, payload };
+        });
+        if (gone.length === 0 && fresh.length === 0 && !refreshed) return prev;
+        return [...kept, ...fresh];
       });
     } catch {
       // network hiccups are fine; next poll will retry
