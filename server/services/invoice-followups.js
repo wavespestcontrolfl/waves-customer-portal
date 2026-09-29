@@ -326,6 +326,31 @@ function followupSteps() {
   return ladderThrough90Live() ? config.stepsThrough90 : config.steps;
 }
 
+// The at-risk pipeline_stage stamp for 60/90-day debt once the legacy
+// balance-reminder late check retires (GATE_BALANCE_REMINDER_LEGACY_OFF):
+// called from this ladder's Day 60/90 steps and late-payment-checker.js's
+// tiers (the legacy method keeps its own inline stamp while it runs). The
+// caller has already confirmed the tier and a delivery. Only an active
+// customer in a live customer stage (or NULL, a legacy row) moves:
+// fireTouch excludes only deleted customers, so a churned/past/dormant
+// customer, a lead or a lost record must be protected here.
+async function markAtRiskForLongOverdue(customerId, database = db) {
+  const { CUSTOMER_STAGES } = require('./customer-stages');
+  await database('customers').where({ id: customerId })
+    .where('active', true)
+    // Only a live customer stage (or NULL, a legacy row) moves to at_risk:
+    // a lead or lost record must not become a customer here, bypassing the
+    // lifecycle stamps a real stage change applies (Codex #5294 r1 P1), and
+    // a churned/past/dormant customer keeps its stage.
+    .where(function () {
+      this.whereNull('pipeline_stage').orWhereIn('pipeline_stage', CUSTOMER_STAGES);
+    })
+    .update({
+      pipeline_stage: 'at_risk',
+      pipeline_stage_changed_at: new Date(),
+    });
+}
+
 function sequenceAnchor(row) {
   return row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
 }
@@ -1937,6 +1962,39 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
 
+  // Day 60/90 (Day 90 ladder, GATE_DUNNING_LADDER_90) inherits the legacy
+  // balance-reminder's at-risk stamp for these same debt-age tiers (Codex
+  // P2, dunning unification): retiring the legacy cron under
+  // GATE_BALANCE_REMINDER_LEGACY_OFF must not drop it. Stamped here — ABOVE
+  // the freshDelivery early return below — because reaching this point
+  // already means a channel confirmed delivery, fresh OR deduped (the
+  // no-channel-delivered branch above returns before here). A dun replay
+  // that only re-confirms an already-delivered leg (freshDelivery === false)
+  // still owes this stamp (Codex P2, round 2): the legacy implicit-channel
+  // branch stamped unconditionally at template selection, so a deduped
+  // Day 60/90 replay must not lose the transition the legacy code never did.
+  // Guarded (Codex P1): the sequence has already advanced above and the
+  // customer already has the message — a transient failure on this
+  // best-effort lifecycle stamp must never throw out of fireTouch and cost
+  // the step advance / interaction logging below, or strand the sequence on
+  // this step for as long as the stamp keeps failing. Same reasoning
+  // late-payment-checker.js's own callers use.
+  // Only once the legacy latePaymentCheck is actually retired (its gate on
+  // AND the ladder live, the same pair it honours): until then that cron
+  // still owns this stamp, and an ungated stamp here would change live
+  // lifecycle stages the moment this merges.
+  // Never for a bank-verification nudge (mdPending): that customer is
+  // completing a payment, and the legacy path treated a pending
+  // microdeposit as a dunning stop (Codex #5294 r2 P1).
+  if (ladderThrough90Live() && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true' && !mdPending
+    && (step.id === 'd60_reminder' || step.id === 'd90_final_notice')) {
+    try {
+      await markAtRiskForLongOverdue(row.customer_id);
+    } catch (stampErr) {
+      logger.warn(`[invoice-followups] at-risk stamp failed for customer ${row.customer_id} (sequence ${row.id}): ${stampErr.message}`);
+    }
+  }
+
   // An already delivered leg advances its step without a new outbound touch.
   if (!freshDelivery) return;
 
@@ -2664,6 +2722,10 @@ module.exports = {
   skipStaleTouches,
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,
+  ladderThrough90Live,
+  markAtRiskForLongOverdue,
+  latePaymentCheckerRetiredLive,
+  adoptOrphanInvoicesLive,
   // Pure predicates, exported for tests only.
   _test: { canSystemResume, isSystemStopStamp },
 };
