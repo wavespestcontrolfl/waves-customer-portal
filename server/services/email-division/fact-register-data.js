@@ -15,9 +15,12 @@
  * Born from the September 2026 Pest Insider draft asserting a "second
  * subterranean termite swarm after storms", which no University of Florida
  * source supports. The rule this register enforces: a statement in customer
- * email quotes a primary source (a UF/IFAS publication, a product label, a
- * manufacturer, a county or district notice, CDC), or it is Waves' own
- * measured data, or it is not said.
+ * email quotes a source cited here, or it is Waves' own measured data, or it
+ * is not said. Any source may be cited (owner ruling 2026-09-29): extension
+ * publications from any university, research papers, product labels and
+ * manufacturers, government notices, industry, retailer and news pages,
+ * forums and Reddit. What every fact keeps is its citation: the URL and the
+ * quoted words, so anyone can see who said it.
  *
  * Per fact:
  * - `quote`   — text taken verbatim from the page(s) at `sourceUrls`, in
@@ -29,9 +32,6 @@
  *               (a negative fact), built from quotes above.
  * - `expiresOn` — ISO date after which the fact is retired (a notice with
  *               an end date). Optional.
- *
- * No retailer page is a source: retailer copy carries efficacy timelines the
- * labels do not.
  */
 
 const SOURCE = 'email-division-fact-register';

@@ -2,8 +2,9 @@
 // anything.
 //
 // Content rule (binding): a customer-facing statement about a product
-// quotes that product's own label or manufacturer, or is our own recorded
-// data, or is not said. Three structural consequences:
+// quotes a fact-register source about that product (any source may be
+// cited — see fact-register-data.js), or is our own recorded data, or is
+// not said. Three structural consequences:
 // 1. A family's `phrase` is a neutral class name derived from the recorded
 //    chemistry ("an insecticide", "a fungicide") — never a target pest, a
 //    mode of action, a nutrient, or a timeline. The family says what the
