@@ -1,20 +1,20 @@
 // Customer activity timeline, no database: merge order and pagination, the
-// engagement rule (an email open is never engagement), the row-to-event
-// mappers, absent-relation guards and per-source failure isolation. The SQL
-// itself is proven on a real Postgres in customer-activity-timeline-postgres.test.js.
+// engagement rule (only first-party, already-filtered evidence is engaged), the
+// row-to-event mappers, masked recipients and per-source failure isolation. The
+// SQL itself is proven on a real Postgres in customer-activity-timeline-postgres.test.js.
 jest.mock('../models/db', () => ({}));
 const mockWarn = jest.fn();
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: (...a) => mockWarn(...a), error: jest.fn(), debug: jest.fn() }));
 
 const timeline = require('../services/customer-activity-timeline');
-const { mergeEvents, isEngagedKind, SOURCES, getCustomerActivity, needsPresent, hasRelation, hasColumn } = timeline;
+const { mergeEvents, isEngagedKind, SOURCES, getCustomerActivity } = timeline;
 
 const ev = (id, at, extra = {}) => ({ id, at: new Date(at).toISOString(), channel: 'sms', kind: 'sent', title: id, detail: null, engaged: false, source: 's', ref: null, ...extra });
 const source = (name) => SOURCES.find((s) => s.name === name);
 
 // A permissive stand-in for a knex builder: every chain call returns itself,
 // awaiting it yields the table's rows, and .first() yields the customer / a null MAX.
-function fakeDb({ customer = { id: 'c1', email: 'A@Example.test' }, rows = {}, present = true, failTable = null, failMax = [], failMaxExpr = null, maxes = {} } = {}) {
+function fakeDb({ customer = { id: 'c1', email: 'A@Example.test' }, rows = {}, failTable = null, failMax = [], failMaxExpr = null, maxes = {} } = {}) {
   const calls = { limit: [], raw: [], chain: [] };
   const dbh = (name) => {
     let lastSelect = null;
@@ -44,44 +44,137 @@ function fakeDb({ customer = { id: 'c1', email: 'A@Example.test' }, rows = {}, p
   // returned object so first() can tell which of a source's queries it is.
   dbh.raw = (sql, bindings) => {
     calls.raw.push([sql, bindings]);
-    if (/^MAX\(/.test(sql)) return { sql };
-    return (async () => {
-      if (/to_regclass\(\?\) IS NOT NULL/.test(sql)) return { rows: [{ ok: typeof present === 'function' ? present(bindings[0]) : present }] };
-      if (/pg_attribute/.test(sql)) return { rows: (typeof present === 'function' ? present(bindings[0], bindings[1]) : present) ? [{ ok: 1 }] : [] };
-      return { rows: [] };
-    })();
+    return { sql };
   };
   dbh.calls = calls;
   return dbh;
 }
 
-beforeEach(() => { timeline.resetGuardCacheForTests(); mockWarn.mockReset(); });
+beforeEach(() => { mockWarn.mockReset(); });
 
-describe('engagement rule', () => {
-  test('only clicks, views and replies are engagement; opens, sends and calls are not', () => {
+const at = (m, s = 0) => new Date(Date.UTC(2026, 8, 1, 12, m, s));
+
+describe('engagement rule: only first-party, already-filtered evidence is engaged', () => {
+  test('the engaged kinds are clicked, viewed and replied; nothing provider-reported or unfiltered is', () => {
     for (const kind of ['clicked', 'viewed', 'replied']) expect(isEngagedKind(kind)).toBe(true);
-    for (const kind of ['opened', 'sent', 'delivered', 'failed', 'bounced', 'complained', 'called', 'placed']) expect(isEngagedKind(kind)).toBe(false);
+    for (const kind of ['provider_clicked', 'viewed_unfiltered', 'opened', 'sent', 'delivered', 'failed', 'bounced', 'complained', 'called', 'placed']) {
+      expect(isEngagedKind(kind)).toBe(false);
+    }
   });
 
-  test('an email row explodes into events where the open is not engaged and the click is', () => {
-    const at = (m) => new Date(Date.UTC(2026, 8, 1, 12, m));
+  test('the summary has exactly three engaged sources: inbound texts, short-link clicks, recorded page views', () => {
+    expect(SOURCES.filter((s) => s.engaged).map((s) => s.name)).toEqual(['texts', 'link clicks', 'page views']);
+    expect(source('texts').engaged.where).toBeTruthy(); // inbound only
+    // every other source may only feed the informational open / provider-click fields
+    for (const src of SOURCES.filter((s) => !s.engaged)) expect(Object.keys(src)).not.toContain('engaged');
+    for (const name of ['emails', 'automation emails', 'newsletters']) {
+      expect(source(name).open.expr).toMatch(/opened_at$/);
+      expect(source(name).providerClick.expr).toMatch(/clicked_at$/);
+    }
+  });
+
+  test('each engaged source produces engaged events', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    expect(source('texts').toEvents({ id: 'x', direction: 'inbound', status: 'received', message_body: 'hi', created_at: t })[0])
+      .toMatchObject({ kind: 'replied', engaged: true, title: 'Replied by text' });
+    expect(source('link clicks').toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'sms' })[0])
+      .toMatchObject({ kind: 'clicked', engaged: true, title: 'Clicked the invoice link' });
+    expect(source('page views').toEvents({ id: 'p', page: 'portal:billing', viewed_at: t })[0])
+      .toMatchObject({ channel: 'portal', kind: 'viewed', engaged: true, detail: 'billing' });
+    expect(source('page views').toEvents({ id: 'p', page: 'appointment', viewed_at: t })[0])
+      .toMatchObject({ channel: 'page', kind: 'viewed', engaged: true, title: 'Opened the appointment page' });
+  });
+
+  test('every non-engaged source still shows its events, and none of them is engaged', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    const stamps = { sent_at: at(0), delivered_at: at(1), opened_at: at(2), clicked_at: at(3), bounced_at: at(4), complained_at: at(5), updated_at: at(6) };
+    const cases = {
+      emails: { id: 'e', status: 'failed', subject_snapshot: 'S', recipient_email_snapshot: 'a@example.test', queued_at: at(0), ...stamps },
+      'automation emails': { id: 'a', status: 'bounced', step_order: 0, template_key: 'k', email: 'a@example.test', ...stamps },
+      newsletters: { id: 'n', subject: 'S', subscriber_email: 'a@example.test', ...stamps },
+      'estimate views': { id: 'v', viewed_at: t, address: '1 Way' },
+      'prep guide views': { id: 'v', viewed_at: t, scheduled_service_id: 'ss' },
+      'service report views': { id: 'v', report_viewed_at: t },
+      'inspection report views': { id: 'v', report_viewed_at: t },
+      'contract views': { id: 'v', viewed_at: t },
+      'price-change notice views': { id: 'v', first_viewed_at: t, view_count: 2 },
+      calls: { id: 'c', created_at: t, direction: 'inbound' },
+    };
+    for (const [name, row] of Object.entries(cases)) {
+      const events = source(name).toEvents(row);
+      expect([name, events.length > 0]).toEqual([name, true]);
+      expect([name, events.every((e) => e.engaged === false)]).toEqual([name, true]);
+    }
+    // outbound texts are never engaged either
+    for (const status of ['sent', 'delivered', 'read', 'failed']) {
+      expect(source('texts').toEvents({ id: 'x', direction: 'outbound', status, message_body: 'hi', created_at: t })[0].engaged).toBe(false);
+    }
+  });
+
+  test('email rows: the open and the provider click are labelled and never engaged', () => {
     const events = source('emails').toEvents({
       id: 'e1', status: 'clicked', subject_snapshot: 'Your estimate', sent_at: at(0), delivered_at: at(1), opened_at: at(2), clicked_at: at(3),
     });
     const by = Object.fromEntries(events.map((e) => [e.kind, e]));
-    expect(Object.keys(by).sort()).toEqual(['clicked', 'delivered', 'opened', 'sent']);
-    expect(by.opened.engaged).toBe(false);
+    expect(Object.keys(by).sort()).toEqual(['delivered', 'opened', 'provider_clicked', 'sent']);
     expect(by.opened.title).toMatch(/not reliable/i);
-    expect(by.clicked.engaged).toBe(true);
-    expect(by.sent.engaged).toBe(false);
-    expect(events.every((e) => e.channel === 'email' && e.detail === 'Your estimate')).toBe(true);
+    expect(by.provider_clicked.title).toBe('Link clicked (reported by email provider — may be a scanner)');
+    expect(events.every((e) => e.engaged === false && e.channel === 'email')).toBe(true);
+  });
+
+  test('raw token-page stamps are labelled "(unfiltered)"', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    const titles = [
+      source('estimate views').toEvents({ id: 'v', viewed_at: t })[0],
+      source('prep guide views').toEvents({ id: 'v', viewed_at: t, scheduled_service_id: 's' })[0],
+      source('service report views').toEvents({ id: 'v', report_viewed_at: t })[0],
+      source('inspection report views').toEvents({ id: 'v', report_viewed_at: t })[0],
+      source('contract views').toEvents({ id: 'v', viewed_at: t })[0],
+      source('price-change notice views').toEvents({ id: 'v', first_viewed_at: t, view_count: 1 })[0],
+    ];
+    expect(titles.every((e) => e.kind === 'viewed_unfiltered' && /^Viewed .+ \(unfiltered\)$/.test(e.title))).toBe(true);
+  });
+
+  test('a provider click that a human short-link click already covers is not listed twice', () => {
+    for (const [name, row] of [
+      ['emails', { id: 'e', subject_snapshot: 's', sent_at: at(0), clicked_at: at(3) }],
+      ['automation emails', { id: 'a', step_order: 0, template_key: 'k', sent_at: at(0), clicked_at: at(3) }],
+      ['newsletters', { id: 'n', subject: 's', sent_at: at(0), clicked_at: at(3) }],
+    ]) {
+      const kinds = (r) => source(name).toEvents(r).map((e) => e.kind);
+      expect([name, kinds(row)]).toEqual([name, ['sent', 'provider_clicked']]);
+      expect([name, kinds({ ...row, clicked_collapsed: true })]).toEqual([name, ['sent']]);
+      // the ranking time for that stamp is SQL that carries the same rule, so a collapsed click cannot rank the row
+      const fn = source(name).ts.find((x) => typeof x === 'function');
+      const { sql, bindings } = fn({ customerId: 'c1' });
+      expect(sql).toMatch(/NOT EXISTS/);
+      expect(sql).toMatch(/INTERVAL '2 minutes'/);
+      expect(sql).toMatch(/scx\.is_bot = false/);
+      expect(bindings).toEqual(['c1', 'c1']);
+    }
+  });
+
+  test('every email event names the recipient the send row recorded, masked', () => {
+    const own = { sent_at: at(0), opened_at: at(2) };
+    const detail = (name, row) => source(name).toEvents({ ...own, ...row }).map((e) => e.detail);
+    expect(detail('emails', { id: 'e', subject_snapshot: 'Your estimate', recipient_email_snapshot: 'Billing.Contact@Example.test' }))
+      .toEqual(['Your estimate · to b***@example.test', 'Your estimate · to b***@example.test']);
+    expect(detail('automation emails', { id: 'a', step_order: 1, template_name: 'Payment failed', email: '  AP.Desk@example.test ' })[0])
+      .toBe('Payment failed (step 2) · to a***@example.test');
+    expect(detail('newsletters', { id: 'n', subject: 'September', subscriber_email: 'subscriber@example.test' })[0])
+      .toBe('Newsletter: September · to s***@example.test');
+    // no recorded address: no recipient text, never a guess
+    expect(detail('emails', { id: 'e', subject_snapshot: 'Your estimate', recipient_email_snapshot: null })[0]).toBe('Your estimate');
+    expect(detail('emails', { id: 'e', subject_snapshot: 'x', recipient_email_snapshot: 'not-an-address' })[0]).toBe('x');
+    // the full address never appears
+    const all = JSON.stringify(source('emails').toEvents({ ...own, id: 'e', recipient_email_snapshot: 'Billing.Contact@Example.test' }));
+    expect(all).not.toMatch(/Billing\.Contact/i);
   });
 
   test('automation emails: bounced and complained statuses each produce their event, dated updated_at', () => {
-    const at = (m) => new Date(Date.UTC(2026, 8, 1, 12, m));
     const map = (status) => source('automation emails').toEvents({
       id: 'a1', status, step_order: 0, template_key: 'k', email: 'a@example.test', sent_at: at(0), updated_at: at(7),
-    }, { emailNorm: 'a@example.test' });
+    });
     const bounced = map('bounced');
     expect(bounced.map((e) => e.kind).sort()).toEqual(['bounced', 'sent']);
     expect(bounced.find((e) => e.kind === 'bounced').at).toBe(at(7).toISOString());
@@ -93,7 +186,6 @@ describe('engagement rule', () => {
   });
 
   test('a failed email is dated at the failure transition (updated_at), after its queue time', () => {
-    const at = (m) => new Date(Date.UTC(2026, 8, 1, 12, m));
     const [failed] = source('emails').toEvents({ id: 'e2', status: 'failed', subject_snapshot: 'x', queued_at: at(0), updated_at: at(9) });
     expect(failed).toMatchObject({ kind: 'failed', at: at(9).toISOString() });
     expect(source('emails').ts.join(' ')).toMatch(/COALESCE\(em\.updated_at, em\.queued_at\)/);
@@ -101,24 +193,14 @@ describe('engagement rule', () => {
     expect(source('emails').toEvents({ id: 'e3', status: 'failed', queued_at: at(0) })[0].at).toBe(at(0).toISOString());
   });
 
-  test('summary sources: opens feed lastEmailOpenAt only, never the engaged list', () => {
-    for (const name of ['emails', 'automation emails', 'newsletters']) {
-      const src = source(name);
-      expect(src.open).toBeTruthy();
-      expect(src.engaged.expr).toMatch(/clicked_at$/);
-      expect(src.engaged.expr).not.toMatch(/opened_at/);
-    }
-    for (const src of SOURCES) expect(src.engaged?.expr || '').not.toMatch(/opened_at/);
-    expect(source('calls').engaged).toBeUndefined();
-  });
-
-  test('texts: only the inbound reply is engagement and outbound status maps to sent / delivered / failed', () => {
+  test('texts: outbound status maps to sent / delivered / read receipt / failed', () => {
     const t = new Date('2026-09-01T12:00:00Z');
     const map = (row) => source('texts').toEvents({ id: 'x', message_type: 'reminder', message_body: 'hi', created_at: t, ...row })[0];
-    expect(map({ direction: 'inbound', status: 'received' })).toMatchObject({ kind: 'replied', engaged: true, title: 'Replied by text' });
-    expect(map({ direction: 'outbound', status: 'delivered' })).toMatchObject({ kind: 'delivered', engaged: false });
-    expect(map({ direction: 'outbound', status: 'undelivered' })).toMatchObject({ kind: 'failed', engaged: false });
-    expect(map({ direction: 'outbound', status: 'queued' })).toMatchObject({ kind: 'sent', engaged: false });
+    expect(map({ direction: 'outbound', status: 'delivered' })).toMatchObject({ kind: 'delivered', title: 'Text delivered (reminder)' });
+    expect(map({ direction: 'outbound', status: 'read' })).toMatchObject({ kind: 'delivered', title: 'Text delivered (read receipt) (reminder)' });
+    expect(map({ direction: 'outbound', status: 'READ', message_type: null })).toMatchObject({ kind: 'delivered', title: 'Text delivered (read receipt)' });
+    expect(map({ direction: 'outbound', status: 'undelivered' })).toMatchObject({ kind: 'failed' });
+    expect(map({ direction: 'outbound', status: 'queued' })).toMatchObject({ kind: 'sent' });
     expect(map({ direction: 'outbound', status: null })).toMatchObject({ kind: 'sent' });
   });
 
@@ -140,42 +222,14 @@ describe('engagement rule', () => {
     expect(map({ from_phone: '+19415550100', metadata: '{not json' })).toMatchObject({ channel: 'sms', kind: 'sent' });
   });
 
-  test('automation emails: a send to a billing contact is shown masked with no engagement events', () => {
-    const at = (m) => new Date(Date.UTC(2026, 8, 1, 12, m));
-    const row = {
-      id: 'b1', status: 'clicked', step_order: 0, template_key: 'payment_failed', template_name: 'Payment failed',
-      email: 'Billing.Contact@Example.test', sent_at: at(0), delivered_at: at(1), opened_at: at(2), clicked_at: at(3), updated_at: at(4),
-    };
-    const ctx = { emailNorm: 'owner@example.test' };
-    const events = source('automation emails').toEvents(row, ctx);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ kind: 'sent', engaged: false, channel: 'email', title: 'Sent to billing contact B***@Example.test', at: at(0).toISOString() });
-    expect(events[0].title).not.toMatch(/Billing\.Contact/);
-    // The customer's own address (case and whitespace ignored) keeps the full event set and its click counts.
-    const own = source('automation emails').toEvents({ ...row, email: '  OWNER@example.test ' }, ctx);
-    expect(own.map((e) => e.kind).sort()).toEqual(['clicked', 'delivered', 'opened', 'sent']);
-    expect(own.find((e) => e.kind === 'clicked').engaged).toBe(true);
-    // A send row with no recorded address is not provably the customer's.
-    expect(source('automation emails').toEvents({ ...row, email: null }, ctx)).toHaveLength(1);
-  });
-
-  test('automation emails: ranking times and summary MAX queries carry the customer-own-send rule', async () => {
-    const src = source('automation emails');
-    // every ranking expression except sent_at's fallback is gated on the rule
-    expect(src.ts.filter((t) => /cu_own\.email/.test(t))).toHaveLength(src.ts.length);
-    expect(src.ts[0]).toMatch(/ELSE COALESCE\(s\.sent_at, s\.delivered_at\) END/);
-    const dbh = fakeDb();
-    await getCustomerActivity('c1', {}, dbh);
-    const scoped = dbh.calls.chain.filter(([t, m, a]) => t === 'automation_step_sends as s' && m === 'whereRaw' && /cu_own\.email/.test(a[0]) && !/CASE/.test(a[0]));
-    // engaged MAX + open MAX
-    expect(scoped).toHaveLength(2);
-  });
-
-  test('portal page views ride the portal channel; token pages ride the page channel', () => {
-    const t = new Date('2026-09-01T12:00:00Z');
-    const map = (page) => source('page views').toEvents({ id: 'p', page, viewed_at: t })[0];
-    expect(map('portal:billing')).toMatchObject({ channel: 'portal', kind: 'viewed', engaged: true, detail: 'billing' });
-    expect(map('appointment')).toMatchObject({ channel: 'page', kind: 'viewed', engaged: true, title: 'Opened the appointment page' });
+  test('the speculative sibling-PR sources are not in this PR', () => {
+    expect(SOURCES.map((s) => s.name)).not.toContain('outside link clicks');
+    expect(SOURCES.map((s) => s.name)).not.toContain('portal visits');
+    const src = require('fs').readFileSync(require.resolve('../services/customer-activity-timeline'), 'utf8');
+    expect(src).not.toMatch(/outbound_link|last_seen_at|to_regclass|pg_attribute/);
+    // and no guessing which sends were the customer's own (round-2 billing-contact rule removed)
+    expect(src).not.toMatch(/billing contact|emailNorm|normEmail|BOT_UA/i);
+    expect(timeline).not.toHaveProperty('needsPresent');
   });
 });
 
@@ -216,30 +270,6 @@ describe('getCustomerActivity guards', () => {
   test('unknown customer is null; a bad cursor is a 400 before any source runs', async () => {
     expect(await getCustomerActivity('nope', {}, fakeDb({ customer: null }))).toBeNull();
     await expect(getCustomerActivity('c1', { before: 'garbage' }, fakeDb())).rejects.toMatchObject({ status: 400 });
-  });
-
-  test('absent relations skip their sources and are reported; the always-present ones still run', async () => {
-    const t = new Date('2026-09-10T12:00:00Z');
-    const dbh = fakeDb({
-      present: false,
-      rows: { 'sms_log as sl': [{ id: 's1', direction: 'inbound', status: 'received', message_body: 'hello', created_at: t }] },
-    });
-    const r = await getCustomerActivity('c1', {}, dbh);
-    expect(r.absentSources).toEqual(expect.arrayContaining(['outside link clicks', 'portal visits', 'automation emails', 'newsletters', 'page views', 'calls']));
-    expect(r.absentSources).not.toContain('texts');
-    expect(r.absentSources).not.toContain('emails');
-    expect(r.events.map((e) => e.title)).toEqual(['Replied by text']);
-    expect(r.unavailableSources).toEqual([]);
-  });
-
-  test('the sibling-PR sources light up when their relations exist', async () => {
-    const present = (table, column) => !['outbound_link_clicks', 'outbound_links'].includes(table) && !(table === 'customers' && column === 'last_seen_at');
-    const before = await getCustomerActivity('c1', {}, fakeDb({ present }));
-    expect(before.absentSources).toEqual(expect.arrayContaining(['outside link clicks', 'portal visits']));
-    timeline.resetGuardCacheForTests();
-    const after = await getCustomerActivity('c1', {}, fakeDb({ present: true }));
-    expect(after.absentSources).not.toContain('outside link clicks');
-    expect(after.absentSources).not.toContain('portal visits');
   });
 
   test('one failing source is reported and the others still return', async () => {
@@ -283,7 +313,6 @@ describe('getCustomerActivity guards', () => {
     expect(exact.events).toHaveLength(2);
     expect(exact.hasMore).toBe(false);
     expect(exact.nextCursor).toBeNull();
-    timeline.resetGuardCacheForTests();
     const more = await getCustomerActivity('c1', { limit: 2 }, fakeDb({ rows: { 'sms_log as sl': [row(3), row(2), row(1)] } }));
     expect(more.events).toHaveLength(2);
     expect(more.hasMore).toBe(true);
@@ -301,21 +330,38 @@ describe('getCustomerActivity guards', () => {
       maxes: { 'sms_log as sl': new Date('2026-09-09T10:00:00Z'), 'email_messages as em': new Date('2026-09-08T10:00:00Z') },
     });
     const r = await getCustomerActivity('c1', {}, dbh);
-    expect(r.summary).toMatchObject({ lastEngagedAt: '2026-09-09T10:00:00.000Z', lastEngagedFrom: 'texts' });
+    // the email MAX is newer than nothing engaged: it only feeds the informational fields
+    expect(r.summary).toMatchObject({ lastEngagedAt: '2026-09-09T10:00:00.000Z', lastEngagedFrom: 'texts', lastEmailOpenAt: '2026-09-08T10:00:00.000Z', lastProviderClickAt: '2026-09-08T10:00:00.000Z' });
     expect(r.unavailableSources).toEqual(['newsletters']);
     const logged = mockWarn.mock.calls.map((c) => c.join(' ')).join('\n');
     expect(logged).toMatch(/summary \(newsletters\) failed for customer c1/);
     expect(logged).not.toMatch(/max boom|example\.test/);
   });
 
-  test('a source whose open MAX fails but whose engagement MAX succeeds still contributes; it is reported unavailable', async () => {
+  test('a source whose open MAX fails but whose provider-click MAX succeeds still contributes; it is reported unavailable', async () => {
     const dbh = fakeDb({
       failMaxExpr: { test: (table, sql) => table === 'email_messages as em' && /opened_at/.test(sql) },
       maxes: { 'email_messages as em': { 'em.clicked_at': new Date('2026-09-09T10:00:00Z') } },
     });
     const r = await getCustomerActivity('c1', {}, dbh);
-    expect(r.summary).toMatchObject({ lastEngagedAt: '2026-09-09T10:00:00.000Z', lastEngagedFrom: 'emails', lastEmailOpenAt: null });
+    // a provider click is informational: it never becomes lastEngagedAt
+    expect(r.summary).toMatchObject({ lastEngagedAt: null, lastEngagedFrom: null, lastEmailOpenAt: null, lastProviderClickAt: '2026-09-09T10:00:00.000Z' });
+    expect(r.summary.lastEmailOpenNote).toMatch(/unreliable/i);
+    expect(r.summary.lastProviderClickNote).toMatch(/unfiltered/i);
     expect(r.unavailableSources).toEqual(['emails']);
+  });
+
+  test('email opens and provider clicks never reach lastEngagedAt, however new', async () => {
+    const newer = new Date('2026-09-20T10:00:00Z');
+    const dbh = fakeDb({
+      maxes: {
+        'sms_log as sl': new Date('2026-09-01T10:00:00Z'),
+        'email_messages as em': newer, 'automation_step_sends as s': newer, 'newsletter_send_deliveries as d': newer,
+        'estimate_views as ev': newer, 'prep_guide_views as v': newer, 'service_records as sr': newer,
+      },
+    });
+    const r = await getCustomerActivity('c1', {}, dbh);
+    expect(r.summary).toMatchObject({ lastEngagedAt: '2026-09-01T10:00:00.000Z', lastEngagedFrom: 'texts', lastEmailOpenAt: newer.toISOString(), lastProviderClickAt: newer.toISOString() });
   });
 
   test('summary stays non-null while any one of its queries succeeds, null only when all reject', async () => {
@@ -327,16 +373,6 @@ describe('getCustomerActivity guards', () => {
     const r = await getCustomerActivity('c1', {}, fakeDb({ failMax: 'all' }));
     expect(r.summary).toBeNull();
     expect(r.unavailableSources).toEqual(expect.arrayContaining(['texts', 'emails', 'newsletters']));
-  });
-
-  test('relation guards are cached and use to_regclass / pg_attribute', async () => {
-    const dbh = fakeDb({ present: true });
-    expect(await hasRelation(dbh, 'call_log')).toBe(true);
-    expect(await hasRelation(dbh, 'call_log')).toBe(true);
-    expect(await hasColumn(dbh, 'customers', 'last_seen_at')).toBe(true);
-    expect(dbh.calls.raw).toHaveLength(2);
-    expect(await needsPresent(dbh, ['call_log', ['customers', 'last_seen_at']])).toBe(true);
-    expect(await needsPresent(fakeDb({ present: false }), ['never_cached_table'])).toBe(false);
   });
 });
 

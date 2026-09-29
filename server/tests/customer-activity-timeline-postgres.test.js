@@ -14,7 +14,7 @@ const url = process.env.ACTIVITY_TIMELINE_TEST_DATABASE_URL || process.env.DATAB
 const pg = url ? describe : describe.skip;
 
 const TEMP_TABLES = `
-  CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, last_seen_at timestamp, deleted_at timestamp);
+  CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, deleted_at timestamp);
   CREATE TEMP TABLE leads (id uuid PRIMARY KEY, customer_id uuid);
   CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp, from_phone text, metadata jsonb);
   CREATE TEMP TABLE short_codes (id uuid PRIMARY KEY, customer_id uuid, lead_id uuid, kind text, channel text, purpose text);
@@ -24,24 +24,22 @@ const TEMP_TABLES = `
   CREATE TEMP TABLE automation_enrollments (id uuid PRIMARY KEY, template_key text, customer_id uuid);
   CREATE TEMP TABLE automation_step_sends (id uuid PRIMARY KEY, enrollment_id uuid, step_order int, status text, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, updated_at timestamp);
   CREATE TEMP TABLE newsletter_sends (id uuid PRIMARY KEY, subject text);
-  CREATE TEMP TABLE newsletter_subscribers (id int PRIMARY KEY, customer_id uuid);
+  CREATE TEMP TABLE newsletter_subscribers (id int PRIMARY KEY, customer_id uuid, email text);
   CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY, send_id uuid, subscriber_id int, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
   CREATE TEMP TABLE customer_page_views (id uuid PRIMARY KEY, customer_id uuid, page text, viewed_at timestamptz);
   CREATE TEMP TABLE estimates (id uuid PRIMARY KEY, customer_id uuid, address text);
   CREATE TEMP TABLE estimate_views (id uuid PRIMARY KEY, estimate_id uuid, viewed_at timestamp);
   CREATE TEMP TABLE scheduled_services (id uuid PRIMARY KEY, customer_id uuid);
   CREATE TEMP TABLE projects (id uuid PRIMARY KEY, customer_id uuid, report_viewed_at timestamp, project_type text);
-  CREATE TEMP TABLE prep_guide_views (id serial PRIMARY KEY, project_id uuid, scheduled_service_id uuid, viewed_at timestamp, user_agent text);
+  CREATE TEMP TABLE prep_guide_views (id serial PRIMARY KEY, project_id uuid, scheduled_service_id uuid, viewed_at timestamp);
   CREATE TEMP TABLE service_records (id uuid PRIMARY KEY, customer_id uuid, report_viewed_at timestamp, service_type text);
   CREATE TEMP TABLE customer_contracts (id uuid PRIMARY KEY, customer_id uuid, viewed_at timestamp, title text);
   CREATE TEMP TABLE price_change_notices (id uuid PRIMARY KEY, customer_id uuid, first_viewed_at timestamp, view_count int);
-  CREATE TEMP TABLE outbound_links (id uuid PRIMARY KEY, target_url text);
-  CREATE TEMP TABLE outbound_link_clicks (id uuid PRIMARY KEY, outbound_link_id uuid, clicked_at timestamp, surface text, template_key text, customer_id uuid);
-  CREATE TEMP TABLE call_log (id uuid PRIMARY KEY, customer_id uuid, created_at timestamp, direction text, status text, duration_seconds int, call_outcome text);
 `;
+const CALL_LOG_DDL = 'CREATE TEMP TABLE call_log (id uuid PRIMARY KEY, customer_id uuid, created_at timestamp, direction text, status text, duration_seconds int, call_outcome text)';
 
 // One instant per fixture row, minutes apart, so ordering is unambiguous.
-const T = (minute) => new Date(Date.UTC(2026, 8, 20, 12, minute, 0));
+const T = (minute, second = 0) => new Date(Date.UTC(2026, 8, 20, 12, minute, second));
 
 pg('getCustomerActivity on Postgres', () => {
   let db;
@@ -52,17 +50,18 @@ pg('getCustomerActivity on Postgres', () => {
   beforeAll(async () => {
     db = knex({ client: 'pg', connection: url, pool: { min: 1, max: 1 } });
     await db.raw(TEMP_TABLES);
-    timeline.resetGuardCacheForTests();
+    await db.raw(CALL_LOG_DDL);
 
     await db('customers').insert([
-      { id: cust, email: 'Synthetic.Person@example.test', last_seen_at: T(59) },
-      { id: other, email: 'other@example.test', last_seen_at: null },
+      { id: cust, email: 'Synthetic.Person@example.test' },
+      { id: other, email: 'other@example.test' },
     ]);
     await db('leads').insert({ id: lead, customer_id: cust });
 
     // texts: outbound sent/delivered/failed + an inbound reply; another customer's row
     await db('sms_log').insert([
       { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'delivered', message_type: 'reminder', message_body: 'Reminder   for\nyour visit', created_at: T(1) },
+      { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'read', message_type: 'reminder', message_body: 'Read receipt text', created_at: T(7) },
       { id: randomUUID(), customer_id: cust, direction: 'outbound', status: 'failed', message_type: 'billing', message_body: 'x'.repeat(400), created_at: T(2) },
       { id: randomUUID(), customer_id: cust, direction: 'inbound', status: 'received', message_type: null, message_body: 'Sounds good, thanks', created_at: T(3) },
       { id: randomUUID(), customer_id: other, direction: 'inbound', status: 'received', message_type: null, message_body: 'not mine', created_at: T(90) },
@@ -79,15 +78,23 @@ pg('getCustomerActivity on Postgres', () => {
     ]);
 
     // link clicks: one by customer, one by the customer's lead, one bot (excluded)
-    const scA = randomUUID(); const scB = randomUUID();
+    const scA = randomUUID(); const scB = randomUUID(); const scC = randomUUID();
     await db('short_codes').insert([
       { id: scA, customer_id: cust, kind: 'invoice', channel: 'sms', purpose: 'invoice_send' },
       { id: scB, customer_id: null, lead_id: lead, kind: 'estimate', channel: 'email', purpose: 'estimate_send' },
+      { id: scC, customer_id: other, kind: 'invoice', channel: 'sms', purpose: 'invoice_send' },
     ]);
     await db('short_code_clicks').insert([
       { id: randomUUID(), short_code_id: scA, clicked_at: T(10), is_bot: false },
       { id: randomUUID(), short_code_id: scB, clicked_at: T(11), is_bot: false },
       { id: randomUUID(), short_code_id: scA, clicked_at: T(95), is_bot: true },
+      // the same tap as the provider click at T(23): 90 seconds after it, so that click is not listed again
+      { id: randomUUID(), short_code_id: scA, clicked_at: T(23, 90), is_bot: false },
+      // 30 seconds after the provider click at T(52), but a bot click and another customer's click: neither collapses it
+      { id: randomUUID(), short_code_id: scA, clicked_at: T(52, 30), is_bot: true },
+      { id: randomUUID(), short_code_id: scC, clicked_at: T(52, 30), is_bot: false },
+      // three minutes after it: outside the two-minute window
+      { id: randomUUID(), short_code_id: scA, clicked_at: T(55), is_bot: false },
     ]);
 
     // emails: linked by recipient id; linked by address only; admin + test rows excluded
@@ -105,6 +112,10 @@ pg('getCustomerActivity on Postgres', () => {
       { id: randomUUID(), recipient_type: 'referral_promoter', recipient_id: randomUUID(), recipient_email_snapshot: 'synthetic.person@example.test', status: 'sent', subject_snapshot: 'promoter mail', sent_at: T(89) },
       // customer precursor (a lead with the same address) rides the address match
       { id: randomUUID(), recipient_type: 'lead', recipient_id: lead, recipient_email_snapshot: 'synthetic.person@example.test', status: 'sent', subject_snapshot: 'lead-era quote', sent_at: T(5) },
+      // provider click with no human short-link click within two minutes: stays listed, never engaged
+      { id: randomUUID(), recipient_type: 'customer', recipient_id: cust, recipient_email_snapshot: 'synthetic.person@example.test', status: 'clicked', subject_snapshot: 'Unmatched click', sent_at: T(51), clicked_at: T(52) },
+      // owned by the customer but addressed to a payer's AP inbox: shown with the masked address, never engaged
+      { id: randomUUID(), recipient_type: 'customer', recipient_id: cust, recipient_email_snapshot: 'Accounts.Payable@example.test', status: 'clicked', subject_snapshot: 'Invoice statement', sent_at: T(59), clicked_at: T(60) },
       // failed: dated at the failure transition (updated_at), after its queue time
       { id: randomUUID(), recipient_type: 'customer', recipient_id: cust, recipient_email_snapshot: 'synthetic.person@example.test', status: 'failed', subject_snapshot: 'Failed send', queued_at: T(26), updated_at: T(28) },
     ]);
@@ -125,7 +136,7 @@ pg('getCustomerActivity on Postgres', () => {
     await db('automation_step_sends').insert({ id: randomUUID(), enrollment_id: enrBill, step_order: 0, status: 'clicked', email: 'accounts.payable@example.test', sent_at: T(87), delivered_at: T(88), opened_at: T(89), clicked_at: T(91) });
     const send = randomUUID();
     await db('newsletter_sends').insert({ id: send, subject: 'September news' });
-    await db('newsletter_subscribers').insert({ id: 7, customer_id: cust });
+    await db('newsletter_subscribers').insert({ id: 7, customer_id: cust, email: 'Subscriber.Address@example.test' });
     await db('newsletter_send_deliveries').insert({ id: randomUUID(), send_id: send, subscriber_id: 7, sent_at: T(33), delivered_at: T(34), opened_at: T(70) });
 
     // page-type views
@@ -140,21 +151,14 @@ pg('getCustomerActivity on Postgres', () => {
     await db('scheduled_services').insert({ id: visit, customer_id: cust });
     await db('projects').insert({ id: proj, customer_id: cust, report_viewed_at: T(46), project_type: 'wdo_inspection' });
     await db('prep_guide_views').insert([
-      { project_id: null, scheduled_service_id: visit, viewed_at: T(43), user_agent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1' },
+      { project_id: null, scheduled_service_id: visit, viewed_at: T(43) },
       { project_id: proj, scheduled_service_id: null, viewed_at: T(44) },
-      // link previewers and scanners: never listed, never engagement
-      { project_id: null, scheduled_service_id: visit, viewed_at: T(75), user_agent: 'Mozilla/5.0 (compatible; Googlebot/2.1)' },
-      { project_id: null, scheduled_service_id: visit, viewed_at: T(76), user_agent: 'WhatsApp/2.23.20 A' },
-      { project_id: proj, scheduled_service_id: null, viewed_at: T(77), user_agent: 'Slackbot-LinkExpanding 1.0' },
     ]);
     await db('service_records').insert({ id: randomUUID(), customer_id: cust, report_viewed_at: T(45), service_type: 'Quarterly pest control' });
     await db('customer_contracts').insert({ id: randomUUID(), customer_id: cust, viewed_at: T(47), title: 'Service agreement' });
     await db('price_change_notices').insert({ id: randomUUID(), customer_id: cust, first_viewed_at: T(48), view_count: 3 });
 
-    // outside link click + a call
-    const ol = randomUUID();
-    await db('outbound_links').insert({ id: ol, target_url: 'https://www.chewy.com/some/path?tag=1' });
-    await db('outbound_link_clicks').insert({ id: randomUUID(), outbound_link_id: ol, clicked_at: T(49), surface: 'page', template_key: 'prep.flea', customer_id: cust });
+    // a call
     await db('call_log').insert({ id: randomUUID(), customer_id: cust, created_at: T(50), direction: 'inbound', status: 'completed', duration_seconds: 125, call_outcome: 'info_given' });
   });
 
@@ -170,33 +174,50 @@ pg('getCustomerActivity on Postgres', () => {
     expect(titles).toEqual(expect.arrayContaining([
       'Text delivered (reminder)', 'Text failed (billing)', 'Replied by text',
       'Clicked the invoice link', 'Clicked the estimate link',
-      'Email sent', 'Clicked a link in an email', 'Email bounced',
-      'Opened the appointment page', 'Opened the portal', 'Opened their estimate', 'Opened the prep guide',
-      'Opened their service report', 'Opened their inspection report', 'Opened a contract',
-      'Opened the price-change notice', 'Clicked an outside link in the prep guide', 'Called us', 'Last seen in the portal',
+      'Email sent', 'Link clicked (reported by email provider — may be a scanner)', 'Email bounced',
+      'Opened the appointment page', 'Opened the portal', 'Viewed their estimate (unfiltered)', 'Viewed the prep guide (unfiltered)',
+      'Viewed their service report (unfiltered)', 'Viewed their inspection report (unfiltered)', 'Viewed a contract (unfiltered)',
+      'Viewed the price-change notice (unfiltered)', 'Called us',
     ]));
     expect(r.events.some((e) => /not mine|admin copy|test send|other owner|recruiting|payer statement|promoter mail|scheduled reminder|sending reminder|canceled reminder|cancelled reminder/.test(`${e.title} ${e.detail}`))).toBe(false);
-    // 2 clicks only: the bot click is filtered
-    expect(r.events.filter((e) => e.source === 'link')).toHaveLength(2);
+    // 4 human clicks: the bot click and another customer's click are filtered
+    expect(r.events.filter((e) => e.source === 'link')).toHaveLength(4);
     // the lead-linked click carries the email channel
     expect(r.events.find((e) => e.title === 'Clicked the estimate link').channel).toBe('email');
-    // outside-link detail is the host only (never the path or query)
-    expect(r.events.find((e) => e.source === 'outlink').detail).toBe('chewy.com');
     // text previews are one flat, capped line
     const failed = r.events.find((e) => e.title === 'Text failed (billing)');
     expect(failed.detail.length).toBeLessThanOrEqual(140);
     expect(r.events.find((e) => e.title === 'Text delivered (reminder)').detail).toBe('Reminder for your visit');
     expect(r.unavailableSources).toEqual([]);
+    // no outside-link or portal-visit source in this PR
+    expect(r.events.some((e) => e.source === 'outlink' || e.source === 'portal')).toBe(false);
+  });
+
+  test('a read text is a delivered text with a read-receipt title, and it paginates like any other', async () => {
+    const r = await run({ limit: 200 });
+    expect(r.events.find((e) => e.detail === 'Read receipt text')).toMatchObject({
+      kind: 'delivered', engaged: false, channel: 'sms', title: 'Text delivered (read receipt) (reminder)', at: T(7).toISOString(),
+    });
+    // exact pagination: the read text is the top of a one-row page when it is the newest text
+    const solo = randomUUID();
+    await db('customers').insert({ id: solo, email: 'reader@example.test' });
+    await db('sms_log').insert([
+      { id: randomUUID(), customer_id: solo, direction: 'outbound', status: 'sent', message_type: null, message_body: 'first', created_at: T(1) },
+      { id: randomUUID(), customer_id: solo, direction: 'outbound', status: 'read', message_type: null, message_body: 'second', created_at: T(2) },
+    ]);
+    const page = await timeline.getCustomerActivity(solo, { limit: 1 }, db);
+    expect(page.events.map((e) => e.title)).toEqual(['Text delivered (read receipt)']);
+    expect(page.hasMore).toBe(true);
+    const next = await timeline.getCustomerActivity(solo, { limit: 1, before: page.nextCursor }, db);
+    expect(next.events.map((e) => e.title)).toEqual(['Text sent']);
   });
 
   test('address fallback: unowned and lead mail is included; job_application, payer and promoter mail is not', async () => {
     const r = await run({ limit: 200 });
-    const subjects = r.events.filter((e) => e.source === 'email').map((e) => e.detail);
+    const subjects = r.events.filter((e) => e.source === 'email').map((e) => e.detail.split(' · ')[0]);
     expect(subjects).toEqual(expect.arrayContaining(['By address only', 'lead-era quote', 'Your estimate']));
     expect(subjects).not.toContain('recruiting mail');
-    // and the recruiting click never became engagement
-    expect(r.events.some((e) => e.detail === 'recruiting mail')).toBe(false);
-    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
+    expect(r.events.some((e) => /recruiting mail/.test(e.detail || ''))).toBe(false);
   });
 
   test('a failed email is dated at its failure time, after the queue time; automation bounces and complaints show', async () => {
@@ -211,8 +232,6 @@ pg('getCustomerActivity on Postgres', () => {
   test('recruiting texts on the customer id are hidden from the feed and the summary', async () => {
     const r = await run({ limit: 200 });
     expect(r.events.some((e) => /applicant/.test(e.detail || ''))).toBe(false);
-    // the T(85) applicant reply would otherwise be the newest "replied" event
-    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
     const solo = randomUUID();
     await db('customers').insert({ id: solo, email: 'recruit.only@example.test' });
     await db('sms_log').insert({ id: randomUUID(), customer_id: solo, direction: 'inbound', status: 'received', message_type: 'job_applicant_reply', message_body: 'hi', created_at: T(3) });
@@ -228,71 +247,78 @@ pg('getCustomerActivity on Postgres', () => {
     expect(r.events.some((e) => e.channel === 'sms' && e.detail === 'Tomorrow at 9')).toBe(false);
   });
 
-  test('prep views from link previewers are dropped from the feed and lastEngagedAt; browser and unknown agents stay', async () => {
+  test('every email event names the recorded recipient, masked; nothing is classified as the customer\'s own or not', async () => {
     const r = await run({ limit: 200 });
-    const prep = r.events.filter((e) => e.source === 'prep');
-    expect(prep.map((e) => e.at).sort()).toEqual([T(43).toISOString(), T(44).toISOString()]);
-    expect(prep.every((e) => /unfiltered for staff previews/.test(e.detail))).toBe(true);
-    // bot views at T(75-77) are after the portal visit (T(59)) and would have won
-    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
-    // a customer whose only prep views are bots has none of it
-    const solo = randomUUID(); const sv = randomUUID();
-    await db('customers').insert({ id: solo, email: 'prep.bot@example.test' });
-    await db('scheduled_services').insert({ id: sv, customer_id: solo });
-    await db('prep_guide_views').insert({ scheduled_service_id: sv, viewed_at: T(5), user_agent: 'Mozilla/5.0 (compatible; bingbot/2.0)' });
-    const only = await timeline.getCustomerActivity(solo, {}, db);
-    expect(only.events.filter((e) => e.source === 'prep')).toEqual([]);
-    expect(only.summary.lastEngagedAt).toBeNull();
+    const to = (source, pick) => r.events.filter((e) => e.source === source && pick(e)).map((e) => e.detail);
+    expect(to('email', (e) => e.kind === 'sent' && /^Your estimate/.test(e.detail))).toEqual(['Your estimate · to s***@example.test']);
+    // the payer / AP inbox is visible as such (masked), and its click is informational only
+    expect(to('email', (e) => /Invoice statement/.test(e.detail))).toEqual(expect.arrayContaining(['Invoice statement · to a***@example.test']));
+    expect(r.events.filter((e) => /Invoice statement/.test(e.detail)).every((e) => e.engaged === false)).toBe(true);
+    // automation: the send row's own (trimmed, mixed-case) snapshot; the redirected billing send is not special
+    expect(to('automation', (e) => e.kind === 'opened' && e.at === T(32).toISOString())).toEqual(['Welcome series (step 1) · to s***@example.test']);
+    expect(to('automation', (e) => e.kind === 'sent' && e.at === T(87).toISOString())).toEqual(['Welcome series (step 1) · to a***@example.test']);
+    // newsletter: the subscriber row's address
+    expect(to('newsletter', (e) => e.kind === 'sent')).toEqual(['Newsletter: September news · to s***@example.test']);
+    // the full address never leaves the server
+    expect(JSON.stringify(r.events)).not.toMatch(/synthetic\.person@|accounts\.payable@|accounts\.payable|subscriber\.address@/i);
+    expect(r.events.some((e) => /billing contact/i.test(e.title))).toBe(false);
   });
 
-  test('the Postgres bot pattern agrees with isBotUserAgent on representative agents', async () => {
-    const { isBotUserAgent } = require('../utils/bot-ua');
-    const agents = [
-      'Mozilla/5.0 (compatible; Googlebot/2.1)', 'WhatsApp/2.23', 'Slackbot-LinkExpanding 1.0', 'curl/8.4.0', 'python-requests/2.31',
-      'facebookexternalhit/1.1', 'Mozilla/5.0 (iPhone) Safari/604.1', 'Mozilla/5.0 (Macintosh) Chrome/120 Safari/537.36',
-      'Mozilla/5.0 Preview', 'Twitterbot/1.0', 'HeadlessChrome/120', 'Robotics Club Browser', 'axios/1.6.0', '',
-    ];
-    const pattern = timeline.BOT_UA_PG;
-    for (const ua of agents) {
-      const { rows } = await db.raw("SELECT (COALESCE(?::text, '') ~* ?) AS bot", [ua, pattern]);
-      expect([ua, rows[0].bot]).toEqual([ua, isBotUserAgent(ua)]);
-    }
-  });
-
-  test('automation sends to a billing contact are shown masked and earn no engagement or open credit', async () => {
+  test('a provider click within two minutes of the customer\'s own human short-link click is listed once, as the short-link click', async () => {
     const r = await run({ limit: 200 });
-    const billing = r.events.filter((e) => e.source === 'automation' && /billing contact/.test(e.title));
-    expect(billing).toHaveLength(1);
-    expect(billing[0]).toMatchObject({ kind: 'sent', engaged: false, title: 'Sent to billing contact a***@example.test' });
-    // the redirected click (T91) and open (T89) are the newest of everything and must not surface
-    expect(r.events.filter((e) => e.source === 'automation' && ['clicked', 'opened', 'delivered'].includes(e.kind)).every((e) => e.at < T(80).toISOString())).toBe(true);
-    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
-    expect(r.summary.lastEmailOpenAt).toBe(T(70).toISOString());
-    // a customer-addressed send (case / spaces ignored) still lists its own open
-    expect(r.events.some((e) => e.source === 'automation' && e.kind === 'opened' && e.at === T(32).toISOString())).toBe(true);
+    const providerClicks = r.events.filter((e) => e.kind === 'provider_clicked').map((e) => [e.source, e.at]);
+    // T(23) (email) is covered by the human click at T(23)+90s and is gone
+    expect(providerClicks.find(([, at]) => at === T(23).toISOString())).toBeUndefined();
+    // a bot click or another customer's click 30 seconds away, and a human click 3 minutes away, do not collapse T(52)
+    expect(providerClicks).toEqual(expect.arrayContaining([['email', T(52).toISOString()]]));
+    // clicks with no short-link click nearby stay listed
+    expect(providerClicks).toEqual(expect.arrayContaining([['email', T(60).toISOString()], ['automation', T(91).toISOString()]]));
+    // and the short-link click is the engaged event for that tap
+    expect(r.events.find((e) => e.source === 'link' && e.at === T(23, 90).toISOString())).toMatchObject({ kind: 'clicked', engaged: true });
+    // the lead's link click also collapses a nearby provider click (linkage by lead)
+    const solo = randomUUID(); const soloLead = randomUUID(); const sc = randomUUID(); const en = randomUUID();
+    await db('customers').insert({ id: solo, email: 'lead.tap@example.test' });
+    await db('leads').insert({ id: soloLead, customer_id: solo });
+    await db('short_codes').insert({ id: sc, customer_id: null, lead_id: soloLead, kind: 'estimate', channel: 'email', purpose: 'estimate_send' });
+    await db('short_code_clicks').insert({ id: randomUUID(), short_code_id: sc, clicked_at: T(30, 45), is_bot: false });
+    await db('automation_enrollments').insert({ id: en, template_key: 'welcome', customer_id: solo });
+    await db('automation_step_sends').insert({ id: randomUUID(), enrollment_id: en, step_order: 0, status: 'clicked', email: 'lead.tap@example.test', sent_at: T(29), clicked_at: T(30) });
+    const tap = await timeline.getCustomerActivity(solo, { limit: 50 }, db);
+    expect(tap.events.map((e) => e.kind).sort()).toEqual(['clicked', 'sent']);
+    // ...but the summary's informational provider-click time is the raw stamp
+    expect(tap.summary.lastProviderClickAt).toBe(T(30).toISOString());
+    expect(tap.summary.lastEngagedAt).toBe(T(30, 45).toISOString());
   });
 
-  test('billing-contact sends rank by their one visible sent event, so they cannot crowd out a newer own send', async () => {
-    const solo = randomUUID(); const en = randomUUID();
+  test('collapsed provider clicks cannot rank a row above a newer send, so paging never skips it', async () => {
+    const solo = randomUUID(); const en = randomUUID(); const sc = randomUUID();
     await db('customers').insert({ id: solo, email: 'ranker@example.test' });
     await db('automation_enrollments').insert({ id: en, template_key: 'welcome', customer_id: solo });
+    await db('short_codes').insert({ id: sc, customer_id: solo, kind: 'estimate', channel: 'email', purpose: 'estimate_send' });
+    // two old sends whose (collapsed) provider clicks are recent, plus a newer send with no click
+    await db('short_code_clicks').insert([
+      { id: randomUUID(), short_code_id: sc, clicked_at: T(50, 20), is_bot: false },
+      { id: randomUUID(), short_code_id: sc, clicked_at: T(51, 20), is_bot: false },
+    ]);
     await db('automation_step_sends').insert([
       { id: randomUUID(), enrollment_id: en, step_order: 0, status: 'clicked', email: 'ap@example.test', sent_at: T(1), clicked_at: T(50) },
       { id: randomUUID(), enrollment_id: en, step_order: 1, status: 'clicked', email: 'ap@example.test', sent_at: T(2), clicked_at: T(51) },
       { id: randomUUID(), enrollment_id: en, step_order: 2, status: 'sent', email: 'Ranker@example.test', sent_at: T(20) },
     ]);
-    const first = await timeline.getCustomerActivity(solo, { limit: 1 }, db);
-    expect(first.events.map((e) => e.at)).toEqual([T(20).toISOString()]);
-    expect(first.events[0].title).toBe('Email sent');
+    const full = await timeline.getCustomerActivity(solo, { limit: 50 }, db);
+    expect(full.events.map((e) => [e.kind, e.at])).toEqual([
+      ['clicked', T(51, 20).toISOString()], ['clicked', T(50, 20).toISOString()],
+      ['sent', T(20).toISOString()], ['sent', T(2).toISOString()], ['sent', T(1).toISOString()],
+    ]);
     const seen = [];
     let cursor = null;
-    for (let i = 0; i < 6; i += 1) {
+    for (let i = 0; i < 8; i += 1) {
       const page = await timeline.getCustomerActivity(solo, { limit: 1, before: cursor }, db);
-      seen.push(...page.events.map((e) => e.at));
+      seen.push(...page.events.map((e) => e.id));
       cursor = page.nextCursor;
       if (!cursor) break;
     }
-    expect(seen).toEqual([T(20).toISOString(), T(2).toISOString(), T(1).toISOString()]);
+    expect(seen).toEqual(full.events.map((e) => e.id));
   });
 
   test('an archived customer is not found', async () => {
@@ -314,28 +340,48 @@ pg('getCustomerActivity on Postgres', () => {
     expect(short.nextCursor).toBe(short.events[1].at);
   });
 
-  test('engagement: clicks, views, replies and portal visits count; opens and calls do not', async () => {
+  test('engagement: only inbound replies, short-link clicks and recorded page views set lastEngagedAt', async () => {
     const r = await run({ limit: 200 });
-    const byKind = (kind) => r.events.filter((e) => e.kind === kind);
-    expect(byKind('opened').length).toBeGreaterThan(0);
-    expect(byKind('opened').every((e) => e.engaged === false)).toBe(true);
-    expect(r.events.filter((e) => e.source === 'call').every((e) => e.engaged === false)).toBe(true);
-    for (const kind of ['clicked', 'viewed', 'replied']) expect(byKind(kind).every((e) => e.engaged)).toBe(true);
+    const engaged = r.events.filter((e) => e.engaged);
+    expect(new Set(engaged.map((e) => e.source))).toEqual(new Set(['sms', 'link', 'pageview']));
+    expect(engaged.every((e) => ['replied', 'clicked', 'viewed'].includes(e.kind))).toBe(true);
+    // every other event is shown but never engaged
+    const rest = r.events.filter((e) => !engaged.includes(e));
+    expect(rest.some((e) => e.kind === 'opened')).toBe(true);
+    expect(rest.some((e) => e.kind === 'provider_clicked')).toBe(true);
+    expect(rest.some((e) => e.kind === 'viewed_unfiltered')).toBe(true);
+    expect(rest.some((e) => e.source === 'call')).toBe(true);
 
-    // Newsletter open at T(70) is the newest thing of all but must not be "engaged".
-    expect(r.summary.lastEmailOpenAt).toBe(T(70).toISOString());
-    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString()); // the portal visit, not the later open
-    expect(r.summary.lastEngagedFrom).toBe('portal visits');
+    // Newer than every engaged event, and none of it counts: a provider click (T91), an open (T89, T70),
+    // unfiltered token-page stamps (T42-T48), the call (T50), an AP-inbox click (T60).
+    expect(r.summary.lastEngagedAt).toBe(T(55).toISOString()); // the human short-link click
+    expect(r.summary.lastEngagedFrom).toBe('link clicks');
+    expect(r.summary.lastEmailOpenAt).toBe(T(89).toISOString());
+    expect(r.summary.lastProviderClickAt).toBe(T(91).toISOString());
     expect(r.summary.lastEmailOpenNote).toMatch(/unreliable/i);
+    expect(r.summary.lastProviderClickNote).toMatch(/unfiltered/i);
     // the summary agrees with the events flagged engaged
-    const newestEngaged = r.events.filter((e) => e.engaged).map((e) => e.at).sort().pop();
-    expect(newestEngaged).toBe(r.summary.lastEngagedAt);
+    expect(engaged.map((e) => e.at).sort().pop()).toBe(r.summary.lastEngagedAt);
+  });
+
+  test('a customer with only non-engaged evidence has no engagement at all', async () => {
+    const solo = randomUUID(); const est = randomUUID(); const en = randomUUID();
+    await db('customers').insert({ id: solo, email: 'quiet@example.test' });
+    await db('estimates').insert({ id: est, customer_id: solo, address: '2 Synthetic Way' });
+    await db('estimate_views').insert({ id: randomUUID(), estimate_id: est, viewed_at: T(5) });
+    await db('customer_contracts').insert({ id: randomUUID(), customer_id: solo, viewed_at: T(6), title: 'Agreement' });
+    await db('automation_enrollments').insert({ id: en, template_key: 'welcome', customer_id: solo });
+    await db('automation_step_sends').insert({ id: randomUUID(), enrollment_id: en, step_order: 0, status: 'clicked', email: 'quiet@example.test', sent_at: T(1), opened_at: T(2), clicked_at: T(3) });
+    const r = await timeline.getCustomerActivity(solo, {}, db);
+    expect(r.events).toHaveLength(5);
+    expect(r.events.every((e) => e.engaged === false)).toBe(true);
+    expect(r.summary).toMatchObject({ lastEngagedAt: null, lastEngagedFrom: null, lastEmailOpenAt: T(2).toISOString(), lastProviderClickAt: T(3).toISOString() });
   });
 
   test('summary reads the whole history, not just the visible page', async () => {
     const r = await run({ limit: 1 });
     expect(r.events).toHaveLength(1);
-    expect(r.summary.lastEngagedAt).toBe(T(59).toISOString());
+    expect(r.summary.lastEngagedAt).toBe(T(55).toISOString());
   });
 
   test('cursor pages concatenate to the full list with no gaps or repeats', async () => {
@@ -354,15 +400,14 @@ pg('getCustomerActivity on Postgres', () => {
     expect(seen.map((e) => e.id)).toEqual(full.map((e) => e.id));
   });
 
-  test('a missing optional column reports the source absent and still returns the rest', async () => {
-    await db.raw('ALTER TABLE customers DROP COLUMN last_seen_at');
-    timeline.resetGuardCacheForTests();
+  test('a source whose table cannot be read is reported unavailable and the rest still returns', async () => {
+    await db.raw('DROP TABLE call_log');
     const r = await run({ limit: 200 });
-    expect(r.absentSources).toContain('portal visits');
-    expect(r.events.some((e) => e.channel === 'portal' && e.title === 'Last seen in the portal')).toBe(false);
-    expect(r.summary.lastEngagedAt).toBe(T(49).toISOString()); // outside-link click is now newest engaged
-    await db.raw('ALTER TABLE customers ADD COLUMN last_seen_at timestamp');
-    timeline.resetGuardCacheForTests();
+    expect(r.unavailableSources).toEqual(['calls']);
+    expect(r.events.some((e) => e.source === 'call')).toBe(false);
+    expect(r.events.some((e) => e.title === 'Replied by text')).toBe(true);
+    expect(r.summary.lastEngagedAt).toBe(T(55).toISOString());
+    await db.raw(CALL_LOG_DDL);
   });
 
   test('unknown customer returns null; a bad cursor is a 400', async () => {

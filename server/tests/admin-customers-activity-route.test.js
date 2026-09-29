@@ -44,7 +44,7 @@ test('dark by default: answers { enabled: false } and reads nothing', async () =
 
 test('gate on: passes the customer, cursor and limit through and marks the payload enabled', async () => {
   process.env[GATE] = 'true';
-  mockGet.mockResolvedValue({ events: [{ id: 'a' }], hasMore: false, nextCursor: null, summary: null, absentSources: [], unavailableSources: [] });
+  mockGet.mockResolvedValue({ events: [{ id: 'a' }], hasMore: false, nextCursor: null, summary: null, unavailableSources: [] });
   const { res } = await call({ query: { before: '2026-09-01T00:00:00Z', limit: '25' } });
   expect(mockGet).toHaveBeenCalledWith('cust-1', { before: '2026-09-01T00:00:00Z', limit: '25' });
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ enabled: true, events: [{ id: 'a' }] }));

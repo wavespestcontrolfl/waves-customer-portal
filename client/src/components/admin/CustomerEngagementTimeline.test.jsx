@@ -33,7 +33,7 @@ describe("CustomerEngagementTimeline", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("badges clicks, views and replies as Engaged but never an email open, and labels the open unreliable", async () => {
+  it("badges only first-party evidence as Engaged and labels the informational summary fields", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => respond({
       enabled: true,
       events: [
@@ -42,10 +42,15 @@ describe("CustomerEngagementTimeline", () => {
         ev("c", "clicked", "Clicked the invoice link"),
         ev("d", "viewed", "Opened the appointment page", { channel: "page" }),
         ev("e", "sent", "Text sent"),
+        ev("f", "provider_clicked", "Link clicked (reported by email provider — may be a scanner)", { channel: "email", detail: "Your estimate · to s***@example.test" }),
+        ev("g", "viewed_unfiltered", "Viewed their estimate (unfiltered)", { channel: "page" }),
       ],
       hasMore: false,
-      summary: { lastEngagedAt: "2026-09-20T15:00:00.000Z", lastEmailOpenAt: "2026-09-21T15:00:00.000Z" },
-      absentSources: ["outside link clicks"],
+      summary: {
+        lastEngagedAt: "2026-09-20T15:00:00.000Z",
+        lastEmailOpenAt: "2026-09-21T15:00:00.000Z",
+        lastProviderClickAt: "2026-09-22T15:00:00.000Z",
+      },
       unavailableSources: [],
     })));
     render(<CustomerEngagementTimeline customerId="c1" />);
@@ -56,9 +61,14 @@ describe("CustomerEngagementTimeline", () => {
     expect(badged("Opened the appointment page")).toBeInTheDocument();
     expect(badged("Email opened (not reliable)")).not.toBeInTheDocument();
     expect(badged("Text sent")).not.toBeInTheDocument();
+    expect(badged("Link clicked (reported by email provider — may be a scanner)")).not.toBeInTheDocument();
+    expect(badged("Viewed their estimate (unfiltered)")).not.toBeInTheDocument();
+    expect(screen.getByText("Your estimate · to s***@example.test")).toBeInTheDocument();
     expect(screen.getByTestId("engagement-summary")).toHaveTextContent(/Last engaged/);
     expect(screen.getByTestId("engagement-last-open")).toHaveTextContent(/unreliable/i);
-    expect(screen.getByText(/Not tracked yet: outside link clicks/)).toBeInTheDocument();
+    expect(screen.getByTestId("engagement-last-provider-click")).toHaveTextContent(/unfiltered/i);
+    expect(screen.getByTestId("engagement-last-provider-click")).toHaveTextContent(/not counted/i);
+    expect(screen.queryByText(/Not tracked yet/)).not.toBeInTheDocument();
   });
 
   it("loads older events with the cursor and appends them without repeats", async () => {

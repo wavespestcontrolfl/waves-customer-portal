@@ -4,46 +4,54 @@
  * One newest-first list per customer of what we sent them and what they did,
  * merged from the tables that already record it:
  *
- *   texts        sms_log (sent / delivered / failed, inbound replies)
- *   links        short_code_clicks via short_codes (customer or lead linkage)
- *   emails       email_messages, automation_step_sends, newsletter_send_deliveries
- *   pages        customer_page_views, estimate_views, prep_guide_views,
- *                service_records / projects.report_viewed_at,
- *                customer_contracts.viewed_at, price_change_notices
- *   calls        call_log
- *   portal       customers.last_seen_at  (absent until the portal-visit PR)
- *   outside link outbound_link_clicks    (absent until the /go tracking PR)
+ *   texts    sms_log (sent / delivered / failed, inbound replies)
+ *   links    short_code_clicks via short_codes (customer or lead linkage)
+ *   emails   email_messages, automation_step_sends, newsletter_send_deliveries
+ *   pages    customer_page_views, estimate_views, prep_guide_views,
+ *            service_records / projects.report_viewed_at,
+ *            customer_contracts.viewed_at, price_change_notices
+ *   calls    call_log
  *
- * Two of those sources ship in sibling PRs, so every source declares the
- * relations it needs and is skipped (reported in `absentSources`) when one is
- * missing: the timeline lights up on its own once those merge, with no code
- * change here.
+ * ENGAGEMENT RULE (owner-approved, PR #5337 round 3). `engaged` (the badge and
+ * `summary.lastEngagedAt`) comes ONLY from first-party evidence that was
+ * already bot / staff filtered where it was recorded:
  *
- * ENGAGEMENT RULE. A click, a page view, an inbound text reply and a portal
- * visit are things the customer DID. An email OPEN is not: Apple Mail Privacy
- * Protection pre-fetches every tracking pixel, so opens fire without a human.
- * Opens are listed (kind 'opened') but never engaged, and never feed
- * `lastEngagedAt`; the newest open is reported separately as
- * `lastEmailOpenAt`, labelled unreliable. Calls are shown but, per the brief,
- * are not counted in lastEngagedAt either.
+ *   short_code_clicks     human/bot-filtered at /l/
+ *   customer_page_views   filtered by its recorder
+ *   inbound sms replies   non-recruiting
+ *
+ * Everything else is shown in the feed and NEVER engaged: SendGrid opens AND
+ * clicks (a scanner or Apple Mail Privacy Protection fires both with no human),
+ * the raw token-page stamps (estimate / prep guide / report / contract /
+ * price-change views, written unfiltered) and calls. Provider clicks are
+ * labelled as such and the raw stamps "(unfiltered)". The summary reports the
+ * newest open (`lastEmailOpenAt`) and newest provider click
+ * (`lastProviderClickAt`) as separate informational fields. One tap that
+ * produced both a provider click and a short-link click shows once, as the
+ * short-link click. Portal-visit and outside-link sources join in a follow-up
+ * PR once the PRs that create them have merged.
+ *
+ * RECIPIENTS. Every email event names the address the send row itself recorded,
+ * masked ("to b***@example.com"): no guessing which sends were the customer's
+ * own, so a third-party inbox (a payer, an accounts-payable desk) reads as one.
  *
  * PAGINATION. One query per source, each capped at `limit` rows (fetched as
  * limit+1 so a source with exactly `limit` rows is not reported as having
  * more) ordered by the newest event the row has BEFORE the cursor; rows are
  * exploded into events (an email row is up to five) and merged in JS. Any
  * event in the overall top `limit` sits in a row inside its own source's top
- * `limit`, so the merge is
- * exact. The cursor is the last event's ISO time (strictly-before), so two
- * events sharing the same millisecond across a page boundary can drop one:
- * an accepted, cosmetic edge for a read-only feed.
+ * `limit`, so the merge is exact (each row's ranking times are exactly the times
+ * that become its events, including the provider-click collapse, which is SQL).
+ * The cursor is the last event's ISO time (strictly-before), so two events
+ * sharing the same millisecond across a page boundary can drop one: an
+ * accepted, cosmetic edge for a read-only feed.
  *
- * The summary (`lastEngagedAt`, `lastEmailOpenAt`) is computed from per-source
- * MAX() queries, not from the visible page, and only on the first page.
+ * The summary is computed from per-source MAX() queries, not from the visible
+ * page, and only on the first page.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
-const { BOT_UA_RE } = require('../utils/bot-ua');
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -54,52 +62,6 @@ const FAR_FUTURE = '9999-12-31T00:00:00.000Z';
 // something we did or something a mail client did on its own.
 const ENGAGED_KINDS = new Set(['clicked', 'viewed', 'replied']);
 const isEngagedKind = (kind) => ENGAGED_KINDS.has(kind);
-
-// ---------------------------------------------------------------------------
-// Relation guards (to_regclass / pg_attribute respect the search_path, and are
-// cached so a page of the customer screen costs a handful of catalog reads).
-// ---------------------------------------------------------------------------
-const GUARD_NEGATIVE_TTL_MS = 5 * 60 * 1000;
-const guardCache = new Map();
-
-async function cachedGuard(key, probe) {
-  const hit = guardCache.get(key);
-  if (hit && (hit.ok || Date.now() - hit.at < GUARD_NEGATIVE_TTL_MS)) return hit.ok;
-  const ok = !!(await probe());
-  guardCache.set(key, { ok, at: Date.now() });
-  return ok;
-}
-
-function hasRelation(dbh, table) {
-  return cachedGuard(`t:${table}`, async () => {
-    const r = await dbh.raw('SELECT to_regclass(?) IS NOT NULL AS ok', [table]);
-    return r?.rows?.[0]?.ok;
-  });
-}
-
-function hasColumn(dbh, table, column) {
-  return cachedGuard(`c:${table}.${column}`, async () => {
-    const r = await dbh.raw(
-      `SELECT 1 AS ok FROM pg_attribute
-        WHERE attrelid = to_regclass(?) AND attname = ? AND NOT attisdropped AND attnum > 0
-        LIMIT 1`,
-      [table, column],
-    );
-    return (r?.rows || []).length > 0;
-  });
-}
-
-function resetGuardCacheForTests() { guardCache.clear(); }
-
-async function needsPresent(dbh, needs = []) {
-  for (const need of needs) {
-    const ok = Array.isArray(need)
-      ? await hasColumn(dbh, need[0], need[1])
-      : await hasRelation(dbh, need);
-    if (!ok) return false;
-  }
-  return true;
-}
 
 // ---------------------------------------------------------------------------
 // Event construction
@@ -114,10 +76,6 @@ function preview(text, max = PREVIEW_MAX) {
   const flat = String(text || '').replace(/\s+/g, ' ').trim();
   if (!flat) return null;
   return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
-}
-
-function hostOf(url) {
-  try { return new URL(String(url)).hostname.replace(/^www\./, ''); } catch { return null; }
 }
 
 function mk(source, rowId, ref, { at, channel, kind, title, detail = null }) {
@@ -156,15 +114,18 @@ function pageViewTitle(page) {
 // ---------------------------------------------------------------------------
 // Sources. `from(dbh, ctx)` builds FROM/JOIN/WHERE only (a knex builder is
 // thenable, so it is returned synchronously and never awaited before it is
-// finished); the runner adds the
-// select list, the recency key, the order and the limit. `ts` are the SQL
-// expressions that carry an event time for the row. `toEvents(row)` explodes a
-// row (all of its timestamps) and the runner drops the ones at/after the
-// cursor. `engaged` / `open` feed the first-page summary.
+// finished); the runner adds the select list, the recency key, the order and
+// the limit. `ts` are the SQL expressions that carry an event time for the row
+// (a function gets ctx and returns { sql, bindings }); `select` entries may
+// likewise be `(dbh, ctx) => raw`. `toEvents(row)` explodes a row (all of its
+// timestamps) and the runner drops the ones at/after the cursor. `engaged`
+// (first-party evidence only), `open` and `providerClick` feed the first-page
+// summary.
 // ---------------------------------------------------------------------------
 // sms_log outbound statuses that mean the text was handed to the carrier (or
-// failed trying). 'queued' / 'accepted' are the provider's own handed-off states.
-const OUTBOUND_LEFT = ['', 'sent', 'queued', 'accepted', 'delivered', 'failed', 'undelivered'];
+// failed trying). 'queued' / 'accepted' are the provider's own handed-off
+// states; 'read' is a delivered text the recipient's device confirmed.
+const OUTBOUND_LEFT = ['', 'sent', 'queued', 'accepted', 'delivered', 'read', 'failed', 'undelivered'];
 
 function isPushProof(row) {
   if (String(row.from_phone || '').toLowerCase() === 'push') return true;
@@ -173,23 +134,35 @@ function isPushProof(row) {
   return String(meta?.channel || '').toLowerCase() === 'push';
 }
 
-// Postgres regex (ARE) spelling of the shared bot user-agent filter, so the
-// feed AND the summary MAX() queries drop the same rows isBotUserAgent would.
-// The only construct that differs is the word boundary: JS \b is ARE \y.
-const BOT_UA_PG = BOT_UA_RE.source.replace(/\\b/g, '\\y');
-
 const maskEmail = (email) => {
-  const [local = '', domain = ''] = String(email || '').split('@');
-  return `${local.slice(0, 1)}***@${domain}`;
+  const [local = '', domain = ''] = String(email || '').trim().split('@');
+  return local && domain ? `${local.slice(0, 1)}***@${domain}`.toLowerCase() : null;
 };
-const normEmail = (email) => String(email || '').trim().toLowerCase();
 
-// SQL twin of the `send row's email is the customer's` rule (normEmail against
-// ctx.emailNorm in the automation source's toEvents): trimmed, case-insensitive,
-// and never true for a blank address. Reads the owning customer's row rather
-// than a binding so it can sit inside the ranking expressions too.
-const AUTOMATION_OWN_SEND = `(LOWER(BTRIM(COALESCE(s.email, ''))) <> ''
-  AND LOWER(BTRIM(COALESCE(s.email, ''))) = (SELECT LOWER(BTRIM(COALESCE(cu_own.email, ''))) FROM customers cu_own WHERE cu_own.id = e.customer_id))`;
+// A provider-reported click (SendGrid) is informational: a scanner fires it as
+// readily as a person. When the same tap also produced a human short-link click
+// (email links are short-wrapped), that click is the engaged event and the
+// provider click is not listed a second time: a short_code_clicks row for this
+// customer (or their lead) within two minutes of it. It is SQL so the ranking
+// times below stay exactly the times that become events.
+function nearShortClick(tsExpr, ctx) {
+  return {
+    sql: `EXISTS (SELECT 1 FROM short_code_clicks scx JOIN short_codes scy ON scy.id = scx.short_code_id
+      WHERE scx.is_bot = false
+        AND (scy.customer_id = ? OR scy.lead_id IN (SELECT ld.id FROM leads ld WHERE ld.customer_id = ?))
+        AND scx.clicked_at BETWEEN ${tsExpr} - INTERVAL '2 minutes' AND ${tsExpr} + INTERVAL '2 minutes')`,
+    bindings: [ctx.customerId, ctx.customerId],
+  };
+}
+// The provider click's ranking time (null once collapsed) and its collapse flag.
+const providerClickTime = (col) => (ctx) => {
+  const near = nearShortClick(col, ctx);
+  return { sql: `CASE WHEN ${col} IS NOT NULL AND NOT ${near.sql} THEN ${col} END`, bindings: near.bindings };
+};
+const providerClickCollapsed = (col) => (dbh, ctx) => {
+  const near = nearShortClick(col, ctx);
+  return dbh.raw(`${near.sql} AS clicked_collapsed`, near.bindings);
+};
 
 const SOURCES = [
   {
@@ -232,9 +205,10 @@ const SOURCES = [
           detail: preview(r.message_body),
         })]);
       }
-      const kind = status === 'delivered' ? 'delivered'
+      const kind = ['delivered', 'read'].includes(status) ? 'delivered'
         : ['failed', 'undelivered'].includes(status) ? 'failed' : 'sent';
-      const title = { delivered: 'Text delivered', failed: 'Text failed', sent: 'Text sent' }[kind];
+      const title = status === 'read' ? 'Text delivered (read receipt)'
+        : { delivered: 'Text delivered', failed: 'Text failed', sent: 'Text sent' }[kind];
       return compact([mk('sms', r.id, ref, {
         at: r.created_at, channel: 'sms', kind, title: `${title}${type}`, detail: preview(r.message_body),
       })]);
@@ -242,16 +216,13 @@ const SOURCES = [
   },
   {
     name: 'link clicks',
-    needs: [['short_code_clicks', 'is_bot'], ['short_codes', 'customer_id']],
     // Also count a click on a link minted for one of this customer's leads
     // (a lead-only prospect has no customer_id on the short code yet).
     from: (dbh, ctx) => dbh('short_code_clicks as scc')
       .join('short_codes as sc', 'sc.id', 'scc.short_code_id')
       .where('scc.is_bot', false)
-      .where((w) => {
-        w.where('sc.customer_id', ctx.customerId);
-        if (ctx.leadLinkage) w.orWhereIn('sc.lead_id', dbh('leads').where('customer_id', ctx.customerId).select('id'));
-      }),
+      .where((w) => w.where('sc.customer_id', ctx.customerId)
+        .orWhereIn('sc.lead_id', dbh('leads').where('customer_id', ctx.customerId).select('id'))),
     select: ['scc.id', 'scc.clicked_at', 'sc.kind', 'sc.channel', 'sc.purpose'],
     ts: ['scc.clicked_at'],
     engaged: { expr: 'scc.clicked_at' },
@@ -267,6 +238,7 @@ const SOURCES = [
     },
   },
   {
+    // Email evidence is provider-reported (SendGrid): shown, never engaged.
     name: 'emails',
     from: (dbh, ctx) => dbh('email_messages as em')
       .whereRaw("COALESCE(em.recipient_type, '') NOT IN ('admin', 'test')")
@@ -285,75 +257,63 @@ const SOURCES = [
             .whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')"));
         }
       }),
-    select: ['em.id', 'em.status', 'em.template_key', 'em.subject_snapshot', 'em.queued_at', 'em.updated_at', 'em.sent_at',
-      'em.delivered_at', 'em.opened_at', 'em.clicked_at', 'em.bounced_at', 'em.complained_at'],
+    select: ['em.id', 'em.status', 'em.template_key', 'em.subject_snapshot', 'em.recipient_email_snapshot', 'em.queued_at',
+      'em.updated_at', 'em.sent_at', 'em.delivered_at', 'em.opened_at', 'em.clicked_at', 'em.bounced_at', 'em.complained_at',
+      providerClickCollapsed('em.clicked_at')],
     // A failure has no column of its own: the row flips to 'failed' on the
     // update that stamps updated_at, so that is the failure time (queued_at is
     // when it was created, which would sort a failure BEFORE its own send).
-    ts: ['em.sent_at', 'em.delivered_at', 'em.opened_at', 'em.clicked_at', 'em.bounced_at', 'em.complained_at',
+    ts: ['em.sent_at', 'em.delivered_at', 'em.opened_at', providerClickTime('em.clicked_at'), 'em.bounced_at', 'em.complained_at',
       "CASE WHEN em.status = 'failed' THEN COALESCE(em.updated_at, em.queued_at) END"],
-    engaged: { expr: 'em.clicked_at' },
     open: { expr: 'em.opened_at' },
-    toEvents: (r) => emailEvents('email', r, r.subject_snapshot || r.template_key, {
-      sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, clicked: r.clicked_at,
+    providerClick: { expr: 'em.clicked_at' },
+    toEvents: (r) => emailEvents('email', r, r.subject_snapshot || r.template_key, r.recipient_email_snapshot, {
+      sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, provider_clicked: r.clicked_collapsed ? null : r.clicked_at,
       bounced: r.bounced_at, complained: r.complained_at,
       failed: String(r.status || '') === 'failed' ? (r.updated_at || r.queued_at) : null,
     }, 'email_messages'),
   },
   {
     name: 'automation emails',
-    needs: ['automation_step_sends', 'automation_enrollments'],
     from: (dbh, ctx) => dbh('automation_step_sends as s')
       .join('automation_enrollments as e', 'e.id', 's.enrollment_id')
       .leftJoin('automation_templates as t', 't.key', 'e.template_key')
       .where('e.customer_id', ctx.customerId),
     select: ['s.id', 's.status', 's.step_order', 's.sent_at', 's.delivered_at', 's.opened_at', 's.clicked_at',
-      's.updated_at', 's.email', 't.name as template_name', 'e.template_key'],
+      's.updated_at', 's.email', 't.name as template_name', 'e.template_key', providerClickCollapsed('s.clicked_at')],
     // The webhook stamps a bounce/complaint only as status + updated_at (the
     // table has no bounced_at/complained_at), so updated_at dates all three.
-    // The ranking times must be exactly the times toEvents turns into events, or
-    // the bounded per-source merge drops a newer event: a send to a billing
-    // contact shows only its sent event, so only that time (or the delivery time
-    // when sent_at is missing) may rank the row.
-    ts: [`CASE WHEN ${AUTOMATION_OWN_SEND} THEN s.sent_at ELSE COALESCE(s.sent_at, s.delivered_at) END`,
-      `CASE WHEN ${AUTOMATION_OWN_SEND} THEN s.delivered_at END`,
-      `CASE WHEN ${AUTOMATION_OWN_SEND} THEN s.opened_at END`,
-      `CASE WHEN ${AUTOMATION_OWN_SEND} THEN s.clicked_at END`,
-      `CASE WHEN ${AUTOMATION_OWN_SEND} AND s.status IN ('failed', 'bounced', 'complained') THEN s.updated_at END`],
-    // A payment-failed enrollment redirected to a billing contact
-    // (automation-runner.js) sends to someone else's inbox, so its clicks and
-    // opens are that person's, not the customer's: only a send row addressed to
-    // the customer's own email counts toward the summary.
-    engaged: { expr: 's.clicked_at', where: (q) => q.whereRaw(AUTOMATION_OWN_SEND) },
-    open: { expr: 's.opened_at', where: (q) => q.whereRaw(AUTOMATION_OWN_SEND) },
-    toEvents: (r, ctx = {}) => (String(r.email || '') && normEmail(r.email) === ctx.emailNorm ? emailEvents('automation', r,
-      `${r.template_name || r.template_key || 'Automation'} (step ${Number(r.step_order) + 1 || 1})`, {
-        sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, clicked: r.clicked_at,
+    ts: ['s.sent_at', 's.delivered_at', 's.opened_at', providerClickTime('s.clicked_at'),
+      "CASE WHEN s.status IN ('failed', 'bounced', 'complained') THEN s.updated_at END"],
+    open: { expr: 's.opened_at' },
+    providerClick: { expr: 's.clicked_at' },
+    toEvents: (r) => emailEvents('automation', r,
+      `${r.template_name || r.template_key || 'Automation'} (step ${Number(r.step_order) + 1 || 1})`, r.email, {
+        sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, provider_clicked: r.clicked_collapsed ? null : r.clicked_at,
         failed: String(r.status || '') === 'failed' ? r.updated_at : null,
         bounced: String(r.status || '') === 'bounced' ? r.updated_at : null,
         complained: String(r.status || '') === 'complained' ? r.updated_at : null,
-      }, 'automation_step_sends') : billingContactSend(r)),
+      }, 'automation_step_sends'),
   },
   {
     name: 'newsletters',
-    needs: ['newsletter_send_deliveries', 'newsletter_sends', ['newsletter_subscribers', 'customer_id']],
     from: (dbh, ctx) => dbh('newsletter_send_deliveries as d')
       .join('newsletter_subscribers as sub', 'sub.id', 'd.subscriber_id')
       .join('newsletter_sends as ns', 'ns.id', 'd.send_id')
       .where('sub.customer_id', ctx.customerId),
     select: ['d.id', 'd.sent_at', 'd.delivered_at', 'd.opened_at', 'd.clicked_at', 'd.bounced_at',
-      'd.complained_at', 'ns.subject'],
-    ts: ['d.sent_at', 'd.delivered_at', 'd.opened_at', 'd.clicked_at', 'd.bounced_at', 'd.complained_at'],
-    engaged: { expr: 'd.clicked_at' },
+      'd.complained_at', 'ns.subject', 'sub.email as subscriber_email', providerClickCollapsed('d.clicked_at')],
+    ts: ['d.sent_at', 'd.delivered_at', 'd.opened_at', providerClickTime('d.clicked_at'), 'd.bounced_at', 'd.complained_at'],
     open: { expr: 'd.opened_at' },
-    toEvents: (r) => emailEvents('newsletter', r, `Newsletter: ${r.subject || 'issue'}`, {
-      sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, clicked: r.clicked_at,
+    providerClick: { expr: 'd.clicked_at' },
+    toEvents: (r) => emailEvents('newsletter', r, `Newsletter: ${r.subject || 'issue'}`, r.subscriber_email, {
+      sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, provider_clicked: r.clicked_collapsed ? null : r.clicked_at,
       bounced: r.bounced_at, complained: r.complained_at,
     }, 'newsletter_send_deliveries'),
   },
   {
+    // customer_page_views is recorded by a bot/staff-filtering recorder: engaged.
     name: 'page views',
-    needs: ['customer_page_views'],
     from: (dbh, ctx) => dbh('customer_page_views as pv').where('pv.customer_id', ctx.customerId),
     select: ['pv.id', 'pv.page', 'pv.viewed_at'],
     ts: ['pv.viewed_at'],
@@ -366,123 +326,74 @@ const SOURCES = [
       detail: String(r.page || '').startsWith('portal:') ? String(r.page).slice('portal:'.length) : null,
     })]),
   },
+  // The token-page stamps below are written unfiltered by their public routes
+  // (any load, a scanner or a staff preview included): listed, never engaged.
   {
     name: 'estimate views',
-    needs: ['estimate_views', 'estimates'],
     from: (dbh, ctx) => dbh('estimate_views as ev').join('estimates as es', 'es.id', 'ev.estimate_id')
       .where('es.customer_id', ctx.customerId),
     select: ['ev.id', 'ev.viewed_at', 'es.id as estimate_id', 'es.address'],
     ts: ['ev.viewed_at'],
-    engaged: { expr: 'ev.viewed_at' },
     toEvents: (r) => compact([mk('estimate', r.id, { type: 'estimate', id: r.estimate_id }, {
-      at: r.viewed_at, channel: 'page', kind: 'viewed', title: 'Opened their estimate', detail: r.address,
+      at: r.viewed_at, channel: 'page', kind: 'viewed_unfiltered', title: 'Viewed their estimate (unfiltered)', detail: r.address,
     })]),
   },
   {
     name: 'prep guide views',
-    needs: ['prep_guide_views', ['prep_guide_views', 'scheduled_service_id'], ['prep_guide_views', 'user_agent'],
-      'scheduled_services', 'projects'],
-    // prep-public.js logs every load of a prep token with no bot or staff
-    // filter. Rows whose stored user agent is a link previewer / scanner are
-    // dropped here, from the feed and from lastEngagedAt alike. A staff preview
-    // looks like a browser and cannot be told apart from a stored row, so those
-    // stay and the event's note says so.
     from: (dbh, ctx) => dbh('prep_guide_views as v')
       .leftJoin('scheduled_services as ss', 'ss.id', 'v.scheduled_service_id')
       .leftJoin('projects as p', 'p.id', 'v.project_id')
-      .where((w) => w.where('ss.customer_id', ctx.customerId).orWhere('p.customer_id', ctx.customerId))
-      .whereRaw("COALESCE(v.user_agent, '') !~* ?", [BOT_UA_PG]),
+      .where((w) => w.where('ss.customer_id', ctx.customerId).orWhere('p.customer_id', ctx.customerId)),
     select: ['v.id', 'v.viewed_at', 'v.scheduled_service_id', 'v.project_id'],
     ts: ['v.viewed_at'],
-    engaged: { expr: 'v.viewed_at' },
     toEvents: (r) => compact([mk('prep', r.id,
       r.scheduled_service_id ? { type: 'scheduled_service', id: r.scheduled_service_id } : { type: 'project', id: r.project_id }, {
-        at: r.viewed_at, channel: 'page', kind: 'viewed', title: 'Opened the prep guide',
-        detail: 'Prep views are unfiltered for staff previews',
+        at: r.viewed_at, channel: 'page', kind: 'viewed_unfiltered', title: 'Viewed the prep guide (unfiltered)',
       })]),
   },
   {
     name: 'service report views',
-    needs: [['service_records', 'report_viewed_at']],
     from: (dbh, ctx) => dbh('service_records as sr').where('sr.customer_id', ctx.customerId).whereNotNull('sr.report_viewed_at'),
     select: ['sr.id', 'sr.report_viewed_at', 'sr.service_type'],
     ts: ['sr.report_viewed_at'],
-    engaged: { expr: 'sr.report_viewed_at' },
     toEvents: (r) => compact([mk('report', r.id, { type: 'service_record', id: r.id }, {
-      at: r.report_viewed_at, channel: 'page', kind: 'viewed', title: 'Opened their service report', detail: r.service_type,
+      at: r.report_viewed_at, channel: 'page', kind: 'viewed_unfiltered', title: 'Viewed their service report (unfiltered)', detail: r.service_type,
     })]),
   },
   {
     name: 'inspection report views',
-    needs: [['projects', 'report_viewed_at']],
     from: (dbh, ctx) => dbh('projects as pr').where('pr.customer_id', ctx.customerId).whereNotNull('pr.report_viewed_at'),
     select: ['pr.id', 'pr.report_viewed_at', 'pr.project_type'],
     ts: ['pr.report_viewed_at'],
-    engaged: { expr: 'pr.report_viewed_at' },
     toEvents: (r) => compact([mk('projectreport', r.id, { type: 'project', id: r.id }, {
-      at: r.report_viewed_at, channel: 'page', kind: 'viewed', title: 'Opened their inspection report',
+      at: r.report_viewed_at, channel: 'page', kind: 'viewed_unfiltered', title: 'Viewed their inspection report (unfiltered)',
       detail: r.project_type ? String(r.project_type).replace(/_/g, ' ') : null,
     })]),
   },
   {
     name: 'contract views',
-    needs: [['customer_contracts', 'viewed_at']],
     from: (dbh, ctx) => dbh('customer_contracts as cc').where('cc.customer_id', ctx.customerId).whereNotNull('cc.viewed_at'),
     select: ['cc.id', 'cc.viewed_at', 'cc.title'],
     ts: ['cc.viewed_at'],
-    engaged: { expr: 'cc.viewed_at' },
     toEvents: (r) => compact([mk('contract', r.id, { type: 'contract', id: r.id }, {
-      at: r.viewed_at, channel: 'page', kind: 'viewed', title: 'Opened a contract', detail: r.title,
+      at: r.viewed_at, channel: 'page', kind: 'viewed_unfiltered', title: 'Viewed a contract (unfiltered)', detail: r.title,
     })]),
   },
   {
     name: 'price-change notice views',
-    needs: [['price_change_notices', 'first_viewed_at']],
     from: (dbh, ctx) => dbh('price_change_notices as pn').where('pn.customer_id', ctx.customerId).whereNotNull('pn.first_viewed_at'),
     select: ['pn.id', 'pn.first_viewed_at', 'pn.view_count'],
     ts: ['pn.first_viewed_at'],
-    engaged: { expr: 'pn.first_viewed_at' },
     toEvents: (r) => {
       const n = Number(r.view_count) || 0;
       return compact([mk('pricechange', r.id, { type: 'price_change_notice', id: r.id }, {
-        at: r.first_viewed_at, channel: 'page', kind: 'viewed', title: 'Opened the price-change notice',
+        at: r.first_viewed_at, channel: 'page', kind: 'viewed_unfiltered', title: 'Viewed the price-change notice (unfiltered)',
         detail: n > 1 ? `Viewed ${n} times` : null,
       })]);
     },
   },
   {
-    // Sibling PR #5328 (GATE_OUTLINK_TRACKING): absent until it merges.
-    name: 'outside link clicks',
-    needs: ['outbound_link_clicks', 'outbound_links'],
-    from: (dbh, ctx) => dbh('outbound_link_clicks as oc')
-      .join('outbound_links as ol', 'ol.id', 'oc.outbound_link_id')
-      .where('oc.customer_id', ctx.customerId),
-    select: ['oc.id', 'oc.clicked_at', 'oc.surface', 'oc.template_key', 'ol.target_url'],
-    ts: ['oc.clicked_at'],
-    engaged: { expr: 'oc.clicked_at' },
-    toEvents: (r) => compact([mk('outlink', r.id, { type: 'outbound_link_click', id: r.id }, {
-      at: r.clicked_at,
-      channel: r.surface === 'email' ? 'email' : 'page',
-      kind: 'clicked',
-      title: 'Clicked an outside link in the prep guide',
-      detail: hostOf(r.target_url),
-    })]),
-  },
-  {
-    // Sibling stacked PR (portal visits): absent until customers.last_seen_at exists.
-    name: 'portal visits',
-    needs: [['customers', 'last_seen_at']],
-    from: (dbh, ctx) => dbh('customers as cu').where('cu.id', ctx.customerId).whereNotNull('cu.last_seen_at'),
-    select: ['cu.id', 'cu.last_seen_at'],
-    ts: ['cu.last_seen_at'],
-    engaged: { expr: 'cu.last_seen_at' },
-    toEvents: (r) => compact([mk('portal', r.id, { type: 'customer', id: r.id }, {
-      at: r.last_seen_at, channel: 'portal', kind: 'viewed', title: 'Last seen in the portal',
-    })]),
-  },
-  {
     name: 'calls',
-    needs: ['call_log'],
     from: (dbh, ctx) => dbh('call_log as cl').where('cl.customer_id', ctx.customerId),
     select: ['cl.id', 'cl.created_at', 'cl.direction', 'cl.status', 'cl.duration_seconds', 'cl.call_outcome'],
     ts: ['cl.created_at'],
@@ -501,26 +412,17 @@ const SOURCES = [
   },
 ];
 
-// The one thing shown for a send that went to someone other than the customer:
-// that it went out, to whom (masked). No delivery / open / click / failure
-// events and no engagement credit, since none of it is the customer's.
-function billingContactSend(r) {
-  const at = r.sent_at || r.delivered_at;
-  return compact([mk('automation', r.id, { type: 'automation_step_sends', id: r.id }, {
-    at, channel: 'email', kind: 'sent',
-    title: `Sent to billing contact${r.email ? ` ${maskEmail(r.email)}` : ''}`,
-    detail: preview(`${r.template_name || r.template_key || 'Automation'} (step ${Number(r.step_order) + 1 || 1})`),
-  })]);
-}
-
-function emailEvents(source, row, subject, stamps, table) {
+// One email row explodes into an event per stamp it carries. The recipient is the
+// address the send row itself recorded, masked, on every event.
+function emailEvents(source, row, subject, recipient, stamps, table) {
   const ref = { type: table, id: row.id };
-  const detail = preview(subject);
+  const masked = maskEmail(recipient);
+  const detail = [preview(subject, 100), masked && `to ${masked}`].filter(Boolean).join(' · ') || null;
   const defs = [
     ['sent', 'Email sent'],
     ['delivered', 'Email delivered'],
     ['opened', 'Email opened (not reliable)'],
-    ['clicked', 'Clicked a link in an email'],
+    ['provider_clicked', 'Link clicked (reported by email provider — may be a scanner)'],
     ['bounced', 'Email bounced'],
     ['complained', 'Marked an email as spam'],
     ['failed', 'Email failed to send'],
@@ -533,16 +435,21 @@ function emailEvents(source, row, subject, stamps, table) {
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
-function recencyKey(exprs, beforeIso) {
-  const parts = exprs.map((e) => `CASE WHEN (${e}) < ?::timestamptz THEN (${e}) END`);
-  return { sql: `GREATEST(${parts.join(', ')})`, bindings: exprs.map(() => beforeIso) };
+// Each ts entry is SQL text or (ctx) => { sql, bindings }; its bindings sit
+// before the cursor binding, and the expression is written twice per CASE.
+function recencyKey(exprs, beforeIso, ctx) {
+  const parts = exprs.map((e) => {
+    const { sql, bindings = [] } = typeof e === 'function' ? e(ctx) : { sql: e };
+    return { sql: `CASE WHEN (${sql}) < ?::timestamptz THEN (${sql}) END`, bindings: [...bindings, beforeIso, ...bindings] };
+  });
+  return { sql: `GREATEST(${parts.map((p) => p.sql).join(', ')})`, bindings: parts.flatMap((p) => p.bindings) };
 }
 
 async function runSource(src, ctx) {
   const { dbh, limit, beforeIso } = ctx;
-  const key = recencyKey(src.ts, beforeIso);
+  const key = recencyKey(src.ts, beforeIso, ctx);
   const q = src.from(dbh, ctx)
-    .select(src.select)
+    .select(src.select.map((c) => (typeof c === 'function' ? c(dbh, ctx) : c)))
     .select(dbh.raw(`${key.sql} AS _key`, key.bindings))
     .whereRaw(`${key.sql} IS NOT NULL`, key.bindings)
     .orderBy('_key', 'desc')
@@ -573,23 +480,27 @@ const latest = (values) => values.filter(Boolean).sort().pop() || null;
 async function computeSummary(sources, ctx) {
   const tasks = [];
   for (const s of sources) {
-    if (s.engaged) tasks.push({ s, kind: 'engaged', run: maxOf(ctx.dbh, s, ctx, s.engaged) });
-    if (s.open) tasks.push({ s, kind: 'open', run: maxOf(ctx.dbh, s, ctx, s.open) });
+    for (const kind of ['engaged', 'open', 'providerClick']) {
+      if (s[kind]) tasks.push({ s, kind, run: maxOf(ctx.dbh, s, ctx, s[kind]) });
+    }
   }
   const results = await Promise.allSettled(tasks.map((t) => t.run));
   const failed = [];
   const engaged = [];
   const opens = [];
+  const providerClicks = [];
   results.forEach((r, i) => {
     const { s, kind } = tasks[i];
     if (r.status === 'rejected') {
       logFailure(`summary (${s.name})`, ctx.customerId, r.reason);
       if (!failed.includes(s.name)) failed.push(s.name);
     } else if (kind === 'engaged') engaged.push({ s, at: r.value });
-    else opens.push(r.value);
+    else if (kind === 'open') opens.push(r.value);
+    else providerClicks.push(r.value);
   });
-  // A source can run two queries (engagement MAX + open MAX): one failing does
-  // not hide the other, so the summary is null only when EVERY query failed.
+  // A source can run several queries (email sources: open MAX + provider-click
+  // MAX): one failing does not hide the others, so the summary is null only
+  // when EVERY query failed.
   if (tasks.length && results.every((r) => r.status === 'rejected')) return { summary: null, failed };
   const newest = engaged.filter((e) => e.at).sort((a, b) => (a.at < b.at ? 1 : -1))[0] || null;
   return {
@@ -598,6 +509,8 @@ async function computeSummary(sources, ctx) {
       lastEngagedFrom: newest?.s.name || null,
       lastEmailOpenAt: latest(opens),
       lastEmailOpenNote: 'Email opens are unreliable (Apple Mail pre-loads them), so they are not counted as engagement.',
+      lastProviderClickAt: latest(providerClicks),
+      lastProviderClickNote: 'Email-provider clicks are unfiltered (security scanners click links too), so they are not counted as engagement.',
     },
     failed,
   };
@@ -628,7 +541,7 @@ function clampLimit(limit) {
 
 /**
  * getCustomerActivity(customerId, { before, limit }) ->
- *   { events, hasMore, nextCursor, summary, absentSources, unavailableSources }
+ *   { events, hasMore, nextCursor, summary, unavailableSources }
  * `summary` is null on cursor pages (only the first page carries it).
  * `dbh` is injectable for tests.
  */
@@ -644,18 +557,10 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
   if (!customer) return null;
   const emails = [...new Set([customer.email, String(customer.email || '').toLowerCase()]
     .map((e) => String(e || '').trim()).filter(Boolean))];
-  const leadLinkage = await hasColumn(dbh, 'short_codes', 'lead_id') && await hasColumn(dbh, 'leads', 'customer_id');
-  const ctx = { dbh, customerId: customer.id, emails, emailNorm: normEmail(customer.email), leadLinkage, limit: cap, beforeIso: beforeIso || FAR_FUTURE };
-
-  const absentSources = [];
-  const live = [];
-  for (const src of SOURCES) {
-    if (await needsPresent(dbh, src.needs)) live.push(src);
-    else absentSources.push(src.name);
-  }
+  const ctx = { dbh, customerId: customer.id, emails, limit: cap, beforeIso: beforeIso || FAR_FUTURE };
 
   const unavailableSources = [];
-  const settled = await Promise.all(live.map(async (src) => {
+  const settled = await Promise.all(SOURCES.map(async (src) => {
     try {
       return await runSource(src, ctx);
     } catch (err) {
@@ -672,7 +577,7 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
   let summary = null;
   if (!beforeIso) {
     try {
-      const out = await computeSummary(live.filter((s) => !unavailableSources.includes(s.name)), ctx);
+      const out = await computeSummary(SOURCES.filter((s) => !unavailableSources.includes(s.name)), ctx);
       summary = out.summary;
       for (const name of out.failed) if (!unavailableSources.includes(name)) unavailableSources.push(name);
     } catch (err) {
@@ -681,7 +586,7 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
     }
   }
 
-  return { ...merged, summary, absentSources, unavailableSources };
+  return { ...merged, summary, unavailableSources };
 }
 
 module.exports = {
@@ -692,9 +597,4 @@ module.exports = {
   DEFAULT_LIMIT,
   MAX_LIMIT,
   SOURCES,
-  BOT_UA_PG,
-  hasRelation,
-  hasColumn,
-  needsPresent,
-  resetGuardCacheForTests,
 };

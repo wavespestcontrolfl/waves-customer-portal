@@ -1,8 +1,10 @@
 // Read-only "what they were sent and what they did" feed for one customer
 // (GET /admin/customers/:id/activity, GATE_CUSTOMER_ACTIVITY_TIMELINE). The
 // server answers { enabled: false } while the gate is dark and this renders
-// nothing at all. Clicks, page views, replies and portal visits carry an
-// "Engaged" badge; email opens do not (mail apps fake them) and are labelled.
+// nothing at all. Only first-party, already-filtered evidence (a short-link
+// click, a recorded page view, a text reply) carries the "Engaged" badge and
+// sets "Last engaged". Email opens, email-provider clicks and raw token-page
+// views are listed, labelled by the server, and never engaged.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell, Globe, Mail, MessageSquare, Phone, Smartphone } from "lucide-react";
 import { Badge, Button, Card } from "../ui";
@@ -28,7 +30,7 @@ function fmtWhen(value) {
 
 // `adminOnly` is the caller's isAdmin: technicians never fetch or see the feed.
 export default function CustomerEngagementTimeline({ customerId, adminOnly = true }) {
-  const [state, setState] = useState({ scope: null, enabled: false, events: [], summary: null, hasMore: false, nextCursor: null, absent: [], unavailable: [] });
+  const [state, setState] = useState({ scope: null, enabled: false, events: [], summary: null, hasMore: false, nextCursor: null, unavailable: [] });
   const [error, setError] = useState(null);
   // A failed "Load older" must not blank the events already on screen (that is
   // what `error` does for a failed first load), so it has its own state.
@@ -63,7 +65,6 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
           summary: cursor && prev.scope === scope ? prev.summary : body.summary || null,
           hasMore: !!body.hasMore,
           nextCursor: body.nextCursor || null,
-          absent: cursor && prev.scope === scope ? prev.absent : body.absentSources || [],
           unavailable: [...new Set([...(cursor && prev.scope === scope ? prev.unavailable : []), ...(body.unavailableSources || [])])],
         };
       });
@@ -111,6 +112,11 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
           Last email open {fmtWhen(summary.lastEmailOpenAt)} (unreliable — Apple Mail fakes opens, so it is not counted).
         </p>
       )}
+      {summary?.lastProviderClickAt && (
+        <p className="mb-2 text-14 text-ink-secondary" data-testid="engagement-last-provider-click">
+          Last email link click reported by the email provider {fmtWhen(summary.lastProviderClickAt)} (unfiltered — security scanners click links too, so it is not counted).
+        </p>
+      )}
       {state.unavailable.length > 0 && (
         <p role="status" className="mb-2 text-14 text-ink-secondary">Some sources could not be read: {state.unavailable.join(", ")}.</p>
       )}
@@ -149,9 +155,6 @@ export default function CustomerEngagementTimeline({ customerId, adminOnly = tru
           </div>
         )}
       </Card>
-      {state.absent.length > 0 && (
-        <p className="mt-2 text-14 text-ink-secondary">Not tracked yet: {state.absent.join(", ")}.</p>
-      )}
     </section>
   );
 }
