@@ -43,6 +43,14 @@ describe('staff-contact is the one definition both callers use', () => {
     expect(staff.smsDelivered({ status: 'queued', provider_accepted: true, push_channel: true })).toBe(false);
   });
 
+  test('the SQL twins are aliased per query and carry no bare question mark (a knex raw would read it as a binding)', () => {
+    for (const sql of [staff.operatorReplySql('os'), staff.smsDeliveredSql('os'), staff.personCallBackSql('ev')]) expect(sql).not.toMatch(/\?/);
+    expect(staff.operatorReplySql('os')).toContain("os.message_type IN ('ai_approved', 'ai_revised')");
+    expect(staff.smsDeliveredSql('os')).toContain("os.status = 'delivered'");
+    expect(staff.personCallBackSql('ev')).toContain("ev.source IN ('admin-click', 'admin-callback', 'tech-click')");
+    expect(staff.personCallBackSql()).toContain('call_log.v2_extraction_status');
+  });
+
   test('the SQL helpers build the fields the predicates read, aliased per query', () => {
     const conn = { raw: (sql) => ({ sql }) };
     expect(staff.operatorSentSql('os')).toContain("os.metadata->>'human_authored'");

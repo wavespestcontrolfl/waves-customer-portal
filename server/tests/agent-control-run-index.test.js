@@ -304,7 +304,7 @@ describe('adapters project onto the canonical shape', () => {
     // the lane policy. SMS intake delegates its lock to the service.
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
     const mapped = Object.entries(LANE_RUNTIME).filter(([, p]) => p.workflow_id);
-    expect(mapped.map(([l]) => l).sort()).toEqual(['call_research', 'call_self_audit', 'shadow_judge',
+    expect(mapped.map(([l]) => l).sort()).toEqual(['call-commitment-contact-check', 'call_research', 'call_self_audit', 'shadow_judge',
       'sms-commitment-fulfillment', 'sms-operational-actions', 'voice_profile']);
     const smsIntake = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'sms-operational-actions.js'), 'utf8');
     expect(scheduler).toContain("require('./sms-operational-actions')");
