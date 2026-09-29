@@ -340,6 +340,13 @@ describe('class rules', () => {
     expect((await reasonFor(leadNote())).reason).toEqual(expect.stringContaining('visit'));
     mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: new Date('2026-09-20T15:00:00Z') }];
     expect((await reasonFor(leadNote())).reason).toBeNull();
+    // A child the system generated on its own (series top-up, seeded follow-up)
+    // after the lead is not a booking anyone made for it.
+    mockTables.scheduled_services = [
+      { customer_id: CUST, latest_created_at: new Date('2026-09-27T15:00:00Z'), recurring_parent_id: VISIT },
+      { customer_id: CUST, latest_created_at: new Date('2026-09-27T16:00:00Z'), parent_service_id: VISIT },
+    ];
+    expect((await reasonFor(leadNote())).reason).toBeNull();
     // Degraded emitter path: leadId is really a customer id, no lead row -> unknown, never "deleted".
     mockTables.leads = [];
     expect((await reasonFor(leadNote())).reason).toBeNull();

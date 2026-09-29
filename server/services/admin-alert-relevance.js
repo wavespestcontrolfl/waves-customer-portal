@@ -157,8 +157,12 @@ async function loadSubjects(rows, conn = db) {
     data.customers = byId(await conn('customers').whereIn('id', customerIds).select('id', 'churned_at', 'deleted_at'));
   }
   if (leadCustomerIds.length) {
+    // A booking someone made: never a child the system generated on its own
+    // (the nightly series top-up, a booking's seeded follow-ups) — those land
+    // on an existing customer's plan whether or not anyone worked the lead.
     const booked = await conn('scheduled_services').whereIn('customer_id', leadCustomerIds)
       .where((q) => q.whereNull('status').orWhereNotIn('status', [...CANCELLED_VISIT_STATUSES]))
+      .whereNull('recurring_parent_id').whereNull('parent_service_id')
       .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
     data.leadVisits = new Map(booked.map((r) => [String(r.customer_id), r.latest_created_at]));
   }
