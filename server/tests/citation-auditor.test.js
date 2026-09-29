@@ -328,6 +328,18 @@ describe('classifyListing', () => {
     expect(other.detail.mismatches[0]).toMatchObject({ field: 'phone', expected: WAVES_LOCATIONS.find((l) => l.id === 'venice').phone });
   });
 
+  test('a truncated prefix of a page whose full version is mismatched is never verified', () => {
+    const head = `<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>`;
+    const conflicting = ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa' } });
+    const full = classifyListing(page(head + conflicting), candidatesFor({}));
+    expect(full.status).toBe('mismatched');
+    const prefix = classifyListing(page(head, { truncated: true }), candidatesFor({})); // the JSON-LD was cut off
+    expect(prefix).toMatchObject({ status: 'fetch-blocked', detail: { reason: 'truncated' } });
+    // a page that would have verified is also not verified when cut off
+    expect(classifyListing(page(`${head}<p>${BRAND.address}</p>`, { truncated: true }), candidatesFor({})).status).toBe('fetch-blocked');
+    expect(classifyListing(page(`${head}<p>${BRAND.address}</p>`), candidatesFor({})).status).toBe('verified');
+  });
+
   test('a cut-off body cannot prove a mismatch', () => {
     const r = classifyListing(page('<h1>Waves Pest Control</h1><p>(941) 555-0142</p>', { truncated: true }), expected);
     expect(r).toMatchObject({ status: 'fetch-blocked', detail: { reason: 'truncated' } });

@@ -272,9 +272,10 @@ function classifyListing(page, candidates) {
   };
   const base = { http_status: page.status, final_url: page.finalUrl, office: expected.locationId, address_checked: address.checked };
 
+  // A cut-off body proves nothing either way: what was cut may hold a conflicting address or
+  // JSON-LD entity (so never verified) or may not repeat a mismatch (so never mismatched).
+  if (page.truncated) return blocked('truncated');
   if (mismatches.length) {
-    // A cut-off body cannot prove a field differs — same rule as the backlink verifier.
-    if (page.truncated) return blocked('truncated');
     return { status: 'mismatched', nap: observed, detail: { ...base, mismatches } };
   }
   if (!phoneOk) return blocked('phone_not_found', { final_url: page.finalUrl }); // name shown, phone not readable
