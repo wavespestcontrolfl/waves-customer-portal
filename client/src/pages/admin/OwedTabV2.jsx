@@ -3,7 +3,7 @@ import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 // Communications → Owed: every open promise across calls, overdue first.
 // Endpoints:
 //   GET   /admin/call-recordings/commitments/open?party=…&hints=…
-//   GET   /admin/call-recordings/commitments/auto-closed?days=7
+//   GET   /admin/call-recordings/commitments/auto-closed?days=7[&before_at=…&before_id=…]
 //   PATCH /admin/call-recordings/commitments/:id   (fulfill | dismiss | reopen)
 // Reads and writes go through the shared admin fetch (429/401 handling).
 // V2 zinc system + components/ui; alert-fg is used for OVERDUE only.
@@ -62,6 +62,13 @@ const MORE_MARK = { true: "+", false: "" };
 const PAGE_SIZE = 200;
 const MAX_STABILITY_WALKS = 3;
 const AUTO_CLOSED_DAYS = 7;
+// One page of the closed-automatically list; `next` is the cursor the page
+// before returned (null for the first page).
+function autoClosedPage(next) {
+  const params = new URLSearchParams({ days: String(AUTO_CLOSED_DAYS) });
+  if (next) { params.set("before_at", next.before_at); params.set("before_id", next.before_id); }
+  return adminFetch(`/admin/call-recordings/commitments/auto-closed?${params.toString()}`);
+}
 
 function humanize(value) {
   return value ? String(value).replace(/_/g, " ") : "";
@@ -151,9 +158,9 @@ export function dueLabel(row, now = Date.now()) {
 }
 
 // What the portal closed on its own in the last week: who, what was promised,
-// the proof it stored, and a one-click Reopen.
+// the proof it stored, and a one-click Reopen; pages of 100 with Load more.
 // Waves promises only, so the customer-party view has none.
-function AutoClosedList({ party, rows, canReopen, busyId, onReopen }) {
+function AutoClosedList({ party, rows, canReopen, busyId, onReopen, hasMore, loadingMore, onLoadMore }) {
   if (party === "customer" || !rows.length) return null;
   return (
     <section className="space-y-1.5" aria-label="Closed automatically">
@@ -170,6 +177,12 @@ function AutoClosedList({ party, rows, canReopen, busyId, onReopen }) {
           </li>
         ))}
       </ul>
+      {hasMore && (
+        <div className="flex items-center gap-2 text-13 md:text-12 text-ink-tertiary">
+          <span>Showing {rows.length} — more closed this week.</span>
+          <Button size="sm" variant="ghost" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more"}</Button>
+        </div>
+      )}
     </section>
   );
 }
@@ -192,18 +205,43 @@ export default function OwedTabV2() {
   // Promises the portal closed on its own in the last week, each with its
   // proof and a Reopen. Secondary to the open list: a failed read leaves the
   // last list on screen rather than raising an error over the real queue.
-  const [autoClosed, setAutoClosed] = useState([]);
+  // Load more walks back with the cursor each page returns; a refresh reads
+  // again as many pages as are on screen, from the top.
+  const [autoClosed, setAutoClosed] = useState({ rows: [], next: null, pages: 1 });
+  const [loadingMoreClosed, setLoadingMoreClosed] = useState(false);
   const autoClosedSeq = useRef(0);
-  const loadAutoClosed = useCallback(async () => {
+  const loadAutoClosed = useCallback(async (pages = 1) => {
     const seq = ++autoClosedSeq.current;
     try {
-      const body = await adminFetch(`/admin/call-recordings/commitments/auto-closed?days=${AUTO_CLOSED_DAYS}`);
-      if (seq === autoClosedSeq.current) setAutoClosed(body.commitments || []);
+      let body = await autoClosedPage(null);
+      let rows = body.commitments || [];
+      let read = 1;
+      while (read < pages && body.has_more && body.next) {
+        body = await autoClosedPage(body.next);
+        rows = [...rows, ...(body.commitments || [])];
+        read += 1;
+      }
+      if (seq === autoClosedSeq.current) setAutoClosed({ rows, next: body.has_more ? body.next : null, pages: read });
     } catch {
       // Keep the list already on screen.
     }
   }, []);
   useEffect(() => { loadAutoClosed(); }, [loadAutoClosed]);
+  const loadMoreAutoClosed = async () => {
+    if (loadingMoreClosed || !autoClosed.next) return;
+    const seq = ++autoClosedSeq.current;
+    setLoadingMoreClosed(true);
+    try {
+      const body = await autoClosedPage(autoClosed.next);
+      if (seq === autoClosedSeq.current) {
+        setAutoClosed((s) => ({ rows: [...s.rows, ...(body.commitments || [])], next: body.has_more ? body.next : null, pages: s.pages + 1 }));
+      }
+    } catch {
+      // Keep the list already on screen.
+    } finally {
+      setLoadingMoreClosed(false);
+    }
+  };
   // Only the latest request may paint: a filter change while an earlier
   // load (or a post-action reload) is in flight would otherwise let the
   // older response overwrite the newer selection.
@@ -257,8 +295,8 @@ export default function OwedTabV2() {
   }, [party, showHints]);
 
   useEffect(() => { load(); return () => { requestSeq.current += 1; }; }, [load]);
-  useVisiblePageRefresh(() => { loadAutoClosed(); return load({ background: true, pageCount: state.loadedPages }); }, {
-    intervalMs: 60000, enabled: state.status !== "loading" && !busyId && !loadingMore,
+  useVisiblePageRefresh(() => { loadAutoClosed(autoClosed.pages); return load({ background: true, pageCount: state.loadedPages }); }, {
+    intervalMs: 60000, enabled: state.status !== "loading" && !busyId && !loadingMore && !loadingMoreClosed,
   });
 
   // The server pages at 200: walk the queue with the offset it returned and
@@ -416,7 +454,8 @@ export default function OwedTabV2() {
           <Button size="sm" variant="ghost" onClick={loadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more"}</Button>
         </div>
       )}
-      <AutoClosedList party={party} rows={autoClosed} canReopen={state.enabled} busyId={busyId} onReopen={(row) => act(row, "reopen")} />
+      <AutoClosedList party={party} rows={autoClosed.rows} canReopen={state.enabled} busyId={busyId} onReopen={(row) => act(row, "reopen")}
+        hasMore={Boolean(autoClosed.next)} loadingMore={loadingMoreClosed} onLoadMore={loadMoreAutoClosed} />
     </div>
   );
 }

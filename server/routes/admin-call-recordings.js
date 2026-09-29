@@ -395,12 +395,24 @@ router.get('/commitments/open', async (req, res, next) => {
 // own in the last `days` days (default 7, max 30): kept on the proof it
 // stored, or dismissed because the customer left. The Owed tab lists them
 // with a one-click Reopen (the PATCH below). Same staff-wide auth as the
-// open feed; reads stay open whatever the switch says.
+// open feed; reads stay open whatever the switch says. Pages of 100:
+// has_more, and the next page is asked for with the before_at / before_id
+// the response returns.
 router.get('/commitments/auto-closed', async (req, res, next) => {
   try {
     const days = Math.max(1, Math.min(30, Number.parseInt(req.query.days, 10) || 7));
+    const { before_at: beforeAt, before_id: beforeId } = req.query;
+    let before = null;
+    if (beforeAt !== undefined || beforeId !== undefined) {
+      if (!UUID_RE.test(String(beforeId || '')) || Number.isNaN(Date.parse(String(beforeAt || '')))) {
+        return res.status(400).json({ error: 'before_at must be a timestamp and before_id a UUID' });
+      }
+      before = { at: new Date(String(beforeAt)).toISOString(), id: String(beforeId) };
+    }
     const { listAutoClosedCommitments } = require('../services/call-commitments');
-    res.json({ commitments: await listAutoClosedCommitments(db, { days }), days });
+    const page = await listAutoClosedCommitments(db, { days, before });
+    res.json({ commitments: page.commitments, days, has_more: Boolean(page.next),
+      next: page.next ? { before_at: page.next.at, before_id: page.next.id } : null });
   } catch (err) { next(err); }
 });
 

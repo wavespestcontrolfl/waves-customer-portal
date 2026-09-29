@@ -93,6 +93,18 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     return { n, phone, email, customerId, call, commitment };
   }
   const later = (minutes = 30) => new Date(Date.now() - 3 * DAY + (90 + minutes * 60) * 1000);
+  // Every page of the closed-automatically list, walked with its cursor.
+  const allAutoClosed = async (days, limit = 100) => {
+    const all = [];
+    let before = null;
+    for (let page = 0; page < 1000; page += 1) {
+      const { commitments, next } = await cc.listAutoClosedCommitments(db, { days, limit, before });
+      all.push(...commitments);
+      if (!next) return all;
+      before = next;
+    }
+    throw new Error('the closed-automatically walk never ended');
+  };
   const row = (id) => db('call_commitments').where({ id }).first();
   const track = (list) => async (query) => { const [r] = await query.returning('id'); list.push(r.id); return r; };
   const addSms = track(made.smsIds);
@@ -304,7 +316,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await db('call_commitments').where({ id: w.commitment.id }).update({ status: 'fulfilled', fulfillment: JSON.stringify(foreign), fulfilled_at: new Date() });
     expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ checked: 0, reopened: 0 });
     expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: foreign });
-    expect((await cc.listAutoClosedCommitments(db, { days: 7 })).map((c) => c.id)).not.toContain(w.commitment.id);
+    expect((await allAutoClosed(7)).map((c) => c.id)).not.toContain(w.commitment.id);
     // Its own closes carry the marker.
     const own = await world({ kind: 'other' });
     await visit(own);
@@ -400,9 +412,15 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       // The reopened card is still refreshable (checked: 1), and the old call is before the renewal.
       expect(await cc.refreshFulfillment(db, cb.call.id)).toMatchObject({ checked: 1, fulfilled: 0 });
       expect(await row(cb.commitment.id)).toMatchObject({ status: 'open', human_state: 'confirmed' });
-      const fresh = await inbound(cb, { created_at: new Date(Date.now() + 60 * 1000) });
+      // A reopened card is the office's: a newer inbound call (an association)
+      // leaves it open with nothing written; the card's own direct proof — a
+      // connected call back after the reopen — still closes it.
+      await inbound(cb, { created_at: new Date(Date.now() + 60 * 1000) });
       await cc.refreshFulfillment(db, cb.call.id);
-      expect((await row(cb.commitment.id)).fulfillment).toMatchObject({ record_id: fresh.id });
+      expect(await row(cb.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+      const back = await outboundCall(cb, { created_at: new Date(Date.now() + 2 * 60 * 1000) });
+      await cc.refreshFulfillment(db, cb.call.id);
+      expect(await row(cb.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: back.id, strength: 'direct' } });
     } finally {
       gates.callCommitments = gateWas;
     }
@@ -434,14 +452,130 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await db('call_commitments').where({ id: humanDismissed.commitment.id }).update({ status: 'dismissed', human_state: 'dismissed', fulfillment: JSON.stringify({ kind: 'customer_left', strength: 'association' }) });
     await db('call_commitments').where({ id: old.commitment.id }).update({ updated_at: new Date(Date.now() - 10 * DAY) });
     await db('call_commitments').where({ id: kept.commitment.id }).update({ updated_at: new Date(Date.now() - 2 * 60 * 1000) });
-    const week = await cc.listAutoClosedCommitments(db, { days: 7 });
+    const week = await allAutoClosed(7);
     const mine = week.filter((c) => [kept, left, direct, manual, humanDismissed, old].some((w) => w.commitment.id === c.id));
     expect(ids(mine)).toEqual([left.commitment.id, kept.commitment.id]);
     expect(mine[0]).toMatchObject({ status: 'dismissed', customer_first_name: `Evidence${left.n}`, call_log_id: left.call.id, fulfillment: { kind: 'customer_left' } });
     expect(mine[1].fulfillment).toMatchObject({ strength: 'association', kind: 'appointment_booked' });
-    expect(ids(await cc.listAutoClosedCommitments(db, { days: 30 }))).toContain(old.commitment.id);
+    expect(ids(await allAutoClosed(30))).toContain(old.commitment.id);
     // A reopened promise drops out.
     await cc.applyHumanUpdate(db, kept.commitment.id, { action: 'reopen' });
-    expect(ids(await cc.listAutoClosedCommitments(db, { days: 7 }))).not.toContain(kept.commitment.id);
+    expect(ids(await allAutoClosed(7))).not.toContain(kept.commitment.id);
+  });
+
+  test('a callback card staff claimed stays theirs: association evidence and a customer who left change nothing; its own direct proof still closes it', async () => {
+    const { gates } = require('../config/feature-gates');
+    const gateWas = gates.callCommitments;
+    gates.callCommitments = true;
+    process.env.GATE_CALLBACK_CARD = 'true';
+    try {
+      const w = await world({ kind: 'callback', human_state: 'confirmed', customerExtra: { churned_at: new Date(Date.now() - 1 * DAY).toISOString().slice(0, 10) } });
+      await inbound(w);
+      await staffEmail(w);
+      await visit(w);
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ checked: 1, fulfilled: 0, hinted: 0 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', human_state: 'confirmed', fulfillment: null });
+      const back = await outboundCall(w);
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: back.id, strength: 'direct' } });
+    } finally {
+      gates.callCommitments = gateWas;
+    }
+  });
+
+  test('a technician follow-up keeps a booked visit as a hint, never a close', async () => {
+    const w = await world({ kind: 'technician_follow_up' });
+    const v = await visit(w);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0, hinted: 1 });
+    const hint = await row(w.commitment.id);
+    expect(hint).toMatchObject({ status: 'open', fulfillment: { record_id: v.id, strength: 'association' } });
+    expect(hint.fulfillment.closed_by).toBeUndefined();
+  });
+
+  test('a staff email to an address another live customer shares proves nothing; a merged (soft-deleted) duplicate with it does not count', async () => {
+    const shared = await world({ kind: 'callback' });
+    const [spouse] = await db('customers').insert({ first_name: `Spouse${shared.n}`, phone: `+1555557${shared.n}`, email: ` ${shared.email.toUpperCase()}` }).returning('id');
+    made.customerIds.push(spouse.id);
+    await staffEmail(shared);
+    expect(await cc.refreshFulfillment(db, shared.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(shared.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    const merged = await world({ kind: 'callback' });
+    const [duplicate] = await db('customers').insert({ first_name: `Duplicate${merged.n}`, phone: `+1555557${merged.n}`, email: merged.email, deleted_at: new Date() }).returning('id');
+    made.customerIds.push(duplicate.id);
+    const e = await staffEmail(merged);
+    expect(await cc.refreshFulfillment(db, merged.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(merged.commitment.id)).fulfillment).toMatchObject({ record_id: e.id });
+  });
+
+  test('an association counts only from a later stated time that is not a deadline; a deadline, or direct proof, keeps the promise early', async () => {
+    const statedAt = new Date(Date.now() - 1 * DAY); // two days after the call
+    const floored = await world({ kind: 'other' });
+    await db('call_commitments').where({ id: floored.commitment.id }).update({ due_at: statedAt, due_type: 'floor' });
+    await sms(floored, 'manual'); // half an hour after the call: before the stated time
+    expect(await cc.refreshFulfillment(db, floored.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(floored.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    const onTime = await sms(floored, 'manual', { created_at: new Date(statedAt.getTime() + 60 * 60 * 1000) });
+    expect(await cc.refreshFulfillment(db, floored.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(floored.commitment.id)).fulfillment).toMatchObject({ record_id: onTime.id });
+    // Untyped is a floor too.
+    const untyped = await world({ kind: 'other' });
+    await db('call_commitments').where({ id: untyped.commitment.id }).update({ due_at: statedAt });
+    await sms(untyped, 'manual');
+    expect(await cc.refreshFulfillment(db, untyped.call.id)).toMatchObject({ fulfilled: 0 });
+    // A deadline is the latest moment, not the first.
+    const deadline = await world({ kind: 'other' });
+    await db('call_commitments').where({ id: deadline.commitment.id }).update({ due_at: statedAt, due_type: 'deadline' });
+    const early = await sms(deadline, 'manual');
+    expect(await cc.refreshFulfillment(db, deadline.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(deadline.commitment.id)).fulfillment).toMatchObject({ record_id: early.id });
+    // Direct proof is not held to the stated time.
+    const direct = await world({ kind: 'schedule_visit' });
+    await db('call_commitments').where({ id: direct.commitment.id }).update({ due_at: statedAt, due_type: 'floor' });
+    const booked = await visit(direct, { source_call_log_id: direct.call.id });
+    expect(await cc.refreshFulfillment(db, direct.call.id)).toMatchObject({ fulfilled: 1 });
+    expect((await row(direct.commitment.id)).fulfillment).toMatchObject({ record_id: booked.id, strength: 'direct' });
+  });
+
+  test('a relink the refresh never saw is found by the periodic scan whatever evidence closed the promise; a merge that moves the evidence with the call keeps it and stops listing it', async () => {
+    const w = await world({ kind: 'other' });
+    await sms(w, 'manual');
+    await cc.refreshFulfillment(db, w.call.id);
+    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'sms_sent', judged_customer_id: w.customerId });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+    const [other] = await db('customers').insert({ first_name: `Relink${w.n}`, phone: `+1555558${w.n}` }).returning('id');
+    made.customerIds.push(other.id);
+    await db('call_log').where({ id: w.call.id }).update({ customer_id: other.id }); // no refresh after it
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1, failed: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+
+    const m = await world({ kind: 'other' });
+    const v = await visit(m);
+    await cc.refreshFulfillment(db, m.call.id);
+    const [survivor] = await db('customers').insert({ first_name: `Survivor${m.n}`, phone: `+1555559${m.n}` }).returning('id');
+    made.customerIds.push(survivor.id);
+    await db('call_log').where({ id: m.call.id }).update({ customer_id: survivor.id });
+    await db('scheduled_services').where({ id: v.id }).update({ customer_id: survivor.id });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(m.call.id);
+    expect(await cc.refreshFulfillment(db, m.call.id)).toMatchObject({ reopened: 0, failed: 0 });
+    expect(await row(m.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: v.id, judged_customer_id: survivor.id } });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(m.call.id);
+  });
+
+  test('listAutoClosedCommitments pages newest first by position: every row exactly once, ties broken by id', async () => {
+    const worlds = [];
+    for (let i = 0; i < 3; i += 1) {
+      const w = await world({ kind: 'other' });
+      await visit(w);
+      await cc.refreshFulfillment(db, w.call.id);
+      worlds.push(w);
+    }
+    const tied = worlds.slice(0, 2).map((w) => w.commitment.id);
+    await db('call_commitments').whereIn('id', tied).update({ updated_at: new Date(Date.now() - 60 * 1000) });
+    const seen = (await allAutoClosed(7, 1)).map((c) => c.id);
+    expect(new Set(seen).size).toBe(seen.length);
+    const mine = new Set(worlds.map((w) => w.commitment.id));
+    expect(seen.filter((id) => mine.has(id))).toEqual([worlds[2].commitment.id, ...[...tied].sort().reverse()]);
   });
 });

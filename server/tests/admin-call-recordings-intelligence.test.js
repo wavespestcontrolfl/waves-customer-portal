@@ -410,22 +410,36 @@ describe('GET /commitments/auto-closed — what the portal closed on its own', (
 
   test('staff read the list over a 7-day default window, clamped to 1..30 days; the rows come back as the service listed them', async () => {
     const closed = [{ id: 'k1', kind: 'send_estimate', status: 'fulfilled', fulfillment: { strength: 'association', kind: 'estimate_sent' }, updated_at: '2026-09-04T15:00:00.123Z' }];
-    commitments.listAutoClosedCommitments.mockResolvedValue(closed);
+    commitments.listAutoClosedCommitments.mockResolvedValue({ commitments: closed, next: null });
     await withServer(async (base) => {
       const res = await get(base);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ commitments: closed, days: 7 });
+      expect(await res.json()).toEqual({ commitments: closed, days: 7, has_more: false, next: null });
       expect((await (await get(base, '?days=3')).json()).days).toBe(3);
       expect((await (await get(base, '?days=400')).json()).days).toBe(30);
       expect((await (await get(base, '?days=0')).json()).days).toBe(7);
       expect((await (await get(base, '?days=abc')).json()).days).toBe(7);
     });
     expect(commitments.listAutoClosedCommitments.mock.calls.map(([, o]) => o.days)).toEqual([7, 3, 30, 7, 7]);
+    expect(commitments.listAutoClosedCommitments.mock.calls.every(([, o]) => o.before === null)).toBe(true);
+  });
+
+  test('more than a page: has_more with the cursor for the next page, which is passed back to the service as given; a malformed cursor is a 400', async () => {
+    const cursorId = '8a3f5c1e-2b4d-4e6f-9a1b-3c5d7e9f1a2b';
+    commitments.listAutoClosedCommitments.mockResolvedValue({ commitments: [{ id: 'k1' }], next: { at: '2026-09-04T15:00:00.123Z', id: cursorId } });
+    await withServer(async (base) => {
+      expect(await (await get(base)).json()).toMatchObject({ has_more: true, next: { before_at: '2026-09-04T15:00:00.123Z', before_id: cursorId } });
+      expect((await get(base, `?before_at=2026-09-04T15:00:00.123Z&before_id=${cursorId}`)).status).toBe(200);
+      for (const bad of ['?before_at=2026-09-04T15:00:00.123Z', `?before_id=${cursorId}`, `?before_at=yesterday&before_id=${cursorId}`, '?before_at=2026-09-04T15:00:00.123Z&before_id=1;drop']) {
+        expect((await get(base, bad)).status).toBe(400);
+      }
+    });
+    expect(commitments.listAutoClosedCommitments.mock.calls.map(([, o]) => o.before)).toEqual([null, { at: '2026-09-04T15:00:00.123Z', id: cursorId }]);
   });
 
   test('a technician reads it too (same staff-wide auth as the open feed), and a failed read is a 500, never an empty list', async () => {
     mockRole = 'tech';
-    commitments.listAutoClosedCommitments.mockResolvedValueOnce([]);
+    commitments.listAutoClosedCommitments.mockResolvedValueOnce({ commitments: [], next: null });
     try {
       await withServer(async (base) => {
         expect((await get(base)).status).toBe(200);

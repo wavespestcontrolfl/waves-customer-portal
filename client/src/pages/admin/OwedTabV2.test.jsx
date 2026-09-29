@@ -277,6 +277,33 @@ describe("OwedTabV2", () => {
     await waitFor(() => expect(calls.filter((c) => c.url.includes("/commitments/auto-closed"))).toHaveLength(2));
   });
 
+  it("pages the Closed-automatically list: Load more asks for the page after the cursor and appends it", async () => {
+    const closedRow = (id, n) => ({ id, kind: "send_estimate", party: "waves", status: "fulfilled", customer_id: `cust-${n}`, customer_first_name: `Test${n}`, customer_last_name: "Customer",
+      updated_at: `2026-09-04T1${n}:00:00.000Z`, fulfillment: { kind: "estimate_sent", strength: "association", matched_at: "2026-09-03T12:45:00Z" } });
+    const cursor = { before_at: "2026-09-04T15:00:00.000Z", before_id: "8a3f5c1e-2b4d-4e6f-9a1b-3c5d7e9f1a2b" };
+    fetch.mockImplementation(async (url, options = {}) => {
+      calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+      if (isAutoClosed(url)) {
+        const later = String(url).includes("before_at=");
+        return { ok: true, status: 200, json: async () => (later
+          ? { commitments: [closedRow("k2", 4)], has_more: false, next: null }
+          : { commitments: [closedRow("k1", 5)], has_more: true, next: cursor }) };
+      }
+      if (String(url).includes("/commitments/open")) return { ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3 }) };
+      return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
+    });
+    render(<OwedTabV2 />);
+    await screen.findByText("Closed automatically (last 7 days)");
+    expect(screen.getAllByRole("button", { name: "Reopen" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Reopen" })).toHaveLength(2));
+    const next = calls.filter((c) => isAutoClosed(c.url)).at(-1).url;
+    expect(next).toContain(`before_at=${encodeURIComponent(cursor.before_at)}`);
+    expect(next).toContain(`before_id=${cursor.before_id}`);
+    // The last page: no more to load.
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  });
+
   it("shows no Closed-automatically section when nothing closed, or while looking at the customer's promises", async () => {
     render(<OwedTabV2 />);
     await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());

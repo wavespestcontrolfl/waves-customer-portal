@@ -1644,11 +1644,16 @@ async function inboundConversation(conn, { callId, after, until, phone, customer
 // A message a person at Waves sent from the Gmail-synced mailbox to the
 // customer: SENT and not INBOX (a self-addressed control message is both),
 // from a Waves address, with the customer's exact address as one recipient.
+// An address another live customer also has (a household sharing one) does
+// not say which of them the message was for, so it proves nothing.
 async function staffEmailTo(conn, { after, until, customerId }) {
   if (!customerId) return null;
   const customer = await conn("customers").where({ id: customerId }).first("email");
   const address = String(customer?.email || "").trim().toLowerCase();
   if (!address) return null;
+  const shared = await conn("customers").whereNot("id", customerId).whereNull("deleted_at")
+    .whereRaw("lower(trim(email)) = ?", [address]).first("id");
+  if (shared) return null;
   const row = await conn("emails")
     .where("received_at", ">", after)
     .where("received_at", "<=", until)
@@ -1738,16 +1743,41 @@ const EVIDENCE_BY_KIND = {
   send_paperwork: ["report_text", "report_email", "staff_email"],
 };
 
+// The kinds an association closes (every other kind keeps it as a hint): a
+// booked visit says nothing about a promised technician follow-up, photos
+// the customer sent are not photos Waves promised, and a payment is the
+// customer's to make.
+const ASSOCIATION_CLOSE_KINDS = new Set(["send_estimate", "send_appointment_confirmation", "callback", "schedule_visit", "send_report", "send_paperwork", "other"]);
+
+// Whether the portal may close this promise on its own: the switch is on,
+// the promise is Waves', and nobody has touched it — a claimed, snoozed or
+// edited callback card (still refreshed, for its own direct proof) and
+// every reviewed row stay the person's.
+function evidenceCloseApplies(commitment) {
+  return promiseEvidenceCloseLive() && commitment.party === "waves" && !commitment.human_state;
+}
+const associationCloses = (commitment) => evidenceCloseApplies(commitment) && ASSOCIATION_CLOSE_KINDS.has(commitment.kind);
+
+// Where an association that could close the promise starts to count: the
+// evidence boundary, or a later stated time that is not a deadline (a
+// floor, or an untyped time) — the follow-up pager's own rule
+// (evidenceFrom), so a text or a booking from before "after the
+// inspection" never keeps it. Direct proof is not held to it.
+function associationFrom(commitment, after) {
+  const stated = commitment.due_at && commitment.due_type !== "deadline" ? new Date(commitment.due_at) : null;
+  return stated && !Number.isNaN(stated.getTime()) && stated.getTime() > after.getTime() ? stated : after;
+}
+
 // The association proof for a promise: each resolver passes the lookups it
-// always made, in its order (`tries`, each () => proof | null). With
-// PROMISE_EVIDENCE_CLOSE on, a Waves promise also gets the follow-up
-// evidence for its kind (EVIDENCE_BY_KIND), and the proof is the EARLIEST
-// of everything found — the stored proof and fulfilled_at name when the
-// promise was kept, not which lookup ran first. Off, or a customer's own
-// promise, it stays the first found, exactly as before.
+// always made, in its order (`tries`, each () => proof | null). For a
+// promise the portal may close on it (associationCloses), the kind's
+// follow-up evidence joins them (EVIDENCE_BY_KIND), and the proof is the
+// EARLIEST of everything found — the stored proof and fulfilled_at name
+// when the promise was kept, not which lookup ran first. Any other promise
+// gets the first found, exactly as before.
 async function associationProof(ctx, tries) {
   const { conn, commitment } = ctx;
-  if (!promiseEvidenceCloseLive() || commitment.party !== "waves") {
+  if (!associationCloses(commitment)) {
     for (const attempt of tries) {
       const proof = await attempt();
       if (proof) return proof;
@@ -1756,7 +1786,7 @@ async function associationProof(ctx, tries) {
   }
   const extra = (EVIDENCE_BY_KIND[commitment.kind] || []).map((name) => async () => {
     const spec = EVIDENCE[name];
-    const hit = await spec.find(conn, ctx.evidence);
+    const hit = await spec.find(conn, ctx.associated);
     return hit ? { kind: spec.kind, record_type: spec.type, record_id: hit.id, matched_at: hit.at, strength: "association", basis: spec.basis } : null;
   });
   let earliest = null;
@@ -1800,8 +1830,8 @@ async function customerLeftProof(conn, commitment, call) {
 // proof first, then associationProof over the lookups it has always made.
 
 // send_estimate's reused-lead lookup: an estimate on a lead this call did not
-// mint (a hint, never direct).
-async function reusedLeadEstimate({ conn, call, after, leadIds }, probe) {
+// mint (a hint, never direct), handed off once associations count.
+async function reusedLeadEstimate({ conn, call, leadIds, associated: { after } }, probe) {
   // A REUSED earlier call's lead — reached through the lead_id /
   // relay_lead_id stamp, or carrying this call's SID only because
   // attribution re-stamped a lead older than the call — is a hint,
@@ -1835,7 +1865,7 @@ async function reusedLeadEstimate({ conn, call, after, leadIds }, probe) {
 }
 
 async function resolveSendEstimate(ctx) {
-  const { conn, call, after, phone, customerId, evidence } = ctx;
+  const { conn, call, after, phone, customerId, associated } = ctx;
   // Direct: the shared primitive above (estimator stamp; lead FK or
   // public-quote mirror on a lead this call minted).
   const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, customerId, phone, after };
@@ -1852,13 +1882,13 @@ async function resolveSendEstimate(ctx) {
     // household number never lets one customer's estimate clear another's
     // promise. Then a visit booked or done for the customer (associationProof).
     async () => {
-      const est = await estimateSentTo(conn, evidence);
+      const est = await estimateSentTo(conn, associated);
       return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.at, strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     },
   ]);
 }
 
-async function resolveAppointmentConfirmation({ conn, commitment, after, until, phone, customerId }) {
+async function resolveAppointmentConfirmation({ conn, commitment, phone, customerId, associated: { after, until } }) {
   if (!phone) return null;
   // A confirmation that failed or was never delivered is not a kept
   // promise; the earliest surviving row is the hint so a later delivery
@@ -1866,7 +1896,7 @@ async function resolveAppointmentConfirmation({ conn, commitment, after, until, 
   // CLOSES the promise (PROMISE_EVIDENCE_CLOSE), it must also have reached
   // the provider — a quiet-hours row is still `scheduled` — and, for a linked
   // call, belong to the same customer (shared household numbers).
-  const closing = promiseEvidenceCloseLive() && commitment.party === "waves";
+  const closing = associationCloses(commitment);
   const sms = await conn("sms_log")
     .where({ direction: "outbound", message_type: "confirmation" })
     .modify((b) => {
@@ -1968,7 +1998,7 @@ async function resolveCallBack({ conn, call, after, until, phone }) {
 }
 
 async function resolveScheduleVisit(ctx) {
-  const { conn, commitment, call, after, customerId, evidence } = ctx;
+  const { conn, commitment, call, after, customerId, associated } = ctx;
   // Booked AFTER the call, like every other match: a reprocess can link
   // an existing visit to this call.
   const direct = await conn("scheduled_services")
@@ -2001,7 +2031,7 @@ async function resolveScheduleVisit(ctx) {
   const slotProof = await slotBookingProof(conn, commitment, call, customerId, after);
   if (slotProof) return slotProof;
   return associationProof(ctx, [async () => {
-    const visit = await bookedVisit(conn, evidence);
+    const visit = await bookedVisit(conn, associated);
     return visit ? { kind: "appointment_booked", record_type: "scheduled_service", record_id: visit.id, matched_at: visit.at, strength: "association", basis: `visit_booked_for_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
   }]);
 }
@@ -2098,8 +2128,12 @@ async function resolveFulfillment(conn, commitment, call) {
   const until = windowEnd(after);
   const phone = contactPhoneOf(call);
   const customerId = call?.customer_id || null;
+  // `evidence` counts from the boundary (direct proof); `associated` from
+  // where an association that could close the promise starts to count.
   const evidence = { callId: call.id, phone, customerId, after, until };
-  return resolver({ conn, commitment, call, after, until, phone, customerId, leadIds: leadIdsOf(call), evidence });
+  const from = associationCloses(commitment) ? associationFrom(commitment, after) : after;
+  const associated = from === after ? evidence : { ...evidence, after: from, until: windowEnd(from) };
+  return resolver({ conn, commitment, call, after, until, phone, customerId, leadIds: leadIdsOf(call), evidence, associated });
 }
 
 // Direct proof marks an open AI row fulfilled. Association proof is stored
@@ -2211,25 +2245,30 @@ function refreshableVerdictSql() {
   [require('./callback-cards').enabled(), VOICE_RELAY_SANDBOX_SOURCE]];
 }
 
-// What refreshFulfillment writes for one open row: the promise's own proof,
-// else — while PROMISE_EVIDENCE_CLOSE is on — a customer who has left.
+// What refreshFulfillment writes for one open row: the promise's own proof
+// when it closes the row; else — for a promise the portal may close
+// (evidenceCloseApplies) — a customer who has left; else the hint, if any.
 async function judgeOpenRow(conn, commitment, call) {
   const proof = await resolveFulfillment(conn, commitment, call);
-  if (proof || !promiseEvidenceCloseLive() || commitment.party !== "waves") return proof;
-  return customerLeftProof(conn, commitment, call);
+  if (!evidenceCloseApplies(commitment) || proof?.strength === "direct" || (proof && closesOnAssociation(commitment, proof))) return proof;
+  return (await customerLeftProof(conn, commitment, call)) || proof;
 }
 
 // The marker every proof refreshFulfillment closes a row with on its own
 // carries (an association close, a customer-left dismissal): the re-judge and
 // the Owed tab's closed-automatically list select on it, so a proof another
-// writer stored is never re-judged or listed as this file's.
+// writer stored is never re-judged or listed as this file's. Beside it, the
+// customer the call had when the proof was judged: a call relinked since —
+// whenever, and however the refresh after it went — is found by the sweep
+// (listLapsedEvidenceClosedCallIds) and judged again.
 const CLOSED_BY_EVIDENCE = "promise_evidence";
-const storedProof = (proof) => (proof.strength === "direct" ? proof : { ...proof, closed_by: CLOSED_BY_EVIDENCE });
+const storedProof = (proof, customerId) => (proof.strength === "direct" ? proof
+  : { ...proof, closed_by: CLOSED_BY_EVIDENCE, judged_customer_id: customerId || null });
 
-// An association proof closes a Waves promise (never the customer's own)
-// while PROMISE_EVIDENCE_CLOSE is on.
+// An association proof closes a promise the portal may close, of a kind an
+// association closes (associationCloses).
 function closesOnAssociation(commitment, proof) {
-  return proof.strength === "association" && commitment.party === "waves" && promiseEvidenceCloseLive();
+  return proof.strength === "association" && associationCloses(commitment);
 }
 
 async function refreshFulfillment(conn, callLogId, call = null) {
@@ -2306,7 +2345,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
             this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
           });
         })
-        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(proof)), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });
+        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(proof, row.customer_id)), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")
@@ -2364,7 +2403,10 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
     if (proof === LOOKUP_FAILED) { failed += 1; continue; }
     const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
     const keeps = proofThatKeeps(c, proof, prior);
-    if (keeps && keeps.basis === prior?.basis && keeps.record_id === prior?.record_id) continue;
+    const stored = keeps ? storedProof(keeps, row.customer_id) : null;
+    // Same record, judged for the same customer: nothing to write.
+    if (stored && stored.basis === prior?.basis && stored.record_id === prior?.record_id
+      && (stored.judged_customer_id ?? null) === (prior?.judged_customer_id ?? null)) continue;
     const unchanged = (q) => q
       .where({ id: c.id, status: c.status })
       .whereNull("human_state")
@@ -2380,7 +2422,7 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
             this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
           });
         })
-        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(keeps)), fulfilled_at: left ? null : keeps.matched_at || new Date(), updated_at: new Date() });
+        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(stored), fulfilled_at: left ? null : keeps.matched_at || new Date(), updated_at: new Date() });
       continue;
     }
     // No longer kept: owed again, carrying whatever hint the facts support.
@@ -2442,9 +2484,11 @@ async function listSlotKeptCallIds(conn) {
 
 
 // Calls holding a promise the evidence close shut (the CLOSED_BY_EVIDENCE
-// marker) on evidence that can be taken back — a visit booked or done that
-// is now gone, off the books, or another customer's; a customer-left
-// dismissal whose customer is no longer churned (or no longer the call's).
+// marker) whose proof may no longer hold: the call's customer is not the one
+// the proof was judged for (a relink, whenever it happened and whatever
+// kind of evidence closed it — the gate off at the time, or the refresh
+// after it failed), a visit booked or done that is now gone or off the
+// books, or a customer-left dismissal whose customer is no longer churned.
 // The periodic sweep refreshes them beside the calls with open promises, so
 // the lapse reopens the promise whenever it happened; the sweep's work
 // follows the lapses, not every promise ever closed. Sent texts, emails,
@@ -2460,7 +2504,8 @@ async function listLapsedEvidenceClosedCallIds(conn) {
        LEFT JOIN customers cu ON (cc.fulfillment ->> 'kind') = ? AND cu.id::text = cc.fulfillment ->> 'record_id'
       WHERE cc.human_state IS NULL AND cc.status IN ('fulfilled', 'dismissed')
         AND (cc.fulfillment ->> 'closed_by') = ?
-        AND (((cc.fulfillment ->> 'record_type') = 'scheduled_service'
+        AND ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
+          OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           OR ((cc.fulfillment ->> 'kind') = ?
               AND (cu.id IS NULL OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id)))`,
@@ -2662,9 +2707,16 @@ async function listOpenCommitments(conn, { party = null, kind = null, kinds = nu
 // dismissed because the customer left. The Owed tab lists them with the
 // stored proof and a Reopen; a promise reopened (open again) or dismissed
 // by a person drops out. Call rows only (an inner join on call_log).
+// Pages of `limit` (at most 100) walk back from `before` ({ at, id }, the
+// last row of the page before — a position, not an offset, so a Reopen or a
+// new close between pages never skips or repeats a row); `next` is the
+// cursor for the page after, null on the last page.
 const AUTO_CLOSED_LIMIT = 100;
-async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_LIMIT } = {}) {
+async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_LIMIT, before = null } = {}) {
   const since = new Date(Date.now() - Math.max(1, Math.min(30, Number(days) || 7)) * 24 * 60 * 60 * 1000);
+  const pageSize = Math.max(1, Math.min(AUTO_CLOSED_LIMIT, Number(limit) || AUTO_CLOSED_LIMIT));
+  // Milliseconds on both sides: the cursor comes back from a JS Date.
+  const position = "date_trunc('milliseconds', cc.updated_at)";
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')
@@ -2677,13 +2729,19 @@ async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_L
     // association close or a customer-left dismissal — never another writer's.
     .whereIn('cc.status', ['fulfilled', 'dismissed'])
     .whereRaw("cc.fulfillment ->> 'closed_by' = ?", [CLOSED_BY_EVIDENCE])
-    .orderBy('cc.updated_at', 'desc')
-    .limit(Math.max(1, Math.min(AUTO_CLOSED_LIMIT, Number(limit) || AUTO_CLOSED_LIMIT)))
+    .modify((q) => { if (before) q.whereRaw(`(${position}, cc.id) < (?::timestamptz, ?::uuid)`, [before.at, before.id]); })
+    .orderByRaw(`${position} DESC, cc.id DESC`)
+    // One row past the page says whether another follows.
+    .limit(pageSize + 1)
     .select(
       'cc.*', 'cl.twilio_call_sid', 'cl.created_at as call_started_at', 'cl.direction', 'cl.from_phone', 'cl.to_phone',
       'cl.customer_id', 'cu.first_name as customer_first_name', 'cu.last_name as customer_last_name',
     );
-  return rows.map(normalizeRow);
+  const last = rows.length > pageSize ? rows[pageSize - 1] : null;
+  return {
+    commitments: rows.slice(0, pageSize).map(normalizeRow),
+    next: last ? { at: new Date(last.updated_at).toISOString(), id: last.id } : null,
+  };
 }
 
 // Which of these commitment ids are still LIVE work right now — open, not
