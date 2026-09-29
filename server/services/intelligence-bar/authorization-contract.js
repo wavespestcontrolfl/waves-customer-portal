@@ -914,6 +914,17 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('comms', 'The assigned technician MAY get a cancelled-visit notice (tech home card + push) by the existing tech-notifications system, depending on conditions at the moment it processes the cancellation');
   }
 
+  // transitionJobStatus auto-resolves this visit's open overdue-family
+  // dispatch alerts (tech_late / unassigned_overdue) inside the cancel
+  // (dispatch-alerts.js#autoResolveOverdueAlertsForJob) — disclosed, and the
+  // count is pinned in the impact so it cannot drift silently (Codex
+  // round-9 P2).
+  const overdueAlerts = toolName === 'cancel_appointment'
+    ? Number(preview?.cancellation?.open_overdue_alerts) || 0 : 0;
+  if (overdueAlerts > 0) {
+    push('operational', `Closes ${overdueAlerts} open overdue dispatch alert${overdueAlerts === 1 ? '' : 's'} (running late / unassigned) for this visit`);
+  }
+
   // Canonical order (kind, then label) so the contract — and therefore its
   // hash — never depends on param key order. The card groups by kind anyway.
   const KIND_RANK = { comms: 0, billing: 1, customer: 2, operational: 3 };

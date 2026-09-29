@@ -14,10 +14,12 @@
 let mockAppointmentRow = null;
 let mockCustomerRow = null;
 let mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
+let mockOpenOverdueAlerts = 0;
 jest.mock('../models/db', () => {
   const customersQb = { where: () => customersQb, first: async () => mockCustomerRow };
   const railQb = (table) => ({ where: () => ({ select: async () => mockCardRailRows[table] }) });
-  const db = jest.fn((table) => (table === 'customers' ? customersQb : (table in mockCardRailRows) ? railQb(table) : {
+  const alertsQb = { whereIn: () => alertsQb, where: () => alertsQb, whereNull: () => alertsQb, count: async () => [{ count: String(mockOpenOverdueAlerts) }] };
+  const db = jest.fn((table) => (table === 'customers' ? customersQb : table === 'dispatch_alerts' ? alertsQb : (table in mockCardRailRows) ? railQb(table) : {
     leftJoin: () => db.__qb,
     where: () => db.__qb,
     first: async () => mockAppointmentRow,
@@ -30,6 +32,17 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The schedule route's canonical money-commitment readers (prepaid coverage,
+// Codex round 9 P1) — mocked so this suite never loads the 26k-line router.
+const mockCoveredReason = jest.fn(() => null);
+const mockEstimateCommitment = jest.fn(async () => null);
+jest.mock('../routes/admin-schedule', () => ({
+  findBillingCoveredVisits: async (_conn, visits) => {
+    const reason = mockCoveredReason(visits[0]);
+    return new Map(reason ? [[visits[0].id, reason]] : []);
+  },
+  findEstimateScopedCommitment: (...a) => mockEstimateCommitment(...a),
+}));
 
 const mockCardHoldPreview = jest.fn();
 jest.mock('../services/estimate-card-holds', () => ({
@@ -120,6 +133,31 @@ test('card_rail_fingerprint changes when a hold or card request appears or chang
   const secured = (await computeCancelAppointmentImpact('svc-synthetic-1')).card_rail_fingerprint;
   expect(new Set([none, pending, secured]).size).toBe(3);
   mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
+});
+
+// Codex round 9 on #5244, P1: money committed outside any linked invoice
+// (prepaid_amount, live annual-prepay coverage, an estimate deposit or a
+// payment-pending prepay invoice) refuses the card — via the schedule's own
+// canonical readers.
+test('prepaid coverage or an estimate-level commitment refuses as prepaid_coverage', async () => {
+  mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockCoveredReason.mockReturnValueOnce('already prepaid');
+  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).card_cancel_refusals).toContain('prepaid_coverage');
+  mockEstimateCommitment.mockResolvedValueOnce('carrying an estimate deposit that has not been applied yet');
+  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).card_cancel_refusals).toContain('prepaid_coverage');
+  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).card_cancel_refusals).not.toContain('prepaid_coverage');
+});
+
+// Codex round 9 on #5244, P2: open overdue-family alerts the cancel will
+// auto-resolve are counted into the (drift-checked) impact.
+test('open_overdue_alerts counts the visit\'s open tech_late / unassigned_overdue alerts', async () => {
+  mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockOpenOverdueAlerts = 2;
+  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).open_overdue_alerts).toBe(2);
+  mockOpenOverdueAlerts = 0;
+  expect((await computeCancelAppointmentImpact('svc-synthetic-1')).open_overdue_alerts).toBe(0);
 });
 
 test('returns null for an appointment that no longer exists', async () => {

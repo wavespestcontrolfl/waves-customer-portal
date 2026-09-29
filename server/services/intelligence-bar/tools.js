@@ -346,7 +346,7 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'cancel_appointment',
-    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no saved-card fee agreement or card hold, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason and point the operator to the Dispatch screen; never say a visit was cancelled until the card is confirmed.',
+    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved-card fee agreement or card hold, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason and point the operator to the Dispatch screen; never say a visit was cancelled until the card is confirmed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -3651,7 +3651,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // invoice, no inspection-credit offer, and is neither a follow-up child nor
 // grouped — nothing this card would need to void, reverse, or disclose a
 // group/follow-up side effect for. Anything else cancels from Dispatch.
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
 
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
@@ -3923,6 +3923,15 @@ async function cancelAppointment(input, actionContext = {}) {
         // fingerprint. Re-read under this lock (their writers lock the same
         // visit row) and refuse on any change — the unpinned follow-through
         // must never charge a fee the card said did not exist.
+        // Prepaid coverage (Codex round 9 P1): estimate-level deposits and
+        // prepay invoices live outside the row fingerprint — re-run the
+        // canonical readers on this trx under the lock (the deposit-ledger
+        // lock is taken after the visit lock, the same order the schedule's
+        // price path uses).
+        const { prepaidCommitmentReason } = require('../appointment-cancel-impact');
+        if (await prepaidCommitmentReason(trx, lockedRow)) {
+          throw new Error('__cancel_card_refused__');
+        }
         const { cardRailFingerprint } = require('../appointment-cancel-impact');
         if (await cardRailFingerprint(trx, appointment_id) !== input._frozen_cancellation_impact.card_rail_fingerprint) {
           throw new Error('__cancel_identity_drift__');

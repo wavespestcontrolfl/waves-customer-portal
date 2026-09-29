@@ -91,8 +91,12 @@ jest.mock('../services/appointment-cancel-impact', () => {
     computeRowFingerprint: actual.computeRowFingerprint,
     legacyAddressFingerprint: actual.legacyAddressFingerprint,
     cardRailFingerprint: actual.cardRailFingerprint,
+    prepaidCommitmentReason: (...a) => mockPrepaidCommitmentReason(...a),
   };
 });
+// Codex round 9 P1: the canonical prepaid/estimate-commitment readers,
+// re-run under the lock. Bare (null) by default.
+const mockPrepaidCommitmentReason = jest.fn(async () => null);
 
 const mockFollowThrough = jest.fn(async () => ({ settled: 1 }));
 jest.mock('../services/visit-cancellation-followthrough', () => ({
@@ -163,6 +167,7 @@ beforeEach(() => {
   mockApptRow = { ...DEFAULT_APPT_ROW };
   mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
   mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
+  mockPrepaidCommitmentReason.mockReset().mockResolvedValue(null);
   mockCancelMayReseedPlan.mockReturnValue(false);
   // Bare by default (owner ruling 2026-09-28) — clearAllMocks() only clears
   // call history, not a factory-provided implementation, but reset
@@ -666,4 +671,19 @@ test('a card request secured between the card and Confirm refuses as drift — n
   expect(result.success).not.toBe(true);
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
   expect(mockFollowThrough).not.toHaveBeenCalled();
+});
+
+// Codex round 9 on #5244, P1: an estimate deposit or prepay commitment that
+// appears after the proposal (it lives outside scheduled_services) is caught
+// by re-running the canonical readers on the cancel trx under the lock.
+test('a prepaid commitment that appears between the card and Confirm refuses under the lock — nothing transitions', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  mockPrepaidCommitmentReason.mockResolvedValue('carrying an estimate deposit that has not been applied yet');
+  const result = await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+  expect(result.success).not.toBe(true);
+  expect(result.error).toMatch(/prepayment or prepaid plan coverage/);
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
 });

@@ -146,6 +146,19 @@ async function cardRailFingerprint(conn, scheduledServiceId) {
   return crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex');
 }
 
+// The schedule route's canonical money-commitment readers (admin-schedule.js
+// findBillingCoveredVisits + findEstimateScopedCommitment): live annual-prepay
+// coverage, a positive prepaid_amount, a money-holding invoice, and at the
+// estimate level an unapplied deposit or a payment-pending prepay invoice.
+// Card-fee rails are checked separately (feeRails: false). Returns a reason
+// string or null; `conn` is db at proposal and the cancel trx under the lock.
+async function prepaidCommitmentReason(conn, row) {
+  const { findBillingCoveredVisits, findEstimateScopedCommitment } = require('../routes/admin-schedule');
+  const covered = await findBillingCoveredVisits(conn, [row], { feeRails: false });
+  if (covered.has(row.id)) return covered.get(row.id);
+  return findEstimateScopedCommitment(conn, row.source_estimate_id);
+}
+
 // Columns that legitimately change on scheduled_services without changing
 // what cancelling THIS row would do — pure operational churn, never a
 // signal that the visit's identity, money effects, eligibility, window, or
@@ -314,8 +327,14 @@ function feeRailClear(fee) {
 // card does not pin, so the visit is cancelled from Dispatch instead. Sorted
 // codes, so the frozen impact (and its drift comparison) covers the verdict
 // too.
-function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyInvoiceLinked, anyInspectionCreditOffer }) {
+function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyInvoiceLinked, anyInspectionCreditOffer, prepaidCommitment = null }) {
   const refusals = [];
+  // Money committed to the visit OUTSIDE any linked invoice (Codex round-9
+  // P1): a hand-collected prepayment, live annual-prepay coverage, or an
+  // estimate-level deposit / still-open prepay invoice. Decided by the SAME
+  // canonical readers the schedule's own cancel/trim paths use
+  // (prepaidCommitmentReason below) — never a narrower parallel classifier.
+  if (prepaidCommitment) refusals.push('prepaid_coverage');
   // Any card rail, any fee, or a card lane state that could not be read.
   if (!feeRailClear(fee)) refusals.push('card_fee_agreement');
   if (invoices.some((inv) => inv.payment_intent)) refusals.push('card_payment_on_invoice');
@@ -399,6 +418,14 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
   const InspectionCredit = require('./inspection-credit');
   const { previewCancellationNoticeVerdict } = require('./job-status');
 
+  const prepaidCommitment = await prepaidCommitmentReason(db, row);
+  // Open overdue-family dispatch alerts the cancel will auto-resolve
+  // (job-status.js → dispatch-alerts.js#autoResolveOverdueAlertsForJob).
+  // Pinned in the impact (drift-checked) and disclosed on the card.
+  const { OVERDUE_ALERT_TYPES } = require('./dispatch-alerts');
+  const [{ count: openOverdueAlerts } = { count: 0 }] = await db('dispatch_alerts')
+    .whereIn('type', OVERDUE_ALERT_TYPES).where({ job_id: scheduledServiceId }).whereNull('resolved_at')
+    .count({ count: '*' });
   const [railFee, invoiceRows, customerNotice, anyInvoiceRow, anyCreditRow] = await Promise.all([
     previewCancelFee(scheduledServiceId, now),
     InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId),
@@ -473,9 +500,11 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
       row, fee, invoices, inspectionCreditReversal: creditReversal,
       anyInvoiceLinked: Boolean(anyInvoiceRow),
       anyInspectionCreditOffer: Boolean(anyCreditRow),
+      prepaidCommitment,
     }),
     customer_notice: customerNotice,
     technician_notice: technicianNotice,
+    open_overdue_alerts: Number(openOverdueAlerts) || 0,
     // Codex round-5 P2 — see legacyAddressFingerprint's own header. Always
     // null for a stamped row (its address is already fully covered by
     // identity_fingerprint below).
@@ -525,5 +554,6 @@ module.exports = {
   // with no stamped service_address_*.
   legacyAddressFingerprint,
   cardRailFingerprint,
+  prepaidCommitmentReason,
   _stableStringify: stableStringify,
 };
