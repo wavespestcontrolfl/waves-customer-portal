@@ -3,7 +3,8 @@
  * (GATE_PORTAL_ACTIVITY, dark by default). Three signals, all comms-free:
  *
  *   1. customers.last_seen_at — stampLastSeen(), called fire-and-forget from
- *      the customer auth middleware. The throttle lives in the UPDATE's
+ *      the foreground beacon routes only (page-view, push-open) — NOT from the
+ *      auth middleware, so background polling never counts. The throttle lives in the UPDATE's
  *      WHERE clause (only rows older than LAST_SEEN_THROTTLE_MINUTES move),
  *      so it holds across pods and a busy tab costs one cheap no-op UPDATE.
  *   2. portal tab views — customer_page_views rows with page 'portal:<tab>'.
@@ -46,7 +47,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ROUTED_TAG_PREFIX = 'push-routed:';
 
 /**
- * Stamp customers.last_seen_at for an authenticated customer request.
+ * Stamp customers.last_seen_at for a foreground activity beacon.
  * Never throws, never awaited by the caller. No-op while the gate is off or
  * for staff browsers / bots.
  */

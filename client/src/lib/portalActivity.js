@@ -57,26 +57,58 @@ function currentSessionKey() {
   } catch { return null; }
 }
 
+// Same-tab dedupe is per signed-in identity (customer + session family), so a
+// logout / profile switch never inherits the previous customer's memo.
+function currentIdentityKey() {
+  try {
+    const identity = tokenSessionIdentity(localStorage.getItem('waves_token'));
+    return identity ? `${identity.customerId}|${identity.sessionId || ''}` : 'anon';
+  } catch { return 'anon'; }
+}
+
+let pendingSeq = 0;
+function newPendingId() {
+  pendingSeq += 1;
+  return `${Date.now().toString(36)}-${pendingSeq}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Returns the stored entry's id, or null when nothing was parked.
 function storePendingPushOpen(body) {
   const session = currentSessionKey();
-  if (!session) return; // nobody signed in to attribute it to — send-only, never replayed
-  try { localStorage.setItem(PENDING_PUSH_OPEN_KEY, JSON.stringify({ body, session, at: Date.now() })); } catch { /* storage unavailable */ }
+  if (!session) return null; // nobody signed in to attribute it to — send-only, never replayed
+  const id = newPendingId();
+  try {
+    localStorage.setItem(PENDING_PUSH_OPEN_KEY, JSON.stringify({ id, body, session, at: Date.now() }));
+  } catch { return null; /* storage unavailable */ }
+  return id;
+}
+
+function readPendingPushOpen() {
+  try { return JSON.parse(localStorage.getItem(PENDING_PUSH_OPEN_KEY) || 'null'); } catch { return null; }
 }
 
 function clearPendingPushOpen() {
   try { localStorage.removeItem(PENDING_PUSH_OPEN_KEY); } catch { /* storage unavailable */ }
 }
 
-async function sendPushOpen(body) {
-  if (await post(PUSH_OPEN_PATH, body)) clearPendingPushOpen();
+// Clear the parked entry only when it is still the one this request carried: an
+// older request finishing late must not delete a newer open parked meanwhile.
+function clearPendingPushOpenIf(id) {
+  if (!id) return;
+  if (readPendingPushOpen()?.id === id) clearPendingPushOpen();
+}
+
+async function sendPushOpen(body, id) {
+  if (await post(PUSH_OPEN_PATH, body)) clearPendingPushOpenIf(id);
 }
 
 /** Record that the customer opened a portal tab. `route` is the tab id. */
 export function reportPortalPageView(route, now = Date.now()) {
   if (serverDisabled || typeof route !== 'string' || !route) return;
-  const previous = lastSent.get(route);
+  const key = `${currentIdentityKey()}|${route}`;
+  const previous = lastSent.get(key);
   if (previous !== undefined && now - previous < RESEND_SAME_ROUTE_MS) return;
-  lastSent.set(route, now);
+  lastSent.set(key, now);
   void post(PAGE_VIEW_PATH, { route, platform: platformHint() });
 }
 
@@ -96,22 +128,20 @@ export function reportPushOpen(data) {
     tag: pick(data?.tag),
     category: pick(data?.category),
   };
-  storePendingPushOpen(body);
-  void sendPushOpen(body);
+  void sendPushOpen(body, storePendingPushOpen(body));
 }
 
 /** Retry a push open whose beacon never got an answer (call on portal mount). */
 export function flushPendingPushOpen(now = Date.now()) {
   if (serverDisabled) return;
-  let pending = null;
-  try { pending = JSON.parse(localStorage.getItem(PENDING_PUSH_OPEN_KEY) || 'null'); } catch { /* unreadable */ }
+  const pending = readPendingPushOpen();
   if (!pending?.body) return;
   if (!pending.session || pending.session !== currentSessionKey()
     || !Number.isFinite(pending.at) || now - pending.at > PENDING_PUSH_OPEN_MAX_AGE_MS) {
     clearPendingPushOpen();
     return;
   }
-  void sendPushOpen(pending.body);
+  void sendPushOpen(pending.body, pending.id);
 }
 
 /** Test seam: forget the session's memo. */

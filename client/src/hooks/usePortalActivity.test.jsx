@@ -41,6 +41,36 @@ it('does not report while the page is hidden or after unmount', () => {
   expect(report).not.toHaveBeenCalled();
 });
 
+it('defers a view scheduled while hidden to the next visible, and sends it once', () => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+  renderHook(() => usePortalActivity('plan'));
+  vi.advanceTimersByTime(2000);
+  expect(report).not.toHaveBeenCalled();
+
+  document.dispatchEvent(new Event('visibilitychange')); // still hidden
+  expect(report).not.toHaveBeenCalled();
+
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(report).toHaveBeenCalledTimes(1);
+  expect(report).toHaveBeenCalledWith('plan');
+
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(report).toHaveBeenCalledTimes(1);
+});
+
+it('drops a deferred view when the customer leaves the tab or unmounts before it shows', () => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+  const { rerender, unmount } = renderHook(({ tab }) => usePortalActivity(tab), { initialProps: { tab: 'plan' } });
+  vi.advanceTimersByTime(2000);
+  rerender({ tab: 'billing' });
+  vi.advanceTimersByTime(2000);
+  unmount();
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(report).not.toHaveBeenCalled();
+});
+
 it('does nothing without a route', () => {
   renderHook(() => usePortalActivity(null));
   vi.advanceTimersByTime(2000);

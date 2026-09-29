@@ -11,6 +11,11 @@
  * when on, whether or not a row was written (bot / staff / deduped views are
  * silent), so a beacon reveals nothing about the recorder's filters. Row
  * conventions: see services/customer-activity.js. Sends nothing.
+ *
+ * These two foreground beacons are the ONLY writers of customers.last_seen_at
+ * (throttled in SQL, staff/bot skipped): the client sends them only while the
+ * page is visible, so background polling on authenticated routes (bell count,
+ * visit tracker) never makes an idle hidden portal look active.
  */
 const express = require('express');
 const router = express.Router();
@@ -28,12 +33,14 @@ router.use((req, res, next) => {
 router.post('/page-view', (req, res) => {
   const body = req.body || {};
   if (!activity.sanitizeRouteName(body.route)) return res.status(400).json({ error: 'invalid route' });
+  activity.stampLastSeen(req, req.customerId);
   void activity.recordPortalView(req, { customerId: req.customerId, route: body.route, platform: body.platform });
   return res.json({ ok: true, enabled: true });
 });
 
 router.post('/push-open', (req, res) => {
   const body = req.body || {};
+  activity.stampLastSeen(req, req.customerId);
   void activity.recordPushOpen(req, {
     customerId: req.customerId,
     platform: body.platform,

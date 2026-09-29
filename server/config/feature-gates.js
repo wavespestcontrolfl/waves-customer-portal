@@ -3740,8 +3740,8 @@ function visitPrepPhotosLive() {
 }
 
 // GATE_PORTAL_ACTIVITY read at CALL time — strict `=== 'true'`. The one
-// canonical reader for the last_seen_at stamp in middleware/auth.js and the
-// customer-activity beacon routes, so a flip or an unset kill needs no restart.
+// canonical reader for the customer-activity beacon routes (which also stamp
+// last_seen_at), so a flip or an unset kill needs no restart.
 function portalActivityLive() {
   return process.env.GATE_PORTAL_ACTIVITY === 'true';
 }

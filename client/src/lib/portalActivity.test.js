@@ -48,6 +48,22 @@ describe('portal page-view beacon', () => {
     expect(beacon.mock.calls.map((c) => c[1].route)).toEqual(['visits', 'billing', 'visits']);
   });
 
+  it('does not carry the same-tab memo across a logout / sign-in as another customer', () => {
+    reportPortalPageView('visits', 1_000);
+    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-b', sessionId: 'fam-b' }));
+    reportPortalPageView('visits', 1_000 + 60_000); // B inside A's 5-minute window
+    reportPortalPageView('visits', 1_000 + 2 * 60_000); // B again: still deduped for B
+    expect(beacon).toHaveBeenCalledTimes(2);
+    // Same customer, new session family (logout + login) also starts fresh.
+    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-b', sessionId: 'fam-b2' }));
+    reportPortalPageView('visits', 1_000 + 3 * 60_000);
+    expect(beacon).toHaveBeenCalledTimes(3);
+    // Signed-out then A back: A's old memo is not what decides for B, and A is deduped by A's own key.
+    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-a', sessionId: 'fam-a' }));
+    reportPortalPageView('visits', 1_000 + 4 * 60_000);
+    expect(beacon).toHaveBeenCalledTimes(3);
+  });
+
   it('stops beaconing for the session once the server says the gate is off', async () => {
     beacon.mockResolvedValue({ ok: true, enabled: false });
     reportPortalPageView('visits');
@@ -132,6 +148,25 @@ describe('push-open survives a page navigation', () => {
     flushPendingPushOpen();
     await flush();
     expect(beacon).toHaveBeenCalledTimes(1);
+    expect(pending()).toBeNull();
+  });
+
+  it('an older open finishing late does not delete a newer parked open', async () => {
+    let releaseFirst;
+    beacon.mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = () => resolve({ ok: true, enabled: true }); }));
+    beacon.mockResolvedValueOnce(null); // the new open's own beacon is not answered -> stays parked
+    reportPushOpen({ notificationId: 'n-old' });
+    reportPushOpen({ notificationId: 'n-new' }); // parked over the old one
+    releaseFirst();
+    await flush();
+    expect(pending().body.notificationId).toBe('n-new');
+  });
+
+  it('a request clears the parked entry when it is still its own', async () => {
+    reportPushOpen({ notificationId: 'n-own' });
+    const id = pending().id;
+    expect(typeof id).toBe('string');
+    await flush();
     expect(pending()).toBeNull();
   });
 

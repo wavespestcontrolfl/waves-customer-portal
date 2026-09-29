@@ -528,9 +528,6 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
     req.customerInactive = customer.active !== true;
     req.accountId = decoded.accountId || customerAccountId;
     req.authSessionId = decoded.sessionId || null;
-    // GATE_PORTAL_ACTIVITY: throttled, fire-and-forget last_seen_at stamp.
-    // Skips staff browsers/bots; never slows or fails the request.
-    try { require('../services/customer-activity').stampLastSeen(req, customer.id); } catch { /* activity is best-effort */ }
     // Selected saved property (GATE_APP_PROPERTY_SCOPE). Honored only when
     // the row is THIS customer's and active; anything else — another
     // customer's property, a row the office retired, gate off — resolves to

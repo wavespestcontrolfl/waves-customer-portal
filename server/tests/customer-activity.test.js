@@ -86,9 +86,20 @@ const updates = () => mockRaw.mock.calls.filter(([sql]) => /UPDATE customers/.te
 const inserts = () => mockRaw.mock.calls.filter(([sql]) => /INSERT INTO customer_page_views/.test(sql));
 const tick = () => new Promise((r) => setImmediate(r));
 
-describe('last_seen_at stamp (auth middleware)', () => {
-  test('an authenticated request stamps last_seen_at with the throttle in the WHERE clause', async () => {
-    const res = await call('GET', '/api/probe/ping');
+describe('last_seen_at stamp (foreground beacons only)', () => {
+  const beaconCall = (headers) => call('POST', '/api/customer/activity/page-view', { body: { route: 'visits' }, headers });
+
+  test('background polling through the auth middleware never stamps last_seen_at', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      const res = await call('GET', '/api/probe/ping');
+      expect(res.status).toBe(200);
+    }
+    await tick();
+    expect(updates()).toHaveLength(0);
+  });
+
+  test('the page-view beacon stamps last_seen_at with the throttle in the WHERE clause', async () => {
+    const res = await beaconCall();
     expect(res.status).toBe(200);
     await tick();
     expect(updates()).toHaveLength(1);
@@ -97,17 +108,32 @@ describe('last_seen_at stamp (auth middleware)', () => {
     expect(params).toEqual([CUSTOMER_ID, activity.LAST_SEEN_THROTTLE_MINUTES]);
   });
 
-  test('gate off: no stamp and the request is unchanged', async () => {
-    delete process.env.GATE_PORTAL_ACTIVITY;
-    const res = await call('GET', '/api/probe/ping');
+  test('the push-open beacon stamps last_seen_at too', async () => {
+    const res = await call('POST', '/api/customer/activity/push-open', { body: { platform: 'ios' } });
     expect(res.status).toBe(200);
+    await tick();
+    expect(updates()).toHaveLength(1);
+  });
+
+  test('a refused (invalid route) beacon does not stamp', async () => {
+    const res = await call('POST', '/api/customer/activity/page-view', { body: { route: 'a1b2c3' } });
+    expect(res.status).toBe(400);
+    await tick();
+    expect(updates()).toHaveLength(0);
+  });
+
+  test('gate off: no stamp and the beacon answers enabled:false', async () => {
+    delete process.env.GATE_PORTAL_ACTIVITY;
+    const res = await beaconCall();
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(false);
     await tick();
     expect(updates()).toHaveLength(0);
   });
 
   test('staff marker cookie (staff browsing as a customer) does not stamp', async () => {
     const marker = jwt.sign({ kind: 'admin_marker', sub: 'staff-1' }, config.jwt.secret);
-    const res = await call('GET', '/api/probe/ping', { headers: { cookie: `waves_admin=${encodeURIComponent(marker)}` } });
+    const res = await beaconCall({ cookie: `waves_admin=${encodeURIComponent(marker)}` });
     expect(res.status).toBe(200);
     await tick();
     expect(updates()).toHaveLength(0);
@@ -115,28 +141,27 @@ describe('last_seen_at stamp (auth middleware)', () => {
 
   test('a staff IP and a bot user agent do not stamp', async () => {
     process.env.WAVES_ADMIN_IPS = '127.0.0.1,::ffff:127.0.0.1,::1';
-    await call('GET', '/api/probe/ping');
+    await beaconCall();
     await tick();
     expect(updates()).toHaveLength(0);
     delete process.env.WAVES_ADMIN_IPS;
-    await call('GET', '/api/probe/ping', { headers: { 'user-agent': 'curl/8.4.0' } });
+    await beaconCall({ 'user-agent': 'curl/8.4.0' });
     await tick();
     expect(updates()).toHaveLength(0);
-    await call('GET', '/api/probe/ping');
+    await beaconCall();
     await tick();
     expect(updates()).toHaveLength(1);
   });
 
-  test('a failing stamp never fails or delays the request', async () => {
+  test('a failing stamp never fails the beacon', async () => {
     mockRaw.mockRejectedValue(new Error('db down'));
-    const res = await call('GET', '/api/probe/ping');
-    expect(res.status).toBe(200);
+    expect((await beaconCall()).status).toBe(200);
     mockRaw.mockImplementation(() => { throw new Error('sync boom'); });
-    expect((await call('GET', '/api/probe/ping')).status).toBe(200);
+    expect((await beaconCall()).status).toBe(200);
   });
 
-  test('an unauthenticated request never reaches the stamp', async () => {
-    const res = await call('GET', '/api/probe/ping', { auth: false });
+  test('an unauthenticated beacon never reaches the stamp', async () => {
+    const res = await call('POST', '/api/customer/activity/page-view', { auth: false, body: { route: 'visits' } });
     expect(res.status).toBe(401);
     expect(updates()).toHaveLength(0);
   });
