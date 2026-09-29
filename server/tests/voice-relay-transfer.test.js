@@ -117,11 +117,19 @@ describe('executeTool transfer_to_office', () => {
     expect(mockRecordGap).not.toHaveBeenCalled();
   });
 
-  test('a confirmed transfer with no failed tool records what the caller wanted', async () => {
+  test('a transfer Sandy marks not_supported, with no failed tool, records what the caller wanted', async () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { ctx, writes } = ctxFor({ handoffFacts: () => ({ verificationTier: 'full', from: '+19415551234', tools: [{ name: 'get_account_overview', ok: true }], turnCount: 2 }) });
-    await executeTool('transfer_to_office', { intent: 'pool service', summary: 'Wants a quote for pool cleaning' }, ctx);
+    await executeTool('transfer_to_office', { intent: 'pool service', summary: 'Wants a quote for pool cleaning', not_supported: true }, ctx);
     expect(mockRecordGap).toHaveBeenCalledWith({ source: 'phone-agent', summary: writes[0].summary, attempted: 'Handed to the office' });
+  });
+
+  test('an ordinary by-design transfer (no not_supported) records no gap', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { ctx } = ctxFor({ handoffFacts: () => ({ verificationTier: 'full', from: '+19415551234', tools: [], turnCount: 2 }) });
+    await executeTool('transfer_to_office', { intent: 'cancel service', summary: 'Wants to cancel' }, ctx);
+    expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
+    expect(mockRecordGap).not.toHaveBeenCalled();
   });
 
   test('a long summary is clamped to twenty words', () => {
@@ -195,7 +203,7 @@ describe('executeTool transfer_to_office', () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { RECOVERY_INTENT } = require('../services/voice-agent/relay-transfer');
     const { ctx } = ctxFor();
-    await executeTool('transfer_to_office', { intent: RECOVERY_INTENT, summary: 'Sandy had repeated system trouble on this call' }, ctx);
+    await executeTool('transfer_to_office', { intent: RECOVERY_INTENT, summary: 'Sandy had repeated system trouble on this call', not_supported: true }, ctx);
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
     expect(mockRecordGap).not.toHaveBeenCalled();
   });

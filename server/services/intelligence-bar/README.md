@@ -85,7 +85,9 @@ anywhere in this list):
   never records. The keyword classifier plays no part.
 - `phone-agent` — `recordGap()` called from Sandy's human handoff
   (`voice-agent/relay-transfer.js`, right after a confirmed
-  `transfer_to_office`), except on the sandbox and when anything broke on
+  `transfer_to_office`) that Sandy marks `not_supported: true` (an optional
+  tool field; most transfers are staff workflows by design), except on the
+  sandbox and when anything broke on
   the call (the provider-failure recovery transfer, `RECOVERY_INTENT`, or
   any failed tool in the handoff packet). Tool timeouts and model-provider failures are not
   recorded: slow or broken tools are Tool Health's job, not a missing
