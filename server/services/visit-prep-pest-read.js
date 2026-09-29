@@ -13,7 +13,8 @@
  *
  * Trigger rule (owner delta on scope doc §5.3 — the topic chips were
  * removed): the visit's service line decides. A stop whose live members
- * include Pest Control (service-line.js classifyServiceLine; members from
+ * include a pest-only service (pest-production-calibration.js
+ * isPestOnlyServiceType — never a WDO inspection or assessment; members from
  * visit-prep.js techStopMemberIds) is read; anything else is
  * 'unsupported' — no engine call, no cap spent. Lawn and tree & shrub have
  * no engine yet (scope doc §5.3, "being rebuilt").
@@ -39,7 +40,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const PhotoService = require('./photos');
 const { identifyPestV2 } = require('./photo-id-v2/pest-engine');
-const { classifyServiceLine } = require('./service-line');
+// Strict pest identity, not the revenue classifier's Pest Control catch-all
+// (which also takes WDO inspections and assessments; Codex #5305 r10 P1).
+const { isPestOnlyServiceType } = require('./pest-production-calibration');
 const { visitPrepPestReadLive } = require('../config/feature-gates');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
@@ -79,7 +82,7 @@ async function liveStopServiceTypes(svc, conn) {
 
 async function isPestStop(svc, conn = db) {
   const types = await liveStopServiceTypes(svc, conn);
-  return types.some((t) => classifyServiceLine(t) === 'Pest Control');
+  return types.some((t) => isPestOnlyServiceType(t));
 }
 
 // The read follows the VISIT's service line only. The appointment page and

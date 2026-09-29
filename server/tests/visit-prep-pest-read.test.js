@@ -285,6 +285,20 @@ describe('trigger rule: moved siblings and topics', () => {
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['WDO Inspection Service', false],
+    ['Waves Assessment', false],
+    ['Termite Bait Monitoring', false],
+    ['Quarterly Pest Control', true],
+    ['One-Time Pest Treatment', true],
+  ])('strict pest identity: %s → read=%s', async (serviceType, reads) => {
+    const conn = fakeConn();
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    mockIdentifyPestV2.mockResolvedValue(okEngineResult());
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: serviceType }, photos: PHOTOS, conn });
+    expect(mockIdentifyPestV2).toHaveBeenCalledTimes(reads ? 1 : 0);
+  });
+
   test('a topic on the submission is not an input: a lawn visit stays unsupported', async () => {
     const conn = fakeConn();
     await triggerVisitPrepPestRead({

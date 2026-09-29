@@ -329,14 +329,24 @@ function useRefreshWhileReadPending(customerFlagged, onRefresh) {
   // read (another submission, another visit) starts a fresh 30 polls.
   const pendingKey = (customerFlagged || []).filter((entry) => entry.read?.status === 'pending')
     .map((entry) => entry.id).join(',');
-  const pending = pendingKey !== '';
   const polls = useRef({ key: '', count: 0 });
   if (polls.current.key !== pendingKey) polls.current = { key: pendingKey, count: 0 };
+  // The latest callback in a ref: parent re-renders (inline retry callbacks,
+  // socket-driven refreshes) must not restart the 30 s timer, or a busy
+  // screen would never poll (Codex #5305 r10 P2).
+  const refreshRef = useRef(onRefresh);
+  refreshRef.current = onRefresh;
+  // `refreshTick` re-arms the timer after each fired poll for the same set.
+  const [refreshTick, setRefreshTick] = useState(0);
   useEffect(() => {
-    if (!pending || typeof onRefresh !== 'function' || polls.current.count >= READ_PENDING_MAX_POLLS) return undefined;
-    const timer = setTimeout(() => { polls.current.count += 1; onRefresh(); }, READ_PENDING_POLL_MS);
+    if (!pendingKey || polls.current.count >= READ_PENDING_MAX_POLLS) return undefined;
+    const timer = setTimeout(() => {
+      polls.current.count += 1;
+      if (typeof refreshRef.current === 'function') refreshRef.current();
+      setRefreshTick((n) => n + 1);
+    }, READ_PENDING_POLL_MS);
     return () => clearTimeout(timer);
-  }, [pending, onRefresh, customerFlagged]);
+  }, [pendingKey, refreshTick]);
 }
 
 function CustomerFlaggedSection({ serviceId, customerFlagged, request, onRefresh }) {

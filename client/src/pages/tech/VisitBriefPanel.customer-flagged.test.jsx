@@ -197,6 +197,29 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     }
   });
 
+  it('a parent re-render with a new retry callback does not restart the 30 s timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = [];
+      const panel = (fn) => (
+        <VisitBriefPanel
+          stop={stopOf(BASE_SERVICE)}
+          detail={detailFor({ 'svc-1': { estimate: null, brief: { brief: null, facts: { access: null, last_visit: null, customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] } } } })}
+          request={vi.fn(async () => ({ photos: [] }))}
+          onRetry={fn} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+        />
+      );
+      const { rerender } = render(panel(() => calls.push('first')));
+      await act(async () => { vi.advanceTimersByTime(20 * 1000); });
+      rerender(panel(() => calls.push('second')));
+      await act(async () => { vi.advanceTimersByTime(11 * 1000); });
+      // Fired at 30 s from the first render, with the LATEST callback.
+      expect(calls).toEqual(['second']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a new pending read gets a fresh refresh budget', async () => {
     vi.useFakeTimers();
     try {
