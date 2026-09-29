@@ -62,7 +62,9 @@ async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
     applicable: (stop, trx) => plantSubjectForStop(stop, trx),
     // read_result carries the engine marker from the claim on, so the tech
     // display can tell a plant read from a pest one (Codex #5320 r1 P2).
-    pendingPatch: { read_result: JSON.stringify(PLANT_MARKER) },
+    // ...with the subject it was claimed for, so a pending lawn read on a
+    // stop reclassified to tree & shrub is not shown (Codex #5320 r4).
+    pendingPatch: (subject) => ({ read_result: JSON.stringify({ ...PLANT_MARKER, subject_type: subject }) }),
     now,
   });
   return out && out.claimed ? { claimed: true, subject: out.value } : out;

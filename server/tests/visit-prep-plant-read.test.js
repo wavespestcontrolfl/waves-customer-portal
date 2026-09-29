@@ -346,7 +346,7 @@ describe('a successful read', () => {
     expect(mockGetPhotoBase64).toHaveBeenCalledWith('visitprep/a.jpg');
     const writes = readStatusWrites(conn, 'sub-1');
     // The claim stamps the engine marker so the display knows who owns it.
-    expect(writes[0]).toEqual({ read_status: 'pending', read_result: JSON.stringify({ engine: 'plant' }) });
+    expect(writes[0]).toEqual({ read_status: 'pending', read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn' }) });
     expect(writes[1].read_status).toBe('done');
     const stored = JSON.parse(writes[1].read_result);
     expect(stored.subject_type).toBe('lawn');
@@ -395,6 +395,8 @@ describe('service labels (Codex #5320 r2)', () => {
     ['Tree & Shrub Care', 'tree_shrub'],
     ['Weekly Lawn Care', 'lawn'],
     ['Lawns Program', 'lawn'],
+    ['lawn_care', 'lawn'],
+    ['tree_shrub', 'tree_shrub'],
   ])('%s → %s', (label, kind) => {
     expect(kind === 'tree_shrub' ? isTreeShrubOnlyServiceType(label) : isLawnOnlyServiceType(label)).toBe(true);
   });

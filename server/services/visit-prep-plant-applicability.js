@@ -28,13 +28,17 @@ const { isPestOnlyServiceType } = require('./pest-production-calibration');
 const { isPestStop, liveStopServiceTypes } = require('./visit-prep-pest-applicability');
 
 function isLawnOnlyServiceType(serviceType) {
-  const raw = String(serviceType || '').toLowerCase();
+  // Separators normalized so stored keys like lawn_care / tree-shrub match
+  // (Codex #5320 r4).
+  const raw = String(serviceType || '').toLowerCase().replace(/[_-]+/g, ' ');
   if (!/\b(lawns?|turf)\b/.test(raw)) return false;
   return !['tree', 'shrub', 'palm', 'pest', 'mosquito', 'termite', 'rodent', 'wdo', ' + '].some((token) => raw.includes(token));
 }
 
 function isTreeShrubOnlyServiceType(serviceType) {
-  const raw = String(serviceType || '').toLowerCase();
+  // Separators normalized so stored keys like lawn_care / tree-shrub match
+  // (Codex #5320 r4).
+  const raw = String(serviceType || '').toLowerCase().replace(/[_-]+/g, ' ');
   // Plurals too: legacy live rows read "Quarterly Trees & Shrubs" (Codex #5320 r2).
   if (!/\b(trees?|shrubs?)\b/.test(raw)) return false;
   return !['lawn', 'turf', 'palm', 'pest', 'mosquito', 'termite', 'rodent', 'wdo', ' + '].some((token) => raw.includes(token));

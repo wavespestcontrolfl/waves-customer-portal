@@ -52,7 +52,8 @@ async function readsToday(conn, now = new Date()) {
  * @param {(svc: object, trx: object) => Promise<any>} opts.applicable
  *   re-proves the engine applies to the stop, inside the locked claim;
  *   a falsy return means unsupported, anything else is handed back.
- * @param {object} opts.pendingPatch  the columns written with read_status 'pending'
+ * @param {object|(value: any) => object} opts.pendingPatch  the columns written with
+ *   read_status 'pending' (a function receives the applicability value)
  * @param {Date} [opts.now]
  * @param {string[]} [opts.expectStatus] statuses the claim may take the row from
  * @returns {Promise<{ claimed: true, value: any } | 'unsupported' | 'refused' | 'taken'>}
@@ -78,7 +79,8 @@ async function claimReadSlot(conn, submissionId, svc, {
         // row): a row another engine already claimed is never taken twice
         // (Codex #5320 r1 P2).
         const updated = await trx('visit_prep_submissions').where({ id: submissionId })
-          .whereIn('read_status', expectStatus).update({ read_status: 'pending', ...pendingPatch });
+          .whereIn('read_status', expectStatus)
+          .update({ read_status: 'pending', ...(typeof pendingPatch === 'function' ? pendingPatch(value) : pendingPatch) });
         if (!updated) return 'taken';
         return { claimed: true, value };
       });

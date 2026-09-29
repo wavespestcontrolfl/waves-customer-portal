@@ -751,6 +751,18 @@ describe('customerFlaggedFacts — plant read integration (GATE_VISIT_PREP_PLANT
     expect(facts[0].read).toEqual({ status: 'unsupported' });
   });
 
+  test('a PENDING lawn read on a stop reclassified to tree & shrub is not shown (unsupported)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Tree & Shrub Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn' }) },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
   test('a PENDING plant read on a currently-lawn stop shows pending', async () => {
     const conn = fakeConn({
       scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
