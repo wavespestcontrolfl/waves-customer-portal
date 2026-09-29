@@ -507,13 +507,18 @@ describe('booking route wiring (source contracts)', () => {
     // Travel gap (GATE_SLOT_TRAVEL_GAP, pre-push P1): the seeded sweep is a
     // commit surface too — it must carry the follow-up's pin like the
     // parent commit does, or a follow-up lands inside a neighbour's drive.
-    expect(booking).toMatch(/excludeServiceIds: sweepExcludeIds,[\s\S]{0,600}travel: seededRowPin\(row, bookingLat, bookingLng\)/);
+    // Self-serve arrival grace (owner ruling 2026-09-28): the sweep's pin
+    // is spread into the travel object alongside the row's own graceMinutes
+    // (resolved per THIS row's date), not passed bare.
+    expect(booking).toMatch(/excludeServiceIds: sweepExcludeIds,[\s\S]{0,700}travel: \{\s*\n\s*\.\.\.seededRowPin\(row, bookingLat, bookingLng\),\s*\n\s*graceMinutes: selfServeArrivalGraceMinutes\(\{ date: rowDate \}\),/);
     // The pin helper must let a SQL NULL fall through to the booking pin —
     // Number(null) is 0 (GH codex #3803 r2 P1).
     expect(booking).toMatch(/function seededRowPin\([\s\S]{0,400}v != null && Number\.isFinite\(Number\(v\)\)/);
     // The parent-extension guard is a commit surface too: the extended
-    // window must clear the travel gap with the same booking pin (r3 P1).
-    expect(booking).toMatch(/parentExtensionGuard\(\{[\s\S]{0,700}travel: \{\s*\n\s*lat: bookingLat,\s*\n\s*lng: bookingLng,/);
+    // window must clear the travel gap with the same booking pin (r3 P1),
+    // and (Codex round 2 on #5310) the same per-date self-serve grace the
+    // sibling seeding-sweep probe above carries.
+    expect(booking).toMatch(/parentExtensionGuard\(\{[\s\S]{0,1500}travel: \{\s*\n\s*lat: bookingLat,\s*\n\s*lng: bookingLng,\s*\n\s*graceMinutes: selfServeArrivalGraceMinutes\(\{ date: parentDateStr \}\),/);
   });
 
   test('activation takes rung-1 occupancy locks BEFORE the comms/row locks, from the pre-computed plan', () => {

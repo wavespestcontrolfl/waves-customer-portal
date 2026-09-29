@@ -462,7 +462,12 @@ describe('availability excludes the estimate\'s own hold', () => {
   });
 
   test('every production call site passes the estimate id', () => {
-    const calls = src.match(/filterCollidingSlots\([^)]*ownEstimateId: estimateId \}/g) || [];
+    // ownEstimateId no longer has to be the LAST key in the options object
+    // (self-serve arrival grace, owner ruling 2026-09-28, added
+    // arrivalGraceMinutes after it) — match either a trailing comma (more
+    // keys follow) or the closing brace, and allow the inner
+    // selfServeArrivalGraceMinutes() call's own parens within the span.
+    const calls = src.match(/filterCollidingSlots\([\s\S]{0,400}?ownEstimateId: estimateId[,}]/g) || [];
     expect(calls.length).toBeGreaterThanOrEqual(2);
   });
 });

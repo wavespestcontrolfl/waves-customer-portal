@@ -129,3 +129,69 @@ describe('leading gap (HQ_START -> a real next stop) with arrival grace', () => 
     expect(leading).toEqual([]);
   });
 });
+
+// Codex round 2 on #5310: the leading-gap sentinel above must also CHARGE
+// this gap's own worst-case HQ lateness against the candidate's own
+// padding, the same way an ordinary late-running stop's lateness eats its
+// own padding everywhere else in this file (paddingMinutesOf's `lateness`
+// term). Without it, a candidate with real slack in its window (60-minute
+// slot, 50-minute job = 10 minutes of padding) got that whole 10 minutes
+// credited toward the required buffer even though the tech's real HQ
+// arrival can itself land up to `hqStartArrivalFloor - earliestFloor`
+// minutes later than the earliest start this gap offers — finish + buffer
+// could then pass next's promised start despite the sentinel "passing".
+describe('leading gap charges HQ lateness against the candidate\'s own padding (Codex round 2 on #5310)', () => {
+  // Numbers (dayOpen 08:00 = 480, every leg 56 min via the same mocked
+  // haversine, a 60-min candidate credited 50 expected minutes = 10 minutes
+  // of its OWN padding, 15-min buffer, grace 90):
+  //   hqStartArrivalFloor = 480 + 56 = 536 (08:56).
+  //   earliestFloor here is dayOpen itself (480): the 56-minute drive-in is
+  //     LESS than the configured 90-minute grace, so day-open binds before
+  //     the grace-derived floor (536-90=446) does — the tech's worst-case
+  //     real lateness relative to the earliest start this gap can OFFER is
+  //     therefore capped at 536-480 = 56 minutes, not the full 90.
+  //   Before this fix: the sentinel credited the candidate's full 10-minute
+  //     padding against the 15-minute buffer (nextBuffer = 5); total room
+  //     needed = 536 (HQ floor) + 50 (work) + 56 (drive out) + 5 = 647.
+  //   After this fix: the 56-minute worst-case HQ lateness alone exceeds
+  //     the 10-minute padding, so none of it survives (nextBuffer = 15);
+  //     total room needed = 536 + 50 + 56 + 15 = 657.
+  test('a gap only the bug thought was safe (647 <= room < 657): fixed code offers nothing, the pre-fix formula would have offered the graced-early hour', async () => {
+    wireDb([stopRow('s1', '10:50', '11:50')]); // next.startMin = 650
+    const { slots } = await findAvailableSlots({
+      lat: 27.4, lng: -82.4, durationMinutes: 60, bufferMinutes: 15, expectedMinutes: 50,
+      dateFrom: FUTURE_DATE, dateTo: FUTURE_DATE, topN: 200,
+      packEnds: true, serviceKey: 'pest_control', arrivalGraceMinutes: 90,
+    });
+    const leading = slots.filter((s) => s.insertion.after_stop_id == null && s.insertion.before_stop_id === 's1');
+    expect(leading).toEqual([]);
+  });
+
+  test('exactly 657 minutes of room (the fixed boundary) still clears — the fix does not over-tighten', async () => {
+    wireDb([stopRow('s1', '10:57', '11:57')]); // next.startMin = 657
+    const { slots } = await findAvailableSlots({
+      lat: 27.4, lng: -82.4, durationMinutes: 60, bufferMinutes: 15, expectedMinutes: 50,
+      dateFrom: FUTURE_DATE, dateTo: FUTURE_DATE, topN: 200,
+      packEnds: true, serviceKey: 'pest_control', arrivalGraceMinutes: 90,
+    });
+    const leading = slots.filter((s) => s.insertion.after_stop_id == null && s.insertion.before_stop_id === 's1');
+    // packedEndsStarts only offers the "packed before next" hour on a
+    // leading gap (prevIsStop is false, so the "packed after prev" branch
+    // never runs) — packedBounds' OWN, unrelated latestFromNextStop (10
+    // minutes of padding, unaffected by this gap's HQ-lateness sentinel)
+    // floors to 09:00 here, not 08:00; this fix only decides whether the
+    // gap is killed to -Infinity, not which hour survives once it isn't.
+    expect(leading.map((s) => s.start_time)).toEqual(['09:00']);
+  });
+
+  test('one minute short of the boundary (656) is infeasible', async () => {
+    wireDb([stopRow('s1', '10:56', '11:56')]); // next.startMin = 656
+    const { slots } = await findAvailableSlots({
+      lat: 27.4, lng: -82.4, durationMinutes: 60, bufferMinutes: 15, expectedMinutes: 50,
+      dateFrom: FUTURE_DATE, dateTo: FUTURE_DATE, topN: 200,
+      packEnds: true, serviceKey: 'pest_control', arrivalGraceMinutes: 90,
+    });
+    const leading = slots.filter((s) => s.insertion.after_stop_id == null && s.insertion.before_stop_id === 's1');
+    expect(leading).toEqual([]);
+  });
+});

@@ -53,6 +53,34 @@ const { serviceDurationMinutes } = require('./service-library');
 const { expectedServiceMinutes, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 const { selfServeArrivalGraceMinutes } = require('./scheduling/travel-gap');
 
+// Arrival grace in CAPACITY mode (Codex round 2 on #5310, GATE_SCHEDULING_CAPACITY
+// is live in production): reserveSlot's ternary probes booked interviews only
+// (findInterviewConflicts) and commitReservation skips the travel-gap probe
+// entirely — neither ever threads `graceMinutes` into anything, because
+// capacity mode's own occupancy model is verifyArrivalCapacity's route
+// simulation, not travel-gap.js/occupancy.js at all. That simulation only
+// enforces the FIXED 120-minute arrival promise (effectiveWindowRange,
+// route-reorder-window-fit.js) — it has no concept of the narrower,
+// owner-configured grace bound, so a signed offer could reserve or graduate
+// with a real simulated arrival anywhere between grace and the full 120
+// minutes, silently promising more lateness than grace was meant to allow.
+// Re-checked here against the SAME `arrivalDelayMinutes` the simulation
+// already computed (findCapacitySlots' own arrival_delay_minutes stamp is
+// this same field) — never re-derived. Grace 0/dark is a no-op: capacity
+// mode's existing 120-minute bound (via `capacityFit`/`fit.feasible` itself)
+// stays the ONLY bound, byte-identical to before this check existed; this
+// only ADDS a stricter refusal when grace is actually configured for the
+// candidate's own date (decision 2: today is always strict, so grace is
+// already 0 there and this never fires for a same-day capacity commit).
+function enforceCapacityArrivalGrace(capacityFit, date) {
+  if (!capacityFit) return;
+  const grace = selfServeArrivalGraceMinutes({ date });
+  if (grace <= 0) return;
+  if (Number.isFinite(capacityFit.arrivalDelayMinutes) && capacityFit.arrivalDelayMinutes > grace) {
+    throw capacityError('arrival_grace');
+  }
+}
+
 // The candidate's own expected-minutes padding credit (owner ruling
 // 2026-09-23) for the travel-gap probes below (occupancy.js decides
 // whether it's ever actually read — gate off, these numbers are unused).
@@ -1081,6 +1109,8 @@ async function reserveSlot({
         conn: trx, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
         serviceTypes: serviceProfile.services.map(service => service.label || service.service),
       }) : null;
+      // Arrival grace (Codex round 2 on #5310) — see enforceCapacityArrivalGrace.
+      enforceCapacityArrivalGrace(capacityFit, date);
       // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
       // graduated visit carries it even if the profile can't be re-resolved
       // at commit; commitReservation backfills it when this returns null.
@@ -1834,6 +1864,8 @@ async function commitReservation({
       conn: client, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
       serviceTypes: serviceProfile?.services.map(service => service.label || service.service),
     }) : null;
+    // Arrival grace (Codex round 2 on #5310) — see enforceCapacityArrivalGrace.
+    enforceCapacityArrivalGrace(capacityFit, scheduledDate);
 
     if (windowEnd && !useCapacity) {
       const conflict = await client('scheduled_services')
@@ -2594,5 +2626,6 @@ module.exports = {
     notesWithServiceMix,
     catalogLinkForProfile,
     candidateExpectedMinutesFromRow,
+    enforceCapacityArrivalGrace,
   },
 };

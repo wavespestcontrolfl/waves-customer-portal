@@ -731,12 +731,31 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
   // the "never make an existing stop late" rule (decision 5) this file must
   // never violate, on the one gap shape packedBounds itself can't see.
   // Mirrors packedBounds' own formula: ownExpected/nextBuffer against the
-  // REAL (un-graced) HQ arrival floor, not the offered start.
+  // REAL (un-graced) HQ arrival floor, not the offered start. Codex round 2
+  // on #5310: the padding probe below must also CHARGE this gap's own
+  // worst-case HQ lateness against the candidate's padding — the same way
+  // an ordinary late-running stop consumes its own padding via
+  // paddingMinutesOf's `lateness` term (travel-gap.js). Without it, a
+  // candidate with real slack in its window (e.g. a 60-minute slot doing a
+  // 50-minute job) got that whole 10 minutes credited against the required
+  // buffer even though the tech's real HQ arrival can itself run up to
+  // `hqStartArrivalFloor - earliestFloor` minutes later than the earliest
+  // start this gap is willing to OFFER — exactly the amount of padding a
+  // late arrival should eat first. `earliestFloor` (computed just above) is
+  // this gap's own true worst case: whichever floor term actually binds it
+  // (day-open, a hard start-floor, or `hqStartArrivalFloor - grace` itself),
+  // never a blind `grace` that could either understate it (another floor
+  // pushes the real earliest start later than grace alone would) or
+  // overstate it (the drive-in itself is shorter than the configured
+  // grace, so the tech can never actually be graced by the full amount).
   if (!prevIsStop && nextIsStop && grace > 0) {
     const ownExpectedForGap = Number.isFinite(candidateExpectedMinutes)
       ? Math.min(candidateExpectedMinutes, durationMinutes) : durationMinutes;
+    const worstCaseHqLateness = Math.max(0, hqStartArrivalFloor - earliestFloor);
     const nextBufferForGap = Math.max(
-      0, stopBuffer - paddingMinutesOf({ startMin: 0, endMin: durationMinutes, expectedMinutes: ownExpectedForGap }),
+      0, stopBuffer - paddingMinutesOf({
+        startMin: 0, endMin: durationMinutes, expectedMinutes: ownExpectedForGap, arrivalMin: worstCaseHqLateness,
+      }),
     );
     if (hqStartArrivalFloor + ownExpectedForGap + driveOut + nextBufferForGap > next.startMin) latestStartFloor = -Infinity;
   }

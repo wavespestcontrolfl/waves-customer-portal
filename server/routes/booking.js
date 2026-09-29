@@ -5157,9 +5157,21 @@ async function createSelfBooking(payload = {}) {
               // clear the same drive + buffer the offered one did — an
               // extension can eat the gap without overlapping the next stop
               // (GH codex #3803 r3 P1). Same booking pin as the commit probe.
+              // Self-serve arrival grace (Codex round 2 on #5310): this
+              // whole activation path only runs behind a self-serve
+              // createSelfBooking wizard-series activation, so the parent's
+              // own signed booking may carry grace too — resolved for the
+              // parent's own date (decision 2), same as the sibling
+              // seeding-sweep probe below. Without it, a graced booking
+              // whose seeded child duration needs more room than the
+              // funnel's own slot got the extension classified conflicting
+              // by the un-graced probe even when the graced offer itself
+              // would have cleared — under-reserving the parent and belling
+              // the office for a clash that was never real.
               travel: {
                 lat: bookingLat,
                 lng: bookingLng,
+                graceMinutes: selfServeArrivalGraceMinutes({ date: parentDateStr }),
               },
             });
             if (extensionClashes.length === 0) {
