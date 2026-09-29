@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   completionAreasForTypedFindings,
   labelsPresentInMarkerNotes,
+  entryLimitProblems,
+  normalizedEntries,
+  reconcileProtocolActions,
+  withoutProtocolMarkerLines,
   offListTypedAreaValues,
   productAreaChoices,
   pruneRestoredFindingsValues,
@@ -176,6 +180,129 @@ describe("structured note marker matching", () => {
       "[Found] Inactive or abandoned nests",
       ["Active mud nests", "Inactive or abandoned nests"],
     )).toEqual(["Inactive or abandoned nests"]);
+  });
+
+  // The server accepts whitespace after "]" as optional; the client must
+  // treat the same lines as live markers (codex P2 #5051).
+  it("treats a no-space marker as active, like the server grammar", () => {
+    for (const line of ["[Protocol]Treated the perimeter", "  [Action]Treated the perimeter  ", "[protocol optional]Treated the perimeter"]) {
+      expect(labelsPresentInMarkerNotes(line, ["Treated the perimeter"])).toEqual(["Treated the perimeter"]);
+    }
+    expect(labelsPresentInMarkerNotes("[Protocol]", ["Treated the perimeter"])).toEqual([]);
+  });
+});
+
+describe("submit reconciliation of protocol action markers", () => {
+  const pestContext = {
+    specialtyProtocolActions: [],
+    protocolActions: [],
+    protocolActionsLoaded: true,
+    actionScopeByLabel: {},
+    isLawn: false,
+    completionImprovements: false,
+  };
+  const lawnContext = {
+    ...pestContext,
+    isLawn: true,
+    protocolActions: [{ label: "Applied weed control" }],
+  };
+
+  it("keeps a completed action whose marker was edited to no-space", () => {
+    const notes = "[Protocol]Treated the perimeter\n[Found] Ants";
+    const result = reconcileProtocolActions({
+      labels: ["Treated the perimeter"],
+      notes,
+      context: pestContext,
+    });
+    expect(result.reportProtocolActions).toEqual(["Treated the perimeter"]);
+    expect(result.reportTechnicianNotes).toBe(notes);
+    expect(result.completedActions).toEqual(["Treated the perimeter"]);
+  });
+
+  it("prunes markers of excluded labels, spaced or not, and nothing else", () => {
+    const result = reconcileProtocolActions({
+      labels: ["Applied weed control", "Stale scout task", "Other stale task"],
+      notes: [
+        "[Protocol] Applied weed control",
+        "[Protocol]Stale scout task",
+        "[Action] Other stale task",
+        "[Action] Free typed action",
+        "Plain prose stays",
+      ].join("\n"),
+      context: lawnContext,
+    });
+    expect(result.reportProtocolActions).toEqual(["Applied weed control"]);
+    expect(result.reportTechnicianNotes).toBe(
+      "[Protocol] Applied weed control\n[Action] Free typed action\nPlain prose stays",
+    );
+    expect(result.completedActions).toEqual(["Applied weed control", "Free typed action"]);
+  });
+
+  it("lets a saved scope stand only while the action source is empty", () => {
+    const actionScopeByLabel = { "Saved label": { scope: "exterior", treatmentApplied: true } };
+    const unavailable = { ...lawnContext, protocolActionsLoaded: false, actionScopeByLabel };
+    const loaded = { ...lawnContext, actionScopeByLabel };
+    const args = { labels: ["Saved label"], notes: "[Action]Saved label" };
+    expect(reconcileProtocolActions({ ...args, context: unavailable }).reportProtocolActions).toEqual(["Saved label"]);
+    const dropped = reconcileProtocolActions({ ...args, context: loaded });
+    expect(dropped.reportProtocolActions).toEqual([]);
+    expect(dropped.reportTechnicianNotes).toBe("");
+  });
+
+  it("counts a whitespace-variant duplicate marker once, like the server", () => {
+    const labels = Array.from({ length: 20 }, (_, i) => `Action number ${i}`);
+    const result = reconcileProtocolActions({
+      labels,
+      notes: "[Action]  action   NUMBER 3 \n[Protocol]Action\tnumber 4",
+      context: pestContext,
+    });
+    expect(result.completedActions).toHaveLength(20);
+    expect(result.completedActions.some((line) => line.length > 240)).toBe(false);
+  });
+
+  it("measures length after whitespace collapse, and still rejects a genuinely long entry", () => {
+    const padded = `Treated ${" ".repeat(400)}the perimeter`;
+    const collapsed = reconcileProtocolActions({ labels: [], notes: `[Action]${padded}`, context: pestContext });
+    expect(collapsed.completedActions).toEqual(["Treated the perimeter"]);
+    const long = reconcileProtocolActions({ labels: [], notes: `[Action]${"x".repeat(241)}`, context: pestContext });
+    expect(long.completedActions.some((line) => line.length > 240)).toBe(true);
+  });
+
+  it("normalizes entries the way the server does", () => {
+    expect(normalizedEntries(["  a   b ", "A B", "", "   ", "c"])).toEqual(["a b", "c"]);
+  });
+
+  it("counts observations and recommendations on the entries the server persists", () => {
+    const labels = Array.from({ length: 19 }, (_, i) => `Finding ${i}`);
+    // A whitespace/case variant of a chip label and of a free line is the same
+    // persisted entry: 19 labels + 1 unique free line = 20, not blocked.
+    const entries = normalizedEntries([...labels, "  finding   3 ", "Extra   sighting", "extra sighting"]);
+    expect(entries).toHaveLength(20);
+    expect(entryLimitProblems([["Observations", entries, entries]])).toEqual([]);
+    const over = normalizedEntries([...entries, "One more"]);
+    expect(entryLimitProblems([["Observations", over, over]])).toEqual([
+      "Observations: at most 20 entries total (21 entered)",
+    ]);
+  });
+
+  it("length-checks after whitespace collapse and rejects a genuinely long line", () => {
+    const spaced = normalizedEntries([`Saw ${" ".repeat(300)}ants`]);
+    expect(entryLimitProblems([["Recommendations", spaced, spaced]])).toEqual([]);
+    const long = normalizedEntries(["y".repeat(241)]);
+    expect(entryLimitProblems([["Recommendations", long, long]])).toEqual([
+      "Recommendations: keep each line under 240 characters",
+    ]);
+  });
+
+  it("limits specialty lanes to their own actions", () => {
+    const context = { ...pestContext, specialtyProtocolActions: [{ label: "Preset action" }] };
+    const result = reconcileProtocolActions({
+      labels: ["Preset action", "Restored label"],
+      notes: "[Protocol]Preset action\n[Protocol]Restored label",
+      context,
+    });
+    expect(result.reportProtocolActions).toEqual(["Preset action"]);
+    expect(withoutProtocolMarkerLines("[Protocol]Restored label", ["Restored label"])).toBe("");
   });
 });
 

@@ -23,6 +23,11 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   coveredTermsAsOf: jest.fn(() => require('../models/db')('annual_prepay_terms')),
   serviceMatchesCoverage: jest.fn((row, type) => row.service_type === type),
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
+  _private: {
+    PREPAY_INVOICE_COLLECTED_STATUSES: ['paid', 'prepaid'],
+    coverageRowsForTerm: jest.fn(async () => []),
+    dateOnly: (d) => (d == null ? null : String(d).slice(0, 10)),
+  },
 }));
 jest.mock('../services/invoice', () => ({
   anyInvoiceLinkedToVisit: jest.fn(),
@@ -109,19 +114,27 @@ function unpricedChild(over = {}) {
 // (the same 'scheduled_services as ss' table, told apart by its
 // where('ss.status', 'completed')); bellRows: the standing bells' created_at /
 // rungAt it reads from 'notifications'.
-function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], completedRows = [], bellRows = [], alertedKeys = new Set() } = {}) {
+// churnedRows: what the churned-customer finder reads ('customers as c');
+// churnedError makes that read throw; churnedChain keeps the builder so a test
+// can see how the finder filtered.
+let churnedChain = null;
+function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], completedRows = [], bellRows = [], churnedRows = [], churnedError = null, alertedKeys = new Set() } = {}) {
+  churnedChain = null;
   db.mockImplementation((table) => {
     let completedCheck = false;
     const c = {};
-    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
+    if (table === 'customers as c') churnedChain = c;
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'whereExists', 'whereNotExists', 'leftJoin', 'join', 'select', 'count', 'as', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
       c[m] = jest.fn(() => c);
     }
     c.where = jest.fn((...args) => { if (args[0] === 'ss.status' && args[1] === 'completed') completedCheck = true; return c; });
     c.then = (res, rej) => {
+      if (table === 'customers as c' && churnedError) return Promise.reject(churnedError).then(res, rej);
       const rows = table === 'scheduled_services' ? staleRows
         : table === 'scheduled_services as ss' ? (completedCheck ? completedRows : coverageRows)
           : table === 'annual_prepay_terms' ? coveredTerms
-            : table === 'notifications' ? bellRows : null;
+            : table === 'notifications' ? bellRows
+              : table === 'customers as c' ? churnedRows : null;
       return Promise.resolve(rows || []).then(res, rej);
     };
     return c;
@@ -134,7 +147,7 @@ function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], comp
 const delegatingRaise = async (...args) => {
   const result = await NotificationService.notifyAdmin(...args);
   if (!result) return result;
-  return { ...result, rang: !result.deduped || (result.refreshed === true && result.rung !== false) };
+  return { ...result, rang: !result.suppressed && (!result.deduped || (result.refreshed === true && result.rung !== false)) };
 };
 
 beforeEach(() => {
@@ -962,6 +975,109 @@ describe('alert episodes (ALERT_EPISODES)', () => {
   });
 });
 
+describe('churned customer with live work (class 4)', () => {
+  const churned = (over = {}) => ({ id: 'cust-churned-1', live_visits: 2, unsent_invoices: 0, ...over });
+  const openKeysByPrefix = (byPrefix) => episodeHelpers.openAdminAlertKeys.mockImplementation(async (_conn, prefix) => byPrefix[prefix] || []);
+  const closedBy = () => Object.fromEntries(episodeHelpers.closeAdminAlertKeys.mock.calls.map(([, keys, reason]) => [reason, keys]));
+
+  test('a churned customer with live upcoming visits rings one bell: counts, action, customer link, no dedupe version', async () => {
+    makeDbMock({ churnedRows: [churned()] });
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ churnedLiveWork: 1, churnedWorkCheckFailed: false, alerted: 1 });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(1);
+    const [category, title, body, opts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls[0];
+    expect(category).toBe('alert');
+    expect(title).toBe('Churned customer still has live work');
+    expect(body).toBe('Still on the books for a churned customer: 2 live visits. Cancel or void it through the app ("Cancel plan…" and the invoice tools).');
+    // No dedupeVersion (a standing alert is never re-rung); a QUIET refresh keeps its text on the work that is left.
+    expect(opts).toEqual({
+      link: '/admin/customers?customerId=cust-churned-1', bell: true, dedupeKey: 'churned-live-work:cust-churned-1',
+      refreshOnDedupe: true, ringOnRefresh: expect.any(Function),
+      metadata: { dedupeKey: 'churned-live-work:cust-churned-1', customer_id: 'cust-churned-1',
+        live_visits: 2, ongoing_series: 0, prepay_terms: 0, pending_prepay_invoices: 0, unsent_invoices: 0 },
+    });
+    expect(opts.ringOnRefresh()).toBe(false);
+  });
+
+  test('only an unsent invoice also rings, and both counts share one bell', async () => {
+    makeDbMock({ churnedRows: [churned({ live_visits: 0, unsent_invoices: 1 }), churned({ id: 'cust-churned-2', live_visits: 1, unsent_invoices: 3 })] });
+    await runInner({ now: NOW });
+    const bodies = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[2]);
+    expect(bodies[0]).toContain('churned customer: 1 unsent invoice.');
+    expect(bodies[0]).not.toContain('visit');
+    expect(bodies[1]).toContain('churned customer: 1 live visit, 3 unsent invoices.');
+    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls[1][3].metadata).toMatchObject({ live_visits: 1, unsent_invoices: 3 });
+  });
+
+  test('the finder asks only for churned, not-deleted customers; a customer it does not return never rings', async () => {
+    makeDbMock({ churnedRows: [] });
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ churnedLiveWork: 0, alerted: 0 });
+    expect(churnedChain.where).toHaveBeenCalledWith('c.pipeline_stage', 'churned');
+    expect(churnedChain.whereNull).toHaveBeenCalledWith('c.deleted_at');
+    // Churned outside the cancel steps only: the processor stamps churn_episode_id.
+    expect(churnedChain.whereNull).toHaveBeenCalledWith('c.churn_episode_id');
+    // Every leg of the churn guard's live work, plus unsent invoices (the real SQL is proven on Postgres).
+    for (const table of ['scheduled_services as sv', 'scheduled_services as so', 'annual_prepay_terms as pt', 'invoices as inv']) {
+      expect(db).toHaveBeenCalledWith(table);
+    }
+    expect(require('../services/annual-prepay-renewals').coveredTermsAsOf).toHaveBeenCalledWith(db, null);
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  });
+
+  test('the bell closes when the customer drops out of the live set; a live key stays open', async () => {
+    makeDbMock({ churnedRows: [churned()] });
+    openKeysByPrefix({ 'churned-live-work:': ['churned-live-work:cust-churned-1', 'churned-live-work:cust-cleaned-up'] });
+    const result = await runInner({ now: NOW });
+    expect(closedBy()).toEqual({ 'no live work left': ['churned-live-work:cust-cleaned-up'] });
+    expect(result).toMatchObject({ closed: 1, closePassFailed: false });
+  });
+
+  test('a failed churned check is reported and never closes its prefix; other classes still page and close', async () => {
+    makeDbMock({ churnedError: new Error('customers read failed'), coverageRows: [unpricedChild()] });
+    openKeysByPrefix({
+      'churned-live-work:': ['churned-live-work:cust-churned-1'],
+      'unpriced-series:': ['unpriced-series:ss-gone'],
+    });
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ churnedWorkCheckFailed: true, churnedLiveWork: 0, alerted: 1 });
+    expect(closedBy()).toEqual({ 'no longer unpriced in the look-ahead window': ['unpriced-series:ss-gone'] });
+  });
+
+  test('it rings AFTER every other class, so it never starves the money pages under the cap', async () => {
+    findLawnEmailAudienceGaps.mockResolvedValueOnce(Array.from({ length: MAX_ALERTS_PER_RUN }, (_, i) => (
+      { customerId: `cust-${i}`, fixable: ['no_coordinates'] }
+    )));
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([{ estimateId: 'e-1', customerId: 'c-1', serviceFamily: 'pest_control', pattern: 'monthly',
+      expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'ev', appointmentIds: [] }]);
+    makeDbMock({ coverageRows: [unpricedChild()], churnedRows: [churned()] });
+    const result = await runInner({ now: NOW });
+    const keys = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey);
+    expect(keys[0]).toBe('unpriced-series:ss-parent-1');
+    expect(keys).not.toContain('churned-live-work:cust-churned-1'); // held behind the cap, rings next tick
+    expect(result.alerted).toBe(MAX_ALERTS_PER_RUN);
+
+    // With room under the cap it rings, and last.
+    makeDbMock({ coverageRows: [unpricedChild()], churnedRows: [churned()] });
+    episodeHelpers.raiseAdminAlertWithReopen.mockClear();
+    await runInner({ now: NOW });
+    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey))
+      .toEqual(['unpriced-series:ss-parent-1', 'churned-live-work:cust-churned-1']);
+  });
+
+  test('kill switch off: still raises through plain notifyAdmin, with no close pass', async () => {
+    alertEpisodesLive.mockReturnValue(false);
+    makeDbMock({ churnedRows: [churned({ live_visits: 0, unsent_invoices: 2 })] });
+    openKeysByPrefix({ 'churned-live-work:': ['churned-live-work:cust-gone'] });
+    const result = await runInner({ now: NOW });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ dedupeKey: 'churned-live-work:cust-churned-1', bell: true });
+    expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ alerted: 1, churnedLiveWork: 1 });
+  });
+});
+
 describe('alertEpisodesLive (the real reader)', () => {
   const { alertEpisodesLive: real } = jest.requireActual('../config/feature-gates');
   const saved = process.env.ALERT_EPISODES;
@@ -1134,6 +1250,37 @@ describe('unpriced series held by a visit that completed unpriced since its bell
     const completedScan = db.mock.results.map((r) => r.value).find((c) => c.where.mock.calls.some(([a, b]) => a === 'ss.status' && b === 'completed'));
     expect(completedScan).toBeUndefined();
     expect(anyInvoiceLinkedToVisit).not.toHaveBeenCalled();
+  });
+});
+
+describe('raiseAdminAlertWithReopen: a suppressed result never rings', () => {
+  test('an internal test customer\'s suppressed alert reports rang false, so it never uses a ring-cap slot', async () => {
+    const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain), orderBy: jest.fn(() => chain), forUpdate: jest.fn(() => chain), first: jest.fn(async () => undefined) };
+    const trx = jest.fn(() => chain);
+    trx.raw = jest.fn(async () => {});
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: null, suppressed: true }));
+    const result = await realHelpers.raiseAdminAlertWithReopen('alert', 't', 'b', { dedupeKey: 'k', metadata: { dedupeKey: 'k' } });
+    expect(result).toMatchObject({ suppressed: true, rang: false });
+    delete db.transaction;
+  });
+
+  test('the watchdog never counts it: a suppressed churned-customer alert leaves the cap for real ones', async () => {
+    makeDbMock({ churnedRows: [{ id: 'cust-demo', live_visits: 1 }] });
+    // After makeDbMock, which installs its own notifyAdmin stand-in.
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: null, suppressed: true }));
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ churnedLiveWork: 1, alerted: 0 });
+  });
+
+  test('kill switch off too: plain notifyAdmin\'s suppressed result never takes a cap slot', async () => {
+    alertEpisodesLive.mockReturnValue(false);
+    makeDbMock({ churnedRows: [{ id: 'cust-demo', live_visits: 1 }] });
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: null, suppressed: true, deduped: false }));
+    const result = await runInner({ now: NOW });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ churnedLiveWork: 1, alerted: 0 });
   });
 });
 

@@ -1766,6 +1766,52 @@ builder is fail-closed, so a config where the rental cannot actually
 price 404s instead of rendering a one-column comparison; 60 req/min
 limit, `no-store`/`no-referrer` headers; no product-registry, vendor, or
 cost data — customer-priced figures only).
+`/api/estimates/:token/map/satellite` and `/api/estimates/:token/map/overlay`
+(read-only token-scoped satellite image proxy, B12; the ONLY way a customer
+surface gets a map image — /data, the SSR page, the PDF render pass and the
+show-your-work payload carry these paths and never a maps.googleapis.com URL,
+because that URL carried the server's Google Maps key, the same key Geocoding
+and Routes use, which cannot be referrer-restricted; `/data` and the SSR HTML
+also run a last-line scrub that strips any maps.googleapis.com `key=` (raw or
+HTML/JSON-escaped separators: `&amp;`, `&#38;`, `&#x26;`, `\u0026`), any
+`key=AIza...` token or bare Google-key shape (so a rotated or staff-pasted key
+that differs from the configured one is caught too) and blanks the literal key
+— the SSR path scrubs its SOURCE values before renderPage escapes them, then
+scrubs the finished HTML as a backstop, and stored `estimates.satellite_url` rows that already
+hold a keyed URL are redacted on output — no migration). A small guard (`mapImagePreGuard`) is mounted in
+`server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter,
+scoped to exactly what Express routes to these two handlers (GET and HEAD,
+case-insensitive path, optional trailing slash): it stamps `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` and `Cross-Origin-Resource-Policy:
+cross-origin` first — so the router.param malformed-token 404 and the global
+and route limiters' 429s inherit them, and a successful image overwrites
+Cache-Control — and answers the dark overlay's generic 404 there, before the
+global limiter can turn it into a 429. Token format gate
+(router.param) + ONE generic 404 body (`Estimate not found`, `no-store`) for
+every refusal — malformed/unknown token, callSideBlock, a row that is not
+`isEstimateCustomerViewable` (drafts, expired, archived, send_failed 404; the
+group-link view bypass matches `/:token/data`; there is NO staff-preview or
+signed-pdf-pin bypass because an <img> carries neither), no usable stored map,
+and upstream failure — so the route is not an existence oracle. The route
+reads NOTHING from the caller's query string: `/map/satellite` rebuilds a
+keyless Static Maps URL from the estimate's OWN stored `satellite_url`
+(`estimate_data.satelliteUrl` fallback), keeping only allow-listed,
+range-checked params (center, zoom 1-22, size <=640x640, maptype
+satellite|hybrid, format, scale 1|2; markers/path/signature dropped) and
+refusing any non-`https://maps.googleapis.com/maps/api/staticmap` value, so it
+cannot become an open proxy or an SSRF vector; `/map/overlay` rebuilds the
+parcel-outline URL from the cached property_lookups row (dark while
+`estimateShowYourWork` is off: the gate check runs BEFORE the limiter and any
+DB work, so a dark route answers the generic 404, never 429). The server key
+is appended only inside the fetch (8 s timeout, image/* content-type and 4 MB
+cap enforced, nothing logged but a URL-free warn); a bounded in-memory cache
+(64 entries, 10 min) keeps one token from fanning out into unlimited Google
+fetches, and a 30 req/min per-IP limiter fronts it. Success streams the bytes
+with `Cache-Control: private, max-age=3600`, `Referrer-Policy: no-referrer`,
+`X-Content-Type-Options: nosniff`, and `Cross-Origin-Resource-Policy:
+cross-origin` (helmet defaults to same-origin, which would block the <img>
+when the SPA is built against a separate API origin via VITE_API_URL).
+Admin-only surfaces keep their direct URLs).
 `/api/estimates/:token/service-details/send` (write; emails or texts that
 same packet to the contact info ALREADY ON the estimate — the destination
 is NEVER caller-supplied (body carries only `service` + `channel`), so

@@ -21,10 +21,12 @@ let catalog;
 let optionalOptions;
 let delayFlags;
 let flagResolvers;
+let reentryDefaultsFromEvidence;
 let completionActions;
 let actionsGate;
 let failActions;
 beforeEach(async () => {
+  reentryDefaultsFromEvidence = false;
   delayFlags = false;
   flagResolvers = [];
   completionActions = { actions: [] };
@@ -82,12 +84,330 @@ beforeEach(async () => {
       data = completionActions;
     }
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
+    if (reentryDefaultsFromEvidence && url.includes('reentry-defaults')) data = url.includes('applicationsRecorded=1')
+      ? { exteriorMinutes: 30, interiorMinutes: 120 } : { exteriorMinutes: 0, interiorMinutes: 0 };
     return { ok: true, json: async () => data };
   }));
   await refetchFlags();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const mount = () => render(<CompletionPanel service={service} products={catalog} onClose={() => {}} onSubmit={submit} />);
+const integrityService = {
+  ...service,
+  id: 'integrity-visit',
+  serviceType: 'Quarterly Pest Control',
+  completionProfile: { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false },
+  waveguardTier: null,
+};
+const mountIntegrity = () => render(<CompletionPanel service={integrityService} products={[]} onClose={() => {}} onSubmit={submit} />);
+
+const integrityActionList = (action) => ({
+  programKey: 'lawn',
+  visit: { visit: 9, month: 'Sep' },
+  actions: [{ id: 'integrity-action', note: action.label, raw: action.label, ...action }],
+});
+
+it.each([false, true])('clears and optionally re-adds an action after Generate: readd=%s', async (readd) => {
+  const label = 'Inspected the recorded lawn service areas.';
+  completionActions = integrityActionList({ label, scope: 'exterior', treatmentApplied: false });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain(`[Protocol] ${label}`);
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain('WHAT WE DID'));
+  fireEvent.click(await screen.findByRole('button', { name: `Remove protocol item: ${label}` }));
+  if (readd) fireEvent.change(select, { target: { value: 'integrity-action' } });
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted.includes(label)).toBe(readd);
+  expect(body.technicianNotes.includes(label)).toBe(readd);
+});
+
+it.each(['Protocol', 'Protocol optional', 'Action'])('removes an edited generated-note [%s] marker with its detached action', async (tag) => {
+  const label = 'Inspected the recorded lawn service areas.';
+  completionActions = integrityActionList({ label, scope: 'exterior', treatmentApplied: false });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  await waitFor(() => expect(notes.value).toContain('WHAT WE DID'));
+  fireEvent.change(notes, { target: { value: `Reviewed generated prose.\n[${tag}] ${label}` } });
+  fireEvent.click(await screen.findByRole('button', { name: `Remove protocol item: ${label}` }));
+  expect(notes.value).toBe('Reviewed generated prose.');
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(label);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(label);
+});
+
+it('removes a detached marker with no space after the tag, matching the server grammar', async () => {
+  const label = 'Inspected the recorded lawn service areas.';
+  completionActions = integrityActionList({ label, scope: 'exterior', treatmentApplied: false });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  await waitFor(() => expect(notes.value).toContain('WHAT WE DID'));
+  // taggedCompletionNoteLines (server, complete-scheduled-service.js) matches
+  // /^\[([^\]]+)\]\s*(.+)$/ — the space after the closing bracket is
+  // optional, so a technician-typed "[Protocol]Label" with no space still
+  // reconstructs the action server-side. The client cleanup must delete it
+  // too (codex P2 #5051, SchedulePage.jsx:15660).
+  fireEvent.change(notes, { target: { value: `Reviewed generated prose.\n[Protocol]${label}` } });
+  fireEvent.click(await screen.findByRole('button', { name: `Remove protocol item: ${label}` }));
+  expect(notes.value).toBe('Reviewed generated prose.');
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(label);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(label);
+});
+
+it('keeps a completed action through submit when its marker is edited to no-space', async () => {
+  const label = 'Inspected the recorded lawn service areas.';
+  completionActions = integrityActionList({ label, scope: 'exterior', treatmentApplied: false });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  expect(notes.value).toContain(`[Protocol] ${label}`);
+  // The server grammar makes the space after "]" optional, so the edited
+  // line is still a live marker: the action and its scope must survive.
+  fireEvent.change(notes, { target: { value: `[Protocol]${label}` } });
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted).toContain(label);
+  expect(body.protocolActionScopesCompleted).toContainEqual({ label, scope: 'exterior', treatmentApplied: false });
+  expect(body.technicianNotes).toBe(`[Protocol]${label}`);
+});
+
+it('still prunes a no-space marker for a label the loaded list no longer offers', async () => {
+  const retiredAction = 'Retired planned lawn application.';
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(),
+    notes: `Handwritten visit note.\n[Protocol]${retiredAction}`,
+    preGenerationNotes: `[Protocol]${retiredAction}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'], selectedProtocolActionLabels: [retiredAction],
+    chipLinesDetached: false,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('completion-actions'))).toBe(true));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(retiredAction);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(retiredAction);
+});
+
+it.each([
+  ['spray application', {}, 1],
+  ['no-dry-down application', { dryDown: false }, 0],
+])('records scope and drying evidence for an existing protocol action: %s', async (_name, dryingEvidence, applicationsRecorded) => {
+  reentryDefaultsFromEvidence = true;
+  const label = `Completed ${_name}.`;
+  completionActions = integrityActionList({
+    label, scope: 'interior', treatmentApplied: true, ...dryingEvidence,
+  });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.includes('reentry-defaults')).at(-1)[0])
+    .toContain(`applicationsRecorded=${applicationsRecorded}`));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionScopesCompleted).toContainEqual({
+    label, scope: 'interior', treatmentApplied: true, ...dryingEvidence,
+  });
+});
+
+it('withdraws spray evidence when a marker-backed application is no longer active', async () => {
+  reentryDefaultsFromEvidence = true;
+  const label = 'Completed the recorded liquid application.';
+  completionActions = integrityActionList({ label, scope: 'exterior', treatmentApplied: true });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.includes('reentry-defaults')).at(-1)[0])
+    .toContain('applicationsRecorded=1'));
+  fireEvent.change(screen.getByPlaceholderText(/Notes about this service/), { target: { value: '' } });
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.includes('reentry-defaults')).at(-1)[0])
+    .toContain('applicationsRecorded=0'));
+});
+
+it.each([
+  [Array.from({ length: 20 }, (_, i) => `Recorded action ${i + 1}.`), 'at most 20 entries', '[Action] Another recorded action.'],
+  [['Recorded action '.repeat(17)], 'keep each line under 240 characters'],
+])('blocks completed actions the server would truncate: %s', async (actions, message, extraMarker = '') => {
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(), notes: `${actions.map((label) => `[Protocol] ${label}`).join('\n')}\n${extraMarker}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    selectedProtocolActionLabels: [actions[0]],
+    actionScopeByLabel: {
+      [actions[0]]: { scope: 'exterior', treatmentApplied: false },
+    },
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  expect(alert).toHaveBeenCalledWith(expect.stringContaining(message));
+  expect(submit).not.toHaveBeenCalled();
+});
+
+it('does not count retired lawn actions that the submitted report removes', async () => {
+  const retiredActions = Array.from({ length: 20 }, (_, i) => `Retired lawn action ${i + 1}.`);
+  const activeMarker = '[Action] Inspected the current service area.';
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(),
+    notes: `${retiredActions.map((label) => `[Protocol] ${label}`).join('\n')}\n${activeMarker}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    selectedProtocolActionLabels: retiredActions,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(alert.mock.calls.flat().join(' ')).not.toContain('Shorten these before submitting');
+  expect(submit.mock.calls[0][1]).toMatchObject({
+    protocolActionsCompleted: [], technicianNotes: activeMarker,
+  });
+});
+
+it('does not validate a long retired specialty marker that is excluded from the request', async () => {
+  const specialtyService = {
+    ...service, id: 'specialty-long-retired', serviceType: 'Mud Dauber Removal',
+    completionProfile: { serviceKey: 'mud_dauber_removal', requiresProducts: false },
+  };
+  const retiredAction = `Retired specialty action ${'x'.repeat(241)}`;
+  localStorage.setItem(`waves_completion_draft_${specialtyService.id}`, JSON.stringify({
+    serviceId: specialtyService.id, savedAt: Date.now(),
+    notes: `[Protocol] ${retiredAction}`,
+    selectedProducts: [], selectedProtocolActionLabels: [retiredAction],
+  }));
+  render(<CompletionPanel service={specialtyService} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(alert.mock.calls.flat().join(' ')).not.toContain('Shorten these before submitting');
+  expect(submit.mock.calls[0][1]).toMatchObject({
+    protocolActionsCompleted: [], technicianNotes: '',
+  });
+});
+
+it('keeps saved scope for a visible restored catalog action', async () => {
+  const action = 'Completed the documented lawn insect-control application.';
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(), notes: `[Protocol] ${action}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'], selectedProtocolActionLabels: [action],
+    actionScopeByLabel: { [action]: { scope: 'exterior', treatmentApplied: true } },
+    chipLinesDetached: false,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1]).toMatchObject({
+    protocolActionsCompleted: [action],
+    protocolActionScopesCompleted: [{ label: action, scope: 'exterior', treatmentApplied: true }],
+  });
+});
+
+it('drops a restored lawn action the current allowlist no longer offers even with saved scope provenance', async () => {
+  // No appointment-plan defaults here (defaultsEnabled stays false), so the
+  // panel falls through to the legacy completion-actions fetch and sets
+  // protocolActionsLoaded=true against a real (non-empty) list — same path
+  // the "keeps saved scope" test above exercises with an empty list.
+  const label = 'Retired granular lawn treatment';
+  const currentLabel = 'Applied granular fertilizer';
+  // Lawn closeouts list only product-backed rows from this endpoint (see
+  // the `rows.filter((a) => a?.product?.id)` comment above) — the current
+  // action needs a `product` to survive that filter and land in
+  // `protocolActions`.
+  completionActions = {
+    actions: [{ id: 'lawn-current', label: currentLabel, note: currentLabel, raw: currentLabel, scope: 'exterior', treatmentApplied: true, product: { id: 'current-lawn-product' } }],
+  };
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(), notes: `[Protocol] ${label}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'], selectedProtocolActionLabels: [label],
+    // A saved scope from before the protocol/appointment plan changed must
+    // not bypass a successfully loaded current list that no longer offers
+    // this label (codex P2 #5051, SchedulePage.jsx:16838).
+    actionScopeByLabel: { [label]: { scope: 'exterior', treatmentApplied: true } },
+    chipLinesDetached: false,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  // Wait for the loaded (non-empty) current list to actually land, not just
+  // for the request to have fired.
+  await screen.findByText(currentLabel);
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(label);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(label);
+});
+
+it.each(['marker', 'mixed-case marker', 'generated'])('omits retired lawn actions without saved choice or scope provenance: %s', async (mode) => {
+  const retiredAction = 'Retired planned lawn application.';
+  const generated = mode === 'generated';
+  const markerAction = mode === 'mixed-case marker' ? retiredAction.toUpperCase() : retiredAction;
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(),
+    notes: generated ? 'WHAT WE DID:\nDocumented this visit.' : `Handwritten visit note.\n[Protocol] ${markerAction}`,
+    preGenerationNotes: `[Protocol] ${markerAction}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'], selectedProtocolActionLabels: [retiredAction],
+    chipLinesDetached: generated,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('completion-actions'))).toBe(true));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(retiredAction);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(markerAction);
+});
+
+it('omits a generated-draft action outside the current specialty preset', async () => {
+  const specialtyService = {
+    ...service, id: 'specialty-visit', serviceType: 'Mud Dauber Removal',
+    completionProfile: { serviceKey: 'mud_dauber_removal', requiresProducts: false },
+  };
+  const retiredAction = 'Retired specialty protocol action';
+  localStorage.setItem(`waves_completion_draft_${specialtyService.id}`, JSON.stringify({
+    serviceId: specialtyService.id, savedAt: Date.now(),
+    notes: 'WHAT WE DID:\nDocumented the visit.\nWHAT WE FOUND:\nNo active work recorded.',
+    selectedProducts: [], areasServiced: [], selectedProtocolActionLabels: [retiredAction], chipLinesDetached: true,
+  }));
+  render(<CompletionPanel service={specialtyService} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).toEqual([]);
+});
 
 it.each([false, true])('requires visit facts beyond a typed treatment target: companion=%s', async (companion) => {
   const targetKey = companion ? 'treatment_target' : 'target_pest';
@@ -1081,6 +1401,9 @@ it('a plan refresh that changes the products drops an untouched generated report
   fireEvent.change(notes, { target: { value: 'Hand notes before generating.' } });
   fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
   await waitFor(() => expect(notes.value).toContain('Applied the old products.'));
+  const generated = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(generated.products[0]).toMatchObject({ applicationMethod: 'broadcast_spray', applicationArea: 'Front yard, Back yard, Side yards', areaUnit: 'sqft' });
+  expect(String(generated.products[0].areaValue)).toBe('5000');
   withdrawDefaults = true;
   fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
   await waitFor(() => expect(screen.queryByText('Updating plan suggestions…')).toBeNull());

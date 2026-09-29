@@ -234,7 +234,7 @@ describe('estimate show your work — gate off', () => {
       expect(html).not.toContain('ai-satellite-caption');
       expect(html).not.toContain('ai-fact');
       // The plain stored satellite image still renders.
-      expect(html).toContain('class="ai-satellite" src="https://maps.googleapis.com/maps/api/staticmap?center=stored-image"');
+      expect(html).toContain('class="ai-satellite" src="/api/estimates/syw-token/map/satellite"');
 
       // No opts, empty opts, and an explicit null payload all produce the
       // exact same bytes — the gate-off page is unchanged.
@@ -333,7 +333,7 @@ describe('estimate show your work — gate on', () => {
     expect(html).not.toContain(PARCEL_ID);
     // No polygon cache hit in this test → plain stored image, no caption
     // element (the .ai-satellite-caption CSS rule ships with the section).
-    expect(html).toContain('class="ai-satellite" src="https://maps.googleapis.com/maps/api/staticmap?center=stored-image"');
+    expect(html).toContain('class="ai-satellite" src="/api/estimates/syw-token/map/satellite"');
     expect(html).not.toContain('<p class="ai-satellite-caption">');
     expect(html).not.toContain('Red outline');
   });
@@ -363,17 +363,19 @@ describe('estimate show your work — gate on', () => {
     getCachedLookup.mockResolvedValue(cacheRowFixture());
 
     const work = await buildShowYourWork(estimateRow(), { enriched: enrichedFixture() });
-    expect(work.overlaySatelliteUrl).toContain('https://maps.googleapis.com/maps/api/staticmap?center=27.3,-82.5');
-    expect(work.overlaySatelliteUrl).toContain('zoom=20');
-    expect(work.overlaySatelliteUrl).toContain('size=640x640');
-    expect(work.overlaySatelliteUrl).toContain('maptype=satellite');
-    expect(work.overlaySatelliteUrl).toContain('path=color%3A0xff0000ff');
-    expect(work.overlaySatelliteUrl).toContain('key=test-maps-key');
+    // B12: the payload carries the token-scoped proxy path — never a Google
+    // URL, never the server key. The proxy route rebuilds the URL itself.
+    expect(work.overlaySatelliteUrl).toBe('/api/estimates/showyourworktoken/map/overlay');
+    expect(JSON.stringify(work)).not.toContain('key=');
+    expect(JSON.stringify(work)).not.toContain('test-maps-key');
+    expect(JSON.stringify(work)).not.toContain('maps.googleapis.com');
 
     const html = renderPage('syw-token', renderEstimate(), renderEstimateData({ enriched: enrichedFixture() }), null, { showYourWork: work });
-    expect(html).toContain('&amp;path=color%3A0xff0000ff');
+    expect(html).toContain('class="ai-satellite" src="/api/estimates/showyourworktoken/map/overlay"');
+    expect(html).not.toContain('test-maps-key');
+    expect(html).not.toMatch(/maps\.googleapis\.com[^"']*key=/);
     expect(html).toContain('Red outline: your property boundary from county records.');
-    expect(html).not.toContain('class="ai-satellite" src="https://maps.googleapis.com/maps/api/staticmap?center=stored-image"');
+    expect(html).not.toContain('class="ai-satellite" src="/api/estimates/syw-token/map/satellite"');
   });
 
   test('cache read failure falls back to the stored satellite_url with no caption', async () => {
@@ -386,7 +388,7 @@ describe('estimate show your work — gate on', () => {
     expect(work.facts.length).toBeGreaterThan(0);
 
     const html = renderPage('syw-token', renderEstimate(), renderEstimateData({ enriched: enrichedFixture() }), null, { showYourWork: work });
-    expect(html).toContain('class="ai-satellite" src="https://maps.googleapis.com/maps/api/staticmap?center=stored-image"');
+    expect(html).toContain('class="ai-satellite" src="/api/estimates/syw-token/map/satellite"');
     expect(html).not.toContain('Red outline');
     expect(html).toContain('Where these details came from');
   });
@@ -418,7 +420,9 @@ describe('estimate show your work — gate on', () => {
         ])
       );
       expect(body.showYourWork.parcelLine).toContain('Manatee County parcel records');
-      expect(body.showYourWork.overlaySatelliteUrl).toContain('path=color%3A0xff0000ff');
+      expect(body.showYourWork.overlaySatelliteUrl).toBe('/api/estimates/showyourworktoken/map/overlay');
+      expect(JSON.stringify(body)).not.toContain('test-maps-key');
+      expect(JSON.stringify(body)).not.toMatch(/maps\.googleapis\.com[^"']*key=/);
       expect(JSON.stringify(body.showYourWork)).not.toContain(PARCEL_ID);
     });
   });

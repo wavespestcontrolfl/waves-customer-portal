@@ -108,6 +108,7 @@ import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatETDate, formatETDateTime } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_FONT, docTransition } from '../theme-doc';
 import { CustomerColumn } from '../components/brand';
@@ -937,7 +938,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
 
       {satelliteUrl ? (
         <img
-          src={satelliteUrl}
+          src={resolveApiAssetUrl(satelliteUrl)}
           alt={`Satellite view of ${address || 'your property'}`}
           loading="lazy"
           style={{
