@@ -582,14 +582,18 @@ function hasUnrecordedRelativeDate(text, day, anchor, ownedAnchorRanges = null) 
   const target = String.raw`(?:the\s+)?${regexpEscape(coreDay).replace(/\s+/g, String.raw`\s+`)}`;
   const count = String.raw`(?:[a-z]+|\d+)`;
   const units = String.raw`(?:full\s+)?(?:days?|weeks?)`;
+  // A qualifier can trail the time as well as the day ("Thursday at two PM
+  // next week"): a few plain words may sit between them, never a
+  // conjunction that starts another clause. Normalized text has no commas.
+  const gap = String.raw`(?:(?!(?:and|but|so|because|while|since|then)\b)[a-z0-9]+\s+){0,5}?`;
   const relative = new RegExp(String.raw`\b(?:`
     + String.raw`(?:next|following)\s+(?:coming\s+)?${target}`
     + String.raw`|(?:next|following)\s+weeks?\s+(?:on\s+)?${target}`
-    + String.raw`|${target}\s+(?:after|before)\s+(?:next|this(?:\s+one)?)`
-    + String.raw`|${target}\s+(?:of\s+(?:the\s+)?)?(?:next|following)\s+weeks?`
-    + String.raw`|${target}\s+(?:the\s+)?weeks?\s+(?:after|before)\s+next`
-    + String.raw`|${target}\s+${count}\s+${units}\s+(?:from\s+(?:now|today)|later|hence)`
-    + String.raw`|${target}\s+(?:in|within|after)\s+(?:${count}\s+){1,3}${units}`
+    + String.raw`|${target}\s+${gap}(?:after|before)\s+(?:next|this(?:\s+one)?)`
+    + String.raw`|${target}\s+${gap}(?:of\s+(?:the\s+)?)?(?:next|following)\s+weeks?`
+    + String.raw`|${target}\s+${gap}(?:the\s+)?weeks?\s+(?:after|before)\s+next`
+    + String.raw`|${target}\s+${gap}${count}\s+${units}\s+(?:from\s+(?:now|today)|later|hence)`
+    + String.raw`|${target}\s+${gap}(?:in|within|after)\s+(?:${count}\s+){1,3}${units}`
     + String.raw`|${count}\s+${units}\s+from\s+${target}`
     + String.raw`|(?:in|within|after)\s+(?:${count}\s+){1,3}${units}\s+(?:on\s+)?${target}`
     + String.raw`)\b`, 'g');

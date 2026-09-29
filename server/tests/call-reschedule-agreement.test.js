@@ -337,6 +337,13 @@ describe('groundRescheduleAgreement', () => {
     expect(plain(THURSDAY_2PM, 'We will see you Thursday after this one at two.', 'two').ok).toBe(false);
     expect(plain(THURSDAY_2PM, 'We will see you Thursday next week at two.', 'two').ok).toBe(false);
     expect(plain(THURSDAY_2PM, 'We will see you Thursday of next week at two.', 'two').ok).toBe(false);
+    // A qualifier trailing the time still qualifies the day (pre-push audit).
+    for (const said of ['We will see you Thursday at two PM next week.', 'We will see you Thursday at two PM the week after next.',
+      'We will see you Thursday at two PM a week from now.']) {
+      expect([said, agreedAt(THURSDAY_2PM, said, { day: 'Thursday', hour: 'two', period: 'PM' }).ok]).toEqual([said, false]);
+    }
+    expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at two PM, and your plan renews next week.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok)
+      .toBe(true);
     // Unrelated relative timing in the same sentence does not qualify the
     // appointment's date.
     expect(plain(THURSDAY_2PM, 'Your plan renews a week from now, and we will see you Thursday at two.', 'two').ok).toBe(true);
