@@ -135,8 +135,13 @@ async function claimReadSlot(conn, submissionId, svc, {
  * @returns {Promise<'stored' | 'changed'>}
  */
 async function settleClaimedRead(conn, submissionId, svc, { applicable, matches, store }) {
+  // The released attempt stays counted: a row claimed before read_attempts
+  // existed holds 0 and counted only through its claimed status, so the
+  // release keeps at least one (pre-push audit P1).
   const release = (trx) => trx('visit_prep_submissions').where({ id: submissionId, read_status: 'pending' })
-    .update({ read_status: 'none', read_ref: null, read_result: null });
+    .update({
+      read_status: 'none', read_ref: null, read_result: null, read_attempts: trx.raw('GREATEST(read_attempts, 1)'),
+    });
   const changed = async (trx) => { await release(trx); return 'changed'; };
   return withLockedStop(conn, svc, {
     onGone: changed,

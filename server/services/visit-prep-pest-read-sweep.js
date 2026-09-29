@@ -207,7 +207,11 @@ async function releaseStaleDone(conn, row, svc) {
       if (!(await needsReadNow(trx, row, live))) return false;
       const released = await trx('visit_prep_submissions')
         .where({ id: row.submission_id, read_status: 'done', read_attempts: row.read_attempts })
-        .update({ read_status: 'none', read_ref: null, read_result: null });
+        // A read finished before read_attempts existed holds 0 and counted
+        // only through 'done'; released, it keeps one attempt counted.
+        .update({
+          read_status: 'none', read_ref: null, read_result: null, read_attempts: Math.max(Number(row.read_attempts) || 0, 1),
+        });
       return released > 0;
     },
   });

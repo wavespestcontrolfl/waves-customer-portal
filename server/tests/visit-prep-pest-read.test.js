@@ -117,7 +117,13 @@ function fakeConn(tables = {}) {
       writes.push({ table, where: { ...q._where }, patch });
       for (const row of (store[table] || [])) {
         if (q._whereIn && !q._whereIn.vals.includes(row[q._whereIn.col])) continue;
-        if (Object.entries(q._where).every(([k, v]) => row[k] === v)) { Object.assign(row, patch); matched += 1; }
+        if (Object.entries(q._where).every(([k, v]) => row[k] === v)) {
+          // The release's GREATEST(read_attempts, 1), evaluated like Postgres.
+          const applied = { ...patch };
+          if (String(applied.read_attempts).includes('GREATEST(read_attempts, 1)')) applied.read_attempts = Math.max(Number(row.read_attempts) || 0, 1);
+          Object.assign(row, applied);
+          matched += 1;
+        }
       }
       return matched;
     };
@@ -653,5 +659,16 @@ describe('a stop that will not hold still while the read settles (Codex #5320 r1
     expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('none');
     expect(conn._store.pest_identifications).toHaveLength(0);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a released read stays counted even when it predates read_attempts (pre-push audit P1)', () => {
+  test('a legacy pending row (attempts 0) released on a changed stop keeps one attempt counted', async () => {
+    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(), read_status: 'pending', read_attempts: 0 }] });
+    const { settleClaimedRead, readsToday } = jest.requireActual('../services/visit-prep-read-claim');
+    const out = await settleClaimedRead(conn, 'sub-1', BASE_SVC, { applicable: async () => false, matches: Boolean, store: async () => {} });
+    expect(out).toBe('changed');
+    expect(conn._store.visit_prep_submissions[0]).toMatchObject({ read_status: 'none', read_attempts: 1 });
+    expect(await readsToday(conn)).toBe(1);
   });
 });

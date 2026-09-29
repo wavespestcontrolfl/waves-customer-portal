@@ -105,7 +105,13 @@ function fakeConn(tables = {}) {
       writes.push({ table, where: { ...q._where }, patch });
       for (const row of (store[table] || [])) {
         if (q._whereIn && !q._whereIn.vals.includes(row[q._whereIn.col])) continue;
-        if (Object.entries(q._where).every(([k, v]) => row[k] === v)) { Object.assign(row, patch); matched += 1; }
+        if (Object.entries(q._where).every(([k, v]) => row[k] === v)) {
+          // The release's GREATEST(read_attempts, 1), evaluated like Postgres.
+          const applied = { ...patch };
+          if (String(applied.read_attempts).includes('GREATEST(read_attempts, 1)')) applied.read_attempts = Math.max(Number(row.read_attempts) || 0, 1);
+          Object.assign(row, applied);
+          matched += 1;
+        }
       }
       return matched;
     };

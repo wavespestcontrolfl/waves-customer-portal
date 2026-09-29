@@ -491,6 +491,17 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
     expect(mockTrigger).not.toHaveBeenCalled();
   });
 
+  test('a legacy done read (attempts 0, pre-column) released keeps one attempt counted (pre-push audit P1)', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_READ, read_attempts: 0, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    await sweepVisitPrepPestReads(conn, NOW);
+    expect(conn._store.submissions[0]).toMatchObject({ read_status: 'none', read_attempts: 1 });
+  });
+
   test('a re-read that landed after selection (attempts moved on) is never released', async () => {
     mockIsPestStop.mockResolvedValue(true);
     const conn = fakeConn({
