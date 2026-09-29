@@ -2,17 +2,21 @@
  * Visit prep photos — pest read RECOVERY SWEEP (GATE_VISIT_PREP_READ_SWEEP,
  * dark). Second-order lane on top of PR 5 (services/visit-prep-pest-read.js):
  * the in-process fire-and-forget trigger there is never retried today, so
- * three classes of `visit_prep_submissions` rows can be stuck with a read
- * that never happened, never finished, or is now stale:
+ * two classes of `visit_prep_submissions` rows can be stuck with a read that
+ * never happened:
  *
- *   (a) read_status 'pending' left stuck by a crash/redeploy mid-read —
- *       stale past the SAME 15-minute threshold the tech display already
- *       treats as failed (visit-prep.js effectiveReadStatus /
- *       READ_PENDING_STALE_MS — reused here, not reimplemented);
  *   (b) read_status 'none' after a photo-load (S3) failure, a claim error,
  *       or a VISIT_STOP_MOVED refusal — the read was never even attempted;
  *   (c) read_status 'unsupported' where the stop has since become a pest
  *       stop (office reclassified Lawn -> Pest after the photos arrived).
+ *
+ * A 'pending' row is NEVER retried (Codex #5319 r2): a pending row may belong
+ * to a read that is still running, and there is no claim timestamp to tell
+ * it from a crashed one, so a retry could run the engine twice and spend
+ * the cap uncounted. A read left pending by a crash shows as failed on the
+ * tech display after 15 minutes. Both retried cases start from an
+ * UNCLAIMED row, so the trigger's conditional claim lets exactly one read
+ * win and counts it against the cap like any first read.
  *
  * A 15-minute cron tick (scheduler.js) reruns triggerVisitPrepPestRead for
  * up to SWEEP_BATCH_LIMIT candidate rows per tick — the SAME trigger the
@@ -49,23 +53,17 @@ const { isPestStop } = require('./visit-prep-pest-applicability');
 const { visitPrepReadSweepLive } = require('../config/feature-gates');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { etDateString } = require('../utils/datetime-et');
-// The tech display's own "is a pending read stale?" rule — reused so
-// "stale" means exactly the same thing here as it does on the Visit Brief.
-const { effectiveReadStatus } = require('./visit-prep')._internal;
 
 const SWEEP_ACTION = 'visit_prep_read_sweep_attempt';
 // Only today's (ET) submissions: the trigger's claim refuses any submission
 // from an earlier ET day (its cap is counted by submission day), so an older
 // retry could only end 'none' without a read.
-// Same value as visit-prep.js's READ_PENDING_STALE_MS (not exported as a
-// bare constant, so effectiveReadStatus is reused directly for case (a);
-// this is the buffer applied to case (b) 'none' rows so the sweep never
-// races the original submission's own in-flight, fire-and-forget trigger).
+// The buffer applied to case (b) 'none' rows so the sweep never races the
+// original submission's own in-flight, fire-and-forget trigger.
 const NONE_MIN_AGE_MS = 15 * 60 * 1000;
 const SWEEP_BATCH_LIMIT = 10;
 
 const SWEEP_CASE = {
-  STALE_PENDING: 'stale_pending',
   NONE_RETRY: 'none_retry',
   RECLASSIFIED_PEST: 'reclassified_pest',
 };
@@ -82,7 +80,7 @@ async function loadPhotos(conn, submissionId) {
 async function candidateRows(conn, now) {
   return conn('visit_prep_submissions as vps')
     .join('scheduled_services as ss', 'ss.id', 'vps.scheduled_service_id')
-    .whereIn('vps.read_status', ['pending', 'none', 'unsupported'])
+    .whereIn('vps.read_status', ['none', 'unsupported'])
     .where('vps.created_at', '>=', etDayStart(now))
     .where('ss.scheduled_date', '>=', etDateString(now))
     .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
@@ -108,39 +106,61 @@ async function dropAlreadyAttempted(conn, rows, caseLabel) {
   return rows.filter((r) => !seen.has(String(r.submission_id)));
 }
 
+const CHECK_ACTION = 'visit_prep_read_sweep_check';
+const CHECK_COOLDOWN_MS = 60 * 60 * 1000;
+
+async function dropRecentlyChecked(conn, rows, now) {
+  if (!rows.length) return rows;
+  const ids = rows.map((r) => String(r.submission_id));
+  const checked = await conn('activity_log')
+    .where({ action: CHECK_ACTION })
+    .where('created_at', '>=', new Date(now.getTime() - CHECK_COOLDOWN_MS))
+    .whereIn(conn.raw("metadata->>'submissionId'"), ids)
+    .select(conn.raw("metadata->>'submissionId' as submission_id"));
+  const seen = new Set(checked.map((r) => String(r.submission_id)));
+  return rows.filter((r) => !seen.has(String(r.submission_id)));
+}
+
+async function recordCheck(conn, row) {
+  await conn('activity_log').insert({
+    action: CHECK_ACTION,
+    description: 'visit-prep pest read sweep: stop still not pest',
+    metadata: { submissionId: String(row.submission_id) },
+  });
+}
+
 async function selectCandidates(conn, now) {
   const rows = await candidateRows(conn, now);
 
-  const stalePending = rows.filter((r) => r.read_status === 'pending'
-    && effectiveReadStatus('pending', r.created_at, now.getTime()) === 'failed');
   const none = rows.filter((r) => r.read_status === 'none'
     && now.getTime() - new Date(r.created_at).getTime() > NONE_MIN_AGE_MS);
   const unsupported = rows.filter((r) => r.read_status === 'unsupported');
 
-  const [pendingOk, noneOk, unsupportedOk] = await Promise.all([
-    dropAlreadyAttempted(conn, stalePending, SWEEP_CASE.STALE_PENDING),
+  const [noneOk, unsupportedOk] = await Promise.all([
     dropAlreadyAttempted(conn, none, SWEEP_CASE.NONE_RETRY),
     dropAlreadyAttempted(conn, unsupported, SWEEP_CASE.RECLASSIFIED_PEST),
   ]);
 
   // Case (c) only when the stop is a pest stop RIGHT NOW — never re-derived
-  // from the submission's stale snapshot. The trigger re-checks this again
-  // itself under the stop lock (visit-prep-pest-read.js resolveApplicability
-  // / claimReadSlot), so a race between this pre-filter and the retry just
-  // resolves to 'unsupported' again, harmlessly.
-  // The per-row "pest now?" check runs only for the slots the batch still
-  // has, oldest first, so a large non-pest backlog never turns one tick into
-  // hundreds of queries (Codex #5319 r1 P2).
-  const room = Math.max(0, SWEEP_BATCH_LIMIT - pendingOk.length - noneOk.length);
+  // from the submission's stale snapshot; the trigger re-checks it under the
+  // stop lock. The per-row check runs only for the batch's remaining room
+  // (Codex #5319 r1 P2), and a row checked and found still not pest is
+  // skipped for CHECK_COOLDOWN_MS, so each tick advances through the cohort
+  // instead of re-checking the same oldest rows (Codex #5319 r2 P2).
+  const room = Math.max(0, SWEEP_BATCH_LIMIT - noneOk.length);
+  const unchecked = await dropRecentlyChecked(conn, unsupportedOk, now);
   const reclassified = [];
-  const oldestUnsupported = [...unsupportedOk].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const oldestUnsupported = [...unchecked].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   for (const row of oldestUnsupported.slice(0, room * 2)) {
     if (reclassified.length >= room) break;
-    if (await isPestStop({ id: row.scheduled_service_id, visit_id: row.visit_id }, conn)) reclassified.push(row);
+    if (await isPestStop({ id: row.scheduled_service_id, visit_id: row.visit_id }, conn)) {
+      reclassified.push(row);
+    } else {
+      await recordCheck(conn, row);
+    }
   }
 
   const combined = [
-    ...pendingOk.map((r) => ({ ...r, caseLabel: SWEEP_CASE.STALE_PENDING })),
     ...noneOk.map((r) => ({ ...r, caseLabel: SWEEP_CASE.NONE_RETRY })),
     ...reclassified.map((r) => ({ ...r, caseLabel: SWEEP_CASE.RECLASSIFIED_PEST })),
   ];

@@ -86,7 +86,11 @@ function fakeConn(seed = {}) {
 
   function activityQuery() {
     const q = {};
-    q.where = (obj) => { q._action = obj?.action; return q; };
+    q.where = (a, _op, since) => {
+      if (typeof a === 'object') q._action = a?.action;
+      else if (a === 'created_at') q._since = since;
+      return q;
+    };
     q.whereRaw = (sql, bindings) => { q._caseValue = bindings[0]; return q; };
     q.whereIn = (_rawCol, vals) => { q._idsFilter = vals.map(String); return q; };
     // Mirrors the real query: an aliased select, never pluck() on a Raw
@@ -94,10 +98,11 @@ function fakeConn(seed = {}) {
     q.pluck = () => { throw new Error('pluck() must not be used here'); };
     q.select = async () => store.activityLog
       .filter((r) => r.action === q._action)
+      .filter((r) => !q._since || !r.created_at || new Date(r.created_at) >= q._since)
       .filter((r) => !q._caseValue || metaOf(r).case === q._caseValue)
       .filter((r) => !q._idsFilter || q._idsFilter.includes(String(metaOf(r).submissionId)))
       .map((r) => ({ submission_id: String(metaOf(r).submissionId) }));
-    q.insert = async (row) => { store.activityLog.push(row); return [{ id: `gen-${store.activityLog.length}` }]; };
+    q.insert = async (row) => { store.activityLog.push({ created_at: new Date(), ...row }); return [{ id: `gen-${store.activityLog.length}` }]; };
     return q;
   }
 
@@ -147,20 +152,10 @@ describe('gate', () => {
   });
 });
 
-describe('candidate selection — case (a) stale pending', () => {
-  test('a pending row stale past 15 minutes is a candidate', async () => {
+describe('pending rows are never retried (Codex #5319 r2)', () => {
+  test('a pending row, however old, is not a candidate (it may be a read still running)', async () => {
     const conn = fakeConn({
-      submissions: [submission({ read_status: 'pending', created_at: new Date(NOW.getTime() - 16 * MIN) })],
-      services: [svc({ scheduled_date: TODAY_ET })],
-    });
-    const candidates = await selectCandidates(conn, NOW);
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0].caseLabel).toBe(SWEEP_CASE.STALE_PENDING);
-  });
-
-  test('a pending row NOT yet stale (< 15 minutes) is not a candidate', async () => {
-    const conn = fakeConn({
-      submissions: [submission({ read_status: 'pending', created_at: new Date(NOW.getTime() - 5 * MIN) })],
+      submissions: [submission({ read_status: 'pending', created_at: new Date(NOW.getTime() - 60 * MIN) })],
       services: [svc({ scheduled_date: TODAY_ET })],
     });
     expect(await selectCandidates(conn, NOW)).toHaveLength(0);
@@ -207,6 +202,21 @@ describe('candidate selection — case (c) unsupported reclassified to pest', ()
       services: [svc({ scheduled_date: TODAY_ET })],
     });
     expect(await selectCandidates(conn, NOW)).toHaveLength(0);
+  });
+});
+
+describe('the unsupported scan advances (Codex #5319 r2)', () => {
+  test('a row checked and found still not pest is skipped for an hour, so later rows get checked', async () => {
+    const conn = fakeConn({
+      submissions: [submission({ id: 'sub-1', read_status: 'unsupported', created_at: new Date(NOW.getTime() - 30 * MIN) })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    mockIsPestStop.mockResolvedValue(false);
+    await selectCandidates(conn, NOW);
+    expect(mockIsPestStop).toHaveBeenCalledTimes(1);
+    mockIsPestStop.mockClear();
+    await selectCandidates(conn, NOW);
+    expect(mockIsPestStop).not.toHaveBeenCalled();
   });
 });
 
