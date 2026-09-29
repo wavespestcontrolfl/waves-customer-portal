@@ -98,6 +98,7 @@ describe('shared property display helper', () => {
   });
   test('saved-property rows use `label` only when there is no address', () => {
     expect(propertyDisplayLabel({ label: 'Rental', address_line1: '12 Oak Ct', city: 'Venice' })).toBe('12 Oak Ct, Venice');
+    expect(propertyDisplayLabel({ profile_label: 'Primary', city: 'Venice', state: 'FL', zip: '34285' })).toBe('Venice, FL 34285');
     expect(propertyDisplayLabel({ label: 'Rental' })).toBe('Rental');
     expect(propertyDisplayLabel({})).toBe('Service property');
     expect(propertyStreetAddress({ city: 'Venice' })).toBeNull();

@@ -26,13 +26,14 @@ function cityStateZip(row = {}) {
   return [clean(row.city), stateZip].filter(Boolean).join(', ');
 }
 
-// Street address first; then the nickname (profile_label, or a saved
-// property's `label`); then whatever city/state/zip exists; then a generic word.
+// Street address first; then whatever city/state/zip exists; then the
+// nickname (profile_label, or a saved property's `label`); then a generic
+// word. A row with a city but no street must not fall back to "Primary".
 function propertyDisplayLabel(row = {}) {
   return propertyStreetAddress(row)
+    || cityStateZip(row)
     || clean(row.profile_label)
     || clean(row.label)
-    || cityStateZip(row)
     || 'Service property';
 }
 
