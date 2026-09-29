@@ -824,7 +824,7 @@ email that linked the draft — is the customer's) still reaches the idempotent
 replay. No message is sent on the refusal: the refusal retires the open
 abandoned-booking recovery intents carrying that HMAC-verified draft id (only the id — neither the typed nor the stored contact ever widens it), and
 `/api/booking/capture-intent` stages no recovery row for a handoff whose draft
-is linked to an established customer (`skipped: contact_linked_established`).
+is linked to an established customer (`skipped: contact_linked_established`). Both are best effort: the abandoned-booking recovery worker re-checks at send time (SMS and email) and skips, marking suppressed, any intent whose draft is linked to an established customer — a lookup error skips that tick — so a failed suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`

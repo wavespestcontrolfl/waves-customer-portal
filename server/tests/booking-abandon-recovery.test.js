@@ -429,3 +429,75 @@ describe('bookingUrlFor — quote→book handoff re-carry', () => {
     expect(url).not.toContain('estimate_id=');
   });
 });
+
+describe('B11 backstop — contact-linked wizard draft linked to an ESTABLISHED customer', () => {
+  const linked = () => intent({ pricing_estimate_id: 'pe-victim', pricing_estimate_token: 'tok' });
+  const gate = (customersOnly) => isEnabled.mockImplementation((name) => (name === 'bookingCustomersOnly' ? customersOnly : true));
+
+  test('SMS: a failed refusal-path suppression write can never lead to a text (send-time re-check)', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] }); // candidates: the un-suppressed row (its suppression write had failed)
+    enqueue('messages', { first: null });
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { pipeline_stage: 'active_customer' } });
+    enqueue('booking_intents', { update: 1 }); // best-effort mark
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([{ table: 'booking_intents', payload: expect.objectContaining({ suppressed: true }) }]);
+  });
+
+  test('email: same re-check on the second touch', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { pipeline_stage: 'won' } });
+    enqueue('booking_intents', { update: 1 });
+
+    const sent = await _internals.runEmailStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('lookup error fails closed — nothing sent, nothing claimed', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    db.mockImplementation((table) => {
+      if (table === 'estimates') throw new Error('db down');
+      return makeBuilder(table, (queues[table] || []).shift() || {});
+    });
+
+    const sent = await _internals.runSmsStage(NOW, new Set());
+
+    expect(sent).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates).toEqual([]); // no claim, no suppress: retried next tick
+  });
+
+  test('draft linked to a still-pre-customer lead (the quoter\'s own row) sends as before', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    enqueue('estimates', { first: { customer_id: 'cust-lead' } });
+    enqueue('customers', { first: { pipeline_stage: 'new_lead' } });
+    enqueue('booking_intents', { update: 1 });
+    enqueue('booking_intents', { update: 1 });
+
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(1);
+  });
+
+  test('gate OFF: the flow still books, so recovery is untouched (no lookup at all)', async () => {
+    gate(false);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 });
+    enqueue('booking_intents', { update: 1 });
+
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(1);
+    expect(db.mock.calls.map((c) => c[0])).not.toContain('estimates');
+  });
+});

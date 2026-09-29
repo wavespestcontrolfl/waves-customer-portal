@@ -134,6 +134,27 @@ describe('assertContactLinkedHandoffProvisional (runs under the customer lock, i
       await expect(run(trx, { phone: '941-555-0177', email: 'owner@example.com' })).resolves.toBeUndefined();
     });
 
+    test('draft-linking contact belongs to the ROOT row A while the address bound property row B — retry still allowed (P2)', async () => {
+      const trx = fakeTrx({
+        customers: [
+          customer({ id: ROOT, pipeline_stage: 'won', phone: '(941) 555-0101', email: 'root@example.com' }),
+          customer({ id: BOUND, pipeline_stage: 'won', phone: '(941) 555-0999', email: 'bound@example.com' }),
+        ],
+        consumed: { id: 'ss-1' }, // under BOUND for this slot
+        draft: { customer_email: 'root@example.com' },
+      });
+      await expect(run(trx, { phone: '941-555-0101' })).resolves.toBeUndefined();
+      await expect(run(trx, { phone: '941-555-0177', email: 'root@example.com' })).resolves.toBeUndefined();
+      // B's own contact is not the linking factor
+      await expect(run(trx, { phone: '941-555-0999' })).rejects.toEqual(REFUSED);
+      // and the consumed booking under B is still required
+      const noBooking = fakeTrx({
+        customers: [customer({ id: ROOT, pipeline_stage: 'won' }), customer({ id: BOUND, pipeline_stage: 'won' })],
+        consumed: null,
+      });
+      await expect(run(noBooking, { phone: '941-555-0101' })).rejects.toEqual(REFUSED);
+    });
+
     test('email matches the customer but did NOT link the draft → refused', async () => {
       const trx = fakeTrx({
         customers: [customer({ pipeline_stage: 'won' })],
@@ -248,6 +269,21 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
       expect(upd.args[0]).toEqual(expect.objectContaining({ suppressed: true }));
       expect(ops.filter((o) => o.table === 'booking_intents' && o.op === 'where').map((o) => o.args)).toEqual([['pricing_estimate_id', 'pe-victim']]);
       expect(ops.filter((o) => o.table === 'booking_intents' && ['orWhere', 'orWhereRaw', 'whereRaw'].includes(o.op))).toEqual([]);
+    });
+
+    test('gate off (flow still books): no skip, no suppression — recovery keeps working', async () => {
+      const { isEnabled } = require('../config/feature-gates');
+      isEnabled.mockImplementation((name) => name !== 'bookingCustomersOnly');
+      try {
+        firstResults.estimates = { customer_id: 'cust-established' };
+        firstResults.customers = { pipeline_stage: 'active_customer' };
+        const result = await call(base());
+        expect(result?.skipped).not.toBe('contact_linked_established');
+        expect(ops.filter((o) => o.table === 'booking_intents' && o.op === 'update' && o.args[0]?.suppressed === true)).toEqual([]);
+        expect(ops.filter((o) => o.table === 'estimates')).toEqual([]);
+      } finally {
+        isEnabled.mockImplementation(() => true);
+      }
     });
 
     test('a lookup error fails closed — no row is staged', async () => {

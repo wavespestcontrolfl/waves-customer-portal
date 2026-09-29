@@ -1162,15 +1162,9 @@ function bookingSlotWindow(config = {}) {
 // server's authority for what each funnel service's visit takes. A known key
 // pins the duration outright; the caller-sent minutes then only matter for
 // unknown/legacy service labels, where the 45–90 catalog-range clamp remains.
-// Pipeline stages that mark a row as a PROSPECT, not a current customer —
-// the customers-only gate refuses these even after a successful phone verify
-// (the quote wizard mints active 'new_lead' rows for anyone who runs it, and
-// admin moves unconverted leads through the rest; 'lost' is a lost lead —
-// 'churned' ex-customers are deliberately NOT here). Subset of
-// admin-customers.js CUSTOMER_STAGES; keep the two in sync.
-const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
-  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating', 'lost',
-]);
+// PRE_CUSTOMER_PIPELINE_STAGES lives in services/booking-contact-linked-handoff.js
+// (shared with capture-intent and the abandoned-booking recovery worker).
+const { PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft } = require('../services/booking-contact-linked-handoff');
 
 // Contact-linked quote-wizard handoff → established customer (B11).
 //
@@ -1205,7 +1199,12 @@ async function assertContactLinkedHandoffProvisional(trx, {
   if (!established.length) return;
   const last10 = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; };
   const lcEmail = (v) => String(v || '').trim().toLowerCase();
-  const bound = established.find((r) => String(r.id) === String(handoff.boundId)) || established[0];
+  // The linking contact belongs to the draft-linked ROOT row (A) — the row
+  // findExistingCustomerByContact matched — which can differ from the account
+  // property row the address bound (B). Contact is judged against A; the
+  // consumed booking below is still required under B.
+  const linkRow = (Array.isArray(rows) ? rows : []).find((r) => String(r.id) === String(handoff.rootId))
+    || (Array.isArray(rows) ? rows : []).find((r) => String(r.id) === String(handoff.boundId));
   const consumed = await trx('scheduled_services as ss')
     .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
     .where('ss.source_estimate_id', pricingEstimateId)
@@ -1218,9 +1217,9 @@ async function assertContactLinkedHandoffProvisional(trx, {
     const typed10 = last10(newCustomer?.phone);
     const typedEmail = lcEmail(newCustomer?.email);
     const draft = await trx('estimates').where({ id: pricingEstimateId }).first('customer_email');
-    const phoneMatches = !!typed10 && typed10 === last10(bound.phone);
-    const emailMatches = !!typedEmail && typedEmail === lcEmail(bound.email)
-      && lcEmail(draft?.customer_email) === lcEmail(bound.email);
+    const phoneMatches = !!typed10 && typed10 === last10(linkRow?.phone);
+    const emailMatches = !!typedEmail && typedEmail === lcEmail(linkRow?.email)
+      && lcEmail(draft?.customer_email) === lcEmail(linkRow?.email);
     if (phoneMatches || emailMatches) return;
   }
   throw Object.assign(new Error(ESTABLISHED_HANDOFF_REFUSAL_MESSAGE), {
@@ -6463,16 +6462,11 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // recovery cron would text/email the real customer for a booking an
     // anonymous quoter started with their contact. Retire any intent already
     // staged for this draft and skip. Lookup errors fail closed (no row).
-    if (handoffVerified) {
+    if (handoffVerified && isEnabled('bookingCustomersOnly')) {
       try {
-        const linkedDraft = await db('estimates').where({ id: handoffId }).first('customer_id');
-        if (linkedDraft?.customer_id) {
-          const linkedCustomer = await db('customers').where({ id: linkedDraft.customer_id })
-            .whereNull('deleted_at').first('pipeline_stage');
-          if (linkedCustomer && !PRE_CUSTOMER_PIPELINE_STAGES.has(String(linkedCustomer.pipeline_stage || ''))) {
-            await suppressRecoveryIntents(db, { pricingEstimateId: handoffId });
-            return res.json({ ok: true, skipped: 'contact_linked_established' });
-          }
+        if (await establishedContactLinkedDraft(db, handoffId)) {
+          await suppressRecoveryIntents(db, { pricingEstimateId: handoffId });
+          return res.json({ ok: true, skipped: 'contact_linked_established' });
         }
       } catch (linkErr) {
         logger.warn(`[booking:capture-intent] contact-link check failed — skipping capture: ${linkErr.message}`);
