@@ -375,7 +375,7 @@ async function runInner({ now = new Date() } = {}) {
     .orderByRaw('ss.scheduled_date >= ? DESC', [todayET])
     .orderBy('ss.scheduled_date', 'asc');
   const unpricedByRoot = new Map();
-  const overdueUnpricedRoots = new Set();
+  const overdueUnpricedByRoot = new Map();
   const prepayGaps = [];
   const paidTermById = await loadPaidTerms(coverageCandidates);
   // Lazy require, like isEnabled above; read at call time so the env is a live kill switch.
@@ -390,9 +390,13 @@ async function runInner({ now = new Date() } = {}) {
     // pre-episode paging, with no coverage lookup at all.
     if (episodes && await coveredByFirstApplicationInvoice(row)) continue;
     const root = seriesRootId(row);
-    // An OVERDUE unpriced visit never pages (the class is upcoming-only), but
-    // it is still an unpriced series: its standing bell must not close on it.
-    if (row.service_date < todayET) { overdueUnpricedRoots.add(String(root)); continue; }
+    // An OVERDUE unpriced visit never pages a new bell (the class is
+    // upcoming-only), but it is still an unpriced series: heldUnpricedAlerts
+    // keeps its bell live.
+    if (row.service_date < todayET) {
+      if (!overdueUnpricedByRoot.has(String(root))) overdueUnpricedByRoot.set(String(root), row);
+      continue;
+    }
     if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
   }
 
@@ -414,6 +418,9 @@ async function runInner({ now = new Date() } = {}) {
         ...(episodes ? { episode_started_at: now.toISOString() } : {}) },
     ];
   });
+  // Held series (episodes only): live, so the close pass keeps their bell and
+  // a bell auto-cleared meanwhile reopens and rings.
+  if (episodes) alerts.push(...await heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, now }));
 
   // Class 2 — recurring-lawn customers invisible to the Monday irrigation
   // email (owner directive 2026-08-05: check daily). The email's audience is
@@ -523,7 +530,7 @@ async function runInner({ now = new Date() } = {}) {
   ]));
 
   const delivered = await deliverAlerts({
-    alerts, episodes, now, overdueUnpricedRoots, horizonDay: etDateString(horizon), lawnGapCheckFailed, acceptedScheduleCheckFailed,
+    alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed, acceptedScheduleCheckFailed,
   });
 
   return {
@@ -544,7 +551,7 @@ async function runInner({ now = new Date() } = {}) {
 // Delivers one run's findings: rings them in order, capped at
 // MAX_ALERTS_PER_RUN real rings, and — under episodes — closes every
 // standing bell the findings no longer name (closeResolvedAlerts).
-async function deliverAlerts({ alerts, episodes, now, overdueUnpricedRoots, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed }) {
+async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed }) {
   let alerted = 0;
   const capped = () => {
     if (alerted < MAX_ALERTS_PER_RUN) return false;
@@ -608,57 +615,92 @@ async function deliverAlerts({ alerts, episodes, now, overdueUnpricedRoots, hori
   if (lawnGapCheckFailed) skipPrefixes.push(LAWN_GAP_PREFIX);
   if (acceptedScheduleCheckFailed) skipPrefixes.push(ACCEPTED_PREFIX);
   try {
-    return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, overdueUnpricedRoots, horizonDay, skipPrefixes }), closePassFailed: false };
+    return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }), closePassFailed: false };
   } catch (err) {
     logger.error(`[schedule-integrity] alert close pass failed: ${err.message}`);
     return { alerted, closed: 0, closePassFailed: true };
   }
 }
 
-// Roots (of the given absent `unpriced-series:<root>` keys) with a visit that
-// completed during the alert's current episode while still unpriced by its own
-// row: the scan's own rule (isUnpricedSeriesVisit, annual-prepay coverage
-// validated the same way), with an authoritative $0 (billing-lane's
-// hasAuthoritativeZeroPrice, under GATE_STAMPED_ZERO_FREE) counting as a price.
-// Whether such a visit was then billed right (a combined first-visit invoice,
-// an invoice by hand) is a person's call, never this pass's: the bell stays up
-// until the visit is priced or a person clears it, as before episodes. The
-// episode starts at the bell's metadata.episode_started_at (the run's pre-scan
-// time, so a completion racing the bell insert still holds); a bell written
-// before that field falls back to the later of its created_at and rungAt.
-// Read-only.
-async function completedUnpricedRoots(absentKeys) {
-  const held = new Set();
-  const roots = absentKeys.map((key) => key.slice(UNPRICED_PREFIX.length)).filter((id) => UUID_RE.test(id));
-  if (!roots.length) return held;
-  // Oldest first, so a key with several rows ends on the newest one's start.
+// Every unpriced-series bell, open or auto-cleared: series root -> the start
+// of the bell's life, the earliest of its created_at and the run that first
+// raised it (episode_started_at is that run's pre-scan time, so a completion
+// racing the first insert still counts). A reopen moves episode_started_at
+// forward but never created_at, so the start never moves forward.
+async function unpricedSeriesBells() {
   const bells = await db('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [absentKeys])
-    .select(db.raw("metadata->>'dedupeKey' as dedupe_key"), 'created_at',
-      db.raw("metadata->>'rungAt' as rung_at"), db.raw("metadata->>'episode_started_at' as episode_started_at"))
-    .orderBy('created_at', 'asc');
-  const episodeStart = new Map();
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [UNPRICED_PREFIX])
+    .select(db.raw("metadata->>'dedupeKey' as dedupe_key"), 'created_at', db.raw("metadata->>'episode_started_at' as episode_started_at"));
+  const since = new Map();
   for (const bell of bells) {
     const root = String(bell.dedupe_key).slice(UNPRICED_PREFIX.length);
-    const observed = bell.episode_started_at ? new Date(bell.episode_started_at).getTime() : NaN;
-    const stamps = [bell.created_at, bell.rung_at].map((v) => (v ? new Date(v).getTime() : NaN)).filter(Number.isFinite);
-    episodeStart.set(root, Number.isFinite(observed) ? observed : Math.max(...stamps, -Infinity));
+    const stamps = [bell.created_at, bell.episode_started_at].map((v) => (v ? new Date(v).getTime() : NaN)).filter(Number.isFinite);
+    if (!UUID_RE.test(root) || !stamps.length) continue;
+    since.set(root, Math.min(since.get(root) ?? Infinity, ...stamps));
   }
+  return since;
+}
+
+// Of these series (root -> bell start), the ones with a visit that completed
+// at or after the bell's start while still unpriced by its own row: the scan's
+// own rule (isUnpricedSeriesVisit, annual-prepay coverage validated the same
+// way), with an authoritative $0 (billing-lane's hasAuthoritativeZeroPrice,
+// under GATE_STAMPED_ZERO_FREE) counting as a price. Whether such a visit was
+// then billed right (a combined first-visit invoice, an invoice by hand) is a
+// person's call, never this job's. Root -> the latest such visit. Read-only.
+async function completedUnpricedSince(sinceByRoot) {
+  const found = new Map();
+  if (!sinceByRoot.size) return found;
+  const roots = [...sinceByRoot.keys()];
   const completed = await coverageScanQuery()
     .where('ss.status', 'completed')
     .where(function inRoots() { this.whereIn('ss.id', roots).orWhereIn('ss.recurring_parent_id', roots); })
+    .whereRaw('COALESCE(ss.completed_at, ss.updated_at) >= ?', [new Date(Math.min(...sinceByRoot.values()))])
     .select(db.raw('COALESCE(ss.completed_at, ss.updated_at) as completed_time'));
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
   const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+  const at = (row) => new Date(row.completed_time).getTime();
   for (const row of completed) {
     const root = String(seriesRootId(row));
-    if (held.has(root) || !episodeStart.has(root)) continue;
-    if (!(new Date(row.completed_time).getTime() >= episodeStart.get(root))) continue;
+    if (!sinceByRoot.has(root) || !(at(row) >= sinceByRoot.get(root))) continue;
+    if (found.has(root) && at(found.get(root)) >= at(row)) continue;
     if (!isUnpricedSeriesVisit(row) || hasAuthoritativeZeroPrice(row.estimated_price, row.primary_line_price)) continue;
     if (row.prepaid_method === ANNUAL_PREPAY_METHOD && await annualPrepayCoversVisit(row, db)) continue;
-    held.add(root);
+    found.set(root, row);
   }
-  return held;
+  return found;
+}
+
+// Held series. The class pages upcoming visits only, but a series still
+// unpriced by an overdue visit, or by one that completed unpriced since its
+// bell first rang, is the same unpriced series: its key stays LIVE, so the
+// close pass keeps the bell, and a bell auto-cleared meanwhile (priced, then
+// the price removed) reopens and rings. A held series only keeps or reopens a
+// bell it already has; it never starts one, so nothing new rings on deploy.
+async function heldUnpricedAlerts({ unpricedByRoot, overdueUnpricedByRoot, now }) {
+  const sinceByRoot = await unpricedSeriesBells();
+  const paged = new Set([...unpricedByRoot.keys()].map(String));
+  const held = new Map();
+  for (const [root, row] of overdueUnpricedByRoot) {
+    if (sinceByRoot.has(root)) held.set(root, { row, completed: false });
+  }
+  for (const [root, row] of await completedUnpricedSince(sinceByRoot)) {
+    if (!held.has(root)) held.set(root, { row, completed: true });
+  }
+  return [...held].filter(([root]) => !paged.has(root)).map(([root, { row, completed }]) => {
+    const type = row.service_type || 'service';
+    const d = row.service_date;
+    return [
+      `${UNPRICED_PREFIX}${root}`,
+      completed ? `Recurring ${type} has no price — the ${d} visit completed without one`
+        : `Recurring ${type} has no price — the ${d} visit is past due`,
+      `The recurring ${type} series has no price on any row (parent or child), and its ${d} visit ` +
+        (completed ? 'completed without one. Price the series, or bill that visit by hand.'
+          : 'is past due. Price the series before it completes at $0.'),
+      { scheduled_service_id: row.id, series_root_id: root, customer_id: row.customer_id || null, visit_date: d,
+        held: completed ? 'completed_unpriced' : 'overdue_unpriced', episode_started_at: now.toISOString() },
+    ];
+  });
 }
 
 // Prepay: key = prepay-coverage:<visit>:<issue>:<evidence hash>.
@@ -740,7 +782,7 @@ async function closeLawnAlerts({ absentOf, close, liveKeys, deliveredKeys }) {
 // moot). Read-only against scheduled_services: it reads a visit's status and
 // writes nothing but admin notifications. A problem that returns after this
 // scan is re-raised, and re-rung, by the next run.
-async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, overdueUnpricedRoots, horizonDay, skipPrefixes }) {
+async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }) {
   const absentOf = async (prefix) => {
     if (skipPrefixes.includes(prefix)) return [];
     return (await episodeHelpers.openAdminAlertKeys(db, prefix)).filter((key) => !liveKeys.has(key));
@@ -750,16 +792,11 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, overdueUnpric
     : 0);
   let closed = 0;
 
-  const unpricedAbsent = (await absentOf(UNPRICED_PREFIX))
-    .filter((key) => !overdueUnpricedRoots.has(key.slice(UNPRICED_PREFIX.length)));
-  // A series whose visit COMPLETED during the bell while still unpriced is
-  // the money loss the bell warned about, not a fix: it stays open until
-  // that visit is priced or a person clears it.
-  const heldRoots = await completedUnpricedRoots(unpricedAbsent);
-  const unpriced = unpricedAbsent.filter((key) => !heldRoots.has(key.slice(UNPRICED_PREFIX.length)));
   // Priced, done, cancelled, or moved past the look-ahead window: a visit
-  // that comes back into the window unpriced re-rings.
-  closed += await close(unpriced, 'no longer unpriced in the look-ahead window');
+  // that comes back into the window unpriced re-rings. A series still
+  // unpriced by an overdue or completed visit is live (heldUnpricedAlerts),
+  // so it is never absent here.
+  closed += await close(await absentOf(UNPRICED_PREFIX), 'no longer unpriced in the look-ahead window');
   closed += await closeLawnAlerts({ absentOf, close, liveKeys, deliveredKeys });
   closed += await close(await absentOf(ACCEPTED_PREFIX), 'gap resolved');
   closed += await closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, horizonDay });
@@ -872,7 +909,8 @@ module.exports = {
   hasOutOfBandPrepaidStamp,
   hasAnnualPrepaidStamp,
   seriesRootId,
-  _completedUnpricedRoots: completedUnpricedRoots,
+  _unpricedSeriesBells: unpricedSeriesBells,
+  _completedUnpricedSince: completedUnpricedSince,
   _closeResolvedAlerts: closeResolvedAlerts,
   _private: episodeHelpers,
   UPCOMING_WINDOW_DAYS,

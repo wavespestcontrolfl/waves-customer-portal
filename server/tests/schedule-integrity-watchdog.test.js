@@ -729,12 +729,26 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     expect(closedBy()).toEqual({ 'no longer unpriced in the look-ahead window': ['unpriced-series:ss-gone'] });
   });
 
-  test('an unpriced series with an OVERDUE unpriced visit stays open even though it no longer pages', async () => {
-    makeDbMock({ coverageRows: [unpricedChild({ service_date: '2026-07-30' })] });
-    openKeysByPrefix({ 'unpriced-series:': ['unpriced-series:ss-parent-1'] });
+  test('an unpriced series with an OVERDUE unpriced visit stays live even though it no longer pages: its existing bell is kept, or reopened', async () => {
+    const ROOT = '0000000d-0000-4000-8000-000000000000';
+    const OVERDUE_KEY = `unpriced-series:${ROOT}`;
+    makeDbMock({ coverageRows: [unpricedChild({ service_date: '2026-07-30', recurring_parent_id: ROOT })],
+      bellRows: [{ dedupe_key: OVERDUE_KEY, created_at: '2026-07-20T12:00:00Z' }] });
+    openKeysByPrefix({ 'unpriced-series:': [OVERDUE_KEY] });
     const result = await runInner({ now: NOW });
     expect(result.unpricedSeries).toBe(0);
     expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
+    // Raised through the reopen wrapper: an open bell is a silent keep, an auto-cleared one rings again.
+    const [, title, , opts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls[0];
+    expect(opts.dedupeKey).toBe(OVERDUE_KEY);
+    expect(title).toMatch(/^Recurring .+ has no price — the 2026-07-30 visit is past due$/);
+    expect(opts.metadata).toMatchObject({ held: 'overdue_unpriced', episode_started_at: NOW.toISOString() });
+  });
+
+  test('a held series never starts a bell: an overdue unpriced visit with no bell for its series raises nothing', async () => {
+    makeDbMock({ coverageRows: [unpricedChild({ service_date: '2026-07-30', recurring_parent_id: '0000000d-0000-4000-8000-000000000000' })] });
+    await runInner({ now: NOW });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 
   describe('prepay coverage closes', () => {
@@ -850,6 +864,7 @@ describe('alert episodes (ALERT_EPISODES)', () => {
     expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(episodeHelpers.openAdminAlertKeys).not.toHaveBeenCalled();
     expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalledWith('notifications');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(2);
     expect(NotificationService.notifyAdmin.mock.calls[0][3]).toEqual({
       link: '/admin/dispatch', bell: true, dedupeKey: 'unpriced-series:ss-parent-1',
@@ -877,7 +892,7 @@ describe('alertEpisodesLive (the real reader)', () => {
 });
 
 
-describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds its bell open', () => {
+describe('unpriced series held by a visit that completed unpriced since its bell first rang (a live key: kept, or reopened)', () => {
   const ROOT = '0000000a-0000-4000-8000-000000000000';
   const CHILD = '0000000b-0000-4000-8000-000000000000';
   const SIBLING_ROOT = '0000000c-0000-4000-8000-000000000000';
@@ -946,11 +961,31 @@ describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds i
     expect(closedKeys()).toEqual([KEY]);
   });
 
-  test('a completion before episode_started_at does not hold', async () => {
+  test('the start is the bell\'s first ring: a later reopen (episode_started_at moved forward) never lets an earlier completion go', async () => {
     makeDbMock({ completedRows: [completed({ completed_time: '2026-08-03T15:00:00Z' })], bellRows: [{ ...BELL, episode_started_at: '2026-08-04T10:00:00Z' }] });
     openKeys(KEY);
     await runInner({ now: NOW });
+    expect(closedKeys()).toEqual([]);
+    // A bell first rung after that completion does not hold for it.
+    makeDbMock({ completedRows: [completed({ completed_time: '2026-08-03T15:00:00Z' })], bellRows: [{ ...BELL, created_at: '2026-08-05T12:00:00Z' }] });
+    openKeys(KEY);
+    await runInner({ now: NOW });
     expect(closedKeys()).toEqual([KEY]);
+  });
+
+  test('a bell auto-cleared after its completed visit was priced reopens when that price is removed (the key is live again)', async () => {
+    // Auto-cleared: the close pass no longer lists it as open, but the bell reader still finds it.
+    makeDbMock({ completedRows: [completed()], bellRows: [{ ...BELL, episode_started_at: '2026-08-01T11:00:00Z' }] });
+    openKeys();
+    await runInner({ now: NOW });
+    const [, title, , opts] = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.find(([, , , o]) => o.dedupeKey === KEY);
+    expect(title).toMatch(/^Recurring .+ has no price — the 2026-08-03 visit completed without one$/);
+    expect(opts.metadata).toMatchObject({ held: 'completed_unpriced', scheduled_service_id: CHILD, series_root_id: ROOT });
+    // Priced again: not live, so nothing is raised for it.
+    episodeHelpers.raiseAdminAlertWithReopen.mockClear();
+    makeDbMock({ completedRows: [completed({ estimated_price: '99.45' })], bellRows: [BELL] });
+    await runInner({ now: NOW });
+    expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 
   test('every unpriced-series raise carries episode_started_at = the run\'s pre-scan time (now); killed, it does not', async () => {
@@ -963,7 +998,7 @@ describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds i
     expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata).not.toHaveProperty('episode_started_at');
   });
 
-  test('completed before the episode started is closed; at or after the bell\'s last ring holds', async () => {
+  test('completed before the bell first rang is closed; at or after its start holds, whatever later rings say', async () => {
     await run([completed({ completed_time: '2026-07-30T15:00:00Z' })]);
     expect(closedKeys()).toEqual([KEY]);
 
@@ -972,12 +1007,12 @@ describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds i
     await run([completed({ completed_time: BELL.created_at })]);
     expect(closedKeys()).toEqual([]);
 
-    // A reopen re-rang the bell later (rungAt): the episode starts there, so an older completion no longer holds.
+    // A later ring (rungAt) never moves the start.
     makeDbMock({ completedRows: [completed({ completed_time: '2026-08-03T15:00:00Z' })],
       bellRows: [{ ...BELL, rung_at: '2026-08-04T10:00:00Z' }] });
     openKeys(KEY);
     await runInner({ now: NOW });
-    expect(closedKeys()).toEqual([KEY]);
+    expect(closedKeys()).toEqual([]);
   });
 
   test('annual-prepay covered (validator confirms) is closed; an unconfirmed stamp holds', async () => {
@@ -1003,12 +1038,13 @@ describe('unpriced series: a completed, still-unpriced, uninvoiced visit holds i
     expect(closedKeys()).toEqual([KEY]);
   });
 
-  test('a run with nothing absent, or only overdue-held roots, never reads completed visits', async () => {
+  test('with no unpriced-series bell the run never reads completed visits', async () => {
     makeDbMock({ coverageRows: [unpricedChild({ id: ROOT, recurring_parent_id: null, service_date: '2026-07-30' })] });
     openKeys(KEY);
     await runInner({ now: NOW });
+    const completedScan = db.mock.results.map((r) => r.value).find((c) => c.where.mock.calls.some(([a, b]) => a === 'ss.status' && b === 'completed'));
+    expect(completedScan).toBeUndefined();
     expect(anyInvoiceLinkedToVisit).not.toHaveBeenCalled();
-    expect(db).not.toHaveBeenCalledWith('notifications');
   });
 });
 

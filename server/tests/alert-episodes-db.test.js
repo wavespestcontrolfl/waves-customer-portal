@@ -218,7 +218,13 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     });
     return { customer, root, child, key };
   };
-  const held = async (s) => [...await watchdog._completedUnpricedRoots([s.key], NOW)];
+  // The real bell reader (open or auto-cleared bells, with each one's start),
+  // narrowed to this fixture's series, then the completed-visit check.
+  const held = async (s) => {
+    const since = await watchdog._unpricedSeriesBells();
+    const mine = new Map([...since].filter(([root]) => root === String(s.root.id)));
+    return [...(await watchdog._completedUnpricedSince(mine)).keys()];
+  };
 
   test('completed, unpriced, no invoice: held', async () => {
     const s = await series();
@@ -252,13 +258,24 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     }
   });
 
-  test('priced (own row or parent), completed before the episode, or episode restarted by a later ring: released', async () => {
+  test('priced (own row or parent), or completed before the bell first rang: released; a later ring never moves the start', async () => {
     expect(await held(await series({ childOver: { estimated_price: 99 } }))).toEqual([]);
     const pricedParent = await series();
     await db('scheduled_services').where({ id: pricedParent.root.id }).update({ primary_line_price: 72 });
     expect(await held(pricedParent)).toEqual([]);
     expect(await held(await series({ completedAt: '2026-09-24T15:00:00Z' }))).toEqual([]);
-    expect(await held(await series({ rungAt: '2026-09-29T10:00:00Z' }))).toEqual([]);
+    const rerung = await series({ rungAt: '2026-09-29T10:00:00Z', episodeStartedAt: '2026-09-29T09:00:00Z' });
+    expect(await held(rerung)).toEqual([rerung.root.id]);
+  });
+
+  test('an AUTO-CLEARED bell still counts: a completed visit priced, then unpriced again, holds its series live (it reopens)', async () => {
+    const s = await series();
+    await db('scheduled_services').where({ id: s.child.id }).update({ estimated_price: 99 });
+    expect(await held(s)).toEqual([]);
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [s.key])
+      .update({ read_at: NOW, metadata: db.raw("metadata || ?::jsonb", [JSON.stringify({ autoCleared: true, autoClearedAt: NOW.toISOString() })]) });
+    await db('scheduled_services').where({ id: s.child.id }).update({ estimated_price: null });
+    expect(await held(s)).toEqual([s.root.id]);
   });
 
   test('a first-application stamp alone releases nothing: billing\'s verdict needs the visit\'s source estimate', async () => {
