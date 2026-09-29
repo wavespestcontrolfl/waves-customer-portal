@@ -30,29 +30,45 @@ function bodyAmountCents(body) {
 // (buildFactsBlock / the paymentMoneyExtra prompt bullet in
 // sms-shadow-drafter.js), so this same shape catches both an unedited draft
 // and a human-edited body that still carries one.
-const ZELLE_CONTACT_RE = /\bzelle\b[^.\n]{0,20}\bto\b\s+([^\s,;()]+)/i;
-function bodyClaimsZelleContact(body) {
-  const m = String(body || '').match(ZELLE_CONTACT_RE);
-  return m ? m[1].replace(/[.,;:]+$/, '') : null;
+// Any email, and any 10/11-digit US phone in whatever format ("(941) 555-1234",
+// "941.555.1234", "+1 941 555 1234"), anywhere in a body that mentions Zelle.
+// Phrase-anchored matching ("Zelle to X") missed "Zelle us at X" and "our
+// Zelle is X", so every contact-shaped token in a Zelle body must be the
+// current recipient.
+const ZELLE_WORD_RE = /\bzelle\b/i;
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const PHONE_RE = /(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
+const phoneDigits = (v) => String(v || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+
+function zelleBodyContacts(body) {
+  const text = String(body || '');
+  if (!ZELLE_WORD_RE.test(text)) return [];
+  return [
+    ...(text.match(EMAIL_RE) || []).map((e) => ({ kind: 'email', value: e.toLowerCase() })),
+    ...(text.match(PHONE_RE) || []).map((ph) => ({ kind: 'phone', value: phoneDigits(ph) })),
+  ];
 }
 
 /**
- * Is the Zelle contact a body claims still the one Waves actually accepts?
- * { stale: false } when the body names no Zelle contact at all; otherwise
- * true unless it matches the CURRENT manualPayOptionsFromEnv recipient
- * exactly (case-insensitive — an email may round-trip differently cased)
- * AND Zelle is currently enabled at all. Fail CLOSED: a reconfigured or
- * now-disabled recipient blocks the send exactly like a stale dollar
- * amount, never a silent send of an old contact.
+ * Is every contact in a Zelle-mentioning body still the one Waves actually
+ * accepts? { stale: false } when the body mentions no Zelle contact;
+ * otherwise stale unless Zelle is currently enabled AND each contact equals
+ * the CURRENT manualPayOptionsFromEnv recipient (email case-insensitive,
+ * phone by digits). Fail CLOSED: a rotated or disabled recipient blocks the
+ * send exactly like a stale dollar amount.
  */
 function outgoingZelleStale(body) {
-  const claimed = bodyClaimsZelleContact(body);
-  if (!claimed) return { stale: false };
+  const contacts = zelleBodyContacts(body);
+  if (!contacts.length) return { stale: false };
   const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
   const current = manualPayOptionsFromEnv()?.zelle?.recipient || null;
-  return current && claimed.toLowerCase() === current.toLowerCase()
-    ? { stale: false }
-    : { stale: true, reason: 'zelle_recipient_stale' };
+  if (!current) return { stale: true, reason: 'zelle_recipient_stale' };
+  const currentEmail = String(current).toLowerCase();
+  const currentPhone = phoneDigits(current);
+  const ok = contacts.every((c) => (c.kind === 'email'
+    ? c.value === currentEmail
+    : currentPhone.length >= 10 && c.value === currentPhone));
+  return ok ? { stale: false } : { stale: true, reason: 'zelle_recipient_stale' };
 }
 
 /**
@@ -119,4 +135,4 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
   }
 }
 
-module.exports = { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, bodyClaimsZelleContact };
+module.exports = { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts };

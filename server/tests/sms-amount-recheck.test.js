@@ -19,7 +19,7 @@ jest.mock('../services/sms-suggest-mode', () => ({ hasPriceQuote: jest.fn((t) =>
 const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
 const { realAnswersGateOn } = require('../services/sms-followup-sla');
 const ContextAggregator = require('../services/context-aggregator');
-const { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, bodyClaimsZelleContact } = require('../services/sms-amount-recheck');
+const { outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts } = require('../services/sms-amount-recheck');
 
 function dbWithCustomer(row) {
   return () => ({ where: () => ({ first: async () => row }) });
@@ -71,7 +71,7 @@ test('bodyAmountCents extracts every priced form in cents', () => {
 
 // Independent-review P1 (finding 4): ZELLE_RECIPIENT is a live env var that
 // can change or be unset between a card's draft time and its send.
-describe('outgoingZelleStale / bodyClaimsZelleContact — a Zelle contact must still be the CURRENT one at send time', () => {
+describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still be the CURRENT one at send time', () => {
   let priorZelle;
   beforeEach(() => {
     priorZelle = process.env.ZELLE_RECIPIENT;
@@ -83,14 +83,14 @@ describe('outgoingZelleStale / bodyClaimsZelleContact — a Zelle contact must s
 
   test('no Zelle contact in the body ⇒ not stale, regardless of config', () => {
     delete process.env.ZELLE_RECIPIENT;
-    expect(bodyClaimsZelleContact('We take card or ACH through your pay link.')).toBeNull();
+    expect(zelleBodyContacts('We take card or ACH through your pay link.')).toEqual([]);
     expect(outgoingZelleStale('We take card or ACH through your pay link.')).toEqual({ stale: false });
   });
 
   test('body names the CURRENT recipient exactly ⇒ not stale', () => {
     process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
     const body = 'You can Zelle to payments@wavespestcontrol.com, just add your name.';
-    expect(bodyClaimsZelleContact(body)).toBe('payments@wavespestcontrol.com');
+    expect(zelleBodyContacts(body)).toEqual([{ kind: 'email', value: 'payments@wavespestcontrol.com' }]);
     expect(outgoingZelleStale(body)).toEqual({ stale: false });
   });
 
@@ -110,6 +110,24 @@ describe('outgoingZelleStale / bodyClaimsZelleContact — a Zelle contact must s
     process.env.ZELLE_RECIPIENT = 'Payments@WavesPestControl.com';
     const body = 'Zelle to payments@wavespestcontrol.com works too.';
     expect(outgoingZelleStale(body)).toEqual({ stale: false });
+  });
+
+  test('phrasing other than "Zelle to X" is still checked (Zelle us at / our Zelle is)', () => {
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    expect(outgoingZelleStale('Our Zelle is old@wavespestcontrol.com.')).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+    expect(outgoingZelleStale('Zelle us at payments@wavespestcontrol.com anytime.')).toEqual({ stale: false });
+  });
+
+  test('phone recipients match by digits in any format; a different number is stale', () => {
+    process.env.ZELLE_RECIPIENT = '941-555-0100';
+    expect(outgoingZelleStale('Zelle us at (941) 555-0100.')).toEqual({ stale: false });
+    expect(outgoingZelleStale('You can Zelle +1 941.555.0100')).toEqual({ stale: false });
+    expect(outgoingZelleStale('Zelle us at (941) 555-0199.')).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+  });
+
+  test('a body that mentions Zelle but carries no contact is not stale', () => {
+    delete process.env.ZELLE_RECIPIENT;
+    expect(outgoingZelleStale('We do not take Zelle right now, but your pay link takes card or bank.')).toEqual({ stale: false });
   });
 
   test('outgoingAmountsStale blocks on a stale Zelle contact even with no dollar amount in the body', async () => {
