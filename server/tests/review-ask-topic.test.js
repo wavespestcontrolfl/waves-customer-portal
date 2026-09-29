@@ -628,13 +628,20 @@ describe('followupAreaWord — a place the customer named AND the tech treated (
     expect(treatedAreaWords(null).size).toBe(0);
   });
 
-  test('named in the topic and treated → the customer\'s own word; otherwise null', () => {
-    expect(followupAreaWord('ants in the kitchen', ['Kitchen', 'Garage'])).toBe('kitchen');
-    expect(followupAreaWord('bugs in my bathroom', ['Bathrooms'])).toBe('bathroom');
-    expect(followupAreaWord('roaches in the bathrooms', ['Bathrooms'])).toBe('bathrooms');
-    expect(followupAreaWord('ants in the kitchen', ['Garage'])).toBeNull();
-    expect(followupAreaWord('ants', ['Kitchen'])).toBeNull();
+  test('tied to the concern in the topic and treated → the customer\'s own word; otherwise null', () => {
+    expect(followupAreaWord('ants in the kitchen', ['Kitchen', 'Garage'], 'ants')).toBe('kitchen');
+    expect(followupAreaWord('bugs in my bathroom', ['Bathrooms'], 'bugs')).toBe('bathroom');
+    expect(followupAreaWord('roaches in the bathrooms', ['Bathrooms'], 'roach')).toBe('bathrooms');
+    expect(followupAreaWord('kitchen ants', ['Kitchen'], 'ants')).toBe('kitchen');
+    expect(followupAreaWord('ants in the kitchen', ['Garage'], 'ants')).toBeNull();
+    expect(followupAreaWord('ants', ['Kitchen'], 'ants')).toBeNull();
     // A place word that does not read as "in the <area>" is never added.
-    expect(followupAreaWord('ants along the perimeter', ['Perimeter'])).toBeNull();
+    expect(followupAreaWord('ants along the perimeter', ['Perimeter'], 'ants')).toBeNull();
+  });
+
+  test('a place that belongs to another pest in the topic is not added (Codex r1 on #5317)', () => {
+    expect(followupAreaWord('ants kitchen roaches garage', ['Garage'], 'ants')).toBeNull();
+    expect(followupAreaWord('ants and roaches in the garage', ['Garage'], 'ants')).toBeNull();
+    expect(followupAreaWord('ants and roaches in the garage', ['Garage'], 'roaches')).toBe('garage');
   });
 });

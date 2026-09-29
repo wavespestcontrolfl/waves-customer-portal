@@ -500,6 +500,11 @@ function parseDecision(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
+// Visit outcomes where no work was performed (pest-recap.js,
+// visit-completion-packets.js): the review drafters must not claim a
+// treatment on them (GATE_REVIEW_ASK_SERVICE_FACTS).
+const NON_PERFORMED_VISIT_OUTCOMES = ["inspection_only", "customer_declined", "incomplete"];
+
 // How long after enrollment the detached topic classifier has surely settled
 // (its model budget is 8 s; review-ask-topic.js TOPIC_TIMEOUT_MS).
 const TOPIC_SETTLE_MS = 60 * 1000;
@@ -4646,6 +4651,8 @@ const ReviewService = {
       // reuse: a draft persisted for the account holder must not be re-sent
       // to a recipient who changed between attempts (Codex P1, r2).
       const recipientIsAccountHolder = isAccountHolderRecipient(contact, customer);
+      const smsFirstName = firstNameFrom(contact.name) || customer.first_name || "";
+      const serviceFacts = recipientIsAccountHolder ? await this._reviewServiceFacts(serviceRecordId) : null;
 
       // Retry reuse: a deferred/transiently-failed step re-enters here with no
       // customBody — reuse the draft already persisted for this exact step so
@@ -4660,7 +4667,11 @@ const ReviewService = {
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
-          if (prior?.custom_body) persistedBody = prior.custom_body;
+          // A draft verified against earlier service facts (report edited,
+          // outcome changed) is re-checked against today's; a miss redrafts.
+          if (prior?.custom_body && !require("./review-ask-drafter").verifyTreatmentClaims(prior.custom_body, serviceFacts, { names: [smsFirstName, techName] })) {
+            persistedBody = prior.custom_body;
+          }
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
       }
 
@@ -4672,12 +4683,12 @@ const ReviewService = {
           ? await this._topicFollowupBody({ sequenceId, customer, contact })
           : await require("./review-ask-drafter").draftAskBody({
             customer,
-            recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
+            recipientFirstName: smsFirstName,
             serviceType,
             techName,
             sequenceStep,
             serviceDate,
-            serviceFacts: await this._reviewServiceFacts(serviceRecordId),
+            serviceFacts,
           });
         if (drafted) persistedBody = drafted;
       }
@@ -4707,6 +4718,8 @@ const ReviewService = {
       const recipientIsAccountHolder = !!(emailContact?.email && customer.email
         && String(emailContact.email).trim().toLowerCase() === String(customer.email).trim().toLowerCase());
       if (recipientIsAccountHolder) {
+        const emailFirstName = firstNameFrom(emailContact.name) || customer.first_name || "";
+        const serviceFacts = await this._reviewServiceFacts(serviceRecordId);
         try {
           const prior = await db("review_requests")
             // Channel-scoped (codex #3235 r1 P2): a step that flipped
@@ -4717,17 +4730,19 @@ const ReviewService = {
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
-          if (prior?.custom_body) persistedBody = prior.custom_body;
+          if (prior?.custom_body && !require("./review-ask-drafter").verifyTreatmentClaims(prior.custom_body, serviceFacts, { names: [emailFirstName, techName] })) {
+            persistedBody = prior.custom_body;
+          }
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
           const drafted = await require("./review-ask-drafter").draftEmailIntro({
             customer,
-            recipientFirstName: firstNameFrom(emailContact.name) || customer.first_name || "",
+            recipientFirstName: emailFirstName,
             serviceType,
             techName,
             sequenceStep,
             serviceDate,
-            serviceFacts: await this._reviewServiceFacts(serviceRecordId),
+            serviceFacts,
           });
           if (drafted) persistedBody = drafted;
         }
@@ -4924,20 +4939,25 @@ const ReviewService = {
    */
   /**
    * GATE_REVIEW_ASK_SERVICE_FACTS (owner 2026-09-29): the service report's
-   * treated areas for the review drafters — { treated, areasTreated }, where
-   * treated means the visit's outcome is completed (a missing outcome is not
-   * a treatment on record). Null when the gate is off, there is no record,
-   * or the read fails: the drafters then work exactly as before. Never
-   * products, findings, recommendations or billing. Never throws.
+   * treated areas for the review drafters — { treated, areasTreated }.
+   * treated is false only for the outcomes where no work was performed
+   * (NON_PERFORMED_VISIT_OUTCOMES, the same set pest-recap.js and the packet
+   * closeout use); a missing outcome is a completed visit, as everywhere
+   * else. areasTreated only on a `completed` visit (owner scope). Null when
+   * either drafter gate is off, there is no record, or the read fails: the
+   * drafters then work exactly as before. Never products, findings,
+   * recommendations or billing. Never throws.
    */
   async _reviewServiceFacts(serviceRecordId) {
-    if (!serviceRecordId || !require("../config/feature-gates").isEnabled("reviewAskServiceFacts")) return null;
+    const gates = require("../config/feature-gates");
+    if (!serviceRecordId || !gates.isEnabled("reviewAskServiceFacts") || !gates.isEnabled("reviewAskPersonalized")) return null;
     try {
       const row = await db("service_records").where({ id: serviceRecordId }).first("structured_notes");
       if (!row) return null;
       const notes = parseDecision(row.structured_notes) || {};
-      const treated = notes.visitOutcome === "completed";
-      const areasTreated = treated && Array.isArray(notes.areasTreated)
+      const outcome = notes.visitOutcome || "completed";
+      const treated = !NON_PERFORMED_VISIT_OUTCOMES.includes(outcome);
+      const areasTreated = outcome === "completed" && Array.isArray(notes.areasTreated)
         ? notes.areasTreated.filter((a) => typeof a === "string")
         : [];
       return { treated, areasTreated };

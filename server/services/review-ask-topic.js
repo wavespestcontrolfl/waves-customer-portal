@@ -376,10 +376,22 @@ const FOLLOWUP_AREA_WORDS = new Set([
   "shed", "closet", "cabinet",
 ].map(singularForm));
 
-/** Whether a word (any case, plural-aware) is on the concern head or modifier lists. */
-function isConcernWord(word) {
+// Concern words that are also places or things a tech treats (a lawn, the
+// house, the trees): a treatment claim may name them only when the tech
+// treated them, never just because they are concern words.
+const PLACE_LIKE_CONCERN_WORDS = new Set([
+  "lawn", "turf", "sod", "grass", "tree", "palm", "hedge", "shrub", "bush", "plant", "citrus", "hibiscus",
+  "ixora", "croton", "frond", "leaf", "house", "roof", "drain", "nest", "web", "patch", "spot",
+].map(singularForm));
+
+/**
+ * Whether a word (any case, plural-aware) names a pest or condition that a
+ * treatment claim may mention freely: on the concern lists and not a place
+ * or treated thing (PLACE_LIKE_CONCERN_WORDS).
+ */
+function isPestWord(word) {
   const w = singularForm(String(word || "").toLowerCase());
-  return CONCERN_HEADS.has(w) || CONCERN_MODIFIERS.has(w);
+  return (CONCERN_HEADS.has(w) || CONCERN_MODIFIERS.has(w)) && !PLACE_LIKE_CONCERN_WORDS.has(w);
 }
 
 function placeWordsOf(text) {
@@ -391,16 +403,31 @@ function treatedAreaWords(areasTreated) {
   return new Set((Array.isArray(areasTreated) ? areasTreated : []).flatMap(placeWordsOf));
 }
 
+// Words that may sit between a concern and its place ("ants IN THE kitchen",
+// "bugs in MY bathroom").
+const AREA_LINK_WORDS = new Set(["in", "on", "at", "around", "under", "by", "near", "the", "my", "our", "a"]);
+
 /**
  * The place the topic follow-up may add ("the ants in the kitchen"): a place
- * the customer named in their own topic that the tech also treated at the
- * visit, in the customer's own spelling, lowercased. Null when none.
+ * the customer tied to THIS concern in their own topic — right after it
+ * through only linking words ("ants in the kitchen") or right before it
+ * ("kitchen ants") — that the tech also treated at the visit. In the
+ * customer's own spelling, lowercased. Null when none: a place elsewhere in
+ * the topic may belong to another pest (Codex r1 on #5317).
  */
-function followupAreaWord(topic, areasTreated) {
+function followupAreaWord(topic, areasTreated, concern) {
   const treated = treatedAreaWords(areasTreated);
-  const word = (String(topic || "").toLowerCase().match(/[a-z]+/g) || [])
-    .find((w) => FOLLOWUP_AREA_WORDS.has(singularForm(w)) && treated.has(singularForm(w)));
-  return word || null;
+  const tokens = String(topic || "").toLowerCase().match(/[a-z]+/g) || [];
+  const concernWords = (String(concern || "").toLowerCase().match(/[a-z]+/g) || []).map(singularForm);
+  if (!concernWords.length) return null;
+  const start = tokens.findIndex((_, i) => concernWords.every((c, k) => singularForm(tokens[i + k] || "") === c));
+  if (start < 0) return null;
+  const isArea = (w) => !!w && FOLLOWUP_AREA_WORDS.has(singularForm(w)) && treated.has(singularForm(w));
+  let i = start + concernWords.length;
+  while (i < tokens.length && AREA_LINK_WORDS.has(tokens[i])) i += 1;
+  if (i > start + concernWords.length && isArea(tokens[i])) return tokens[i];
+  if (isArea(tokens[start - 1])) return tokens[start - 1];
+  return null;
 }
 
 function hasEvidenceToClassify(ev) {
@@ -540,7 +567,7 @@ module.exports = {
   followupAreaWord,
   treatedAreaWords,
   placeWordsOf,
-  isConcernWord,
+  isPestWord,
   singularForm,
   readTopicEvidence,
   collectTopicEvidence,

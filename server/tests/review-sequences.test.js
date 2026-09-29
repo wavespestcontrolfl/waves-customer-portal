@@ -25,6 +25,7 @@ jest.mock('../services/review-ask-drafter', () => ({
   draftAskBody: (...a) => mockDraftAskBody(...a),
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
   draftTopicFollowupBody: (...a) => mockDraftTopicFollowup(...a),
+  verifyTreatmentClaims: (...a) => jest.requireActual('../services/review-ask-drafter').verifyTreatmentClaims(...a),
 }));
 // Day-0 contextual topic (own suite: review-ask-topic.test.js). Default null
 // = no topic, matching the gate-off production posture; this file only
@@ -673,6 +674,7 @@ describe('review sequences — cadence engine', () => {
 
     test('with GATE_REVIEW_ASK_SERVICE_FACTS on, the follow-up gets the visit\'s treated areas', async () => {
       mockGates.reviewAskServiceFacts = true;
+      mockGates.reviewAskPersonalized = true;
       const mock = setup({ seq: followupDue });
       mock.__state.rows.service_records[0].structured_notes = JSON.stringify({ visitOutcome: 'completed', areasTreated: ['Kitchen'] });
       await ReviewService.processReviewSequences();
@@ -5000,6 +5002,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     };
     const customer = { id: 'sf-1', first_name: 'Stan', last_name: 'Q', phone: '+19410000042', nearest_location_id: 'bradenton' };
 
+    beforeEach(() => { mockGates.reviewAskPersonalized = true; });
+
     test('gate on, completed visit → the treated areas', async () => {
       mockGates.reviewAskServiceFacts = true;
       db.mockImplementation(makeMock(withRecord('seq-sf1', customer, { visitOutcome: 'completed', areasTreated: ['Kitchen', 'Garage', 42] })));
@@ -5007,11 +5011,48 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceFacts: { treated: true, areasTreated: ['Kitchen', 'Garage'] } }));
     });
 
-    test('gate on, not a completed visit (or no outcome) → no treatment on record, no areas', async () => {
+    test.each([
+      ['inspection_only', { treated: false, areasTreated: [] }],
+      ['customer_declined', { treated: false, areasTreated: [] }],
+      ['incomplete', { treated: false, areasTreated: [] }],
+      // Performed visits that are not a plain `completed`: work was done, but
+      // areas only ride a completed one (tree-reviewer on #5317).
+      ['follow_up_needed', { treated: true, areasTreated: [] }],
+      ['customer_concern', { treated: true, areasTreated: [] }],
+    ])('gate on, %s visit → %j', async (visitOutcome, expected) => {
       mockGates.reviewAskServiceFacts = true;
-      db.mockImplementation(makeMock(withRecord('seq-sf2', customer, { visitOutcome: 'inspection_only', areasTreated: ['Kitchen'] })));
+      db.mockImplementation(makeMock(withRecord(`seq-sf-${visitOutcome}`, customer, { visitOutcome, areasTreated: ['Kitchen'] })));
       await ReviewService.processReviewSequences();
-      expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceFacts: { treated: false, areasTreated: [] } }));
+      expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceFacts: expected }));
+    });
+
+    test('a record with no outcome is a completed visit, as everywhere else', async () => {
+      mockGates.reviewAskServiceFacts = true;
+      db.mockImplementation(makeMock(withRecord('seq-sf-none', customer, { areasTreated: ['Kitchen'] })));
+      await ReviewService.processReviewSequences();
+      expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceFacts: { treated: true, areasTreated: ['Kitchen'] } }));
+    });
+
+    test('either drafter gate off → no service_records read for facts', async () => {
+      mockGates.reviewAskServiceFacts = true;
+      mockGates.reviewAskPersonalized = false;
+      const mock = makeMock(withRecord('seq-sf-off', customer, { visitOutcome: 'completed', areasTreated: ['Kitchen'] }));
+      const tables = [];
+      db.mockImplementation((t) => { tables.push(t); return mock(t); });
+      await ReviewService.processReviewSequences();
+      // The visit-context recovery reads service_records once with a join;
+      // a facts read would be a second, plain read.
+      expect(tables.filter((t) => t === 'service_records').length).toBeLessThanOrEqual(1);
+    });
+
+    test('a retry reuses a persisted draft only while it still passes today\'s facts', async () => {
+      mockGates.reviewAskServiceFacts = true;
+      const fx = withRecord('seq-sf-reuse', customer, { visitOutcome: 'inspection_only', areasTreated: [] });
+      fx.review_requests.push({ id: 'rr-old', sequence_id: 'seq-sf-reuse', sequence_step: 1, customer_id: customer.id, channel: 'sms', status: 'failed', custom_body: 'Hi Stan, hope the ants are backing off since we treated the kitchen: {review_url}', created_at: new Date(Date.now() - 3600000) });
+      db.mockImplementation(makeMock(fx));
+      await ReviewService.processReviewSequences();
+      // The old draft claims a treatment the report no longer shows: redrafted.
+      expect(mockDraftAskBody).toHaveBeenCalled();
     });
 
     test('gate off → no facts, the drafter works as before', async () => {

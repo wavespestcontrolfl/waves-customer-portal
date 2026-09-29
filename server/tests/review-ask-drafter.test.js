@@ -431,24 +431,44 @@ describe('service facts — treated areas from the service report', () => {
 
   test('a treatment claim on a treated area passes; on an untreated one it falls back to the template', async () => {
     expect(await ask('Hi Aaron, hope the ants are backing off since we treated the kitchen: {review_url}', FACTS)).not.toBeNull();
+    expect(await ask('Hi Aaron, hope the ants are backing off since we treated the kitchen and garage: {review_url}', FACTS)).toBeNull();
     expect(await ask('Hi Aaron, hope the ants are backing off since we treated the attic: {review_url}', FACTS)).toBeNull();
   });
 
-  test('verifyTreatmentClaims: only with facts, completed visits only, a claim sentence stays in a closed vocabulary', () => {
+  test('verifyTreatmentClaims: only with facts; a draft that claims work stays in a closed vocabulary', () => {
     const v = (text, facts = FACTS) => Drafter.verifyTreatmentClaims(text, facts, { names: ['Aaron', 'Adam'] });
     expect(v('We sprayed the attic.', null)).toBeNull();
-    expect(v('We treated the kitchen and garage.')).toBeNull();
+    expect(v('We treated the kitchen.')).toBeNull();
     expect(v('We treated the lanai and pool cage.')).toBeNull();
     expect(v('Hope the ants are backing off since Adam treated the kitchen, Aaron.')).toBeNull();
     expect(v('Hope the roaches are settling down since the treatment.')).toBeNull();
-    // Any place not treated, however it is named (pre-push review on the first cut).
-    for (const t of ['We sprayed the attic.', 'We treated the dining room.', 'We treated the whole house.', 'We treated the shed out back.']) {
+    // Any place not treated, however it is named, whichever sentence it sits in.
+    for (const t of ['We sprayed the attic.', 'We treated the dining room.', 'We treated the house.', 'We treated the lawn, Aaron.',
+      'We treated the trees and hedges.', 'We treated the roof.', 'We treated the drains.',
+      'Thanks for having us out for the treatment, Aaron. The attic should be quiet now.',
+      'The kitchen looked great. We treated the bedroom.']) {
       expect([t, v(t)]).toEqual([t, 'claim_word_outside_facts']);
     }
-    expect(v('The kitchen looked great. We treated the bedroom.')).toBe('claim_word_outside_facts');
-    // A sentence with no treatment claim is not checked.
+    // Other ways of claiming work are claims too (tree-reviewer + Codex r1 on #5317).
+    for (const t of ['We baited the attic.', 'We dusted the attic today, Aaron.', 'We serviced the attic.', 'We took care of the attic.', 'We fogged the attic.']) {
+      expect([t, v(t)]).toEqual([t, 'claim_word_outside_facts']);
+    }
+    expect(v('Thanks for letting us service the lanai today.', { treated: false, areasTreated: [] })).toBe('treatment_not_on_record');
+    // At most ONE treated area, from one label (Codex r1 on #5317).
+    expect(v('We treated the kitchen and garage.')).toBe('more_than_one_area');
+    expect(v('We treated the pool garage.')).toBe('more_than_one_area');
+    // A draft with no work claim is not checked.
     expect(v('Hope the kitchen ants are backing off. Thanks for having us!')).toBeNull();
     expect(v('Hope things are better since the treatment.', { treated: false, areasTreated: [] })).toBe('treatment_not_on_record');
+  });
+
+  test('a visit with no work done never gets the "since the treatment" instruction (Codex r1 on #5317)', async () => {
+    await ask(CLEAN_BODY, { treated: false, areasTreated: [] });
+    expect(mockDispatch.mock.calls[0][1].system).toMatch(/no work was done at this visit/);
+    expect(mockDispatch.mock.calls[0][1].system).not.toMatch(/since the treatment/);
+    mockDispatch.mockClear();
+    await ask(CLEAN_BODY, FACTS);
+    expect(mockDispatch.mock.calls[0][1].system).toMatch(/since the treatment/);
   });
 
   test('the email intro gets the same facts and the same check', async () => {
