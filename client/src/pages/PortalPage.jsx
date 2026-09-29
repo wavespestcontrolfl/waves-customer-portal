@@ -2722,7 +2722,18 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // file further — see its own header. The button only shows while the
   // server's own eligibility says so (nextService.prepPhotos.eligible),
   // never inferred client-side.
-  const [visitPrepSheetOpen, setVisitPrepSheetOpen] = useState(false);
+  // The visit id the sheet was opened for, not a bare boolean: the sheet is
+  // open only while the card still shows THAT visit, so a refresh that
+  // drops it (A → none → B) can never reopen the sheet for B on its own
+  // (Codex #5306 r3 P2).
+  const [visitPrepSheetFor, setVisitPrepSheetFor] = useState(null);
+  // Forget it as soon as the card shows anything else, so even the same
+  // visit coming back after a gap does not reopen the sheet by itself.
+  useEffect(() => {
+    if (visitPrepSheetFor != null && String(nextService?.id ?? '') !== String(visitPrepSheetFor)) {
+      setVisitPrepSheetFor(null);
+    }
+  }, [nextService?.id, visitPrepSheetFor]);
   const [stats, setStats] = useState(null);
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
@@ -3196,7 +3207,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                   own eligibility says this visit currently takes photos —
                   the same rule the appointment page's own block uses. */}
               {nextService.prepPhotos?.eligible && (
-                <button type="button" onClick={() => setVisitPrepSheetOpen(true)} data-glass-accent="" style={{
+                <button type="button" onClick={() => setVisitPrepSheetFor(nextService.id)} data-glass-accent="" style={{
                   ...dashboardSecondaryButton,
                   position: 'relative',
                 }}>Send photos</button>
@@ -3226,8 +3237,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             and the button itself only shows once eligible is true. */}
         {nextService && (
           <VisitPrepPhotoSheet
-            open={visitPrepSheetOpen}
-            onClose={() => setVisitPrepSheetOpen(false)}
+            open={visitPrepSheetFor != null && String(visitPrepSheetFor) === String(nextService.id)}
+            onClose={() => setVisitPrepSheetFor(null)}
             scheduledServiceId={nextService.id}
             photosRemaining={nextService.prepPhotos?.photosRemaining}
             onSent={() => { void nextRead.refresh(); }}
