@@ -430,7 +430,8 @@ describe('engine failure — never blocks the submission, always ends at failed'
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'none']);
+    // Loaded before the claim: no slot was ever held.
+    expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['none']);
   });
 
   test('storing the pest_identifications row throws: still resolves to failed, never throws out of the trigger', async () => {

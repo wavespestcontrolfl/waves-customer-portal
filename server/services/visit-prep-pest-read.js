@@ -186,6 +186,19 @@ async function triggerVisitPrepPestRead({
     return;
   }
 
+  // Photos BEFORE the daily-slot claim: a storage failure never reaches the
+  // engine and never holds a slot, so it can't make an overlapping
+  // submission be refused at the cap for a read that never happens
+  // (Codex #5305 r8, r17 P2).
+  let loaded;
+  try {
+    loaded = await Promise.all(photos.map((p) => PhotoService.getPhotoBase64(p.s3Key)));
+  } catch (err) {
+    logger.error(`[visit-prep-pest-read] photo load failed for submission=${submissionId}: ${err.message}`);
+    await setReadStatus(conn, submissionId, 'none');
+    return;
+  }
+
   let claimed;
   try {
     claimed = await claimReadSlot(conn, submissionId, svc);
@@ -203,17 +216,6 @@ async function triggerVisitPrepPestRead({
     // 'none', not 'failed': a cap rejection never claimed a slot, so it
     // must not hold the count up if the cap is raised the same day
     // (Codex #5305 r1 P2). The tech sees no read line either way.
-    await setReadStatus(conn, submissionId, 'none');
-    return;
-  }
-
-  // Photos first: a storage failure never reached the engine, so the claim
-  // is released ('none') instead of counting a paid read (Codex #5305 r8).
-  let loaded;
-  try {
-    loaded = await Promise.all(photos.map((p) => PhotoService.getPhotoBase64(p.s3Key)));
-  } catch (err) {
-    logger.error(`[visit-prep-pest-read] photo load failed for submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'none');
     return;
   }

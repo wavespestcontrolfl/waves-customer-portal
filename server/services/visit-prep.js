@@ -709,6 +709,25 @@ function readFactsFromContract(status, contract) {
 // off or no submissions must both read as "key absent," not "empty list."
 // Never returns S3 keys or URLs — photoIds only; the thumbnails endpoint
 // above signs those on its own authorized read.
+const FINAL_CHECK_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
+
+// The stop's final member set and, when asked, whether it is still a pest
+// stop, from one consistent snapshot. A conn without transactions (unit-test
+// fakes) runs the same reads directly.
+async function finalStopSnapshot(svc, conn, needPest) {
+  const run = async (c) => {
+    const current = await stillOnTechStop(svc, c);
+    const stillPest = needPest
+      ? await require('./visit-prep-pest-applicability').membersArePest([...current], c)
+      : true;
+    return { current, stillPest };
+  };
+  // Inside a caller's transaction (or a test fake) the reads already share
+  // that connection; only a pool-level conn opens the snapshot.
+  if (typeof conn.transaction !== 'function' || conn.isTransaction) return run(conn);
+  return conn.transaction((trx) => run(trx), FINAL_CHECK_SNAPSHOT);
+}
+
 async function customerFlaggedFacts(svc, conn = db) {
   const ids = await techStopMemberIds(svc, conn);
   if (ids.length === 0) return null;
@@ -752,24 +771,26 @@ async function customerFlaggedFacts(svc, conn = db) {
     }
   }
 
-  // Members re-resolved after every read above.
-  const current = await stillOnTechStop(svc, conn);
+  // Membership and pest-ness are read in ONE repeatable-read snapshot (the
+  // FINAL_CHECK_SNAPSHOT pattern of estimate-consultation-offer.js), so the
+  // member set that filters what is served and the member set judged pest
+  // are the same rows at the same instant (Codex #5305 r16/r17 P1). Checked
+  // for running reads too, so "Photo read pending" never outlives a
+  // reclassification (r13). The applicability module never loads the
+  // vision engine here.
+  const needPest = readsLive && submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
+  let snapshot;
+  try {
+    snapshot = await finalStopSnapshot(svc, conn, needPest);
+  } catch (err) {
+    if (!needPest) throw err;
+    logger.warn(`[visit-prep] read applicability failed for ${svc.id}: ${err.message}`);
+    readsLive = false;
+    snapshot = { current: await stillOnTechStop(svc, conn), stillPest: true };
+  }
+  const { current, stillPest } = snapshot;
   const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
   if (kept.length === 0) return null;
-
-  // Pest-ness of the SAME final member set that decides what is served
-  // (Codex #5305 r16 P1), checked for running reads too so "Photo read
-  // pending" never outlives a reclassification (r13). The lightweight
-  // applicability module never loads the vision engine here.
-  let stillPest = true;
-  if (readsLive && kept.some((s) => s.read_status === 'done' || s.read_status === 'pending')) {
-    try {
-      stillPest = await require('./visit-prep-pest-applicability').membersArePest([...current], conn);
-    } catch (err) {
-      logger.warn(`[visit-prep] read applicability failed for ${svc.id}: ${err.message}`);
-      readsLive = false;
-    }
-  }
 
   return kept.map((s) => ({
     id: s.id,
