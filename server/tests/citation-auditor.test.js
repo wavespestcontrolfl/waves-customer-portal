@@ -139,7 +139,60 @@ describe('classifyListing', () => {
     test('the Waves entity is also recognised by one of our office phones alone', () => {
       const r = withLd([publisher, { '@type': 'LocalBusiness', name: 'Bradenton Office', telephone: PARRISH.phone, address: { streetAddress: '9 Wrong St' } }]);
       expect(r.status).toBe('mismatched');
-      expect(r.detail.mismatches[0]).toMatchObject({ field: 'address', seen: '9 Wrong St' });
+      expect(r.detail.mismatches.map((m) => m.field)).toEqual(['name', 'address']);
+      expect(r.detail.mismatches[1]).toMatchObject({ seen: '9 Wrong St' });
+    });
+
+    describe('a field the Waves entity states wins over page text; unstated fields come from the text', () => {
+      const VENICE = WAVES_LOCATIONS.find((l) => l.id === 'venice');
+      const SARASOTA = WAVES_LOCATIONS.find((l) => l.id === 'sarasota');
+      const footer = `<footer>${BRAND.phone} ${BRAND.address}</footer>`;
+      const listing = (entity, extra, candidates = candidatesFor({})) =>
+        classifyListing(page(`<h1>Waves Pest Control</h1>${extra}${ld(entity)}`), candidates);
+
+      test('wrong entity phone + street are mismatched even though a footer shows the canonical details', () => {
+        const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '(941) 555-0142', address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa' } }, footer);
+        expect(r.status).toBe('mismatched');
+        expect(r.detail.mismatches.map((m) => m.field)).toEqual(['phone', 'address']);
+        expect(r.detail.mismatches[0].seen).toEqual(['(941) 555-0142']);
+        expect(r.detail.mismatches[1].seen).toBe('99 Old Rd, Tampa');
+      });
+
+      test('entity with the right phone and no address: the text supplies our full street -> verified', () => {
+        const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone }, footer);
+        expect(r.status).toBe('verified');
+        expect(r.detail.address_checked).toBe(true);
+      });
+
+      test('entity with the right phone and a wrong street is mismatched even though the text has our street', () => {
+        const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '99 Old Rd' } }, footer);
+        expect(r.status).toBe('mismatched');
+        expect(r.detail.mismatches.map((m) => m.field)).toEqual(['address']);
+      });
+
+      test('a wrong name the entity states is not rescued by the brand name in the page text', () => {
+        const r = listing({ '@type': 'LocalBusiness', name: 'Acme Bug Co', telephone: BRAND.phone }, footer);
+        expect(r.status).toBe('mismatched');
+        expect(r.detail.mismatches.map((m) => m.field)).toEqual(['name']);
+      });
+
+      test('entity with no phone: the phone is read from the text', () => {
+        expect(listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', address: { streetAddress: '13649 Luxe Avenue' } }, footer).status).toBe('verified');
+        const wrong = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control' }, '<p>(941) 555-0142</p>');
+        expect(wrong.detail.mismatches.map((m) => m.field)).toEqual(['phone']);
+      });
+
+      test('unassigned brand row: entity phone matches Venice but the address matches Sarasota -> mismatched against Venice', () => {
+        const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: VENICE.phone, address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Sarasota' } }, `<footer>${SARASOTA.address}</footer>`);
+        expect(r.status).toBe('mismatched');
+        expect(r.detail.office).toBe('venice');
+        expect(r.detail.mismatches).toEqual([{ field: 'address', expected: VENICE.address, seen: '1450 Pine Warbler Pl, Sarasota' }]);
+      });
+
+      test('unassigned brand row: entity phone and address both Venice -> verified, office venice', () => {
+        const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: VENICE.phone, address: { streetAddress: '1978 S Tamiami Trl #10' } }, '');
+        expect(r).toMatchObject({ status: 'verified', detail: { office: 'venice' } });
+      });
     });
 
     test('no Waves entity: JSON-LD contributes nothing (no address mismatch, no phone evidence)', () => {

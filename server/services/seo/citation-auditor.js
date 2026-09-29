@@ -21,8 +21,11 @@
  *                  name + phone)
  *                  Street matching is on the FULL normalized street (number, whole
  *                  name, suffix, directional — normalizeStreet), never a partial
- *                  match; JSON-LD counts only from the entity that is Waves (its
- *                  name, or one of our office phones), never another node.
+ *                  match. Precedence: when the page's JSON-LD has a Waves entity
+ *                  (its name, or one of our office phones; never another node),
+ *                  that entity IS the listing's NAP — each field it states is
+ *                  judged on its own and page text can never erase a mismatch
+ *                  there; only fields it leaves unstated are read from the text.
  *   mismatched     fetched; a field differs — status_detail.mismatches lists
  *                  each { field, expected, seen }
  *   fetch-blocked  the page could not be read: 403/429/5xx or any non-2xx,
@@ -129,39 +132,47 @@ function addressStrings(address) {
   return { display, street: address.streetAddress || null };
 }
 
+// What the page says. `entity` is the Waves JSON-LD entity's own stated fields (null when the
+// page has none); `textPhones` is every phone in the visible text and tel: links.
 function extractNap(html) {
   const text = visibleText(html);
-  const ld = wavesEntity(html);
-  const phones = new Set();
-  for (const m of text.matchAll(PHONE_RE)) if (phoneKey(m[0]).length === 10) phones.add(phoneKey(m[0]));
+  const textPhones = new Set();
+  for (const m of text.matchAll(PHONE_RE)) if (phoneKey(m[0]).length === 10) textPhones.add(phoneKey(m[0]));
   for (const m of String(html).matchAll(/href\s*=\s*["']tel:([^"']+)["']/gi)) {
-    const k = phoneKey(decodeURIComponent(m[1])); if (k.length === 10) phones.add(k);
+    const k = phoneKey(decodeURIComponent(m[1])); if (k.length === 10) textPhones.add(k);
   }
-  if (ld) for (const p of [].concat(ld.telephone || [])) { const k = phoneKey(p); if (k.length === 10) phones.add(k); }
   const title = (String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
-  const ldAddr = addressStrings(ld && ld.address);
-  return { text, phones: [...phones], title: title.replace(/\s+/g, ' ').trim(), ldName: (ld && ld.name) || null, ldAddress: ldAddr.display, ldStreet: ldAddr.street };
+  const node = wavesEntity(html);
+  const addr = addressStrings(node && node.address);
+  const entity = node && {
+    name: node.name || null,
+    phones: [].concat(node.telephone || []).map(phoneKey).filter((k) => k.length === 10),
+    street: addr.street,
+    address: addr.display,
+  };
+  return { text, textPhones: [...textPhones], title: title.replace(/\s+/g, ' ').trim(), entity };
 }
 
 // Street-address-like strings in visible text: number + street name + a common suffix.
 const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?`, 'gi');
 
-// Address: our full normalized street anywhere in the visible text confirms it. Otherwise the
-// Waves JSON-LD entity's own address, when it states one, decides: it confirms (full street
-// present) or is a mismatch. Otherwise address-like strings that are not ours leave it
-// unconfirmed (a sidebar may list other businesses, so never a mismatch); none at all means
-// the page shows no address.
+// Address. A street the Waves entity states IS the listing's address: it confirms (full
+// normalized street present) or is a mismatch, and page text cannot change that. A page with no
+// stated street: our full normalized street anywhere in the visible text confirms it; otherwise
+// address-like strings that are not ours leave it unconfirmed (a sidebar may list other
+// businesses, so never a mismatch); none at all means the page shows no address.
 function judgeAddress(nap, expected) {
   const street = streetOfAddress(expected.address);
-  if (hasStreet(normalizeStreet(nap.text), street)) return { inText: true, checked: true, mismatch: null, unconfirmed: null };
-  if (nap.ldStreet) {
-    const ok = hasStreet(normalizeStreet(nap.ldStreet), street);
-    const mismatch = ok ? null : { field: 'address', expected: expected.address, seen: nap.ldAddress };
-    return { inText: false, checked: true, mismatch, unconfirmed: null };
+  const stated = nap.entity && nap.entity.street;
+  if (stated) {
+    const confirmed = hasStreet(normalizeStreet(stated), street);
+    const mismatch = confirmed ? null : { field: 'address', expected: expected.address, seen: nap.entity.address };
+    return { confirmed, checked: true, mismatch, unconfirmed: null };
   }
+  if (hasStreet(normalizeStreet(nap.text), street)) return { confirmed: true, checked: true, mismatch: null, unconfirmed: null };
   const seen = nap.text.match(ADDRESS_LIKE_RE);
-  return { inText: false, checked: false, mismatch: null, unconfirmed: seen ? seen[0].trim() : null };
+  return { confirmed: false, checked: false, mismatch: null, unconfirmed: seen ? seen[0].trim() : null };
 }
 
 /**
@@ -181,24 +192,29 @@ function classifyListing(page, candidates) {
   const nap = extractNap(html);
   if (nap.text.length < MIN_VISIBLE_CHARS) return blocked('empty_or_js_only');
 
-  // With several candidate offices, judge against the one whose phone the page shows
+  // ONE precedence rule: a field the Waves JSON-LD entity states IS the listing's value for it
+  // and page text never overrides it; only a field the entity leaves unstated is read from the
+  // visible text. With several candidate offices, judge against the one whose phone matched
   // (else the first, the default office).
-  const expected = candidates.find((c) => nap.phones.includes(c.phoneKey)) || candidates[0];
-  const namePresent = alnum(`${nap.text} ${nap.title} ${nap.ldName || ''}`).includes(alnum(expected.name));
-  if (!namePresent && !nap.phones.length) return blocked('no_nap_found');
+  const { entity } = nap;
+  const phones = entity && entity.phones.length ? entity.phones : nap.textPhones;
+  const expected = candidates.find((c) => phones.includes(c.phoneKey)) || candidates[0];
+  const nameText = entity && entity.name ? entity.name : `${nap.text} ${nap.title}`;
+  const namePresent = alnum(nameText).includes(alnum(expected.name));
+  if (!namePresent && !phones.length) return blocked('no_nap_found');
 
   const mismatches = [];
-  if (!namePresent) mismatches.push({ field: 'name', expected: expected.name, seen: nap.ldName || nap.title || null });
-  const phoneOk = nap.phones.includes(expected.phoneKey);
-  if (nap.phones.length && !phoneOk) mismatches.push({ field: 'phone', expected: candidates.map((c) => c.phone).join(' or '), seen: nap.phones.slice(0, 3).map(fmtPhone) });
+  if (!namePresent) mismatches.push({ field: 'name', expected: expected.name, seen: (entity && entity.name) || nap.title || null });
+  const phoneOk = phones.includes(expected.phoneKey);
+  if (phones.length && !phoneOk) mismatches.push({ field: 'phone', expected: candidates.map((c) => c.phone).join(' or '), seen: phones.slice(0, 3).map(fmtPhone) });
 
   const address = judgeAddress(nap, expected);
   if (address.mismatch) mismatches.push(address.mismatch);
 
   const observed = {
-    nap_name: namePresent ? expected.name : nap.ldName,
-    nap_phone: phoneOk ? expected.phone : (nap.phones[0] ? fmtPhone(nap.phones[0]) : null),
-    nap_address: address.inText ? expected.address : nap.ldAddress,
+    nap_name: namePresent ? expected.name : (entity && entity.name) || null,
+    nap_phone: phoneOk ? expected.phone : (phones[0] ? fmtPhone(phones[0]) : null),
+    nap_address: address.confirmed ? expected.address : (entity && entity.address) || null,
   };
   const base = { http_status: page.status, final_url: page.finalUrl, office: expected.locationId, address_checked: address.checked };
 
