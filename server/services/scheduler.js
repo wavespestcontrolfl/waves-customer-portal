@@ -2328,10 +2328,11 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Signup classifier failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
-  // WEEKLY MON 4:20AM — Directory-listing (citation) audit: read-only GET of each
+  // WEEKLY MON 4:47AM — Directory-listing (citation) audit: read-only GET of each
   // seo_citations.listing_url, classified against config/locations.js NAP
   // (services/seo/citation-auditor.js). Kill = GATE_CITATION_AUDIT=false.
-  cron.schedule('20 4 * * 1', async () => {
+  // :47 is unused in the 4am hour (4:20 already runs three daily jobs).
+  cron.schedule('47 4 * * 1', async () => {
     if (!isEnabled('citationAudit')) return;
     logger.info('Running: citation audit');
     try {

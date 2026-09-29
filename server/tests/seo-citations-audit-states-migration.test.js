@@ -1,17 +1,17 @@
 /**
- * 20260929200000 — seo_citations status vocabulary. The DB-backed case runs the
+ * 20260929230000 — seo_citations status vocabulary. The DB-backed case runs the
  * ORIGINAL create-table migration, inserts rows in every old status, runs the
  * new migration and checks the value mapping (needs DATABASE_URL; skipped
  * locally without one, runs in CI). The fake-knex cases always run.
  */
 const fs = require('fs');
 const path = require('path');
-const migration = require('../models/migrations/20260929200000_seo_citations_audit_states');
+const migration = require('../models/migrations/20260929230000_seo_citations_audit_states');
 const createTable = require('../models/migrations/20260401000045_seo_citations');
 const { _internals } = require('../services/seo/citation-auditor');
 const { WAVES_LOCATIONS } = require('../config/locations');
 
-const src = fs.readFileSync(path.join(__dirname, '../models/migrations/20260929200000_seo_citations_audit_states.js'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '../models/migrations/20260929230000_seo_citations_audit_states.js'), 'utf8');
 
 function fakeKnex() {
   const raws = [];

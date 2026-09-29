@@ -9,7 +9,7 @@
  * status_detail.office records which one matched.
  *
  * States (seo_citations.status, CHECK-constrained by migration
- * 20260929200000_seo_citations_audit_states):
+ * 20260929230000_seo_citations_audit_states):
  *   unverified     no listing URL recorded, or never checked
  *   verified       fetched; name and phone match, plus the address when the
  *                  page shows one
@@ -29,7 +29,7 @@
  * re-validated, timeout, 600 KB body cap) — no second fetcher. `directory_url`
  * is the directory's homepage, never our listing, so it is never audited.
  *
- * Scheduling: weekly cron in services/scheduler.js (Mon 4:20 AM ET), run
+ * Scheduling: weekly cron in services/scheduler.js (Mon 4:47 AM ET), run
  * exclusively. Kill switch: GATE_CITATION_AUDIT=false (default on; the audit is
  * read-only GETs of public pages, sequential, one per row). Staff record each
  * listing's URL and office in the SEO admin Citations editor (updateCitation).
