@@ -33,7 +33,8 @@ const db = require('../server/models/db');
 const { previewRiderPair, resolveSeriesPropertyScope, seriesPropertyVerdict } = require('../server/services/rider-series-preview');
 const { familyOfServiceRow } = require('../server/services/cancellation-processor');
 const { overlayRecurringTemplateOverrides } = require('../server/services/recurring-template-overrides');
-const { NON_CANCELLED_ROOT_STATUSES } = require('../server/services/recurring-appointment-seeder');
+const { EXCLUDED_ROOT_STATUSES } = require('../server/services/recurring-appointment-seeder');
+const { normalizedPattern } = require('../server/services/secure-appointment-plans');
 
 const json = process.argv.includes('--json');
 const eligibleOnly = process.argv.includes('--eligible-only');
@@ -102,8 +103,11 @@ function classifyAndGroupByCustomer(rows, serviceMap) {
   for (const row of rows) {
     const family = classifyCandidate(row, serviceMap);
     if (family !== 'lawn_care' && family !== 'pest_control') continue;
-    if (family === 'lawn_care' && row.recurring_pattern !== LAWN_PATTERN) continue;
-    if (family === 'pest_control' && row.recurring_pattern !== PEST_PATTERN) continue;
+    // The admin modal stores every-6-weeks as 'custom' + 42 days; the shared
+    // normalizer maps it, as the prepay-on-book path does.
+    const pattern = normalizedPattern(row);
+    if (family === 'lawn_care' && pattern !== LAWN_PATTERN) continue;
+    if (family === 'pest_control' && pattern !== PEST_PATTERN) continue;
     const key = String(row.customer_id);
     if (!byCustomer.has(key)) byCustomer.set(key, []);
     byCustomer.get(key).push({ row, family });
@@ -179,10 +183,13 @@ async function findCandidatePairs(trx) {
     // surfaced as a candidate pair.
     // Null-safe: a legacy root with a NULL status is live, and a bare
     // NOT IN would drop it.
-    .where((q) => { q.whereNull('s.status').orWhereNotIn('s.status', NON_CANCELLED_ROOT_STATUSES); })
-    .whereIn('s.recurring_pattern', [LAWN_PATTERN, PEST_PATTERN])
+    .where((q) => { q.whereNull('s.status').orWhereNotIn('s.status', EXCLUDED_ROOT_STATUSES); })
+    .where((q) => {
+      q.whereIn('s.recurring_pattern', [LAWN_PATTERN, PEST_PATTERN])
+        .orWhere((c) => { c.where('s.recurring_pattern', 'custom').where('s.recurring_interval_days', 42); });
+    })
     .select(
-      's.id', 's.customer_id', 's.property_id', 's.recurring_pattern', 's.service_type', 's.service_id',
+      's.id', 's.customer_id', 's.property_id', 's.recurring_pattern', 's.recurring_interval_days', 's.service_type', 's.service_id',
       's.recurring_template_overrides', 's.source_estimate_id',
       // Codex P2 round #2 on PR #5290: resolveSeriesPropertyScope (via
       // topUpScopeInput) reads these stamped address fields too — omitting

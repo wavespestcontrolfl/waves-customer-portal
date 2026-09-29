@@ -311,7 +311,7 @@ same convention as `server/scripts/dunning-adopt-orphans-dry-run.js`.
 
 **Candidate discovery excludes cancelled roots (Codex P2 round #2 on PR
 #5290)**: the candidate query applies
-`recurring-appointment-seeder.js#NON_CANCELLED_ROOT_STATUSES` (the exact
+`recurring-appointment-seeder.js#EXCLUDED_ROOT_STATUSES` (the exact
 status list `findActiveRecurringSeries` excludes on ITS own candidate
 roots, exported and reused rather than hand-rolled here) — a cancelled
 root's `recurring_ongoing` flag is never cleared on cancel, so without this

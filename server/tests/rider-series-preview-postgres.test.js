@@ -786,6 +786,8 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       expect(preview.anchor).toBeNull();
       expect(preview.plan).toEqual([]);
       expect(preview.eligible).toBe(false);
+      // The rescheduled parent is still reported as a live pinned visit.
+      expect(preview.pinned).toEqual([expect.objectContaining({ id: pestParent.id, why: 'rescheduled_pending' })]);
     });
   });
 
@@ -811,5 +813,15 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     expect(preview.reasons).toContain('no_anchor');
     expect(preview.anchor).toBeNull();
     expect(preview.plan).toEqual([]);
+  });
+
+  test('the report excludes exactly the root statuses findActiveRecurringSeries excludes', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { EXCLUDED_ROOT_STATUSES } = require('../services/recurring-appointment-seeder');
+    const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    const literal = seeder.match(/\.whereNull\('recurring_parent_id'\)[\s\S]{0,900}?\.whereNotIn\('status', (\[[^\]]*\])\)/);
+    expect(literal).toBeTruthy();
+    expect(EXCLUDED_ROOT_STATUSES).toEqual(JSON.parse(literal[1].replace(/'/g, '"')));
   });
 });

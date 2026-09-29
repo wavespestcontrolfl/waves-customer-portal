@@ -649,7 +649,13 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       riderRows, classifications, lastRiderDate, reschedulePending,
     } = await classifyRiderRows(conn, riderParentId, riderParent, todayStr);
     if (reschedulePending) reasons.push('rider_reschedule_pending');
-    if (!lastRiderDate) { reasons.push('no_anchor'); return empty(reasons); }
+    const pinnedRows = () => riderRows
+      .map((r) => ({ row: r, c: classifications.get(r.id) }))
+      .filter(({ c }) => c && c.pinned === true)
+      .map(({ row, c }) => ({ id: row.id, date: dateOnly(row.scheduled_date), why: c.why }));
+    // No anchor: the plan stays empty, but the live pinned visits (e.g. a
+    // rescheduled_pending row) are still reported.
+    if (!lastRiderDate) { reasons.push('no_anchor'); return { ...empty(reasons), pinned: pinnedRows() }; }
 
     const futureMovable = riderRows.filter((r) => {
       const c = classifications.get(r.id);
@@ -694,10 +700,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     });
 
     const diff = diffPlan(plan, movableRows);
-    const pinned = riderRows
-      .map((r) => ({ row: r, c: classifications.get(r.id) }))
-      .filter(({ c }) => c && c.pinned === true)
-      .map(({ row, c }) => ({ id: row.id, date: dateOnly(row.scheduled_date), why: c.why }));
+    const pinned = pinnedRows();
 
     return {
       eligible: reasons.length === 0,
