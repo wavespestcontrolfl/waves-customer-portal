@@ -160,7 +160,7 @@ function scopePhotoCardsToLiveVisits(q, conn) {
   return q.where(function livePhotoCards() {
     this.whereNot({ type: TYPE }).orWhereExists(function liveVisit() {
       this.select(conn.raw('1')).from('scheduled_services as s')
-        .whereRaw("s.id::text = tech_notifications.payload->>'scheduled_service_id'")
+        .whereRaw("s.id = (tech_notifications.payload->>'scheduled_service_id')::uuid")
         .whereRaw('s.technician_id = tech_notifications.technician_id')
         .whereNotIn('s.status', OFF_ROUTE_STATUSES);
     });
