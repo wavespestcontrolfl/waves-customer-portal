@@ -3511,6 +3511,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['Plan ID: 99.', 'pass', null],
     ['Plan número: 99.', 'pass', null],
     ['Premium código: 99.', 'pass', null],
+    ['Código para el plan Premium: 99.', 'pass', null],
+    ['Número correspondiente al plan Premium: 99.', 'pass', null],
   ])('no_price_disclosure: %s', (text, status, phrase) => {
     const check = run('no_price_disclosure', true, text);
     expect(check.status).toBe(status);
@@ -5730,7 +5732,7 @@ describe('voice relay eval — named spoken checks', () => {
       expect(replay._internals.scenarioStatus({ checks })).toBe('pass');
     }
     // A time in another clause, or a denied readiness, is not a readiness deadline.
-    for (const text of ['El presupuesto estará listo, mañana la oficina le llamará.', 'El presupuesto estará listo y mañana le llamaremos.', 'El presupuesto estará listo y el lunes le llamaremos.', 'El presupuesto estará listo, a las tres la oficina le llamará.', 'Mañana le llamaremos, el presupuesto estará listo.', 'El presupuesto estará listo o mañana le llamaremos.', 'Le prepararemos el presupuesto, el técnico estará disponible mañana.', 'El técnico estará disponible mañana para revisar el presupuesto.', 'El presupuesto no estará listo mañana.']) {
+    for (const text of ['El presupuesto estará listo, mañana la oficina le llamará.', 'El presupuesto estará listo y mañana le llamaremos.', 'El presupuesto estará listo y el lunes le llamaremos.', 'El presupuesto estará listo, a las tres la oficina le llamará.', 'Mañana le llamaremos, el presupuesto estará listo.', 'El presupuesto estará listo o mañana le llamaremos.', 'Le prepararemos el presupuesto, el técnico estará disponible mañana.', 'El presupuesto estará listo y dos técnicos lo revisarán mañana.', 'El técnico estará disponible mañana para revisar el presupuesto.', 'El presupuesto no estará listo mañana.']) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
     }

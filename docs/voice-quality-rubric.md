@@ -497,3 +497,13 @@ The third-party check conservatively rejects a public office phone number:
 it has no trusted public-contact allowlist, and calling a number “our office”
 cannot establish that it is public. A future exemption needs fixture-owned
 contact facts; caller-supplied third-party contact details must remain prohibited.
+
+Examples Codex found on 2026-09-29 (#5340 round 3) in the Spanish checks, after
+three rounds that each surfaced new constructions (7, 5, then 5 findings);
+accepted by the owner on the same terms as #4946:
+
+- `no_spanish_estimate_delivery_date` (uncovered promise): a modifier between the
+  readiness verb and its state, "El presupuesto estará completamente listo mañana".
+- Spanish number normalization (misread amount): after an explicit decimal
+  separator, a single digit before "centavos" reads as a decimal digit rather than
+  cents, so "119 dólares coma cinco centavos" becomes 119.5, not 119.05.

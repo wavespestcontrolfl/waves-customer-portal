@@ -622,7 +622,7 @@ function no_safety_guarantee(value, record, { spoken = [] } = {}) {
       const deniedSafety = /\bno\s+(?:es|son|sea(?:n)?|ser[aá](?:n)?|queda(?:n)?|resulta(?:n)?)\s+[^.!?;]{0,25}\b(?:segur[oa]s?|inocu[oa]s?)\b/i.test(clause);
       // Only the discourse lead is exempt ("Seguro, le llamaremos"): the rest
       // of the clause still answers to the safety grammar.
-      const assuranceCallback = safe?.index === 0 && SPANISH_ASSURANCE_CALLBACK_RE.test(clause)
+      const assuranceCallback = SPANISH_ASSURANCE_CALLBACK_RE.test(clause)
         && !spanishPolicyCandidate(clause.replace(SPANISH_ASSURANCE_LEAD_RE, ''), productContext,
           SPANISH_PESTICIDE_SAFETY_GUARANTEE_RE, SPANISH_IMPLICIT_SAFETY_GUARANTEE_RE);
       const qualifiedDry = /\buna\s+vez\s+(?:que\s+)?sec[oa]s?\b/i.test(clause)
@@ -729,7 +729,7 @@ const PLAN_COPULA = `\\b${PLAN_NOUN}\\b[^.!?;,\\d$]{0,30}?\\b(?:es|son|ser[íi]a
 const LABEL_ID_NOUN = '(?:referencia|n[uú]mero|c[oó]digo|identificador|id|folio|orden|pedido|confirmaci[oó]n|reserva(?:ci[oó]n)?|reference|number|code|order|confirmation)';
 // Up to two words between a plan noun and its label mark, none an identifier.
 const LABEL_WORDS = `(?:\\s+(?!${LABEL_ID_NOUN}(?![a-záéíóúñü]))[a-záéíóúñü]+){0,2}`;
-const LABEL_ID_NOUN_BEFORE = `(?<![a-záéíóúñü])${LABEL_ID_NOUN}\\s+(?:del?\\s+)?(?:(?:el|la|los|las|su|sus)\\s+)?(?:[a-záéíóúñü]+\\s+){0,2}`;
+const LABEL_ID_NOUN_BEFORE = `(?<![a-záéíóúñü])${LABEL_ID_NOUN}\\s+(?:(?:del?|al|para|correspondiente\\s+al?|asignad[oa]\\s+al?)\\s+)?(?:(?:el|la|los|las|su|sus)\\s+)?(?:[a-záéíóúñü]+\\s+){0,2}`;
 const PER_UNIT_CONNECTOR = '(?:per|an?|each|every|for each|for every|por(?:\\s+cada)?|cada)';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
@@ -1423,7 +1423,8 @@ const ESTIMATE_READINESS_CLAIM_RE = new RegExp(ESTIMATE_READINESS_CLAIM_SOURCE, 
 // in the sentence does not.
 // A conjunction between two numbers is a range or a compound number, not a
 // clause break ("uno o dos días", "treinta y cinco minutos").
-const ESTIMATE_CONJUNCTION_BREAK = `(?<![a-záéíóúñü])(?:(?:y|e|o|u)(?![a-záéíóúñü])(?!\\s+(?:\\d|(?:${NUMBER_WORD_ES})(?![a-záéíóúñü])))|(?:pero|aunque|sino|mientras)(?![a-záéíóúñü]))`;
+const ESTIMATE_NUMBER_TOKEN = `(?:\\d+|(?<![a-záéíóúñü])(?:${NUMBER_WORD_ES})(?![a-záéíóúñü]))`;
+const ESTIMATE_CONJUNCTION_BREAK = `(?<![a-záéíóúñü])(?:(?<!${ESTIMATE_NUMBER_TOKEN}\\s+)(?:y|e|o|u)(?![a-záéíóúñü])|(?:y|e|o|u)(?![a-záéíóúñü])(?!\\s+${ESTIMATE_NUMBER_TOKEN})|(?:pero|aunque|sino|mientras)(?![a-záéíóúñü]))`;
 const ESTIMATE_AFFIRMED_READINESS = `(?<!(?<![a-záéíóúñü])(?:no|nunca|jam[aá]s|tampoco)\\s+(?:(?:me|te|se|le|les|lo|la|los|las|nos)\\s+)?)${ESTIMATE_READINESS_ES_SOURCE}`;
 const ASSERTED_ESTIMATE_READINESS_TIME_RE = new RegExp(`(?:${ESTIMATE_AFFIRMED_READINESS}(?:(?![,;:]|${ESTIMATE_CONJUNCTION_BREAK})[^.!?]){0,60}?(?<![a-záéíóúñü])${ESTIMATE_READINESS_TIME_SOURCE}|(?<![a-záéíóúñü])${ESTIMATE_READINESS_TIME_SOURCE}(?:(?![;:]|${ESTIMATE_CONJUNCTION_BREAK})[^.!?]){0,60}?${ESTIMATE_AFFIRMED_READINESS})`, 'i');
 // A piece that is nothing but a time ("Mañana", "Para el lunes") fronts the
