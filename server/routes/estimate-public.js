@@ -144,6 +144,7 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
+const { createSignupEmailLane, signupLaneEligible } = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
 function lawnCalendarBlock(services) {
@@ -12757,6 +12758,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // was skipped, refused, or errored (the charge then falls back to the
     // delivered pay link exactly like today).
     let recurringCardEnrollmentResult = null;
+    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL, dark): a standard recurring
+    // signup whose combined onboarding email is going to carry the plan and the
+    // Auto Pay authorization HOLDS the two separate emails (membership.started
+    // and the Auto Pay confirmation) until that email's fate is known, and
+    // sends each of them exactly as today unless the combined email was
+    // accepted for sending AND actually rendered its section (see the onboarding
+    // send below). Annual prepay sends no membership email today and stays out
+    // of this lane. Enrollment itself is unchanged either way. Gate off: false,
+    // nothing is held, every email fires inline as before.
+    const signupLane = createSignupEmailLane({
+      eligible: signupLaneEligible({
+        annualPrepaySelected,
+        customerId,
+        standardConversion: txResult.standardConversion,
+      }),
+      customerId,
+      membershipEmail: txResult.standardConversion?.membershipEmail || null,
+      getEnrollment: () => recurringCardEnrollmentResult,
+    });
     if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
       // Payer re-check against the RESOLVED customer (Codex #2668 round-3 P1):
       // an unlinked estimate resolves/creates its customer INSIDE the accept
@@ -12813,6 +12833,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // the checkbox the customer saw even when the quote step degraded.
           consentVariant: annualPrepaySelected && recurringCardLaneActive
             && RecurringCards.isPrepayCardAndChargeEnabled() ? 'prepay_card' : null,
+          ...(signupLane.holdEnrollmentConfirmation ? { holdEnrollmentConfirmation: true } : {}),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
@@ -12850,13 +12871,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           scheduledServiceId: postCommitPayerScopeSsId,
           // Post-acknowledgement opt-outs win (Codex r17).
           authorizedAt: acceptAuthorizedAt,
+          ...(signupLane.holdEnrollmentConfirmation ? { holdEnrollmentConfirmation: true } : {}),
         });
         // A refused enrollment (method removed/unenrollable between the
         // policy check and here) must not fail silently — this accepted
         // plan would lose its card-on-file protection (Codex #2680). Same
         // office exception the fresh-capture path raises.
         if (enrollment.enrolled || enrollment.reason === 'already_enrolled') {
-          recurringCardEnrollmentResult = { enrolled: true, paymentMethodRowId: recurringCardPolicy.savedMethodRowId };
+          recurringCardEnrollmentResult = {
+            enrolled: true,
+            paymentMethodRowId: recurringCardPolicy.savedMethodRowId,
+            ...(enrollment.sendEnrollmentConfirmation
+              ? { sendEnrollmentConfirmation: enrollment.sendEnrollmentConfirmation, confirmationMethodRowId: enrollment.methodId }
+              : {}),
+          };
         }
         if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
           await require('../services/notification-service').notifyAdmin(
@@ -12879,6 +12907,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       }
     }
+    // Enrollment has returned: any held Auto Pay confirmation now exists, so the
+    // safety timer that releases it on an accept that throws can start.
+    signupLane.armGuard();
     let invoiceMode = txResult.invoiceMode === true || (recurringCardPayerFallback && txResult.standardInvoiceMinted === true);
     // The in-transaction lane stamp promised "completion auto-charges the
     // anchor invoice" — but the post-commit payer re-check can SKIP
@@ -13161,7 +13192,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // SKIPPED conversion (converter found nothing to convert) may still
     // return a membershipEmail payload — no membership started, so send
     // nothing for it.
-    if (!annualPrepaySelected
+    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): for a signup the combined
+    // onboarding email below carries the plan and the Auto Pay authorization,
+    // so membership.started is HELD (signupLane, services/signup-single-email.js)
+    // and sent — exactly as here — unless that email was accepted for sending
+    // and rendered the plan section. Gate off: the block below is unchanged.
+    if (!signupLane.eligible
+      && !annualPrepaySelected
       && standardConversion?.membershipEmail
       && standardConversion?.recurringConversionSkipped !== true) {
       const AccountMembershipEmail = require('../services/account-membership-email');
@@ -13178,36 +13215,48 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // copy, so the sender falls back to the estimate's own contact
     // (pre-push Codex P1). Gate off ⇒ customer-less accepts email nothing,
     // exactly as before.
-    if (customerId || recordAcceptanceTerms) {
-      const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
-      // DB-refreshed rows carry scheduled_date as a Date (pg materializes
-      // date columns at local midnight); freshly-built rows carry the
-      // 'YYYY-MM-DD' string. Normalize both to the calendar-date key so the
-      // sort is by date, not by "Tue Jul ..." weekday text.
-      const dateKey = (v) => {
-        if (!v) return '';
-        if (v instanceof Date) {
-          return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+    let signupEmailHandled = false;
+    try {
+      if (customerId || recordAcceptanceTerms) {
+        const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+        // DB-refreshed rows carry scheduled_date as a Date (pg materializes
+        // date columns at local midnight); freshly-built rows carry the
+        // 'YYYY-MM-DD' string. Normalize both to the calendar-date key so the
+        // sort is by date, not by "Tue Jul ..." weekday text.
+        const dateKey = (v) => {
+          if (!v) return '';
+          if (v instanceof Date) {
+            return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+          }
+          return String(v).slice(0, 10);
+        };
+        const firstAcceptedAppointment = [...acceptedAppointmentsToRegister].sort((a, b) => {
+          const ad = dateKey(a?.scheduled_date);
+          const bd = dateKey(b?.scheduled_date);
+          return ad === bd
+            ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
+            : ad.localeCompare(bd);
+        })[0] || null;
+        const onboardingArgs = {
+          customerId,
+          estimateId: estimate.id,
+          acceptanceId: acceptanceRecordId,
+          serviceLabel: firstAcceptedAppointment?.service_type
+            || invoiceServiceLabel
+            || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
+            || 'service',
+          appointment: firstAcceptedAppointment,
+        };
+        if (signupLane.eligible) {
+          signupEmailHandled = true;
+          void signupLane.run((signup) => sendEstimateAcceptedOnboarding({ ...onboardingArgs, signup }));
+        } else {
+          void sendEstimateAcceptedOnboarding(onboardingArgs);
         }
-        return String(v).slice(0, 10);
-      };
-      const firstAcceptedAppointment = [...acceptedAppointmentsToRegister].sort((a, b) => {
-        const ad = dateKey(a?.scheduled_date);
-        const bd = dateKey(b?.scheduled_date);
-        return ad === bd
-          ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
-          : ad.localeCompare(bd);
-      })[0] || null;
-      void sendEstimateAcceptedOnboarding({
-        customerId,
-        estimateId: estimate.id,
-        acceptanceId: acceptanceRecordId,
-        serviceLabel: firstAcceptedAppointment?.service_type
-          || invoiceServiceLabel
-          || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
-          || 'service',
-        appointment: firstAcceptedAppointment,
-      });
+      }
+    } finally {
+      // Whatever happened above, a held email is never dropped.
+      if (!signupEmailHandled) signupLane.settle();
     }
     if (customerId) {
       try {

@@ -397,6 +397,49 @@ async function sendWelcomeEmail(customer) {
   return { outcome: 'sent' };
 }
 
+// ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): the welcome EMAIL is skipped —
+// never the welcome text — when this customer's signup email was actually
+// accepted for sending and still carries the app steps. Decided HERE, at
+// delivery time (~60 minutes after signup), from what was really sent: a
+// combined email that failed, was blocked or never went out (or a gate turned
+// off in the meantime) leaves the welcome email to send exactly as it does
+// today. Any lookup error reads as "not covered".
+async function combinedSignupEmailCoversWelcome(customer, row) {
+  try {
+    if (!require('./signup-single-email').signupGateLive()) return false;
+    const { SIGNUP_APP_MARKER, SIGNUP_FULL_CATEGORY, accountCustomerIds } = require('./estimate-accepted-email');
+    // The sequence row is queued moments BEFORE the signup email is sent, so
+    // the window opens an hour ahead of it — or at the start of that ET day,
+    // whichever is earlier: the short same-day email (the second property
+    // accepted hours after the first) is chosen from anywhere in the ET day, so
+    // the welcome check must reach that far back too.
+    const createdAt = row?.created_at ? new Date(row.created_at) : new Date();
+    const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+    const startOfEtDay = parseETDateTime(`${etDateString(createdAt)}T00:00`);
+    const hourBefore = new Date(createdAt.getTime() - 60 * 60 * 1000);
+    const since = startOfEtDay && startOfEtDay < hourBefore ? startOfEtDay : hourBefore;
+    // The same scope the short-email check uses: this customer or another on
+    // the same account (their other properties), at the customer's own address —
+    // a second property's welcome email is just as redundant once the person
+    // has the full signup email.
+    const ids = await accountCustomerIds(customer.id);
+    const query = db('email_messages')
+      .where({ template_key: 'estimate.accepted_onboarding', recipient_type: 'customer' })
+      .whereIn('recipient_id', ids)
+      .whereIn('status', ['sent', 'delivered', 'opened', 'clicked'])
+      .whereRaw('categories @> ?::jsonb', [JSON.stringify([SIGNUP_FULL_CATEGORY])])
+      .where('created_at', '>=', since)
+      .whereRaw('text_snapshot ILIKE ?', [`%${SIGNUP_APP_MARKER}%`]);
+    const address = String(customer.email || '').trim().toLowerCase();
+    if (address) query.whereRaw('lower(recipient_email_snapshot) = ?', [address]);
+    const found = await query.first('id');
+    return !!found;
+  } catch (err) {
+    logger.warn(`[new-recurring-welcome] signup-email check failed for customer ${customer?.id}; sending the welcome email as usual: ${err.message}`);
+    return false;
+  }
+}
+
 async function deliverQueuedWelcome(row) {
   const emailOnly = row.sequence_type === EMAIL_SEQUENCE_TYPE;
   const meta = parseMetadata(row);
@@ -448,11 +491,19 @@ async function deliverQueuedWelcome(row) {
   // Idempotent per customer, so SMS retries can't double it, and an email
   // failure never blocks the text. Fires at the same +1h delivery moment as
   // the SMS. Kill switch = the welcome.new_recurring email template row.
-  const emailResult = await sendWelcomeEmail(customer).catch((err) => {
-    const { redactEmailAddresses } = require('./email-template-library');
-    logger.warn(`[new-recurring-welcome] welcome email failed for customer ${customer.id}: ${redactEmailAddresses(err.message)}`);
-    return { outcome: 'failed' };
-  });
+  const signupEmailCovers = !emailOnly && await combinedSignupEmailCoversWelcome(customer, row);
+  if (signupEmailCovers) {
+    logger.info(`[new-recurring-welcome] welcome email skipped for customer ${customer.id} — the signup email already carried the app steps (text unchanged)`);
+  }
+  const emailResult = signupEmailCovers
+    // The signup email IS this customer's welcome email: same outcome as an
+    // already-delivered one, so an email-only settle below still completes.
+    ? { outcome: 'deduped' }
+    : await sendWelcomeEmail(customer).catch((err) => {
+      const { redactEmailAddresses } = require('./email-template-library');
+      logger.warn(`[new-recurring-welcome] welcome email failed for customer ${customer.id}: ${redactEmailAddresses(err.message)}`);
+      return { outcome: 'failed' };
+    });
 
   if (emailOnly || !customer.phone) {
     // An email-only sequence can never reach the SMS leg, even with a phone.
@@ -670,6 +721,7 @@ module.exports = {
     hasWelcomeSequence,
     retireSupersededEmailRows,
     deliverQueuedWelcome,
+    combinedSignupEmailCoversWelcome,
     recordWelcomeInteraction,
     renderWelcomeBody,
   },

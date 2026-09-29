@@ -31,6 +31,7 @@ const mockDb = jest.fn((table) => {
     whereNot: jest.fn(() => chain),
     whereIn: jest.fn((col, vals) => { wheres.push({ whereIn: col, vals }); return chain; }),
     whereNotNull: jest.fn(() => chain),
+    whereRaw: jest.fn(() => chain),
     limit: jest.fn(async () => {
       if (table === 'sms_sequences') {
         // The sweep runs two scans over this table — stale-claim recovery
@@ -167,6 +168,7 @@ describe('new recurring welcome SMS', () => {
     mockEmailSequenceExists = false;
     mockEmailProviderRow = null;
     delete process.env.GATE_ONE_TIME_WELCOME_EMAIL;
+    delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
     mockTierLabelStatus.mockResolvedValue('not_label');
     mockPriorRecurringSeries = null;
     mockPriorServicedVisit = null;
@@ -583,6 +585,95 @@ describe('new recurring welcome SMS', () => {
         customer_portal_url: expect.stringContaining('/login'),
       }),
     }));
+  });
+
+  describe('ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): the welcome text is unchanged, only its email half can be folded away', () => {
+    function dueWelcome({ phone = '(941) 555-1234' } = {}) {
+      mockDueSequences = [{
+        id: 'seq-1',
+        customer_id: 'customer-1',
+        step: 0,
+        created_at: new Date('2026-09-29T14:00:00Z'),
+        metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+      }];
+      mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone, email: 'ada@example.com' };
+      mockScheduledServiceRow = { status: 'pending' };
+      mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+      mockSendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
+    }
+
+    test('gate on and the combined signup email was delivered: the text still sends, the welcome EMAIL does not', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1' }; // the delivered combined signup email
+      const results = await service.processDueWelcomes();
+      expect(results.sent).toBe(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockUpdates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ table: 'sms_sequences', data: expect.objectContaining({ status: 'completed' }) }),
+      ]));
+    });
+
+    test('the delivery-time lookup only counts a delivered full signup email that still carries the app steps', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1' };
+      const covered = await service._internals.combinedSignupEmailCoversWelcome(
+        { id: 'customer-1', email: 'Ada@Example.com' }, { created_at: new Date('2026-09-29T14:00:00Z') });
+      expect(covered).toBe(true);
+      const emailQuery = mockDb.mock.results.map((r) => r.value).find((c) => c.whereRaw.mock.calls.length);
+      expect(emailQuery.where).toHaveBeenCalledWith({ template_key: 'estimate.accepted_onboarding', recipient_type: 'customer' });
+      expect(emailQuery.whereIn).toHaveBeenCalledWith('recipient_id', ['customer-1']);
+      expect(emailQuery.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked']);
+      expect(emailQuery.whereRaw).toHaveBeenCalledWith('categories @> ?::jsonb', [JSON.stringify(['signup_full'])]);
+      expect(emailQuery.whereRaw).toHaveBeenCalledWith('text_snapshot ILIKE ?', ['%enter your texted code%']);
+      expect(emailQuery.whereRaw).toHaveBeenCalledWith('lower(recipient_email_snapshot) = ?', ['ada@example.com']);
+      // The window opens an hour BEFORE the queued row (the row is queued moments before the email).
+      // 10:00 AM ET queue row: the hour before is 9:00 AM ET, but the window opens at the ET day start (midnight).
+      expect(emailQuery.where).toHaveBeenCalledWith('created_at', '>=', new Date('2026-09-29T04:00:00Z'));
+    });
+
+    test('gate on but no delivered combined email (failed, blocked, no address, a plain fallback): the welcome email sends exactly as today', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = null;
+      const results = await service.processDueWelcomes();
+      expect(results.sent).toBe(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
+    });
+
+    test('the gate turned OFF between signup and delivery: the welcome email sends even though a combined email exists', async () => {
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1' };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('an unreadable lookup reads as "not covered": the welcome email sends', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      // The first table access of a direct call is the coverage lookup itself.
+      mockDb.mockImplementationOnce(() => { throw new Error('db down'); });
+      await expect(service._internals.combinedSignupEmailCoversWelcome({ id: 'customer-1' }, {})).resolves.toBe(false);
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('sending the welcome email as usual'));
+    });
+
+    test('a phoneless customer whose signup email was delivered: the sequence still completes, nothing is emailed or texted', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome({ phone: '' });
+      mockEmailProviderRow = { id: 'email-1' };
+      const results = await service.processDueWelcomes();
+      expect(results.sent).toBe(1);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockUpdates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ table: 'sms_sequences', data: expect.objectContaining({ status: 'completed' }) }),
+      ]));
+    });
   });
 
   test('phoneless customer with an email gets the welcome email; sequence COMPLETES via email', async () => {

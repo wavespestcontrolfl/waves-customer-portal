@@ -32,6 +32,7 @@ const {
   sendAutopayEnrollmentConfirmation,
   sendAutopaySetupInvitation,
   sendCardHoldConfirmation,
+  buildAutopayPaymentSection,
   _private,
 } = require('../services/card-enrollment-email');
 const { CARD_CONSENT_TEXT } = require('../services/payment-method-consent-text');
@@ -501,5 +502,71 @@ describe('signature rewrite migration (20260721100020) — authored sign-offs su
   test('signatures without the company name are untouched (no rewrite, returns null)', () => {
     expect(_test.rewriteBlocks([{ type: 'signature', content: '— The Waves Team' }])).toBe(null);
     expect(_test.rewriteBlocks([{ type: 'signature', content: '— Virginia' }])).toBe(null);
+  });
+});
+
+// The Payment section of the one-signup-email (GATE_SIGNUP_SINGLE_EMAIL) is the
+// SAME resolution the standalone email uses — every consent-row rule included.
+describe('one-signup-email Payment section (buildAutopayPaymentSection)', () => {
+  const CARD_PM = { id: 'pm-1', stripe_payment_method_id: 'pm_stripe_1', card_brand: 'visa', last_four: '4776', method_type: 'card' };
+  const BANK_PM = { id: 'pm-1', stripe_payment_method_id: 'pm_bank_1', method_type: 'ach', bank_name: 'Chase Bank', bank_last_four: '6789', last_four: '6789' };
+  const ACH_CONSENT = { id: 'c-ach', source: 'portal_add_bank', consent_text_version: 'v10_2026-07-13', consent_text_snapshot: 'SNAPSHOT: ACH debit authorization (v10)', created_at: '2026-07-13T08:00:00Z' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_CARD_ENROLLMENT_EMAILS = 'true';
+    state.tables = { customers: [CUSTOMER], payment_methods: [CARD_PM], payment_method_consents: [CONSENT_V9] };
+  });
+  afterAll(() => { delete process.env.GATE_CARD_ENROLLMENT_EMAILS; });
+
+  test('still requires GATE_CARD_ENROLLMENT_EMAILS: gate off is a no-op with no reads', async () => {
+    delete process.env.GATE_CARD_ENROLLMENT_EMAILS;
+    expect(await buildAutopayPaymentSection({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' })).toBe(null);
+    const db = require('../models/db');
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('card: label, how Auto Pay works, and the STORED authorization word for word — the same values the standalone email sends', async () => {
+    const section = await buildAutopayPaymentSection({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
+    expect(section.authorizationText).toBe('SNAPSHOT: the exact text the customer agreed to (v9)');
+    expect(section.variables).toMatchObject({
+      payment_heading: 'Payment',
+      payment_method_label: 'Visa ending 4776',
+      payment_timing_line: "After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.",
+      authorization_text: 'SNAPSHOT: the exact text the customer agreed to (v9)',
+    });
+    await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
+    const standalone = mockSendTemplate.mock.calls[0][0].payload;
+    expect(section.variables.authorization_text).toBe(standalone.authorization_text);
+    expect(section.variables.payment_timing_line).toBe(standalone.charge_timing_line);
+  });
+
+  test('bank: debit wording and the ACH authorization, never card copy', async () => {
+    state.tables = { customers: [CUSTOMER], payment_methods: [BANK_PM], payment_method_consents: [ACH_CONSENT] };
+    const section = await buildAutopayPaymentSection({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
+    expect(section.variables.payment_method_label).toBe('Chase Bank account ending 6789');
+    expect(section.variables.payment_timing_line).toContain('debited');
+    expect(section.variables.authorization_text).toBe('SNAPSHOT: ACH debit authorization (v10)');
+  });
+
+  test('a newer hold-scoped consent never becomes the authorization', async () => {
+    state.tables.payment_method_consents = [
+      { id: 'hold', source: 'estimate_card_hold', consent_text_version: 'v9_2026-07-12', consent_text_snapshot: 'HOLD-ONLY visit-scoped terms', created_at: '2026-07-13T02:00:00Z' },
+      CONSENT_V9,
+    ];
+    const section = await buildAutopayPaymentSection({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
+    expect(section.variables.authorization_text).toBe('SNAPSHOT: the exact text the customer agreed to (v9)');
+  });
+
+  test.each([
+    ['only a hold-scoped consent', { payment_method_consents: [{ id: 'hold', source: 'estimate_card_hold', consent_text_version: 'v9_2026-07-12', consent_text_snapshot: 'HOLD', created_at: '2026-07-13T02:00:00Z' }] }],
+    ['only a pre-v8 consent', { payment_method_consents: [{ ...CONSENT_V9, consent_text_version: 'v7_2026-05-01' }] }],
+    ['no consent at all', { payment_method_consents: [] }],
+    ['no stripe payment method row', { payment_methods: [] }],
+    ['an unknown method family', { payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x', method_type: 'cashapp' }] }],
+    ['no usable email on the customer', { customers: [{ id: 'cust-1', first_name: 'T', email: '' }] }],
+  ])('%s: no payment section (the authorization copy is never fabricated)', async (_label, override) => {
+    state.tables = { ...state.tables, ...override };
+    expect(await buildAutopayPaymentSection({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' })).toBe(null);
   });
 });

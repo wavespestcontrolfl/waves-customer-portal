@@ -59,7 +59,7 @@ const BANK_ALIASES = ['ach', 'us_bank_account'];
  *   every other caller.
  * @returns {{ enrolled: boolean, reason?: string, methodId?: string, inChargeMethodId?: string, sendEnrollmentConfirmation?: Function }}
  */
-async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, scheduledServiceId = null, invoiceId = null, dbh = db }) {
+async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, scheduledServiceId = null, invoiceId = null, holdEnrollmentConfirmation = false, dbh = db }) {
   if (!customerId || (!paymentMethodId && !stripePaymentMethodId)) {
     return { enrolled: false, reason: 'missing_args' };
   }
@@ -245,14 +245,19 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
       } catch { /* best-effort */ }
     }
     : null;
-  if (sendEnrollmentConfirmation && !runningInCallerTrx) {
+  // holdEnrollmentConfirmation (GATE_SIGNUP_SINGLE_EMAIL, the estimate accept
+  // route only): hand the closure back exactly as savepoint mode does, so the
+  // caller can fold the confirmation into the one signup email and fire this
+  // closure ONLY if that email was not accepted for sending. Enrollment itself
+  // is unchanged; a caller that never passes the flag fires inline as before.
+  if (sendEnrollmentConfirmation && !runningInCallerTrx && !holdEnrollmentConfirmation) {
     sendEnrollmentConfirmation();
   }
   return {
     enrolled: true,
     methodId: target.id,
     inChargeMethodId,
-    ...(runningInCallerTrx && sendEnrollmentConfirmation ? { sendEnrollmentConfirmation } : {}),
+    ...((runningInCallerTrx || holdEnrollmentConfirmation) && sendEnrollmentConfirmation ? { sendEnrollmentConfirmation } : {}),
   };
 }
 

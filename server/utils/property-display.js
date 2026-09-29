@@ -21,6 +21,14 @@ function propertyStreetAddress(row = {}) {
   return [street, cityStateZip(row)].filter(Boolean).join(', ');
 }
 
+// "123 Main St Apt 4" — the street line alone (subjects and headings that name
+// a property without the city/state/zip). null when there is no street line.
+function propertyStreetLine(row = {}) {
+  const line1 = clean(row.address_line1);
+  if (!line1) return null;
+  return [line1, clean(row.address_line2)].filter(Boolean).join(' ');
+}
+
 function cityStateZip(row = {}) {
   const stateZip = [clean(row.state), clean(row.zip)].filter(Boolean).join(' ');
   return [clean(row.city), stateZip].filter(Boolean).join(', ');
@@ -37,4 +45,4 @@ function propertyDisplayLabel(row = {}) {
     || 'Service property';
 }
 
-module.exports = { propertyStreetAddress, propertyDisplayLabel };
+module.exports = { propertyStreetAddress, propertyStreetLine, propertyDisplayLabel };
