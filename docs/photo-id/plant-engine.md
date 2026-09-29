@@ -370,8 +370,11 @@ plant-**NAME** tie only. Ships DARK behind `GATE_PLANT_ID_REFEREE` (off
 unless exactly `'true'`); off, the ladder is byte-identical to Gemini → Sol
 with no third call.
 
-`runReferee` runs between `runEscalation` and the leg-failure check, only
-when **the run is `identify` mode**, the run is not `photosUnusable`, the
+`runReferee` runs AFTER `runEscalation` and AFTER the leg-failure check
+(`legFailureReason`): a run with no usable vision leg returns its failure
+first, so the billed referee call never runs for an answer that cannot be
+returned. It then runs only when **the run is `identify` mode**, the prior
+legs' combined photo read is neither unusable nor blocked, the
 total budget (`PHOTO_ID_V2_TIMEOUT_MS`) has room for one more leg, and at
 least one identity lane the subject actually uses
 (`identifyLaneSlotsFor(subject)`: turf/weeds for a lawn, host for

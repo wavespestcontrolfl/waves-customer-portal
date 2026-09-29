@@ -1839,6 +1839,31 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       },
     });
 
+    test('Codex #5307 r10: two different off-catalog names in one group never draw the referee; the answer is that group either way', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const offCatalog = (name, confidence) => ({
+        slug: '', off_catalog_name: name, group_id: 'turfgrasses', confidence, cues_visible: [], cues_not_visible: [],
+      });
+      dispatch.mockImplementation(async (route, payload) => {
+        const step = String(payload?.promptVersion || '').split(':')[1];
+        if (step === 'candidates') return { ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [offCatalog('Zoysia', 0.5)], weeds: [], host: [] } };
+        if (step === 'escalation') {
+          return {
+            ok: true,
+            json: {
+              quality: OK_QUALITY, shows: 'plant', turf: [offCatalog('Centipede', 0.6)], weeds: [], host: [], observed_terms: [], conditions: [],
+            },
+          };
+        }
+        return { ok: false, reason: 'unused_leg' };
+      });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      // An off-catalog read is never named, so settling Zoysia vs Centipede
+      // could not change the answer: it is the group, and no Fable call is billed.
+      expect(dispatch.mock.calls.map(([, p]) => p.laneId)).not.toContain('plant_id_referee');
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+    });
+
     test('gate off: no 4th dispatch, result identical to the pre-referee disagreement outcome', async () => {
       delete process.env.GATE_PLANT_ID_REFEREE;
       [candidatesLeg, verifyLeg, disagreeingEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
@@ -1861,8 +1886,10 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         ['plant_id', 'candidates'], ['plant_id', 'verify'], ['plant_id', 'escalation'], ['plant_id_referee', 'referee'],
       ]);
       // The first live run (2026-09-29) found every Fable call 400ing on the
-      // schema's numeric bounds: the referee's wire schema carries none.
-      expect(JSON.stringify(dispatch.mock.calls[3][1].jsonSchema)).not.toMatch(/"(minimum|maximum|exclusiveMinimum|exclusiveMaximum|multipleOf)"/);
+      // schema's numeric bounds; what reaches Anthropic must carry none.
+      // The shared llm/call.js anthropicSchema() strips them on the wire (#5347).
+      const { anthropicSchema } = jest.requireActual('../services/llm/call');
+      expect(JSON.stringify(anthropicSchema(dispatch.mock.calls[3][1].jsonSchema))).not.toMatch(/"(minimum|maximum|exclusiveMinimum|exclusiveMaximum|multipleOf)"/);
       // A tie-break never holds the request for the whole 4-minute ladder budget.
       expect(dispatch.mock.calls[3][1].timeoutMs).toBeLessThanOrEqual(engine._test.REFEREE_MAX_MS);
       // Settled on Gemini's own top — never pretty_sure, even though its own
