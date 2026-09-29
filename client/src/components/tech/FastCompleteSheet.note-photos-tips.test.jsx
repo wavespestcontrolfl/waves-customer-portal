@@ -166,6 +166,8 @@ describe('FastCompleteSheet recorded dictation', () => {
     fireEvent.click(fullForm);
     fireEvent.click(otherProduct);
     expect(onFullForm).not.toHaveBeenCalled();
+    // With the catalog loaded, + Other product opens the picker, not the full form.
+    expect(screen.queryByRole('dialog', { name: 'Add a product' })).toBeNull();
   });
 
   test('live speech recognition never holds the completion', async () => {
