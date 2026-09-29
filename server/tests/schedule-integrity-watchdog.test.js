@@ -32,8 +32,15 @@ jest.mock('../services/irrigation-weekly-email', () => ({
 jest.mock('../services/recurring-schedule-audit', () => ({
   findAcceptedRecurringScheduleGaps: jest.fn(async () => []),
 }));
+// Alert relevance (its own suite): a row written quiet at ring time, and the
+// clear-on-absence helper this watchdog calls after a complete scan.
+jest.mock('../services/admin-alert-relevance', () => ({
+  quietedAtRingTime: jest.fn((row) => row?.metadata?.feed === 'activity'),
+  retireKeysNoLongerRaised: jest.fn(async () => 0),
+}));
 
 const { findAcceptedRecurringScheduleGaps } = require('../services/recurring-schedule-audit');
+const { retireKeysNoLongerRaised } = require('../services/admin-alert-relevance');
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
@@ -501,5 +508,58 @@ describe('accepted-plan schedule detection', () => {
     findAcceptedRecurringScheduleGaps.mockRejectedValueOnce(new Error('read failed'));
     makeDbMock({ coverageRows: [unpricedChild()] });
     expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleCheckFailed: true, alerted: 1 });
+  });
+});
+
+describe('standing bells the scan no longer raises (alert relevance)', () => {
+  const acceptedGap = (i) => ({ estimateId: `e-${i}`, customerId: `c-${i}`, serviceFamily: 'pest_control', pattern: 'monthly',
+    expectedVisits: 12, recordedVisits: 0, issues: ['missing_schedule'], evidenceKey: 'missing', appointmentIds: [] });
+  const prepayRow = (id) => unpricedChild({ id, estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100 });
+
+  test('a bell written quiet because its subject had already moved on never uses the per-run cap', async () => {
+    findLawnEmailAudienceGaps.mockResolvedValueOnce(Array.from({ length: MAX_ALERTS_PER_RUN + 2 }, (_, i) => (
+      { customerId: `lawn-${i}`, fixable: ['no_coordinates'] })));
+    makeDbMock();
+    let calls = 0;
+    NotificationService.notifyAdmin.mockImplementation(async () => {
+      calls += 1;
+      return calls <= 5 ? { id: calls, metadata: { feed: 'activity', retired: { by: 'alert-relevance' } } } : { id: calls };
+    });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: MAX_ALERTS_PER_RUN + 2 - 5 });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(MAX_ALERTS_PER_RUN + 2);
+  });
+
+  test('after a complete scan, the prepay and accepted-plan bells it no longer raised are handed to the relevance retire with exactly the current keys', async () => {
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([acceptedGap(1)]);
+    makeDbMock({ coverageRows: [prepayRow('prepay-1')] });
+    const result = await runInner({ now: NOW });
+    expect(result.cleared).toEqual({ prepayCoverage: 0, acceptedSchedule: 0 });
+    const byPrefix = Object.fromEntries(retireKeysNoLongerRaised.mock.calls.map(([o]) => [o.prefix, o]));
+    const rung = NotificationService.notifyAdmin.mock.calls.map((call) => call[3].metadata.dedupeKey);
+    expect(byPrefix['prepay-coverage:'].liveKeys).toEqual(rung.filter((k) => k.startsWith('prepay-coverage:prepay-1:')));
+    expect(byPrefix['prepay-coverage:'].liveKeys).toHaveLength(1);
+    expect(byPrefix['accepted-schedule:'].liveKeys).toEqual(['accepted-schedule:e-1:pest_control']);
+    // Nothing found at all: every standing bell of both classes is handed over.
+    retireKeysNoLongerRaised.mockClear();
+    makeDbMock();
+    await runInner({ now: NOW });
+    expect(retireKeysNoLongerRaised.mock.calls.map(([o]) => [o.prefix, o.liveKeys])).toEqual([['prepay-coverage:', []], ['accepted-schedule:', []]]);
+  });
+
+  test('a run stopped at its cap clears nothing (the replacements are not all raised yet), and a failed accepted-plan check leaves that class alone', async () => {
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce(Array.from({ length: MAX_ALERTS_PER_RUN + 1 }, (_, i) => acceptedGap(i)));
+    makeDbMock();
+    await runInner({ now: NOW });
+    expect(retireKeysNoLongerRaised).not.toHaveBeenCalled();
+    findAcceptedRecurringScheduleGaps.mockRejectedValueOnce(new Error('read failed'));
+    makeDbMock({ coverageRows: [prepayRow('prepay-2')] });
+    expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleCheckFailed: true });
+    expect(retireKeysNoLongerRaised.mock.calls.map(([o]) => o.prefix)).toEqual(['prepay-coverage:']);
+  });
+
+  test('a failed clear is logged and never fails the run (the bells already rang)', async () => {
+    retireKeysNoLongerRaised.mockRejectedValueOnce(new Error('db down'));
+    makeDbMock({ coverageRows: [prepayRow('prepay-3')] });
+    await expect(runInner({ now: NOW })).resolves.toMatchObject({ skipped: false, alerted: 1 });
   });
 });

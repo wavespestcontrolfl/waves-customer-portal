@@ -29,6 +29,10 @@ let mockTrxs;
 jest.mock('../models/db', () => {
   const strip = (col) => String(col).split('.').pop();
   const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v || {});
+  // Key-order-free JSON, like jsonb equality.
+  const canon = (v) => (v && typeof v === 'object'
+    ? (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`)
+    : JSON.stringify(v ?? null));
   const builder = (table) => {
     const conds = [];
     const q = { table, calls: [] };
@@ -42,6 +46,7 @@ jest.mock('../models/db', () => {
     b.where = (...args) => {
       q.calls.push(['where', ...args]);
       if (args.length === 1 && args[0] && typeof args[0] === 'object') Object.entries(args[0]).forEach(([k, v]) => conds.push((r) => r[k] === v));
+      if (args.length === 2 && typeof args[0] === 'string') conds.push((r) => r[strip(args[0])] === args[1]);
       if (args.length === 3 && args[0] === 'id' && args[1] === '>') conds.push((r) => String(r.id) > String(args[2]));
       return b;
     };
@@ -49,11 +54,25 @@ jest.mock('../models/db', () => {
     b.whereIn = (col, ids) => { q.calls.push(['whereIn', col, ids]); conds.push((r) => ids.includes(String(r[strip(col)]))); return b; };
     b.whereRaw = (sql, args = []) => {
       q.calls.push(['whereRaw', sql, args]);
-      if (String(sql).startsWith("metadata->>'dedupeKey' =")) conds.push((r) => parse(r.metadata).dedupeKey === args[0]);
+      const text = String(sql);
+      const meta = (r) => (r.metadata == null ? null : parse(r.metadata));
+      if (text.startsWith("metadata->>'dedupeKey' =")) conds.push((r) => parse(r.metadata).dedupeKey === args[0]);
+      // The retire's version fence and its own-stamp match.
+      if (text === 'link IS NOT DISTINCT FROM ?') conds.push((r) => (r.link ?? null) === (args[0] ?? null));
+      if (text === 'metadata IS NOT DISTINCT FROM ?::jsonb') conds.push((r) => canon(meta(r)) === canon(args[0] == null ? null : JSON.parse(args[0])));
+      if (text === "metadata->'retired'->>'at' = ?") conds.push((r) => meta(r)?.retired?.at === args[0]);
+      // Clear-on-absence: bell-visible, under a key prefix, not a key raised this run.
+      if (text === "COALESCE(metadata->>'feed', '') <> 'activity'") conds.push((r) => meta(r)?.feed !== 'activity');
+      if (text === "left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?") conds.push((r) => String(meta(r)?.dedupeKey || '').slice(0, args[0]) === args[1]);
+      if (text === "NOT (metadata->>'dedupeKey' = ANY(?::text[]))") conds.push((r) => !args[0].includes(meta(r)?.dedupeKey));
       return b;
     };
     const hit = () => (mockTables[table] || []).filter((r) => conds.every((c) => c(r)));
-    b.first = async () => { mockQueries.push(q); return hit()[0] || null; };
+    b.first = async () => {
+      mockQueries.push(q);
+      if (mockHooks[`${table}:first`]) mockHooks[`${table}:first`]();
+      return hit()[0] || null;
+    };
     b.update = (patch) => {
       let applied = null;
       const apply = () => {
@@ -111,7 +130,7 @@ jest.mock('../models/db', () => {
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const {
-  runAdminAlertRelevanceSweep, classify, loadSubjects, subjectFor, refsFromRow, ringTimeCheck,
+  runAdminAlertRelevanceSweep, classify, loadSubjects, subjectFor, refsFromRow, ringTimeCheck, retireKeysNoLongerRaised,
 } = require('../services/admin-alert-relevance');
 const { adminAlertRelevanceLive } = require('../config/feature-gates');
 
@@ -644,6 +663,95 @@ describe('runAdminAlertRelevanceSweep', () => {
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result.retired).toBe(1);
     expect(good.read_at).toBeInstanceOf(Date);
+  });
+
+  test('a refresh that rewrote the bell between the fresh read and the write keeps it ringing: the retire lands only on the version it judged', async () => {
+    churnedWithDraft();
+    const row = divergenceRow(uid(570));
+    mockTables.notifications = [row];
+    const refreshed = { ...JSON.parse(row.metadata), invoiceId: INV2, stampedInvoiceId: INV2, dedupeVersion: 'paid-replacement' };
+    let invoiceReads = 0;
+    // During the fresh verdict's own read (the 2nd), the first-application
+    // sweep refreshes the same keyed row onto a paid governing replacement.
+    mockHooks.invoices = () => {
+      invoiceReads += 1;
+      if (invoiceReads === 2) {
+        row.metadata = JSON.stringify(refreshed);
+        mockTables.invoices.push(invoice({ id: INV2, status: 'paid' }));
+      }
+    };
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
+    expect(row.read_at).toBeNull();
+    expect(JSON.parse(row.metadata)).toEqual(refreshed);
+  });
+
+  test('a quiet refresh after the write is judged as it stands: the final verdict reads the bell again and puts it back when the new content has not moved on', async () => {
+    churnedWithDraft();
+    const row = divergenceRow(uid(571));
+    mockTables.notifications = [row];
+    const refreshed = { ...JSON.parse(row.metadata), invoiceId: INV2, stampedInvoiceId: INV2, dedupeVersion: 'paid-replacement' };
+    let reads = 0;
+    // 1st read: the fresh read before the write. 2nd: the read after it — a
+    // quiet refresh (read_at untouched, the stamp merged in) lands just before.
+    mockHooks['notifications:first'] = () => {
+      reads += 1;
+      if (reads === 2) {
+        row.metadata = JSON.stringify({ ...refreshed, retired: JSON.parse(row.metadata).retired });
+        mockTables.invoices.push(invoice({ id: INV2, status: 'paid' }));
+      }
+    };
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
+    expect(row.read_at).toBeNull();
+    expect(JSON.parse(row.metadata)).toEqual(refreshed);
+  });
+
+  test('re-arm: a retired hot-view bell frees its rolling-dedupe key, so the customer back on a restored estimate rings the same day', async () => {
+    const key = `estimate_hot_view:${EST}`;
+    mockTables.estimates = [{ id: EST, status: 'viewed', archived_at: new Date('2026-09-28T12:00:00Z'), sent_at: null, customer_id: CUST }];
+    const row = note({ id: uid(572), category: 'estimate_hot_view', link: `/admin/estimates?estimateId=${EST}`, metadata: { dedupeKey: key, estimateId: EST, customerId: CUST, sessions: 3 } });
+    mockTables.notifications = [row];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ retired: 1, byClass: { estimate_hot_view: 1 } });
+    expect(JSON.parse(row.metadata)).toMatchObject({ dedupeKey: null, retired: { dedupeKey: key, reason: expect.stringContaining('archived') } });
+    // Unarchived; the customer is back on it inside the 24-hour window.
+    mockTables.estimates[0].archived_at = null;
+    const again = await NotificationService.notifyAdmin('estimate_hot_view', 'Reading their estimate again', 'body', {
+      bell: true, link: `/admin/estimates?estimateId=${EST}`, dedupeKey: key, dedupeWindowMs: 24 * 3600000,
+      metadata: { estimateId: EST, customerId: CUST, sessions: 4 },
+    });
+    expect(again.deduped).toBe(false);
+    const fresh = mockTables.notifications.find((r) => r.id !== row.id);
+    expect(fresh.read_at == null).toBe(true);
+    expect(JSON.parse(fresh.metadata).feed).toBeUndefined();
+  });
+});
+
+describe('retireKeysNoLongerRaised (an emitter\'s clear-on-absence)', () => {
+  const standing = (id, key, extra = {}) => note({ id, category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT, ...extra } });
+  const REASON = 'The schedule watchdog no longer finds this gap';
+
+  test('retires only the unread, bell-visible bells under the prefix whose key the scan did not raise', async () => {
+    const live = standing(uid(580), 'prepay-coverage:v1:annual_coverage_unverified:aaa');
+    const gone = standing(uid(581), 'prepay-coverage:v1:annual_coverage_unverified:old');
+    const theirs = { ...standing(uid(582), 'prepay-coverage:v2:x:y'), read_at: new Date('2026-09-28T10:00:00Z') };
+    const other = standing(uid(583), 'accepted-schedule:e1:pest_control');
+    const quiet = standing(uid(584), 'prepay-coverage:v3:x:y', { feed: 'activity' });
+    mockTables.notifications = [live, gone, theirs, other, quiet];
+    expect(await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: ['prepay-coverage:v1:annual_coverage_unverified:aaa'], reason: REASON, now: NOW })).toBe(1);
+    expect(gone.read_at).toBeInstanceOf(Date);
+    expect(JSON.parse(gone.metadata).retired).toEqual({ by: 'alert-relevance', reason: REASON, at: NOW.toISOString() });
+    for (const r of [live, other, quiet]) {
+      expect(r.read_at).toBeNull();
+      expect(JSON.parse(r.metadata).retired).toBeUndefined();
+    }
+    expect(theirs.read_at).toEqual(new Date('2026-09-28T10:00:00Z'));
+  });
+
+  test('switch off: nothing is touched', async () => {
+    process.env.ADMIN_ALERT_RELEVANCE = 'off';
+    const gone = standing(uid(585), 'prepay-coverage:v9:x:y');
+    mockTables.notifications = [gone];
+    expect(await retireKeysNoLongerRaised({ prefix: 'prepay-coverage:', liveKeys: [], reason: REASON, now: NOW })).toBe(0);
+    expect(gone.read_at).toBeNull();
   });
 });
 

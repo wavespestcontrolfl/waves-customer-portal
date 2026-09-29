@@ -29,10 +29,13 @@
  * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
  * — never dedupeVersion/autoCleared/invoiceId, so every emitter's own dedupe
  * and recovery logic still sees the row exactly as a human dismissal. The one
- * exception is a class marked `rearm` (unpriced series): its emitter
- * forever-dedupes on a stable key, so the key moves into the stamp
- * (`retired.dedupeKey`, `dedupeKey: null`) and a condition that regresses
- * (the price removed again) raises a fresh bell instead of finding this row.
+ * exception is a class marked `rearm` (unpriced series, estimate hot view):
+ * its emitter dedupes on a stable key (forever, or a rolling day), so the key
+ * moves into the stamp (`retired.dedupeKey`, `dedupeKey: null`) and a
+ * condition that comes back (the price removed again, an estimate restored)
+ * raises a fresh bell instead of finding this row. An emitter that knows its
+ * whole current set can also clear on absence (retireKeysNoLongerRaised, the
+ * schedule-integrity watchdog's prepay and accepted-plan reviews).
  * A genuine state change can still re-bell a refreshOnDedupe row once; the
  * next sweep retires it again if its subject is still gone. Read-only apart
  * from notification rows.
@@ -277,8 +280,9 @@ const CLASSES = [
   { // admin-dispatch.js applySeriesMoveEffects
     key: 'series_move', categories: ['schedule_conflict'], match: (meta) => !!meta.seriesMoveId, rule: seriesMoveMovedOn,
   },
-  { // estimate-hot-view-alert.js
-    key: 'estimate_hot_view', categories: ['estimate_hot_view'],
+  { // estimate-hot-view-alert.js — a 24-hour rolling dedupe on a stable key, and an
+    // archived or closed estimate can be restored, so a retire re-arms it too
+    key: 'estimate_hot_view', categories: ['estimate_hot_view'], rearm: true,
     rule: (s) => {
       if (!s.estimate) return null;
       if (TERMINAL_ESTIMATE_STATUSES.includes(String(s.estimate.status).toLowerCase())) return `Estimate is ${s.estimate.status}`;
@@ -327,11 +331,27 @@ function candidateQuery(cursor) {
 const sameRow = (a, b) => a.category === b.category && (a.link || null) === (b.link || null)
   && JSON.stringify(parseMeta(a.metadata)) === JSON.stringify(parseMeta(b.metadata));
 
-// Judges one row on a fresh read and retires it only if it is still moved on,
-// then judges it once more AFTER the write: a change that landed between the
-// read and the write (a payment starting on a churned customer's draft, a
-// lead reopened) puts the bell back exactly as it was — unless a person has
-// read it since (their read_at wins). No row locks: see the module header.
+// The same predicate as a write condition: the retire lands only on the
+// version it judged (category, link and metadata — everything the rule reads),
+// never on a bell an emitter refreshed in between.
+const sameVersion = (q, row) => q.where('category', row.category)
+  .whereRaw('link IS NOT DISTINCT FROM ?', [row.link ?? null])
+  .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [row.metadata == null ? null : JSON.stringify(parseMeta(row.metadata))]);
+
+// The bell as it read before this module's stamp: no `retired`, and a re-arm
+// class's key back in place.
+function unretired(metadata) {
+  const { retired, ...meta } = parseMeta(metadata);
+  return retired?.dedupeKey && meta.dedupeKey == null ? { ...meta, dedupeKey: retired.dedupeKey } : meta;
+}
+
+// Judges one row on a fresh read and retires it only if it is still moved on
+// and still the version judged, then judges it once more AFTER the write, on
+// the bell as it stands then (a quiet refresh rewrites content without
+// touching read_at): a change that landed between the read and the write (a
+// payment starting on a churned customer's draft, a lead reopened) puts the
+// bell back — unless a person has read it since (their read_at wins), or a
+// refresh rang it again (the emitter's). No row locks: see the module header.
 // A change after the final judgement is a new event its emitter raises.
 async function retireIfStillMovedOn(row, cls, todayET, now) {
   const current = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
@@ -346,15 +366,36 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   // which a JS Date read back would truncate, and the put-back below must
   // match the exact read_at this write stored.
   const readAt = new Date();
-  const [retired] = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
+  const [retired] = await sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at'), current)
     .update({ read_at: readAt, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp, ...rearm })]) })
     .returning(['id']);
   if (!retired) return null;
-  if (cls.rule(subjectFor(current, await loadSubjects([current]), todayET))) return reason;
-  await db('notifications').where({ id: row.id, read_at: readAt })
-    .whereRaw("metadata->'retired'->>'at' = ?", [stamp.at])
+  const stillOurs = (q) => q.where({ id: row.id, read_at: readAt }).whereRaw("metadata->'retired'->>'at' = ?", [stamp.at]);
+  const latest = await stillOurs(db('notifications')).first('id', 'category', 'link', 'metadata');
+  if (!latest) return null;
+  const judged = { ...latest, metadata: unretired(latest.metadata) };
+  if (cls.rule(subjectFor(judged, await loadSubjects([judged]), todayET))) return reason;
+  await stillOurs(db('notifications'))
     .update({ read_at: null, metadata: db.raw("(metadata - 'retired') || ?::jsonb", [JSON.stringify(rearm.dedupeKey === null ? { dedupeKey } : {})]) });
   return null;
+}
+
+// An emitter's clear-on-absence (schedule-integrity-watchdog.js): after a
+// COMPLETE scan, every unread bell under `prefix` whose key the scan no longer
+// raised is retired with the sweep's own stamp — the gap was fixed, or its
+// evidence changed and the scan raised a new key beside it. A pure read_at +
+// stamp like every other retire; no row locks; a person's read is untouched.
+async function retireKeysNoLongerRaised({ category = 'alert', prefix, liveKeys, reason, now = new Date() }) {
+  if (!adminAlertRelevanceLive()) return 0;
+  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
+  const stamp = { by: RETIRED_BY, reason, at: now.toISOString() };
+  const retired = await excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin', category }))
+    .whereNull('read_at')
+    .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [prefix.length, prefix])
+    .whereRaw("NOT (metadata->>'dedupeKey' = ANY(?::text[]))", [liveKeys])
+    .update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]) })
+    .returning(['id']);
+  return retired.length;
 }
 
 // A backlog bigger than one run (MAX_PAGES pages) is walked across runs: a
@@ -465,6 +506,8 @@ async function pushIsMovedOn({ bellRow, bellWritten, pushTo, category, link, met
 
 module.exports = {
   runAdminAlertRelevanceSweep,
+  retireKeysNoLongerRaised,
+  quietedAtRingTime,
   pushIsMovedOn,
   ringTimeCheck,
   classify,

@@ -4508,12 +4508,14 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    // A date the move only flagged for arrival-window route review (no other
-    // appointment sits on it — rebooker.js arrivalWindowDates) is a
-    // heads-up, not work: with nothing preserved, untimed or truly
-    // overlapping, that card is written into the bell already read — visible
-    // in its list, never counted or rung.
-    const arrivalOnlyDates = new Set((Array.isArray(result.arrivalWindowDates) ? result.arrivalWindowDates : []).map((d) => String(d).split('T')[0]));
+    // A date the move only flagged for arrival-window route review (every
+    // overlap on it was the route check's own verdict — rebooker.js
+    // arrivalOnlyDates, an explicit per-date verdict; a date that ALSO has a
+    // real overlap is not in it) is a heads-up, not work: with nothing
+    // preserved, untimed or truly overlapping, that card is written into the
+    // bell already read — visible in its list, never counted or rung. A move
+    // recorded before that verdict existed carries none, so it rings.
+    const arrivalOnlyDates = new Set((Array.isArray(result.arrivalOnlyDates) ? result.arrivalOnlyDates : []).map((d) => String(d).split('T')[0]));
     const bellWorthy = dueConflicts.length || preserved.length || overlapDates.some((d) => !arrivalOnlyDates.has(d));
     if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {
       try {
