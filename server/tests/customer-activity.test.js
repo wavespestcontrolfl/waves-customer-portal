@@ -1,7 +1,7 @@
 /**
  * Customer activity (GATE_PORTAL_ACTIVITY): the throttled last_seen_at stamp
- * from the customer auth middleware, the portal page-view and push-open
- * beacon routes, and the route-name / push-subject sanitisers.
+ * (stamped only by the foreground beacons, never the auth middleware), the
+ * portal page-view and push-open beacon routes, and the route-name / push-subject sanitisers.
  *
  * The REAL auth middleware and the REAL customer-activity router run against
  * a stubbed db; db.raw records every SQL statement so the tests can pin what

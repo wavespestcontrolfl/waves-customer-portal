@@ -48,14 +48,44 @@ it('defers a view scheduled while hidden to the next visible, and sends it once'
   expect(report).not.toHaveBeenCalled();
 
   document.dispatchEvent(new Event('visibilitychange')); // still hidden
+  vi.advanceTimersByTime(2000);
   expect(report).not.toHaveBeenCalled();
 
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
   document.dispatchEvent(new Event('visibilitychange'));
+  document.dispatchEvent(new Event('visibilitychange')); // a duplicate event inside the debounce sends once
+  vi.advanceTimersByTime(1000);
   expect(report).toHaveBeenCalledTimes(1);
   expect(report).toHaveBeenCalledWith('plan');
+});
 
+it('re-reports the current tab every time the app returns to the foreground', () => {
+  renderHook(() => usePortalActivity('visits'));
+  vi.advanceTimersByTime(1000);
+  expect(report).toHaveBeenCalledTimes(1);
+
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
   document.dispatchEvent(new Event('visibilitychange'));
+  vi.advanceTimersByTime(2000);
+  expect(report).toHaveBeenCalledTimes(1);
+
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  document.dispatchEvent(new Event('visibilitychange'));
+  vi.advanceTimersByTime(1000);
+  expect(report).toHaveBeenCalledTimes(2);
+  expect(report).toHaveBeenLastCalledWith('visits');
+});
+
+it('goes hidden during the debounce: nothing is sent until it is visible again', () => {
+  renderHook(() => usePortalActivity('learn'));
+  vi.advanceTimersByTime(300);
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+  document.dispatchEvent(new Event('visibilitychange'));
+  vi.advanceTimersByTime(2000);
+  expect(report).not.toHaveBeenCalled();
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  document.dispatchEvent(new Event('visibilitychange'));
+  vi.advanceTimersByTime(1000);
   expect(report).toHaveBeenCalledTimes(1);
 });
 
