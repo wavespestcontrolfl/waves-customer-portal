@@ -416,7 +416,33 @@ function combinedStopEntity(members, isVisitGroup) {
   return { startMin, endMin, expectedMinutes, lat: members[0].lat, lng: members[0].lng };
 }
 
-function annotateProjectedArrivals(stops) {
+// Codex round 6 on #5310 (STRUCTURAL): the ONE chain-walk this whole A2/A4
+// lane is built on, coalescing multi-row physical stops (allocationKey/
+// visit_id) into logical groups first and HQ-seeding whichever logical
+// stop is first — extracted so every grace decision walks this SAME
+// timeline instead of a second, parallel, independently-incomplete copy
+// (rounds 4-5 fixed this walk itself; round 6's two findings were both
+// consumers that had drifted from it: projectGraceForCandidate's own
+// candidate-arrival formula for the no-before-neighbour case, and its
+// `annotate()` reading an individual group MEMBER's own un-combined shape
+// instead of the group's). Returns:
+//  - `sorted`: the input, sorted by startMin (stable — ties keep input order).
+//  - `arrivalByStop`: member row -> its group's shared arrivalMin (a plain
+//    number). This is annotateProjectedArrivals' own public contract below,
+//    stamped onto EACH MEMBER'S OWN individual copy — find-time.js's
+//    buildDayStops returns that array AS its `dayStops`, read field by
+//    field for purposes far beyond grace math (id, customer, city, its own
+//    packedBounds geometry), so a member must never lose its own identity.
+//  - `combinedByStop`: member row -> the GROUP's own combined entity
+//    (startMin/endMin/expectedMinutes spanning every member, the shared
+//    arrivalMin, and `hold` true if ANY member is a live hold) — used ONLY
+//    by projectGraceForCandidate's `annotate()` below, which feeds
+//    effectiveEndMinutes/paddingMinutesOf/travelGapViolation: those need
+//    the group's TRUE combined shape (Codex round 6 P1) — reading an
+//    individual member's own un-widened window/credit understated a
+//    visit_id group's real occupancy exactly the way an ungrouped chain
+//    once did before rounds 4-5's own fix.
+function projectDayChain(stops) {
   const sorted = [...stops].sort((a, b) => a.startMin - b.startMin);
   const groups = [];
   for (const stop of sorted) {
@@ -427,14 +453,24 @@ function annotateProjectedArrivals(stops) {
   }
   let prev = null;
   const arrivalByStop = new Map();
+  const combinedByStop = new Map();
   for (const group of groups) {
     const lead = combinedStopEntity(group.members, group.isVisitGroup);
     const arrivalMin = prev
       ? Math.max(lead.startMin, effectiveEndMinutes(prev) + requiredGapMinutes(prev, lead))
       : Math.max(lead.startMin, SHIFT.startMinutes + driveMin(HQ, coordsOf(lead)));
-    for (const member of group.members) arrivalByStop.set(member, arrivalMin);
-    prev = { ...lead, arrivalMin };
+    const combined = { ...lead, arrivalMin, hold: group.members.some((member) => isHoldStop(member)) };
+    for (const member of group.members) {
+      arrivalByStop.set(member, arrivalMin);
+      combinedByStop.set(member, combined);
+    }
+    prev = combined;
   }
+  return { sorted, arrivalByStop, combinedByStop };
+}
+
+function annotateProjectedArrivals(stops) {
+  const { sorted, arrivalByStop } = projectDayChain(stops);
   return sorted.map((stop) => ({ ...stop, arrivalMin: arrivalByStop.get(stop) }));
 }
 
@@ -505,22 +541,38 @@ function classifyStopsAroundCandidate(candidate, stops) {
 // in from every before-side neighbour, unchanged when grace is 0 or there
 // is no before-side neighbour at all) — see travelGapConflicts' own header
 // for the full rule.
+// Codex round 6 P1s on #5310, both fixed by routing through projectDayChain
+// (the SAME timeline annotateProjectedArrivals walks) instead of this
+// function's own two parallel shortcuts:
+//   1. (travel-gap.js:518, the `annotate` below) used to read an individual
+//      group MEMBER's own un-combined shape — now reads combinedByStop, the
+//      group's TRUE combined entity, so a graced candidate placed right
+//      after a visit_id group is measured against the group's real
+//      (summed-work, full-span) effective end, not one member's own.
+//   2. (travel-gap.js:518's OWN sibling, the no-before-neighbour return)
+//      used to hand back `candidate` completely unchanged (no arrivalMin at
+//      all) whenever the candidate has no real stop before it — so the
+//      STRICT after-side check (travelGapViolation's candidateEarly branch,
+//      decision 5) measured the candidate's effective end from its bare,
+//      possibly-graced-early advertised start instead of its own real HQ
+//      arrival, silently ACCEPTING a later real stop the candidate's true
+//      (late) finish would actually collide with. `candidateForAfterSide`
+//      now ALWAYS carries an arrivalMin whenever grace > 0 — the SAME
+//      HQ-seed formula projectDayChain's own first-entry case uses,
+//      because a candidate with no real predecessor IS, for this purpose,
+//      the day's first entity too.
 function projectGraceForCandidate(candidate, { validStops, before, liveNeighbourHolds }) {
   if (!(candidate.graceMinutes > 0)) return { annotate: (stop) => stop, candidateForAfterSide: candidate };
-  const projected = annotateProjectedArrivals(validStops);
-  // annotateProjectedArrivals sorts its own copy of validStops (same array,
-  // same comparator -> Array#sort's stability guarantees the same order
-  // both times), so index i of that sort is exactly stop i here.
-  const sortedOriginals = [...validStops].sort((a, b) => a.startMin - b.startMin);
-  const byOriginal = new Map(sortedOriginals.map((stop, i) => [stop, projected[i]]));
-  const annotate = (stop) => byOriginal.get(stop) || stop;
+  const { combinedByStop } = projectDayChain(validStops);
+  const annotate = (stop) => combinedByStop.get(stop) || stop;
   const beforeSide = [...before, ...liveNeighbourHolds.filter((hold) => hold.endMin <= candidate.startMin)];
-  if (!beforeSide.length) return { annotate, candidateForAfterSide: candidate };
-  const arrival = beforeSide.reduce((acc, stop) => {
-    const annotated = annotate(stop);
-    return Math.max(acc, effectiveEndMinutes(annotated) + requiredGapMinutes(annotated, candidate));
-  }, candidate.startMin);
-  return { annotate, candidateForAfterSide: { ...candidate, arrivalMin: arrival } };
+  const arrivalMin = beforeSide.length
+    ? beforeSide.reduce((acc, stop) => {
+      const annotated = annotate(stop);
+      return Math.max(acc, effectiveEndMinutes(annotated) + requiredGapMinutes(annotated, candidate));
+    }, candidate.startMin)
+    : Math.max(candidate.startMin, SHIFT.startMinutes + driveMin(HQ, coordsOf(candidate)));
+  return { annotate, candidateForAfterSide: { ...candidate, arrivalMin } };
 }
 
 function travelGapConflicts(candidate, stops) {
@@ -562,26 +614,22 @@ function travelGapConflicts(candidate, stops) {
   // P1: an empty `stops` array used to bail out of this whole function
   // before reaching here at all — fixed above). Mirrors the sentinel's
   // formula exactly, grounded only in what this module can see (real
-  // stops): `arrivalFloor` is the candidate's own real (chained/projected)
-  // arrival established by any BEFORE-side neighbour above
-  // (`candidateForAfterSide.arrivalMin`), or — when there is no real stop
-  // before it EITHER, so the candidate is effectively the day's first stop
-  // too — the SAME HQ-seed floor annotateProjectedArrivals' own first-stop
-  // case above uses (max(startMin, SHIFT.startMinutes + driveMin(HQ,
-  // candidate))), never a bare, optimistic `candidate.startMin`.
-  // `ownDuration` is its FULL (uncredited) work — never the expected-minutes
-  // credit — and `driveHome` is the same drive-to-HQ estimator find-time's
-  // own detour scoring uses. Grace 0 is BYTE-IDENTICAL (never evaluated at
-  // all): `candidateForAfterSide` is `candidate` unchanged then, and every
+  // stops): `arrivalFloor` is `candidateForAfterSide.arrivalMin`, always
+  // finite whenever grace > 0 (round 6's own fix on projectGraceForCandidate
+  // above — the SAME HQ-seed floor applies there when the candidate has no
+  // real stop before it either, since it is then the day's first entity
+  // too) — never a bare, optimistic `candidate.startMin`. `ownDuration` is
+  // its FULL (uncredited) work — never the expected-minutes credit — and
+  // `driveHome` is the same drive-to-HQ estimator find-time's own detour
+  // scoring uses. Grace 0 is BYTE-IDENTICAL (never evaluated at all):
+  // `candidateForAfterSide` is `candidate` unchanged then, and every
   // existing caller's own stored-window day-end check (slot-reservation.js
   // et al.) already covers that case — adding this unconditionally would be
   // a BRAND NEW rejection path this module has never had, not a mirror of one.
   const hasAfterSideNeighbour = after.length > 0
     || liveNeighbourHolds.some((hold) => hold.startMin > candidate.startMin);
   if (candidate.graceMinutes > 0 && !hasAfterSideNeighbour) {
-    const arrivalFloor = Number.isFinite(candidateForAfterSide.arrivalMin)
-      ? candidateForAfterSide.arrivalMin
-      : Math.max(candidate.startMin, SHIFT.startMinutes + driveMin(HQ, coordsOf(candidate)));
+    const arrivalFloor = candidateForAfterSide.arrivalMin;
     const ownDuration = candidate.endMin - candidate.startMin;
     const driveHome = driveMin(coordsOf(candidate), HQ);
     if (arrivalFloor + ownDuration + driveHome > currentDayEndMinutes()) {

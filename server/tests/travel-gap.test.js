@@ -827,3 +827,101 @@ describe('annotateProjectedArrivals coalesces visit_id groups too, including sta
     expect(out.map((s) => s.arrivalMin)).toEqual([540, 540]);
   });
 });
+
+// Codex round 6 P1s on #5310 — both projectGraceForCandidate consumers that
+// had drifted from projectDayChain (the SAME timeline annotateProjectedArrivals
+// walks), found by a structural review after rounds 4-5 kept surfacing one
+// input path at a time.
+describe('projectGraceForCandidate routes through projectDayChain, not a second parallel formula (Codex round 6 on #5310)', () => {
+  beforeEach(() => { process.env.SLOT_TRAVEL_BUFFER_MINUTES = '15'; });
+
+  // Finding #1 (travel-gap.js:518): a candidate with NO real stop before it
+  // used to reach the after-side check completely unannotated (no
+  // arrivalMin at all), so its effective end was measured from its bare,
+  // possibly-graced-early advertised start rather than its own real HQ
+  // arrival — silently accepting a later real stop its true (late) finish
+  // would actually collide with.
+  describe('a first-of-day candidate (no before-neighbour) is measured from its REAL HQ arrival against a later stop', () => {
+    // Same mocked-haversine precedent as find-time-hq-leading-gap-grace.test.js
+    // (20 miles -> 56 minutes via the real, unmocked milesToDriveMinutes
+    // model): dayOpen 08:00 (480) + 56 = HQ arrival 536 (08:56). Candidate
+    // offered 08:00-09:00 (480-540, no padding), grace 90 (offering 56
+    // minutes before the real HQ arrival is comfortably inside a 90-minute
+    // grace). Real finish (effective end) = 536 + 60 = 596 (09:56); +15
+    // buffer = 611 (10:11) is the earliest a later stop can safely start.
+    function loadIsolatedTravelGap() {
+      let isolated;
+      jest.isolateModules(() => {
+        jest.doMock('../services/route-optimizer', () => ({
+          ...jest.requireActual('../services/route-optimizer'),
+          haversine: () => 20,
+        }));
+        isolated = require('../services/scheduling/travel-gap');
+      });
+      jest.dontMock('../services/route-optimizer');
+      return isolated;
+    }
+    const candidate = { startMin: 480, endMin: 540, windowMinutes: 60, expectedMinutes: 60, lat: 27.4, lng: -82.4, graceMinutes: 90 };
+
+    test('a new stop at 10:00 (600) — 11 minutes short of the real 10:11 clearance — is refused, not silently accepted', () => {
+      const isolatedTravelGap = loadIsolatedTravelGap();
+      const newStop = { id: 'new', startMin: 600, endMin: 660, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+      const conflicts = isolatedTravelGap.travelGapConflicts(candidate, [newStop]);
+      expect(conflicts.map((c) => c.reason)).toEqual(['travel_gap']);
+    });
+
+    test('a new stop at 10:15 (615), past the real clearance, is fine', () => {
+      const isolatedTravelGap = loadIsolatedTravelGap();
+      const newStop = { id: 'new', startMin: 615, endMin: 675, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+      expect(isolatedTravelGap.travelGapConflicts(candidate, [newStop])).toEqual([]);
+    });
+
+    test('grace 0 is byte-identical: the SAME 10:00 stop is fine (no HQ-lateness concept at grace 0 — the un-graced code path never offered a start earlier than it could reach anyway)', () => {
+      const isolatedTravelGap = loadIsolatedTravelGap();
+      const newStop = { id: 'new', startMin: 600, endMin: 660, windowMinutes: 60, expectedMinutes: 60, lat: null, lng: null };
+      expect(isolatedTravelGap.travelGapConflicts({ ...candidate, graceMinutes: 0 }, [newStop])).toEqual([]);
+    });
+  });
+
+  // Finding #2 (travel-gap.js:438/518's `annotate`): a candidate placed
+  // right after a visit_id group used to be measured against ONE member's
+  // own individual (un-combined) credit, understating the group's real
+  // combined occupancy.
+  describe('a candidate after a visit_id group is measured against the GROUP\'S combined effective end, not one member\'s own', () => {
+    // Same staggered-window group as the coalescing describe block above:
+    // m1 09:00-10:00 (own credit 60), m2 09:30-11:00 (own credit 90) — group
+    // arrives on time at 540 (09:00, clears the 480 HQ-seed floor). A
+    // candidate can never start before m2's own RAW end (660, 11:00 — a
+    // real overlap regardless of any credit, G3), so the observable
+    // difference is what happens for a candidate starting JUST past that
+    // raw floor: fixed combined credit SUMS to 150, clamped to the
+    // 120-minute combined window (540-660) -> real combined effective end
+    // 660, +15 buffer = 675 (11:15). The BUGGY per-member read instead
+    // based effectiveEnd on m2's own 90-minute credit from the SHARED
+    // (group) arrival 540 -> 630 — 30 minutes BELOW m2's own raw end (660),
+    // so the buggy gap check was never even binding past the overlap floor:
+    // it would have accepted ANY start at/after 660 with 0 minutes to
+    // spare, when the route genuinely needs 675.
+    const m1 = { id: 'v2a', startMin: 540, endMin: 600, expectedMinutes: 60, lat: null, lng: null, visit_id: 'visit-6' };
+    const m2 = { id: 'v2b', startMin: 570, endMin: 660, expectedMinutes: 90, lat: null, lng: null, visit_id: 'visit-6' };
+    const candidate = (graceMinutes) => ({
+      startMin: 665, endMin: 685, windowMinutes: 20, expectedMinutes: 20, lat: null, lng: null, graceMinutes,
+    }); // 11:05, just past m2's own raw end (660) — never an overlap either way
+
+    test('grace 5 — the BUGGY threshold (645) says 0 minutes late and passes; the REAL 675 threshold says 10 minutes late, over a 5-minute grace — refused', () => {
+      expect(travelGapConflicts(candidate(5), [m1, m2]).map((c) => c.reason)).toEqual(['travel_gap']);
+    });
+
+    test('grace 10 — exactly covers the real 10-minute lateness — fine; grace 9 does not', () => {
+      expect(travelGapConflicts(candidate(10), [m1, m2])).toEqual([]);
+      expect(travelGapConflicts(candidate(9), [m1, m2]).map((c) => c.reason)).toEqual(['travel_gap']);
+    });
+
+    test('grace 0 is byte-identical: the ordinary (non-grouped) pairwise check against m2 alone still applies, unrelated to this fix', () => {
+      // m2's own raw end (660) + 15 buffer = 675 > 665 -> still a plain
+      // travel_gap violation at grace 0, same as before this whole lane —
+      // grace 0 never reads any credited/combined shape at all.
+      expect(travelGapConflicts(candidate(0), [m1, m2]).map((c) => c.reason)).toEqual(['travel_gap']);
+    });
+  });
+});
