@@ -131,5 +131,7 @@ describe('customer_visit_photos cards follow the visit-prep gates at request tim
     expect(chain.join).toHaveBeenCalledWith('technicians as t', 't.id', 's.technician_id');
     expect(chain.where).toHaveBeenCalledWith('t.field_dispatchable', true);
     expect(chain.where).toHaveBeenCalledWith('t.employment_status', 'active');
+    // …inside the canonical technician access window.
+    expect(chain.where).toHaveBeenCalledWith('s.scheduled_date', '>=', require('../services/technician-visit-scope').techAccessCutoff());
   });
 });

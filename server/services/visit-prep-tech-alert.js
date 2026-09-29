@@ -44,6 +44,7 @@ const { visitPrepPhotosLive, visitPrepTechAlertsLive } = require('../config/feat
 const { isAssignable, applyAssignable } = require('./technician-eligibility');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { dateOnlyString } = require('../utils/datetime-et');
+const { techAccessCutoff } = require('./technician-visit-scope');
 
 const TYPE = 'customer_visit_photos';
 
@@ -179,7 +180,11 @@ function scopePhotoCardsToLiveVisits(q, conn) {
         .join('technicians as t', 't.id', 's.technician_id')
         .whereRaw("s.id = (tech_notifications.payload->>'scheduled_service_id')::uuid")
         .whereRaw('s.technician_id = tech_notifications.technician_id')
-        .whereNotIn('s.status', OFF_ROUTE_STATUSES);
+        .whereNotIn('s.status', OFF_ROUTE_STATUSES)
+        // The canonical technician access window (technician-visit-scope.js):
+        // past it the Visit Brief and its photos refuse the tech, so the card
+        // goes too (Codex #5303 r12 P1).
+        .where('s.scheduled_date', '>=', techAccessCutoff());
       applyAssignable(liveVisit, 't');
     });
   });
