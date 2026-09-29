@@ -23,7 +23,11 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   coveredTermsAsOf: jest.fn(() => require('../models/db')('annual_prepay_terms')),
   serviceMatchesCoverage: jest.fn((row, type) => row.service_type === type),
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
-  _private: { PREPAY_INVOICE_COLLECTED_STATUSES: ['paid', 'prepaid'] },
+  _private: {
+    PREPAY_INVOICE_COLLECTED_STATUSES: ['paid', 'prepaid'],
+    coverageRowsForTerm: jest.fn(async () => []),
+    dateOnly: (d) => (d == null ? null : String(d).slice(0, 10)),
+  },
 }));
 jest.mock('../services/invoice', () => ({
   anyInvoiceLinkedToVisit: jest.fn(),
@@ -120,7 +124,7 @@ function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], comp
     let completedCheck = false;
     const c = {};
     if (table === 'customers as c') churnedChain = c;
-    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'whereNotExists', 'leftJoin', 'join', 'select', 'count', 'as', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'whereExists', 'whereNotExists', 'leftJoin', 'join', 'select', 'count', 'as', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
       c[m] = jest.fn(() => c);
     }
     c.where = jest.fn((...args) => { if (args[0] === 'ss.status' && args[1] === 'completed') completedCheck = true; return c; });
@@ -1011,6 +1015,8 @@ describe('churned customer with live work (class 4)', () => {
     expect(result).toMatchObject({ churnedLiveWork: 0, alerted: 0 });
     expect(churnedChain.where).toHaveBeenCalledWith('c.pipeline_stage', 'churned');
     expect(churnedChain.whereNull).toHaveBeenCalledWith('c.deleted_at');
+    // Churned outside the cancel steps only: the processor stamps churn_episode_id.
+    expect(churnedChain.whereNull).toHaveBeenCalledWith('c.churn_episode_id');
     // Every leg of the churn guard's live work, plus unsent invoices (the real SQL is proven on Postgres).
     for (const table of ['scheduled_services as sv', 'scheduled_services as so', 'annual_prepay_terms as pt', 'invoices as inv']) {
       expect(db).toHaveBeenCalledWith(table);
