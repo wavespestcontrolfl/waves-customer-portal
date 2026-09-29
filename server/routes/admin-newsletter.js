@@ -18,6 +18,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
 const crypto = require('crypto');
 const { linkToCustomer, linkManyToCustomers, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
+const NewsletterSubscribers = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
@@ -397,12 +398,31 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
 // GET /api/admin/newsletter/sends
 router.get('/sends', async (req, res, next) => {
   try {
+    // `correctable` below reads archived-customer links: repair stale ones
+    // first, as every audience read does, so a row whose archived link has a
+    // live twin counts as outstanding (codex round 18 P2). Best effort — a
+    // failed sweep must not blank the History list.
+    try {
+      await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
+    } catch (err) {
+      logger.warn(`[newsletter] relink before /sends failed: ${err.message}`);
+    }
     // Order by effective send date (sent_at for sent rows, otherwise created_at)
     // so Beehiiv-imported historical posts slot into chronological order
     // instead of bunching at "now" by import time.
     const rows = await db('newsletter_sends')
       .leftJoin('technicians', 'newsletter_sends.created_by', 'technicians.id')
-      .select('newsletter_sends.*', 'technicians.name as created_by_name')
+      .select(
+        'newsletter_sends.*',
+        'technicians.name as created_by_name',
+        // Whether a Resume still has someone to mail: a failed/sent campaign
+        // with an outstanding retryable ledger row can have its copy
+        // corrected in place and resumed (PATCH correct-and-resume; the same
+        // predicate as hasOutstandingDeliveries, codex round 14 P2).
+        db.raw('EXISTS (?) AS has_outstanding', [
+          NewsletterSender.outstandingEligibleDeliveries('newsletter_sends.id', { correlate: true }).select(db.raw('1')),
+        ]),
+      )
       .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')
       .limit(500);
 
@@ -413,6 +433,7 @@ router.get('/sends', async (req, res, next) => {
       ...row,
       rates: computeSendRates(row),
       sending_stale: NewsletterSender.sendingClaimIsStale(row),
+      correctable: ['failed', 'sent'].includes(row.status) && row.has_outstanding === true,
     }));
 
     // Pooled aggregate is summed across ALL sent campaigns in the DB — not
@@ -628,9 +649,47 @@ router.patch('/sends/:id', async (req, res, next) => {
   try {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
-    if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
+    // Correct-and-resume (codex round 12 on #5187): a partially delivered
+    // campaign ('failed' / 'sent' with a delivery ledger) whose stored copy
+    // the resume re-validation now rejects is corrected HERE, in place — it
+    // keeps its publicly readable state (the web version the first batch
+    // received stays up) and the next Resume reaches only the ledger's
+    // outstanding rows (sendCampaign's ledger guard). Copy fields only: the
+    // audience is the ledger and the type is locked by the guards below.
+    // Only while a Resume still has someone to mail (an outstanding retryable
+    // ledger row): a fully delivered campaign's archive stays what its
+    // recipients received (codex round 14 P2).
+    const correctingDelivered = ['failed', 'sent'].includes(send.status)
+      && await NewsletterSender.hasOutstandingDeliveries(send.id);
+    if (!['draft', 'scheduled'].includes(send.status) && !correctingDelivered) {
+      return res.status(400).json({ error: 'can only edit drafts or scheduled sends, or correct the copy of a partially delivered campaign' });
+    }
 
     const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial, eventIds } = req.body;
+    if (correctingDelivered) {
+      // Immutable on a partially delivered campaign: the audience (the
+      // ledger), the type (locked by the guards below) and the event lineup.
+      // The composer sends the stored type back on every save, so an
+      // UNCHANGED value passes and only a change is refused (codex round 13
+      // P2).
+      const sameJson = (left, right) => JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+      const storedEventIds = Array.isArray(send.event_ids) ? send.event_ids : (() => {
+        try { return JSON.parse(send.event_ids || '[]'); } catch { return []; }
+      })();
+      const changesImmutable = (newsletterType !== undefined && newsletterType !== send.newsletter_type)
+        || (segmentFilter !== undefined && !sameJson(segmentFilter, send.segment_filter))
+        || (eventIds !== undefined && !sameJson([...(Array.isArray(eventIds) ? eventIds : [])].sort(), [...storedEventIds].sort()));
+      if (changesImmutable) {
+        return res.status(400).json({ error: 'a partially delivered campaign can only have its copy corrected — its audience is the delivery ledger and its type and event lineup are fixed' });
+      }
+      // Every recipient's A/B variant is already fixed in the ledger: adding
+      // or removing subject B would leave the outstanding rows in a variant
+      // sendCampaign never iterates, and the campaign could finalize as sent
+      // with nobody mailed (codex round 13 P1). Rewording B is fine.
+      if (subjectB !== undefined && Boolean(subjectB) !== Boolean(send.subject_b)) {
+        return res.status(400).json({ error: 'cannot add or remove subject B on a partially delivered campaign — every recipient\'s variant is already assigned' });
+      }
+    }
 
     // Factual-lock integrity: a flagship ("local-weekly-fresh-events") draft was
     // generated through the fact-locked, hallucination-gated pipeline. Both the
@@ -659,6 +718,20 @@ router.patch('/sends/:id', async (req, res, next) => {
         && newsletterType !== 'reengagement') {
       return res.status(400).json({
         error: 'Cannot change a re-engagement (win-back) newsletter to another type — the sunset lane keys on it. Delete and recreate instead.',
+      });
+    }
+
+    // Same class of guard for the Pest Insider: its proof kill switch
+    // (GATE_PEST_INSIDER_PROOF) and the fact-register claim scan both key on
+    // newsletter_type='pest-insider-monthly'. A template swap in the composer
+    // replaces only the HTML body, so retyping the draft would carry its old
+    // text body, subject or preview past both gates. Refuse the change —
+    // delete + recreate to genuinely retype.
+    if (newsletterType !== undefined
+        && send.newsletter_type === 'pest-insider-monthly'
+        && newsletterType !== 'pest-insider-monthly') {
+      return res.status(400).json({
+        error: 'Cannot change a Pest Insider newsletter to another type — it would bypass its fact-register send gate and proof kill switch. Delete and recreate instead.',
       });
     }
 
@@ -710,9 +783,48 @@ router.patch('/sends/:id', async (req, res, next) => {
       .some((value) => value !== undefined);
     const invalidatesProof = send.status === 'scheduled' && !!send.proof_approved_at && contentChanged;
 
-    const updatedCount = await db('newsletter_sends')
+    if (correctingDelivered) {
+      // The corrected copy is written to the row and served on the public
+      // web version at once, and a fully delivered campaign gives nobody a
+      // reason to click Resume — so the correction itself must pass the
+      // same claim validation a send does, here, not only in
+      // prepareResumeCampaign (pre-push audit P1 on fcd51e3fca). A
+      // Pest Insider by its type; a promoted legacy flagship by its calendar
+      // link, exactly as the send path classifies it.
+      const typedFor = requiresClaimValidation(send.newsletter_type)
+        ? send.newsletter_type
+        : ((send.newsletter_type === null && await isFlagshipSend(send)) ? FLAGSHIP_TYPE_KEY : null);
+      if (typedFor) {
+        const corrected = {
+          ...send,
+          newsletter_type: typedFor,
+          subject: subject ?? send.subject,
+          subject_b: subjectB !== undefined ? subjectB : send.subject_b,
+          html_body: htmlBody ?? send.html_body,
+          text_body: textBody ?? send.text_body,
+          preview_text: previewText ?? send.preview_text,
+        };
+        const lockedPrices = await lockedPricesForSend(corrected, db);
+        const { errors } = validateNewsletterDraft(corrected, { recipientCount: 1, lockedPrices });
+        if (errors.length > 0) {
+          return res.status(400).json({ error: 'Validation failed — the corrected copy still carries a blocked claim', errors });
+        }
+      }
+    }
+
+    const saveQuery = db('newsletter_sends')
       .where({ id: req.params.id })
-      .whereIn('status', ['draft', 'scheduled'])
+      .whereIn('status', correctingDelivered ? [send.status] : ['draft', 'scheduled']);
+    // A correction is bound to the exact row version inspected above (codex
+    // round 19 P2): a Resume that claimed, mailed and re-finalized the
+    // campaign in between leaves the same status but a later updated_at, so
+    // the save finds nothing (409) instead of rewriting the archive of a
+    // campaign with nobody left to receive the correction. The +1 ms absorbs
+    // sub-millisecond precision the driver drops on read.
+    if (correctingDelivered && send.updated_at) {
+      saveQuery.where('updated_at', '<', new Date(new Date(send.updated_at).getTime() + 1));
+    }
+    const updatedCount = await saveQuery
       .update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,
@@ -912,14 +1024,59 @@ router.post('/sends/:id/send', async (req, res) => {
     }
 
     // Fire-and-forget. Don't await — the response should land before the
-    // first recipient is queued.
-    NewsletterSender.sendCampaign(req.params.id, { force }).catch(async (err) => {
+    // first recipient is queued. The claim is bound to the exact row version
+    // this handler just validated (status, updated_at, approval): an edit
+    // landing between here and the claim leaves the claim empty instead of
+    // broadcasting content nobody validated.
+    NewsletterSender.sendCampaign(req.params.id, {
+      force,
+      expect: { status: send.status, updatedAt: send.updated_at, proofApprovedAt: send.proof_approved_at },
+    }).catch(async (err) => {
       // ALREADY_CLAIMED = another worker (scheduler tick, or a second
       // manual click that beat us to the atomic claim) is actively
       // sending this row. Do NOT flip to 'failed' or we'd overwrite an
       // in-flight campaign — let the winner finish and stamp 'sent'.
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter] background send ${req.params.id} already claimed by another worker — no-op`);
+        return;
+      }
+      if (err.code === 'VERSION_CHANGED') {
+        // The route already answered 202: tell the operator the send did
+        // NOT happen (the draft changed under them), instead of letting the
+        // row sit as an edited draft they believe was dispatched (codex
+        // round 9).
+        logger.info(`[newsletter] background send ${req.params.id} changed after validation — not dispatching that version`);
+        // triggerNotification can resolve without delivering anything (no
+        // bell row, no push — { bellWritten: false, push: null }), so the
+        // result is checked, not just the absence of a throw — the same
+        // predicate newsletter-proof.js's notifyProof uses (codex round 11).
+        // An undelivered notice is logged AND written as a critical audit
+        // event, so the "not sent" fact survives somewhere durable.
+        let delivered = false;
+        let failure = null;
+        try {
+          const { triggerNotification } = require('../services/notification-triggers');
+          const result = await triggerNotification('newsletter_send_not_dispatched', { sendId: req.params.id, subject: send.subject });
+          delivered = result?.bellWritten === true || Number(result?.push?.sent) > 0;
+        } catch (notifyErr) {
+          failure = notifyErr.message;
+        }
+        if (!delivered) {
+          logger.error(`[newsletter] not-dispatched notice for ${req.params.id} was not delivered${failure ? `: ${failure}` : ' (no bell, no push)'}`);
+          try {
+            const { recordAuditEvent } = require('../services/audit-log');
+            await recordAuditEvent({
+              actor_type: 'system',
+              action: 'newsletter.send_not_dispatched_unnotified',
+              resource_type: 'newsletter_send',
+              resource_id: req.params.id,
+              metadata: { subject: send.subject },
+              critical: true,
+            });
+          } catch (auditErr) {
+            logger.error(`[newsletter] not-dispatched audit for ${req.params.id} failed: ${auditErr.message}`);
+          }
+        }
         return;
       }
       if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
@@ -1005,11 +1162,11 @@ router.post('/sends/:id/resume', async (req, res) => {
 
     res.status(202).json({ accepted: true, sendId: req.params.id, status: 'resuming' });
   } catch (err) {
-    if (err.code === 'STILL_SENDING' || err.code === 'ALREADY_CLAIMED') {
+    if (err.code === 'STILL_SENDING' || err.code === 'ALREADY_CLAIMED' || err.code === 'VERSION_CHANGED') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
-    if (err.code === 'NOT_RESUMABLE' || err.code === 'NOTHING_TO_RESUME') {
-      return res.status(400).json({ error: err.message, code: err.code });
+    if (err.code === 'NOT_RESUMABLE' || err.code === 'NOTHING_TO_RESUME' || err.code === 'VALIDATION_FAILED') {
+      return res.status(400).json({ error: err.message, code: err.code, errors: err.errors });
     }
     logger.error(`[newsletter] resume dispatch failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: err.message });
