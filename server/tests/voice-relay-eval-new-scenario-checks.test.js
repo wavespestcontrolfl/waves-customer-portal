@@ -344,13 +344,19 @@ describe('mid-thought-pause — tools_performed_include catches a valid-looking 
   });
 });
 
-describe('backchannel-vs-explicit-correction — capture_lead_input_includes can fail on WRONG data, not just a missing call', () => {
+describe('backchannel-vs-explicit-correction — capture_lead_input_asserts can fail on WRONG data, not just a missing call', () => {
   test('capture_lead is called validly, but with the pre-correction address ⇒ the real critical check fails, and blocks the scenario', async () => {
     mockSdk();
     const { replay, scenario } = loadScenario('backchannel-vs-explicit-correction');
-    const realCheck = scenario.expect.find((e) => e.check === 'capture_lead_input_includes');
+    // Codex round-5 P1: capture_lead_input_includes was a case-insensitive
+    // SUBSTRING match, so a near-miss superstring ("188B Palm Harbor Drive")
+    // or the wrong street type ("88B Palm Harbor Road") both still contained
+    // "88B Palm Harbor" and would have passed. capture_lead_input_asserts
+    // with an anchored (^…$) pattern requires the whole field to be the
+    // exact value instead.
+    const realCheck = scenario.expect.find((e) => e.check === 'capture_lead_input_asserts');
     expect(realCheck).toBeTruthy();
-    expect(realCheck.value).toEqual({ address_line1: '88B Palm Harbor' });
+    expect(realCheck.value).toEqual({ address_line1: ['^\\s*88b\\s+palm\\s+harbor\\s+dr(?:ive)?\\.?\\s*$'] });
     expect(realCheck.severity).toBe('critical');
 
     // Turn 1: ack, no tool. Turn 2 (backchannel "Mm-hmm"): ack, no tool.
@@ -379,7 +385,7 @@ describe('backchannel-vs-explicit-correction — capture_lead_input_includes can
     expect(captured).toBeTruthy();
     expect(captured.ok).toBe(true);
     expect(captured.invalid).not.toBe(true);
-    const check = result.checks.find((c) => c.check === 'capture_lead_input_includes');
+    const check = result.checks.find((c) => c.check === 'capture_lead_input_asserts');
     expect(check.status).toBe('fail');
     expect(check.detail).toMatch(/address_line1/);
     // This check is `severity: critical` in the real fixture (bumped from
@@ -578,14 +584,21 @@ describe('interruption-inside-amount-or-date — tool_input_includes can fail wh
   });
 });
 
-describe('interruption-inside-amount-or-date — the corrected lawn price must be spoken in the right unit (per application, never per month)', () => {
+// Codex round-5 P1: the old spoken_never_matches (per-month wording) and
+// spoken_matches_any (price+unit required) checks below are gone from the
+// real fixture, replaced by ONE generic amount_requires_unit check that
+// validates the unit on EVERY quoted price instead of enumerating bad ones
+// — it closed a real gap the old blocklist had (it never named "per year",
+// so "$119 per application and $99 per year" used to pass). These describe
+// blocks now exercise that check through the real harness instead.
+describe('interruption-inside-amount-or-date — amount_requires_unit closes the price+unit gap (Codex round-5 P1, supersedes the old blocklist checks)', () => {
   test('speaking the corrected lawn price as "per month" ⇒ the real critical check fails', async () => {
     mockSdk();
     const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('\\bper month\\b'));
+    const realCheck = scenario.expect.find((e) => e.check === 'amount_requires_unit');
     expect(realCheck).toBeTruthy();
     expect(realCheck.severity).toBe('critical');
-    expect(realCheck.value.fromTurn).toBe(2);
+    expect(realCheck.value).toEqual({ amount: [119, 99], unit: 'application' });
 
     script.push(
       toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
@@ -600,42 +613,83 @@ describe('interruption-inside-amount-or-date — the corrected lawn price must b
     const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
 
     expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    const check = result.checks.find((c) => c.check === 'amount_requires_unit');
     expect(check.status).toBe('fail');
-    expect(check.detail).toMatch(/per month/i);
     expect(result.status).toBe('fail');
   });
 
-  test('speaking the corrected lawn price as "per application" passes the check', async () => {
+  // The actual round-5 P1 gap: "per year" was never on the old enumerated
+  // blocklist (only "monthly"/"a month"/"/mo"/"per month"/etc were).
+  test('speaking the corrected lawn price as "per year" ⇒ the real critical check fails', async () => {
     mockSdk();
     const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('\\bper month\\b'));
+    const realCheck = scenario.expect.find((e) => e.check === 'amount_requires_unit');
     expect(realCheck).toBeTruthy();
 
     script.push(
       toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
       say('Quarterly pest control is $129 per application.'),
       toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
-      say('For lawn care: enhanced $119 per application, premium $99 per application.'),
+      say('For lawn care: enhanced $119 per application, premium $99 per year.'),
       say('All set, thanks.'),
     );
     const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
 
     expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
-    expect(check.status).toBe('pass');
-    expect(result.status).toBe('pass');
+    const check = result.checks.find((c) => c.check === 'amount_requires_unit');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
   });
-});
 
-describe('interruption-inside-amount-or-date — the corrected lawn price figure must actually be spoken', () => {
+  test('speaking the corrected lawn price as "per visit" ⇒ the real critical check fails', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'amount_requires_unit');
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care: enhanced $119 per application, premium $99 per visit.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'amount_requires_unit');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
+  test('speaking the corrected price with NO unit wording at all ⇒ the real critical check fails', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'amount_requires_unit');
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      // The bug this check closes: the bare price figure alone, with no
+      // unit wording at all — easily heard as a flat one-time fee.
+      say('For lawn care: enhanced is $119, premium is $99.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'amount_requires_unit');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
   test('the corrected lawn price is never spoken (Sandy only acks the correction) ⇒ the real critical check fails', async () => {
     mockSdk();
     const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
+    const realCheck = scenario.expect.find((e) => e.check === 'amount_requires_unit');
     expect(realCheck).toBeTruthy();
-    expect(realCheck.severity).toBe('critical');
-    expect(realCheck.value.fromTurn).toBe(2);
 
     script.push(
       toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
@@ -647,15 +701,15 @@ describe('interruption-inside-amount-or-date — the corrected lawn price figure
     const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
 
     expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
+    const check = result.checks.find((c) => c.check === 'amount_requires_unit');
     expect(check.status).toBe('fail');
     expect(result.status).toBe('fail');
   });
 
-  test('speaking one of the corrected lawn figures ($119 or $99) passes the check', async () => {
+  test('speaking either corrected figure ($119 or $99) as "per application" passes the check', async () => {
     mockSdk();
     const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
+    const realCheck = scenario.expect.find((e) => e.check === 'amount_requires_unit');
     expect(realCheck).toBeTruthy();
 
     script.push(
@@ -668,7 +722,30 @@ describe('interruption-inside-amount-or-date — the corrected lawn price figure
     const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
 
     expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
+    const check = result.checks.find((c) => c.check === 'amount_requires_unit');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+
+  // amount is an array (either $119 or $99 satisfies it) — the OR side
+  // passes on its own, not only when both figures happen to appear.
+  test('speaking only the premium figure ($99) as "per application" passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'amount_requires_unit');
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care, the premium program is $99 per application.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'amount_requires_unit');
     expect(check.status).toBe('pass');
     expect(result.status).toBe('pass');
   });
@@ -916,119 +993,6 @@ describe('mid-stream-disconnect-recovery — the false-completion prohibition no
       say("You're welcome, take care."),
     );
     const result = await replay.runScenario({ ...scenario, expect: [neverSpoken] });
-
-    expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
-    expect(check.status).toBe('pass');
-    expect(result.status).toBe('pass');
-  });
-});
-
-describe('interruption-inside-amount-or-date — "per application" wording is itself required, not just the bare price figure', () => {
-  test('speaking the corrected price with NO "per application" wording ⇒ the real critical check fails', async () => {
-    mockSdk();
-    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
-    expect(realCheck).toBeTruthy();
-    expect(realCheck.severity).toBe('critical');
-
-    script.push(
-      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
-      say('Quarterly pest control is $129 per application.'),
-      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
-      // The bug this fix closes: the bare price figure alone, with no unit
-      // wording at all — easily heard as a flat one-time fee.
-      say('For lawn care: enhanced is $119, premium is $99.'),
-      say('All set, thanks.'),
-    );
-    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
-
-    expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
-    expect(check.status).toBe('fail');
-    expect(result.status).toBe('fail');
-  });
-
-  test('speaking the corrected price WITH "per application" wording passes the check', async () => {
-    mockSdk();
-    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
-    expect(realCheck).toBeTruthy();
-
-    script.push(
-      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
-      say('Quarterly pest control is $129 per application.'),
-      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
-      say('For lawn care: enhanced $119 per application, premium $99 per application.'),
-      say('All set, thanks.'),
-    );
-    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
-
-    expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
-    expect(check.status).toBe('pass');
-    expect(result.status).toBe('pass');
-  });
-});
-
-describe('interruption-inside-amount-or-date — the monthly-wording prohibition now covers equivalent phrasings, not just literal "per month"', () => {
-  test('"a month" wording fails the check', async () => {
-    mockSdk();
-    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('\\ba month\\b'));
-    expect(realCheck).toBeTruthy();
-    expect(realCheck.severity).toBe('critical');
-
-    script.push(
-      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
-      say('Quarterly pest control is $129 per application.'),
-      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
-      say('For lawn care: enhanced is $119 a month, premium is $99 a month.'),
-      say('All set, thanks.'),
-    );
-    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
-
-    expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
-    expect(check.status).toBe('fail');
-    expect(result.status).toBe('fail');
-  });
-
-  test('"/mo" shorthand fails the check', async () => {
-    mockSdk();
-    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('/mo\\b'));
-    expect(realCheck).toBeTruthy();
-
-    script.push(
-      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
-      say('Quarterly pest control is $129 per application.'),
-      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
-      say('For lawn care: enhanced is $119/mo, premium is $99/mo.'),
-      say('All set, thanks.'),
-    );
-    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
-
-    expect(result.error).toBeUndefined();
-    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
-    expect(check.status).toBe('fail');
-    expect(result.status).toBe('fail');
-  });
-
-  test('"per application" wording (never a monthly form) still passes the check', async () => {
-    mockSdk();
-    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
-    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('\\ba month\\b'));
-    expect(realCheck).toBeTruthy();
-
-    script.push(
-      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
-      say('Quarterly pest control is $129 per application.'),
-      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
-      say('For lawn care: enhanced $119 per application, premium $99 per application.'),
-      say('All set, thanks.'),
-    );
-    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
 
     expect(result.error).toBeUndefined();
     const check = result.checks.find((c) => c.check === 'spoken_never_matches');

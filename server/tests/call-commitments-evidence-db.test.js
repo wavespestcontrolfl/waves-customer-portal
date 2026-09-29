@@ -120,7 +120,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   // under, and a near-miss that must not close.
   const inbound = (w, extra = {}) => db('call_log').insert({
     twilio_call_sid: `CA${'5'.repeat(24)}${w.n}in${Object.keys(extra).length}`, direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, status: 'completed',
-    duration_seconds: 75, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }), customer_id: w.customerId, created_at: later(), ...extra,
+    duration_seconds: 75, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false, is_spam: false } }), customer_id: w.customerId, created_at: later(), ...extra,
   }).returning('id').then(([r]) => { made.callIds.push(r.id); return r; });
   // A call a person placed through the staff bridge that reached a live conversation.
   const outboundCall = (w, extra = {}) => db('call_log').insert({
@@ -707,5 +707,284 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const booked = await visit(w, { created_at: later(120) });
     expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
     expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_id: booked.id, basis: 'visit_booked_for_same_customer_within_14_days' });
+  });
+
+  test('the lapse scan never lists a DIRECT call proof: an unlinked promise returned by a staff call to a linked customer stays closed without flapping', async () => {
+    // The promise call has no customer, so the direct lookup matches the
+    // callback by phone; the staff call back itself is linked to a customer.
+    const w = await world({ kind: 'callback', customer: false });
+    const [other] = await db('customers').insert({ first_name: `Linked${w.n}`, phone: `+1555557${w.n}` }).returning('id');
+    made.customerIds.push(other.id);
+    const back = await outboundCall(w, { customer_id: other.id });
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+    const closed = await row(w.commitment.id);
+    expect(closed.fulfillment).toMatchObject({ record_id: back.id, strength: 'direct', record_type: 'call_log' });
+    expect(closed.fulfillment.closed_by).toBeUndefined();
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+  });
+
+  // ── A callback is kept by the customer phoning in and talking with a person ──
+  const CB_BASIS = 'caller_called_in_and_talked_with_staff_within_14_days';
+  const outcomeOf = (outcome) => ({ call_outcome: outcome });
+
+  test('callback: the customer phoning in and talking with a person closes it with the proof stored; an ai_transferred call counts, and the switch off leaves it open', async () => {
+    const answered = await world({ kind: 'callback' });
+    const talk = await inbound(answered);
+    const transferred = await world({ kind: 'callback' });
+    const handedOff = await inbound(transferred, outcomeOf('ai_transferred'));
+    process.env.PROMISE_EVIDENCE_CLOSE = 'off';
+    expect(await cc.refreshFulfillment(db, answered.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(answered.commitment.id)).toMatchObject({ status: 'open' });
+    delete process.env.PROMISE_EVIDENCE_CLOSE;
+    for (const [w, call] of [[answered, talk], [transferred, handedOff]]) {
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
+      const closed = await row(w.commitment.id);
+      expect(closed).toMatchObject({ status: 'fulfilled', human_state: null });
+      expect(closed.fulfillment).toMatchObject({
+        kind: 'inbound_call', record_type: 'call_log', record_id: call.id, strength: 'association', basis: CB_BASIS,
+        closed_by: 'promise_evidence', judged_customer_id: w.customerId,
+      });
+      expect(closed.fulfillment.closed_at).toEqual(expect.any(String));
+    }
+    // It shows on the Owed closed list, and Reopen sticks (a person's verdict).
+    expect((await allAutoClosed(7)).map((c) => c.id)).toEqual(expect.arrayContaining([answered.commitment.id, transferred.commitment.id]));
+    await cc.applyHumanUpdate(db, answered.commitment.id, { action: 'reopen' });
+    await cc.refreshFulfillment(db, answered.call.id);
+    expect(await row(answered.commitment.id)).toMatchObject({ status: 'open', human_state: 'confirmed' });
+  });
+
+  test('callback near-misses stay open: voicemail, an assistant-handled call, an invalid extraction, another customer on the same phone, before the floor, after the window, the promise\'s own call, a sandbox call, an outbound call', async () => {
+    const stayOpen = async (seed, kind = 'callback') => {
+      const w = await world({ kind });
+      await seed(w);
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    };
+    await stayOpen((w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) }));
+    await stayOpen((w) => inbound(w, outcomeOf('voicemail')));
+    await stayOpen((w) => inbound(w, outcomeOf('ai_handled')));
+    // A spam / robocall: the extraction's verdict, the processor's terminal status (call_outcome is left unset), or a non-conversation nature or disposition.
+    await stayOpen((w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false, is_spam: true } }) }));
+    await stayOpen((w) => inbound(w, { processing_status: 'spam' }));
+    await stayOpen((w) => inbound(w, { processing_status: 'voicemail' }));
+    await stayOpen((w) => inbound(w, { answered_by: 'voicemail' }));
+    for (const call_nature of ['robocall', 'spam_solicitation', 'wrong_number', 'silent_or_noise', 'vendor_or_partner']) {
+      await stayOpen((w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ call_nature, meta: { is_voicemail: false, is_spam: false } }) }));
+    }
+    for (const disposition of ['spam_discarded', 'wrong_number_closed', 'no_action_needed', 'vendor_logged']) {
+      await stayOpen((w) => inbound(w, { disposition }));
+    }
+    // A stamp missing altogether is not a conversation.
+    await stayOpen((w) => inbound(w, { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }) }));
+    await stayOpen((w) => inbound(w, { v2_extraction_status: 'failed' }));
+    await stayOpen((w) => inbound(w, { v2_extraction_status: null }));
+    // No stamp on is_voicemail: the extraction never said it was a conversation.
+    await stayOpen((w) => inbound(w, { ai_extraction_enriched: null }));
+    // Another customer on the same phone (a shared household number): never a phone-only match.
+    await stayOpen(async (w) => {
+      const [other] = await db('customers').insert({ first_name: `Household${w.n}`, phone: w.phone }).returning('id');
+      made.customerIds.push(other.id);
+      await inbound(w, { customer_id: other.id });
+    });
+    // An unlinked call from the same phone.
+    await stayOpen((w) => inbound(w, { customer_id: null }));
+    // Before the floor (the end of the promise call) and after the 14-day window.
+    await stayOpen((w) => inbound(w, { created_at: new Date(Date.now() - 3 * DAY + 30 * 1000) }));
+    await stayOpen((w) => inbound(w, { created_at: new Date(Date.now() - 3 * DAY + 15 * DAY) }));
+    // A sandbox bake-off call, and the caller merely being called (outbound).
+    await stayOpen((w) => inbound(w, { source: 'voice_relay_sandbox' }));
+    await stayOpen((w) => inbound(w, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, source: null }));
+    // The promise's own call, however it reads, is never its follow-up.
+    await stayOpen((w) => db('call_log').where({ id: w.call.id })
+      .update({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }) }));
+    // Only a callback promise takes it: another kind ignores a conversation.
+    await stayOpen((w) => inbound(w), 'send_estimate');
+    // A stated floor after the call moves the start: a call before it does not count.
+    const floored = await world({ kind: 'callback' });
+    await db('call_commitments').where({ id: floored.commitment.id }).update({ due_at: later(600), due_type: 'floor' });
+    await inbound(floored);
+    expect(await cc.refreshFulfillment(db, floored.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(floored.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+  });
+
+  test('a callback kept by an inbound call is reopened when that call is relinked to another customer: the lapse scan lists it and the refresh reopens it', async () => {
+    const [other] = await db('customers').insert({ first_name: 'RelinkedEvidence', phone: '+15555559997' }).returning('id');
+    made.customerIds.push(other.id);
+    const w = await world({ kind: 'callback' });
+    const talk = await inbound(w);
+    const untouched = await world({ kind: 'callback' });
+    await inbound(untouched);
+    for (const x of [w, untouched]) await cc.refreshFulfillment(db, x.call.id);
+    expect((await row(w.commitment.id)).status).toBe('fulfilled');
+    const before = await cc.listLapsedEvidenceClosedCallIds(db);
+    expect(before).not.toContain(w.call.id);
+    expect(before).not.toContain(untouched.call.id);
+    // The EVIDENCE call moves to another customer; the promise call stays put.
+    await db('call_log').where({ id: talk.id }).update({ customer_id: other.id });
+    const lapsed = await cc.listLapsedEvidenceClosedCallIds(db);
+    expect(lapsed).toContain(w.call.id);
+    expect(lapsed).not.toContain(untouched.call.id);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1, failed: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'open', human_state: null, fulfillment: null, fulfilled_at: null });
+    // Unlinked altogether reads the same; and a deleted evidence call is a lapse too.
+    await db('call_log').where({ id: talk.id }).update({ customer_id: w.customerId });
+    await cc.refreshFulfillment(db, w.call.id);
+    expect((await row(w.commitment.id)).status).toBe('fulfilled');
+    await db('call_log').where({ id: talk.id }).update({ customer_id: null });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
+  });
+
+  describe('a callback\'s own direct proof reads the shared staff-contact rules', () => {
+    const closesWith = async (seed) => {
+      const w = await world({ kind: 'callback' });
+      const record = await seed(w);
+      const result = await cc.refreshFulfillment(db, w.call.id);
+      return { w, record, result, saved: await row(w.commitment.id) };
+    };
+
+    test('an automated outbound call (collections voice) or a call with no live conversation is not a returned callback', async () => {
+      for (const extra of [
+        { source: 'collections_voice' },
+        { source: null },
+        { source: 'admin-click', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) },
+        { source: 'admin-click', v2_extraction_status: 'failed' },
+        { source: 'admin-click', metadata: JSON.stringify({ customer_leg: { status: 'no-answer', duration_seconds: 0 } }) },
+        { source: 'admin-click', metadata: JSON.stringify({ customer_leg: { status: 'completed', duration_seconds: 59 } }) },
+        { source: 'admin-click', duration_seconds: 45 },
+      ]) {
+        const { result, saved } = await closesWith((w) => outboundCall(w, extra));
+        expect(result).toMatchObject({ fulfilled: 0 });
+        expect(saved).toMatchObject({ status: 'open', fulfillment: null });
+      }
+    });
+
+    test('a staff-bridge call back with a live conversation closes it directly, whichever bridge source placed it', async () => {
+      for (const source of ['admin-click', 'admin-callback', 'tech-click']) {
+        const { record, result, saved } = await closesWith((w) => outboundCall(w, { source }));
+        expect(result).toMatchObject({ fulfilled: 1 });
+        expect(saved).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: record.id, strength: 'direct', basis: 'callback_returned_connected_outbound_call' } });
+      }
+    });
+
+    test('a queued, unstamped or undelivered manual text is not a returned callback; a delivered composer text, a delivered staff-queue send and an accepted push notice are', async () => {
+      const composer = JSON.stringify({ human_authored: true });
+      for (const seed of [
+        // 'manual' with no human stamp: automations reuse the type.
+        (w) => sms(w, 'manual', { status: 'delivered' }),
+        // Stamped but only queued, or sent with no provider acceptance for a push.
+        (w) => sms(w, 'manual', { status: 'queued', metadata: composer }),
+        (w) => sms(w, 'manual', { status: 'sent', metadata: composer }),
+        (w) => sms(w, 'ai_assistant_reply', { status: 'delivered' }),
+        // A stamped text that only queued: the push proof needs provider acceptance too.
+        (w) => sms(w, 'manual', { status: 'sent', from_phone: 'push', metadata: composer }),
+      ]) {
+        const { result, saved } = await closesWith(seed);
+        expect(result).toMatchObject({ fulfilled: 0 });
+        expect(saved).toMatchObject({ status: 'open', fulfillment: null });
+      }
+      for (const seed of [
+        (w) => sms(w, 'manual', { status: 'delivered', metadata: composer }),
+        (w) => sms(w, 'ai_approved', { status: 'delivered' }),
+        (w) => sms(w, 'ai_revised', { status: 'delivered' }),
+        (w) => sms(w, 'manual', { status: 'sent', from_phone: 'push', metadata: JSON.stringify({ human_authored: true, providerAccepted: true }) }),
+      ]) {
+        const { record, saved } = await closesWith(seed);
+        expect(saved).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: record.id, strength: 'direct', basis: 'callback_returned_by_human_text' } });
+      }
+    });
+
+    test('a text from the sending admin counts as a person\'s (admin_user_id)', async () => {
+      const [admin] = await db('technicians').insert({ name: 'Synthetic Evidence Staff', email: `staff-${Date.now()}@example.invalid`, role: 'technician', employment_status: 'active' }).returning('id');
+      try {
+        const { record, saved } = await closesWith((w) => sms(w, 'manual', { status: 'delivered', admin_user_id: admin.id }));
+        expect(saved).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: record.id, strength: 'direct' } });
+      } finally {
+        await db('sms_log').whereIn('id', made.smsIds).update({ admin_user_id: null });
+        await db('technicians').where({ id: admin.id }).del();
+      }
+    });
+  });
+
+  test('a reprocessed evidence call that no longer reads as a conversation is listed by the lapse scan and the refresh reopens the callback', async () => {
+    const meta = (m) => JSON.stringify({ meta: { is_voicemail: false, is_spam: false, ...m } });
+    const changes = [
+      { v2_extraction_status: 'failed' },
+      { ai_extraction_enriched: meta({ is_voicemail: true }) },
+      { ai_extraction_enriched: meta({ is_spam: true }) },
+      { processing_status: 'spam' },
+      { call_outcome: 'ai_handled' },
+      { call_outcome: 'voicemail' },
+      { disposition: 'wrong_number_closed' },
+      { ai_extraction_enriched: JSON.stringify({ call_nature: 'robocall', meta: { is_voicemail: false, is_spam: false } }) },
+    ];
+    const worlds = [];
+    for (const change of changes) {
+      const w = await world({ kind: 'callback' });
+      const talk = await inbound(w);
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      worlds.push({ w, talk, change });
+    }
+    const steady = await world({ kind: 'callback' });
+    await inbound(steady);
+    await cc.refreshFulfillment(db, steady.call.id);
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toEqual(expect.arrayContaining([worlds[0].w.call.id]));
+    for (const { talk, change } of worlds) await db('call_log').where({ id: talk.id }).update(change);
+    const lapsed = await cc.listLapsedEvidenceClosedCallIds(db);
+    expect(lapsed).not.toContain(steady.call.id);
+    for (const { w, change } of worlds) {
+      expect(lapsed).toContain(w.call.id);
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1, failed: 0 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+      expect(change).toBeTruthy();
+    }
+  });
+
+  test('a promise call with no usable phone (blocked caller ID) linked to a customer still closes on that customer\'s later inbound conversation', async () => {
+    const w = await world({ kind: 'callback' });
+    await db('call_log').where({ id: w.call.id }).update({ from_phone: null });
+    const talk = await inbound(w);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: talk.id, basis: CB_BASIS } });
+    // Nothing phone-based is looked up: a text to the number the call never had proves nothing.
+    const bare = await world({ kind: 'callback' });
+    await db('call_log').where({ id: bare.call.id }).update({ from_phone: null });
+    await staffText(bare, { status: 'delivered' });
+    expect(await cc.refreshFulfillment(db, bare.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(bare.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+  });
+
+  describe('the direct proof pages past a long run of candidates the shared predicates refuse', () => {
+    const BULK = 201; // one more than a page
+    test('a valid staff call back after 201 invalid staff calls still closes the callback', async () => {
+      const w = await world({ kind: 'callback' });
+      const at = later(5);
+      const rows = Array.from({ length: BULK }, (_, i) => ({
+        twilio_call_sid: `CA${'2'.repeat(24)}${w.n}b${String(i).padStart(3, '0')}`, direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone,
+        status: 'completed', duration_seconds: 80, customer_id: w.customerId, created_at: at, source: 'admin-click',
+        v2_extraction_status: 'failed', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }),
+      }));
+      const inserted = await db('call_log').insert(rows).returning('id');
+      inserted.forEach((r) => made.callIds.push(r.id));
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+      const good = await outboundCall(w, { created_at: later(20) });
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: good.id, strength: 'direct' } });
+    });
+
+    test('a delivered composer text after 201 undelivered ones still closes the callback', async () => {
+      const w = await world({ kind: 'callback' });
+      const at = later(5);
+      const rows = Array.from({ length: BULK }, () => ({
+        direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, customer_id: w.customerId, message_type: 'manual', status: 'sent',
+        created_at: at, metadata: JSON.stringify({ human_authored: true }),
+      }));
+      const inserted = await db('sms_log').insert(rows).returning('id');
+      inserted.forEach((r) => made.smsIds.push(r.id));
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+      const good = await staffText(w, { status: 'delivered', created_at: later(20) });
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: good.id, strength: 'direct' } });
+    });
   });
 });

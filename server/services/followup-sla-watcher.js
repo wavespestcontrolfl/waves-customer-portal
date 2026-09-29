@@ -39,14 +39,15 @@ const NotificationService = require('./notification-service');
 const commitments = require('./call-commitments');
 const { etDateString, etCalendarDayOf, etParts } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const {
+  STAFF_APPROVED_SMS_TYPES, STAFF_CALL_SOURCES, operatorReply, personCallBack, smsDelivered,
+  operatorSentSql, smsContactSelects, callContactSelects,
+} = require('./staff-contact');
 
 // Same trigger as the overdue watchdog: registered tech-visible, so the
 // bell reaches the staff who work the Owed tab.
 const TRIGGER_KEY = 'call_commitment_overdue';
 const SLA_KINDS = Object.freeze(['callback', 'send_estimate', 'schedule_visit']);
-// Human-authored texts, as the callback proof counts them: typed by staff,
-// or an AI draft staff approved or revised before it went out.
-const HUMAN_TEXT_TYPES = Object.freeze(['manual', 'ai_approved', 'ai_revised']);
 const SLA_MINUTES = 60;
 const DAY_OPEN = '08:00';
 const DAY_CLOSE = '20:00';
@@ -135,9 +136,10 @@ function selectMissed(rows, { now = new Date(), calendar = OPEN_CALENDAR } = {})
 }
 
 // Customer activity after the promise that the fulfillment proof does not
-// model: a visit booked, a call that reached the customer (on any SLA kind,
-// not only callbacks), or a staff-typed text that was sent. Automated
-// texts (reminders, confirmations) never count as a follow-up.
+// model: a visit booked, a person's call that reached the customer (on any
+// SLA kind, not only callbacks), or a person's text that was delivered.
+// Automated calls and texts (collections, reminders, confirmations) never
+// count as a follow-up.
 // The caller's number on the promise's call: the dialed number on an
 // outbound call, the caller ID on an inbound one.
 // The call-commitments digits rule (phoneDigits / phoneWhere), so the pager
@@ -289,12 +291,14 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
   const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
     .where('created_at', '>', bookedFloor).whereNull('recurring_parent_id').whereNull('parent_service_id')
     .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at', 'scheduled_date', 'window_start') : [];
-  // A call that reached the customer — the proof's bar for a returned
-  // callback (completed customer leg of 60 s or more, affirmatively not
-  // voicemail), applied to every SLA kind; never a voice-relay sandbox call.
-  const calls = await byContact(conn('call_log'))
+  // A call a person placed that reached the customer: the proof's bar for a
+  // returned callback (staff-contact.js personCallBack: a staff-bridge
+  // source, a live conversation in the reviewed extraction, a card call's
+  // customer leg completed at 60 s or more), applied to every SLA kind;
+  // never an automated outbound call, never a voice-relay sandbox call.
+  const calls = (await byContact(conn('call_log'))
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-    .whereRaw("direction LIKE 'outbound%'").where('created_at', '>', floor)
+    .whereRaw("direction LIKE 'outbound%'").whereIn('source', STAFF_CALL_SOURCES).where('created_at', '>', floor)
     // The proof's two connected-call arms: a callback-card bridge whose
     // customer leg completed (>= 60 s, affirmatively not voicemail), or an
     // ordinary outbound call — no card link — whose own duration is >= 60 s.
@@ -309,15 +313,20 @@ async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
           .whereRaw('COALESCE(duration_seconds, 0) >= 60');
       });
     })
-    .select('id', 'customer_id', 'to_phone', 'created_at');
-  // A text a person typed that actually went out: the staff send paths stamp
-  // BOTH message_type 'manual' and admin_user_id (either alone admits
-  // automated texts), and only queued/sent/delivered rows reached anyone.
-  const texts = await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
+    .select('id', 'customer_id', 'to_phone', 'created_at', ...callContactSelects(conn))).filter(personCallBack);
+  // A text a person sent that reached the customer: the proof's rule
+  // (staff-contact.js operatorReply + smsDelivered: the composer's stamp,
+  // the sending admin or a staff-approved draft, and a delivered text). A
+  // bare 'manual' type is reused by automated senders, and a queued text
+  // reached no one yet.
+  const texts = (await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
     .whereRaw("direction LIKE 'out%'").where('created_at', '>', floor)
-    .whereIn('message_type', HUMAN_TEXT_TYPES).whereNotNull('admin_user_id')
-    .whereIn('status', ['queued', 'sent', 'delivered'])
-    .select('customer_id', 'to_phone', 'created_at');
+    .where(function personSent() {
+      this.whereRaw(operatorSentSql('sms_log')).orWhereIn('message_type', STAFF_APPROVED_SMS_TYPES);
+    })
+    .whereIn('status', ['sent', 'delivered'])
+    .select('customer_id', 'to_phone', 'created_at', 'status', 'message_type', 'from_phone', ...smsContactSelects(conn)))
+    .filter((t) => operatorReply(t) && smsDelivered(t));
   // A quote delivered to the customer rather than linked to this call: the
   // canonical proof records it as an association hint on the promise
   // (fulfillment kind estimate_sent, status still open) — its ownership rules
