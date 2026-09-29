@@ -117,9 +117,10 @@ describe('rider-series planRiderDates', () => {
     const plan = planRiderDates({ hostDates, lastRiderDate: anchor, horizonDate: horizon });
     expect(plan.length).toBeGreaterThan(0);
     for (const d of plan) expect(d <= horizon).toBe(true);
-    // The next date beyond the last planned one would exceed the horizon.
-    const last = plan[plan.length - 1];
-    expect(addDays(last, MIN_GAP_DAYS) > horizon || true).toBe(true);
+    // Nothing the horizon allows is left out: the plan is exactly the
+    // unbounded plan cut at the horizon.
+    const unbounded = planRiderDates({ hostDates, lastRiderDate: anchor, horizonDate: addDays(anchor, 2000) });
+    expect(plan).toEqual(unbounded.filter((d) => d <= horizon));
   });
 
   test('empty host list plus an already-past horizon plans nothing', () => {

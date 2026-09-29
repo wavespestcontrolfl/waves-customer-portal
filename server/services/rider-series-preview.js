@@ -597,8 +597,12 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
     const isPlanRow = isPlanSeriesRow(r);
     const isReschedulePending = isPlanRow && c.why === 'rescheduled_pending';
     if (isReschedulePending) reschedulePending = true;
-    const performed = r.track_state === 'complete'
-      || (r.status === 'completed' && !TERMINAL_TRACK_STATES.includes(r.track_state));
+    // A cancelled/skipped/no-show status wins over a stale 'complete'
+    // tracker, the same precedence classifyRiderRow applies: such a visit
+    // never happened, so it never anchors.
+    const operationallyTerminal = ['cancelled', 'skipped', 'no_show'].includes(r.status);
+    const performed = !operationallyTerminal && (r.track_state === 'complete'
+      || (r.status === 'completed' && !TERMINAL_TRACK_STATES.includes(r.track_state)));
     if (isPlanRow && !isReschedulePending && (performed || c.pinned === true)) {
       const d = dateOnly(r.scheduled_date);
       if (d && (!lastRiderDate || d > lastRiderDate)) lastRiderDate = d;

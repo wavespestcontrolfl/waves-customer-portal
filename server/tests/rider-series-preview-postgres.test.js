@@ -912,4 +912,12 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       spy.mockRestore();
     }
   });
+
+  test.each(['cancelled', 'skipped', 'no_show'])('a %s row whose tracker still reads complete never anchors', async (status) => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const [, second] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc');
+    await trx('scheduled_services').where({ id: second.id }).update({ status, track_state: 'complete' });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(preview.anchor).not.toBe(dateOnlyStr(second.scheduled_date));
+  });
 });
