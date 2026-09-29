@@ -123,7 +123,18 @@ function walksMatch(previous, current) {
 export function proofLabel(row) {
   const proof = row.fulfillment || {};
   if (proof.kind === "customer_left") return `Customer left ${fmtWhen(proof.matched_at, false) || ""}`.trim();
+  // A model judged that a person's text or call back delivered the promise.
+  if (proof.kind === "person_contact") {
+    const how = proof.record_type === "call_log" ? "staff call back" : "staff text";
+    return `Kept: ${how}${proof.matched_at ? ` ${fmtWhen(proof.matched_at)}` : ""}`;
+  }
   return `Kept: ${KEPT_LABEL[proof.kind] || humanize(proof.kind) || "follow-up"}${proof.matched_at ? ` ${fmtWhen(proof.matched_at)}` : ""}`;
+}
+
+// The words a model quoted from the record that kept the promise, if any.
+export function proofQuote(row) {
+  const proof = row.fulfillment || {};
+  return proof.kind === "person_contact" && proof.quote ? String(proof.quote).slice(0, 240) : null;
 }
 
 export function whoLabel(row) {
@@ -175,6 +186,7 @@ function AutoClosedList({ party, rows, canReopen, busyId, onReopen, hasMore, loa
             <span className="text-ink-tertiary">· {KIND_LABEL[row.kind] || humanize(row.kind)}</span>
             <span className="text-ink-secondary">· {proofLabel(row)}</span>
             {row.description && <span className="basis-full text-ink-primary">{row.description}</span>}
+            {proofQuote(row) && <span className="basis-full text-ink-secondary">Judged kept from: "{proofQuote(row)}"</span>}
             {canReopen && (
               <Button size="sm" variant="ghost" disabled={busyId === row.id} onClick={() => onReopen(row)} className="ml-auto">Reopen</Button>
             )}

@@ -42,7 +42,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-w
 const { parseETDateTime, etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { promiseEvidenceCloseLive } = require('../config/feature-gates');
-const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects } = require('./staff-contact');
+const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects, operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 
 // A due time typed by the office arrives either as an ISO instant (the
 // panel converts its datetime-local value with the ET helper) or, from any
@@ -1613,6 +1613,19 @@ async function returnedOutboundCall(conn, { after, until = null, phone, customer
   return row ? { id: row.id, at: row.created_at } : null;
 }
 
+// Not a proactive draft: a text sent from a draft with no inbound anchor
+// (message_drafts.sms_log_id unset, sent within two minutes of this row) is
+// not a reply. Over the sms_log alias `os`; the callback proof's fence
+// (humanTextTo) and the contact check's witness loader share it.
+function withoutProactiveDraft(builder) {
+  builder.whereNotExists(function proactiveDraft() {
+    this.select(1).from("message_drafts as mdx")
+      .whereNull("mdx.sms_log_id")
+      .whereRaw("(mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))")
+      .whereRaw("mdx.sent_at BETWEEN os.created_at - interval '2 minutes' AND os.created_at + interval '2 minutes'");
+  });
+}
+
 async function humanTextTo(conn, { after, until = null, phone, customerId }) {
   const row = await firstContactMatch((cursor, size) => conn("sms_log as os")
     .where("os.direction", "outbound")
@@ -1622,12 +1635,7 @@ async function humanTextTo(conn, { after, until = null, phone, customerId }) {
     })
     .where("os.created_at", ">", after)
     .modify((b) => { if (until) b.where("os.created_at", "<=", until); })
-    .whereNotExists(function proactiveDraft() {
-      this.select(1).from("message_drafts as mdx")
-        .whereNull("mdx.sms_log_id")
-        .whereRaw("(mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))")
-        .whereRaw("mdx.sent_at BETWEEN os.created_at - interval '2 minutes' AND os.created_at + interval '2 minutes'");
-    })
+    .modify(withoutProactiveDraft)
     .modify((b) => { phoneWhere(b, "os.to_phone", phone); sameCustomerWhere(b, "os.customer_id", customerId); afterCursor(b, "os", cursor); })
     .orderBy([{ column: "os.created_at", order: "asc" }, { column: "os.id", order: "asc" }])
     .limit(size)
@@ -2328,6 +2336,14 @@ async function judgeOpenRow(conn, commitment, call) {
 const CLOSED_BY_EVIDENCE = "promise_evidence";
 const storedProof = (proof, customerId, closedAt = new Date().toISOString()) => (proof.strength === "direct" ? proof
   : { ...proof, closed_by: CLOSED_BY_EVIDENCE, judged_customer_id: customerId || null, closed_at: closedAt });
+// A close a MODEL judged (call-commitment-contact-check.js, PROMISE_CONTACT_CHECK):
+// a person's later delivered text or call back to the call's customer that
+// delivered what an "other" promise said it would. It rests on that one
+// record, so the re-judge below keeps it while the record still stands
+// (contactCloseStands, no model call) and the lapse scan lists it when the
+// record goes.
+const PERSON_CONTACT_KIND = "person_contact";
+const PERSON_CONTACT_BASIS = "model_judged_person_contact";
 // The same instant as SQL over a call_commitments alias: the stored ISO-Z
 // text, whose text order is time order (compared with ISO strings), so the
 // partial index call_commitments_evidence_closed_idx can serve it.
@@ -2468,12 +2484,24 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
   let failed = 0;
   let reopened = 0;
   for (const c of kept) {
+    const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
+    // A close a model judged from one person's text or call back stays while
+    // that record stands — read again here, deterministically, whether or not
+    // PROMISE_CONTACT_CHECK is on (the switch only stops NEW checks). Anything
+    // else falls through to the ordinary re-judge below, which reopens it.
+    if (prior?.basis === PERSON_CONTACT_BASIS) {
+      const stands = await require("./call-commitment-contact-check").contactCloseStands(conn, c, row, prior).catch((err) => {
+        logger.warn(`[call-commitments] contact-close lookup failed for ${c.id}: ${err.message}`);
+        return LOOKUP_FAILED;
+      });
+      if (stands === LOOKUP_FAILED) { failed += 1; continue; }
+      if (stands) continue;
+    }
     const proof = await judgeOpenRow(conn, c, row).catch((err) => {
       logger.warn(`[call-commitments] fulfillment lookup failed for ${c.id}: ${err.message}`);
       return LOOKUP_FAILED;
     });
     if (proof === LOOKUP_FAILED) { failed += 1; continue; }
-    const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
     const keeps = proofThatKeeps(c, proof, prior);
     // A row still closed keeps the time it first closed.
     const stored = keeps ? storedProof(keeps, row.customer_id, prior?.closed_at) : null;
@@ -2598,6 +2626,8 @@ async function listLapsedEvidenceClosedCallIds(conn) {
        LEFT JOIN customers cu ON cu.id = CASE WHEN (cc.fulfillment ->> 'kind') = ? THEN (cc.fulfillment ->> 'record_id')::uuid END
        -- Keyed by the proof's own record id: no evidence finder ever records a sandbox call.
        LEFT JOIN call_log ev ON ev.id = (CASE WHEN (cc.fulfillment ->> 'record_type') = 'call_log' THEN (cc.fulfillment ->> 'record_id')::uuid END)
+       -- A person's text that a model judged kept the promise: the same, by id.
+       LEFT JOIN sms_log sw ON sw.id = (CASE WHEN (cc.fulfillment ->> 'record_type') = 'sms_log' AND (cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' THEN (cc.fulfillment ->> 'record_id')::uuid END)
       WHERE ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
@@ -2610,7 +2640,18 @@ async function listLapsedEvidenceClosedCallIds(conn) {
               AND (ev.id IS NULL OR ev.customer_id::text IS DISTINCT FROM (cc.fulfillment ->> 'judged_customer_id')
                 -- A reprocess can also change what the call was: it must
                 -- still be the conversation inboundConversation accepts.
-                OR ((cc.fulfillment ->> 'kind') = 'inbound_call' AND (${inboundConversationSql('ev')}) IS NOT TRUE)))
+                OR ((cc.fulfillment ->> 'kind') = 'inbound_call' AND (${inboundConversationSql('ev')}) IS NOT TRUE)
+                -- A model-judged close on a person's call back: it must still
+                -- be a call a person placed that reached the customer
+                -- (personCallBack, read from the same extraction fields).
+                OR ((cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}'
+                  AND (ev.direction IS DISTINCT FROM 'outbound' OR (${personCallBackSql('ev')}) IS NOT TRUE))))
+          -- ... or on a person's delivered text: gone, relinked to another
+          -- customer, or no longer a text a person sent that was delivered.
+          OR ((cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'sms_log'
+              AND (sw.id IS NULL OR sw.customer_id::text IS DISTINCT FROM (cc.fulfillment ->> 'judged_customer_id')
+                OR sw.direction IS DISTINCT FROM 'outbound'
+                OR (${operatorReplySql('sw')} AND ${smsDeliveredSql('sw')}) IS NOT TRUE))
           OR ((cc.fulfillment ->> 'kind') = ?
               AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id))
           -- ISO-Z text both sides (the stored proof's matched_at), so a
@@ -3498,6 +3539,14 @@ module.exports = {
   refreshFulfillment,
   listSlotKeptCallIds,
   listLapsedEvidenceClosedCallIds,
+  storedProof,
+  associationFrom,
+  evidenceBoundary,
+  windowEnd,
+  refreshableVerdictSql,
+  withoutProactiveDraft,
+  PERSON_CONTACT_KIND,
+  PERSON_CONTACT_BASIS,
   applyHumanUpdate,
   editRestatesRow,
   callbackEditEventMetadata,
