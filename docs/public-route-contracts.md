@@ -48,6 +48,22 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 ## Routes
 
+Customer page-view log (no payload, gate, or header change): the data GET of
+`/api/public/appointment/:token`, `/api/public/reschedule/:token`,
+`/api/public/reservice/:token`, `/api/public/secure-card/:token`,
+`/api/public/track/:token`, and `/api/public/inspection/:token` records one
+`customer_page_views` row once the token has resolved to a row (never for a
+malformed, unknown, expired-track, or dark-gated token; a resolved-but-closed
+page such as a completed visit or a closed card request still counts as a
+view), through `server/services/customer-page-views.js`. It is fire-and-forget
+(never awaited, never throws, never alters the response), skips bot/preview
+user agents, staff browsers (`waves_admin` marker cookie), and
+`WAVES_ADMIN_IPS`, and stores only a sha256 of the IP and a 500-char user
+agent. The same page + subject + ip hash is deduped inside a fixed lookback
+from its latest row: 10 minutes by default, 60 for the track page (its 30s
+poll hits the same endpoint), so a page left open past the window logs one
+more row per window.
+
 Invoice/receipt address preservation: a saved `invoices.customer_address_snapshot`
 supplies the displayed customer address on `/api/pay/:token`, `/invoice.pdf`,
 `/api/receipt/:token` and its PDF. Legacy rows retain their existing address

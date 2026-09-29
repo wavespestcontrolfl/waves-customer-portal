@@ -35,6 +35,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { isTrackTokenLive } = require('../services/track-token-expiry');
 const logger = require('../services/logger');
+const { recordPageView } = require('../services/customer-page-views');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const PhotoService = require('../services/photos');
 const {
@@ -72,6 +73,7 @@ const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
+const TRACK_VIEW_DEDUPE_MINUTES = 60;
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -453,6 +455,14 @@ router.get('/:token', async (req, res, next) => {
     if (!isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
+    // Customer-page-view log. This endpoint is also the 30s en-route poll and
+    // the client sends nothing that tells a poll from a page open, so the
+    // recorder's same-ip/same-visit dedupe window is what keeps polls from
+    // counting as views: 60 minutes, i.e. one tracking session = one view
+    // (bots/staff skipped, never blocks).
+    void recordPageView({
+      req, page: 'track', customerId: row.customer_id, subjectType: 'scheduled_service', subjectId: row.id, dedupeMinutes: TRACK_VIEW_DEDUPE_MINUTES,
+    });
     row = await ensureEnRouteDestinationGeocoded(row);
 
     // Presign the tech's photo (if S3-managed) inside this trusted
