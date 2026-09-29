@@ -90,6 +90,7 @@ function fakeConn(tables = {}) {
     q.update = async (patch) => {
       writes.push({ table, where: { ...q._where }, patch });
       for (const row of (store[table] || [])) {
+        if (q._whereIn && !q._whereIn.vals.includes(row[q._whereIn.col])) continue;
         if (Object.entries(q._where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
       }
       return 1;
@@ -196,7 +197,7 @@ describe('trigger rule', () => {
       submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Quarterly Pest Control' }, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_result: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
   });
 
   test.each([
@@ -228,7 +229,7 @@ describe('trigger rule', () => {
       conn,
     });
     expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_result: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
   });
 
   test('grouped stop: lawn if a live lawn sibling exists even when the requested row is tree & shrub', async () => {

@@ -27,17 +27,8 @@
  * one that never claimed a cap slot ends 'none'.
  *
  * Shared daily cap: this lane spends the SAME `VISIT_PREP_READ_DAILY_CAP`
- * (default 40) the pest read does — `readsToday` below counts every
- * `visit_prep_submissions` row in pending/done/failed regardless of which
- * engine produced it, and the claim below takes the EXACT SAME advisory
- * lock key (`CAP_LOCK_KEY`) the pest read's claimReadSlot does, so a pest
- * and a plant submission claiming at the same instant still serialize
- * against each other's count — a second cap was deliberately not added.
- * The claim/count logic itself is a small, deliberate duplication of
- * visit-prep-pest-read.js's own (rather than extracting a shared module)
- * to avoid touching that already-hardened lane (18+ Codex rounds) for a
- * ~30-line function; both modules must keep CAP_LOCK_KEY and the env var
- * name identical if either changes.
+ * (default 40) and the same locked claim the pest read does, through
+ * visit-prep-read-claim.js — one count, one lock, never a second cap.
  *
  * Storage: `read_result` (jsonb, nullable, migration
  * 20260929080000_visit_prep_plant_read_result.js) holds
@@ -52,74 +43,27 @@ const logger = require('./logger');
 const PhotoService = require('./photos');
 const { identifyPlantV2 } = require('./photo-id-v2/plant-engine');
 const { visitPrepPlantReadLive } = require('../config/feature-gates');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { plantSubjectForStop } = require('./visit-prep-plant-applicability');
 
-const DEFAULT_DAILY_CAP = 40;
-
-function dailyCap() {
-  const value = Number(process.env.VISIT_PREP_READ_DAILY_CAP);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_DAILY_CAP;
-}
+// The daily cap and the locked claim are the SAME ones the pest read uses
+// (visit-prep-read-claim.js): one cap across both engines.
+const {
+  claimReadSlot: claimSharedReadSlot, markUnsupported, dailyCap, etDayStart,
+} = require('./visit-prep-read-claim');
 
 // 'lawn' | 'tree_shrub' | 'unsupported'.
 async function resolveApplicability(svc, conn) {
   return (await plantSubjectForStop(svc, conn)) || 'unsupported';
 }
 
-// Same America/New_York calendar day as the pest read's own etDayStart —
-// kept as its own local copy rather than a shared import (see the module
-// header's duplication note).
-function etDayStart(now = new Date()) {
-  return parseETDateTime(`${etDateString(now)}T00:00`);
-}
-
-async function readsToday(conn, now = new Date()) {
-  const row = await conn('visit_prep_submissions')
-    .whereIn('read_status', ['pending', 'done', 'failed'])
-    .where('created_at', '>=', etDayStart(now))
-    .count('id as count')
-    .first();
-  return Number(row?.count || 0);
-}
-
-// SAME lock key string as visit-prep-pest-read.js's own CAP_LOCK_KEY —
-// deliberate: this is what makes the two engines share one cap under
-// concurrent claims (see the module header). Not imported from that module
-// (a shared constant would be the one part of this duplication worth
-// extracting, but a stray edit to one copy without the other silently
-// breaks the sharing either way, so both files carry a comment pointing at
-// each other instead).
-const CAP_LOCK_KEY = 'visit-prep-pest-read-cap';
-
-// Returns { claimed: true, subject } | 'unsupported' (no longer a plant
-// stop) | 'refused' (cap reached, or not a today submission).
+// Returns { claimed: true, subject } | 'unsupported' | 'refused'.
 async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
-  const { lockStopForRow } = require('./visit-groups');
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await conn.transaction(async (trx) => {
-        if ((await lockStopForRow(trx, svc.id)) === null) return 'unsupported';
-        const { techStopMemberIds } = require('./visit-prep');
-        const members = await techStopMemberIds(svc, trx);
-        await trx('scheduled_services').whereIn('id', [...new Set([svc.id, ...members])]).forShare().select('id');
-        const subject = await plantSubjectForStop(svc, trx);
-        if (!subject) return 'unsupported';
-        // The cap lock last, held only for the count and the claim — the
-        // SAME key the pest read's claim takes (see CAP_LOCK_KEY above).
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
-        const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
-        if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
-        if (await readsToday(trx, now) >= dailyCap()) return 'refused';
-        await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', read_result: null });
-        return { claimed: true, subject };
-      });
-    } catch (err) {
-      if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
-      if (err && err.code === 'VISIT_STOP_MOVED') return 'refused';
-      throw err;
-    }
-  }
+  const out = await claimSharedReadSlot(conn, submissionId, svc, {
+    applicable: (stop, trx) => plantSubjectForStop(stop, trx),
+    pendingPatch: { read_result: null },
+    now,
+  });
+  return out && out.claimed ? { claimed: true, subject: out.value } : out;
 }
 
 async function setReadStatus(conn, submissionId, status, readResult = null) {
@@ -162,7 +106,7 @@ async function triggerVisitPrepPlantRead({
   }
 
   if (applicability === 'unsupported') {
-    await setReadStatus(conn, submissionId, 'unsupported');
+    await markUnsupported(conn, submissionId, logger);
     return;
   }
 
@@ -188,7 +132,7 @@ async function triggerVisitPrepPlantRead({
     return;
   }
   if (claim === 'unsupported') {
-    await setReadStatus(conn, submissionId, 'unsupported');
+    await markUnsupported(conn, submissionId, logger);
     return;
   }
   if (!claim || claim === 'refused' || !claim.claimed) {

@@ -101,6 +101,7 @@ function fakeConn(tables = {}) {
     q.update = async (patch) => {
       writes.push({ table, where: { ...q._where }, patch });
       for (const row of (store[table] || [])) {
+        if (q._whereIn && !q._whereIn.vals.includes(row[q._whereIn.col])) continue;
         if (Object.entries(q._where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
       }
       return 1;
@@ -202,7 +203,7 @@ describe('trigger rule', () => {
       submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Lawn Weed & Feed' }, photos: PHOTOS, conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
   });
 
   test('grouped stop: pest if ANY LIVE member is pest, even when the requested row itself is lawn', async () => {
@@ -273,7 +274,7 @@ describe('trigger rule', () => {
       conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
   });
 });
 
@@ -294,7 +295,7 @@ describe('trigger rule: moved siblings and topics', () => {
       conn,
     });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
   });
 
   test('a RESCHEDULED pest sibling (awaiting a new date) does not count', async () => {
@@ -354,7 +355,7 @@ describe('trigger rule: moved siblings and topics', () => {
     };
     await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
+    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
   });
 
   test('a topic on the submission is not an input: a lawn visit stays unsupported', async () => {
@@ -516,6 +517,17 @@ describe('_internal.etDayStart (cap day = America/New_York calendar day)', () =>
   test('winter (EST) offset', () => {
     const start = _internal.etDayStart(new Date('2026-12-15T15:00:00Z'));
     expect(start.toISOString()).toBe('2026-12-15T05:00:00.000Z');
+  });
+});
+
+describe('unsupported never clobbers the other engine', () => {
+  test('a lawn stop whose row a plant read already claimed (pending) stays pending', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: null }],
+      visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(), read_status: 'pending' }],
+    });
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Lawn Weed & Feed' }, photos: PHOTOS, conn });
+    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('pending');
   });
 });
 

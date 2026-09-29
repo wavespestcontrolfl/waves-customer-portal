@@ -41,15 +41,12 @@ const logger = require('./logger');
 const PhotoService = require('./photos');
 const { identifyPestV2 } = require('./photo-id-v2/pest-engine');
 const { visitPrepPestReadLive } = require('../config/feature-gates');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
-const DEFAULT_DAILY_CAP = 40;
-
-function dailyCap() {
-  const value = Number(process.env.VISIT_PREP_READ_DAILY_CAP);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_DAILY_CAP;
-}
-
+// The daily cap and the locked claim are shared with every visit-prep read
+// engine (visit-prep-read-claim.js).
+const {
+  claimReadSlot: claimSharedReadSlot, markUnsupported, dailyCap, etDayStart,
+} = require('./visit-prep-read-claim');
 const { isPestStop, liveStopServiceTypes } = require('./visit-prep-pest-applicability');
 
 
@@ -61,62 +58,15 @@ async function resolveApplicability(svc, conn) {
   return (await isPestStop(svc, conn)) ? 'pest' : 'unsupported';
 }
 
-// The cap's day is the America/New_York calendar day (AGENTS.md), not
-// the DB session's UTC day: midnight ET as an instant, bound as a param.
-function etDayStart(now = new Date()) {
-  return parseETDateTime(`${etDateString(now)}T00:00`);
-}
-
-async function readsToday(conn, now = new Date()) {
-  const row = await conn('visit_prep_submissions')
-    .whereIn('read_status', ['pending', 'done', 'failed'])
-    .where('created_at', '>=', etDayStart(now))
-    .count('id as count')
-    .first();
-  return Number(row?.count || 0);
-}
-
-// Count and claim in ONE transaction under an advisory lock, so two
-// submissions at the same moment can't both pass the cap check. The
-// 'pending' write IS the claim: it is what readsToday counts.
-const CAP_LOCK_KEY = 'visit-prep-pest-read-cap';
-
 // Returns 'claimed', 'unsupported' (no longer a pest stop) or 'refused'
 // (cap reached, or not a today submission).
 async function claimReadSlot(conn, submissionId, svc, now = new Date()) {
-  // The canonical stop lock (visit-groups.js lockStopForRow) serializes this
-  // proof against every grouping writer (join, move, detach), so the member
-  // set can't change under it; the members' rows are then share-locked
-  // against status/type writers that don't take the stop lock. A stop that
-  // moved under the peek retries, like visit-prep.js withStopLock
-  // (Codex #5305 r18 P1).
-  const { lockStopForRow } = require('./visit-groups');
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await conn.transaction(async (trx) => {
-        if ((await lockStopForRow(trx, svc.id)) === null) return 'unsupported';
-        const { techStopMemberIds } = require('./visit-prep');
-        const members = await techStopMemberIds(svc, trx);
-        await trx('scheduled_services').whereIn('id', [...new Set([svc.id, ...members])]).forShare().select('id');
-        if (!(await isPestStop(svc, trx))) return 'unsupported';
-        // The cap lock last, held only for the count and the claim.
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
-        // The count is by submission day, so only a TODAY (ET) submission
-        // may claim: one committed just before midnight whose trigger runs
-        // after it is not read, rather than spending the new day's cap
-        // uncounted (Codex #5305 r4 P2). Its photos still reach the tech.
-        const own = await trx('visit_prep_submissions').where({ id: submissionId }).first('created_at');
-        if (!own || new Date(own.created_at) < etDayStart(now)) return 'refused';
-        if (await readsToday(trx, now) >= dailyCap()) return 'refused';
-        await trx('visit_prep_submissions').where({ id: submissionId }).update({ read_status: 'pending', read_ref: null });
-        return 'claimed';
-      });
-    } catch (err) {
-      if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
-      if (err && err.code === 'VISIT_STOP_MOVED') return 'refused';
-      throw err;
-    }
-  }
+  const out = await claimSharedReadSlot(conn, submissionId, svc, {
+    applicable: (stop, trx) => isPestStop(stop, trx),
+    pendingPatch: { read_ref: null },
+    now,
+  });
+  return out && out.claimed ? 'claimed' : out;
 }
 
 async function setReadStatus(conn, submissionId, status, readRef = null) {
@@ -194,7 +144,7 @@ async function triggerVisitPrepPestRead({
   }
 
   if (applicability === 'unsupported') {
-    await setReadStatus(conn, submissionId, 'unsupported');
+    await markUnsupported(conn, submissionId, logger);
     return;
   }
 
@@ -220,7 +170,7 @@ async function triggerVisitPrepPestRead({
     return;
   }
   if (claimed === 'unsupported') {
-    await setReadStatus(conn, submissionId, 'unsupported');
+    await markUnsupported(conn, submissionId, logger);
     return;
   }
   if (claimed !== 'claimed') {
