@@ -695,6 +695,9 @@ const SLOT_SCOPE_WORDS = new Set([
   'seventeen', 'eighteen', 'nineteen', 'twenty', 'thirty', 'forty', 'fifty', 'sixty',
 ]);
 const SLOT_SCOPE_BREAKS = new Set(['and', 'but']);
+// A coordinated clause that points back at the appointment ("and that is next
+// week", "but it moves to the 30th") describes it, so it is in scope too.
+const APPOINTMENT_REFERENCES = new Set(['that', 'it', 'its', 'this', 'those', 'them', 'one', 'appointment', 'visit', 'service', 'time', 'slot', 'day', 'date']);
 function slotScopeIsPlain(sentences, words) {
   if (!words || typeof words !== 'object') return true;
   const slotTokens = new Set([words.day, words.hour].filter((w) => typeof w === 'string').flatMap((w) => normalize(w).split(' ')));
@@ -702,14 +705,17 @@ function slotScopeIsPlain(sentences, words) {
   const allowed = (t) => SLOT_SCOPE_WORDS.has(t) || recorded.has(t) || /^\d+(?:st|nd|rd|th)?$/.test(t);
   return sentences.every(({ ns }) => {
     const toks = ns.split(' ');
-    const at = toks.flatMap((t, i) => (slotTokens.has(t) ? [i] : []));
-    if (!at.length) return true;
-    let from = at[0];
-    while (from > 0 && !SLOT_SCOPE_BREAKS.has(toks[from - 1])) from -= 1;
-    let to = at[at.length - 1] + 1;
-    while (to < toks.length && !SLOT_SCOPE_BREAKS.has(toks[to])) to += 1;
+    const clauses = [];
+    let start = 0;
+    toks.forEach((t, i) => {
+      if (SLOT_SCOPE_BREAKS.has(t)) { clauses.push(toks.slice(start, i)); start = i + 1; }
+    });
+    clauses.push(toks.slice(start));
+    const inScope = clauses.filter((c) => c.some((t) => slotTokens.has(t)));
+    if (!inScope.length) return true;
+    const scoped = clauses.filter((c) => c.some((t) => slotTokens.has(t) || APPOINTMENT_REFERENCES.has(t)));
     // "Following your request, ..." is courtesy; "following Thursday" is a date.
-    return toks.slice(from, to).every((t, i, run) => allowed(t) && !(t === 'following' && slotTokens.has(run[i + 1])));
+    return scoped.every((c) => c.every((t, i) => allowed(t) && !(t === 'following' && slotTokens.has(c[i + 1]))));
   });
 }
 function plainCommitment(text, words) {
