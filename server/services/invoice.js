@@ -452,6 +452,32 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // conversion, or annual-prepay stamping can commit between the two, and the
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
+// True when this invoice bills an upcoming visit OTHER than its own anchor,
+// read from the invoice's own lines (client_id scheduled_<id>_primary — every
+// service mint writes one) plus the combined first-application stamp
+// (scheduled_services.first_application_invoice_id). Fails closed.
+async function invoiceBillsAnotherUpcomingVisit(conn, invoiceRow) {
+  let items = invoiceRow.line_items;
+  if (typeof items === "string") { try { items = JSON.parse(items); } catch { items = []; } }
+  const lineIds = (Array.isArray(items) ? items : [])
+    .map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ""))?.[1])
+    .filter((id) => id && id !== String(invoiceRow.scheduled_service_id));
+  if (!invoiceRow.id && !lineIds.length) return false; // nothing to match on
+  try {
+    const row = await conn("scheduled_services")
+      .where(function () {
+        this.where("first_application_invoice_id", invoiceRow.id);
+        if (lineIds.length) this.orWhereIn("id", lineIds);
+      })
+      .whereNot("id", invoiceRow.scheduled_service_id)
+      .whereNotIn("status", ["cancelled", "canceled", "completed", "no_show", "skipped", "rescheduled"])
+      .first("id");
+    return Boolean(row);
+  } catch (err) {
+    throw new Error(`Could not verify the other visits this invoice bills — refusing to unvoid (${err.message})`);
+  }
+}
+
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
   // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) additions — both
   // independent of the scheduled_service_id early-return below, so they
@@ -575,32 +601,15 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
       "Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead",
     );
   }
-  // A combined first-application invoice also bills every NON-anchor
-  // member stamped with its id (scheduled_services.first_application_
-  // invoice_id); the anchor-only checks above never see them. A member can
-  // be re-priced while this invoice is void (the re-price guard only sees
-  // live invoices — Codex r6 P1 on #5301), and the invoice's member lines
-  // are gross accepted amounts that can't be compared with the new price,
-  // so restoring one while it still covers another upcoming visit is
-  // refused outright; staff create a new invoice instead. Fail closed.
-  if (invoiceRow.id) {
-    let coveredMember = null;
-    try {
-      let q = conn("scheduled_services")
-        .where("first_application_invoice_id", invoiceRow.id)
-        .whereNotIn("status", ["cancelled", "canceled", "completed", "no_show", "skipped", "rescheduled"]);
-      q = q.whereNot("id", invoiceRow.scheduled_service_id);
-      coveredMember = await q.first("id");
-    } catch (err) {
-      if (!/first_application_invoice_id/.test(String(err.message))) {
-        throw new Error(`Could not verify the visits this combined invoice covers — refusing to unvoid (${err.message})`);
-      }
-    }
-    if (coveredMember) {
-      throw new Error(
-        "Cannot unvoid — this combined first-application invoice also covers other upcoming visits whose prices may have changed since it was voided; create a new invoice instead",
-      );
-    }
+  // A combined first-application invoice also bills OTHER visits (owner
+  // ruling 2026-09-29 on #5301): restoring one while it bills another
+  // upcoming visit could revive an old price that visit was re-priced away
+  // from while this invoice was void. Refused outright — staff create a new
+  // invoice instead.
+  if (await invoiceBillsAnotherUpcomingVisit(conn, invoiceRow)) {
+    throw new Error(
+      "Cannot unvoid — this invoice also bills other upcoming visits whose prices may have changed since it was voided; create a new invoice instead",
+    );
   }
 }
 

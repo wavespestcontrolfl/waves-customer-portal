@@ -469,7 +469,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
       .mockReturnValueOnce(noRow()) // term pre-guard
       .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'confirmed' } })) // fast-fail pass: visit live
-      .mockReturnValueOnce(noRow()) // fast-fail pass: no other upcoming visit on a combined invoice
+      .mockReturnValueOnce(noRow()) // fast-fail pass: bills no other upcoming visit
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft', scheduled_service_id: 'svc-1' })] }))
       .mockReturnValueOnce(noRow()) // TOCTOU term re-check
       .mockReturnValueOnce(noRow()) // money guard
@@ -679,7 +679,7 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
 
   // Codex r6 P1 on #5301: a combined first-application invoice also bills
   // its NON-anchor members; one may have been re-priced while it was void.
-  test('a combined first-application invoice still covering another upcoming visit refuses the restore', async () => {
+  test('an invoice still billing another upcoming visit (stamp or its own member line) refuses the restore', async () => {
     let svcReads = 0;
     const conn = jest.fn((table) => {
       if (String(table).startsWith('scheduled_services')) {
@@ -689,10 +689,10 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
       throw new Error(`unexpected table ${table}`);
     });
     await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: 'anchor' }))
-      .rejects.toThrow(/also covers other upcoming visits/);
+      .rejects.toThrow(/also bills other upcoming visits/);
   });
 
-  test('the covered-member read failing closed refuses the restore', async () => {
+  test('the other-visits read failing closed refuses the restore', async () => {
     let svcReads = 0;
     const conn = jest.fn((table) => {
       svcReads += 1;
@@ -702,7 +702,7 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
       return q;
     });
     await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: 'anchor' }))
-      .rejects.toThrow(/Could not verify the visits this combined invoice covers/);
+      .rejects.toThrow(/Could not verify the other visits this invoice bills/);
   });
 
   test('on: the packet-member read failing closed refuses to unvoid', async () => {

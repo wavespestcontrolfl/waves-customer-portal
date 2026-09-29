@@ -291,61 +291,72 @@ describe('liveInvoice reaches direct and indirect invoices alike', () => {
 // #5253, Codex round 9): one more indirect link, read only under
 // liveInvoice, same shape as the SR/packet reads.
 describe('liveInvoice reaches the combined first-application invoice link', () => {
-  // `anchorInvoices` feeds the plain 'invoices' key, which loadGoverningInvoice
-  // reads for a replacement when the stamp is terminal (the direct
-  // scheduled_service_id read sees them too, but on the ANCHOR's id).
-  // The stamped invoice's LOCKED row comes from 'invoices' (by id), so each
-  // fixture carries it there as well; `lockedStatus` lets it differ from the
-  // unlocked join (an unvoid landing in between — Codex r4 P1).
-  const fixture = (rows, anchorInvoices = [], { lockedStatus, tryLockAcquired = true } = {}) => makeConn({
+  // Simple rule (owner ruling 2026-09-29 on #5301): any non-void invoice on
+  // the anchor (or the stamp itself) that bills THIS member by its own lines.
+  // 'invoices' is the locked candidate read (the fake ignores its filters —
+  // the SQL excludes void rows — so fixtures list only non-void candidates).
+  const fixture = (candidates, { tryLockAcquired = true } = {}) => makeConn({
     hasTables: ALL_TABLES_PRESENT,
     tryLockAcquired,
     byTable: {
       estimate_card_holds: [],
       appointment_card_requests: [],
-      invoices: [
-        ...rows.map((r) => ({ id: r.id, status: lockedStatus || r.status, scheduled_service_id: r.scheduled_service_id, credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: r.total })),
-        ...anchorInvoices,
-      ],
+      invoices: candidates,
       'invoices as inv': [],
       'visit_completion_packet_items as p': [],
-      'appointment_card_requests as acr': [],
-      'scheduled_services as ss': rows,
+      'scheduled_services as ss': [{ member_id: 'v2', stamp_id: 'inv1', anchor_id: 'anchor' }],
     },
   });
-  const stamp = (status) => ({
-    member_id: 'v2', id: 'inv1', status, scheduled_service_id: 'anchor',
-    credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 400,
+  const inv = (id, lines, status = 'draft') => ({
+    id, status, scheduled_service_id: 'anchor', credit_applied: 0, stripe_payment_intent_id: null, total: 400,
+    line_items: JSON.stringify(lines),
   });
-  const replacement = {
-    id: 'inv2', status: 'draft', scheduled_service_id: 'anchor', total: 400, created_at: '2026-09-20T00:00:00Z',
-    line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 400, amount: 400 }]),
-  };
+  const anchorLine = { client_id: 'scheduled_anchor_primary', description: 'Pest Control', quantity: 1, unit_price: 200, amount: 200 };
+  const memberLine = { client_id: 'scheduled_v2_primary', description: 'Lawn Care', quantity: 1, unit_price: 200, amount: 200 };
+  const aggregateLine = { description: 'First service application', quantity: 1, unit_price: 400, amount: 400 };
 
-  test('an open combined first-application invoice blocks the member visit', async () => {
-    const covered = await findBillingCoveredVisits(fixture([stamp('draft')]), [{ id: 'v2' }], { liveInvoice: true });
+  test('the live stamp blocks its member', async () => {
+    const covered = await findBillingCoveredVisits(fixture([inv('inv1', [aggregateLine])]), [{ id: 'v2' }], { liveInvoice: true });
     expect(covered.get('v2')).toMatch(/combined first-application invoice/);
   });
 
-  test('a PAID combined first-application invoice blocks with the generic "money on it" reason', async () => {
-    const covered = await findBillingCoveredVisits(fixture([stamp('paid')]), [{ id: 'v2' }], { liveInvoice: true });
+  test('a PAID stamp blocks with the generic "money on it" reason', async () => {
+    const covered = await findBillingCoveredVisits(fixture([inv('inv1', [aggregateLine], 'paid')]), [{ id: 'v2' }], { liveInvoice: true });
     expect(covered.get('v2')).toMatch(/money on it/);
   });
 
-  test('a void stamp with no replacement on the anchor does not block', async () => {
-    const covered = await findBillingCoveredVisits(fixture([stamp('void')]), [{ id: 'v2' }], { liveInvoice: true });
+  test('no non-void invoice on the anchor: nothing blocks', async () => {
+    const covered = await findBillingCoveredVisits(fixture([]), [{ id: 'v2' }], { liveInvoice: true });
     expect(covered.has('v2')).toBe(false);
   });
 
-  // Codex r2 P1 on #5301: void-and-reissue on the anchor.
-  test('a void stamp REISSUED on the anchor blocks through the live replacement', async () => {
-    const covered = await findBillingCoveredVisits(fixture([stamp('void')], [replacement]), [{ id: 'v2' }], { liveInvoice: true });
+  test("an anchor invoice billing only the anchor doesn't block the member", async () => {
+    const covered = await findBillingCoveredVisits(fixture([inv('inv9', [anchorLine])]), [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.has('v2')).toBe(false);
+  });
+
+  test("ANY anchor invoice carrying the member's own line blocks — even beside an anchor-only one", async () => {
+    const covered = await findBillingCoveredVisits(fixture([inv('inv8', [anchorLine]), inv('inv9', [anchorLine, memberLine])]), [{ id: 'v2' }], { liveInvoice: true });
     expect(covered.get('v2')).toMatch(/combined first-application invoice/);
   });
 
-  test('a locked stamped invoice (55P03) maps to VISIT_BUSY_RETRY, never a raw lock error', async () => {
-    const conn = fixture([stamp('draft')]);
-    const base = conn;
+  test('an unitemized first-application invoice on the anchor blocks every member', async () => {
+    const covered = await findBillingCoveredVisits(fixture([inv('inv9', [aggregateLine])]), [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
+  });
+
+  test("an unrelated unitemized anchor invoice (a repair) doesn't block the member", async () => {
+    const covered = await findBillingCoveredVisits(fixture([inv('inv9', [{ description: 'Door sweep repair', quantity: 1, unit_price: 40, amount: 40 }])]), [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.has('v2')).toBe(false);
+  });
+
+  test("the anchor's mint lock held elsewhere maps to VISIT_BUSY_RETRY", async () => {
+    await expect(findBillingCoveredVisits(fixture([], { tryLockAcquired: false }), [{ id: 'v2' }], { liveInvoice: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
+  });
+
+  test('a locked candidate invoice (55P03) maps to VISIT_BUSY_RETRY, never a raw lock error', async () => {
+    const base = fixture([inv('inv1', [aggregateLine])]);
     const wrapped = (table) => {
       const q = base(table);
       if (table === 'invoices') q.noWait = jest.fn(() => { const e = new Error('lock'); e.code = '55P03'; q.then = (res, rej) => Promise.reject(e).then(res, rej); return q; });
@@ -357,33 +368,8 @@ describe('liveInvoice reaches the combined first-application invoice link', () =
       .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
   });
 
-  test("a void stamp replaced by an ANCHOR-ONLY invoice doesn't block the member (Codex r6 P2)", async () => {
-    const anchorOnly = { ...replacement, line_items: JSON.stringify([{ client_id: 'scheduled_anchor_primary', description: 'Pest Control', quantity: 1, unit_price: 200, amount: 200 }]) };
-    const covered = await findBillingCoveredVisits(fixture([stamp('void')], [anchorOnly]), [{ id: 'v2' }], { liveInvoice: true });
-    expect(covered.has('v2')).toBe(false);
-  });
-
-  test("a void stamp replaced by an itemized invoice with the MEMBER's own line blocks it", async () => {
-    const itemized = { ...replacement, line_items: JSON.stringify([
-      { client_id: 'scheduled_anchor_primary', description: 'Pest Control', quantity: 1, unit_price: 200, amount: 200 },
-      { client_id: 'scheduled_v2_primary', description: 'Lawn Care', quantity: 1, unit_price: 200, amount: 200 },
-    ]) };
-    const covered = await findBillingCoveredVisits(fixture([stamp('void')], [itemized]), [{ id: 'v2' }], { liveInvoice: true });
-    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
-  });
-
-  test('an unvoid landing between the join and the lock is seen: the LOCKED row decides (Codex r4 P1)', async () => {
-    const covered = await findBillingCoveredVisits(fixture([stamp('void')], [], { lockedStatus: 'draft' }), [{ id: 'v2' }], { liveInvoice: true });
-    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
-  });
-
-  test("the anchor's mint lock held elsewhere maps to VISIT_BUSY_RETRY (Codex r4 P1)", async () => {
-    await expect(findBillingCoveredVisits(fixture([stamp('void')], [], { tryLockAcquired: false }), [{ id: 'v2' }], { liveInvoice: true }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
-  });
-
   test('without liveInvoice the combined first-application link is not read', async () => {
-    const covered = await findBillingCoveredVisits(fixture([stamp('draft')]), [{ id: 'v2' }]);
+    const covered = await findBillingCoveredVisits(fixture([inv('inv1', [aggregateLine])]), [{ id: 'v2' }]);
     expect(covered.size).toBe(0);
   });
 });

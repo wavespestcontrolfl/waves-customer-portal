@@ -17585,7 +17585,8 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 //     scheduled_services.first_application_invoice_id — a link deliberately
 //     separate from invoices.scheduled_service_id (which only ever names the
 //     anchor) — so a member visit's own re-price has no other way to find
-//     the invoice covering it.
+//     the invoice covering it (memberBillingInvoiceRows: any non-void
+//     invoice on the anchor that bills the member by its own lines).
 // A free re-service conversion gets no exemption (owner ruling 2026-09-28,
 // #5253 r3: "same rule as any re-price") — staff void or release first. None
 // of the three existing callers (the plan trim, the series-cancel fee rails,
@@ -17621,79 +17622,63 @@ async function findEstimateScopedCommitment(conn, estimateId) {
   return null;
 }
 
-// The combined first-application invoice that GOVERNS each member visit
-// (Codex r2 P1 on #5301): the stamp on scheduled_services.first_application_
-// invoice_id, unless that invoice was voided/refunded and reissued on the
-// anchor — then the live replacement that bills the base application, via
-// the same loadGoverningInvoice the sibling split uses. Resolved once per
-// distinct stamp; a governing invoice that is itself terminal holds nothing
-// and is dropped. Returns rows in the shape findBillingCoveredVisits
-// classifies.
-// Locks (Codex r3 on #5301): the stamped invoices first — the sibling
-// split's own order — so an unvoid can't revive one mid-decision, then the
-// replacement candidates. Every liveInvoice caller already holds a visit
-// row, and the saved-card charge path locks invoice → visit, so both are
-// NOWAIT: contention is a VISIT_BUSY_RETRY, never a deadlock.
-async function governingFirstApplicationRows(conn, ids) {
-  const { loadGoverningInvoice } = require('../services/first-application-sibling-split');
-  const stamped = await conn('scheduled_services as ss')
+// Combined first-application invoices that still bill each member visit
+// (owner ruling 2026-09-29 on #5301 — the simple rule, no replacement-chain
+// tracing): every NON-void invoice on the member's anchor visit, plus the
+// stamp itself, that bills THIS member by its own lines — an itemized
+// invoice names each visit it bills (client_id scheduled_<id>_primary,
+// which every service mint writes); an unitemized base-application invoice
+// ("First service application") bills every member; the live stamp bills
+// its members by construction. Locks: the anchor's mint lock is TRIED
+// first (invoice creation serializes on it, so no new invoice appears
+// before this save commits), then the candidate invoices are locked AND
+// read in one NOWAIT statement. Contention is a VISIT_BUSY_RETRY, never a
+// wait (this save already holds a visit row; the card-charge path locks
+// invoice then visit). Returns rows in findBillingCoveredVisits' shape.
+async function memberBillingInvoiceRows(conn, ids) {
+  const stamps = await conn('scheduled_services as ss')
     .join('invoices as inv', 'inv.id', 'ss.first_application_invoice_id')
     .whereIn('ss.id', ids)
-    .select(
-      'ss.id as member_id', 'inv.id', 'inv.status', 'inv.scheduled_service_id',
-      'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
-    );
-  if (stamped.length === 0) return [];
+    .select('ss.id as member_id', 'inv.id as stamp_id', 'inv.scheduled_service_id as anchor_id');
+  if (stamps.length === 0) return [];
   const busy = () => Object.assign(
     new Error('An invoice for this visit is being updated or charged right now — try the price change again in a moment.'),
     { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
   );
-  const governingById = new Map();
+  const anchorIds = [...new Set(stamps.map((row) => row.anchor_id).filter(Boolean).map(String))].sort();
+  const stampIds = [...new Set(stamps.map((row) => String(row.stamp_id)))].sort();
+  let candidates;
   try {
-    // The anchor's mint lock first (Codex r4 P1): invoice creation on the
-    // anchor serializes on it, so "no replacement exists" stays true
-    // through this save's price write. TRIED, never waited on — this save
-    // already holds a visit row and its own mint lock.
     const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-    const anchorIds = [...new Set(stamped.map((row) => String(row.scheduled_service_id)).filter((id) => id && id !== 'null'))].sort();
     for (const anchorId of anchorIds) {
       if (!(await tryAcquireScheduledInvoiceMintLock(conn, anchorId))) throw busy();
     }
-    // Lock AND read the stamped invoices in one statement (Codex r4 P1): an
-    // unvoid committed between the join above and this lock must be seen.
-    const stampIds = [...new Set(stamped.map((row) => String(row.id)))].sort();
-    const fresh = await conn('invoices').whereIn('id', stampIds).orderBy('id').forUpdate().noWait()
+    candidates = await conn('invoices')
+      .where(function () { this.whereIn('id', stampIds).orWhereIn('scheduled_service_id', anchorIds); })
+      .whereNotIn('status', require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES)
+      .orderBy('id')
+      .forUpdate()
+      .noWait()
       .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
-    const freshById = new Map(fresh.map((inv) => [String(inv.id), inv]));
-    for (const row of stamped) {
-      const key = String(row.id);
-      if (governingById.has(key)) continue;
-      const lockedStamp = freshById.get(key);
-      governingById.set(key, lockedStamp ? await loadGoverningInvoice(conn, lockedStamp, { noWait: true }) : null);
-    }
   } catch (err) {
     if (err?.code !== '55P03') throw err;
     throw busy();
   }
-  const terminal = new Set(require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES);
-  // A REPLACEMENT (not the stamp itself) covers a member only when it bills
-  // that member (Codex r6 P2 on #5301): an itemized invoice names each
-  // visit it bills (client_id scheduled_<id>_primary — every service mint
-  // writes one), so an ordinary anchor-only invoice doesn't cover the other
-  // members; a non-itemized aggregate replacement covers every stamped member.
-  const billsMember = (inv, memberId) => {
-    let items = inv?.line_items;
+  const billedIds = (inv) => {
+    let items = inv.line_items;
     if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
-    const ids = (Array.isArray(items) ? items : [])
-      .map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ''))?.[1])
-      .filter(Boolean);
-    return ids.length === 0 || ids.includes(String(memberId));
+    items = Array.isArray(items) ? items : [];
+    const itemized = items.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ''))?.[1]).filter(Boolean);
+    const aggregate = itemized.length === 0 && items.some((li) => /^first (service )?application$/i.test(String(li?.description || '').trim()));
+    return { itemized, aggregate };
   };
-  return stamped
-    .map((row) => ({ member: row.member_id, stampId: String(row.id), inv: governingById.get(String(row.id)) }))
-    .filter(({ inv }) => inv && !terminal.has(inv.status))
-    .filter(({ inv, stampId, member }) => String(inv.id) === stampId || billsMember(inv, member))
-    .map(({ member, inv }) => ({
+  return stamps.flatMap(({ member_id: member, stamp_id: stampId, anchor_id: anchorId }) => candidates
+    .filter((inv) => String(inv.id) === String(stampId) || String(inv.scheduled_service_id) === String(anchorId))
+    .filter((inv) => {
+      const { itemized, aggregate } = billedIds(inv);
+      return String(inv.id) === String(stampId) || aggregate || itemized.includes(String(member));
+    })
+    .map((inv) => ({
       scheduled_service_id: member,
       status: inv.status,
       credit_applied: inv.credit_applied ?? 0,
@@ -17701,7 +17686,7 @@ async function governingFirstApplicationRows(conn, ids) {
       stripe_payment_intent_id: inv.stripe_payment_intent_id ?? null,
       total: inv.total,
       _openReason: 'attached to a combined first-application invoice that is still open at the old price',
-    }));
+    })));
 }
 
 async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
@@ -17843,7 +17828,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
       // anchor — invoices.scheduled_service_id names only the anchor.
       // hasColumn-guarded: the column postdates some schemas.
       if (await conn.schema.hasColumn('scheduled_services', 'first_application_invoice_id')) {
-        invoiced.push(...await governingFirstApplicationRows(conn, ids));
+        invoiced.push(...await memberBillingInvoiceRows(conn, ids));
       }
     }
     const hasDepositCreditLine = (items) => {
