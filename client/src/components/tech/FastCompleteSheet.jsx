@@ -5,6 +5,11 @@
 // callback). Owner ask: today's forms are "too long and laborious for techs"
 // for what is, in practice, a quick targeted treatment.
 //
+// The visit note leads the sheet: the tech talks (or types), adds photos, and
+// may pick ONE tip for the customer (owner ruling 2026-09-28: one per service
+// visit, chosen from that visit's options). Photos are staged against the
+// visit through the existing photo manager and promoted at completion.
+//
 // Records only what the application record needs for the HOUSE PEST MIX
 // (Taurus SC, Atticus Talak 7.9 F, LESCO 90/10 surfactant — lib/pest-default-mix.js): which of
 // those went down, their amounts and rates, pests targeted, where, how, and
@@ -23,7 +28,7 @@
 //
 // Product catalog and visit identity come from the SAME context endpoint
 // ServiceRecapModal loads (GET /admin/dispatch/:id/pest-recap/context).
-import React, { useCallback, useEffect, useRef, useState, useId } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -32,7 +37,10 @@ import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { shouldResetCompletionIdempotencyKey } from '../../lib/completion-idempotency';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
-import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
+import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
+import DictationButton from './DictationButton';
+import TechServicePhotosModal from './TechServicePhotosModal';
+import { UiSurface, Button, Field, Input, Textarea, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // Fallback amount unit when the resolver names none.
@@ -64,6 +72,12 @@ const ACTIVITY_LEVELS = [
   { value: 'moderate', label: 'Moderate', rating: 3 },
   { value: 'heavy', label: 'Heavy', rating: 5 },
 ];
+// Tips shown before the tech searches or opens the whole list.
+const TIP_PREVIEW_COUNT = 4;
+// Mirrors MAX_CUSTOM_TIP_CHARS (server tip-library.js): the server rejects a
+// longer line, never trims it.
+const CUSTOM_TIP_MAX_CHARS = 240;
+const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
 const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
 const dayOf = (value) => String(value || '').slice(0, 10);
 // Letters and digits only: the row's address is built in SQL and the live
@@ -204,11 +218,13 @@ function rowRate(row, sprayMethod) {
 }
 
 // Every requirement the application record needs, in screen order.
-function missingRequirement(form, rows, ratingAllowed) {
+function missingRequirement(form, rows, ratingAllowed, dictationPending) {
   const active = rows.filter((row) => row.active);
   const missingAmount = active.find((row) => !hasAmount(row));
   const needsLinearFt = active.some((row) => rowMethod(row, form.method) === 'perimeter_spray');
   return [
+    // A recorded clip still being taken or transcribed would miss the save.
+    [dictationPending, 'Finish dictating before you complete.'],
     [!active.length, 'Select at least one product.'],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [!form.pests.size, 'Select at least one pest.'],
@@ -223,7 +239,16 @@ function targetsOf(form) {
   return [...form.pests].map((pest) => (pest === 'Other' ? form.otherPest.trim() : pest));
 }
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
+// One tip per service visit: a library pick OR the tech's own line, never
+// both. null when the picker never loaded, so nothing the tech could not see
+// freezes onto the report.
+function techTipsOf(form, tipsAvailable) {
+  if (!tipsAvailable) return null;
+  const custom = form.customTip.trim();
+  return custom ? { ids: [], custom } : { ids: form.tipId ? [form.tipId] : [], custom: null };
+}
+
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -248,6 +273,7 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
     areasServiced: [...form.areas],
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
+    techTips: techTipsOf(form, tipsAvailable),
     // The customer recap text ships in a later Fast Complete PR; until then
     // this path sends none. No review ask on a re-service (adopted
     // 2026-09-26), and a free callback never carries a pay link.
@@ -294,6 +320,21 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
     return () => { active = false; };
   }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress]);
   return ctx;
+}
+
+// The tip library, read on its own: the picker is optional, so a slow or
+// failed read never holds the sheet. null until it arrives, and when the
+// read fails or the tips gate is off.
+function useTipLibrary({ base, request }) {
+  const [library, setLibrary] = useState(null);
+  useEffect(() => {
+    let active = true;
+    request(`${base}/tech-tips`)
+      .then((data) => { if (active) setLibrary(data?.available === true ? data : null); })
+      .catch(() => { if (active) setLibrary(null); });
+    return () => { active = false; };
+  }, [base, request]);
+  return library;
 }
 
 // One completion attempt at a time, settled into the four outcomes above.
@@ -369,6 +410,16 @@ function ChoiceSection({ title, action, columns = 2, children }) {
   );
 }
 
+// The photo manager opens over the sheet. While it is up the sheet is inert
+// and hidden from assistive tech, the way the photo manager treats its own
+// marks dialog; `version` moves on each close so the count is read again.
+function usePhotoManager() {
+  const [state, setState] = useState({ isOpen: false, version: 0 });
+  const open = useCallback(() => setState((prev) => ({ ...prev, isOpen: true })), []);
+  const close = useCallback(() => setState((prev) => ({ isOpen: false, version: prev.version + 1 })), []);
+  return { ...state, open, close, hiddenProps: state.isOpen ? { 'aria-hidden': true, inert: '' } : {} };
+}
+
 export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
@@ -387,6 +438,12 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   });
   const submission = useFastCompleteSubmit({ base, request });
   const { submitting, done } = submission;
+  const photoManager = usePhotoManager();
+  // A recorded dictation clip is still being taken or transcribed (the
+  // upload path). The full form is another page and carries nothing over,
+  // so Full form and "+ Other product" wait for the clip, like Complete and
+  // photos. Close still works: it discards the sheet, typed note included.
+  const [dictationPending, setDictationPending] = useState(false);
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -406,6 +463,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   const locked = submitting || submission.failure !== null;
 
   return createPortal(
+    <>
     <UiSurface
       density="touch"
       className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
@@ -417,30 +475,46 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
+        {...photoManager.hiddenProps}
       >
-        <header className="tech-visit-header">
-          <div>
-            <h2 id={titleId} className="tech-visit-title">{done ? 'Re-service complete' : 'Complete re-service'}</h2>
-            {/* The LIVE visit once loaded, so the tech sees whose property
-                this completion records against. */}
-            <p className="tech-visit-muted">
-              {ctx.visit?.customerName || service?.customerName || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
-            </p>
-            {liveAddressLine(ctx.visit?.address) && <p className="tech-visit-muted">{liveAddressLine(ctx.visit.address)}</p>}
-          </div>
-          {!done && (
-            <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked}>Full form</Button>
-          )}
-          <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={submitting} aria-label="Close">×</Button>
-        </header>
-        <SheetBody service={service} ctx={ctx} submission={submission} locked={locked} onCompleted={onCompleted} onFullForm={onFullForm} />
+        <SheetHeader titleId={titleId} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+        <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} />
       </section>
-    </UiSurface>,
+    </UiSurface>
+    {photoManager.isOpen && (
+      <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
+    )}
+    </>,
     document.body,
   );
 }
 
-function SheetBody({ service, ctx, submission, locked, onCompleted, onFullForm }) {
+// The LIVE visit once loaded, so the tech sees whose property this
+// completion records against.
+function customerNameOf(visit, service) {
+  return visit?.customerName || service?.customerName || '';
+}
+
+function SheetHeader({ titleId, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
+  const address = liveAddressLine(visit?.address);
+  return (
+    <header className="tech-visit-header">
+      <div>
+        <h2 id={titleId} className="tech-visit-title">{done ? 'Re-service complete' : 'Complete re-service'}</h2>
+        <p className="tech-visit-muted">
+          {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
+        </p>
+        {address && <p className="tech-visit-muted">{address}</p>}
+      </div>
+      {!done && (
+        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+      )}
+      <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
+    </header>
+  );
+}
+
+function SheetBody({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onCompleted, onFullForm }) {
   if (submission.done) {
     return (
       <div className="tech-visit-body">
@@ -457,16 +531,23 @@ function SheetBody({ service, ctx, submission, locked, onCompleted, onFullForm }
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
-  return <FastCompleteForm ctx={ctx} submission={submission} locked={locked} onFullForm={onFullForm} />;
+  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} />;
 }
 
-function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
+function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm }) {
   const [rows, setRows] = useState(ctx.rows);
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
     pests: new Set(), otherPest: '', areas: new Set(), method: 'spot_treatment', linearFt: '', activity: '', note: '',
+    tipId: '', customTip: '',
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
+  // Each dictated chunk joins what is already in the box.
+  const appendNote = useCallback((text) => {
+    setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
+  }, []);
+  const tips = useTipLibrary({ base: `/admin/dispatch/${service?.id}`, request });
+  const tipsAvailable = !!tips;
 
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => (row.productId === productId ? { ...row, ...patch } : row)));
@@ -477,12 +558,12 @@ function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
     setRows((prev) => prev.map((row) => (SPRAY_METHODS.has(row.catalogMethod) ? { ...row, rateInput: null } : row)));
   }, [setField]);
 
-  const missingReason = missingRequirement(form, rows, ctx.rating.allowed);
+  const missingReason = missingRequirement(form, rows, ctx.rating.allowed, dictationPending);
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed }),
+      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
   };
@@ -491,6 +572,10 @@ function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
     <>
       <div className="tech-visit-body">
         <fieldset className="tech-visit-form" disabled={locked}>
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
+          {/* A clip being recorded keeps recording behind the photo manager, so
+              photos wait until the dictation is finished. */}
+          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked || dictationPending} />
           <ProductsSection
             rows={rows}
             method={form.method}
@@ -500,6 +585,7 @@ function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
             onToggleRow={(row) => updateRow(row.productId, { active: !row.active })}
             onUpdateRow={updateRow}
             onOtherProduct={onFullForm}
+            otherProductLocked={locked || dictationPending}
           />
           <PestsSection form={form} setField={setField} locked={locked} />
           <ChoiceSection title="Where" columns={3}>
@@ -515,7 +601,16 @@ function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
               ))}
             </ChoiceSection>
           )}
-          <NoteField note={form.note} onChange={(value) => setField('note', value)} />
+          {tipsAvailable && (
+            <TipSection
+              library={tips}
+              tipId={form.tipId}
+              customTip={form.customTip}
+              locked={locked}
+              onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
+              onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+            />
+          )}
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
@@ -537,7 +632,7 @@ function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
   );
 }
 
-function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onToggleRow, onUpdateRow, onOtherProduct }) {
+function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onToggleRow, onUpdateRow, onOtherProduct, otherProductLocked }) {
   return (
     <>
     <ChoiceSection
@@ -560,7 +655,7 @@ function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onTo
       ))}
       {/* Any product beyond the house mix completes through the full
           completion screen, which records its method, amount and area. */}
-      <Chip disabled={locked} label="+ Other product" onClick={onOtherProduct} />
+      <Chip disabled={otherProductLocked} label="+ Other product" onClick={onOtherProduct} />
     </ChoiceSection>
     {editAmounts && rows.filter((row) => row.active).map((row) => (
       <AmountRow key={row.productId} row={row} rate={rowRate(row, method)} onChange={(patch) => onUpdateRow(row.productId, patch)} />
@@ -610,16 +705,140 @@ function MethodSection({ form, rows, setField, chooseMethod, locked }) {
   );
 }
 
-// Optional, so it stays one tap away until the tech wants it.
-function NoteField({ note, onChange }) {
-  const [open, setOpen] = useState(!!note);
-  if (!open) {
-    return <Button type="button" variant="ghost" className="tech-visit-action" onClick={() => setOpen(true)}>+ Add note</Button>;
-  }
+// The visit note leads the sheet. The mic appends what the tech says; on a
+// phone without speech recognition it records a clip for server transcription
+// (DictationButton's upload fallback), and renders nothing where neither works.
+function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked }) {
+  const noteId = useId();
   return (
-    <Field label="Note (optional)" className="tech-visit-field">
-      <Input className="tech-visit-control" value={note} onChange={(e) => onChange(e.target.value)} placeholder="Anything for the next visit" autoFocus />
-    </Field>
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title"><label htmlFor={noteId}>Tell me about the visit</label></h3>
+      </div>
+      <div className="tech-visit-note-row">
+        <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} />
+        <Textarea
+          id={noteId}
+          className="tech-visit-control"
+          rows={3}
+          value={note}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="What you treated, where, and what you saw"
+        />
+      </div>
+    </section>
+  );
+}
+
+// Photos are staged against the visit by the existing photo manager (opened
+// over the sheet by the parent) and promoted into the service record at
+// completion. Optional here.
+function PhotosSection({ serviceId, request, photos, locked }) {
+  const [count, setCount] = useState(null);
+  // Only the latest read may set the count: a first read still in flight
+  // when the manager closes must not land after the refreshed one.
+  const readSequence = useRef(0);
+  useEffect(() => {
+    const sequence = ++readSequence.current;
+    request(`/tech/services/${serviceId}/photos`)
+      .then((data) => {
+        if (sequence === readSequence.current) setCount(Array.isArray(data?.photos) ? data.photos.length : null);
+      })
+      // The count is a convenience; the photo manager reports its own errors.
+      .catch(() => { if (sequence === readSequence.current) setCount(null); });
+    return () => { readSequence.current += 1; };
+  }, [request, serviceId, photos.version]);
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Photos</h3>
+        <span className="tech-visit-muted">{count ? `${count} added` : 'Optional'}</span>
+      </div>
+      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={photos.open} disabled={locked}>
+        {count ? 'Add or view photos' : 'Add photos'}
+      </Button>
+    </section>
+  );
+}
+
+// What the picker says beside a tip: already covered by the customer's
+// saved settings, or when it last went out to this customer.
+function tipMark(tip, library) {
+  if (tip.condition === 'irrigation_on_file' && library?.conditions?.irrigation_on_file === true) return 'already on file';
+  const day = library?.lastSent?.[tip.id];
+  return day ? techTipSentLabel(day) : null;
+}
+
+// The tips on screen: search results, the whole list, or the short list,
+// with the pick always kept in view. `noMatch` is about the search alone, so
+// a pinned pick never hides that a search found nothing.
+function visibleTips(allTips, { query, showAll, tipId }) {
+  const listed = query ? rankTechTips(allTips, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
+  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? allTips.find((tip) => tip.id === tipId) : null;
+  return { tips: pinned ? [pinned, ...listed] : listed, noMatch: !!query && !listed.length };
+}
+
+function TipOption({ tip, library, pressed, locked, onPick }) {
+  return (
+    <Button
+      type="button"
+      variant="secondary"
+      className="tech-visit-action tech-visit-tip"
+      aria-pressed={pressed}
+      onClick={() => onPick(tip.id)}
+      disabled={locked}
+    >
+      <span>
+        {tip.label}
+        <span className="tech-visit-tip-copy">{[techTipSubtext(tip.copy), tipMark(tip, library)].filter(Boolean).join(' · ')}</span>
+      </span>
+    </Button>
+  );
+}
+
+// One tip per service visit, from this visit's options: a short list first,
+// the whole list behind "Show all", search across all of it, or the tech's
+// own line. Only the id (or the typed line) goes on the wire; the server
+// resolves and freezes the copy.
+function TipSection({ library, tipId, customTip, locked, onPick, onCustom }) {
+  const [query, setQuery] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const allTips = useMemo(
+    () => (library?.groups || []).flatMap((group) => group.tips || []),
+    [library],
+  );
+  const q = query.trim().toLowerCase();
+  const { tips: visible, noMatch } = visibleTips(allTips, { query: q, showAll, tipId });
+  const hasPick = !!tipId || !!customTip.trim();
+  const writingOwn = writing || !!customTip;
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Tip for the customer</h3>
+        <span className="tech-visit-muted">{hasPick ? '1 picked' : 'Pick 1 (optional)'}</span>
+      </div>
+      <Field label="Search tips" className="tech-visit-field">
+        <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
+      </Field>
+      <div className="tech-visit-tip-list">
+        {visible.map((tip) => (
+          <TipOption key={tip.id} tip={tip} library={library} pressed={tip.id === tipId} locked={locked} onPick={onPick} />
+        ))}
+        {noMatch && <p className="tech-visit-muted">No tips match.</p>}
+      </div>
+      <div className="tech-visit-tile-grid">
+        {!q && allTips.length > TIP_PREVIEW_COUNT && (
+          <Chip disabled={locked} label={showAll ? 'Show fewer' : 'Show all'} onClick={() => setShowAll((on) => !on)} />
+        )}
+        {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}
+      </div>
+      {writingOwn && (
+        <Field label="Your own tip (one sentence)" className="tech-visit-field">
+          <Input className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
+        </Field>
+      )}
+    </section>
   );
 }
 

@@ -3,7 +3,8 @@
 // vocabulary they use at the truck lands on the right tip first), and the
 // option subtext is the copy's first sentence, trimmed.
 import { describe, expect, test } from 'vitest';
-import { rankTechTips, techTipSubtext, techTipSentLabel, parkTaggedNoteLines, stripParkedTaggedLines, TECH_TIP_MAX } from './SchedulePage.jsx';
+import { parkTaggedNoteLines, stripParkedTaggedLines, TECH_TIP_MAX } from './SchedulePage.jsx';
+import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
 
 const TIPS = [
   { id: 'water_bromeliads', label: 'Flush bromeliads weekly', keywords: ['bromeliad', 'cups', 'water'], copy: 'If you have bromeliads, the cup holds water. Flush weekly.' },
