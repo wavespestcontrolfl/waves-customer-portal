@@ -242,6 +242,23 @@ describe('trigger rule: moved siblings and topics', () => {
     expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported', read_ref: null }]);
   });
 
+  test('a RESCHEDULED pest sibling (awaiting a new date) does not count', async () => {
+    mockTechStopMemberIds.mockResolvedValueOnce(['svc-1', 'svc-2']);
+    const conn = fakeConn({
+      scheduled_services: [
+        { id: 'svc-1', service_type: 'Lawn Weed & Feed', status: 'confirmed', visit_id: 'visit-9' },
+        { id: 'svc-2', service_type: 'Quarterly Pest Control', status: 'rescheduled', visit_id: 'visit-9' },
+      ],
+    });
+    await triggerVisitPrepPestRead({
+      submissionId: 'sub-1',
+      svc: { id: 'svc-1', customer_id: 'cust-1', service_type: 'Lawn Weed & Feed', visit_id: 'visit-9' },
+      photos: PHOTOS,
+      conn,
+    });
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+  });
+
   test('a topic on the submission is not an input: a lawn visit stays unsupported', async () => {
     const conn = fakeConn();
     await triggerVisitPrepPestRead({

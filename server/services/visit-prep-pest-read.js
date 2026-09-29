@@ -41,7 +41,7 @@ const PhotoService = require('./photos');
 const { identifyPestV2 } = require('./photo-id-v2/pest-engine');
 const { classifyServiceLine } = require('./service-line');
 const { visitPrepPestReadLive } = require('../config/feature-gates');
-const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 const DEFAULT_DAILY_CAP = 40;
@@ -65,7 +65,10 @@ async function liveStopServiceTypes(svc, conn) {
   const others = (await techStopMemberIds(svc, conn)).filter((id) => String(id) !== String(svc.id));
   if (!others.length) return own;
   const rows = await conn('scheduled_services').whereIn('id', others).select('service_type', 'status');
-  return [...own, ...rows.filter((r) => !TERMINAL_ROW_STATUSES.includes(r.status)).map((r) => r.service_type)];
+  // Join-ineligible = terminal + 'rescheduled' (a row awaiting a new date
+  // keeps its old visit_id/date/window but is no longer at this stop;
+  // Codex #5305 r7 P2).
+  return [...own, ...rows.filter((r) => !JOIN_INELIGIBLE_STATUSES.includes(r.status)).map((r) => r.service_type)];
 }
 
 async function isPestStop(svc, conn = db) {

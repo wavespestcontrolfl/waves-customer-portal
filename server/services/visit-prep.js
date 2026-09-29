@@ -705,25 +705,28 @@ async function customerFlaggedFacts(svc, conn = db) {
     if (!photoIdsBySubmission.has(p.submission_id)) photoIdsBySubmission.set(p.submission_id, []);
     photoIdsBySubmission.get(p.submission_id).push(p.id);
   }
-  const current = await stillOnTechStop(svc, conn);
-  const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
-  if (kept.length === 0) return null;
-
   // Batch-fetch the stored contract for every DONE read on this stop —
   // one query regardless of how many submissions carry a result. A
   // submission whose read_ref points at a row that no longer exists (a
   // purge, or the FK's ON DELETE SET NULL racing this read) just falls
   // back to `{ status }` with no fixed fields — never a thrown error over
-  // an otherwise-informative section.
+  // an otherwise-informative section. Fetched BEFORE the membership
+  // recheck below, so every read this function does is covered by it
+  // (Codex #5305 r7 P1).
   const readsLive = require('../config/feature-gates').visitPrepPestReadLive();
   const readRefs = readsLive
-    ? [...new Set(kept.filter((s) => s.read_status === 'done' && s.read_ref).map((s) => s.read_ref))]
+    ? [...new Set(submissions.filter((s) => s.read_status === 'done' && s.read_ref).map((s) => s.read_ref))]
     : [];
   const contractsByRef = new Map();
   if (readRefs.length) {
     const rows = await conn('pest_identifications').whereIn('id', readRefs).select('id', 'report_contract');
     for (const row of rows) contractsByRef.set(row.id, parseJsonMaybe(row.report_contract));
   }
+
+  // The LAST await: members re-resolved after every read above.
+  const current = await stillOnTechStop(svc, conn);
+  const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
+  if (kept.length === 0) return null;
 
   return kept.map((s) => ({
     id: s.id,

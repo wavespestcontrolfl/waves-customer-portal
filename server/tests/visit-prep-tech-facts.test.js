@@ -350,6 +350,39 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
     expect(facts.map((f) => f.id)).toEqual(['sub-A']);
   });
 
+  test('with reads on, the read contracts are fetched BEFORE the final membership recheck (Codex #5305 r7 P1)', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    try {
+      const inner = reassignedMidRead();
+      // Both submissions carry a finished read, so the contracts ARE fetched.
+      const withReads = fakeConn({
+        visit_prep_submissions: [
+          { id: 'sub-A', scheduled_service_id: 'svc-A', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: 'mine', read_status: 'done', read_ref: 'pi-A' },
+          { id: 'sub-B', scheduled_service_id: 'svc-B', created_at: new Date('2026-09-30T11:00:00Z'), topic: null, location_on_property: null, note: 'reassigned away', read_status: 'done', read_ref: 'pi-B' },
+        ],
+        pest_identifications: [
+          { id: 'pi-A', report_contract: JSON.stringify({ v2: { entry: { common_name: 'German cockroach' } } }) },
+          { id: 'pi-B', report_contract: JSON.stringify({ v2: { entry: { common_name: 'Fire ant' } } }) },
+        ],
+      });
+      const order = [];
+      const conn = (table) => {
+        order.push(table);
+        return (table === 'visit_prep_submissions' || table === 'pest_identifications') ? withReads(table) : inner(table);
+      };
+      const facts = await customerFlaggedFacts({ id: 'svc-A', visit_id: 'visit-9' }, conn);
+      expect(facts.map((f) => f.id)).toEqual(['sub-A']);
+      expect(facts[0].read.commonName).toBe('German cockroach');
+      expect(order).toContain('pest_identifications');
+      const lastMembership = order.lastIndexOf('scheduled_services');
+      expect(order.slice(lastMembership + 1)).not.toContain('pest_identifications');
+    } finally {
+      delete process.env.GATE_VISIT_PREP_PHOTOS;
+      delete process.env.GATE_VISIT_PREP_PEST_READ;
+    }
+  });
+
   test('stopPhotoViewUrls drops a sibling reassigned while URLs were signed, and never returns the internal row id', async () => {
     const photos = await stopPhotoViewUrls({ id: 'svc-A', visit_id: 'visit-9' }, reassignedMidRead());
     expect(photos.map((p) => p.id)).toEqual(['photo-A']);
