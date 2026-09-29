@@ -10140,7 +10140,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 );
               }
               if (prevDate !== bulkTargetDate && svc.first_application_invoice_id) {
-                await require('../services/visit-groups').syncFirstApplicationInvoiceDate(trx, id, bulkTargetDate);
+                await require('../services/visit-groups').syncFirstApplicationInvoiceDate(trx, id);
               }
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;

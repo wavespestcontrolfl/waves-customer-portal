@@ -406,28 +406,56 @@ async function unsentFirstApplicationInvoiceIds(trx, memberIds) {
 }
 
 /**
- * Keep the exempt first-application draft's service_date on its anchor's
- * date when the anchor moves (the accept stamps service_date from the
- * anchor's scheduled_date; closeout adoption refuses an invoice whose date
- * differs from the owner row). due_date is the accept day, not the visit
- * day, and stays. Same transaction as the row's own date write; only an
- * invoice passing unsentFirstApplicationInvoiceIds is touched. No-op when
- * the row carries no such invoice.
+ * Keep the exempt first-application draft's service_date on its OWNER row's
+ * date (the accept stamps service_date from the anchor's scheduled_date;
+ * closeout adoption refuses an invoice whose date differs from the owner
+ * row). due_date is the accept day, not the visit day, and stays.
+ *
+ * Called in the moved row's own transaction after its date write, for ANY
+ * member of the covered set: the invoice is resolved through the moved row's
+ * first_application_invoice_id (every member carries the stamp; only the
+ * anchor is the invoice's scheduled_service_id), and the target date is the
+ * owner's CURRENT date, so the result is the same whichever member starts a
+ * whole-stop move, and repeating it is a no-op.
+ *
+ * TOCTOU: the invoice row is locked FIRST (NOWAIT → VISIT_BUSY), then the
+ * complete untouched predicate is re-run under that lock, then the write.
+ * A grouped row whose owner sits in the same visit and whose invoice stopped
+ * qualifying (sent/paid/charging since the move was planned) REFUSES the move
+ * (VISIT_FROZEN_MOVE_UNSUPPORTED; the caller's transaction rolls back the
+ * row's own date write) — exactly the verdict the visit would now get. An
+ * ungrouped row, or one whose owner is elsewhere, keeps today's behavior:
+ * the invoice is left alone and the move proceeds.
  */
-async function syncFirstApplicationInvoiceDate(trx, serviceId, newDate) {
-  const day = dateOnly(newDate);
-  if (!serviceId || !day) return 0;
-  const ids = await unsentFirstApplicationInvoiceIds(trx, [serviceId]);
-  if (!ids.length) return 0;
+async function syncFirstApplicationInvoiceDate(trx, serviceId) {
+  if (!serviceId) return 0;
+  const row = await trx('scheduled_services').where({ id: serviceId })
+    .first('id', 'visit_id', 'first_application_invoice_id');
+  if (!row || !row.first_application_invoice_id) return 0;
+  let invoice;
   try {
-    await trx('invoices').whereIn('id', ids).forUpdate().noWait().select('id');
+    invoice = await trx('invoices').where({ id: row.first_application_invoice_id })
+      .forUpdate().noWait().first('id', 'scheduled_service_id', 'service_date');
   } catch (err) {
     if (err && err.code === '55P03') {
       throw Object.assign(new Error('This visit\'s invoice is being processed — try again in a moment.'), { statusCode: 409, isOperational: true, code: 'VISIT_BUSY' });
     }
     throw err;
   }
-  return Number(await trx('invoices').whereIn('id', ids).update({ service_date: day, updated_at: trx.fn.now() }));
+  if (!invoice || !invoice.scheduled_service_id) return 0;
+  const owner = await trx('scheduled_services').where({ id: invoice.scheduled_service_id })
+    .first('id', 'visit_id', 'scheduled_date');
+  if (!owner) return 0;
+  const qualifies = (await unsentFirstApplicationInvoiceIds(trx, [owner.id])).includes(invoice.id);
+  if (!qualifies) {
+    if (row.visit_id && owner.visit_id && String(owner.visit_id) === String(row.visit_id)) {
+      throw Object.assign(new Error('Cannot move this stop: its invoice was sent or has a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'child_artifacts' });
+    }
+    return 0;
+  }
+  const day = dateOnly(owner.scheduled_date);
+  if (!day || dateOnly(invoice.service_date) === day) return 0;
+  return Number(await trx('invoices').where({ id: invoice.id }).update({ service_date: day, updated_at: trx.fn.now() }));
 }
 
 async function visitActivity(visitId, trx = db) {

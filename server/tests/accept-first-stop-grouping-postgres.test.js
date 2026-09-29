@@ -296,6 +296,8 @@ postgres('a combined first stop with its accept invoice stays movable until real
     baseline = { visit: await mockPg('service_visits').where({ id: ctx.visitId }).first() };
   });
   afterEach(async () => {
+    await mockPg('appointment_reminders').whereIn('scheduled_service_id', ctx.rows.map((r) => r.id))
+      .update({ move_hold_until: null, move_hold_token: null });
     await mockPg('stripe_invoice_charge_attempts').where({ invoice_id: ctx.invoice.id }).del();
     await mockPg('payments').where({ customer_id: ctx.customerId }).del();
     await mockPg('service_records').where({ customer_id: ctx.customerId }).del();
@@ -348,6 +350,55 @@ postgres('a combined first stop with its accept invoice stays movable until real
     expect(invoice).toMatchObject({ status: 'draft', scheduled_service_id: ctx.holdId, total: ctx.invoice.total,
       subtotal: ctx.invoice.subtotal, line_items: ctx.invoice.line_items });
     expect(await mockPg('invoices').where({ customer_id: ctx.customerId })).toHaveLength(1);
+  });
+
+  test('a whole-stop move started from a NON-anchor member still moves the invoice date', async () => {
+    const lawn = ctx.rows.find((row) => row.id !== ctx.holdId);
+    expect(lawn.id).not.toBe(ctx.invoice.scheduled_service_id);
+    const target = nextWeek(ctx.rows[0]);
+    const result = await rebooker().reschedule(lawn.id, target, windowOf(lawn), 'test move', 'admin',
+      { overlapAdvisory: true, seriesPolicy: 'single' });
+    expect(result.visitMove.failed).toEqual([]);
+    const rows = await mockPg('scheduled_services').whereIn('id', ctx.rows.map((r) => r.id));
+    expect(rows.every((r) => ymd(r.scheduled_date) === target)).toBe(true);
+    expect(ymd((await mockPg('invoices').where({ id: ctx.invoice.id }).first()).service_date)).toBe(target);
+    // Repeating the sync is a no-op (idempotent across members).
+    await mockPg.transaction(async (trx) => {
+      expect(await visitGroups().syncFirstApplicationInvoiceDate(trx, lawn.id)).toBe(0);
+      expect(await visitGroups().syncFirstApplicationInvoiceDate(trx, ctx.holdId)).toBe(0);
+    });
+  });
+
+  test('an invoice sent after the move was planned is never rewritten, and the move is refused', async () => {
+    const target = nextWeek(ctx.rows[0]);
+    const sentAt = new Date();
+    await expect(rebooker().reschedule(ctx.holdId, target, windowOf(ctx.rows[0]), 'test move', 'admin', {
+      overlapAdvisory: true,
+      seriesPolicy: 'single',
+      // Runs inside each member's move transaction, after the frozen-verdict
+      // plan and before the date write and the invoice sync.
+      beforeMove: async () => {
+        await mockPg('invoices').where({ id: ctx.invoice.id }).update({ status: 'sent', sent_at: sentAt });
+      },
+    })).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
+    const rows = await mockPg('scheduled_services').whereIn('id', ctx.rows.map((r) => r.id));
+    expect(rows.every((r) => ymd(r.scheduled_date) === ymd(ctx.rows[0].scheduled_date))).toBe(true);
+    const invoice = await mockPg('invoices').where({ id: ctx.invoice.id }).first();
+    expect(ymd(invoice.service_date)).toBe(ymd(ctx.invoice.service_date));
+    expect(invoice.status).toBe('sent');
+  });
+
+  test('an invoice locked by a sender makes the move retryable (VISIT_BUSY) with nothing written', async () => {
+    const holder = await mockPg.transaction();
+    try {
+      await holder('invoices').where({ id: ctx.invoice.id }).forUpdate().first('id');
+      await expect(move(ctx.rows[0], nextWeek(ctx.rows[0]))).rejects.toMatchObject({ code: 'VISIT_BUSY' });
+    } finally {
+      await holder.rollback();
+    }
+    const rows = await mockPg('scheduled_services').whereIn('id', ctx.rows.map((r) => r.id));
+    expect(rows.every((r) => ymd(r.scheduled_date) === ymd(ctx.rows[0].scheduled_date))).toBe(true);
+    expect(ymd((await mockPg('invoices').where({ id: ctx.invoice.id }).first()).service_date)).toBe(ymd(ctx.invoice.service_date));
   });
 
   test('customer self-serve stays refused for the grouped stop (2+ live members), never as frozen', async () => {
