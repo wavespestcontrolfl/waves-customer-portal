@@ -57,9 +57,15 @@ function fakeQuery(rows) {
 // contract too (a query written against a different alias would silently
 // stop matching this fixture and fall through as "not covered", the same
 // gap this suite exists to catch).
-function makeConn({ hasTables = {}, byTable = {} } = {}) {
+// `hasColumns` keys are `table.column` — default present (matches
+// `hasTables`' default-true shape) so existing fixtures that never mention
+// the new prepay/first-application columns keep reading them as available.
+function makeConn({ hasTables = {}, hasColumns = {}, byTable = {} } = {}) {
   const conn = (table) => fakeQuery(byTable[table] || []);
-  conn.schema = { hasTable: jest.fn(async (name) => hasTables[name] !== false) };
+  conn.schema = {
+    hasTable: jest.fn(async (name) => hasTables[name] !== false),
+    hasColumn: jest.fn(async (table, column) => hasColumns[`${table}.${column}`] !== false),
+  };
   return conn;
 }
 
@@ -269,6 +275,87 @@ describe('liveInvoice reaches direct and indirect invoices alike', () => {
   test('without liveInvoice the indirect links are not read (pre-existing callers unchanged)', async () => {
     const conn = fixture({ 'invoices as inv': [{ scheduled_service_id: 'v1', ...unpaid, status: 'paid' }] });
     expect((await findBillingCoveredVisits(conn, [{ id: 'v1' }])).size).toBe(0);
+  });
+});
+
+// /secure annual-prepay pick and the combined first-application invoice
+// (owner-ordered follow-up to #5253, Codex round 9): two more indirect
+// links, read only under liveInvoice, same shape as the SR/packet reads.
+describe('liveInvoice reaches the /secure annual-prepay invoice link', () => {
+  const fixture = (rows) => makeConn({
+    hasTables: ALL_TABLES_PRESENT,
+    byTable: {
+      estimate_card_holds: [],
+      appointment_card_requests: [],
+      invoices: [],
+      'invoices as inv': [],
+      'visit_completion_packet_items as p': [],
+      'appointment_card_requests as acr': rows,
+      'scheduled_services as ss': [],
+    },
+  });
+
+  test('an open /secure prepay invoice blocks with the prepay-specific reason', async () => {
+    const conn = fixture([{ scheduled_service_id: 'v1', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/annual prepay invoice from the card-confirmation page/);
+  });
+
+  test('a PAID /secure prepay invoice blocks with the generic "money on it" reason', async () => {
+    const conn = fixture([{ scheduled_service_id: 'v1', status: 'paid', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/money on it/);
+  });
+
+  test('a void /secure prepay invoice does not block (the query itself excludes it)', async () => {
+    const conn = fixture([]);
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
+    expect(covered.size).toBe(0);
+  });
+
+  test('without liveInvoice the /secure prepay link is not read', async () => {
+    const conn = fixture([{ scheduled_service_id: 'v1', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 900 }]);
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }]);
+    expect(covered.size).toBe(0);
+  });
+});
+
+describe('liveInvoice reaches the combined first-application invoice link', () => {
+  const fixture = (rows) => makeConn({
+    hasTables: ALL_TABLES_PRESENT,
+    byTable: {
+      estimate_card_holds: [],
+      appointment_card_requests: [],
+      invoices: [],
+      'invoices as inv': [],
+      'visit_completion_packet_items as p': [],
+      'appointment_card_requests as acr': [],
+      'scheduled_services as ss': rows,
+    },
+  });
+
+  test('an open combined first-application invoice blocks the member visit', async () => {
+    const conn = fixture([{ scheduled_service_id: 'v2', status: 'draft', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 400 }]);
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
+  });
+
+  test('a PAID combined first-application invoice blocks with the generic "money on it" reason', async () => {
+    const conn = fixture([{ scheduled_service_id: 'v2', status: 'paid', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 400 }]);
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/money on it/);
+  });
+
+  test('a void combined first-application invoice does not block (the query itself excludes it)', async () => {
+    const conn = fixture([]);
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.size).toBe(0);
+  });
+
+  test('without liveInvoice the combined first-application link is not read', async () => {
+    const conn = fixture([{ scheduled_service_id: 'v2', status: 'draft', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 400 }]);
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }]);
+    expect(covered.size).toBe(0);
   });
 });
 

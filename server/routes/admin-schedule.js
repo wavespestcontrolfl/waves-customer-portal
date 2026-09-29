@@ -17577,13 +17577,30 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // completion and Charge Now reuse it at the OLD price.
 // It also discovers invoices linked through a service record or a
 // combined-visit packet (Codex r2 P1 on #5253), so money or a live invoice
-// on an indirectly linked invoice blocks too. A free re-service conversion
-// gets no exemption (owner ruling 2026-09-28, #5253 r3: "same rule as any
-// re-price") — staff void or release first. None of the three
-// existing callers (the plan trim, the series-cancel fee rails, the price/
-// service sibling propagation before this option was threaded onto it) ever
-// needed to know about an invoice nobody has paid — so this stays opt-in,
-// default false, keeping every pre-existing call byte-identical.
+// on an indirectly linked invoice blocks too. Two more indirect links
+// (owner-ordered follow-up to #5253, Codex round 9):
+//   - an annual prepay invoice picked (but not yet paid) from the /secure
+//     card-confirmation page. secure-appointment-plans.js mints the invoice
+//     and stamps it on appointment_card_requests.prepay_invoice_id while the
+//     request itself stays 'pending' and the annual_prepay_terms row is
+//     deliberately left with no source_estimate_id — so neither the visit
+//     stamp this function already reads (annual_prepay_term_id) nor
+//     findEstimateScopedCommitment's estimate-keyed read ever sees it. The
+//     request's own scheduled_service_id is the only durable link.
+//   - a combined first-application invoice for a non-anchor member visit.
+//     estimate-converter.js stamps EVERY covered member (anchor and
+//     siblings alike) with the SAME invoice id on
+//     scheduled_services.first_application_invoice_id — a link deliberately
+//     separate from invoices.scheduled_service_id (which only ever names the
+//     anchor) — so a member visit's own re-price has no other way to find
+//     the invoice covering it.
+// A free re-service conversion gets no exemption (owner ruling 2026-09-28,
+// #5253 r3: "same rule as any re-price") — staff void or release first. None
+// of the three existing callers (the plan trim, the series-cancel fee rails,
+// the price/service sibling propagation before this option was threaded
+// onto it) ever needed to know about an invoice nobody has paid — so this
+// stays opt-in, default false, keeping every pre-existing call
+// byte-identical.
 // Money committed at the ESTIMATE level for a visit created or adopted from
 // one (Codex r8 P1 on #5253) — invisible to findBillingCoveredVisits, which
 // keys on the visit: a received, not-yet-applied estimate deposit (keyed by
@@ -17745,6 +17762,46 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
           );
         invoiced.push(...packetLinked);
       }
+      // /secure annual-prepay pick, unpaid (owner-ordered follow-up to
+      // #5253, Codex round 9). The request row stays 'pending' and the term
+      // carries no source_estimate_id (see the comment above this function),
+      // so appointment_card_requests.prepay_invoice_id is the ONLY durable
+      // link from the visit to this invoice. hasColumn-guarded: the column
+      // postdates some schemas.
+      if (await conn.schema.hasTable('appointment_card_requests')
+        && await conn.schema.hasColumn('appointment_card_requests', 'prepay_invoice_id')) {
+        const prepayLinked = await conn('appointment_card_requests as acr')
+          .join('invoices as inv', 'inv.id', 'acr.prepay_invoice_id')
+          .whereIn('acr.scheduled_service_id', ids)
+          .whereNotIn('inv.status', [...NO_MONEY_HELD])
+          .select(
+            'acr.scheduled_service_id as scheduled_service_id',
+            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+          );
+        invoiced.push(...prepayLinked.map((row) => ({
+          ...row,
+          _openReason: 'on an annual prepay invoice from the card-confirmation page that is still open at the old price',
+        })));
+      }
+      // Combined first-application invoice, non-anchor member (see the
+      // comment above this function). scheduled_services.first_application_
+      // invoice_id is the only durable link for a member other than the
+      // anchor — invoices.scheduled_service_id names only the anchor.
+      // hasColumn-guarded: the column postdates some schemas.
+      if (await conn.schema.hasColumn('scheduled_services', 'first_application_invoice_id')) {
+        const firstAppLinked = await conn('scheduled_services as ss')
+          .join('invoices as inv', 'inv.id', 'ss.first_application_invoice_id')
+          .whereIn('ss.id', ids)
+          .whereNotIn('inv.status', [...NO_MONEY_HELD])
+          .select(
+            'ss.id as scheduled_service_id',
+            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+          );
+        invoiced.push(...firstAppLinked.map((row) => ({
+          ...row,
+          _openReason: 'attached to a combined first-application invoice that is still open at the old price',
+        })));
+      }
     }
     const hasDepositCreditLine = (items) => {
       try {
@@ -17775,8 +17832,11 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
         // Completion and Charge Now reuse any live attached invoice, so it
         // would keep billing the OLD price (Codex r1 P1: a $0 draft too) —
         // the same "any live invoice" rule the sibling propagation already
-        // applies (Codex #3505 r7, owner decision).
-        mark(inv.scheduled_service_id, 'attached to an invoice that is still open at the old price');
+        // applies (Codex #3505 r7, owner decision). The prepay and combined
+        // first-application reads above tag their rows with a more specific
+        // `_openReason` so the refusal names which invoice is still open;
+        // every other source falls back to the generic wording.
+        mark(inv.scheduled_service_id, inv._openReason || 'attached to an invoice that is still open at the old price');
       }
     }
   }
