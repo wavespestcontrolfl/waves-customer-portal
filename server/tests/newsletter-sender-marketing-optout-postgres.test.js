@@ -1,15 +1,24 @@
 /**
- * Send-time explicit marketing opt-out (owner ruling 2026-09-28, #5165),
- * against real Postgres: excludeMarketingOptedOut's correlated anti-join —
- * linked customer OR any live profile on the same mailbox (exact, or the
- * Google dot/+tag/googlemail identity), explicit false / 'sms' only — and
- * the resume path terminalizing an opted-out recipient's ledger row instead
- * of mailing it. Self-skips unless DATABASE_URL is set (CI's "DB-gated
- * suites" step runs it against the migrated database). Safe on a shared
- * database: every fixture is synthetic and uniquely named, every audience
- * read is narrowed to this file's own subscriber ids, the resume runs on its
- * own send's ledger only, and fixtures commit (the sender reads through the
- * shared db module) and are removed in afterEach.
+ * Send-time mailbox mailability (owner rulings 2026-09-28 + 2026-09-29,
+ * #5165), against real Postgres: excludeMailboxNotMailable's correlated
+ * anti-join — (a) linked customer OR any live profile on the same mailbox
+ * (exact, or the Google dot/+tag/googlemail identity) with an explicit
+ * false / 'sms' opt-out, and (b) ANY OTHER newsletter_subscribers row on
+ * the same mailbox in a non-'active' status (unsubscribed/pending/
+ * inactive/waitlist/unrecognised) — and the resume path terminalizing a
+ * non-mailable recipient's ledger row instead of mailing it. Self-skips
+ * unless DATABASE_URL is set (CI's "DB-gated suites" step runs it against
+ * the migrated database). Safe on a shared database: every fixture is
+ * synthetic and uniquely named, every audience read is narrowed to this
+ * file's own subscriber ids, the resume runs on its own send's ledger
+ * only, and fixtures commit (the sender reads through the shared db
+ * module) and are removed in afterEach.
+ *
+ * Owner ruling 2026-09-29 (option A): per-writer mailbox locks (subscribe/
+ * confirm/unsubscribe/webhook routes taking a lockCustomerEmail advisory
+ * lock before writing) were reverted — they kept spreading into live paths
+ * and produced a genuine deadlock. Mailbox mailability is judged here, at
+ * send time, by reading current row STATE instead.
  */
 jest.setTimeout(30000);
 
@@ -110,6 +119,83 @@ postgres('newsletter sender — explicit marketing opt-out at send time (real Po
     await customer({ email: `amy${t}@gmail.com` }, { email_enabled: false });
     const dotted = await subscriber(`a.m.y${t}+news@gmail.com`);
     expect(await audienceIds([plain.id, dotted.id])).toEqual([]);
+  });
+
+  // Owner ruling 2026-09-29 — mailbox mailability by SIBLING STATE: an
+  // active subscriber is skipped when ANY OTHER row on the same mailbox
+  // (exact, or the Google alias identity) is anything other than 'active'.
+  // Both directions of the alias spelling are proven, plus each of the
+  // non-active statuses the codebase actually writes to this column
+  // (unsubscribed, pending, inactive, waitlist), plus the negative case
+  // (a sibling on a genuinely DIFFERENT mailbox never blocks).
+  test('an active johndoe@gmail.com with an unsubscribed j.o.h.n.d.o.e+x@gmail.com sibling is not mailed', async () => {
+    const t = tag().replace(/-/g, '');
+    const active = await subscriber(`johndoe${t}@gmail.com`);
+    await subscriber(`j.o.h.n.d.o.e${t}+x@gmail.com`, { status: 'unsubscribed' });
+    expect(await audienceIds([active.id])).toEqual([]);
+  });
+
+  test('the reverse spelling: an active j.o.h.n.d.o.e+x@gmail.com with an unsubscribed johndoe@gmail.com sibling is not mailed', async () => {
+    const t = tag().replace(/-/g, '');
+    const active = await subscriber(`j.o.h.n.d.o.e${t}+x@gmail.com`);
+    await subscriber(`johndoe${t}@gmail.com`, { status: 'unsubscribed' });
+    expect(await audienceIds([active.id])).toEqual([]);
+  });
+
+  test.each(['pending', 'waitlist', 'inactive'])(
+    'a %s sibling on the same mailbox blocks the active row too',
+    async (siblingStatus) => {
+      const t = tag().replace(/-/g, '');
+      const active = await subscriber(`sib${t}@gmail.com`);
+      await subscriber(`s.i.b${t}+news@gmail.com`, { status: siblingStatus });
+      expect(await audienceIds([active.id])).toEqual([]);
+    },
+  );
+
+  test('an unrecognised/unknown status on a same-mailbox sibling fails closed (no CHECK constraint on status)', async () => {
+    const t = tag().replace(/-/g, '');
+    const active = await subscriber(`weird${t}@gmail.com`);
+    await subscriber(`w.e.i.r.d${t}+x@gmail.com`, { status: 'bounced_forever_or_whatever' });
+    expect(await audienceIds([active.id])).toEqual([]);
+  });
+
+  test('a sibling on a genuinely DIFFERENT mailbox does not block', async () => {
+    const t = tag().replace(/-/g, '');
+    const active = await subscriber(`unrelated1-${t}@gmail.com`);
+    await subscriber(`unrelated2-${t}@gmail.com`, { status: 'unsubscribed' });
+    expect(await audienceIds([active.id])).toEqual([active.id]);
+  });
+
+  test('resume: a retryable ledger row for a recipient with a non-active same-mailbox sibling is terminalized as skipped, never mailed', async () => {
+    const t = tag().replace(/-/g, '');
+    const keep = await customer({}, { marketing_offers: true, email_enabled: true });
+    const keepSub = await subscriber(keep.email, { customer_id: keep.id });
+    const blockedEmail = `resumeblocked${t}@gmail.com`;
+    const blockedSub = await subscriber(blockedEmail);
+    const [send] = await db('newsletter_sends').insert({
+      subject: 'Synthetic resume (mailbox state)',
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      status: 'sent',
+      sent_at: new Date(Date.now() - 3600 * 1000),
+      auto_share_social: false,
+    }).returning(['id']);
+    created.sends.push(send.id);
+    await db('newsletter_send_deliveries').insert([
+      { send_id: send.id, subscriber_id: keepSub.id, email: keepSub.email, status: 'failed' },
+      { send_id: send.id, subscriber_id: blockedSub.id, email: blockedSub.email, status: 'failed' },
+    ]);
+    // A same-mailbox alias unsubscribes AFTER the original (partial) send.
+    const aliasSub = await subscriber(`r.e.s.u.m.e.b.l.o.c.k.e.d${t}+x@gmail.com`, { status: 'unsubscribed' });
+    created.subscribers.push(aliasSub.id);
+
+    const result = await resumeCampaign(send.id);
+
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual([keepSub.email]);
+    expect(result.skipped_ineligible).toBe(1);
+    const skipped = await db('newsletter_send_deliveries').where({ send_id: send.id, subscriber_id: blockedSub.id }).first();
+    expect(skipped).toMatchObject({ status: 'skipped', bounce_reason: 'ineligible_at_dispatch' });
   });
 
   // Codex #5165 (:141): GOOGLE_MAILBOX_SQL.mailbox() strips everything from

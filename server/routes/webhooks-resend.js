@@ -33,7 +33,6 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 
 const SVIX_ID = 'svix-id';
 const SVIX_TIMESTAMP = 'svix-timestamp';
@@ -132,7 +131,15 @@ async function handleEvent(ev) {
         });
         await db('newsletter_sends').where({ id: delivery.send_id }).increment('bounced_count', 1);
         if (delivery.subscriber_id) {
-          await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+          // A delivery can be re-pointed at the surviving subscriber when a
+          // customer's email typo merges two subscriber rows
+          // (customer-email-fanout). Fence the BOUNCE to the address the
+          // delivery was mailed to, exactly as the SendGrid handler does: a
+          // late bounce from the dead old mailbox must not bounce-count the
+          // corrected address. The complaint (opt-out) below is never fenced.
+          const bouncedQ = db('newsletter_subscribers').where({ id: delivery.subscriber_id });
+          const mailed = String(delivery.email || '').trim().toLowerCase();
+          await (mailed ? bouncedQ.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : bouncedQ).update({
             bounce_count: db.raw('COALESCE(bounce_count,0) + 1'),
             last_bounced_at: now,
             updated_at: now,
@@ -166,22 +173,8 @@ async function handleEvent(ev) {
         });
         await db('newsletter_sends').where({ id: delivery.send_id }).increment('complained_count', 1);
         if (delivery.subscriber_id) {
-          // Per-mailbox fence (codex #5165 P1, :393): the SAME lock
-          // subscribeOrResubscribe and the reconcile take, taken before
-          // this status write. delivery.email is the recipient snapshot on
-          // the delivery row itself — no extra lookup needed. Best-effort:
-          // lockCustomerEmail throws on a blank address, and a complaint
-          // must never fail (and retry forever) over a fencing lock it
-          // couldn't take (codex round-2 P1).
-          await db.transaction(async (trx) => {
-            if (delivery.email && delivery.email.trim()) {
-              await lockCustomerEmail(trx, delivery.email);
-            } else {
-              logger.warn(`[resend-webhook] newsletter subscriber id=${delivery.subscriber_id} unsubscribe has no address to lock on — proceeding unlocked`);
-            }
-            await trx('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
-              status: 'unsubscribed', unsubscribed_at: now, updated_at: now,
-            });
+          await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+            status: 'unsubscribed', unsubscribed_at: now, updated_at: now,
           });
         }
       }

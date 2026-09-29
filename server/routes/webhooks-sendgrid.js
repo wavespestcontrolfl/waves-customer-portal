@@ -24,7 +24,6 @@ const logger = require('../services/logger');
 const bounceRecovery = require('../services/email-bounce-recovery');
 const bounceRescue = require('../services/email-bounce-rescue');
 const providerRetry = require('../services/transactional-email-provider-retry');
-const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
@@ -890,35 +889,39 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   }
   if (updates.subscriberAction && delivery.subscriber_id) {
     const at = updates.subscriberAt;
+    // A delivery can be re-pointed at the surviving subscriber when a
+    // customer's email typo merges two subscriber rows (customer-email-fanout).
+    // BOUNCES are fenced to the address the delivery was mailed to: a late
+    // bounce from the dead OLD mailbox must not bounce-count the corrected
+    // address. Opt-outs (unsubscribe / spam complaint) are NEVER fenced: an
+    // opt-out is honored on the subscription even if its address moved —
+    // over-honoring is safe, dropping one is not.
+    const subscriberRow = () => {
+      const q = client('newsletter_subscribers').where({ id: delivery.subscriber_id });
+      const mailed = String(delivery.email || '').trim().toLowerCase();
+      return mailed ? q.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : q;
+    };
     if (updates.subscriberAction === 'bounce_increment') {
-      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+      await subscriberRow().update({
         bounce_count: client.raw('COALESCE(bounce_count,0) + 1'),
         last_bounced_at: at,
         updated_at: at,
       });
-    } else if (updates.subscriberAction === 'force_unsubscribe' || updates.subscriberAction === 'unsubscribe_if_active') {
-      // Per-mailbox fence (codex #5165 P1, :393): the SAME lock
-      // subscribeOrResubscribe and the reconcile take, taken before this
-      // status write — `client` is already an open transaction (the
-      // caller's processWebhookEvent), so this just adds the one lock this
-      // writer needs, never a second transaction. delivery.email is the
-      // recipient snapshot on the delivery row itself, no extra lookup.
-      // Best-effort: lockCustomerEmail throws on a blank address, and an
-      // unsubscribe/complaint must never fail (and retry forever) over a
-      // fencing lock it couldn't take — the schema's NOT NULL doesn't rule
-      // out a legacy empty string (codex round-2 P1).
-      if (delivery.email && delivery.email.trim()) {
-        await lockCustomerEmail(client, delivery.email);
-      } else {
-        logger.warn(`[sendgrid-webhook] newsletter subscriber id=${delivery.subscriber_id} unsubscribe has no address to lock on — proceeding unlocked`);
-      }
-      const query = client('newsletter_subscribers').where({ id: delivery.subscriber_id });
-      if (updates.subscriberAction === 'unsubscribe_if_active') query.whereNot({ status: 'unsubscribed' });
-      await query.update({
+    } else if (updates.subscriberAction === 'force_unsubscribe') {
+      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
         status: 'unsubscribed',
         unsubscribed_at: at,
         updated_at: at,
       });
+    } else if (updates.subscriberAction === 'unsubscribe_if_active') {
+      await client('newsletter_subscribers')
+        .where({ id: delivery.subscriber_id })
+        .whereNot({ status: 'unsubscribed' })
+        .update({
+          status: 'unsubscribed',
+          unsubscribed_at: at,
+          updated_at: at,
+        });
     }
   }
 

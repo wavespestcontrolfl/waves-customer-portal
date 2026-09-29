@@ -154,11 +154,6 @@ describe('inactive subscriber resubscribe', () => {
       .mockImplementationOnce(() => write)
       .mockImplementationOnce(() => reread);
     db.raw = jest.fn((sql) => ({ __raw: sql }));
-    // subscribeOrResubscribe now opens a transaction to take the
-    // per-mailbox lock (codex #5165 P1) before its read/write — `trx` is
-    // the same mocked `db`, so the three mockImplementationOnce calls above
-    // are consumed in the same order as before this lock existed.
-    db.transaction = jest.fn(async (fn) => fn(db));
 
     const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
     const result = await subscribeOrResubscribe({

@@ -672,6 +672,19 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   const importableRows = [];
   const projectedAddresses = new Set();
   const cityCounts = new Map();
+  // Codex P2 (:699) — "Retry a surviving profile after the projected winner
+  // disappears": fetchCandidateRows' ORDER BY picks ONE canonical candidate
+  // per mailbox to project/import (projectedAddresses dedup below), but
+  // every OTHER independently-importable candidate sharing that mailbox is
+  // a real, live FALLBACK — if the kept candidate is archived/re-staged
+  // between this projection and its write-time recheck (outcome
+  // 'no_longer_live'), the mailbox itself is very likely still eligible
+  // through one of these siblings. mailboxFallbacks holds them in the SAME
+  // canonical order, keyed by mailbox identity, for the write loop below to
+  // retry — never assumed still-importable; each retry re-runs the full,
+  // fresh withAddressDecision (importOneCustomer), exactly like the first
+  // attempt.
+  const mailboxFallbacks = new Map();
 
   for (const row of candidateRows) {
     let decision;
@@ -694,8 +707,13 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     // johndoe@gmail.com) count once (codex round on 78312cbf27).
     const address = normalizeEmail(decision.fresh.email);
     const mailbox = googleMailboxIdentity(address) || address;
-    if (projectedAddresses.has(mailbox)) { excluded.duplicate_address += 1; continue; }
+    if (projectedAddresses.has(mailbox)) {
+      excluded.duplicate_address += 1;
+      mailboxFallbacks.get(mailbox).push(row.customer_id);
+      continue;
+    }
     projectedAddresses.add(mailbox);
+    mailboxFallbacks.set(mailbox, []);
     importableRows.push(decision.fresh);
     // The canonical profile's city — the profile the row links to, whose
     // city the write's zone fill reads.
@@ -733,13 +751,32 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     }
   }
 
+  // Codex P2 (:699): a 'no_longer_live' outcome is specific to the ONE
+  // candidate that just failed its write-time recheck (archived/re-staged
+  // since the projection) — it says nothing about the mailbox's OTHER
+  // sharing profiles, so retry each of mailboxFallbacks' surviving
+  // candidates, in the SAME canonical order the projection picked them,
+  // before giving up on the address. Every other outcome ('row_appeared'
+  // — the mailbox is already claimed, retrying can't help; an exclusion —
+  // address-level, so every sharing profile would see the SAME reason)
+  // stops immediately, exactly as before.
+  async function importAddressWithFallback(customerId, fallbackIds) {
+    let result = await importOneCustomer(conn, customerId);
+    for (let i = 0; result.outcome === 'no_longer_live' && i < fallbackIds.length; i += 1) {
+      result = await importOneCustomer(conn, fallbackIds[i]);
+    }
+    return result;
+  }
+
   let imported = 0;
   let zoneFillsApplied = 0;
   let orphanLinksApplied = 0;
   const appliedCityCounts = new Map();
   if (write) {
     await guardedEach(importableRows, (row) => ({ customerId: row.customer_id }), async (row) => {
-      const result = await importOneCustomer(conn, row.customer_id);
+      const address = normalizeEmail(row.email);
+      const mailbox = googleMailboxIdentity(address) || address;
+      const result = await importAddressWithFallback(row.customer_id, mailboxFallbacks.get(mailbox) || []);
       if (result.outcome === 'imported') {
         imported += 1;
         appliedCityCounts.set(result.city, (appliedCityCounts.get(result.city) || 0) + 1);
@@ -748,7 +785,9 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
       if (result.outcome === 'excluded') { excluded[result.reason] = (excluded[result.reason] || 0) + 1; return; }
       // 'row_appeared' and 'no_longer_live' each have their own bucket —
       // a rejected candidate always keeps its reason and is counted,
-      // never silently dropped as importable-with-imported:0.
+      // never silently dropped as importable-with-imported:0. Only the
+      // FINAL outcome (after exhausting every fallback) is counted here —
+      // never once per attempt.
       excluded[result.outcome] += 1;
     });
 

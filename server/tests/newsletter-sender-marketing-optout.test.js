@@ -1,16 +1,23 @@
 /**
- * Send-time explicit marketing opt-out (owner ruling 2026-09-28, #5165) —
- * no DB access: the generated SQL shape (Knex .toSQL()) and a source
- * contract that EVERY audience read in newsletter-sender.js carries the
- * predicate. Behaviour (who is excluded, the resume skip) is proven against
- * real Postgres in newsletter-sender-marketing-optout-postgres.test.js.
+ * Send-time mailbox mailability (owner rulings 2026-09-28 + 2026-09-29,
+ * #5165) — no DB access: the generated SQL shape (Knex .toSQL()) and a
+ * source contract that EVERY audience read in newsletter-sender.js carries
+ * the predicate. Behaviour (who is excluded, the resume skip) is proven
+ * against real Postgres in newsletter-sender-marketing-optout-postgres.test.js.
+ *
+ * Owner ruling 2026-09-29 (option A): per-writer mailbox locks were reverted
+ * (they kept spreading into live paths and produced a genuine deadlock) in
+ * favor of judging mailbox state at SEND TIME — excludeMailboxNotMailable
+ * now carries BOTH the explicit-opt-out rule and a new rule: an active
+ * subscriber is skipped when ANY OTHER newsletter_subscribers row for the
+ * SAME MAILBOX has a status other than 'active'.
  */
 const fs = require('fs');
 const path = require('path');
 const db = require('../models/db');
-const { buildSubscriberQuery, excludeMarketingOptedOut, outstandingEligibleDeliveries } = require('../services/newsletter-sender');
+const { buildSubscriberQuery, excludeMailboxNotMailable, outstandingEligibleDeliveries } = require('../services/newsletter-sender');
 
-describe('excludeMarketingOptedOut', () => {
+describe('excludeMailboxNotMailable', () => {
   test('buildSubscriberQuery anti-joins explicit opt-outs on the linked customer or any live same-mailbox profile', () => {
     const { sql } = buildSubscriberQuery(null).toSQL();
     // The notification_prefs/customers join is pre-filtered to explicit
@@ -30,12 +37,38 @@ describe('excludeMarketingOptedOut', () => {
     expect(sql).toContain("REPLACE(SPLIT_PART(SPLIT_PART(LOWER(TRIM(newsletter_subscribers.email)), '@', 1), '+', 1), '.', '') <> ''");
   });
 
+  // Owner ruling 2026-09-29 — the second half of the merged predicate: an
+  // active subscriber is skipped when ANY OTHER row sharing its mailbox
+  // (exact or Google alias) has a status other than 'active'. Pre-filtered
+  // into its own MATERIALIZED CTE keyed on a single computed mailbox
+  // identity (never an OR of exact-match-or-Google-alias), so Postgres can
+  // plan the match as a real equi-join/hash anti-join instead of a per-row
+  // rescan of the whole non-active tail (codex #5165 EXPLAIN finding).
+  test('buildSubscriberQuery anti-joins any non-active same-mailbox sibling row, via a single computed mailbox-key equi-join', () => {
+    const { sql } = buildSubscriberQuery(null).toSQL();
+    expect(sql).toMatch(/"blocked_mailbox_siblings" as materialized \(select distinct \(case when/i);
+    // status IS DISTINCT FROM 'active', never `<> 'active'` — a NULL status
+    // (the column carries no NOT NULL) must also block, fail-closed.
+    expect(sql).toContain("status IS DISTINCT FROM 'active'");
+    expect(sql).toMatch(/from "newsletter_subscribers" where status is distinct from 'active'/i);
+    // The mailbox-key CASE: a Google address collapses to its stripped
+    // mailbox identity (never empty), everything else to its own
+    // LOWER(TRIM) — computed identically on the CTE side and the outer
+    // newsletter_subscribers.email side, so the two are a single equality.
+    expect(sql).toContain("SPLIT_PART(LOWER(TRIM(email)), '@', 2) IN ('gmail.com', 'googlemail.com')");
+    expect(sql).toContain("REPLACE(SPLIT_PART(SPLIT_PART(LOWER(TRIM(email)), '@', 1), '+', 1), '.', '') <> ''");
+    expect(sql).toContain("|| '@gmail.com'");
+    expect(sql).toMatch(/not exists \(select 1 from "blocked_mailbox_siblings" as "bm" where bm\.mailbox_key = \(case when/i);
+    expect(sql).toContain('SPLIT_PART(LOWER(TRIM(newsletter_subscribers.email))');
+  });
+
   test('present with a segment filter too, and usable on a delivery-ledger join (resume precheck shape)', () => {
     expect(buildSubscriberQuery({ customersOnly: true }).toSQL().sql).toMatch(/"notification_prefs" as "mop"/);
-    const { sql } = excludeMarketingOptedOut(
+    const { sql } = excludeMailboxNotMailable(
       db('newsletter_send_deliveries').join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id'),
     ).toSQL();
     expect(sql).toMatch(/"notification_prefs" as "mop"/);
+    expect(sql).toMatch(/"blocked_mailbox_siblings" as materialized/i);
   });
 
   // #5187's outstandingEligibleDeliveries backs the resume precheck,
@@ -49,19 +82,21 @@ describe('excludeMarketingOptedOut', () => {
     // A CTE is valid inside a subquery expression (Postgres) — the MATERIALIZED
     // opt-out set is still scoped to this one EXISTS(...), never shared globally.
     expect(sql).toMatch(/EXISTS \(\(with "opted_out_profiles" as materialized \(select .*"notification_prefs" as "mop".*oo\.customer_id = newsletter_subscribers\.customer_id/is);
+    expect(sql).toMatch(/"blocked_mailbox_siblings" as materialized/i);
   });
 
   // Every audience read (fresh selection, resume refetch, per-chunk
   // re-check, resume precheck — and any added later) goes through
-  // excludeArchivedCustomers; each such call must be wrapped by the opt-out
-  // predicate, or a resume could mail an opted-out person.
-  test('every excludeArchivedCustomers call in the sender is wrapped by excludeMarketingOptedOut', () => {
+  // excludeArchivedCustomers; each such call must be wrapped by the
+  // mailbox-mailability predicate, or a resume could mail a
+  // no-longer-mailable person.
+  test('every excludeArchivedCustomers call in the sender is wrapped by excludeMailboxNotMailable', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/newsletter-sender.js'), 'utf8');
     const calls = [...src.matchAll(/excludeArchivedCustomers\(/g)].map((m) => m.index)
       .filter((i) => !src.slice(Math.max(0, i - 9), i).endsWith('function '));
     expect(calls.length).toBeGreaterThanOrEqual(4); // selection, refetch, chunk re-check, outstandingEligibleDeliveries
     for (const i of calls) {
-      expect(src.slice(Math.max(0, i - 'excludeMarketingOptedOut('.length), i)).toBe('excludeMarketingOptedOut(');
+      expect(src.slice(Math.max(0, i - 'excludeMailboxNotMailable('.length), i)).toBe('excludeMailboxNotMailable(');
     }
   });
 
@@ -69,12 +104,14 @@ describe('excludeMarketingOptedOut', () => {
   // call to anchor on, so the contract is named-function-by-function: every
   // audience/cohort/denominator read that decides who gets flagged, counted
   // as awaiting a win-back, swept into sunset, or used as the valve's
-  // active-list denominator must carry excludeMarketingOptedOut — an
-  // opted-out subscriber the sender already skips at send time must never
-  // be flagged, counted as "awaiting", or drive the valve fraction, or the
-  // job stages a win-back draft it can never resolve (see the module's own
-  // comments on findFlagCandidates / cohortAwaitingWinback for why).
-  test('every sunset audience/cohort/denominator read in newsletter-sunset.js carries excludeMarketingOptedOut', () => {
+  // active-list denominator must carry excludeMailboxNotMailable — a
+  // non-mailable subscriber (opted out, or a same-mailbox sibling that's
+  // unsubscribed/pending/inactive/waitlist) the sender already skips at
+  // send time must never be flagged, counted as "awaiting", or drive the
+  // valve fraction, or the job stages a win-back draft it can never
+  // resolve (see the module's own comments on findFlagCandidates /
+  // cohortAwaitingWinback for why).
+  test('every sunset audience/cohort/denominator read in newsletter-sunset.js carries excludeMailboxNotMailable', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/newsletter-sunset.js'), 'utf8');
     const FUNCTIONS = ['findFlagCandidates', 'cohortAwaitingWinback', 'findSunsetCandidates', 'runNewsletterSunset'];
     for (const name of FUNCTIONS) {
@@ -82,7 +119,7 @@ describe('excludeMarketingOptedOut', () => {
       expect(start).toBeGreaterThanOrEqual(0); // the function still exists under this exact name
       const nextFn = src.slice(start + 1).search(/\n(async )?function /);
       const body = nextFn === -1 ? src.slice(start) : src.slice(start, start + 1 + nextFn);
-      expect(body).toContain('excludeMarketingOptedOut(');
+      expect(body).toContain('excludeMailboxNotMailable(');
     }
   });
 });

@@ -1408,60 +1408,6 @@ describe('sendgrid newsletter suppression ledger writes', () => {
     }));
   });
 
-  // Codex #5165 P1 (:393): the per-mailbox lock — the SAME lock
-  // subscribeOrResubscribe and the reconcile take — must be taken on the
-  // delivery's own recipient address BEFORE this status write, so a
-  // concurrent import decision for a differently-spelled alias of the same
-  // mailbox can't commit in the gap. `client` here is already an open
-  // transaction (processWebhookEvent's), so this adds only the one lock
-  // this writer needs — never a second transaction.
-  test('newsletter dropped Group Unsubscribe takes the per-mailbox lock before the subscriber write', async () => {
-    const { client, calls } = fakeClient();
-
-    await handleNewsletterEvent({
-      event: 'dropped',
-      reason: 'Group Unsubscribe',
-      email: 'sub@example.com',
-    }, {
-      id: 'delivery-2',
-      send_id: 'send-2',
-      subscriber_id: 13,
-      email: 'sub@example.com',
-    }, client);
-
-    const lockCall = client.raw.mock.calls.find(([sql]) => String(sql).includes('pg_advisory_xact_lock'));
-    expect(lockCall).toBeTruthy();
-    expect(lockCall[1]).toEqual(['customer-email:sub@example.com']);
-    const lockOrder = client.raw.mock.invocationCallOrder[client.raw.mock.calls.indexOf(lockCall)];
-    const updateOrder = calls.newsletter_subscribers[0].update.mock.invocationCallOrder[0];
-    expect(lockOrder).toBeLessThan(updateOrder);
-  });
-
-  // Codex round-2 P1: lockCustomerEmail throws on a blank address, and an
-  // unsubscribe/complaint must never fail (and have SendGrid retry it
-  // forever) over a fencing lock it couldn't take — a NOT NULL column
-  // doesn't rule out a legacy empty string. A blank delivery.email skips
-  // the lock and the status write still lands.
-  test('newsletter dropped Group Unsubscribe with a blank delivery email skips the lock but still writes the status', async () => {
-    const { client, calls } = fakeClient();
-
-    await handleNewsletterEvent({
-      event: 'dropped',
-      reason: 'Group Unsubscribe',
-      email: '',
-    }, {
-      id: 'delivery-2b',
-      send_id: 'send-2b',
-      subscriber_id: 13,
-      email: '',
-    }, client);
-
-    const lockCall = client.raw.mock.calls.find(([sql]) => String(sql).includes('pg_advisory_xact_lock'));
-    expect(lockCall).toBeUndefined(); // never attempted — would have thrown
-    const subscriberUpdate = calls.newsletter_subscribers[0].update.mock.calls[0][0];
-    expect(subscriberUpdate).toEqual(expect.objectContaining({ status: 'unsubscribed' }));
-  });
-
   test('newsletter dropped Unsubscribed Address writes a global unsubscribe suppression', async () => {
     const { client, calls } = fakeClient();
 

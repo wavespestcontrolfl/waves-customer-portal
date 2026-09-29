@@ -726,6 +726,74 @@ test('two candidate profiles sharing one address: projected ONCE (duplicate_addr
   expect(state.subscribers).toHaveLength(1);
 });
 
+// Codex P2 (:699) — "Retry a surviving profile after the projected winner
+// disappears": the kept candidate for a mailbox (c1, is_primary_profile —
+// the canonical pick) is archived AFTER the projection but BEFORE its own
+// write-time recheck; the OTHER live candidate sharing the same mailbox
+// (c2, the fallback the projection counted as duplicate_address) is still
+// eligible, so the write must retry it rather than dropping the whole
+// mailbox as no_longer_live.
+test('when the kept mailbox candidate is archived before its write-time recheck, the write retries the next live candidate for the SAME mailbox', async () => {
+  const state = {
+    customers: [
+      cust({ id: 'c1', email: 'fallback@example.com', is_primary_profile: true, created_at: '2026-01-01', first_name: 'Primary' }),
+      cust({ id: 'c2', email: 'fallback@example.com', created_at: '2026-02-01', first_name: 'Secondary' }),
+    ],
+    subscribers: [],
+    prefs: [],
+  };
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  let reads = 0;
+  conn.raw = jest.fn(async (sql, bindings) => {
+    // Projection processes c1 then c2 (canonical order): 2 reads each (peek +
+    // FOR SHARE) = reads #1-4. c1's write-time decision's OWN first read is
+    // #5 — archive it right there, simulating the race.
+    if (sql.includes('WHERE c.id = ?') && ++reads === 5) state.customers[0].deleted_at = new Date();
+    return rawImpl(sql, bindings);
+  });
+  const write = await reconcileCustomers({ dryRun: false, conn });
+  expect(write.imported).toBe(1);
+  expect(write.excluded.no_longer_live).toBe(0); // the fallback succeeded — never counted as dropped
+  expect(state.subscribers).toHaveLength(1);
+  expect(state.subscribers[0].customer_id).toBe('c2'); // the surviving candidate, not the archived one
+});
+
+// The same race, but EVERY sharing candidate is archived before its own
+// write-time recheck runs — the mailbox is genuinely gone, and the outcome
+// (no_longer_live) is counted exactly ONCE, never once per attempt.
+test('when every mailbox candidate is archived before its write-time recheck, no_longer_live is counted exactly once, not once per fallback attempt', async () => {
+  const state = {
+    customers: [
+      cust({ id: 'c1', email: 'allgone@example.com', is_primary_profile: true, created_at: '2026-01-01' }),
+      cust({ id: 'c2', email: 'allgone@example.com', created_at: '2026-02-01' }),
+    ],
+    subscribers: [],
+    prefs: [],
+  };
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  let reads = 0;
+  conn.raw = jest.fn(async (sql, bindings) => {
+    // Archive BOTH customers right before c1's write-time recheck (read #5)
+    // — c2's own retry (reads #7-8) then also finds nothing live.
+    if (sql.includes('WHERE c.id = ?') && ++reads === 5) {
+      state.customers[0].deleted_at = new Date();
+      state.customers[1].deleted_at = new Date();
+    }
+    return rawImpl(sql, bindings);
+  });
+  const write = await reconcileCustomers({ dryRun: false, conn });
+  expect(write.imported).toBe(0);
+  expect(write.excluded.no_longer_live).toBe(1); // exactly once — never once per attempt (2 fallback attempts made)
+  // The ONLY other exclusion is duplicate_address (1), from the projection
+  // phase counting c2 as the mailbox's second candidate — unrelated to the
+  // write-time retry count. No exclusion bucket is double-counted.
+  expect(write.excluded.duplicate_address).toBe(1);
+  expect(Object.values(write.excluded).reduce((a, b) => a + b, 0)).toBe(2);
+  expect(state.subscribers).toHaveLength(0);
+});
+
 test('the dry run keys duplicates by mailbox identity: equivalent Google spellings are projected once', async () => {
   const state = {
     customers: [cust({ id: 'c1', email: 'john.doe+work@gmail.com' }), cust({ id: 'c2', email: 'johndoe@gmail.com' })],

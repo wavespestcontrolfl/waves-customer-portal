@@ -6,21 +6,7 @@
  */
 
 const db = require('../models/db');
-const logger = require('./logger');
 const { REENGAGEMENT_TAG } = require('./newsletter-sunset');
-// The SAME per-mailbox fence the reconcile's decideAddress takes (codex
-// #5165 P1, :393): every writer below that changes a subscriber row's
-// status, or inserts a new one, takes lockCustomerEmail (the exact address
-// key, plus a Google address's mailbox-identity key) BEFORE it reads the
-// row it's about to decide on — so a signup/confirm/unsubscribe for one
-// spelling of a Gmail alias always serializes against the reconcile's
-// decision for a DIFFERENT spelling of the same mailbox (or against another
-// writer here), instead of committing a stale view in the gap. None of
-// these writers touch a customers row or a prefs row, so — per the
-// reconcile's own lock-order contract — each takes ONLY the email key,
-// never the comms-lock/customer-row/prefs-row sequence a full address
-// decision needs.
-const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 
 // Canonical definition moved to the dependency-free util (pre-push P1 PR
 // #3303 r20) so the attribution linkage mirror can share it; re-exported
@@ -39,7 +25,7 @@ const PENDING_PURGE_MS = 30 * 24 * 60 * 60 * 1000;    // 30 days — then delete
 // A 'waitlist' row (the out-of-area consultation prompt) meeting a later
 // signup: its own transition, out of subscribeOrResubscribe's shared state
 // machine (Codex #4737 r9 P2).
-async function transitionWaitlistRow(trx, existing, {
+async function transitionWaitlistRow(existing, {
   source, firstName, lastName, requireConfirmation, promoteWaitlist, linkCustomer, lc,
 }) {
   // Codex pre-push P1 :1087, 2026-09-24 — a 'waitlist' row (the
@@ -77,7 +63,7 @@ async function transitionWaitlistRow(trx, existing, {
   if (requireConfirmation) {
     updates.status = 'pending';
     updates.confirmation_sent_at = new Date();
-    updates.confirmation_token = trx.raw('gen_random_uuid()');
+    updates.confirmation_token = db.raw('gen_random_uuid()');
   } else {
     updates.status = 'active';
     updates.confirmed_at = new Date();
@@ -86,10 +72,10 @@ async function transitionWaitlistRow(trx, existing, {
   // an overlapping signup or admin promotion that moved it first wins, and
   // this call returns null so the caller re-runs the normal state machine
   // (never a second token overwriting the first's emailed link).
-  const moved = await trx('newsletter_subscribers').where({ id: existing.id, status: 'waitlist' }).update(updates);
+  const moved = await db('newsletter_subscribers').where({ id: existing.id, status: 'waitlist' }).update(updates);
   if (!moved) return null;
-  if (linkCustomer) await linkToCustomer(lc, trx);
-  const fresh = await trx('newsletter_subscribers').where({ id: existing.id }).first();
+  if (linkCustomer) await linkToCustomer(lc);
+  const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
   return { subscriber: fresh, action: requireConfirmation ? 'confirmation_sent' : 'resubscribed' };
 }
 
@@ -133,13 +119,29 @@ async function transitionWaitlistRow(trx, existing, {
  * website and quote-wizard signups must pass requireConfirmation=true).
  */
 async function subscribeOrResubscribe(params = {}) {
-  const { email, strict = true } = params;
+  return subscribeOrResubscribeOnce(params, { retried: false });
+}
+
+async function subscribeOrResubscribeOnce({
+  email,
+  firstName = null,
+  lastName = null,
+  source = 'public_form',
+  strict = true,
+  linkCustomer = true,
+  requireConfirmation = false,
+  // An operator's explicit single add (admin-newsletter.js POST
+  // /subscribers) may promote a waitlist row straight to active; bulk and
+  // automatic trusted flows never do (Codex #4737 r3 P2).
+  promoteWaitlist,
+} = {}, { retried } = {}) {
   if (!email) {
     const err = new Error('email required');
     err.code = 'EMAIL_REQUIRED';
     throw err;
   }
   const lc = String(email).trim().toLowerCase();
+
   if (strict) {
     if (!EMAIL_RE.test(lc)) {
       const err = new Error('valid email required');
@@ -151,27 +153,8 @@ async function subscribeOrResubscribe(params = {}) {
     err.code = 'INVALID_EMAIL';
     throw err;
   }
-  // Validation is pure JS (no DB), so an invalid/missing email throws
-  // before any transaction opens or lock is taken — unchanged from before
-  // this lock existed.
-  return db.transaction(async (trx) => {
-    await lockCustomerEmail(trx, lc);
-    return subscribeOrResubscribeOnce(trx, lc, params, { retried: false });
-  });
-}
 
-async function subscribeOrResubscribeOnce(trx, lc, {
-  firstName = null,
-  lastName = null,
-  source = 'public_form',
-  linkCustomer = true,
-  requireConfirmation = false,
-  // An operator's explicit single add (admin-newsletter.js POST
-  // /subscribers) may promote a waitlist row straight to active; bulk and
-  // automatic trusted flows never do (Codex #4737 r3 P2).
-  promoteWaitlist,
-} = {}, { retried } = {}) {
-  const existing = await trx('newsletter_subscribers').where({ email: lc }).first();
+  const existing = await db('newsletter_subscribers').where({ email: lc }).first();
 
   if (existing) {
     // Pending → still mid-DOI. Resend the confirmation email if the
@@ -180,33 +163,33 @@ async function subscribeOrResubscribeOnce(trx, lc, {
     // trusted (admin add) on a previously public-form-pending row.
     if (existing.status === 'pending') {
       if (requireConfirmation) {
-        await trx('newsletter_subscribers').where({ id: existing.id }).update({
+        await db('newsletter_subscribers').where({ id: existing.id }).update({
           source,
           first_name: firstName !== null ? firstName : existing.first_name,
           last_name: lastName !== null ? lastName : existing.last_name,
           confirmation_sent_at: new Date(),
           updated_at: new Date(),
         });
-        if (linkCustomer) await linkToCustomer(lc, trx);
-        const fresh = await trx('newsletter_subscribers').where({ id: existing.id }).first();
+        if (linkCustomer) await linkToCustomer(lc);
+        const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
         return { subscriber: fresh, action: 'confirmation_resent' };
       }
       // Trusted-context promotion: flip pending to active.
-      await trx('newsletter_subscribers').where({ id: existing.id }).update({
+      await db('newsletter_subscribers').where({ id: existing.id }).update({
         status: 'active',
         confirmed_at: new Date(),
         updated_at: new Date(),
       });
-      if (linkCustomer) await linkToCustomer(lc, trx);
-      const fresh = await trx('newsletter_subscribers').where({ id: existing.id }).first();
+      if (linkCustomer) await linkToCustomer(lc);
+      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
       return { subscriber: fresh, action: 'confirmed' };
     }
 
     if (existing.status === 'waitlist') {
       // Its own status-specific transition (Codex #4737 r9 P2) — see
       // transitionWaitlistRow below.
-      return waitlistBranch(trx, existing, {
-        firstName, lastName, source, linkCustomer, requireConfirmation, promoteWaitlist, lc,
+      return waitlistBranch(existing, {
+        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist, lc,
       }, retried);
     }
 
@@ -240,19 +223,19 @@ async function subscribeOrResubscribeOnce(trx, lc, {
       updates.deactivated_at = null;
       updates.deactivated_reason = null;
       updates.reengagement_flagged_at = null;
-      updates.tags = trx.raw("COALESCE(tags, '[]'::jsonb) - ?", [REENGAGEMENT_TAG]);
+      updates.tags = db.raw("COALESCE(tags, '[]'::jsonb) - ?", [REENGAGEMENT_TAG]);
       if (requireConfirmation) {
         updates.status = 'pending';
         updates.confirmation_sent_at = new Date();
-        updates.confirmation_token = trx.raw('gen_random_uuid()');
+        updates.confirmation_token = db.raw('gen_random_uuid()');
         updates.confirmed_at = null;
       } else {
         updates.status = 'active';
         updates.confirmed_at = new Date();
       }
-      await trx('newsletter_subscribers').where({ id: existing.id }).update(updates);
-      if (linkCustomer) await linkToCustomer(lc, trx);
-      const fresh = await trx('newsletter_subscribers').where({ id: existing.id }).first();
+      await db('newsletter_subscribers').where({ id: existing.id }).update(updates);
+      if (linkCustomer) await linkToCustomer(lc);
+      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
       return {
         subscriber: fresh,
         action: requireConfirmation ? 'confirmation_sent' : 'resubscribed',
@@ -262,16 +245,16 @@ async function subscribeOrResubscribeOnce(trx, lc, {
     // status === 'active' — already confirmed. No-op aside from the
     // customer-link refresh (in case the row predates the customer
     // signup and the link is newly possible).
-    if (linkCustomer) await linkToCustomer(lc, trx);
-    const fresh = await trx('newsletter_subscribers').where({ id: existing.id }).first();
+    if (linkCustomer) await linkToCustomer(lc);
+    const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
     return { subscriber: fresh, action: 'already_active' };
   }
 
   // New row — its own step (keeps this state machine's complexity down).
-  return insertNewSubscriber(trx, { lc, firstName, lastName, source, requireConfirmation, linkCustomer }, () => (retried
+  return insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer }, () => (retried
     ? null
-    : subscribeOrResubscribeOnce(trx, lc, {
-      firstName, lastName, source, linkCustomer, requireConfirmation, promoteWaitlist,
+    : subscribeOrResubscribeOnce({
+      email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist,
     }, { retried: true })));
 }
 
@@ -282,15 +265,15 @@ async function subscribeOrResubscribeOnce(trx, lc, {
 // The waitlist branch of the state machine: the conditional transition, and
 // — when an overlapping request moved the row first (Codex #4737 r20 P2) —
 // one re-run against the row's new state.
-async function waitlistBranch(trx, existing, params, retried) {
+async function waitlistBranch(existing, params, retried) {
   const { lc, ...signup } = params;
-  const transitioned = await transitionWaitlistRow(trx, existing, { ...signup, lc });
+  const transitioned = await transitionWaitlistRow(existing, { ...signup, lc });
   if (transitioned) return transitioned;
   if (retried) return { subscriber: existing, action: 'already_pending' };
-  return subscribeOrResubscribeOnce(trx, lc, signup, { retried: true });
+  return subscribeOrResubscribeOnce(signup, { retried: true });
 }
 
-async function insertNewSubscriber(trx, { lc, firstName, lastName, source, requireConfirmation, linkCustomer }, onConflict) {
+async function insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer }, onConflict) {
   const insertRow = {
     email: lc,
     first_name: firstName,
@@ -305,22 +288,17 @@ async function insertNewSubscriber(trx, { lc, firstName, lastName, source, requi
   }
   let row;
   try {
-    // Savepoint: the outer `trx` holds the mailbox lock for the whole
-    // subscribeOrResubscribe call — a 23505 here must roll back only this
-    // INSERT, never poison the outer transaction the retry (onConflict)
-    // below still needs to run on.
-    const inserted = await trx.transaction(async (sp) => sp('newsletter_subscribers').insert(insertRow).returning('*'));
-    [row] = inserted;
+    [row] = await db('newsletter_subscribers').insert(insertRow).returning('*');
   } catch (err) {
     const retry = err && err.code === '23505' ? onConflict() : null;
     if (retry) return retry;
     throw err;
   }
 
-  if (linkCustomer) await linkToCustomer(lc, trx);
+  if (linkCustomer) await linkToCustomer(lc);
   // Re-read for the same reason — surfaces the freshly populated
   // customer_id without requiring callers to know the link runs.
-  const fresh = await trx('newsletter_subscribers').where({ id: row.id }).first();
+  const fresh = await db('newsletter_subscribers').where({ id: row.id }).first();
   return {
     subscriber: fresh,
     action: requireConfirmation ? 'confirmation_sent' : 'created',
@@ -339,9 +317,9 @@ async function insertNewSubscriber(trx, { lc, firstName, lastName, source, requi
  *   'unsubscribed'   — row is unsubscribed; nothing to do
  *   'not_found'      — token doesn't match any row
  */
-async function lookupByToken(token, conn = db) {
+async function lookupByToken(token) {
   if (!token) return { subscriber: null, action: 'not_found' };
-  const sub = await conn('newsletter_subscribers').where({ confirmation_token: token }).first();
+  const sub = await db('newsletter_subscribers').where({ confirmation_token: token }).first();
   if (!sub) return { subscriber: null, action: 'not_found' };
   if (sub.status === 'active') return { subscriber: sub, action: 'already_active' };
   if (sub.status === 'unsubscribed') return { subscriber: sub, action: 'unsubscribed' };
@@ -391,42 +369,26 @@ async function purgeStalePendingSubscribers() {
 async function confirmByToken(token) {
   const initial = await lookupByToken(token);
   if (initial.action !== 'pending') return initial;
-  return db.transaction(async (trx) => {
-    // Per-mailbox fence (codex #5165 P1, :393): the SAME lock
-    // subscribeOrResubscribe and the reconcile take. The unlocked
-    // lookupByToken above is read-only classification for the caller's
-    // page copy — the address is only known once it returns, so the lock
-    // is taken here, immediately before the actual write below.
-    // Best-effort: lockCustomerEmail throws on a blank address, and a
-    // confirm must never fail over a fencing lock it couldn't take (codex
-    // round-2 P1) — every known writer of this row validates the email
-    // before insert, but the column has no CHECK against an empty string.
-    if (initial.subscriber.email && initial.subscriber.email.trim()) {
-      await lockCustomerEmail(trx, initial.subscriber.email);
-    } else {
-      logger.warn(`[newsletter] confirm subscriber id=${initial.subscriber.id} has no address to lock on — proceeding unlocked`);
-    }
-    // status === 'pending' — flip to active. The flip is an atomic CAS on
-    // the token AND the pending status (Codex #3084 r41): an email
-    // correction can rotate this row's tokens between the lookup and this
-    // write — the old link was DELIVERED to a rejected/typo mailbox, and an
-    // id-only update would let that stale link activate the freshly
-    // retargeted row (a third party confirming an address that isn't
-    // theirs). Zero rows means the token no longer owns the row; re-run the
-    // lookup so the caller sees the current truth (the stale link reads
-    // 'not_found'; a concurrent same-token confirm reads 'already_active').
-    const flipped = await trx('newsletter_subscribers')
-      .where({ id: initial.subscriber.id, confirmation_token: token, status: 'pending' })
-      .update({
-        status: 'active',
-        confirmed_at: new Date(),
-        updated_at: new Date(),
-      });
-    if (!flipped) return lookupByToken(token, trx);
-    await linkToCustomer(initial.subscriber.email, trx);
-    const fresh = await trx('newsletter_subscribers').where({ id: initial.subscriber.id }).first();
-    return { subscriber: fresh, action: 'confirmed' };
-  });
+  // status === 'pending' — flip to active. The flip is an atomic CAS on
+  // the token AND the pending status (Codex #3084 r41): an email
+  // correction can rotate this row's tokens between the lookup and this
+  // write — the old link was DELIVERED to a rejected/typo mailbox, and an
+  // id-only update would let that stale link activate the freshly
+  // retargeted row (a third party confirming an address that isn't
+  // theirs). Zero rows means the token no longer owns the row; re-run the
+  // lookup so the caller sees the current truth (the stale link reads
+  // 'not_found'; a concurrent same-token confirm reads 'already_active').
+  const flipped = await db('newsletter_subscribers')
+    .where({ id: initial.subscriber.id, confirmation_token: token, status: 'pending' })
+    .update({
+      status: 'active',
+      confirmed_at: new Date(),
+      updated_at: new Date(),
+    });
+  if (!flipped) return lookupByToken(token);
+  await linkToCustomer(initial.subscriber.email);
+  const fresh = await db('newsletter_subscribers').where({ id: initial.subscriber.id }).first();
+  return { subscriber: fresh, action: 'confirmed' };
 }
 
 /**

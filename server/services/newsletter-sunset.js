@@ -159,7 +159,7 @@ async function reactivateSunsetComebacks(now) {
 
 // Phase B candidates — active, not already flagged, globally-suppressed AND
 // explicitly-marketing-opted-out excluded (codex #5165: the sender's send-time
-// excludeMarketingOptedOut predicate — server/services/newsletter-sender.js —
+// excludeMailboxNotMailable predicate — server/services/newsletter-sender.js —
 // already skips these subscribers on every campaign, so flagging one here
 // only stages a win-back they can never receive, which then keeps
 // cohortAwaitingWinback nonzero and re-triggers ensureWinbackDraft forever),
@@ -168,9 +168,9 @@ async function reactivateSunsetComebacks(now) {
 // delivered-history gate is what makes the job inert until real send history
 // accumulates: nobody can be flagged during the first-campaign ramp.
 async function findFlagCandidates(now) {
-  const { excludeGloballySuppressed, excludeMarketingOptedOut } = require('./newsletter-sender');
+  const { excludeGloballySuppressed, excludeMailboxNotMailable } = require('./newsletter-sender');
   const cutoff = new Date(now.getTime() - INACTIVITY_DAYS * DAY_MS);
-  const rows = await excludeMarketingOptedOut(excludeGloballySuppressed(
+  const rows = await excludeMailboxNotMailable(excludeGloballySuppressed(
     db('newsletter_subscribers')
       .where({ status: 'active' })
       .whereNull('reengagement_flagged_at')
@@ -269,13 +269,13 @@ function buildWinbackDraftRow() {
 
 // Phase C — how many flagged actives have NOT yet received a win-back sent
 // after their flag date, and stage one draft for them if none is open.
-// Codex #5165: excludeMarketingOptedOut too — an opted-out flagged
+// Codex #5165: excludeMailboxNotMailable too — an opted-out flagged
 // subscriber is never actually sent the win-back (the sender skips them at
 // send time), so without this filter they count as "awaiting" forever and
 // ensureWinbackDraft keeps parking a fresh draft that can never resolve them.
 async function cohortAwaitingWinback() {
-  const { excludeMarketingOptedOut } = require('./newsletter-sender');
-  const row = await excludeMarketingOptedOut(
+  const { excludeMailboxNotMailable } = require('./newsletter-sender');
+  const row = await excludeMailboxNotMailable(
     db('newsletter_subscribers')
       .where({ status: 'active' })
       .whereNotNull('reengagement_flagged_at')
@@ -313,15 +313,15 @@ async function ensureWinbackDraft(cohort) {
 // left the subscriber stranded forever: never suppressed, never re-sent
 // (cohortAwaitingWinback keys on sent_at), alert resolved with no outcome.
 // SELECT and UPDATE are split so the safety valve can weigh this cohort
-// BEFORE any status flips. excludeMarketingOptedOut (codex #5165) keeps this
+// BEFORE any status flips. excludeMailboxNotMailable (codex #5165) keeps this
 // read consistent with the flag/cohort/denominator reads above — an
 // opted-out subscriber can never actually match the whereExists below (the
 // sender never sent them a win-back to begin with), so this is belt-and-
 // suspenders, not a behavior change on its own.
 async function findSunsetCandidates(now) {
-  const { excludeMarketingOptedOut } = require('./newsletter-sender');
+  const { excludeMailboxNotMailable } = require('./newsletter-sender');
   const graceCutoff = new Date(now.getTime() - GRACE_DAYS * DAY_MS);
-  const rows = await excludeMarketingOptedOut(
+  const rows = await excludeMailboxNotMailable(
     db('newsletter_subscribers')
       .where({ status: 'active' })
       .whereNotNull('reengagement_flagged_at')
@@ -443,8 +443,8 @@ async function runNewsletterSunset(now = new Date()) {
   // #5165). Counting suppressed/opted-out-but-active rows would understate
   // the cohort fraction and let a tracking outage slip past the valve on a
   // bounce-heavy or heavily-opted-out list.
-  const { excludeGloballySuppressed, excludeMarketingOptedOut } = require('./newsletter-sender');
-  const activeRow = await excludeMarketingOptedOut(excludeGloballySuppressed(
+  const { excludeGloballySuppressed, excludeMailboxNotMailable } = require('./newsletter-sender');
+  const activeRow = await excludeMailboxNotMailable(excludeGloballySuppressed(
     db('newsletter_subscribers').where({ status: 'active' }),
   )).count('* as c').first();
   const activeCount = Number(activeRow?.c || 0);

@@ -18,7 +18,6 @@ const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
 const crypto = require('crypto');
 const { linkToCustomer, linkManyToCustomers, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
-const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 const NewsletterSubscribers = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const { wrapNewsletter } = require('../services/email-template');
@@ -338,28 +337,11 @@ router.delete('/subscribers/:subscriberId', async (req, res, next) => {
     if (!Number.isInteger(subscriberId) || subscriberId <= 0) {
       return res.status(400).json({ error: 'invalid subscriber id' });
     }
-    // Per-mailbox fence (codex #5165 P1, :393): the SAME lock
-    // subscribeOrResubscribe and the reconcile take — learn the address
-    // first (read-only), then lock BEFORE the actual status write. A
-    // missing id is still a silent no-op success, exactly as before.
-    const existing = await db('newsletter_subscribers').where({ id: subscriberId }).first('email');
-    if (existing) {
-      await db.transaction(async (trx) => {
-        // Best-effort: lockCustomerEmail throws on a blank address, and an
-        // admin unsubscribe must never fail over a fencing lock it
-        // couldn't take (codex round-2 P1).
-        if (existing.email && existing.email.trim()) {
-          await lockCustomerEmail(trx, existing.email);
-        } else {
-          logger.warn(`[admin-newsletter] subscriber id=${subscriberId} unsubscribe has no address to lock on — proceeding unlocked`);
-        }
-        await trx('newsletter_subscribers').where({ id: subscriberId }).update({
-          status: 'unsubscribed',
-          unsubscribed_at: new Date(),
-          updated_at: new Date(),
-        });
-      });
-    }
+    await db('newsletter_subscribers').where({ id: subscriberId }).update({
+      status: 'unsubscribed',
+      unsubscribed_at: new Date(),
+      updated_at: new Date(),
+    });
     res.json({ success: true });
   } catch (err) { next(err); }
 });

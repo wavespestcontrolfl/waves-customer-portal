@@ -18,7 +18,6 @@ const {
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
-const { lockCustomerEmail } = require('../utils/customer-comms-lock');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveAnswer, recordQuizResponse, getQuiz, quizBookingUrl } = require('../services/newsletter-quiz');
@@ -108,32 +107,14 @@ router.post('/unsubscribe/:token', async (req, res) => {
     // token correctly matches nothing.
     let unsubRows = [];
     if (isUuid) {
-      // Learn the address first (read-only, unlocked — mirrors
-      // confirmByToken's lookupByToken) so the per-mailbox fence (codex
-      // #5165 P1, :393 — the SAME lock subscribeOrResubscribe and the
-      // reconcile take) can be taken BEFORE the actual CAS write below.
-      const byToken = await db('newsletter_subscribers').where({ unsubscribe_token: req.params.token }).first();
-      if (byToken) {
-        unsubRows = await db.transaction(async (trx) => {
-          // Best-effort: lockCustomerEmail throws on a blank address, and
-          // this one-click unsubscribe must always return 200 quickly —
-          // never fail (or have mail clients retry it) over a fencing
-          // lock it couldn't take (codex round-2 P1).
-          if (byToken.email && byToken.email.trim()) {
-            await lockCustomerEmail(trx, byToken.email);
-          } else {
-            logger.warn(`[newsletter] unsubscribe subscriber id=${byToken.id} has no address to lock on — proceeding unlocked`);
-          }
-          return trx('newsletter_subscribers')
-            .where({ unsubscribe_token: req.params.token })
-            .whereNot({ status: 'unsubscribed' })
-            .update({
-              status: 'unsubscribed',
-              unsubscribed_at: new Date(),
-              updated_at: new Date(),
-            }, ['id', 'email']);
-        });
-      }
+      unsubRows = await db('newsletter_subscribers')
+        .where({ unsubscribe_token: req.params.token })
+        .whereNot({ status: 'unsubscribed' })
+        .update({
+          status: 'unsubscribed',
+          unsubscribed_at: new Date(),
+          updated_at: new Date(),
+        }, ['id', 'email']);
       if (unsubRows.length) {
         logger.info(`[newsletter] One-click unsubscribe for subscriber id=${unsubRows[0].id}`);
       }

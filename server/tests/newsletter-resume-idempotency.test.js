@@ -576,7 +576,9 @@ describe('resumeCampaign — preconditions', () => {
     expect(q.join).toHaveBeenCalledWith('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id');
     expect(q.where).toHaveBeenCalledWith({ 'newsletter_subscribers.status': 'active' });
     expect(q.whereIn).toHaveBeenCalledWith('newsletter_send_deliveries.status', ['queued', 'failed', 'sending']);
-    expect(q.whereNotExists).toHaveBeenCalledTimes(3); // global suppression + archived customer + explicit marketing opt-out
+    // global suppression + archived customer + explicit marketing opt-out
+    // + non-mailable same-mailbox sibling (owner ruling 2026-09-29, #5165)
+    expect(q.whereNotExists).toHaveBeenCalledTimes(4);
   });
 
   test('the correction-eligibility read and the resume precheck relink archived links BEFORE judging outstanding rows (codex round 18 P2)', async () => {
