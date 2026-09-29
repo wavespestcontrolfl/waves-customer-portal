@@ -12,7 +12,7 @@ const db = require('../models/db');
 const auditor = require('../services/seo/citation-auditor');
 const { WAVES_LOCATIONS } = require('../config/locations');
 
-const { classifyListing, candidatesFor, STATES } = auditor._internals;
+const { classifyListing, candidatesFor, normalizeStreet, streetOfAddress, STATES } = auditor._internals;
 const BRAND = WAVES_LOCATIONS[0];
 const PARRISH = WAVES_LOCATIONS.find((l) => l.id === 'parrish');
 
@@ -79,6 +79,80 @@ describe('classifyListing', () => {
 
   test('no address-like string at all: name + phone decide', () => {
     expect(classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p><p>Serving Manatee and Sarasota counties since 2019.</p>`), candidatesFor({})).status).toBe('verified');
+  });
+
+  describe('street matching is on the FULL normalized street, never a partial', () => {
+    const SARASOTA = WAVES_LOCATIONS.find((l) => l.id === 'sarasota');
+    const VENICE = WAVES_LOCATIONS.find((l) => l.id === 'venice');
+    const forOffice = (loc, addressText) => classifyListing(page(`<h1>Waves Pest Control</h1><p>${loc.phone}</p><p>${addressText}</p>`), candidatesFor({ location_id: loc.id }));
+
+    test('expected streets normalize to number + full name + suffix (+ directional)', () => {
+      expect(WAVES_LOCATIONS.map((l) => streetOfAddress(l.address))).toEqual([
+        '13649 luxe avenue', '5155 115th circle east', '1450 pine warbler place', '1978 south tamiami trail',
+      ]);
+      expect(normalizeStreet('1978 S. Tamiami Trl #10, Venice')).toBe('1978 south tamiami trail venice');
+      expect(normalizeStreet('13649 Luxe Ave Suite 110')).toBe('13649 luxe avenue');
+    });
+
+    test('"1450 Pine Street, Tampa" is NOT confirmed against 1450 Pine Warbler PL', () => {
+      const r = forOffice(SARASOTA, '1450 Pine Street, Tampa, FL');
+      expect(r.status).toBe('unverified');
+      expect(r.detail).toMatchObject({ reason: 'address_unconfirmed', seen: '1450 Pine Street' });
+    });
+
+    test.each(['1450 Pine Warbler Pl, Sarasota, FL 34240', '1450 PINE WARBLER PLACE', '1450 pine warbler pl.'])('%s is confirmed', (text) => {
+      const r = forOffice(SARASOTA, text);
+      expect(r.status).toBe('verified');
+      expect(r.detail.address_checked).toBe(true);
+    });
+
+    test('a number that merely ends in ours does not confirm (11450 Pine Warbler Pl)', () => {
+      expect(forOffice(SARASOTA, '11450 Pine Warbler Pl').status).toBe('unverified');
+    });
+
+    test.each(['1978 S Tamiami Trl #10', '1978 South Tamiami Trail', '1978 S. Tamiami Trail, Suite 10'])('%s matches 1978 South Tamiami Trail', (text) => {
+      expect(forOffice(VENICE, text).status).toBe('verified');
+    });
+
+    test('a directional-less variant is ambiguous, so unconfirmed (never confirmed)', () => {
+      expect(forOffice(VENICE, '1978 Tamiami Trail').status).toBe('unverified');
+    });
+  });
+
+  describe('only the Waves JSON-LD entity is evidence', () => {
+    const bizLd = (address) => ({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address });
+    const publisher = { '@type': 'Organization', name: 'Local Directory Inc', telephone: '(813) 555-0100', address: { streetAddress: '1 Directory Way', addressLocality: 'Tampa' } };
+    const withLd = (graph, extra = '') => classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${extra}${ld({ '@graph': graph })}`), candidatesFor({}));
+
+    test('a publisher Organization listed before our LocalBusiness causes no false mismatch', () => {
+      const r = withLd([publisher, bizLd({ streetAddress: '13649 Luxe Ave #110', addressLocality: 'Bradenton' })]);
+      expect(r.status).toBe('verified');
+      expect(r.detail.address_checked).toBe(true);
+    });
+
+    test('the Waves entity with a wrong street is mismatched, even after a publisher node', () => {
+      const r = withLd([publisher, bizLd({ streetAddress: '99 Old Rd', addressLocality: 'Tampa' })]);
+      expect(r.status).toBe('mismatched');
+      expect(r.detail.mismatches).toEqual([{ field: 'address', expected: BRAND.address, seen: '99 Old Rd, Tampa' }]);
+    });
+
+    test('the Waves entity is also recognised by one of our office phones alone', () => {
+      const r = withLd([publisher, { '@type': 'LocalBusiness', name: 'Bradenton Office', telephone: PARRISH.phone, address: { streetAddress: '9 Wrong St' } }]);
+      expect(r.status).toBe('mismatched');
+      expect(r.detail.mismatches[0]).toMatchObject({ field: 'address', seen: '9 Wrong St' });
+    });
+
+    test('no Waves entity: JSON-LD contributes nothing (no address mismatch, no phone evidence)', () => {
+      const r = withLd([publisher, { '@type': 'LocalBusiness', name: 'Acme Bug Co', telephone: '(941) 555-0142', address: { streetAddress: '7 Acme Blvd' } }]);
+      expect(r.status).toBe('verified');
+      expect(r.detail.address_checked).toBe(false);
+      expect(r.nap.nap_phone).toBe(BRAND.phone);
+    });
+
+    test('a JSON-LD-only phone from another business is not our phone evidence', () => {
+      const r = classifyListing(page(`<h1>Waves Pest Control</h1>${ld({ '@graph': [publisher] })}`), candidatesFor({}));
+      expect(r).toMatchObject({ status: 'fetch-blocked', detail: { reason: 'phone_not_found' } });
+    });
   });
 
   test('mismatched name when a phone is shown but our name is not', () => {

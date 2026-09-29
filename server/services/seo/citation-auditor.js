@@ -19,6 +19,10 @@
  *                  page shows one (an address-like string on the page must match
  *                  the office whose phone matched; a page with none is judged on
  *                  name + phone)
+ *                  Street matching is on the FULL normalized street (number, whole
+ *                  name, suffix, directional — normalizeStreet), never a partial
+ *                  match; JSON-LD counts only from the entity that is Waves (its
+ *                  name, or one of our office phones), never another node.
  *   mismatched     fetched; a field differs — status_detail.mismatches lists
  *                  each { field, expected, seen }
  *   fetch-blocked  the page could not be read: 403/429/5xx or any non-2xx,
@@ -69,23 +73,34 @@ function candidatesFor(row) {
   return (assigned ? [assigned] : WAVES_LOCATIONS).map(napOf);
 }
 
-// "13649 Luxe Ave #110, Bradenton" -> matches "13649 Luxe Ave", "13649 Luxe Avenue Ste 5",
-// "1978 S Tamiami Trl" (leading directional skipped) — number + first street word.
-function streetRegex(address) {
-  const m = String(address || '').match(/^\s*(\d+)\s+(?:[nsew]\.?\s+)?([a-z0-9]+)/i);
-  return m ? new RegExp(`\\b${m[1]}\\s+(?:[nsew]\\.?\\s+)?${m[2]}\\b`, 'i') : null;
+const STREET_WORDS = {
+  st: 'street', ave: 'avenue', rd: 'road', blvd: 'boulevard', dr: 'drive', ln: 'lane', ct: 'court', cir: 'circle',
+  pl: 'place', trl: 'trail', hwy: 'highway', pkwy: 'parkway', n: 'north', s: 'south', e: 'east', w: 'west',
+};
+// The ONE street normalizer (expected addresses, visible text and JSON-LD all go through it):
+// lowercase, drop unit designators and their value, strip punctuation, expand suffixes and
+// directionals, collapse spaces. A street is confirmed only when the full normalized string
+// (number + whole street name + suffix + directional) appears — never a partial match.
+function normalizeStreet(str) {
+  return String(str || '').toLowerCase()
+    .replace(/#\s*[a-z0-9-]+/g, ' ')
+    .replace(/\b(?:suite|ste|unit|apt|apartment|bldg|building)\b\.?\s*[a-z0-9-]+/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(' ').filter(Boolean).map((w) => STREET_WORDS[w] || w).join(' ');
 }
+const streetOfAddress = (address) => normalizeStreet(String(address || '').split(',')[0]);
+const hasStreet = (normalizedText, normalizedStreet) => Boolean(normalizedStreet) && ` ${normalizedText} `.includes(` ${normalizedStreet} `);
 
 const PHONE_RE = /(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\d{3}[-.\s]\d{3}[-.\s]\d{4})/g;
 const fmtPhone = (k) => `(${k.slice(0, 3)}) ${k.slice(3, 6)}-${k.slice(6)}`;
 
-// schema.org LocalBusiness-style nodes from JSON-LD (directories publish these).
-function jsonLdBusinesses(html) {
+// Every named/phoned/addressed schema.org node in the page's JSON-LD (arrays, @graph, mainEntity).
+function jsonLdNodes(html) {
   const out = [];
   const visit = (node) => {
     if (!node || typeof node !== 'object') return;
     if (Array.isArray(node)) return node.forEach(visit);
-    if (node.telephone || node.address) out.push(node);
+    if (node.name || node.telephone || node.address) out.push(node);
     if (node['@graph']) visit(node['@graph']);
     if (node.mainEntity) visit(node.mainEntity);
   };
@@ -95,41 +110,54 @@ function jsonLdBusinesses(html) {
   return out;
 }
 
-function streetOf(address) {
-  if (!address) return null;
-  if (typeof address === 'string') return address;
-  return [address.streetAddress, address.addressLocality, address.postalCode].filter(Boolean).join(', ') || null;
+const OFFICE_PHONE_KEYS = new Set(WAVES_LOCATIONS.map((l) => phoneKey(l.phone)));
+const isWavesNode = (n) => alnum(n.name).includes(alnum(BRAND_NAME))
+  || [].concat(n.telephone || []).some((p) => OFFICE_PHONE_KEYS.has(phoneKey(p)));
+
+// ONLY the entity that is Waves (its name says so, or its phone is one of our four offices)
+// is evidence; a directory's own Organization or another business's node never is. Its name,
+// phone and address are taken together, from one node (the most complete one if several).
+function wavesEntity(html) {
+  const mine = jsonLdNodes(html).filter(isWavesNode);
+  return mine.find((n) => n.address) || mine[0] || null;
+}
+
+function addressStrings(address) {
+  if (!address) return { display: null, street: null };
+  if (typeof address === 'string') return { display: address, street: address };
+  const display = [address.streetAddress, address.addressLocality, address.postalCode].filter(Boolean).join(', ') || null;
+  return { display, street: address.streetAddress || null };
 }
 
 function extractNap(html) {
   const text = visibleText(html);
-  const ld = jsonLdBusinesses(html);
+  const ld = wavesEntity(html);
   const phones = new Set();
   for (const m of text.matchAll(PHONE_RE)) if (phoneKey(m[0]).length === 10) phones.add(phoneKey(m[0]));
   for (const m of String(html).matchAll(/href\s*=\s*["']tel:([^"']+)["']/gi)) {
     const k = phoneKey(decodeURIComponent(m[1])); if (k.length === 10) phones.add(k);
   }
-  for (const n of ld) for (const p of [].concat(n.telephone || [])) { const k = phoneKey(p); if (k.length === 10) phones.add(k); }
+  if (ld) for (const p of [].concat(ld.telephone || [])) { const k = phoneKey(p); if (k.length === 10) phones.add(k); }
   const title = (String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
-  const ldName = (ld.find((n) => n.name) || {}).name || null;
-  const ldAddress = streetOf((ld.find((n) => n.address) || {}).address);
-  return { text, phones: [...phones], title: title.replace(/\s+/g, ' ').trim(), ldName, ldAddress };
+  const ldAddr = addressStrings(ld && ld.address);
+  return { text, phones: [...phones], title: title.replace(/\s+/g, ' ').trim(), ldName: (ld && ld.name) || null, ldAddress: ldAddr.display, ldStreet: ldAddr.street };
 }
 
 // Street-address-like strings in visible text: number + street name + a common suffix.
 const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?`, 'gi');
 
-// Address: our street (number + first street word) anywhere in the text confirms it.
-// Otherwise a structured (JSON-LD) address that lacks our street is a mismatch. Otherwise
-// address-like strings that are not ours leave it unconfirmed (a sidebar may list other
-// businesses, so that is not a mismatch); none at all means the page shows no address.
+// Address: our full normalized street anywhere in the visible text confirms it. Otherwise the
+// Waves JSON-LD entity's own address, when it states one, decides: it confirms (full street
+// present) or is a mismatch. Otherwise address-like strings that are not ours leave it
+// unconfirmed (a sidebar may list other businesses, so never a mismatch); none at all means
+// the page shows no address.
 function judgeAddress(nap, expected) {
-  const streetRe = streetRegex(expected.address);
-  const inText = streetRe ? streetRe.test(nap.text) : false;
-  if (inText || !streetRe) return { inText, checked: inText, mismatch: null, unconfirmed: null };
-  if (nap.ldAddress) {
-    const mismatch = streetRe.test(nap.ldAddress) ? null : { field: 'address', expected: expected.address, seen: nap.ldAddress };
+  const street = streetOfAddress(expected.address);
+  if (hasStreet(normalizeStreet(nap.text), street)) return { inText: true, checked: true, mismatch: null, unconfirmed: null };
+  if (nap.ldStreet) {
+    const ok = hasStreet(normalizeStreet(nap.ldStreet), street);
+    const mismatch = ok ? null : { field: 'address', expected: expected.address, seen: nap.ldAddress };
     return { inText: false, checked: true, mismatch, unconfirmed: null };
   }
   const seen = nap.text.match(ADDRESS_LIKE_RE);
@@ -270,4 +298,4 @@ class CitationAuditor {
 
 module.exports = new CitationAuditor();
 module.exports.statusCounts = statusCounts; // shared with backlink-monitor's dashboard
-module.exports._internals = { classifyListing, candidatesFor, expectedNapFor, extractNap, STATES };
+module.exports._internals = { classifyListing, candidatesFor, expectedNapFor, extractNap, normalizeStreet, streetOfAddress, STATES };
