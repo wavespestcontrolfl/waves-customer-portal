@@ -1155,6 +1155,13 @@ function clearedProviderRetryState(message) {
   };
 }
 
+// The explicit estimate id(s) a send hands the annual-offer guard — shared by
+// sendTemplate and preflightTemplateSend so the live send and shadow
+// preflight guard the same ids.
+function guardEstimateIdsFor({ estimateId = null, estimateIds = null } = {}) {
+  return Array.isArray(estimateIds) && estimateIds.length ? estimateIds : (estimateId ? [estimateId] : []);
+}
+
 function assertTemplateSendable(template, { test = false } = {}) {
   if (test) return;
   const status = String(template?.status || 'active').toLowerCase();
@@ -1163,6 +1170,212 @@ function assertTemplateSendable(template, { test = false } = {}) {
   err.status = 409;
   err.code = 'EMAIL_TEMPLATE_DISABLED';
   throw err;
+}
+
+// A deterministic send refusal from the shared pre-dispatch steps below
+// (resolveTemplateForSend / prepareTemplateSend): the template, version,
+// payload or compliance state means THIS send cannot go out as asked. The
+// symbol carries sendTemplate's audit record for it (eventType null = the
+// check never audited) and marks it as a verdict, distinct from an
+// infrastructure error (a DB read throwing) that carries no tag. Symbol
+// keys stay out of the error's enumerable/JSON shape.
+const SEND_REFUSAL = Symbol('email_send_refusal');
+function sendRefusal(err, audit = {}) {
+  err[SEND_REFUSAL] = { eventType: null, ...audit };
+  return err;
+}
+
+async function auditSendRefusal(err, context = {}) {
+  const refusal = err && err[SEND_REFUSAL];
+  if (!refusal || !refusal.eventType) return;
+  await auditEmailTemplateIssue({
+    ...context,
+    templateKey: refusal.templateKey || context.templateKey,
+    versionId: Object.prototype.hasOwnProperty.call(refusal, 'versionId') ? refusal.versionId : context.versionId,
+    eventType: refusal.eventType,
+    reason: err.message,
+    ...(refusal.missingVariables ? { missingVariables: refusal.missingVariables } : {}),
+  });
+}
+
+// Step 1 of the send guard chain, shared by sendTemplate and
+// preflightTemplateSend (codex P2 round 6 on #5154: the preflight had been a
+// parallel re-implementation that kept missing one live guard per round):
+// resolve the template + version, the reviewed-content hash, sendable
+// status, and an active version.
+async function resolveTemplateForSend({ templateKey, versionId, expectedContentHash = null, test = false } = {}) {
+  let template;
+  let version;
+  if (versionId) {
+    const row = await loadVersion(versionId);
+    if (!row) {
+      throw sendRefusal(Object.assign(new Error('template version not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }), {
+        eventType: 'missing_version',
+      });
+    }
+    template = row.template;
+    version = row;
+  } else {
+    const loaded = await loadTemplateByKey(templateKey);
+    if (!loaded?.template) {
+      throw sendRefusal(Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }), {
+        eventType: 'missing_template', versionId: undefined,
+      });
+    }
+    template = loaded.template;
+    version = loaded.activeVersion;
+  }
+  if (expectedContentHash && templateContentHash(template, version) !== expectedContentHash) {
+    throw sendRefusal(new Error('The reviewed email content changed. Review the message again before sending.'));
+  }
+  try {
+    assertTemplateSendable(template, { test });
+  } catch (err) {
+    throw sendRefusal(err, { eventType: 'disabled_template', templateKey: template?.template_key || templateKey });
+  }
+  if (!version) {
+    throw sendRefusal(Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }), {
+      eventType: 'missing_active_version', templateKey: template?.template_key || templateKey,
+    });
+  }
+  return { template, version };
+}
+
+// Refusal code for a marketing-stream send from a caller that must not send
+// marketing directly (codex P1 round 7 on #5154): the email division's
+// marketing lanes (e.g. nurture.expired_1 on marketing_nurture) send ONLY
+// through email-division/ledger.js sendWithLedger, which owns eligibility,
+// frequency caps, reservation idempotency and the final recipient/consent
+// fence.
+const LEDGER_REQUIRED_CODE = 'EMAIL_DIVISION_LEDGER_REQUIRED';
+
+// Step 2 of the shared guard chain: the effective suppression stream, the
+// SendGrid ASM group and unsubscribe URL, the marketing-compliance guard
+// (a marketing send needs an unsubscribe URL or ASM group), the render,
+// required variables, and the production placeholder guards. Pure (no I/O).
+// marketingRequiresLedger: refuse (LEDGER_REQUIRED_CODE, no audit row) when
+// the send classifies as marketing by the library's own isMarketingSend —
+// set by the automation executor, which is not the ledger.
+function prepareTemplateSend({
+  template, version, payload, suppressionGroupKey, unsubscribeUrl = null, test = false, marketingRequiresLedger = false,
+} = {}) {
+  const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
+  if (marketingRequiresLedger && isMarketingSend(template, effectiveSuppressionGroupKey)) {
+    const err = new Error('marketing-stream sends must go through the email division ledger (email-division/ledger.js sendWithLedger), not the automation executor');
+    err.status = 409;
+    err.code = LEDGER_REQUIRED_CODE;
+    throw sendRefusal(err);
+  }
+  const asmGroupId = asmGroupIdFor(template, effectiveSuppressionGroupKey);
+  const effectiveUnsubscribeUrl = unsubscribeUrlForRender({
+    template,
+    unsubscribeUrl,
+    asmGroupId,
+    suppressionGroupKey: effectiveSuppressionGroupKey,
+  });
+  if (isMarketingSend(template, effectiveSuppressionGroupKey) && !test && !effectiveUnsubscribeUrl) {
+    const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');
+    err.status = 400;
+    err.code = 'EMAIL_TEMPLATE_UNSUBSCRIBE_REQUIRED';
+    throw sendRefusal(err);
+  }
+
+  // A template may pin service chrome while riding a marketing_* suppression
+  // stream (referral.invite — owner directive 2026-07-06: user-unsubscribable
+  // via marketing_referral, rendered like the service emails). The pin is
+  // layout_wrapper_id === 'service_pinned_v1'; every other template keeps the
+  // stream-driven newsletter wrapper, and the unsubscribe/ASM requirements
+  // above are untouched (they key on isMarketingSend, not the wrapper).
+  const pinsServiceChrome = String(template.layout_wrapper_id || '').toLowerCase() === 'service_pinned_v1';
+  // A pin must FORCE 'service' (not just skip the marketing override):
+  // renderTemplate falls back to template.mode, and a pinned template may
+  // carry mode 'marketing' from its seed (referral.invite does).
+  const rendered = renderTemplate({
+    template,
+    version,
+    payload,
+    unsubscribeUrl: effectiveUnsubscribeUrl,
+    modeOverride: pinsServiceChrome
+      ? 'service'
+      : (isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null),
+  });
+  const renderedAudit = { templateKey: template.template_key, versionId: version.id };
+  if (rendered.missingPayload.length) {
+    const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
+    err.status = 400;
+    throw sendRefusal(err, { ...renderedAudit, eventType: 'missing_payload', missingVariables: rendered.missingPayload });
+  }
+  if (!test && String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    const placeholderFields = productionPlaceholderPayloadValues(payload || {});
+    if (placeholderFields.length) {
+      const err = new Error(`Placeholder values are not allowed in production email payloads: ${placeholderFields.join(', ')}`);
+      err.status = 400;
+      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_PAYLOAD';
+      throw sendRefusal(err, { ...renderedAudit, eventType: 'placeholder_payload', missingVariables: placeholderFields });
+    }
+    const renderedPlaceholderFields = productionPlaceholderRenderedValues(rendered);
+    if (renderedPlaceholderFields.length) {
+      const err = new Error(`Placeholder values are not allowed in production rendered emails: ${renderedPlaceholderFields.join(', ')}`);
+      err.status = 400;
+      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_RENDERED';
+      throw sendRefusal(err, { ...renderedAudit, eventType: 'placeholder_rendered', missingVariables: renderedPlaceholderFields });
+    }
+  }
+  return { effectiveSuppressionGroupKey, asmGroupId, effectiveUnsubscribeUrl, rendered };
+}
+
+// NO-PROVIDER preflight for email-template-automation-executor.js's shadow
+// mode: would the identical live sendTemplate attempt reach the provider?
+// Built from the SAME guard chain sendTemplate runs (codex P2 rounds on
+// #5154), never a mirror of it: resolveTemplateForSend, prepareTemplateSend
+// (ASM group / unsubscribe URL / marketing-compliance guard, render,
+// required variables, placeholders), the recipient suppression lookup
+// sendTemplate blocks on, and the annual-offer guard sendOne runs at the
+// provider boundary (sendgrid-mail.js applyAnnualOfferGuard, fed the same
+// estimate ids via guardEstimateIdsFor and the same template key). Never
+// writes an email_messages row, never audits (that table records real send
+// attempts), never calls the provider. The one live step intentionally
+// skipped is the message-level idempotency lookup against email_messages
+// (shadow inserts no message, so "would this collide" has no meaning).
+//
+// A deterministic refusal (a sendRefusal, a suppression, a withheld annual
+// offer) returns { ok:false, reason, code }; an infrastructure error (a DB
+// read failing, the annual guard's own lookup failing) is rethrown for the
+// caller to handle — it is not a verdict.
+async function preflightTemplateSend({
+  templateKey, versionId, expectedContentHash = null, payload, to, suppressionGroupKey,
+  unsubscribeUrl = null, estimateId = null, estimateIds = null, withheldLinkPolicy = null,
+  marketingRequiresLedger = false,
+} = {}) {
+  if (!to) return { ok: false, reason: 'recipient email required' };
+  let template;
+  let version;
+  let prepared;
+  try {
+    ({ template, version } = await resolveTemplateForSend({ templateKey, versionId, expectedContentHash }));
+    prepared = prepareTemplateSend({ template, version, payload, suppressionGroupKey, unsubscribeUrl, marketingRequiresLedger });
+  } catch (err) {
+    if (err && err[SEND_REFUSAL]) return { ok: false, reason: err.message, ...(err.code ? { code: err.code } : {}) };
+    throw err;
+  }
+  const { rendered } = prepared;
+  const suppression = await activeSuppressionFor(template, to, suppressionGroupKey);
+  if (suppression) {
+    return { ok: false, reason: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}` };
+  }
+  try {
+    await sendgrid.applyAnnualOfferGuard({
+      html: rendered.html,
+      text: rendered.text,
+      estimateIds: guardEstimateIdsFor({ estimateId, estimateIds }),
+      templateKey,
+      ...(withheldLinkPolicy ? { withheldLinkPolicy } : {}),
+    });
+  } catch (err) {
+    if (err?.annualOfferWithheld) return { ok: false, reason: 'annual_offer_withheld', code: 'ANNUAL_OFFER_WITHHELD' };
+    throw err;
+  }
+  return { ok: true, template, version, rendered };
 }
 
 async function sendTemplate({
@@ -1232,78 +1445,22 @@ async function sendTemplate({
   // pricing-authority CTA swap for the same reason (the deposit is owed
   // regardless of the offer's own state).
   withheldLinkPolicy = null,
+  // Refuse a marketing-stream send before any email_messages row (the
+  // automation executor's email-division ledger fence; see
+  // prepareTemplateSend).
+  marketingRequiresLedger = false,
 } = {}) {
   if (!to) throw new Error('recipient email required');
+  const auditRefusal = (err) => auditSendRefusal(err, {
+    templateKey, versionId, recipientType, recipientId, triggerEventId, automationRunId, idempotencyKey,
+  });
   let template;
   let version;
-  if (versionId) {
-    const row = await loadVersion(versionId);
-    if (!row) {
-      await auditEmailTemplateIssue({
-        templateKey,
-        versionId,
-        eventType: 'missing_version',
-        reason: 'template version not found',
-        recipientType,
-        recipientId,
-        triggerEventId,
-        automationRunId,
-        idempotencyKey,
-      });
-      throw Object.assign(new Error('template version not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
-    }
-    template = row.template;
-    version = row;
-  } else {
-    const loaded = await loadTemplateByKey(templateKey);
-    if (!loaded?.template) {
-      await auditEmailTemplateIssue({
-        templateKey,
-        eventType: 'missing_template',
-        reason: 'template not found',
-        recipientType,
-        recipientId,
-        triggerEventId,
-        automationRunId,
-        idempotencyKey,
-      });
-      throw Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
-    }
-    template = loaded.template;
-    version = loaded.activeVersion;
-  }
-  if (expectedContentHash && templateContentHash(template, version) !== expectedContentHash) {
-    throw new Error('The reviewed email content changed. Review the message again before sending.');
-  }
   try {
-    assertTemplateSendable(template, { test });
+    ({ template, version } = await resolveTemplateForSend({ templateKey, versionId, expectedContentHash, test }));
   } catch (err) {
-    await auditEmailTemplateIssue({
-      templateKey: template?.template_key || templateKey,
-      versionId,
-      eventType: 'disabled_template',
-      reason: err.message,
-      recipientType,
-      recipientId,
-      triggerEventId,
-      automationRunId,
-      idempotencyKey,
-    });
+    await auditRefusal(err);
     throw err;
-  }
-  if (!version) {
-    await auditEmailTemplateIssue({
-      templateKey: template?.template_key || templateKey,
-      versionId,
-      eventType: 'missing_active_version',
-      reason: 'active template not found',
-      recipientType,
-      recipientId,
-      triggerEventId,
-      automationRunId,
-      idempotencyKey,
-    });
-    throw Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
   }
 
   let retryMessage = null;
@@ -1325,96 +1482,16 @@ async function sendTemplate({
     retryMessage = existing || null;
   }
 
-  const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
-  const asmGroupId = asmGroupIdFor(template, effectiveSuppressionGroupKey);
-  const effectiveUnsubscribeUrl = unsubscribeUrlForRender({
-    template,
-    unsubscribeUrl,
-    asmGroupId,
-    suppressionGroupKey: effectiveSuppressionGroupKey,
-  });
-  if (isMarketingSend(template, effectiveSuppressionGroupKey) && !test && !effectiveUnsubscribeUrl) {
-    const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');
-    err.status = 400;
-    throw err;
-  }
-
-  // A template may pin service chrome while riding a marketing_* suppression
-  // stream (referral.invite — owner directive 2026-07-06: user-unsubscribable
-  // via marketing_referral, rendered like the service emails). The pin is
-  // layout_wrapper_id === 'service_pinned_v1'; every other template keeps the
-  // stream-driven newsletter wrapper, and the unsubscribe/ASM requirements
-  // above are untouched (they key on isMarketingSend, not the wrapper).
-  const pinsServiceChrome = String(template.layout_wrapper_id || '').toLowerCase() === 'service_pinned_v1';
-  // A pin must FORCE 'service' (not just skip the marketing override):
-  // renderTemplate falls back to template.mode, and a pinned template may
-  // carry mode 'marketing' from its seed (referral.invite does).
-  const rendered = renderTemplate({
-    template,
-    version,
-    payload,
-    unsubscribeUrl: effectiveUnsubscribeUrl,
-    modeOverride: pinsServiceChrome
-      ? 'service'
-      : (isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null),
-  });
-  if (rendered.missingPayload.length) {
-    const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
-    err.status = 400;
-    await auditEmailTemplateIssue({
-      templateKey: template.template_key,
-      versionId: version.id,
-      eventType: 'missing_payload',
-      reason: err.message,
-      recipientType,
-      recipientId,
-      triggerEventId,
-      automationRunId,
-      idempotencyKey,
-      missingVariables: rendered.missingPayload,
+  let prepared;
+  try {
+    prepared = prepareTemplateSend({
+      template, version, payload, suppressionGroupKey, unsubscribeUrl, test, marketingRequiresLedger,
     });
+  } catch (err) {
+    await auditRefusal(err);
     throw err;
   }
-  if (!test && String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
-    const placeholderFields = productionPlaceholderPayloadValues(payload || {});
-    if (placeholderFields.length) {
-      const err = new Error(`Placeholder values are not allowed in production email payloads: ${placeholderFields.join(', ')}`);
-      err.status = 400;
-      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_PAYLOAD';
-      await auditEmailTemplateIssue({
-        templateKey: template.template_key,
-        versionId: version.id,
-        eventType: 'placeholder_payload',
-        reason: err.message,
-        recipientType,
-        recipientId,
-        triggerEventId,
-        automationRunId,
-        idempotencyKey,
-        missingVariables: placeholderFields,
-      });
-      throw err;
-    }
-    const renderedPlaceholderFields = productionPlaceholderRenderedValues(rendered);
-    if (renderedPlaceholderFields.length) {
-      const err = new Error(`Placeholder values are not allowed in production rendered emails: ${renderedPlaceholderFields.join(', ')}`);
-      err.status = 400;
-      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_RENDERED';
-      await auditEmailTemplateIssue({
-        templateKey: template.template_key,
-        versionId: version.id,
-        eventType: 'placeholder_rendered',
-        reason: err.message,
-        recipientType,
-        recipientId,
-        triggerEventId,
-        automationRunId,
-        idempotencyKey,
-        missingVariables: renderedPlaceholderFields,
-      });
-      throw err;
-    }
-  }
+  const { effectiveSuppressionGroupKey, asmGroupId, rendered } = prepared;
 
   const fromName = template.from_name || 'Waves Pest Control';
   const fromEmail = template.from_email || 'contact@wavespestcontrol.com';
@@ -1671,8 +1748,7 @@ async function sendTemplate({
     // (and any future sender) can carry an estimate link without ever
     // passing an id. sendOne's own content derivation covers that; this is
     // only the explicit addition.
-    const guardEstimateIds = Array.isArray(estimateIds) && estimateIds.length
-      ? estimateIds : (estimateId ? [estimateId] : []);
+    const guardEstimateIds = guardEstimateIdsFor({ estimateId, estimateIds });
     // dispatchToProvider is composed so a caller's own withProviderHandoff
     // (outermost) has already acquired its lock by the time sendOne's guard
     // reads a fresh row, whether or not a caller handoff is present at all
@@ -1914,4 +1990,6 @@ module.exports = {
   createDraftVersion,
   publishVersion,
   sendTemplate,
+  preflightTemplateSend,
+  LEDGER_REQUIRED_CODE,
 };
