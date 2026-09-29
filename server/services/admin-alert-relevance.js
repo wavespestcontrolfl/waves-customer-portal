@@ -184,7 +184,7 @@ async function loadSubjects(rows, conn = db) {
       .select('id', 'status', 'archived_at', 'sent_at', 'customer_id'));
   }
   if (customerIds.length) {
-    data.customers = byId(await conn('customers').whereIn('id', customerIds).select('id', 'churned_at', 'deleted_at'));
+    data.customers = byId(await conn('customers').whereIn('id', customerIds).select('id', 'pipeline_stage', 'churned_at', 'deleted_at'));
   }
   if (leadCustomerIds.length) {
     // A booking someone made: never a child the system generated on its own
@@ -207,8 +207,11 @@ function subjectFor(row, data, todayET) {
     meta: resolved.refs.meta,
     todayET,
     customer,
-    // Paused customers are NOT left: only churned or soft-deleted ones.
-    customerLeft: !!customer && !!(customer.churned_at || customer.deleted_at),
+    // Paused customers are NOT left: only churned or soft-deleted ones. Churned
+    // is the LIVE stage — churned_at is history a reactivated customer can
+    // still carry (customer-stages.js; email-division eligibility reads the
+    // stage the same way).
+    customerLeft: !!customer && (customer.pipeline_stage === 'churned' || !!customer.deleted_at),
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
   };
 }

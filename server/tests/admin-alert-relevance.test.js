@@ -151,7 +151,9 @@ const note = (over = {}) => ({
   id: uid(100 + (seq += 1)), recipient_type: 'admin', read_at: null, created_at: new Date('2026-09-27T12:00:00Z'),
   link: null, ...over, metadata: JSON.stringify(over.metadata || {}),
 });
-const customer = (over = {}) => ({ id: CUST, churned_at: null, deleted_at: null, ...over });
+// A churn stamp means the churned stage unless a test says otherwise (a
+// reactivated customer keeps a stale churned_at on a live stage).
+const customer = (over = {}) => ({ id: CUST, pipeline_stage: over.churned_at ? 'churned' : 'active_customer', churned_at: null, deleted_at: null, ...over });
 const visit = (over = {}) => ({
   id: VISIT, customer_id: CUST, status: 'pending', is_recurring: true, recurring_parent_id: null,
   estimated_price: null, primary_line_price: null, prepaid_amount: null, prepaid_method: null,
@@ -273,6 +275,7 @@ describe('class rules', () => {
 
   test.each([
     ['customer churned', () => { mockTables.customers = [customer({ churned_at: new Date() })]; }, 'Customer left'],
+    ['customer churned on a legacy row with no churn date', () => { mockTables.customers = [customer({ pipeline_stage: 'churned' })]; }, 'Customer left'],
     ['visit cancelled', () => { mockTables['scheduled_services as ss'] = [visit({ status: 'cancelled' })]; }, 'no longer open'],
     ['visit completed', () => { mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })]; }, 'no longer open'],
     ['visit skipped', () => { mockTables['scheduled_services as ss'] = [visit({ status: 'skipped' })]; }, 'no longer open'],
@@ -285,6 +288,12 @@ describe('class rules', () => {
     mockTables['scheduled_services as ss'] = [visit()];
     arrange();
     expect((await reasonFor(unpriced())).reason).toEqual(expect.stringContaining(text));
+  });
+
+  test('a reactivated customer who still carries an old churn date has not left: the stage is the live state', async () => {
+    mockTables['scheduled_services as ss'] = [visit()];
+    mockTables.customers = [customer({ churned_at: new Date('2026-06-01T12:00:00Z'), pipeline_stage: 'active_customer' })];
+    expect((await reasonFor(unpriced())).reason).toBeNull();
   });
 
   test('unpriced series: an annual-prepay stamp clears it only once the watchdog validator confirms the term (fail-closed)', async () => {
