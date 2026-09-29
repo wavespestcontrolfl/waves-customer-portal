@@ -93,6 +93,31 @@ async function setReadStatus(conn, submissionId, status, readResult = JSON.strin
  * @returns {Promise<void>} never throws — every failure is caught, logged, and written as
  *          read_status='failed' so the row never sticks on 'pending'.
  */
+// Claims the daily slot and returns the plant subject, or settles every
+// non-claimed outcome (another read holds the row, no longer a plant stop,
+// cap refused, claim error) and returns null.
+async function claimOrSettle(conn, submissionId, svc) {
+  let claim;
+  try {
+    claim = await claimReadSlot(conn, submissionId, svc);
+  } catch (err) {
+    logger.error(`[visit-prep-plant-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
+    await markUnclaimed(conn, submissionId, 'none', logger);
+    return null;
+  }
+  if (claim && claim.claimed) return claim.subject;
+  if (claim === 'taken') return null; // another read holds the row
+  if (claim === 'unsupported') {
+    await markUnsupported(conn, submissionId, logger);
+    return null;
+  }
+  logger.warn(`[visit-prep-plant-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
+  // 'none', not 'failed': a cap rejection never claimed a slot (see the
+  // pest read's own comment on this).
+  await markUnclaimed(conn, submissionId, 'none', logger);
+  return null;
+}
+
 async function triggerVisitPrepPlantRead({
   submissionId, svc, photos, conn = db,
 } = {}) {
@@ -127,30 +152,12 @@ async function triggerVisitPrepPlantRead({
     return;
   }
 
-  let claim;
-  try {
-    claim = await claimReadSlot(conn, submissionId, svc);
-  } catch (err) {
-    logger.error(`[visit-prep-plant-read] daily-cap claim failed submission=${submissionId}: ${err.message}`);
-    await markUnclaimed(conn, submissionId, 'none', logger);
-    return;
-  }
-  if (claim === 'taken') return; // another read holds the row
-  if (claim === 'unsupported') {
-    await markUnsupported(conn, submissionId, logger);
-    return;
-  }
-  if (!claim || claim === 'refused' || !claim.claimed) {
-    logger.warn(`[visit-prep-plant-read] daily cap (${dailyCap()}) reached — submission=${submissionId} not read, photos still delivered`);
-    // 'none', not 'failed': a cap rejection never claimed a slot (see the
-    // pest read's own comment on this).
-    await markUnclaimed(conn, submissionId, 'none', logger);
-    return;
-  }
+  const subject = await claimOrSettle(conn, submissionId, svc);
+  if (!subject) return;
 
   let result;
   try {
-    result = await identifyPlantV2({ photos: loaded, subject: claim.subject });
+    result = await identifyPlantV2({ photos: loaded, subject });
   } catch (err) {
     logger.error(`[visit-prep-plant-read] engine threw for submission=${submissionId}: ${err.message}`);
     await setReadStatus(conn, submissionId, 'failed');
@@ -169,7 +176,7 @@ async function triggerVisitPrepPlantRead({
   try {
     await conn('visit_prep_submissions').where({ id: submissionId }).update({
       read_status: 'done',
-      read_result: JSON.stringify({ ...PLANT_MARKER, v2: result.v2, internal: result.internal, subject_type: claim.subject }),
+      read_result: JSON.stringify({ ...PLANT_MARKER, v2: result.v2, internal: result.internal, subject_type: subject }),
     });
   } catch (err) {
     logger.error(`[visit-prep-plant-read] storing the read failed submission=${submissionId}: ${err.message}`);
