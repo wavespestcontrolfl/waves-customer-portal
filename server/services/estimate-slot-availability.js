@@ -35,6 +35,7 @@ const { capacityEnabled } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
+  selfServeArrivalGraceMinutes,
 } = require('./scheduling/travel-gap');
 const { ensureCatalogLoaded, expectedServiceMinutes, expectedMinutesSync, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -1469,6 +1470,12 @@ async function filterCollidingSlots(slots, {
   // (zero padding, legacy drive+buffer gap). Computed once by the caller
   // from its resolved service profile; independent of `coords`.
   candidateExpectedMinutes = null,
+  // Self-serve arrival grace (A1, owner ruling 2026-09-28) — the RAW,
+  // multi-date value the caller resolved from selfServeArrivalGraceMinutes()
+  // with no `date`; this file zeroes TODAY's own slots itself below (same
+  // "one switch point" convention as find-time.js). 0/omitted (every caller
+  // before this lane) makes every candidate below byte-identical.
+  arrivalGraceMinutes = 0,
 } = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
@@ -1558,6 +1565,11 @@ async function filterCollidingSlots(slots, {
       lat: row.lat ?? null,
       lng: row.lng ?? null,
       hold: row.reservation_expires_at != null && row.customer_id == null,
+      // Multi-tech parity (owner ruling 2026-09-28): the assigned technician
+      // of THIS row, so a graced candidate's travel-gap check can be scoped
+      // to its own assigned tech's route instead of every tech's combined
+      // rows — see the technician filter below.
+      technician_id: row.technician_id ?? null,
       // Expected-minutes padding credit for THIS row (owner ruling
       // 2026-09-23) — only resolved when the travel-gap check runs; no
       // service_key_snapshot/service_type match falls back to the window
@@ -1609,6 +1621,19 @@ async function filterCollidingSlots(slots, {
     // packed-before-next-stop candidate; a slot with no known duration
     // falls back to legacy (no windowMinutes -> paddingMinutesOf is 0).
     const candidateWindow = Number.isFinite(s.durationMinutes) ? s.durationMinutes : (slotEnd - slotStart);
+    // Same-day strict (decision 2) — this is the one place this slot's own
+    // date resolves its grace; every date at/before today gets 0.
+    const grace = arrivalGraceMinutes > 0 && s.date !== etDateString() ? arrivalGraceMinutes : 0;
+    // Multi-tech parity (owner ruling 2026-09-28): a graced candidate's
+    // travel-gap check is scoped to its OWN assigned technician's rows (plus
+    // unassigned, which could still become this tech's) rather than every
+    // tech's rows chained as one fictitious route — exactly what the
+    // per-tech offer generator (find-time.js) already assumed. Grace 0 (or
+    // no assigned tech yet) keeps the full tech-blind list, byte-identical
+    // to before this lane.
+    const travelNeighbours = grace > 0 && s.techId
+      ? (allByDate.get(s.date) || []).filter((b) => b.technician_id == null || String(b.technician_id) === String(s.techId))
+      : (allByDate.get(s.date) || []);
     return !violatesTravelGap(
       {
         startMin: slotStart, endMin: slotEnd, ...candidatePin,
@@ -1616,8 +1641,9 @@ async function filterCollidingSlots(slots, {
         expectedMinutes: Number.isFinite(candidateExpectedMinutes)
           ? Math.min(candidateExpectedMinutes, candidateWindow)
           : candidateWindow,
+        graceMinutes: grace,
       },
-      allByDate.get(s.date) || [],
+      travelNeighbours,
     );
   });
 }
@@ -1854,8 +1880,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // Travel policy in the key: the gate and buffer are read at call time
     // by reserveSlot, while filterCollidingSlots ran when this entry was
     // built — a flip or buffer change must not serve now-prohibited slots
-    // until TTL (GH codex #3803 r1 P1).
-    travelGapEnabled() ? `travel-gap:${travelBufferMinutes()}` : 'travel-gap:off',
+    // until TTL (GH codex #3803 r1 P1). Arrival grace (A9) rides the same
+    // segment: a Railway variable change redeploys and clears this
+    // in-process cache anyway, but the key still matters for tests and any
+    // in-process change (e.g. a future non-redeploy control surface).
+    travelGapEnabled() ? `travel-gap:${travelBufferMinutes()}:grace:${selfServeArrivalGraceMinutes()}` : 'travel-gap:off',
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached && !serviceProfile.reservationServiceMix) {
@@ -1970,7 +1999,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       stopDatesInRange(dateFrom, dateTo, estimateId),
     ]);
     const asapRaw = asapLists.flat().filter((s) => !stopDates.has(s.date));
-    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
+    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId, arrivalGraceMinutes: selfServeArrivalGraceMinutes() });
     const filtered = dedupeSlots(asap).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
@@ -2050,6 +2079,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // The resolved whole-visit credit (above) — find-time must not
       // re-derive it from one service key.
       expectedMinutes: candidateExpectedMinutes,
+      // Self-serve arrival grace (A1, owner ruling 2026-09-28) — RAW value;
+      // find-time zeroes today's own candidates itself.
+      arrivalGraceMinutes: selfServeArrivalGraceMinutes(),
       // Customer-facing day close (scheduling/customer-windows.js) — find-time's
       // own DAY_END_HOUR default (17) stays untouched for staff/optimizer
       // callers that don't pass this. currentDayEndMinutes() honors a
@@ -2084,12 +2116,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId, arrivalGraceMinutes: selfServeArrivalGraceMinutes() });
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId, arrivalGraceMinutes: selfServeArrivalGraceMinutes() });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
@@ -2278,6 +2310,9 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     bufferMinutes: customerFacingBufferMinutes(),
     packEnds: true,
     serviceKey: serviceProfile.services[0]?.catalogServiceKey || serviceProfile.services[0]?.engineKey || null,
+    // Self-serve arrival grace (A1, owner ruling 2026-09-28) — RAW value;
+    // find-time zeroes today's own candidates itself.
+    arrivalGraceMinutes: selfServeArrivalGraceMinutes(),
     // Same customer-facing day close as the live path (see above).
     dayEndHour: currentDayEndMinutes() / 60,
     // Same customer-grid restriction as the live path — this admin debug
@@ -2309,6 +2344,11 @@ async function getSlotDebug(estimateId, userOpts = {}) {
         total_drive_minutes: s.total_drive_minutes,
         insertion: s.insertion,
         stops_that_day: s.stops_that_day,
+        // Arrival grace diagnostics (A9) — 0/the slot's own start at grace 0,
+        // so this adds fields without changing any existing assertion on
+        // the other `raw` values above.
+        arrival_min: s.arrival_min,
+        late_minutes: s.late_minutes,
       },
     }))
     .filter((c) => slotWindowFitsDay(c.windowStart, c.windowEnd));
@@ -2323,6 +2363,9 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     },
     coords,
     travelGap: { enabled: travelGapEnabled(), bufferMinutes: travelBufferMinutes() },
+    // Arrival grace (A9) — the raw, multi-date value this call resolved;
+    // 0 (dark) until SELF_SERVE_ARRIVAL_GRACE_MINUTES is set.
+    arrivalGrace: { minutes: selfServeArrivalGraceMinutes() },
     window: { dateFrom, dateTo, durationMinutes: serviceProfile.durationMinutes },
     serviceProfile,
     proximityDriveMinutes: opts.proximityDriveMinutes,

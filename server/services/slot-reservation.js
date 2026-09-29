@@ -51,6 +51,7 @@ const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
 const { serviceDurationMinutes } = require('./service-library');
 const { expectedServiceMinutes, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
+const { selfServeArrivalGraceMinutes } = require('./scheduling/travel-gap');
 
 // The candidate's own expected-minutes padding credit (owner ruling
 // 2026-09-23) for the travel-gap probes below (occupancy.js decides
@@ -1219,6 +1220,12 @@ async function reserveSlot({
             ...(holdPin || { lat: null, lng: null }),
             expectedMinutes: candidateExpectedMinutes
               ?? await candidateExpectedMinutesFromRow(trx, sameSlotHold, effectiveDurationMinutes),
+            // Arrival grace (A1, owner ruling 2026-09-28) — the estimate
+            // picker is always self-serve; `technicianId` (multi-tech
+            // parity) is this hold's own assigned tech, same identity the
+            // sameSlotHold match above already pinned it to.
+            graceMinutes: selfServeArrivalGraceMinutes({ date }),
+            technicianId: techId || null,
           },
         });
         if (refreshClash.length) {
@@ -1370,8 +1377,15 @@ async function reserveSlot({
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the hold's own pin, resolved
         // above; null → buffer-only, never a skipped check. Same
         // expected-minutes credit find-time/filterCollidingSlots resolved
-        // when this window was offered (owner ruling 2026-09-23).
-        travel: { ...(holdPin || { lat: null, lng: null }), expectedMinutes: candidateExpectedMinutes },
+        // when this window was offered (owner ruling 2026-09-23). Arrival
+        // grace (A1) + multi-tech parity (`technicianId`) — same as the
+        // refresh leg above.
+        travel: {
+          ...(holdPin || { lat: null, lng: null }),
+          expectedMinutes: candidateExpectedMinutes,
+          graceMinutes: selfServeArrivalGraceMinutes({ date }),
+          technicianId: techId || null,
+        },
       });
       if (committedClash.length) {
         const err = new Error('slot no longer available');
@@ -1897,6 +1911,10 @@ async function commitReservation({
           lat: row.lat ?? null, lng: row.lng ?? null,
           expectedMinutes: (await candidateExpectedMinutesFromProfile(client, serviceProfile, probeWindowMinutes))
             ?? (await candidateExpectedMinutesFromRow(client, row, probeWindowMinutes)),
+          // Arrival grace (A1) + multi-tech parity (`technicianId`, owner
+          // ruling 2026-09-28) — this hold row's own assigned tech.
+          graceMinutes: selfServeArrivalGraceMinutes({ date: scheduledDate }),
+          technicianId: row.technician_id || null,
         },
       });
       // Capacity mode keeps its own visit check (verifyArrivalCapacity,
@@ -2482,9 +2500,13 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       includeHolds: alreadyLapsed,
       // Same expected-minutes credit find-time/filterCollidingSlots
       // resolved when this window was offered (owner ruling 2026-09-23).
+      // Arrival grace (A1) + multi-tech parity (`technicianId`, owner
+      // ruling 2026-09-28) — this hold row's own assigned tech.
       travel: {
         lat: row.lat ?? null, lng: row.lng ?? null,
         expectedMinutes: await candidateExpectedMinutesFromRow(trx, row, extendWindowMinutes),
+        graceMinutes: selfServeArrivalGraceMinutes({ date: scheduledDate }),
+        technicianId: row.technician_id || null,
       },
     });
     if (clash.length) {

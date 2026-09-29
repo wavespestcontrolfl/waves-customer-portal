@@ -910,7 +910,9 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     const seriesIdx = src.indexOf('await SmartRebooker.rescheduleSeries(');
     expect(singleIdx).toBeGreaterThan(-1);
     expect(seriesIdx).toBeGreaterThan(-1);
-    const single = src.slice(singleIdx, singleIdx + 900);
+    // 900 -> 1200: grew by arrival grace's `arrivalGraceMinutes` option
+    // (owner ruling 2026-09-28).
+    const single = src.slice(singleIdx, singleIdx + 1200);
     expect(single).toMatch(/expect: \{ scheduled_date: svc\.scheduled_date, window_start: svc\.window_start \}/);
     expect(single).toMatch(/beforeMove: noticeRecheck/);
     const series = src.slice(seriesIdx, singleIdx);

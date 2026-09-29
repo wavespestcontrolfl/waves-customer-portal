@@ -18,7 +18,10 @@ const {
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
-const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
+const {
+  violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes,
+  selfServeArrivalGraceMinutes,
+} = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
 
@@ -1502,6 +1505,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
     // against neighbouring stops; 0 when the gate is off.
     bufferMinutes: customerFacingBufferMinutes(),
+    // Self-serve arrival grace (A1, owner ruling 2026-09-28) — RAW value,
+    // same self-serve/voice split as selfServeNotice/customerFacing above:
+    // the voice-agent callers never set selfServeNotice, so they never get
+    // grace either (byte-identical). find-time zeroes today's own
+    // candidates itself.
+    arrivalGraceMinutes: selfServeNotice ? selfServeArrivalGraceMinutes() : 0,
     // Relocating an existing visit (public self-reschedule): drop its own row
     // from the occupied-route set so it doesn't block the slot it's moving
     // out of. Default [] = identical behavior for every other caller.
@@ -1718,8 +1727,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // findConflictingVisits `travel` probe rejects a window that merely
       // touches a stop across a real drive; drop it here so it is never
       // offered. Same soft-degrade as the overlap mirror (no map → skip).
+      // Arrival grace (A1, owner ruling 2026-09-28): self-serve callers only
+      // (selfServeNotice, same split as the notice window above) — the
+      // voice agent never sets it, so it never gets graceMinutes either
+      // (byte-identical). `date: slot.date` is this exact candidate's own
+      // date, so a same-day slot resolves to 0 here directly (decision 2).
       if (dayOccupied && violatesTravelGap({
         startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
+        graceMinutes: selfServeNotice ? selfServeArrivalGraceMinutes({ date: slot.date }) : 0,
       }, dayOccupied)) return;
       idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin, {
         lat, lng, durationMinutes: duration, expectedMinutes: candidateExpectedMinutes,
@@ -3913,6 +3928,12 @@ async function createSelfBooking(payload = {}) {
           // Same credit buildBookingAvailability offered this window under.
           // expectedIdentity: consultation page only (#4737 r1 P2).
           expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
+          // Arrival grace (A1) — createSelfBooking is self-serve-only (never
+          // voice); `date` is this commit's own date (decision 2).
+          // `technicianId` scopes the multi-tech projection to this
+          // booking's assigned tech (owner ruling 2026-09-28).
+          graceMinutes: selfServeArrivalGraceMinutes({ date: slotDateStr }),
+          technicianId: technician_id || null,
         },
       });
       if (globalClash.length) {
@@ -5267,7 +5288,15 @@ async function createSelfBooking(payload = {}) {
               // stamped pin (the seeder copies the parent's lat/lng), else
               // the booking pin the parent commit measured with — the
               // mirrored guard every commit surface carries (pre-push P1).
-              travel: seededRowPin(row, bookingLat, bookingLng),
+              // Self-serve arrival grace (P5, owner ruling 2026-09-28): this
+              // sweep only ever runs behind a self-serve createSelfBooking
+              // activation, so it always may carry grace, resolved for THIS
+              // row's own date (decision 2).
+              travel: {
+                ...seededRowPin(row, bookingLat, bookingLng),
+                graceMinutes: selfServeArrivalGraceMinutes({ date: rowDate }),
+                technicianId: row.technician_id ?? null,
+              },
             });
             if (clashes.length > 0) {
               // Demote the colliding occurrence to the documented

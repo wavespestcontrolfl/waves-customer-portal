@@ -65,6 +65,7 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 // reaches the SAME answer this page gives (codex #4293 r3 P2).
 const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
 const { visitInsideMoveNoticeWindow, violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
+const { selfServeArrivalGraceMinutes } = require('../services/scheduling/travel-gap');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -863,6 +864,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             sourceSurface: 'customer_web',
             disclosedFuturePlacementDays: req.body.disclosed_future_placement_days ?? null,
             travelGap: true,
+            // Arrival grace (A1, owner ruling 2026-09-28) — resolved once
+            // for the anchor's own target date (decision 2); rebooker.js's
+            // series sweep shares this one value across every sibling.
+            arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date }),
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
             beforeMove: noticeRecheck,
@@ -883,6 +888,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             technicianId: slot.technician_id,
             seriesPolicy: 'single',
             travelGap: true,
+            // Arrival grace (A1, owner ruling 2026-09-28) — this move's own
+            // target date (decision 2: same-day strict).
+            arrivalGraceMinutes: selfServeArrivalGraceMinutes({ date }),
             // Single-visit ONLY — see buildAvailabilityForService above.
             capacityPlacement: true,
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },

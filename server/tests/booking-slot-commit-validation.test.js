@@ -466,7 +466,9 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // PR #4623) — the SLOT_TAKEN shape still sits directly after it.
     // 1000: grew again by the travel probe's expected-minutes credit
     // (#4664, offer/commit parity).
-    const probeBlock = src.slice(probeIdx, probeIdx + 1000);
+    // 1400: grew again by arrival grace + multi-tech `graceMinutes`/
+    // `technicianId` on the same travel probe (owner ruling 2026-09-28).
+    const probeBlock = src.slice(probeIdx, probeIdx + 1400);
     expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
     expect(probeBlock).toMatch(/statusCode: 409/);
     // Shared module import rides the same lazy require as the lock helper.
@@ -932,5 +934,47 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
     const occurrences = src.split('selfServeNotice: true,').length - 1;
     // GET /availability, POST /find-slots, and the capture-intent revalidation.
     expect(occurrences).toBe(3);
+  });
+});
+
+describe('arrival grace + multi-tech commit parity (A1/owner ruling 2026-09-28, source guards)', () => {
+  test('buildBookingAvailability threads grace into find-time only for self-serve callers', () => {
+    const fnIdx = src.indexOf('async function buildBookingAvailability(');
+    const findTimeIdx = src.indexOf('arrivalGraceMinutes: selfServeNotice ? selfServeArrivalGraceMinutes() : 0,', fnIdx);
+    expect(findTimeIdx).toBeGreaterThan(fnIdx);
+    const findAvailIdx = src.indexOf('const result = await findAvailableSlots({', fnIdx);
+    const returnIdx = src.indexOf('});', findAvailIdx);
+    expect(findTimeIdx).toBeGreaterThan(findAvailIdx);
+    expect(findTimeIdx).toBeLessThan(returnIdx);
+  });
+
+  test('addCandidate\'s travel-gap mirror carries graceMinutes, self-serve opt-in only', () => {
+    const violIdx = src.indexOf("if (dayOccupied && violatesTravelGap({");
+    expect(violIdx).toBeGreaterThan(-1);
+    const block = src.slice(violIdx, violIdx + 400);
+    expect(block).toMatch(/graceMinutes: selfServeNotice \? selfServeArrivalGraceMinutes\(\{ date: slot\.date \}\) : 0,/);
+  });
+
+  test("createSelfBooking's global commit probe carries graceMinutes AND technicianId (multi-tech parity)", () => {
+    const probeIdx = src.indexOf('const globalClash = await findConflictingVisits({');
+    expect(probeIdx).toBeGreaterThan(-1);
+    const block = src.slice(probeIdx, probeIdx + 1400);
+    expect(block).toMatch(/graceMinutes: selfServeArrivalGraceMinutes\(\{ date: slotDateStr \}\),/);
+    expect(block).toMatch(/technicianId: technician_id \|\| null,/);
+  });
+
+  test('the recurring follow-up seeding sweep carries graceMinutes per-row (P5)', () => {
+    const sweepIdx = src.indexOf('for (const row of seededRows) {');
+    expect(sweepIdx).toBeGreaterThan(-1);
+    const clashIdx = src.indexOf('const clashes = await findConflictingVisits({', sweepIdx);
+    const block = src.slice(clashIdx, clashIdx + 1100);
+    expect(block).toMatch(/graceMinutes: selfServeArrivalGraceMinutes\(\{ date: rowDate \}\),/);
+  });
+
+  test('relay-booking (voice) never imports or sets graceMinutes/arrivalGraceMinutes', () => {
+    const relaySrc = fs.readFileSync(path.join(__dirname, '../services/voice-agent/relay-booking.js'), 'utf8');
+    expect(relaySrc).not.toMatch(/graceMinutes/);
+    expect(relaySrc).not.toMatch(/arrivalGraceMinutes/);
+    expect(relaySrc).not.toMatch(/selfServeArrivalGraceMinutes/);
   });
 });
