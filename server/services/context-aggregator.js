@@ -4,9 +4,18 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, formatETTime } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+// v13 LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
+// the public tracking page uses (server/routes/track-public.js) — never
+// reimplemented here — so the minutes the AI states match what the
+// customer would see on their own tracking link.
+const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
+const { calculateBoundedTrackingEta, finiteNumber } = require('./customer-tracking-eta');
+const { stampedAddressDiverges } = require('./stamped-address');
+const { publicPortalUrl } = require('../utils/portal-url');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -508,6 +517,68 @@ async function fetchDuesChargeCandidates(customer) {
   return rows;
 }
 
+// v13 LIVE ETA (GATE_SMS_REAL_ANSWERS, owner ruling 2026-09-29): a TODAY
+// en-route visit gets a live GPS ETA + tracking link in the SMS facts block,
+// so the texting AI can answer "where's the tech" instead of always handing
+// off. Reuses the exact public-tracking-page path (resolveFreshTechPosition
+// + calculateBoundedTrackingEta — same staleness window and provider
+// timeout the customer's own tracking link uses) rather than
+// track-transitions.js's separate resolveEnRouteEtaMinutes (that one only
+// fires once, at the moment a visit flips to en_route, for the initial
+// notification text — this runs on every drafted reply while the visit
+// stays en_route, so it needs the SAME staleness re-check the tracking page
+// makes on every poll, not a one-shot lookup).
+// FAILS CLOSED on every edge: no technician, no destination coordinates
+// (stamped-address divergence with no visit-level pin — "no pin beats a
+// wrong pin", same rule track-transitions.js applies), no track token, a
+// stale/missing GPS position, or a provider timeout/error all resolve to
+// null — the caller then falls back to today's LIVE STATUS-only line with
+// no invented ETA. Errors are logged with the scheduled_service id only,
+// never customer PII.
+async function resolveLiveEtaFact(row, customer) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  if (!row?.technician_id || !row?.track_view_token) return null;
+  try {
+    const diverges = stampedAddressDiverges({
+      service_address_line1: row.service_address_line1,
+      service_address_zip: row.service_address_zip,
+      service_address_city: row.service_address_city,
+      customer_address_line1: customer?.address_line1,
+      customer_zip: customer?.zip,
+      customer_city: customer?.city,
+    });
+    const destLat = finiteNumber(row.service_lat) ?? (diverges ? null : finiteNumber(customer?.latitude));
+    const destLng = finiteNumber(row.service_lng) ?? (diverges ? null : finiteNumber(customer?.longitude));
+    if (destLat == null || destLng == null) return null;
+
+    const position = await resolveFreshTechPosition({
+      techId: row.technician_id,
+      bouncieImei: row.tech_bouncie_imei,
+      logPrefix: 'sms-shadow-live-eta',
+    });
+    if (!position) return null;
+
+    const eta = await calculateBoundedTrackingEta({
+      techLat: position.lat,
+      techLng: position.lng,
+      customerLat: destLat,
+      customerLng: destLng,
+      techUpdatedAt: position.lastReportedAt,
+      logPrefix: 'sms-shadow-live-eta',
+    });
+    if (!eta || !Number.isFinite(eta.minutes)) return null;
+
+    return {
+      minutes: eta.minutes,
+      asOf: `${formatETTime(new Date(position.lastReportedAt))} ET`,
+      trackUrl: `${publicPortalUrl()}/track/${row.track_view_token}`,
+    };
+  } catch (err) {
+    logger.warn(`[context] live ETA lookup failed for scheduled_service ${row?.id}: ${err.message}`);
+    return null;
+  }
+}
+
 class ContextAggregator {
   async getFullCustomerContext(phone) {
     const clean = (phone || '').replace(/\D/g, '');
@@ -539,7 +610,18 @@ class ContextAggregator {
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
       db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
+      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select(
+        'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name',
+        // LIVE ETA inputs (v13, GATE_SMS_REAL_ANSWERS) — technician_id + the
+        // tech's Bouncie IMEI to resolve a fresh GPS position, the visit's
+        // own track_view_token for the SAME "Track live" link the en-route
+        // SMS sends, and the stamped-vs-primary destination coords
+        // track-transitions.js's resolveEnRouteEtaMinutes already reads the
+        // same way for the initial en-route text.
+        'ss.id', 'ss.technician_id', 'ss.track_view_token', 'tech.bouncie_imei as tech_bouncie_imei',
+        'ss.lat as service_lat', 'ss.lng as service_lng',
+        'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city'
+      ),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
       // five future autopay rows empty the history.
@@ -740,6 +822,16 @@ class ContextAggregator {
 
     const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance, billingLane);
 
+    // v13 LIVE ETA: only a visit that's TODAY and en_route has a tech worth
+    // tracking — every other row resolves instantly to null with no lookup.
+    const liveEtas = await Promise.all(
+      upcomingServices.map((s) => (
+        s.status === 'en_route' && this.calendarDay(s.scheduled_date) === etDateString()
+          ? resolveLiveEtaFact(s, customer)
+          : null
+      ))
+    );
+
     return {
       known: true,
       customer: {
@@ -767,7 +859,7 @@ class ContextAggregator {
         notes: customerSafeVisitNotes(s.technician_notes),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
       })),
-      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
+      upcomingServices: upcomingServices.map((s, i) => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString(), liveEta: liveEtas[i] || null })),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable
         unavailable: billingUnavailable,
@@ -1092,3 +1184,4 @@ module.exports.resolveMonthlyDuesFact = resolveMonthlyDuesFact;
 module.exports.resolveDuesCollectionState = resolveDuesCollectionState;
 module.exports.authorizedDuesCents = authorizedDuesCents;
 module.exports.resolveAnnualCoverageState = resolveAnnualCoverageState;
+module.exports.resolveLiveEtaFact = resolveLiveEtaFact;

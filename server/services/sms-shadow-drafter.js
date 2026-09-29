@@ -1168,6 +1168,19 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
+  // v13 LIVE ETA (GATE_SMS_REAL_ANSWERS only — gate-off stays the exact v11
+  // literal, matching every other conditional in this function): the
+  // facts block now carries a LIVE ETA + TRACKING LINK line on a TODAY
+  // en-route visit whenever context-aggregator resolved one (same
+  // resolveFreshTechPosition + calculateBoundedTrackingEta bounds the
+  // customer tracking page uses). The model may state THAT number only —
+  // never compute or invent one — and share the link with it.
+  const liveEtaClause = realAnswersOn
+    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK.'
+    : '';
+  const liveEtaUseRule = realAnswersOn
+    ? ' A visit line that also shows LIVE ETA and TRACKING LINK means you may tell the customer about how many minutes away the tech is (that exact number) and share the link.'
+    : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
@@ -1176,7 +1189,7 @@ ${CUSTOMER_SMS_HOUSE_VOICE}
 FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (${factSourceList}). A plausible-sounding guess is still a fabrication. You must NEVER:
 - State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), ${upcomingOrThread}. ${noAppointmentRule}
 - Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
-- Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site. If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
+- Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site.${liveEtaClause} If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
 - Claim what a trap caught, what was found, or what was treated, unless the context states it.
 - Assert a service cadence or frequency ("every other month") or treatment timing ("safe to water in 1–2 hours") that isn't in the context.
 - Reference a billing event — a payment, an auto-pay attempt, a charge, an invoice — that isn't shown in BILLING.
@@ -1193,7 +1206,7 @@ PROPERTY & ACCESS RULES:
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
 ${deferRule}
 
-USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now. If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
+USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now.${liveEtaUseRule} If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
 ${handoffBullet}
@@ -1388,8 +1401,22 @@ function buildFactsBlock(context, extras = {}) {
           const parts = [`${s.type}${s.isToday ? ' TODAY' : ''} on ${formatEtDate(s.date)}`];
           parts.push(s.window ? `window ${s.window}` : 'no arrival window set');
           parts.push(s.tech ? `tech ${s.tech}` : 'tech not yet assigned');
-          if (s.isToday && s.status === 'en_route') parts.push('LIVE STATUS: tech marked en route to this visit');
-          else if (s.isToday && s.status === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
+          if (s.isToday && s.status === 'en_route') {
+            parts.push('LIVE STATUS: tech marked en route to this visit');
+            // v13 LIVE ETA (GATE_SMS_REAL_ANSWERS): context-aggregator only
+            // ever populates s.liveEta from a fresh GPS position + bounded
+            // ETA (same functions + staleness/timeout the customer tracking
+            // page uses) — a stale/missing position, missing destination
+            // coords, or a provider timeout/error all resolve to null there,
+            // so this line is absent exactly when the drafter genuinely has
+            // no live minutes to state. Gate-checked again here (belt and
+            // suspenders) so a gate-off caller can never surface this fact,
+            // keeping this block byte-identical to v11 when the gate is off.
+            if (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.liveEta && Number.isFinite(s.liveEta.minutes) && s.liveEta.trackUrl) {
+              parts.push(`LIVE ETA: about ${s.liveEta.minutes} minutes (GPS, as of ${s.liveEta.asOf})`);
+              parts.push(`TRACKING LINK: ${s.liveEta.trackUrl}`);
+            }
+          } else if (s.isToday && s.status === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
           else if (s.isToday) parts.push('no live tech location known');
           return `- ${parts.join(', ')}`;
         })
