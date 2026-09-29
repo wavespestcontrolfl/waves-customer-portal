@@ -35,7 +35,8 @@
         "USE /api/public/pest-forecast (inline function#a972e744)",
         "USE /api/public/pest-identifier (inline function#14727834)",
         "USE /api/public/reservice (inline function#d0926d91)",
-        "USE /api/public/secure-card (inline function#8abc12e6)"
+        "USE /api/public/secure-card (inline function#8abc12e6)",
+        "USE /api/public/track (trackPublicPreparser#a6e0dc6f)"
       ]
     },
     {
@@ -128,6 +129,16 @@
       "routes": [
         "GET /l/:code",
         "USE /l (express-rate-limit({ handler#945948f2 }))"
+      ]
+    },
+    {
+      "router": "server/routes/outbound-redirect.js",
+      "mount": "/go",
+      "reason": "Prep-guide outside-link click logger + 302 — destinations are pre-registered outbound_links rows resolved by code only (no URL in the request, so not an open redirect); per-route limiter; see docs/public-route-contracts.md",
+      "routes": [
+        "GET /go/:code",
+        "USE /go (express-rate-limit({ handler#f2668dc4 }))",
+        "USE /go (inline function#29df873e)"
       ]
     },
     {
@@ -373,7 +384,8 @@
       "reason": "Tokenized live technician-tracking map linked from appointment SMS",
       "routes": [
         "GET /api/public/track/:token",
-        "POST /api/public/track/:token/stops-ahead"
+        "POST /api/public/track/:token/stops-ahead",
+        "POST /api/public/track/:token/view"
       ]
     },
     {

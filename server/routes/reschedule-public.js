@@ -53,6 +53,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const SmartRebooker = require('../services/rebooker');
 const { noStore } = require('../middleware/no-store');
+const { recordPageView } = require('../services/customer-page-views');
 
 // Token-keyed appointment data (address, visit window) — never cacheable.
 router.use(noStore);
@@ -516,6 +517,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'reschedule', customerId: svc.customer_id, subjectType: 'scheduled_service', subjectId: svc.id });
 
     const elig = withSelfServeNotice(accountInactive(svc)
       ? { ok: false, reason: 'account_inactive' }

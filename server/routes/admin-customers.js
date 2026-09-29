@@ -2721,6 +2721,28 @@ router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
   }
 });
 
+// GET /api/admin/customers/:id/activity — read-only "what they were sent and
+// what they did" feed (GATE_CUSTOMER_ACTIVITY_TIMELINE, dark by default).
+// requireAdmin: it shows message previews, link clicks and page views.
+// Dark = 200 { enabled: false } so the panel hides itself; no other read or
+// write happens. Query: before (ISO cursor from the previous page), limit.
+router.get('/:id/activity', requireAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').customerActivityTimelineLive()) return res.json({ enabled: false });
+    const { getCustomerActivity } = require('../services/customer-activity-timeline');
+    const { before, limit } = req.query || {};
+    const result = await getCustomerActivity(req.params.id, {
+      before: typeof before === 'string' && before ? before : null,
+      limit,
+    });
+    if (!result) return res.status(404).json({ error: 'Customer not found' });
+    res.json({ enabled: true, ...result });
+  } catch (err) {
+    if (err?.status === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
 // GET /api/admin/customers/:id/comms — unified per-customer SMS + voice
 // thread (PR 3 of comms unification). Replaces the SMS-only feed that
 // fed the Comms tab from `data.smsLog`. Email lands in PR 5.

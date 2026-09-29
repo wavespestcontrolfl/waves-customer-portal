@@ -17,6 +17,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { resolveShortCode } = require('../services/short-url');
 const { isBotUserAgent } = require('../utils/bot-ua');
+const { shouldRecord } = require('../services/customer-page-views');
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -65,6 +66,9 @@ router.get('/:code', async (req, res) => {
       resolveShortCode(code, {
         ip: req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip,
         userAgent: ua,
+        // Staff previews (admin marker cookie / WAVES_ADMIN_IPS) still redirect
+        // and bump the aggregate, but write no per-click engagement row.
+        recordClick: shouldRecord(req),
       }).catch(() => { /* already logged inside */ });
     }
 
