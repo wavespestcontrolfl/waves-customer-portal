@@ -453,6 +453,26 @@ describe('PATCH /commitments/:id', () => {
       expect(res.status).toBe(400);
     });
   });
+
+  test('a Reopen carries the version the office was shown; a newer verdict answers 409 (other actions are unchanged)', async () => {
+    mockDb([{ call_log_id: CALL_ID }, { call_log_id: CALL_ID }, { call_log_id: CALL_ID }]);
+    const shown = '2026-09-28T18:00:00.123Z';
+    commitments.applyHumanUpdate.mockResolvedValue({ id: COMMIT_ID, status: 'open' });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reopen', expected_at: shown }) });
+      expect(res.status).toBe(200);
+      expect(commitments.applyHumanUpdate).toHaveBeenLastCalledWith(db, COMMIT_ID, expect.objectContaining({ action: 'reopen', expectedAt: shown }));
+    });
+    await withServer(async (base) => {
+      await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'dismiss', expected_at: shown }) });
+      expect(commitments.applyHumanUpdate.mock.calls.at(-1)[2]).not.toHaveProperty('expectedAt');
+    });
+    commitments.applyHumanUpdate.mockRejectedValue(Object.assign(new Error('This promise changed since you opened it — refresh and try again'), { status: 409 }));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reopen', expected_at: shown }) });
+      expect(res.status).toBe(409);
+    });
+  });
 });
 
 describe('customer-profile SMS commitments', () => {

@@ -1534,7 +1534,9 @@ async function slotBookingProof(conn, commitment, call, customerId, after) {
 // caller's phone and customer, the evidence boundary (`after`, the end of the
 // call or the latest renewal) and the window's end — and answers { id, at }.
 const WITHIN = `within_${ASSOCIATION_WINDOW_DAYS}_days`;
-const NOT_DELIVERED = ["failed", "undelivered", "canceled", "error"];
+// A report counts once the provider accepted it — never a row still queued
+// for quiet hours (scheduled / sending), blocked, or failed.
+const PROVIDER_ACCEPTED = ["sent", "delivered"];
 // A person's mailbox: an address at Waves' own domain (the Gmail-sync
 // `emails` rows carry the bare address; a display-name wrapper is tolerated).
 const STAFF_ADDRESS_RE = "@wavespestcontrol\\.com>{0,1}[[:space:]]*$";
@@ -1593,7 +1595,8 @@ async function bookedVisit(conn, { after, until, customerId }) {
     .where("customer_id", customerId)
     .where("created_at", ">", after)
     .where("created_at", "<=", until)
-    .whereNotIn("status", ["cancelled", "canceled"])
+    // Off the books (cancelled, rescheduled away, skipped) is no appointment.
+    .whereNotIn("status", SLOT_OFF_BOOKS_STATUSES)
     .whereNull("recurring_parent_id")
     .whereNull("parent_service_id")
     .orderBy("created_at", "asc")
@@ -1615,7 +1618,7 @@ async function completedVisit(conn, { after, until, customerId }) {
 // The caller talked to us again: a completed inbound call from their number,
 // a minute or more, affirmatively not a voicemail (the reviewed extraction's
 // own is_voicemail flag, the signal the callback proof uses).
-async function inboundConversation(conn, { callId, after, until, phone }) {
+async function inboundConversation(conn, { callId, after, until, phone, customerId }) {
   if (!phone) return null;
   const row = await conn("call_log")
     .whereNot("id", callId)
@@ -1630,7 +1633,9 @@ async function inboundConversation(conn, { callId, after, until, phone }) {
     // getting back to the caller (a transfer to staff still counts).
     .whereRaw("COALESCE(call_outcome, '') <> 'ai_handled'")
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-    .modify((b) => phoneWhere(b, "from_phone", phone))
+    // A LINKED call is answered only by a call linked to the same customer
+    // (shared household numbers), like the outbound-call and text helpers.
+    .modify((b) => { phoneWhere(b, "from_phone", phone); sameCustomerWhere(b, "customer_id", customerId); })
     .orderBy("created_at", "asc")
     .first("id", "created_at");
   return row ? { id: row.id, at: row.created_at } : null;
@@ -1685,7 +1690,7 @@ async function reportTextTo(conn, { after, until, phone }) {
   const row = await conn("sms_log")
     .where("direction", "outbound")
     .where("message_type", "like", "service_report%")
-    .whereNotIn("status", NOT_DELIVERED)
+    .whereIn("status", PROVIDER_ACCEPTED)
     .where("created_at", ">", after)
     .where("created_at", "<=", until)
     .modify((b) => phoneWhere(b, "to_phone", phone))
@@ -1699,7 +1704,7 @@ async function reportEmailTo(conn, { after, until, customerId }) {
   const row = await conn("email_messages")
     .where({ recipient_type: "customer", recipient_id: String(customerId) })
     .where("template_key", "like", "service.report%")
-    .whereNotIn("status", ["failed", "bounced"])
+    .whereIn("status", PROVIDER_ACCEPTED)
     .where("sent_at", ">", after)
     .where("sent_at", "<=", until)
     .orderBy("sent_at", "asc")
@@ -1731,17 +1736,33 @@ const EVIDENCE_BY_KIND = {
   send_paperwork: ["report_text", "report_email", "staff_email"],
 };
 
-// The first follow-up the portal can show for this Waves promise, as an
-// association proof — or null (nothing found, the switch is off, or the
-// promise is the customer's).
-async function extraEvidence(conn, commitment, ctx) {
-  if (!promiseEvidenceCloseLive() || commitment.party !== "waves") return null;
-  for (const name of EVIDENCE_BY_KIND[commitment.kind] || []) {
-    const spec = EVIDENCE[name];
-    const hit = await spec.find(conn, ctx);
-    if (hit) return { kind: spec.kind, record_type: spec.type, record_id: hit.id, matched_at: hit.at, strength: "association", basis: spec.basis };
+// The association proof for a promise: each resolver passes the lookups it
+// always made, in its order (`tries`, each () => proof | null). With
+// PROMISE_EVIDENCE_CLOSE on, a Waves promise also gets the follow-up
+// evidence for its kind (EVIDENCE_BY_KIND), and the proof is the EARLIEST
+// of everything found — the stored proof and fulfilled_at name when the
+// promise was kept, not which lookup ran first. Off, or a customer's own
+// promise, it stays the first found, exactly as before.
+async function associationProof(ctx, tries) {
+  const { conn, commitment } = ctx;
+  if (!promiseEvidenceCloseLive() || commitment.party !== "waves") {
+    for (const attempt of tries) {
+      const proof = await attempt();
+      if (proof) return proof;
+    }
+    return null;
   }
-  return null;
+  const extra = (EVIDENCE_BY_KIND[commitment.kind] || []).map((name) => async () => {
+    const spec = EVIDENCE[name];
+    const hit = await spec.find(conn, ctx.evidence);
+    return hit ? { kind: spec.kind, record_type: spec.type, record_id: hit.id, matched_at: hit.at, strength: "association", basis: spec.basis } : null;
+  });
+  let earliest = null;
+  for (const attempt of [...tries, ...extra]) {
+    const proof = await attempt();
+    if (proof && (!earliest || new Date(proof.matched_at).getTime() < new Date(earliest.matched_at).getTime())) earliest = proof;
+  }
+  return earliest;
 }
 
 // The end of the call — or, for an obligation RENEWED (reopened by staff, or
@@ -1770,6 +1791,292 @@ async function customerLeftProof(conn, commitment, call) {
   return { kind: CUSTOMER_LEFT, record_type: "customer", record_id: customer.id, matched_at: parseETDateTime(`${customer.churned_day}T12:00`), strength: "association", basis: "customer_left_after_promise" };
 }
 
+// ── Per-kind fulfillment resolvers ─────────────────────────────────────────
+// resolveFulfillment builds one context per promise and hands it to the
+// resolver for its kind (RESOLVERS). Each answers a proof — { kind,
+// record_type, record_id, matched_at, strength, basis } — or null: direct
+// proof first, then associationProof over the lookups it has always made.
+
+// send_estimate's reused-lead lookup: an estimate on a lead this call did not
+// mint (a hint, never direct).
+async function reusedLeadEstimate({ conn, call, after, leadIds }, probe) {
+  // A REUSED earlier call's lead — reached through the lead_id /
+  // relay_lead_id stamp, or carrying this call's SID only because
+  // attribution re-stamped a lead older than the call — is a hint,
+  // never direct proof (Codex #3738 r13 P1): an estimate later sent on
+  // it is not necessarily this call's. Same guard as buildCallOutcomes:
+  // no lead key, no lead lookup. No local catch: a failed lead lookup
+  // reaches refreshFulfillment's failed accounting (r13 P2) instead of
+  // reading as "no leads".
+  const stampedLeads = (leadIds.length || call.twilio_call_sid) ? await conn("leads")
+    .where(function scope() {
+      if (leadIds.length) this.orWhereIn("id", leadIds);
+      if (call.twilio_call_sid) this.orWhere("twilio_call_sid", call.twilio_call_sid);
+    })
+    .select("id", "estimate_id", "twilio_call_sid", "created_at") : [];
+  const mintedHere = (lead) => Boolean(lead.twilio_call_sid) && lead.twilio_call_sid === call.twilio_call_sid && mintedByCall(lead, probe);
+  const mintedIds = new Set(stampedLeads.filter(mintedHere).map((l) => String(l.id)));
+  const reused = stampedLeads.filter((l) => !mintedHere(l));
+  const reusedLeadIds = [...new Set([...leadIds.filter((id) => !mintedIds.has(id)), ...reused.map((l) => String(l.id))])];
+  const reusedEstimateIds = reused.map((l) => l.estimate_id).filter(Boolean);
+  if (reusedEstimateIds.length || reusedLeadIds.length) {
+    const onReused = await handedOffWithin(conn("estimates")
+      .where(function linkedToLeads() {
+        if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
+        if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
+      }), after)
+      .orderByRaw(handoffOrder(conn, after))
+      .first(...HANDOFF_COLS(conn));
+    if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
+  }
+  return null;
+}
+
+async function resolveSendEstimate(ctx) {
+  const { conn, call, after, phone, customerId, evidence } = ctx;
+  // Direct: the shared primitive above (estimator stamp; lead FK or
+  // public-quote mirror on a lead this call minted).
+  const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, customerId, phone, after };
+  const direct = (await directEstimatesSentAfter(conn, [probe])).get("call");
+  if (direct) return direct;
+  return associationProof(ctx, [
+    () => reusedLeadEstimate(ctx, probe),
+    // An estimate linked only through estimates.customer_phone still keeps
+    // the promise (commercial proposals store the phone with a NULL
+    // customer_id, so a same-customer lookup misses them). Mirror the
+    // promised-estimate-watcher phone predicate (Codex #3738 P1): a LINKED
+    // call is cleared by its own customer's estimate; an UNLINKED call only
+    // by an UNLINKED estimate whose phone matches the caller — a shared
+    // household number never lets one customer's estimate clear another's
+    // promise. Then a visit booked or done for the customer (associationProof).
+    async () => {
+      const est = await estimateSentTo(conn, evidence);
+      return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.at, strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+    },
+  ]);
+}
+
+async function resolveAppointmentConfirmation({ conn, after, until, phone }) {
+  if (!phone) return null;
+  // A confirmation that failed or was never delivered is not a kept
+  // promise; the earliest surviving row is the hint so a later delivery
+  // is not hidden behind an earlier failure (Codex r16 P2).
+  const sms = await conn("sms_log")
+    .where({ direction: "outbound", message_type: "confirmation" })
+    .whereNotIn("status", ["failed", "undelivered", "canceled", "error"])
+    .where("created_at", ">", after)
+    .where("created_at", "<=", until)
+    .modify((b) => phoneWhere(b, "to_phone", phone))
+    .orderBy("created_at", "asc")
+    .first("id", "created_at", "status");
+  return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+}
+
+async function resolveCallback(ctx) {
+  const { conn, commitment, after, phone, customerId, evidence } = ctx;
+  if (!phone) return null;
+  // Each attempt is judged under the policy it was placed under. An
+  // attempt under the CARD policy — the card's commitment link, or the
+  // Call Log action's policy-stamped source-call link — needs a
+  // completed customer leg plus a reviewed extraction of a real
+  // conversation; ringing the staff phone or voicemail is not proof. A
+  // pre-policy call keeps the legacy connected-call rule below. The gate
+  // plays no part, so rollback cannot weaken a card attempt and enabling
+  // the gate cannot strip an earlier attempt of its rule.
+  // Two plain arms, no COALESCE: each arm implies one of the partial
+  // expression indexes on call_log.metadata (relatedCommitmentId;
+  // relatedCallId under the card policy), so the watchdog's per-promise
+  // probes are index lookups rather than sequential scans of call_log.
+  // The source-call arm covers the Call Log action only (no commitment
+  // link): a card call for a SIBLING promise on the same source call
+  // carries both keys and must never be this promise's proof or its
+  // text-fallback suppressor.
+  const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
+  const policyBindings = [commitment.id, commitment.call_log_id];
+  const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+  const connected = await conn('call_log').where('direction', 'outbound')
+    .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
+    .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+    .whereRaw(policyLink, policyBindings)
+    .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+    .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+    .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+    .modify((b) => { phoneWhere(b, 'to_phone', phone); sameCustomer(b, 'customer_id'); })
+    .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+  if (connected) {
+    // The proof is the completed customer leg, so the promise is kept
+    // when that leg ended, not when the staff leg was dialed.
+    const legEnded = Date.parse(connected.metadata?.customer_leg?.ended_at || '');
+    return { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
+      matched_at: Number.isFinite(legEnded) ? new Date(legEnded) : connected.created_at,
+      strength: 'direct', basis: 'callback_customer_conversation' };
+  }
+  // A returned callback IS the fulfilment — the phone is the linkage.
+  // Same completion predicate as the callbacks digest
+  // (unworked-comms-watcher, "Already returned"): a CONNECTED outbound
+  // call to the caller's number after this call (>= 60 s — the stored
+  // duration is the parent leg, so a pickup-and-abandon is short), or
+  // a HUMAN-authored text to it (manual / ai_approved / ai_revised —
+  // never the assistant's automatic reply, and not a proactive draft
+  // with no inbound anchor). A LINKED call is returned only by a
+  // record linked to the same customer (shared household numbers);
+  // an unlinked call keeps the phone-level match. No outer window: a
+  // callback returned late was still returned. No card-policy attempt
+  // — this promise's or any other's, whose parent-leg duration says
+  // nothing about the customer leg — is ever judged by this rule, and
+  // once one exists for this promise a text no longer stands in for the
+  // conversation it promised.
+  const outbound = await returnedOutboundCall(conn, { ...evidence, until: null });
+  if (outbound) return { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.at, strength: "direct", basis: "callback_returned_connected_outbound_call" };
+  const cardAttempt = await conn('call_log').whereRaw(policyLink, policyBindings).first('id');
+  if (cardAttempt) return null;
+  const text = await humanTextTo(conn, { ...evidence, until: null });
+  // No local catch: a failed lookup must reach refreshFulfillment's
+  // `failed` accounting so the watchdog leaves this call out of the bell.
+  if (text) return { kind: "sms_sent", record_type: "sms_log", record_id: text.id, matched_at: text.at, strength: "direct", basis: "callback_returned_by_human_text" };
+  return associationProof(ctx, []);
+}
+
+async function resolveCallBack({ conn, call, after, until, phone }) {
+  // The CUSTOMER's promise to call us back: the inbound counterpart of
+  // the outbound lookup above — a later completed inbound call from the
+  // caller's number (Codex r8 P2). Same association strength: the call
+  // proves contact, not what was said.
+  if (!phone) return null;
+  const inbound = await conn("call_log")
+    .whereNot("id", call.id)
+    .where("direction", "like", "inbound%")
+    .where("created_at", ">", after)
+    .where("created_at", "<=", until)
+    .where("status", "completed")
+    .where("duration_seconds", ">=", 20)
+    // A bake-off call from a customer's phone is not the customer calling back.
+    .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
+    .modify((b) => phoneWhere(b, "from_phone", phone))
+    .orderBy("created_at", "asc")
+    .first("id", "created_at");
+  return inbound ? { kind: "inbound_call", record_type: "call_log", record_id: inbound.id, matched_at: inbound.created_at, strength: "association", basis: `completed_inbound_call_from_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+}
+
+async function resolveScheduleVisit(ctx) {
+  const { conn, commitment, call, after, customerId, evidence } = ctx;
+  // Booked AFTER the call, like every other match: a reprocess can link
+  // an existing visit to this call.
+  const direct = await conn("scheduled_services")
+    .where("source_call_log_id", call.id)
+    .where("created_at", ">", after)
+    .whereNotIn("status", ["cancelled", "canceled"])
+    .orderBy("created_at", "asc")
+    .first("id", "created_at", "scheduled_date", "status");
+  if (direct) return { kind: "appointment_booked", record_type: "scheduled_service", record_id: direct.id, matched_at: direct.created_at, strength: "direct", basis: "visit_booked_from_this_call" };
+  // An agent who MOVED an on-the-books visit kept a schedule_visit promise
+  // without creating a row, so neither lookup above can witness it and the
+  // watchdog reported the promise overdue (GH codex #4204 r6 P2). The
+  // applier's own activity row names this call and the visit it moved —
+  // direct proof, same standard as a booking from this call.
+  // schedule_visit ONLY. A moved visit proves an existing appointment
+  // changed time; it says nothing about a promised technician follow-up,
+  // and closing that owed work on this evidence would drop it silently
+  // (GH codex #4204 r7 P2).
+  const { ACTIVITY_ACTION: RESCHEDULE_APPLIED } = require("./call-reschedule-apply");
+  const movedRow = commitment.kind !== "schedule_visit" ? null : await conn("activity_log")
+    .where({ action: RESCHEDULE_APPLIED })
+    .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)])
+    .orderBy("created_at", "asc")
+    .first("created_at", "metadata");
+  const movedMeta = typeof movedRow?.metadata === "string" ? JSON.parse(movedRow.metadata) : movedRow?.metadata;
+  if (movedMeta?.scheduled_service_id) {
+    return { kind: "appointment_rescheduled", record_type: "scheduled_service", record_id: movedMeta.scheduled_service_id, matched_at: movedRow.created_at, strength: "direct", basis: "visit_rescheduled_from_this_call" };
+  }
+  if (!customerId) return null;
+  const slotProof = await slotBookingProof(conn, commitment, call, customerId, after);
+  if (slotProof) return slotProof;
+  return associationProof(ctx, [async () => {
+    const visit = await bookedVisit(conn, evidence);
+    return visit ? { kind: "appointment_booked", record_type: "scheduled_service", record_id: visit.id, matched_at: visit.at, strength: "association", basis: `visit_booked_for_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+  }]);
+}
+
+async function resolveSendPhotos({ conn, after, until, phone }) {
+  if (!phone) return null;
+  const msg = await conn("messages as m")
+    .join("conversations as c", "c.id", "m.conversation_id")
+    .where("m.direction", "inbound")
+    .where("m.created_at", ">", after)
+    .where("m.created_at", "<=", until)
+    .whereRaw("m.media IS NOT NULL AND jsonb_typeof(m.media) = 'array' AND jsonb_array_length(m.media) > 0")
+    .modify((b) => phoneWhere(b, "c.contact_phone", phone))
+    .orderBy("m.created_at", "asc")
+    .first("m.id", "m.created_at")
+    .catch(() => null);
+  return msg ? { kind: "inbound_media", record_type: "message", record_id: msg.id, matched_at: msg.created_at, strength: "association", basis: `inbound_message_with_media_from_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+}
+
+async function resolveMakePayment({ conn, call, after, until, customerId }) {
+  // Paid AFTER the call, like every other match: a visit re-linked to
+  // this call during a reprocess can carry an invoice paid before it.
+  // And PAID means a payment: an invoice closed with pre-existing credit
+  // (apply-credit stamps paid_at and creates no payment row) or a
+  // goodwill adjustment is not the customer keeping a promise to pay —
+  // the witness is a paid payments row (Codex #3738 r11 P2) — and it
+  // must be THAT invoice's payment, recorded after the call. payments
+  // has no invoice_id column: a row is linked to its invoice through
+  // metadata.invoice_id / waves_invoice_id or a shared Stripe
+  // PaymentIntent (the completion + refund paths key on the same). A
+  // same-day payment on some other invoice cannot vouch for one closed
+  // with account credit after the call (Codex #3738 r12 P2). payment_date
+  // is a DATE (business day, Eastern), so the post-call instant is the
+  // row's created_at, with the business day as the floor.
+  if (!customerId) return null;
+  const paidByItsOwnPayment = (qb) => qb.whereExists(function paymentForThisInvoice() {
+    this.select(conn.raw("1")).from("payments as p")
+      .where("p.status", "paid")
+      .where("p.created_at", ">", after)
+      .whereRaw("p.payment_date >= (?::timestamptz AT TIME ZONE 'America/New_York')::date", [after])
+      .whereRaw("(p.metadata::jsonb ->> 'invoice_id' = i.id::text OR p.metadata::jsonb ->> 'waves_invoice_id' = i.id::text"
+        + " OR (p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id))");
+  });
+  const direct = await conn("invoices as i")
+    .join("scheduled_services as ss", "ss.id", "i.scheduled_service_id")
+    .where("ss.source_call_log_id", call.id)
+    .whereNotNull("i.paid_at")
+    .where("i.paid_at", ">", after)
+    .modify(paidByItsOwnPayment)
+    .orderBy("i.paid_at", "asc")
+    .first("i.id", "i.paid_at")
+    .catch(() => null);
+  if (direct) return { kind: "invoice_paid", record_type: "invoice", record_id: direct.id, matched_at: direct.paid_at, strength: "direct", basis: "invoice_for_the_visit_booked_from_this_call_paid" };
+  const inv = await conn("invoices as i")
+    .where("i.customer_id", customerId)
+    .whereNotNull("i.paid_at")
+    .where("i.paid_at", ">", after)
+    .where("i.paid_at", "<=", until)
+    .modify(paidByItsOwnPayment)
+    .orderBy("i.paid_at", "asc")
+    .first("i.id", "i.paid_at")
+    .catch(() => null);
+  return inv ? { kind: "invoice_paid", record_type: "invoice", record_id: inv.id, matched_at: inv.paid_at, strength: "association", basis: `customer_invoice_paid_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+}
+
+// No record linked to the promise to look for: the report or a staff email,
+// a later human contact, or the customer's own next visit or estimate is the
+// follow-up (associationProof's evidence for the kind).
+const resolveByFollowUp = (ctx) => associationProof(ctx, []);
+
+const RESOLVERS = {
+  send_estimate: resolveSendEstimate,
+  send_appointment_confirmation: resolveAppointmentConfirmation,
+  callback: resolveCallback,
+  call_back: resolveCallBack,
+  schedule_visit: resolveScheduleVisit,
+  technician_follow_up: resolveScheduleVisit,
+  send_photos: resolveSendPhotos,
+  make_payment: resolveMakePayment,
+  send_report: resolveByFollowUp,
+  send_paperwork: resolveByFollowUp,
+  other: resolveByFollowUp,
+};
+
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
   // Evidence counts from the end of the call — or, for a callback card whose
@@ -1777,264 +2084,13 @@ async function resolveFulfillment(conn, commitment, call) {
   // promise), from that renewal (evidenceBoundary).
   const after = await evidenceBoundary(conn, commitment, call);
   if (!started || Number.isNaN(started.getTime()) || !after) return null;
+  const resolver = RESOLVERS[commitment.kind];
+  if (!resolver) return null;
   const until = windowEnd(after);
   const phone = contactPhoneOf(call);
   const customerId = call?.customer_id || null;
-  const leadIds = leadIdsOf(call);
   const evidence = { callId: call.id, phone, customerId, after, until };
-
-  switch (commitment.kind) {
-    case "send_estimate": {
-      // Direct: the shared primitive above (estimator stamp; lead FK or
-      // public-quote mirror on a lead this call minted).
-      const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, customerId, phone, after };
-      const direct = (await directEstimatesSentAfter(conn, [probe])).get("call");
-      if (direct) return direct;
-      // A REUSED earlier call's lead — reached through the lead_id /
-      // relay_lead_id stamp, or carrying this call's SID only because
-      // attribution re-stamped a lead older than the call — is a hint,
-      // never direct proof (Codex #3738 r13 P1): an estimate later sent on
-      // it is not necessarily this call's. Same guard as buildCallOutcomes:
-      // no lead key, no lead lookup. No local catch: a failed lead lookup
-      // reaches refreshFulfillment's failed accounting (r13 P2) instead of
-      // reading as "no leads".
-      const stampedLeads = (leadIds.length || call.twilio_call_sid) ? await conn("leads")
-        .where(function scope() {
-          if (leadIds.length) this.orWhereIn("id", leadIds);
-          if (call.twilio_call_sid) this.orWhere("twilio_call_sid", call.twilio_call_sid);
-        })
-        .select("id", "estimate_id", "twilio_call_sid", "created_at") : [];
-      const mintedHere = (lead) => Boolean(lead.twilio_call_sid) && lead.twilio_call_sid === call.twilio_call_sid && mintedByCall(lead, probe);
-      const mintedIds = new Set(stampedLeads.filter(mintedHere).map((l) => String(l.id)));
-      const reused = stampedLeads.filter((l) => !mintedHere(l));
-      const reusedLeadIds = [...new Set([...leadIds.filter((id) => !mintedIds.has(id)), ...reused.map((l) => String(l.id))])];
-      const reusedEstimateIds = reused.map((l) => l.estimate_id).filter(Boolean);
-      if (reusedEstimateIds.length || reusedLeadIds.length) {
-        const onReused = await handedOffWithin(conn("estimates")
-          .where(function linkedToLeads() {
-            if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
-            if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
-          }), after)
-          .orderByRaw(handoffOrder(conn, after))
-          .first(...HANDOFF_COLS(conn));
-        if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
-      }
-      // An estimate linked only through estimates.customer_phone still keeps
-      // the promise (commercial proposals store the phone with a NULL
-      // customer_id, so a same-customer lookup misses them). Mirror the
-      // promised-estimate-watcher phone predicate (Codex #3738 P1): a LINKED
-      // call is cleared by its own customer's estimate; an UNLINKED call only
-      // by an UNLINKED estimate whose phone matches the caller — a shared
-      // household number never lets one customer's estimate clear another's
-      // promise. Then a visit booked or done for the customer (extraEvidence).
-      const est = await estimateSentTo(conn, evidence);
-      if (est) return { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.at, strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` };
-      return extraEvidence(conn, commitment, evidence);
-    }
-    case "send_appointment_confirmation": {
-      if (!phone) return null;
-      // A confirmation that failed or was never delivered is not a kept
-      // promise; the earliest surviving row is the hint so a later delivery
-      // is not hidden behind an earlier failure (Codex r16 P2).
-      const sms = await conn("sms_log")
-        .where({ direction: "outbound", message_type: "confirmation" })
-        .whereNotIn("status", ["failed", "undelivered", "canceled", "error"])
-        .where("created_at", ">", after)
-        .where("created_at", "<=", until)
-        .modify((b) => phoneWhere(b, "to_phone", phone))
-        .orderBy("created_at", "asc")
-        .first("id", "created_at", "status");
-      return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
-    }
-    case "callback": {
-      if (!phone) return null;
-      // Each attempt is judged under the policy it was placed under. An
-      // attempt under the CARD policy — the card's commitment link, or the
-      // Call Log action's policy-stamped source-call link — needs a
-      // completed customer leg plus a reviewed extraction of a real
-      // conversation; ringing the staff phone or voicemail is not proof. A
-      // pre-policy call keeps the legacy connected-call rule below. The gate
-      // plays no part, so rollback cannot weaken a card attempt and enabling
-      // the gate cannot strip an earlier attempt of its rule.
-      // Two plain arms, no COALESCE: each arm implies one of the partial
-      // expression indexes on call_log.metadata (relatedCommitmentId;
-      // relatedCallId under the card policy), so the watchdog's per-promise
-      // probes are index lookups rather than sequential scans of call_log.
-      // The source-call arm covers the Call Log action only (no commitment
-      // link): a card call for a SIBLING promise on the same source call
-      // carries both keys and must never be this promise's proof or its
-      // text-fallback suppressor.
-      const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
-      const policyBindings = [commitment.id, commitment.call_log_id];
-      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
-      const connected = await conn('call_log').where('direction', 'outbound')
-        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-        .where('created_at', '>', after).where('v2_extraction_status', 'valid')
-        .whereRaw(policyLink, policyBindings)
-        .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
-        .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
-        .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
-        .modify((b) => { phoneWhere(b, 'to_phone', phone); sameCustomer(b, 'customer_id'); })
-        .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
-      if (connected) {
-        // The proof is the completed customer leg, so the promise is kept
-        // when that leg ended, not when the staff leg was dialed.
-        const legEnded = Date.parse(connected.metadata?.customer_leg?.ended_at || '');
-        return { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
-          matched_at: Number.isFinite(legEnded) ? new Date(legEnded) : connected.created_at,
-          strength: 'direct', basis: 'callback_customer_conversation' };
-      }
-      // A returned callback IS the fulfilment — the phone is the linkage.
-      // Same completion predicate as the callbacks digest
-      // (unworked-comms-watcher, "Already returned"): a CONNECTED outbound
-      // call to the caller's number after this call (>= 60 s — the stored
-      // duration is the parent leg, so a pickup-and-abandon is short), or
-      // a HUMAN-authored text to it (manual / ai_approved / ai_revised —
-      // never the assistant's automatic reply, and not a proactive draft
-      // with no inbound anchor). A LINKED call is returned only by a
-      // record linked to the same customer (shared household numbers);
-      // an unlinked call keeps the phone-level match. No outer window: a
-      // callback returned late was still returned. No card-policy attempt
-      // — this promise's or any other's, whose parent-leg duration says
-      // nothing about the customer leg — is ever judged by this rule, and
-      // once one exists for this promise a text no longer stands in for the
-      // conversation it promised.
-      const outbound = await returnedOutboundCall(conn, { ...evidence, until: null });
-      if (outbound) return { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.at, strength: "direct", basis: "callback_returned_connected_outbound_call" };
-      const cardAttempt = await conn('call_log').whereRaw(policyLink, policyBindings).first('id');
-      if (cardAttempt) return null;
-      const text = await humanTextTo(conn, { ...evidence, until: null });
-      // No local catch: a failed lookup must reach refreshFulfillment's
-      // `failed` accounting so the watchdog leaves this call out of the bell.
-      if (text) return { kind: "sms_sent", record_type: "sms_log", record_id: text.id, matched_at: text.at, strength: "direct", basis: "callback_returned_by_human_text" };
-      return extraEvidence(conn, commitment, evidence);
-    }
-    case "call_back": {
-      // The CUSTOMER's promise to call us back: the inbound counterpart of
-      // the outbound lookup above — a later completed inbound call from the
-      // caller's number (Codex r8 P2). Same association strength: the call
-      // proves contact, not what was said.
-      if (!phone) return null;
-      const inbound = await conn("call_log")
-        .whereNot("id", call.id)
-        .where("direction", "like", "inbound%")
-        .where("created_at", ">", after)
-        .where("created_at", "<=", until)
-        .where("status", "completed")
-        .where("duration_seconds", ">=", 20)
-        // A bake-off call from a customer's phone is not the customer calling back.
-        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-        .modify((b) => phoneWhere(b, "from_phone", phone))
-        .orderBy("created_at", "asc")
-        .first("id", "created_at");
-      return inbound ? { kind: "inbound_call", record_type: "call_log", record_id: inbound.id, matched_at: inbound.created_at, strength: "association", basis: `completed_inbound_call_from_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
-    }
-    case "schedule_visit":
-    case "technician_follow_up": {
-      // Booked AFTER the call, like every other match: a reprocess can link
-      // an existing visit to this call.
-      const direct = await conn("scheduled_services")
-        .where("source_call_log_id", call.id)
-        .where("created_at", ">", after)
-        .whereNotIn("status", ["cancelled", "canceled"])
-        .orderBy("created_at", "asc")
-        .first("id", "created_at", "scheduled_date", "status");
-      if (direct) return { kind: "appointment_booked", record_type: "scheduled_service", record_id: direct.id, matched_at: direct.created_at, strength: "direct", basis: "visit_booked_from_this_call" };
-      // An agent who MOVED an on-the-books visit kept a schedule_visit promise
-      // without creating a row, so neither lookup above can witness it and the
-      // watchdog reported the promise overdue (GH codex #4204 r6 P2). The
-      // applier's own activity row names this call and the visit it moved —
-      // direct proof, same standard as a booking from this call.
-      // schedule_visit ONLY. A moved visit proves an existing appointment
-      // changed time; it says nothing about a promised technician follow-up,
-      // and closing that owed work on this evidence would drop it silently
-      // (GH codex #4204 r7 P2).
-      const { ACTIVITY_ACTION: RESCHEDULE_APPLIED } = require("./call-reschedule-apply");
-      const movedRow = commitment.kind !== "schedule_visit" ? null : await conn("activity_log")
-        .where({ action: RESCHEDULE_APPLIED })
-        .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)])
-        .orderBy("created_at", "asc")
-        .first("created_at", "metadata");
-      const movedMeta = typeof movedRow?.metadata === "string" ? JSON.parse(movedRow.metadata) : movedRow?.metadata;
-      if (movedMeta?.scheduled_service_id) {
-        return { kind: "appointment_rescheduled", record_type: "scheduled_service", record_id: movedMeta.scheduled_service_id, matched_at: movedRow.created_at, strength: "direct", basis: "visit_rescheduled_from_this_call" };
-      }
-      if (!customerId) return null;
-      const slotProof = await slotBookingProof(conn, commitment, call, customerId, after);
-      if (slotProof) return slotProof;
-      const visit = await bookedVisit(conn, evidence);
-      if (visit) return { kind: "appointment_booked", record_type: "scheduled_service", record_id: visit.id, matched_at: visit.at, strength: "association", basis: `visit_booked_for_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` };
-      return extraEvidence(conn, commitment, evidence);
-    }
-    case "send_photos": {
-      if (!phone) return null;
-      const msg = await conn("messages as m")
-        .join("conversations as c", "c.id", "m.conversation_id")
-        .where("m.direction", "inbound")
-        .where("m.created_at", ">", after)
-        .where("m.created_at", "<=", until)
-        .whereRaw("m.media IS NOT NULL AND jsonb_typeof(m.media) = 'array' AND jsonb_array_length(m.media) > 0")
-        .modify((b) => phoneWhere(b, "c.contact_phone", phone))
-        .orderBy("m.created_at", "asc")
-        .first("m.id", "m.created_at")
-        .catch(() => null);
-      return msg ? { kind: "inbound_media", record_type: "message", record_id: msg.id, matched_at: msg.created_at, strength: "association", basis: `inbound_message_with_media_from_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
-    }
-    case "make_payment": {
-      // Paid AFTER the call, like every other match: a visit re-linked to
-      // this call during a reprocess can carry an invoice paid before it.
-      // And PAID means a payment: an invoice closed with pre-existing credit
-      // (apply-credit stamps paid_at and creates no payment row) or a
-      // goodwill adjustment is not the customer keeping a promise to pay —
-      // the witness is a paid payments row (Codex #3738 r11 P2) — and it
-      // must be THAT invoice's payment, recorded after the call. payments
-      // has no invoice_id column: a row is linked to its invoice through
-      // metadata.invoice_id / waves_invoice_id or a shared Stripe
-      // PaymentIntent (the completion + refund paths key on the same). A
-      // same-day payment on some other invoice cannot vouch for one closed
-      // with account credit after the call (Codex #3738 r12 P2). payment_date
-      // is a DATE (business day, Eastern), so the post-call instant is the
-      // row's created_at, with the business day as the floor.
-      if (!customerId) return null;
-      const paidByItsOwnPayment = (qb) => qb.whereExists(function paymentForThisInvoice() {
-        this.select(conn.raw("1")).from("payments as p")
-          .where("p.status", "paid")
-          .where("p.created_at", ">", after)
-          .whereRaw("p.payment_date >= (?::timestamptz AT TIME ZONE 'America/New_York')::date", [after])
-          .whereRaw("(p.metadata::jsonb ->> 'invoice_id' = i.id::text OR p.metadata::jsonb ->> 'waves_invoice_id' = i.id::text"
-            + " OR (p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id))");
-      });
-      const direct = await conn("invoices as i")
-        .join("scheduled_services as ss", "ss.id", "i.scheduled_service_id")
-        .where("ss.source_call_log_id", call.id)
-        .whereNotNull("i.paid_at")
-        .where("i.paid_at", ">", after)
-        .modify(paidByItsOwnPayment)
-        .orderBy("i.paid_at", "asc")
-        .first("i.id", "i.paid_at")
-        .catch(() => null);
-      if (direct) return { kind: "invoice_paid", record_type: "invoice", record_id: direct.id, matched_at: direct.paid_at, strength: "direct", basis: "invoice_for_the_visit_booked_from_this_call_paid" };
-      const inv = await conn("invoices as i")
-        .where("i.customer_id", customerId)
-        .whereNotNull("i.paid_at")
-        .where("i.paid_at", ">", after)
-        .where("i.paid_at", "<=", until)
-        .modify(paidByItsOwnPayment)
-        .orderBy("i.paid_at", "asc")
-        .first("i.id", "i.paid_at")
-        .catch(() => null);
-      return inv ? { kind: "invoice_paid", record_type: "invoice", record_id: inv.id, matched_at: inv.paid_at, strength: "association", basis: `customer_invoice_paid_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
-    }
-    case "send_report":
-    case "send_paperwork":
-    case "other":
-      // No record linked to the promise to look for: the report or a staff
-      // email, a later human contact, or the customer's own next visit or
-      // estimate is the follow-up (extraEvidence).
-      return extraEvidence(conn, commitment, evidence);
-    default:
-      return null;
-  }
+  return resolver({ conn, commitment, call, after, until, phone, customerId, leadIds: leadIdsOf(call), evidence });
 }
 
 // Direct proof marks an open AI row fulfilled. Association proof is stored
@@ -2173,12 +2229,15 @@ async function refreshFulfillment(conn, callLogId, call = null) {
   // move after it is kept — the call's customer (a relink), the stated or
   // confirmed slot (a reprocess), the visit itself (cancelled, moved,
   // rescheduled) — so it is never final: every refresh judges it again,
-  // read before the open rows are settled below. Untouched AI rows only;
-  // a human verdict stands.
+  // read before the open rows are settled below. So, while
+  // PROMISE_EVIDENCE_CLOSE is on, is one the portal closed on association
+  // proof or dismissed because its customer left: a relink to another
+  // customer takes that evidence away. Untouched AI rows only; a human
+  // verdict stands.
   const kept = await conn("call_commitments")
-    .where({ call_log_id: callLogId, status: "fulfilled" })
+    .where({ call_log_id: callLogId })
     .whereNull("human_state")
-    .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS]);
+    .whereRaw(...autoClosedSql(promiseEvidenceCloseLive()));
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -2246,43 +2305,66 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
-  const rejudged = await rejudgeSlotKept(conn, kept, row, callLogId);
+  const rejudged = await rejudgeAutoClosed(conn, kept, row, callLogId);
   failed += rejudged.failed;
   return { checked: open.length + kept.length, fulfilled, hinted, cleared, failed, reopened: rejudged.reopened };
 }
 
-// Judges refreshFulfillment's slot-kept rows again: still kept by the same
-// record (untouched), kept by another (re-pointed, same customer guard as
-// the open-row write), or reopened carrying whatever hint the facts support.
-async function rejudgeSlotKept(conn, kept, row, callLogId) {
+// The rows refreshFulfillment re-judges after they closed: a slot booking's
+// direct proof always, and — with PROMISE_EVIDENCE_CLOSE on — an association
+// close or a customer-left dismissal (only the portal writes those, never a
+// person, so the human_state IS NULL fence above keeps human verdicts out).
+function autoClosedSql(evidenceClose) {
+  if (!evidenceClose) return ["status = 'fulfilled' AND fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS]];
+  return ["((status = 'fulfilled' AND (fulfillment ->> 'basis' = ? OR fulfillment ->> 'strength' = 'association'))"
+    + " OR (status = 'dismissed' AND fulfillment ->> 'kind' = ?))", [SLOT_BOOKING_BASIS, CUSTOMER_LEFT]];
+}
+
+// The proof an automatically closed row still stands on, judged the way it
+// would close today: a slot row only on direct proof (as before), a
+// customer-left row on the customer still having left, anything else on a
+// proof refreshFulfillment would close an open row with. Null = owed again.
+function proofThatKeeps(c, proof, prior) {
+  if (!proof) return null;
+  if (prior?.basis === SLOT_BOOKING_BASIS) return proof.strength === "direct" ? proof : null;
+  return proof.strength === "direct" || proof.kind === CUSTOMER_LEFT || closesOnAssociation(c, proof) ? proof : null;
+}
+
+// Judges refreshFulfillment's automatically closed rows again: still kept by
+// the same record (untouched), kept by another (re-pointed, same customer
+// guard as the open-row write for a slot proof), or reopened carrying
+// whatever hint the facts support. A relink to another customer is the
+// case this exists for: the proof that closed the row was the old
+// customer's.
+async function rejudgeAutoClosed(conn, kept, row, callLogId) {
   const LOOKUP_FAILED = Symbol("lookup_failed");
   let failed = 0;
   let reopened = 0;
   for (const c of kept) {
-    const proof = await resolveFulfillment(conn, c, row).catch((err) => {
+    const proof = await judgeOpenRow(conn, c, row).catch((err) => {
       logger.warn(`[call-commitments] fulfillment lookup failed for ${c.id}: ${err.message}`);
       return LOOKUP_FAILED;
     });
     if (proof === LOOKUP_FAILED) { failed += 1; continue; }
     const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
-    const stillKept = proof?.strength === "direct";
-    if (stillKept && proof.basis === prior?.basis && proof.record_id === prior?.record_id) continue;
+    const keeps = proofThatKeeps(c, proof, prior);
+    if (keeps && keeps.basis === prior?.basis && keeps.record_id === prior?.record_id) continue;
     const unchanged = (q) => q
-      .where({ id: c.id, status: "fulfilled" })
+      .where({ id: c.id, status: c.status })
       .whereNull("human_state")
-      .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS])
       .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at]);
-    if (stillKept) {
-      // Kept by another record now (another visit at the slot, or a
-      // canonical proof): same customer guard as the open-row write above.
+    if (keeps) {
+      // Kept by another record now (another visit at the slot, a canonical
+      // proof, another follow-up): same customer guard as the open-row write.
+      const left = keeps.kind === CUSTOMER_LEFT;
       await unchanged(conn("call_commitments"))
         .modify((q) => {
-          if (proof.basis !== SLOT_BOOKING_BASIS) return;
+          if (keeps.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
             this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
           });
         })
-        .update({ fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
+        .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(keeps), fulfilled_at: left ? null : keeps.matched_at || new Date(), updated_at: new Date() });
       continue;
     }
     // No longer kept: owed again, carrying whatever hint the facts support.
@@ -2775,7 +2857,7 @@ const HUMAN_ACTIONS = new Set(['confirm', 'dismiss', 'fulfill', 'reopen', 'edit'
 // PATCH while the card gate is off, SMS actions — gets them recorded here,
 // so a card reopened after a gate rollback is not closed again by the
 // conversation that fulfilled it before.
-async function applyHumanUpdate(conn, id, { action, description, due_at, note, reviewedBy, renewalAudit = true } = {}) {
+async function applyHumanUpdate(conn, id, { action, description, due_at, note, reviewedBy, renewalAudit = true, expectedAt = null } = {}) {
   if (!HUMAN_ACTIONS.has(action)) throw Object.assign(new Error(`Unknown commitment action: ${action}`), { status: 400 });
   // The row update and its renewal boundary commit together: a refresh
   // running between them would close a reopened callback on the old
@@ -2783,7 +2865,7 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   // missing for good. Callers that pass the plain connection get one
   // transaction here; a caller's own transaction is reused as is.
   if (renewalAudit && ['reopen', 'edit'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
-    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit, expectedAt }));
   }
   // A dismiss or fulfill recorded straight on the ledger is an explicit
   // office verdict for a send_reschedule_link commitment (see the branch
@@ -2798,7 +2880,7 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   // never opens a second, nested one around a connection its caller already
   // committed to reusing as-is.
   if (renewalAudit && ['dismiss', 'fulfill'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
-    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit, expectedAt }));
   }
   // A Confirm recorded on the ledger can ALSO be the office verdict that
   // revives a send_reschedule_link commitment's generation (see the
@@ -2810,12 +2892,19 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   // the reopen/edit wrap, so an ordinary callback Confirm (which needs none
   // of this) never pays for a transaction it doesn't use.
   if (renewalAudit && action === 'confirm' && !conn.isTransaction && typeof conn.transaction === 'function') {
-    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit, expectedAt }));
   }
   // Locked: the edit is classified (restated or not) against the row the
   // update will overwrite, never a snapshot another save has since changed.
   const before = renewalAudit && ['reopen', 'edit'].includes(action)
-    ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at', 'subject') : null;
+    ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at', 'subject', 'updated_at') : null;
+  // The office acted on the version it was shown (the Owed tab's Reopen on an
+  // automatically closed promise, `expectedAt` = that row's updated_at): a
+  // newer verdict since — another person's dismiss or Mark done — is never
+  // silently overwritten. Judged on the locked row.
+  if (expectedAt && before && new Date(before.updated_at).getTime() !== new Date(expectedAt).getTime()) {
+    throw Object.assign(new Error('This promise changed since you opened it — refresh and try again'), { status: 409 });
+  }
   // Same kind/party check as `before` above, but scoped to dismiss/fulfill
   // and independent of renewalAudit (which the callback branch below still
   // needs `before` — populated only for reopen/edit — to gate on).

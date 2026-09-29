@@ -463,6 +463,9 @@ router.patch('/commitments/:id', async (req, res, next) => {
       due_at: req.body?.due_at,
       note: req.body?.note,
       reviewedBy: req.technicianId || null,
+      // A Reopen acts on the version the office was shown (the Owed tab's
+      // closed-automatically list): a newer verdict answers 409.
+      ...(req.body?.action === 'reopen' && req.body?.expected_at ? { expectedAt: req.body.expected_at } : {}),
     });
     res.json({ commitment: row });
   } catch (err) {
