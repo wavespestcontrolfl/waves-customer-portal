@@ -902,8 +902,12 @@ const NotificationService = {
       // read, or queues behind this whole transaction and lands on top of
       // the refresh; the refresh can never overwrite a dismissal back to
       // unread.
+      // Newest row first: a key with a rolling dedupeWindowMs can hold several
+      // rows (an old one aged out of the window, then a fresh insert), and
+      // the LATEST decides whether the episode is standing or cleared — an
+      // arbitrary older auto-cleared row must not re-version a live one.
       const existing = await trx('notifications').where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('metadata');
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).orderBy('created_at', 'desc').forUpdate().first('metadata');
       let existingMeta = existing?.metadata;
       if (typeof existingMeta === 'string') { try { existingMeta = JSON.parse(existingMeta); } catch { existingMeta = null; } }
       const priorGeneration = Number(existingMeta?.recurrenceGeneration) || 0;

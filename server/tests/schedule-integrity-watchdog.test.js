@@ -891,7 +891,7 @@ describe('raiseAdminAlertWithReopen row lock', () => {
   test('the standing-row read takes a row lock (forUpdate) inside the transaction after the advisory lock, and notifyAdmin runs on that transaction', async () => {
     const real = jest.requireActual('../services/notification-service');
     const order = [];
-    const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain) };
+    const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain), orderBy: jest.fn(() => chain) };
     chain.forUpdate = jest.fn(() => { order.push('forUpdate'); return chain; });
     chain.first = jest.fn(async () => { order.push('first'); return { metadata: { autoCleared: true, recurrenceGeneration: 1 } }; });
     const trx = jest.fn(() => chain);
@@ -901,6 +901,8 @@ describe('raiseAdminAlertWithReopen row lock', () => {
     const result = await real.raiseAdminAlertWithReopen.call({ notifyAdmin }, 'alert', 't', 'b', { dedupeKey: 'k', dedupeVersion: 'v', metadata: { dedupeKey: 'k' } });
     expect(order).toEqual(['advisory', 'forUpdate', 'first']);
     expect(chain.forUpdate).toHaveBeenCalledTimes(1);
+    // The newest row for the key decides (a rolling-window key can hold several).
+    expect(chain.orderBy).toHaveBeenCalledWith('created_at', 'desc');
     expect(notifyAdmin.mock.calls[0][3]).toMatchObject({ trx, dedupeVersion: 'v::g2', refreshOnDedupe: true, metadata: { autoCleared: false, recurrenceGeneration: 2 } });
     expect(result.rang).toBe(true);
     delete db.transaction;
