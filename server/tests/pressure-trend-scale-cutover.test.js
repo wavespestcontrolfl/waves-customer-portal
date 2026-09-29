@@ -7,8 +7,8 @@
 const {
   buildPressureTrendContextFromRows,
   buildPressureTrendContext,
-  TECH_RATING_CUTOVER_AT,
 } = require('../services/service-report/pressure-trend');
+const { TECH_RATING_CUTOVER_AT } = require('../services/pest-pressure/score-scale');
 
 const CUSTOMER = 'cust-synthetic-1';
 
@@ -31,18 +31,25 @@ describe('pressure trend across the #4741 scale change', () => {
     expect(new Date(TECH_RATING_CUTOVER_AT).toISOString()).toBe('2026-09-24T04:00:00.000Z');
   });
 
-  test('June blended 0.9 then September tap 3.0 is a first reading, not "increased"', () => {
+  test('June blended 0.9 then September tap 3.0 is "rescaled": not up, not a first visit', () => {
     const ctx = buildPressureTrendContextFromRows({
       record: row('rec-now', '2026-09-28', 3),
       priorRows: [row('rec-june', '2026-06-10', 0.9)],
     });
-    expect(ctx.direction).toBe('first_visit');
+    expect(ctx.direction).toBe('rescaled');
     expect(ctx.delta).toBeUndefined();
-    expect(ctx.customerSummary).toContain('first pressure marker: 3.0');
-    expect(ctx.customerSummary).not.toMatch(/increased/i);
+    // Earlier visits exist, so never "first" wording; approved fallback copy only.
+    expect(ctx.customerSummary).toBe('Pressure trend will appear after more visits.');
+    expect(ctx.customerSummary).not.toMatch(/first|increased|down/i);
     // The chart gets the same filter: no fake 0.9 -> 3.0 jump.
     expect(ctx.points.map((p) => p.pressureIndex)).toEqual([3]);
     expect(ctx.points[0]).not.toHaveProperty('scale');
+  });
+
+  test('a genuine first visit (no prior readings at all) keeps the first-reading copy', () => {
+    const ctx = buildPressureTrendContextFromRows({ record: row('rec-now', '2026-09-28', 3), priorRows: [] });
+    expect(ctx.direction).toBe('first_visit');
+    expect(ctx.customerSummary).toContain('first pressure marker: 3.0');
   });
 
   test('a low pre-cutover baseline does not trigger the low-baseline "increased" copy either', () => {
@@ -50,7 +57,7 @@ describe('pressure trend across the #4741 scale change', () => {
       record: row('rec-now', '2026-09-28', 1),
       priorRows: [row('rec-june', '2026-06-10', 0)],
     });
-    expect(ctx.direction).toBe('first_visit');
+    expect(ctx.direction).toBe('rescaled');
     expect(ctx.customerSummary).not.toMatch(/increased/i);
   });
 
@@ -107,7 +114,7 @@ describe('pressure trend across the #4741 scale change', () => {
     }
     const TAP = { technicianActivityRating: { value: 3, weight: 100, present: true } };
 
-    test('tap-scored current visit vs a blended prior stays a first reading', async () => {
+    test('tap-scored current visit vs a blended prior is rescaled, not a first visit', async () => {
       const ctx = await buildPressureTrendContext({
         record: row('rec-now', '2026-09-28', 3),
         knex: fakeKnex({
@@ -118,7 +125,7 @@ describe('pressure trend across the #4741 scale change', () => {
           ],
         }),
       });
-      expect(ctx.direction).toBe('first_visit');
+      expect(ctx.direction).toBe('rescaled');
       expect(ctx.points.map((p) => p.pressureIndex)).toEqual([3]);
     });
 
@@ -149,7 +156,7 @@ describe('pressure trend across the #4741 scale change', () => {
           ],
         }),
       });
-      expect(ctx.direction).toBe('first_visit');
+      expect(ctx.direction).toBe('rescaled');
       expect(ctx.points.map((p) => p.pressureIndex)).toEqual([2]);
     });
 
@@ -166,7 +173,7 @@ describe('pressure trend across the #4741 scale change', () => {
         return q;
       };
       const ctx = await buildPressureTrendContext({ record: row('rec-now', '2026-09-28', 3), knex });
-      expect(ctx.direction).toBe('first_visit');
+      expect(ctx.direction).toBe('rescaled');
     });
   });
 });

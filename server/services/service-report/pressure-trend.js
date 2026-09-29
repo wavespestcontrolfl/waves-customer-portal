@@ -3,30 +3,22 @@ const { reserviceReportCopyGateOn } = require('./reservice-report');
 const { detectServiceLine } = require('./service-line-configs');
 const { dateOnlyToNoonUtc, formatVisitLabel, normalizeDate } = require('./time-format');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
-const { scoreSourceFromComponents } = require('../pest-pressure/calculate');
+const {
+  SCALE_TECHNICIAN_RATING,
+  SCALE_BLENDED,
+  scaleFromComponentScores,
+  scaleFromCutoverDate,
+} = require('../pest-pressure/score-scale');
 
-// Scale change (#4741, merged 2026-09-24): a technician's 0-5 tap became the
-// Pest Pressure score exactly (tap 3 -> 3.0); before, the tap was blended with
-// zeros (tap 3 -> 0.9). No past score was recalculated, so stored
-// pressure_index values sit on two different scales and must never be
-// compared with each other - a June 0.9 next to a September 3.0 is the same
-// tech rating, not "pressure increased".
-//
-// The per-record marker is pest_pressure_scores.component_scores carrying the
-// technicianActivityRating component (scoreSource 'technician_rating').
-// TECH_RATING_CUTOVER_AT is the fallback for a visit with no score row (or
-// when the score lookup fails): 2026-09-24 00:00 America/New_York (EDT, UTC-4).
-const SCALE_TECHNICIAN_RATING = 'technician_rating';
-const SCALE_BLENDED = 'blended';
-const TECH_RATING_CUTOVER_AT = Date.parse('2026-09-24T04:00:00Z');
+// Readings recorded before/after the #4741 tech-rating cutover sit on
+// different scales (see pest-pressure/score-scale.js) and are never compared
+// or charted together.
 
 function pressureScaleOf(row) {
   if (row?.pressure_scale === SCALE_TECHNICIAN_RATING || row?.pressure_scale === SCALE_BLENDED) {
     return row.pressure_scale;
   }
-  return serviceStartedAt(row).getTime() >= TECH_RATING_CUTOVER_AT
-    ? SCALE_TECHNICIAN_RATING
-    : SCALE_BLENDED;
+  return scaleFromCutoverDate(serviceStartedAt(row));
 }
 
 const SEVERITY_RANK = {
@@ -90,6 +82,9 @@ function groupFindingsByRecordId(findings = []) {
 }
 
 function buildCustomerSummary({ direction, percentChange, baseline, current }) {
+  // 'rescaled': earlier visits exist but were scored on the pre-#4741 scale,
+  // so there is nothing comparable yet. Not a first visit, and no up/down.
+  if (direction === 'rescaled') return 'Pressure trend will appear after more visits.';
   if (direction === 'first_visit') {
     return current?.pressureIndex != null
       ? `This is your first pressure marker: ${current.pressureIndex.toFixed(1)}. Future reports will show the trend.`
@@ -144,8 +139,9 @@ function buildPressureTrendContextFromRows({
 
   // Only readings on the newest reading's scale are comparable (and chartable):
   // when the newest is a technician tap and every earlier one is a pre-#4741
-  // blended score, the series is just the newest point -> first_visit copy,
-  // never a fake up/down and never a fake jump on the report chart.
+  // blended score, the series is just the newest point - never a fake up/down
+  // and never a fake jump on the report chart. Those earlier visits DO exist,
+  // so this is not a first visit either: direction 'rescaled' (below).
   const newest = dated[dated.length - 1];
   const points = dated
     .filter((point) => point.scale === newest?.scale)
@@ -162,7 +158,7 @@ function buildPressureTrendContextFromRows({
     : undefined;
 
   let direction = 'unknown';
-  if (points.length < 2) direction = 'first_visit';
+  if (points.length < 2) direction = dated.length > points.length ? 'rescaled' : 'first_visit';
   else if (Math.abs(delta) < 0.1) direction = 'flat';
   else if (delta < 0) direction = 'down';
   else direction = 'up';
@@ -190,10 +186,7 @@ async function loadPressureScales(ids, knex) {
     .select('service_record_id', 'component_scores')
     .catch(() => []);
   for (const row of Array.isArray(scoreRows) ? scoreRows : []) {
-    scales.set(
-      String(row.service_record_id),
-      scoreSourceFromComponents(row.component_scores) === 'technician_rating' ? SCALE_TECHNICIAN_RATING : SCALE_BLENDED,
-    );
+    scales.set(String(row.service_record_id), scaleFromComponentScores(row.component_scores));
   }
   return scales;
 }
@@ -273,6 +266,5 @@ module.exports = {
   buildPressureTrendContext,
   buildPressureTrendContextFromRows,
   buildCustomerSummary,
-  TECH_RATING_CUTOVER_AT,
   SEVERITY_RANK,
 };

@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const { savepointRead } = require('../../utils/savepoint-read');
 const { DEFAULT_CONFIG } = require('./config');
+const { classifyScoreScale } = require('./score-scale');
 
 // Fields whose values change what the customer sees on a Pest Pressure
 // surface (card visibility, narrative text, breakdown table, explanation
@@ -121,19 +122,39 @@ async function loadActiveConfig(knex = db, { scope = 'global' } = {}) {
  * Read the most recent prior Pest Pressure score for trend resolution.
  * Filters by service_line when provided so quarterly pest reports don't
  * use a lawn baseline.
+ *
+ * currentScale ('technician_rating' | 'blended', see score-scale.js): only a
+ * previous score recorded on the SAME scale is a baseline. #4741 (2026-09-24)
+ * made a technician tap the score directly while older scores were blended,
+ * so a June 0.9 -> September 3.0 "+2.1 vs. last visit" compares two scales.
+ * With no same-scale previous score the result is { value: null } - the same
+ * as a first score (no trend persisted). Omit currentScale for the legacy
+ * any-scale lookup.
  */
-async function loadPreviousScore(knex, { customerId, serviceLine = null, beforeServiceRecordId = null, beforeServiceDate = null }) {
+const PREVIOUS_SCORE_SCAN_LIMIT = 25;
+
+async function loadPreviousScore(knex, { customerId, serviceLine = null, beforeServiceRecordId = null, beforeServiceDate = null, currentScale = null }) {
   const q = knex('pest_pressure_scores')
     .where('customer_id', customerId)
     .whereNotNull('displayed_score')
     .whereNot('data_completeness', 'insufficient')
     .orderBy('service_date', 'desc')
-    .orderBy('calculated_at', 'desc')
-    .limit(1);
+    .orderBy('calculated_at', 'desc');
   if (serviceLine) q.where('service_line', serviceLine);
   if (beforeServiceRecordId) q.whereNot('service_record_id', beforeServiceRecordId);
   if (beforeServiceDate) q.where('service_date', '<=', beforeServiceDate);
-  const row = await q.first('displayed_score', 'service_date', 'service_record_id');
+  let row;
+  if (currentScale) {
+    const candidates = await q
+      .limit(PREVIOUS_SCORE_SCAN_LIMIT)
+      .select('displayed_score', 'service_date', 'service_record_id', 'component_scores');
+    row = (candidates || []).find((candidate) => classifyScoreScale({
+      componentScores: candidate.component_scores,
+      at: candidate.service_date,
+    }) === currentScale);
+  } else {
+    row = await q.limit(1).first('displayed_score', 'service_date', 'service_record_id');
+  }
   if (!row || row.displayed_score === null) return { value: null };
   return {
     value: Number(row.displayed_score),
