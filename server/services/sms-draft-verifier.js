@@ -32,6 +32,7 @@ Check EVERY concrete detail in the draft, one by one — each:
 - claim about what was found, caught, treated, or inspected
 - service cadence/frequency, or a treatment-timing rule
 - billing event (a payment, an auto-pay attempt, a charge)
+- a payment method or contact for paying (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly; a contact that matches it is fine, one that doesn't appear there at all is a fabrication
 
 A detail is GROUNDED only if it appears in the FACTS, or in what the customer LITERALLY wrote. It is a VIOLATION if you cannot point to the exact source. Rules:
 - DEFAULT TO FLAGGING. If you are not certain a detail is grounded, flag it.

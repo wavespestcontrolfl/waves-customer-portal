@@ -689,6 +689,61 @@ describe('v10 — full-account grounding', () => {
   });
 });
 
+describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did you get my payment)', () => {
+  let priorZelle;
+  beforeEach(() => {
+    priorZelle = process.env.ZELLE_RECIPIENT;
+    delete process.env.ZELLE_RECIPIENT;
+  });
+  afterEach(() => {
+    if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT;
+    else process.env.ZELLE_RECIPIENT = priorZelle;
+  });
+
+  test('ZELLE_RECIPIENT unset ⇒ card/ACH only, never a guessed Zelle contact', () => {
+    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } });
+    expect(block).toContain('- Payment options: card or bank account (ACH) through their personal pay link');
+    expect(block).toContain('no Zelle recipient is configured right now, so do not offer Zelle');
+    expect(block).not.toMatch(/Zelle to \S/);
+  });
+
+  test('ZELLE_RECIPIENT set ⇒ the SAME canonical value the public /pay page reads, never a hardcoded one', () => {
+    process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
+    const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } });
+    expect(block).toContain('Zelle to payments@wavespestcontrol.com');
+    expect(block).toContain('their name or invoice number in the Zelle memo');
+    // send_payment_link is documented as producing the pay-page link
+    expect(block).toContain('{"type":"send_payment_link"} texts a link to their pay page (portal.wavespestcontrol.com)');
+  });
+
+  test('renders even when billing itself is unavailable — payment options are business config, not this customer\'s ledger', () => {
+    const block = buildFactsBlock({ summary: 'X', billing: { unavailable: true, outstandingBalance: 0, recentPayments: [] } });
+    expect(block).toContain('- Payment options: card or bank account (ACH)');
+  });
+
+  test('BILLING & MONEY RULES: payment-method questions answer from PAYMENT OPTIONS, and payment confirmation is gated on Recent payments/Open invoice', () => {
+    const p = buildSystemPrompt();
+    expect(p).toMatch(/Payment-method questions.*answer directly from the Payment options line/i);
+    expect(p).toMatch(/never invent a Zelle phone\/email/i);
+    expect(p).toMatch(/Did you get my payment.*confirm ONLY when Recent payments/i);
+    expect(p).toMatch(/NEVER say a payment was received, applied, or that they're all set unless BILLING actually shows it/i);
+  });
+
+  test('a Zelle phone/email in the facts never trips the deterministic amount guard (real or spoofed formats)', () => {
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    const ctx = { billing: { outstandingBalance: 50 } };
+    const replies = [
+      'You can Zelle payment to (941) 555-1234 — just put your name in the memo.',
+      'You can Zelle payment to payments@wavespestcontrol.com.',
+      'We take card or ACH through your pay link, or Zelle to 9415551234.',
+    ];
+    for (const reply of replies) {
+      expect(replyQuotesUngroundedAmount(reply, ctx, { byMeaning: false })).toBe(false);
+      expect(replyQuotesUngroundedAmount(reply, ctx, { byMeaning: true })).toBe(false);
+    }
+  });
+});
+
 describe('v9 — natural voice + owner-approved voice profile', () => {
   test('house voice drops the closer boilerplate and every-message greeting', () => {
     // The old rules MANDATED a closer and a greeting on every message —

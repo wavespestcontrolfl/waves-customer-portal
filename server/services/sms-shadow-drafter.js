@@ -29,6 +29,11 @@ const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
 const { etParts } = require('../utils/datetime-et');
+// The canonical "how we accept payment" source — the SAME env-driven reader
+// the public /pay page's off-Stripe options block uses (Codex/owner: never a
+// hardcoded Zelle contact). ZELLE_RECIPIENT unset ⇒ null, and the PAYMENT
+// OPTIONS fact below states card/ACH only.
+const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
 
 const DRAFTER = 'house_voice';
 // v7 (06-14): FEW-SHOT VOICE GROUNDING. v6 attacked fact fabrication via data
@@ -1185,6 +1190,8 @@ FACT DISCIPLINE — the single most important rule. A fabricated detail is the w
 BILLING & MONEY RULES:
 - Real amounts shown in BILLING or PENDING ESTIMATE are facts you MAY state, exactly as written ("your balance is $120.00"). Never round, never estimate, never compute a new total, and never state a figure the facts don't show — an invented or derived amount is the worst kind of fabrication. A figure the CUSTOMER mentions ("I think my balance is $50") is a question to answer from BILLING, never a fact to confirm.
 - When the customer needs to act on an amount: point them to portal.wavespestcontrol.com (the one URL you may write), or say we'll text their pay link — and add {"type":"send_payment_link"} to intended_actions so a teammate actually sends it. NEVER invent or guess any other URL.
+- Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
+- "Did you get my payment?" / any payment-confirmation question: confirm ONLY when Recent payments (or Open invoice) lists a matching payment — state exactly what that line shows. If nothing matches, say it isn't showing on our end yet and you'll confirm — NEVER say a payment was received, applied, or that they're all set unless BILLING actually shows it; a Zelle or ACH payment can be genuinely sent and still take time to show up here.
 - If the open invoice is BILLED TO A THIRD-PARTY PAYER, never ask the customer to pay it.
 - Autopay and card questions: answer from the Autopay and Card-on-file lines (brand + last-4 only — a full card number never exists here).
 
@@ -1465,6 +1472,21 @@ function buildFactsBlock(context, extras = {}) {
   if (context.billing?.payerBilledInvoice) {
     billingLines.push('- A separate invoice is BILLED TO A THIRD-PARTY PAYER — never ask the customer to pay that one');
   }
+  // v13: PAYMENT OPTIONS — how Waves actually accepts payment, read from the
+  // SAME canonical source the public /pay page's own "other ways to pay"
+  // block uses (routes/pay-v2-helpers.js#manualPayOptionsFromEnv, driven by
+  // ZELLE_RECIPIENT). Never hardcoded — Zelle-only unset ⇒ card/ACH only.
+  // This fact is account-independent (business config, not this customer's
+  // ledger) so it renders whether or not BILLING itself is known. Zelle has
+  // no webhook into this system (same file's comment) — a Zelle payment
+  // still needs the office to match and record it before it is a fact here,
+  // which is why "did you get my payment" is answered from Recent payments
+  // below, never assumed from having quoted this line.
+  const manualPayOptions = manualPayOptionsFromEnv();
+  const zelleRecipient = manualPayOptions?.zelle?.recipient || null;
+  billingLines.push(zelleRecipient
+    ? `- Payment options: card or bank account (ACH) through their personal pay link, or Zelle to ${zelleRecipient} (have them put their name or invoice number in the Zelle memo so the office can match it) — {"type":"send_payment_link"} texts a link to their pay page (portal.wavespestcontrol.com) showing the Pay button and this same Zelle info`
+    : '- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts a link to their pay page (portal.wavespestcontrol.com) showing the Pay button; no Zelle recipient is configured right now, so do not offer Zelle');
   const pays = billingKnown ? (context.billing?.recentPayments || []).filter((p) => p && p.amount != null) : [];
   if (pays.length) {
     billingLines.push(`- Recent payments: ${pays.map((p) => `$${Number(p.amount).toFixed(2)} ${p.status || ''} ${formatEtDate(p.payment_date || p.date)}`.replace(/\s+/g, ' ').trim()).join('; ')}`);

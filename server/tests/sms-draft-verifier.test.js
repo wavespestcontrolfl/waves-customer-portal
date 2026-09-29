@@ -46,6 +46,13 @@ describe('verifier — prompt contract', () => {
     expect(p).toMatch(/QUOTE the exact/i);
   });
 
+  test('v6 verifier checks a payment method/contact (Zelle phone/email) against PAYMENT OPTIONS', () => {
+    const p = buildVerifierSystemPrompt();
+    expect(p).toMatch(/payment method or contact/i);
+    expect(p).toMatch(/zelle/i);
+    expect(p).toMatch(/Payment options line in BILLING/i);
+  });
+
   test('user prompt carries facts, the customer message, and the draft under check', () => {
     const p = buildVerifierUserPrompt(
       'NEXT SERVICE: Quarterly Pest Friday, Jun 19',
