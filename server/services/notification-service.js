@@ -279,6 +279,10 @@ function createPlainAdmin(service, { category, title, body, createOpts, ringGate
   const gate = relevance ? relevance.gate : ringGate;
   const gated = async (conn) => {
     const ring = await gate(conn);
+    // A re-arm class whose subject has already moved on is not written at
+    // all (admin-alert-relevance.js ringTimeCheck): success without a row,
+    // the same sentinel an internal-test suppression returns.
+    if (!ring && relevance?.skip()) return { id: null, suppressed: true };
     // A ring stamps its own rungAt (admin-alerts-ring-v2 follow-up):
     // findPriorRungRow's 7-day baseline reads this, not created_at, so a
     // later refresh of a DIFFERENT row can find this one as "the prior

@@ -824,6 +824,26 @@ describe('ring time, through the existing ringGate seam', () => {
     expect(mockTrxs[0].transaction).toHaveBeenCalledTimes(1);
   });
 
+  test.each([
+    ['unpriced series, customer left', 'alert', `unpriced-series:${PARENT}`, { scheduled_service_id: VISIT, customer_id: CUST },
+      () => { mockTables['scheduled_services as ss'] = [visit()]; mockTables.customers = [customer({ churned_at: new Date('2026-09-21T12:00:00Z') })]; },
+      () => { mockTables.customers = [customer()]; }],
+    ['estimate hot view, estimate archived', 'estimate_hot_view', `estimate_hot_view:${EST}`, { estimateId: EST, customerId: CUST },
+      () => { mockTables.estimates = [{ id: EST, status: 'viewed', archived_at: new Date('2026-09-28T12:00:00Z'), sent_at: null, customer_id: CUST }]; },
+      () => { mockTables.estimates[0].archived_at = null; }],
+  ])('a re-arm class already moved on writes no row at all, run after run (nothing piles up), and rings once the subject is back: %s', async (_label, category, key, meta, gone, back) => {
+    gone();
+    const emit = () => NotificationService.notifyAdmin(category, 'Title', 'body', { bell: true, dedupeKey: key, metadata: meta });
+    for (let run = 0; run < 3; run += 1) expect(await emit()).toMatchObject({ id: null, suppressed: true, deduped: false });
+    expect(mockTables.notifications || []).toHaveLength(0);
+    back();
+    const rang = await emit();
+    expect(rang.deduped).toBe(false);
+    expect(mockTables.notifications).toHaveLength(1);
+    expect(stored()[0]).toMatchObject({ dedupeKey: key, rungAt: expect.any(String) });
+    expect(stored()[0].quiet).toBeUndefined();
+  });
+
   test('ringTimeCheck is null when the switch is off or the row is not in the table', () => {
     expect(ringTimeCheck({ category: 'inbound_sms', metadata: {} })).toBeNull();
     process.env.ADMIN_ALERT_RELEVANCE = '0';

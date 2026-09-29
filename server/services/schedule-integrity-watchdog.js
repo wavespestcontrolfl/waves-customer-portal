@@ -332,9 +332,9 @@ async function runInner({ now = new Date() } = {}) {
     }
     // A deduped result (the standing row already exists and either matched
     // or was just refreshed) is not a NEW alert for this run's count — nor is
-    // a row written quiet because its subject had already moved on
-    // (admin-alert-relevance.js ringTimeCheck): nothing rang.
-    if (created.deduped || require('./admin-alert-relevance').quietedAtRingTime(created)) return false;
+    // one written quiet, or not written at all, because its subject had
+    // already moved on (admin-alert-relevance.js ringTimeCheck): nothing rang.
+    if (created.deduped || created.suppressed || require('./admin-alert-relevance').quietedAtRingTime(created)) return false;
     alerted += 1;
     return true;
   };

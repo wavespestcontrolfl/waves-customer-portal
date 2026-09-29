@@ -23,8 +23,9 @@
  *     a money path (invoice settlement takes the visit FOR UPDATE NOWAIT).
  *   - ringTimeCheck: the ringGate notifyAdmin's existing seam already runs
  *     inside the insert's transaction — a fresh row that has ALREADY moved on
- *     is written activity-only instead of ringing (notification-service.js
- *     createPlainAdmin; the dedupe/refresh path is untouched).
+ *     is written activity-only instead of ringing, or, for a re-arm class,
+ *     not written at all (notification-service.js createPlainAdmin; the
+ *     dedupe/refresh path is untouched).
  *
  * A retire is a PURE `read_at = now` plus `metadata.retired = {by, reason, at}`
  * — never dedupeVersion/autoCleared/invoiceId, so every emitter's own dedupe
@@ -439,8 +440,11 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
 // Ring-time seam for notification-service.js createPlainAdmin: null when the
 // row is not in the table (or the switch is off), else the `ringGate` notifyAdmin
 // already runs inside the insert's transaction plus the retired stamp to write
-// when it declines. A failed read rings (fail open) — on a savepoint, so the
-// caller's transaction is never left aborted.
+// when it declines. A re-arm class declined there writes no row at all
+// (`skip`): a quiet row would either keep its key — and swallow the bell when
+// the subject comes back — or free it and add one row per emitter run while
+// the subject stays gone. A failed read rings (fail open) — on a savepoint, so
+// the caller's transaction is never left aborted.
 function ringTimeCheck({ category, link, metadata }) {
   try {
     const row = { category, link, metadata };
@@ -456,18 +460,15 @@ function ringTimeCheck({ category, link, metadata }) {
           const data = await (typeof conn.transaction === 'function' ? conn.transaction(run) : run(conn));
           const reason = cls.rule(subjectFor(row, data, etDateString(new Date())));
           if (reason) retired = { by: RETIRED_BY, reason, at: new Date().toISOString() };
+          if (reason && cls.rearm) logger.info(`[alert-relevance] ${cls.key} not raised: ${reason}`);
           return !reason;
         } catch (err) {
           logger.warn(`[alert-relevance] ring-time check failed for ${cls.key}: ${err.message}`);
           return true;
         }
       },
-      // A re-arm class written quiet leaves its dedupe key free as well.
-      stamp: () => {
-        if (!retired) return {};
-        const { dedupeKey } = parseMeta(metadata);
-        return cls.rearm && dedupeKey ? { retired: { ...retired, dedupeKey }, dedupeKey: null } : { retired };
-      },
+      stamp: () => (retired ? { retired } : {}),
+      skip: () => Boolean(retired) && Boolean(cls.rearm),
     };
   } catch (err) {
     // Relevance is advisory: it must never break writing the bell itself.
