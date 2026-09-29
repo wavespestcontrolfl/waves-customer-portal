@@ -25,6 +25,16 @@ const {
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
 
+// Self-serve arrival grace (A1) for a caller that may or may not be self-serve:
+// voice callers never set selfServeNotice, so they always get 0. With no
+// `date`, the RAW value (find-time zeroes today's candidates itself); with a
+// date, that date's own value (same-day strict). A helper so the callers'
+// already over-budget functions don't gain a branch.
+function selfServeGraceFor(selfServeNotice, date) {
+  if (!selfServeNotice) return 0;
+  return date ? selfServeArrivalGraceMinutes({ date }) : selfServeArrivalGraceMinutes();
+}
+
 // Series-creator owner-move guard (Codex #4716 r3 P1): shared by every
 // post-commit recurring-series creator in this file (the quarterly pest
 // follow-up seeding and activateWizardSeries's wizard-plan activation).
@@ -1510,7 +1520,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // the voice-agent callers never set selfServeNotice, so they never get
     // grace either (byte-identical). find-time zeroes today's own
     // candidates itself.
-    arrivalGraceMinutes: selfServeNotice ? selfServeArrivalGraceMinutes() : 0,
+    arrivalGraceMinutes: selfServeGraceFor(selfServeNotice),
     // Relocating an existing visit (public self-reschedule): drop its own row
     // from the occupied-route set so it doesn't block the slot it's moving
     // out of. Default [] = identical behavior for every other caller.
@@ -1734,7 +1744,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // date, so a same-day slot resolves to 0 here directly (decision 2).
       if (dayOccupied && violatesTravelGap({
         startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
-        graceMinutes: selfServeNotice ? selfServeArrivalGraceMinutes({ date: slot.date }) : 0,
+        graceMinutes: selfServeGraceFor(selfServeNotice, slot.date),
       }, dayOccupied)) return;
       idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin, {
         lat, lng, durationMinutes: duration, expectedMinutes: candidateExpectedMinutes,

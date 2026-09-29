@@ -1801,9 +1801,9 @@ class SmartRebooker {
       // that date. The TARGET (destination) date, never the date this
       // move is running on; same-day strict (decision 2) is additionally
       // enforced inside the reader itself.
-      if (Number(options.arrivalGraceMinutes) > 0) {
-        enforceCapacityArrivalGrace(capacityCommitFit, newDateStr);
-      }
+      enforceCapacityArrivalGrace(capacityCommitFit, newDateStr, {
+        optedIn: Number(options.arrivalGraceMinutes) > 0,
+      });
       // A reviewed move also pins the route whose destination was probed.
       // A tech CHANGE pins the observed prior technician in the CAS: the
       // pre-read is unlocked, and a dispatch reassignment A→B landing

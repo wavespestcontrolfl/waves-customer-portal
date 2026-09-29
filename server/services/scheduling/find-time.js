@@ -149,6 +149,12 @@ async function findArrivalWindowSlots(opts) {
   return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length };
 }
 
+// The caller's raw arrival grace (0 when unset) — a helper so
+// findCapacitySlots, already over its complexity budget, doesn't gain a branch.
+function rawGraceOf(opts) {
+  return opts.arrivalGraceMinutes || 0;
+}
+
 async function findCapacitySlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 30, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
@@ -286,7 +292,7 @@ async function findCapacitySlots(opts) {
   // (decision 2). Omitted (every existing caller) -> 0 -> byte-identical.
   const packed = opts.packEnds === true ? packCapacityEnds(slots, {
     lat: opts.lat, lng: opts.lng, durationMinutes, expectedMinutes: opts.expectedMinutes,
-    graceMinutes: opts.arrivalGraceMinutes || 0, today,
+    graceMinutes: rawGraceOf(opts), today,
   }) : slots;
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));

@@ -1463,6 +1463,14 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
 // page could report no times at all and leave a still-live reservation
 // unconfirmable, and the React page forced a needless re-pick. Another
 // estimate's hold still blocks, exactly as before.
+// A slot's own arrival grace from the caller's RAW value: same-day slots are
+// always strict (decision 2). A helper so filterCollidingSlots, already over
+// its complexity budget, doesn't gain a branch.
+function graceForSlotDate(rawGraceMinutes, date) {
+  if (!(rawGraceMinutes > 0)) return 0;
+  return date === etDateString() ? 0 : rawGraceMinutes;
+}
+
 async function filterCollidingSlots(slots, {
   dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null, ownEstimateId = null,
   // This estimate's own catalog expected-service minutes (owner ruling
@@ -1475,7 +1483,8 @@ async function filterCollidingSlots(slots, {
   // with no `date`; this file zeroes TODAY's own slots itself below (same
   // "one switch point" convention as find-time.js). 0/omitted (every caller
   // before this lane) makes every candidate below byte-identical.
-  arrivalGraceMinutes = 0,
+  // Raw self-serve grace; unset = 0 (graceForSlotDate treats it as strict).
+  arrivalGraceMinutes,
 } = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
@@ -1618,7 +1627,7 @@ async function filterCollidingSlots(slots, {
     const candidateWindow = Number.isFinite(s.durationMinutes) ? s.durationMinutes : (slotEnd - slotStart);
     // Same-day strict (decision 2) — this is the one place this slot's own
     // date resolves its grace; every date at/before today gets 0.
-    const grace = arrivalGraceMinutes > 0 && s.date !== etDateString() ? arrivalGraceMinutes : 0;
+    const grace = graceForSlotDate(arrivalGraceMinutes, s.date);
     // Tech-blind, grace included (Codex round 1 on #5310): an earlier
     // version scoped a graced candidate's travel-gap check to its own
     // assigned technician's rows, but the overlap check two lines above

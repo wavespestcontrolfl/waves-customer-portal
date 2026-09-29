@@ -939,9 +939,17 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
 });
 
 describe('arrival grace commit parity (A1, owner ruling 2026-09-28, source guards)', () => {
+  test('selfServeGraceFor gives non-self-serve (voice) callers 0 and resolves a date when given', () => {
+    const helperIdx = src.indexOf('function selfServeGraceFor(selfServeNotice, date) {');
+    expect(helperIdx).toBeGreaterThan(-1);
+    const body = src.slice(helperIdx, helperIdx + 200);
+    expect(body).toMatch(/if \(!selfServeNotice\) return 0;/);
+    expect(body).toMatch(/date \? selfServeArrivalGraceMinutes\(\{ date \}\) : selfServeArrivalGraceMinutes\(\)/);
+  });
+
   test('buildBookingAvailability threads grace into find-time only for self-serve callers', () => {
     const fnIdx = src.indexOf('async function buildBookingAvailability(');
-    const findTimeIdx = src.indexOf('arrivalGraceMinutes: selfServeNotice ? selfServeArrivalGraceMinutes() : 0,', fnIdx);
+    const findTimeIdx = src.indexOf('arrivalGraceMinutes: selfServeGraceFor(selfServeNotice),', fnIdx);
     expect(findTimeIdx).toBeGreaterThan(fnIdx);
     const findAvailIdx = src.indexOf('const result = await findAvailableSlots({', fnIdx);
     const returnIdx = src.indexOf('});', findAvailIdx);
@@ -953,7 +961,7 @@ describe('arrival grace commit parity (A1, owner ruling 2026-09-28, source guard
     const violIdx = src.indexOf("if (dayOccupied && violatesTravelGap({");
     expect(violIdx).toBeGreaterThan(-1);
     const block = src.slice(violIdx, violIdx + 400);
-    expect(block).toMatch(/graceMinutes: selfServeNotice \? selfServeArrivalGraceMinutes\(\{ date: slot\.date \}\) : 0,/);
+    expect(block).toMatch(/graceMinutes: selfServeGraceFor\(selfServeNotice, slot\.date\),/);
   });
 
   test("createSelfBooking's global commit probe carries graceMinutes, tech-blind (no technicianId)", () => {

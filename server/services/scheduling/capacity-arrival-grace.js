@@ -45,8 +45,12 @@
 const { capacityError } = require('./arrival-route');
 const { selfServeArrivalGraceMinutes } = require('./travel-gap');
 
-function enforceCapacityArrivalGrace(capacityFit, date) {
-  if (!capacityFit) return;
+// `optedIn` (default true) lets a mixed-caller commit path (rebooker.js,
+// which also serves staff/SMS/voice moves) pass whether THIS caller asked
+// for grace, keeping the opt-in decision here instead of adding a branch to
+// its already over-budget commit function.
+function enforceCapacityArrivalGrace(capacityFit, date, { optedIn = true } = {}) {
+  if (!capacityFit || !optedIn) return;
   const grace = selfServeArrivalGraceMinutes({ date });
   if (grace <= 0) return;
   if (Number.isFinite(capacityFit.arrivalDelayMinutes) && capacityFit.arrivalDelayMinutes > grace) {
