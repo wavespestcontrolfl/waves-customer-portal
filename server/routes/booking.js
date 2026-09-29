@@ -1164,7 +1164,9 @@ function bookingSlotWindow(config = {}) {
 // unknown/legacy service labels, where the 45–90 catalog-range clamp remains.
 // PRE_CUSTOMER_PIPELINE_STAGES lives in services/booking-contact-linked-handoff.js
 // (shared with capture-intent and the abandoned-booking recovery worker).
-const { PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft } = require('../services/booking-contact-linked-handoff');
+const {
+  PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft, loadContactLinkedAccountRows, isEstablishedCustomerRow,
+} = require('../services/booking-contact-linked-handoff');
 
 // Contact-linked quote-wizard handoff → established customer (B11).
 //
@@ -1191,20 +1193,25 @@ async function assertContactLinkedHandoffProvisional(trx, {
   handoff, pricingEstimateId, slotDate, slotStart, newCustomer,
 }) {
   if (!handoff?.rootId || !handoff?.boundId) return;
-  const ids = [...new Set([String(handoff.rootId), String(handoff.boundId)])];
-  const rows = await trx('customers').whereIn('id', ids).forShare().select('id', 'pipeline_stage', 'phone', 'email');
-  const established = (Array.isArray(rows) ? rows : []).filter(
-    (r) => !PRE_CUSTOMER_PIPELINE_STAGES.has(String(r.pipeline_stage || '')),
-  );
-  if (!established.length) return;
+  // Account-wide, through the ONE shared classifier (capture-intent and the
+  // recovery worker use it too): blocked when the draft-linked row OR any
+  // sibling property row on its account (including the row the address bound)
+  // is established. The bound row is always in the account, but a vanished
+  // root falls back to reading it directly.
+  let { rows } = await loadContactLinkedAccountRows(trx, handoff.rootId, { forShare: true });
+  if (!rows.some((r) => String(r.id) === String(handoff.boundId))) {
+    const boundRow = await trx('customers').where({ id: handoff.boundId }).forShare().first('id', 'pipeline_stage', 'phone', 'email');
+    if (boundRow) rows = [...rows, boundRow];
+  }
+  if (!rows.some(isEstablishedCustomerRow)) return;
   const last10 = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; };
   const lcEmail = (v) => String(v || '').trim().toLowerCase();
   // The linking contact belongs to the draft-linked ROOT row (A) — the row
   // findExistingCustomerByContact matched — which can differ from the account
   // property row the address bound (B). Contact is judged against A; the
   // consumed booking below is still required under B.
-  const linkRow = (Array.isArray(rows) ? rows : []).find((r) => String(r.id) === String(handoff.rootId))
-    || (Array.isArray(rows) ? rows : []).find((r) => String(r.id) === String(handoff.boundId));
+  const linkRow = rows.find((r) => String(r.id) === String(handoff.rootId))
+    || rows.find((r) => String(r.id) === String(handoff.boundId));
   const consumed = await trx('scheduled_services as ss')
     .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
     .where('ss.source_estimate_id', pricingEstimateId)
@@ -6456,21 +6463,30 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     const handoffId = str(b.pricing_estimate_id, 80);
     const handoffToken = str(b.estimate_token, 200);
     const handoffVerified = !!(handoffId && handoffToken && verifyHandoff(handoffId, handoffToken));
-    // A wizard handoff whose draft was contact-linked to an ESTABLISHED customer
-    // can never book without the portal OTP (see assertContactLinkedHandoff
-    // Provisional), so it must never stage a send-eligible recovery row: the
-    // recovery cron would text/email the real customer for a booking an
-    // anonymous quoter started with their contact. Retire any intent already
-    // staged for this draft and skip. Lookup errors fail closed (no row).
+    // A wizard handoff whose draft is contact-linked to a customer whose ACCOUNT
+    // holds an ESTABLISHED row can never book without the portal OTP (see
+    // assertContactLinkedHandoffProvisional; one shared classifier), so it must
+    // never stage a send-eligible recovery row: the recovery cron would
+    // text/email the real customer for a booking an anonymous quoter started
+    // with their contact. The capture is handled EXACTLY like any other one —
+    // same validation, same revalidation, same response — except the row it
+    // writes is born suppressed (and any intent already staged for this draft
+    // is retired), so the response is no oracle for "is this contact a
+    // customer" (Codex r3 P2). A lookup error fails closed the same way
+    // (suppressed row, ordinary response). Gate off: the flow still books, so
+    // recovery is untouched.
+    let linkedEstablished = false;
     if (handoffVerified && isEnabled('bookingCustomersOnly')) {
       try {
-        if (await establishedContactLinkedDraft(db, handoffId)) {
-          await suppressRecoveryIntents(db, { pricingEstimateId: handoffId });
-          return res.json({ ok: true, skipped: 'contact_linked_established' });
-        }
+        linkedEstablished = await establishedContactLinkedDraft(db, handoffId);
       } catch (linkErr) {
-        logger.warn(`[booking:capture-intent] contact-link check failed — skipping capture: ${linkErr.message}`);
-        return res.json({ ok: false, skipped: 'lookup_failed' });
+        logger.warn(`[booking:capture-intent] contact-link check failed — staging suppressed: ${linkErr.message}`);
+        linkedEstablished = true;
+      }
+      if (linkedEstablished) {
+        await suppressRecoveryIntents(db, { pricingEstimateId: handoffId }).catch((supErr) => {
+          logger.warn(`[booking:capture-intent] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
+        });
       }
     }
     const row = {
@@ -6507,6 +6523,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       attribution: b.attribution ? JSON.stringify(b.attribution) : null,
       last_activity_at: db.fn.now(),
       updated_at: db.fn.now(),
+      ...(linkedEstablished ? { suppressed: true } : {}),
     };
 
     const tenMatch = (q) => q.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
@@ -6596,11 +6613,11 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       let found = null;
       if (sessionId) {
         found = await conn('booking_intents').where({ session_id: sessionId })
-          .whereNull('converted_at').where('suppressed', false)
+          .whereNull('converted_at').where('suppressed', linkedEstablished)
           .orderBy('captured_at', 'desc').first('id');
       }
       if (!found) {
-        found = await tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', false))
+        found = await tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', linkedEstablished))
           .orderBy('captured_at', 'desc').first('id');
       }
       return found;

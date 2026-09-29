@@ -22,12 +22,12 @@ jest.mock('../models/db', () => {
     const q = {};
     const record = (name) => (...args) => {
       // Grouped where((q) => …): run the callback against this same recorder.
-      if (typeof args[0] === 'function') { args[0](q); return q; }
+      if (typeof args[0] === 'function') { args[0].call(q, q); return q; }
       ops.push({ table, op: name, args });
       return q;
     };
     for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere',
-      'orWhereRaw', 'join', 'leftJoin', 'forShare', 'forUpdate', 'orderBy', 'limit', 'select']) q[m] = record(m);
+      'orWhereRaw', 'andWhere', 'join', 'leftJoin', 'forShare', 'forUpdate', 'orderBy', 'limit', 'select']) q[m] = record(m);
     q.first = async (...args) => { ops.push({ table, op: 'first', args }); return firstResults[table] !== undefined ? firstResults[table] : null; };
     q.update = async (payload) => { ops.push({ table, op: 'update', args: [payload] }); return 1; };
     q.insert = async (payload) => { ops.push({ table, op: 'insert', args: [payload] }); return [{ id: 'new' }]; };
@@ -54,7 +54,7 @@ const BOUND = 'cust-bound';
 const handoff = { rootId: ROOT, boundId: BOUND };
 const SLOT = { slotDate: '2099-01-01', slotStart: '09:00' };
 const customer = (over = {}) => ({
-  id: BOUND, pipeline_stage: 'active_customer', phone: '(941) 555-0101', email: 'owner@example.com', ...over,
+  id: ROOT, pipeline_stage: 'active_customer', phone: '(941) 555-0101', email: 'owner@example.com', ...over,
 });
 
 // Fake trx: customers read (forShare rows), consumed-booking lookup, draft row.
@@ -62,10 +62,16 @@ function fakeTrx({ customers, consumed = null, draft = null }) {
   const calls = [];
   const trx = (table) => {
     const q = {};
-    for (const m of ['where', 'whereIn', 'whereNot', 'join', 'select']) q[m] = (...a) => { calls.push([table, m, ...a]); return q; };
+    for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'andWhere', 'orderBy', 'limit', 'join', 'select']) q[m] = (...a) => { calls.push([table, m, ...a]); return q; };
     q.forShare = () => { calls.push([table, 'forShare']); return q; };
-    q.first = async () => (table === 'estimates' ? draft : consumed);
-    q.then = (ok, err) => Promise.resolve(customers).then(ok, err);
+    // customers: the draft-linked ROOT row is read with .first(); the account
+    // siblings come back from the list query (same shape the shared loader uses).
+    q.first = async () => {
+      if (table === 'estimates') return draft;
+      if (table === 'customers') return customers.find((r) => r.id === ROOT) || null;
+      return consumed;
+    };
+    q.then = (ok, err) => Promise.resolve(customers.filter((r) => r.id !== ROOT)).then(ok, err);
     return q;
   };
   trx.calls = calls;
@@ -111,6 +117,25 @@ describe('assertContactLinkedHandoffProvisional (runs under the customer lock, i
   test('either the draft\'s root customer or the bound property row being established refuses', async () => {
     const trx = fakeTrx({ customers: [customer({ id: ROOT, pipeline_stage: 'won' }), customer({ id: BOUND, pipeline_stage: 'new_lead' })] });
     await expect(run(trx, {})).rejects.toEqual(REFUSED);
+  });
+
+  test('account-wide: a lead ROOT row under an account holding an ESTABLISHED sibling property is refused (r3 P1)', async () => {
+    const trx = fakeTrx({ customers: [
+      customer({ id: ROOT, pipeline_stage: 'new_lead', account_id: 'acct-1' }),
+      customer({ id: 'cust-sibling', pipeline_stage: 'active_customer', account_id: 'acct-1' }),
+    ] });
+    await expect(run(trx, { phone: '941-555-0101' })).rejects.toEqual(REFUSED);
+    // the sibling read is the same account resolution the gate uses, share-locked
+    const sibQuery = trx.calls.filter((c) => c[0] === 'customers');
+    expect(sibQuery.some((c) => c[1] === 'forShare')).toBe(true);
+  });
+
+  test('account with only lead rows → allowed', async () => {
+    const trx = fakeTrx({ customers: [
+      customer({ id: ROOT, pipeline_stage: 'new_lead', account_id: 'acct-1' }),
+      customer({ id: 'cust-sibling', pipeline_stage: 'contacted', account_id: 'acct-1' }),
+    ] });
+    await expect(run(trx, { phone: '941-555-0101' })).resolves.toBeUndefined();
   });
 
   test('no handoff tag (bearer / accept-link identity) → never checked', async () => {
@@ -245,9 +270,10 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
       const key = _internals.captureIpKey(req);
       req.body = { capture_token: mintCaptureToken(key), ...body };
       let payload;
-      const res = { json: (p) => { payload = p; return res; }, status: () => res };
+      let status = 200;
+      const res = { json: (p) => { payload = p; return res; }, status: (c) => { status = c; return res; } };
       await captureHandler(req, res);
-      return payload;
+      return Object.assign({}, payload, { __status: status });
     };
     const base = () => ({
       session_id: 'sess-1',
@@ -259,16 +285,39 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
       new_customer: { first_name: 'Pat', phone: '941-555-0101', email: 'pat@example.com', address_line1: '123 Palm Ave', zip: '34231' },
     });
 
-    test('a handoff whose draft is linked to an ESTABLISHED customer stages nothing and retires any staged intent', async () => {
-      firstResults.estimates = { customer_id: 'cust-established', customer_phone: '941-555-0101', customer_email: 'owner@example.com' };
-      firstResults.customers = { pipeline_stage: 'active_customer' };
+    const suppressedForDraft = () => ops.filter((o) => o.table === 'booking_intents' && o.op === 'update' && o.args[0]?.suppressed === true);
+
+    test('established link: intents already staged for the draft are retired AND the response is indistinguishable from an ordinary capture (r3 P2)', async () => {
+      // Ordinary capture: draft linked to the quoter's own pre-customer lead.
+      firstResults.estimates = { customer_id: 'cust-lead', customer_phone: '941-555-0101' };
+      firstResults.customers = { id: 'cust-lead', pipeline_stage: 'new_lead' };
+      const ordinary = await call(base());
+      expect(suppressedForDraft()).toEqual([]);
+      ops.length = 0;
+
+      // Established link: same request, same mocks otherwise.
+      firstResults.customers = { id: 'cust-lead', pipeline_stage: 'active_customer' };
+      const established = await call(base());
+      expect(established).toEqual(ordinary); // status, body shape and values identical
+      expect(JSON.stringify(established)).not.toContain('contact_linked_established');
+      expect(suppressedForDraft().length).toBe(1);
+      expect(ops.find((o) => o.table === 'booking_intents' && o.op === 'where' && o.args[0] === 'pricing_estimate_id').args).toEqual(['pricing_estimate_id', 'pe-victim']);
+    });
+
+    test('account-wide: a lead root row whose account holds an established sibling property is treated as established', async () => {
+      firstResults.estimates = { customer_id: 'cust-lead' };
+      firstResults.customers = { id: 'cust-lead', account_id: 'acct-1', pipeline_stage: 'new_lead' };
+      firstResults['customers:list'] = [{ id: 'cust-sibling', account_id: 'acct-1', pipeline_stage: 'active_customer' }];
       const result = await call(base());
-      expect(result).toEqual({ ok: true, skipped: 'contact_linked_established' });
-      expect(ops.filter((o) => o.table === 'booking_intents' && o.op === 'insert')).toEqual([]);
-      const upd = ops.find((o) => o.table === 'booking_intents' && o.op === 'update');
-      expect(upd.args[0]).toEqual(expect.objectContaining({ suppressed: true }));
-      expect(ops.filter((o) => o.table === 'booking_intents' && o.op === 'where').map((o) => o.args)).toEqual([['pricing_estimate_id', 'pe-victim']]);
-      expect(ops.filter((o) => o.table === 'booking_intents' && ['orWhere', 'orWhereRaw', 'whereRaw'].includes(o.op))).toEqual([]);
+      expect(result.skipped).not.toBe('contact_linked_established');
+      expect(suppressedForDraft().length).toBe(1);
+    });
+
+    test('the write side: a linked-established capture is born suppressed and finds its own suppressed row (source guard)', () => {
+      const src = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
+      expect(src).toContain('...(linkedEstablished ? { suppressed: true } : {})');
+      expect(src).toContain(".where('suppressed', linkedEstablished)");
+      expect(src).not.toContain("skipped: 'contact_linked_established'");
     });
 
     test('gate off (flow still books): no skip, no suppression — recovery keeps working', async () => {
@@ -286,16 +335,20 @@ describe('recovery intents after a refused / established handoff (P1)', () => {
       }
     });
 
-    test('a lookup error fails closed — no row is staged', async () => {
+    test('a lookup error fails closed (suppressed) with the ordinary response — no distinct error shape', async () => {
+      firstResults.estimates = { customer_id: 'cust-lead' };
+      firstResults.customers = { id: 'cust-lead', pipeline_stage: 'new_lead' };
+      const ordinary = await call(base());
+      ops.length = 0;
       db.mockImplementationOnce(() => { throw new Error('boom'); });
       const result = await call(base());
-      expect(result).toEqual({ ok: false, skipped: 'lookup_failed' });
-      expect(ops.filter((o) => o.table === 'booking_intents')).toEqual([]);
+      expect(result).toEqual(ordinary);
+      expect(suppressedForDraft().length).toBe(1);
     });
 
     test('a draft linked to the quoter\'s own pre-customer lead is NOT skipped by this check', async () => {
       firstResults.estimates = { customer_id: 'cust-lead' };
-      firstResults.customers = { pipeline_stage: 'new_lead' };
+      firstResults.customers = { id: 'cust-lead', pipeline_stage: 'new_lead' };
       const result = await call(base());
       expect(result?.skipped).not.toBe('contact_linked_established');
       expect(ops.filter((o) => o.table === 'booking_intents' && o.op === 'update' && o.args[0]?.suppressed === true)).toEqual([]);

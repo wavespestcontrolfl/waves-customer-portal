@@ -44,7 +44,7 @@ function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
     'join', 'leftJoin', 'where', 'whereIn', 'whereNotIn', 'whereNot', 'whereNull',
-    'whereNotNull', 'whereRaw', 'orWhereNull', 'andWhere', 'orderBy', 'select', 'groupBy', 'max', 'as',
+    'whereNotNull', 'whereRaw', 'orWhereNull', 'andWhere', 'limit', 'orderBy', 'select', 'groupBy', 'max', 'as',
   ]) b[m] = jest.fn(() => b);
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
   b.update = jest.fn((payload) => { b._mode = 'update'; updates.push({ table, payload }); return b; });
@@ -476,6 +476,19 @@ describe('B11 backstop — contact-linked wizard draft linked to an ESTABLISHED 
     expect(sent).toBe(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(updates).toEqual([]); // no claim, no suppress: retried next tick
+  });
+
+  test('account-wide (r3 P1): a lead root row under an account with an ESTABLISHED sibling property is blocked too', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    enqueue('estimates', { first: { customer_id: 'cust-lead' } });
+    enqueue('customers', { first: { id: 'cust-lead', account_id: 'acct-1', pipeline_stage: 'new_lead' } }); // root
+    enqueue('customers', { rows: [{ id: 'cust-sibling', account_id: 'acct-1', pipeline_stage: 'active_customer' }] }); // siblings
+    enqueue('booking_intents', { update: 1 });
+
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('draft linked to a still-pre-customer lead (the quoter\'s own row) sends as before', async () => {

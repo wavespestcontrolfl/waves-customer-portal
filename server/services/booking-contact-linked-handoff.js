@@ -19,16 +19,51 @@ const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
   'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating', 'lost',
 ]);
 
-// True when the draft named by pricingEstimateId is linked to a live customer
-// row that is NOT a pre-customer prospect. Throws on a lookup error — callers
-// decide (recovery and capture fail closed).
+// The ACCOUNT a contact-linked draft resolves to: the draft-linked customer
+// row plus every live, active sibling property row on its account — the same
+// account resolution routes/booking.js findAccountPropertyByAddress uses to
+// bind a submitted address to a property row. Confirmation, capture-intent
+// and the recovery worker all classify through THIS list so they can never
+// diverge: a handoff is blocked when ANY of these rows is an established
+// customer, even if the draft-linked row itself is still a lead (the address
+// bind can land the booking on an established sibling). opts.forShare
+// share-locks the rows (confirmation, inside its transaction). Returns
+// { root, rows } — root null when the customer row is gone.
+async function loadContactLinkedAccountRows(conn, customerId, { forShare = false, columns = ['id', 'account_id', 'pipeline_stage', 'phone', 'email'] } = {}) {
+  const rootQ = conn('customers').where({ id: customerId }).whereNull('deleted_at');
+  if (forShare) rootQ.forShare();
+  const root = await rootQ.first(...columns);
+  if (!root) return { root: null, rows: [] };
+  const accountId = root.account_id || root.id;
+  const siblingQ = conn('customers')
+    .where(function () {
+      this.where('account_id', accountId).orWhere('id', accountId);
+    })
+    .whereNot('id', root.id)
+    .whereNull('deleted_at')
+    .andWhere(function () {
+      this.whereNull('active').orWhere('active', true);
+    })
+    .orderBy('id')
+    .limit(25);
+  if (forShare) siblingQ.forShare();
+  const siblings = await siblingQ.select(...columns);
+  return { root, rows: [root, ...(Array.isArray(siblings) ? siblings : [])] };
+}
+
+const isEstablishedCustomerRow = (r) => !PRE_CUSTOMER_PIPELINE_STAGES.has(String(r?.pipeline_stage || ''));
+
+// True when the draft named by pricingEstimateId is contact-linked to a live
+// customer whose ACCOUNT holds any established row. Throws on a lookup error
+// — callers fail closed.
 async function establishedContactLinkedDraft(conn, pricingEstimateId) {
   if (!pricingEstimateId) return false;
   const draft = await conn('estimates').where({ id: pricingEstimateId }).first('customer_id');
   if (!draft?.customer_id) return false;
-  const customer = await conn('customers').where({ id: draft.customer_id }).whereNull('deleted_at').first('pipeline_stage');
-  if (!customer) return false;
-  return !PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''));
+  const { rows } = await loadContactLinkedAccountRows(conn, draft.customer_id);
+  return rows.some(isEstablishedCustomerRow);
 }
 
-module.exports = { PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft };
+module.exports = {
+  PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft, loadContactLinkedAccountRows, isEstablishedCustomerRow,
+};
