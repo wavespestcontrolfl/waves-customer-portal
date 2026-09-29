@@ -2596,7 +2596,8 @@ async function listLapsedEvidenceClosedCallIds(conn) {
        JOIN call_log cl ON cl.id = cc.call_log_id
        LEFT JOIN scheduled_services ss ON ss.id = CASE WHEN (cc.fulfillment ->> 'record_type') = 'scheduled_service' THEN (cc.fulfillment ->> 'record_id')::uuid END
        LEFT JOIN customers cu ON cu.id = CASE WHEN (cc.fulfillment ->> 'kind') = ? THEN (cc.fulfillment ->> 'record_id')::uuid END
-       LEFT JOIN call_log ev ON ev.id = CASE WHEN (cc.fulfillment ->> 'record_type') = 'call_log' THEN (cc.fulfillment ->> 'record_id')::uuid END
+       -- Keyed by the proof's own record id: no evidence finder ever records a sandbox call.
+       LEFT JOIN call_log ev ON ev.id = (CASE WHEN (cc.fulfillment ->> 'record_type') = 'call_log' THEN (cc.fulfillment ->> 'record_id')::uuid END)
       WHERE ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
