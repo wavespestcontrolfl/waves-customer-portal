@@ -199,7 +199,8 @@ describe('reportProductCopyFor — public shape', () => {
   it('normalizeReportCity title-cases an ALL-CAPS value, trims, and collapses internal whitespace', () => {
     expect(normalizeReportCity('BRADENTON')).toBe('Bradenton');
     expect(normalizeReportCity('LAKEWOOD  RANCH')).toBe('Lakewood Ranch');
-    expect(normalizeReportCity('  bradenton  ')).toBe('bradenton'); // not all-caps — passed through as-is, never re-cased
+    expect(normalizeReportCity('  lakewood ranch  ')).toBe('Lakewood Ranch'); // all-lowercase is title-cased too
+    expect(normalizeReportCity('North port')).toBe('North port'); // mixed case is trusted as entered
     expect(normalizeReportCity('Port Charlotte')).toBe('Port Charlotte');
   });
 

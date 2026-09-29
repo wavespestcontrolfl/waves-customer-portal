@@ -62,8 +62,8 @@ function floorToMultipleOf25(count) {
 }
 
 // Normalizes a city for display: trim, collapse internal whitespace, and
-// title-case a value that is ENTIRELY upper-case (owner ruling 2026-09-29) —
-// a value that isn't all-caps is trusted as already correctly cased and
+// title-case a value that is ENTIRELY upper- or lower-case (owner ruling
+// 2026-09-29) — a mixed-case value is trusted as already correctly cased and
 // passed through unchanged (never invented, never re-cased). Returns null
 // for blank/unusable input (nothing left after trimming, or no letters at
 // all — e.g. stray punctuation/digits).
@@ -71,7 +71,8 @@ function normalizeReportCity(rawCity) {
   const collapsed = String(rawCity == null ? '' : rawCity).trim().replace(/\s+/g, ' ');
   if (!collapsed || !/[a-zA-Z]/.test(collapsed)) return null;
   const isAllCaps = collapsed === collapsed.toUpperCase() && collapsed !== collapsed.toLowerCase();
-  if (!isAllCaps) return collapsed;
+  const isAllLower = collapsed === collapsed.toLowerCase() && collapsed !== collapsed.toUpperCase();
+  if (!isAllCaps && !isAllLower) return collapsed;
   return collapsed
     .toLowerCase()
     .split(' ')
