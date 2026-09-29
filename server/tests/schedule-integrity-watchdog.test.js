@@ -113,7 +113,7 @@ function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], comp
   db.mockImplementation((table) => {
     let completedCheck = false;
     const c = {};
-    for (const m of ['whereIn', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
       c[m] = jest.fn(() => c);
     }
     c.where = jest.fn((...args) => { if (args[0] === 'ss.status' && args[1] === 'completed') completedCheck = true; return c; });
@@ -1019,6 +1019,13 @@ describe('unpriced series held by a visit that completed unpriced since its bell
     episodeHelpers.closeAdminAlertKeys.mockClear();
     await run([completed({ estimated_price: null })]);
     expect(closedKeys()).toEqual([]);
+  });
+
+  test('only a real completion time counts: a backfilled completion (completed_at NULL) never holds, whatever its later edits', async () => {
+    await run([completed({ completed_time: null })]);
+    expect(closedKeys()).toEqual([KEY]);
+    const scan = db.mock.results.map((r) => r.value).find((c) => c.where.mock.calls.some(([a, b]) => a === 'ss.status' && b === 'completed'));
+    expect(scan.whereNotNull).toHaveBeenCalledWith('ss.completed_at');
   });
 
   test('completed but priced (own row or parent) is closed', async () => {

@@ -634,6 +634,7 @@ async function unpricedSeriesBells() {
 }
 
 // Of these series (root -> bell start), the ones with a visit that completed
+// (its own completed_at; a backfilled completion without one never counts)
 // at or after the bell's start while still unpriced by its own row: the scan's
 // own rule (isUnpricedSeriesVisit, annual-prepay coverage validated the same
 // way), with an authoritative $0 (authoritativeZeroPrice) counting as a price. Whether such a visit was
@@ -646,8 +647,12 @@ async function completedUnpricedSince(sinceByRoot) {
   const completed = await coverageScanQuery()
     .where('ss.status', 'completed')
     .where(function inRoots() { this.whereIn('ss.id', roots).orWhereIn('ss.recurring_parent_id', roots); })
-    .whereRaw('COALESCE(ss.completed_at, ss.updated_at) >= ?', [new Date(Math.min(...sinceByRoot.values()))])
-    .select(db.raw('COALESCE(ss.completed_at, ss.updated_at) as completed_time'));
+    // A real completion time only: a backfilled completion keeps completed_at
+    // NULL, and updated_at moves on any later edit, so it would make an old
+    // completion look new.
+    .whereNotNull('ss.completed_at')
+    .where('ss.completed_at', '>=', new Date(Math.min(...sinceByRoot.values())))
+    .select('ss.completed_at as completed_time');
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
   const at = (row) => new Date(row.completed_time).getTime();
   for (const row of completed) {

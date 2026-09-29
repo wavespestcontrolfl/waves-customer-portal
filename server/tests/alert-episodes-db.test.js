@@ -279,6 +279,12 @@ maybeDescribe('unpriced series: completed visit holds its bell (live Postgres)',
     }
   });
 
+  test('a backfilled completion (completed_at NULL) never holds, however recently the row was edited', async () => {
+    const backfilled = await series({ completedAt: null });
+    await db('scheduled_services').where({ id: backfilled.child.id }).update({ updated_at: NOW });
+    expect(await held(backfilled)).toEqual([]);
+  });
+
   test('priced (own row or parent), or completed before the bell first rang: released; a later ring never moves the start', async () => {
     expect(await held(await series({ childOver: { estimated_price: 99 } }))).toEqual([]);
     const pricedParent = await series();
