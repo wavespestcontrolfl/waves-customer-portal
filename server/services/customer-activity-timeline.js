@@ -58,6 +58,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -195,7 +196,10 @@ const SOURCES = [
     // customer's id when an applicant is also a customer; they are owner-only
     // and never customer history, so the shared sms_log exclusion applies to
     // the feed and to the summary MAX queries alike (both build from here).
-    from: (dbh, ctx) => excludeRecruitingSmsLog(dbh('sms_log as sl').where('sl.customer_id', ctx.customerId)
+    // An unresolved review-ask / billing-leg reservation placeholder can carry
+    // an OUTBOUND_LEFT status (failed / undelivered) yet never reached the
+    // customer, so it is dropped in SQL before paging, like every sms_log reader.
+    from: (dbh, ctx) => excludeUnresolvedSendReservations(excludeRecruitingSmsLog(dbh('sms_log as sl').where('sl.customer_id', ctx.customerId)
       .where((w) => w.where('sl.direction', 'inbound')
         .orWhereRaw(`LOWER(COALESCE(sl.status, '')) IN (${OUTBOUND_LEFT.map(() => '?').join(', ')})`, OUTBOUND_LEFT))
       // A scheduled send is two rows: the queue parent (promoted to 'sent' when
@@ -209,9 +213,10 @@ const SOURCES = [
           .whereRaw('twin.customer_id = sl.customer_id')
           .whereRaw('twin.id <> sl.id')
           .whereRaw("twin.metadata->>'scheduled_sms_log_id' = sl.id::text")
-          .whereRaw(`LOWER(COALESCE(twin.status, '')) IN (${OUTBOUND_LEFT.map(() => '?').join(', ')})`, OUTBOUND_LEFT);
+          .whereRaw(`LOWER(COALESCE(twin.status, '')) IN (${OUTBOUND_LEFT.map(() => '?').join(', ')})`, OUTBOUND_LEFT)
+          .modify((q) => excludeUnresolvedSendReservations(q, 'twin'));
       }),
-    'sl.message_type'),
+    'sl.message_type'), 'sl'),
     select: ['sl.id', 'sl.direction', 'sl.status', 'sl.message_type', 'sl.message_body', 'sl.created_at',
       'sl.from_phone', 'sl.metadata'],
     ts: ['sl.created_at'],

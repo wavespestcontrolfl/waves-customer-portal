@@ -392,3 +392,13 @@ test('every source is read-only: nothing but select/max builders are used', () =
   const src = require('fs').readFileSync(require.resolve('../services/customer-activity-timeline'), 'utf8');
   expect(src).not.toMatch(/\.(insert|update|del|delete|truncate)\(|INSERT INTO|UPDATE |DELETE FROM/);
 });
+
+describe('texts source excludes unresolved send reservations', () => {
+  test('the feed and summary MAX queries both carry the shared reservation exclusion on the sl alias', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'customer-activity-timeline.js'), 'utf8');
+    expect(src).toMatch(/excludeUnresolvedSendReservations\(excludeRecruitingSmsLog\(dbh\('sms_log as sl'\)/);
+    expect(src).toMatch(/'sl'\),\s*select: \['sl\.id'/);
+    // a scheduled-send twin that is itself an unresolved placeholder must not hide its parent
+    expect(src).toMatch(/excludeUnresolvedSendReservations\(q, 'twin'\)/);
+  });
+});

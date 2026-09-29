@@ -431,6 +431,33 @@ pg('getCustomerActivity on Postgres', () => {
   };
   const activity = (id) => timeline.getCustomerActivity(id, { limit: 200 }, db);
 
+  test('an unresolved review-ask reservation placeholder is never a text the customer got, feed or summary', async () => {
+    const c = await fresh('reservation@example.test');
+    const parent = randomUUID(); const twin = randomUUID();
+    await db('sms_log').insert([
+      // failed / undelivered placeholders pass the OUTBOUND_LEFT status filter but never reached the customer
+      { id: randomUUID(), customer_id: c, direction: 'outbound', status: 'failed', message_type: 'review_request', message_body: 'placeholder failed', created_at: T(1), metadata: JSON.stringify({ review_ask_reservation: true }) },
+      { id: randomUUID(), customer_id: c, direction: 'outbound', status: 'undelivered', message_type: 'review_request', message_body: 'placeholder undelivered', created_at: T(2), metadata: JSON.stringify({ review_ask_reservation: true }) },
+      // a resolved (delivered) review ask is a real text
+      { id: randomUUID(), customer_id: c, direction: 'outbound', status: 'delivered', message_type: 'review_request', message_body: 'real review ask', created_at: T(3), metadata: JSON.stringify({ review_ask_reservation: true }) },
+      // an ordinary failed text stays listed
+      { id: randomUUID(), customer_id: c, direction: 'outbound', status: 'failed', message_type: 'billing', message_body: 'real failed text', created_at: T(4) },
+      // a reservation twin must not hide its scheduled parent
+      { id: parent, customer_id: c, direction: 'outbound', status: 'sent', message_type: 'reminder', message_body: 'kept parent', created_at: T(5) },
+      { id: twin, customer_id: c, direction: 'outbound', status: 'failed', message_type: 'reminder', message_body: 'placeholder twin', created_at: T(6), metadata: JSON.stringify({ review_ask_reservation: true, scheduled_sms_log_id: parent }) },
+    ]);
+    const r = await activity(c);
+    expect(r.events.filter((e) => e.source === 'sms').map((e) => e.detail).sort()).toEqual(['kept parent', 'real failed text', 'real review ask']);
+    // paging is exact: the placeholders never occupy a page slot
+    const seen = []; let cursor = null;
+    do {
+      const page = await timeline.getCustomerActivity(c, { limit: 1, before: cursor }, db);
+      seen.push(...page.events);
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen).toHaveLength(3);
+  });
+
   test('address fallback matches case-insensitively and ignores padding on the snapshot', async () => {
     const c = await fresh('Mixed.Case@Example.Test');
     await db('email_messages').insert([
