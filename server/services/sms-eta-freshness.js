@@ -29,7 +29,25 @@
 //      repeat the redundant lookup finding #4 calls out in
 //      sms-amount-recheck.js) — never any OTHER entry's visits: with two
 //      distinct stops/techs, a reply quoting the completed visit's number
-//      must not pass because some OTHER stop is still en route.
+//      must not pass because some OTHER stop is still en route. Codex
+//      round-7 P2: for a minutes/status claim (never the tracking-link-only
+//      path, which names one visit by its own token), EVERY sibling of a
+//      grouped entry must be live (`every()`), not just one (`some()`) — a
+//      claim about the group ("your techs are 9 minutes away") implicitly
+//      covers every member, so one sibling going terminal (cancelled/
+//      skipped/completed) fails the whole entry closed even while another
+//      sibling sharing the physical stop is still en route.
+//   3a. Codex round-7 P2 (structural default-deny): every earlier round of
+//      this PR added one more arrival-trigger-word to the phrase list that
+//      decides whether a plain minutes figure is a claim at all ("on the
+//      way", written numbers, ranges, "from you", bare "ETA: 20", "20
+//      minutes to go") — an open-ended enumeration that keeps missing new
+//      phrasings. Once there's a live ETA to check a claim against (a
+//      snapshot with entries, or a /track/ link), the trigger-word list is
+//      abandoned for a plain "N minute(s)" figure: it is a claim by default
+//      UNLESS its own clause is an explicit non-arrival duration (dry time,
+//      wait-before-pets/re-entry, "takes about", "lasts") — see
+//      findGroundedMinutesFigures in sms-shadow-drafter.js.
 //   4. Codex round-4 P2: a reply that shares ONLY the /track/:token link (no
 //      minutes figure, no arrival wording at all) used to skip every check
 //      above entirely — `outgoingBody` is scanned for a /track/ link
@@ -122,8 +140,21 @@ function sendTimeTrackTokenLive(expiresAt) {
  * instead of round-tripping through JSON.
  */
 async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, now = new Date(), dbh = db }) {
-  const { findEtaMinutesClaims, bodyMentionsArrival, bodyHasTimedArrivalPhrase, bodyHasUnclassifiedArrivalDigit } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
-  const claims = findEtaMinutesClaims(outgoingBody);
+  const { findEtaMinutesClaims, bodyMentionsArrival, bodyHasTimedArrivalPhrase, bodyHasUnclassifiedArrivalDigit, findGroundedMinutesFigures } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
+  const snapshotHasEntries = Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0;
+  const trackTokens = extractTrackTokens(outgoingBody);
+  const hasTrackLink = trackTokens.length > 0;
+  // Structural default-deny (Codex round-7 P2): once there's a live ETA
+  // snapshot to check a claim against, or a /track/ link that implies one,
+  // stop relying on findEtaMinutesClaims's arrival-trigger-word list (which
+  // has missed a new phrasing every round this PR has gone through) — union
+  // in findGroundedMinutesFigures, which treats EVERY plain minutes figure
+  // as a claim unless its own clause is an explicit non-arrival duration.
+  // With neither a snapshot nor a link, there is nothing to check a claim
+  // against anyway, so the trigger-based detection is kept as-is.
+  const claims = (snapshotHasEntries || hasTrackLink)
+    ? [...findEtaMinutesClaims(outgoingBody), ...findGroundedMinutesFigures(outgoingBody)]
+    : findEtaMinutesClaims(outgoingBody);
   // TIMED unparsed claim (Codex round-5 P2): a vague/approximate duration
   // ("half an hour away", "an hour out", "a few minutes away", "a couple
   // minutes", "quarter hour", "shortly", "any minute now", "soon") states
@@ -152,11 +183,8 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // minutes at all — every snapshot entry must then still be live and fresh.
   // Pure status copy only ("on the way", "en route") — no duration wording
   // of any kind — lands here.
-  const snapshotHasEntries = Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0;
   const unparsedStatusClaim = !claims.length && !timedArrivalClaim && bodyMentionsArrival(outgoingBody)
     && (snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || '')));
-  const trackTokens = extractTrackTokens(outgoingBody);
-  const hasTrackLink = trackTokens.length > 0;
   if (!claims.length && !timedArrivalClaim && !unparsedStatusClaim && !hasTrackLink) return null;
 
   // Only the current grouped shape is accepted — { entries: [{ minutes,
@@ -250,9 +278,20 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, dbh, trackToke
     const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at');
     const liveStates = allowOnSite ? new Set(['en_route', 'on_property']) : new Set(['en_route']);
     const liveById = new Map(rows.map((row) => [row.id, liveStates.has(customerTrackState(row))]));
-    // EACH bound entry must have at least one of ITS OWN visits still live —
-    // a different entry's live visit never covers this one.
-    const allBoundEntriesLive = boundEntries.every((entry) => entry.scheduledServiceIds.some((id) => liveById.get(id)));
+    // Codex round-7 P2: a minutes/status claim about a grouped entry
+    // implicitly covers EVERY sibling in it ("your techs are 9 minutes
+    // away" means both the pest and lawn stop, not just whichever one is
+    // still moving) — so EVERY sibling of a bound entry must still be
+    // customer-facing live (`every()`), not just one of them (`some()`): a
+    // cancelled/skipped/completed sibling fails the whole entry closed, even
+    // while another sibling sharing the physical stop is still en route.
+    // The tracking-link-only path is deliberately NOT changed here — sharing
+    // a link names ONE visit (the token's own owning row, verified below by
+    // trackTokensToVerify), never a claim about the whole group, so it keeps
+    // its existing `some()` semantics.
+    const allBoundEntriesLive = allowOnSite
+      ? boundEntries.every((entry) => entry.scheduledServiceIds.some((id) => liveById.get(id)))
+      : boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => liveById.get(id)));
     if (!allBoundEntriesLive) return 'eta_claim_no_longer_en_route';
 
     if (trackTokensToVerify.length) {

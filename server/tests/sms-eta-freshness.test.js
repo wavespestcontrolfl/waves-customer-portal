@@ -19,6 +19,12 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   bodyMentionsArrival: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
   bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
+  // Structural default-deny (Codex round-7 P2): unioned into `claims`
+  // whenever the snapshot has entries or the body carries a /track/ link.
+  // Defaults to empty so every pre-existing test (which drives the mocked
+  // findEtaMinutesClaims directly) is unaffected; the dedicated describe
+  // block below swaps in the real implementation.
+  findGroundedMinutesFigures: jest.fn(() => []),
 }));
 jest.mock('../services/track-transitions', () => ({
   customerTrackState: jest.fn((row) => row?.track_state || null),
@@ -125,12 +131,41 @@ test('status="en_route" but a STALE track_state (Codex round-1 finding): fails c
   expect(reason).toBe('eta_claim_no_longer_en_route');
 });
 
-test('fresh facts and still en_route: passes (any one of a grouped entry\'s own sibling ids counts)', async () => {
+// Codex round-7 P2: a minutes/status claim about a grouped entry implicitly
+// covers EVERY sibling, so ONE sibling going terminal (here, completed)
+// fails the whole entry closed even though another sibling sharing the
+// physical stop is still en route — this used to pass on `some()` semantics
+// (see the superseded test this replaces, pre-round-7: "any one of a
+// grouped entry's own sibling ids counts").
+test('fresh facts but ONE sibling of a grouped entry has gone terminal: fails closed — a minutes/status claim covers every sibling', async () => {
   const reason = await etaClaimBlockReason({
     liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'] }] }, factsGeneratedAt: FRESH, outgoingBody: 'The tech is 12 minutes away.', now: NOW,
     dbh: fakeDb([{ id: 'svc-1', status: 'completed', track_state: 'complete' }, { id: 'svc-2', status: 'en_route', track_state: 'en_route' }]),
   });
+  expect(reason).toBe('eta_claim_no_longer_en_route');
+});
+
+test('fresh facts and EVERY sibling of a grouped entry still en_route: passes', async () => {
+  const reason = await etaClaimBlockReason({
+    liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'] }] }, factsGeneratedAt: FRESH, outgoingBody: 'The tech is 12 minutes away.', now: NOW,
+    dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }, { id: 'svc-2', status: 'en_route', track_state: 'en_route' }]),
+  });
   expect(reason).toBeNull();
+});
+
+// Lawn+Pest grouped scenario named in the PR (owner-facing wording): a
+// combined-stop reply quoting one shared minutes figure must block once
+// EITHER service line has gone terminal, not just when both have.
+test('grouped Lawn+Pest stop: Lawn leg cancelled blocks a shared minutes claim even though Pest is still en_route', async () => {
+  findEtaMinutesClaims.mockReturnValue([claim(9)]);
+  const reason = await etaClaimBlockReason({
+    liveEtaSnapshot: { entries: [{ minutes: 9, scheduledServiceIds: ['svc-pest', 'svc-lawn'] }] }, factsGeneratedAt: FRESH, outgoingBody: 'Your tech is about 9 minutes away.', now: NOW,
+    dbh: fakeDb([
+      { id: 'svc-pest', status: 'en_route', track_state: 'en_route' },
+      { id: 'svc-lawn', status: 'cancelled', track_state: null },
+    ]),
+  });
+  expect(reason).toBe('eta_claim_no_longer_en_route');
 });
 
 test('a DB failure during the recheck fails closed', async () => {
@@ -488,6 +523,77 @@ describe('round 6 (Codex P2): an arrival sentence with a digit findEtaMinutesCla
     drafter.bodyHasUnclassifiedArrivalDigit.mockReturnValue(false);
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'Thanks, see you soon!', now: NOW,
+    });
+    expect(reason).toBeNull();
+  });
+});
+
+describe('round 7 (Codex P2): structural default-deny — a plain minutes figure with NO trigger word is still a claim once there is a snapshot/link to check it against', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    drafter.findEtaMinutesClaims.mockReset().mockImplementation(real.findEtaMinutesClaims);
+    drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
+    drafter.bodyHasTimedArrivalPhrase.mockReset().mockImplementation(real.bodyHasTimedArrivalPhrase);
+    drafter.bodyHasUnclassifiedArrivalDigit.mockReset().mockImplementation(real.bodyHasUnclassifiedArrivalDigit);
+    drafter.findGroundedMinutesFigures.mockReset().mockImplementation(real.findGroundedMinutesFigures);
+  });
+  const liveEtaSnapshot = { entries: [{ minutes: 20, scheduledServiceIds: ['svc-1'] }] };
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+
+  test.each([
+    '20 minutes to go.',
+    '20 min left.',
+    'Due in 20.',
+    'Be with you in 20 minutes.',
+    'Reach you in about 20.',
+  ])('%p is bound and blocked once the visit is done, with no trigger-list match required', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'completed', track_state: 'complete' }]),
+    });
+    expect(reason).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test.each([
+    '20 minutes to go.',
+    '20 min left.',
+    'Due in 20.',
+    'Be with you in 20 minutes.',
+    'Reach you in about 20.',
+  ])('%p passes when the visit is still en_route', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBeNull();
+  });
+
+  test.each([
+    'Allow 30 minutes to dry.',
+    'The service takes about 45 minutes.',
+  ])('explicit non-arrival duration %p is never treated as a claim, even with a live snapshot present', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+    });
+    expect(reason).toBeNull();
+  });
+
+  // The whole point of the structural fix: a bare minutes figure with NO
+  // trigger word anywhere in the sentence still binds once there's a
+  // snapshot to check it against — no future phrasing needs its own
+  // trigger-word addition here.
+  test('a bare "20 minutes." with no arrival wording at all is still a claim when a snapshot is present', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody: '20 minutes.', now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'completed', track_state: 'complete' }]),
+    });
+    expect(reason).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('the same bare "20 minutes." with NO snapshot and NO link is untouched (nothing to check it against)', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: '20 minutes.', now: NOW,
     });
     expect(reason).toBeNull();
   });

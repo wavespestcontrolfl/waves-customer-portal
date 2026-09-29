@@ -35,6 +35,10 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   bodyMentionsArrival: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
   bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
+  // Structural default-deny (Codex round-7 P2): sms-eta-freshness.js unions
+  // this in whenever there's a snapshot/track link — empty here for the
+  // same "never claims an ETA" reason as findEtaMinutesClaims above.
+  findGroundedMinutesFigures: jest.fn(() => []),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));

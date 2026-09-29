@@ -172,6 +172,9 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   bodyMentionsArrival: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
   bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
+  // Structural default-deny (Codex round-7 P2) — see identical mock comment
+  // in sms-auto-send-open-times.test.js.
+  findGroundedMinutesFigures: jest.fn(() => []),
 }));
 jest.mock('../services/sms-graduation', () => ({
   evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true, blockers: [] })),

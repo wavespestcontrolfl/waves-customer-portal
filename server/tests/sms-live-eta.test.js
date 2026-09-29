@@ -833,6 +833,64 @@ describe('round 3 (audit P1s): arrival wording beats duration exclusions; every 
   });
 });
 
+// Codex round-7 P2 (structural default-deny): every earlier round added one
+// more arrival-trigger word to findEtaMinutesClaims's phrase list ("on the
+// way", written numbers, ranges, "from you", bare "ETA: 20", "20 minutes to
+// go") — an open-ended enumeration. Once the facts actually carry a LIVE ETA
+// to check a claim against, validateLiveEtaMinutes stops depending on that
+// list for a plain minutes figure: it binds by default, no trigger word
+// required, unless its own clause is an explicit non-arrival duration.
+describe('round 7 (Codex P2): structural default-deny at draft time — a plain minutes figure needs no trigger word once the facts carry a LIVE ETA', () => {
+  let prior;
+  beforeEach(() => { prior = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; });
+
+  test.each([
+    '20 minutes to go.',
+    '20 min left.',
+    'Due in 20.',
+    'Be with you in 20 minutes.',
+    'Reach you in about 20.',
+  ])('%p is bound to the LIVE ETA figure with no trigger-list match required', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    '20 minutes to go.',
+    'Due in 20.',
+  ])('%p is rejected when it does not match the LIVE ETA figure', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+  });
+
+  test.each([
+    'Allow 30 minutes to dry.',
+    'The service takes about 45 minutes.',
+  ])('explicit non-arrival duration %p never needs to match the LIVE ETA figure', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' })).toEqual({ ok: true, violations: [] });
+  });
+
+  // The point of the structural fix: a bare "20 minutes." with no arrival
+  // wording at all still gets bound once the facts carry a LIVE ETA — no
+  // future phrasing needs its own trigger-word addition here.
+  test('a bare "20 minutes." with no arrival wording at all is still bound and checked', () => {
+    const passing = validateLiveEtaMinutes({ reply: '20 minutes.', factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' });
+    expect(passing).toEqual({ ok: true, violations: [] });
+    const failing = validateLiveEtaMinutes({ reply: '20 minutes.', factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' });
+    expect(failing.ok).toBe(false);
+  });
+
+  test('the same bare "20 minutes." with NO LIVE ETA fact at all passes — nothing to check it against here', () => {
+    expect(validateLiveEtaMinutes({ reply: '20 minutes.', factsBlock: 'LIVE STATUS: tech marked en route to this visit' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate off: never runs (byte-identical to before)', () => {
+    delete process.env[GATE];
+    expect(validateLiveEtaMinutes({ reply: '20 minutes to go.', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+});
+
 describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (independent review finding #2, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2)', () => {
   test('no scheduled_service ever backed a LIVE ETA fact: null', () => {
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [] })).toBeNull();

@@ -483,11 +483,20 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // arrival word at all ("from you" alone has no "away"/"arriv"/"eta") was
 // missed entirely, so the reply passed both the draft-time verifier AND the
 // send-time freshness recheck with an unbound ETA claim.
-const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out\s+from|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property))\b/i;
-const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+there|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property))\b/i;
+// Round 7 (Codex P2, PR #5334): "to go", "left", "until he/she/they/the
+// tech", "due in", "reach(ing) you" and "be(ing) with you" — yet another
+// round finding yet another phrasing ("20 minutes to go") the fixed word
+// list didn't cover. Adding these words is NOT the structural fix (see
+// findGroundedMinutesFigures below, which stops depending on this list
+// entirely once there's a LIVE ETA to check a claim against) — it only
+// keeps the ungrounded/no-snapshot trigger-based path (findEtaMinutesClaims,
+// bodyMentionsArrival, bodyHasTimedArrivalPhrase) from missing these exact
+// phrasings too.
+const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out\s+from|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
+const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
 const ETA_MINUTES_TOKEN_RE = /\b(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
 const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
-const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it)\b[^.?!\n]{0,20}$/i;
+const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it|lasts?)\b[^.?!\n]{0,20}$/i;
 // A bare "in <number>" with no minutes unit at all ("be at your place in
 // 20", "he'll be there in 20") right after one of these arrival phrases —
 // Codex round-4 P2 sibling: never writing the word "minutes" doesn't make it
@@ -496,7 +505,11 @@ const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)
 // ("read the invoice in 20", "back in 2026") never false-positives, and
 // excluded when a unit word DOES follow (seconds/hours/etc., or "minutes" —
 // which the ordinary unit-based pass above already claims on its own).
-const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up)\s+in\s+(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+// Round 7 (Codex P2): "due in 20" / "reach you in about 20" carry no unit
+// AND (for "due") no other STRONG trigger word at all — the phrase itself is
+// the trigger, same reasoning as the rest of this pass. An optional "about"
+// between "in" and the number is allowed ("reach you in about 20").
+const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here|with\s+you)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up|due|reach(?:ing)?\s+you|get(?:ting)?\s+to\s+you)\s+in\s+(?:about\s+)?(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
 // Bare-integer ETA claims (Codex round-6 P2, PR #5334): "ETA: 20", "his ETA
 // is 20", "ETA 20", "eta ~20" carry no "minutes"/"in" wording at all — every
 // pass above requires SOME unit or connector word, so these skipped number
@@ -721,6 +734,69 @@ function findEtaMinutesClaims(text) {
 
   return claims;
 }
+// Structural default-deny (Codex round-7 P2, PR #5334): findEtaMinutesClaims
+// above requires an arrival-TRIGGER word to share the sentence with a
+// minutes figure, and every round of this PR has found one more phrasing
+// that trigger list doesn't cover ("on the way", written numbers, ranges,
+// "from you", bare "ETA: 20", now "20 minutes to go") — an open-ended
+// enumeration that can never be finished. This function is the fix for the
+// two call sites that actually have a LIVE ETA to check a claim against
+// (sms-eta-freshness.js's send-time recheck when the snapshot has entries or
+// the body carries a /track/ link, and validateLiveEtaMinutes below when the
+// facts carry a LIVE ETA line): a plain "N minute(s)" figure — after
+// number-word normalization, ranges/between bounds included — is a timed ETA
+// claim with NO trigger word required at all, UNLESS its own clause is an
+// explicit NON-arrival duration (treatment/dry time, "wait ... before
+// pets/re-entry", "takes about", "lasts", "the service takes ...") — a
+// short, closed list that doesn't grow the way ETA phrasing does. A STRONG
+// arrival word in the clause still wins over the exclusion (same as
+// findEtaMinutesClaims, e.g. "he'll take about 12 minutes to arrive" despite
+// "take about" also reading like a duration-exclusion prefix) — everything
+// else is identical to maybeClaim above minus the "no trigger at all ⇒ not a
+// claim" bailout, since removing that bailout IS the structural fix: a bare
+// "20 minutes." with nothing else in the sentence is exactly the shape a
+// trigger-word list can never catch, and grounded default-deny catches it.
+function findGroundedMinutesFigures(text) {
+  const claims = [];
+  const str = normalizeNumberWords(text);
+  const spans = sentenceSpans(str);
+  const sentenceFor = (index) => {
+    const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+    return str.slice(span[0], span[1]);
+  };
+  const maybeGroundedClaim = (minutes, matchIndex, matchLength, sentence) => {
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) {
+      claims.push({ minutes, index: matchIndex });
+      return true;
+    }
+    const after = str.slice(matchIndex + matchLength, matchIndex + matchLength + 30);
+    const before = str.slice(Math.max(0, matchIndex - 30), matchIndex);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) return false;
+    claims.push({ minutes, index: matchIndex });
+    return true;
+  };
+
+  const consumed = [];
+  for (const rangeRe of [RANGE_MINUTES_RE, BETWEEN_MINUTES_RE]) {
+    const re = new RegExp(rangeRe.source, rangeRe.flags);
+    let rm;
+    while ((rm = re.exec(str))) {
+      const sentence = sentenceFor(rm.index);
+      const addedFirst = maybeGroundedClaim(parseInt(rm[1], 10), rm.index, rm[0].length, sentence);
+      const addedSecond = maybeGroundedClaim(parseInt(rm[2], 10), rm.index, rm[0].length, sentence);
+      if (addedFirst || addedSecond) consumed.push([rm.index, rm.index + rm[0].length]);
+    }
+  }
+
+  const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
+  let m;
+  while ((m = re.exec(str))) {
+    if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
+    maybeGroundedClaim(parseInt(m[1], 10), m.index, m[0].length, sentenceFor(m.index));
+  }
+
+  return claims;
+}
 // Backstop for sms-eta-freshness.js (round 6): does the outgoing body carry
 // an arrival-triggered sentence with a digit findEtaMinutesClaims could NOT
 // turn into a claim? Scoped to a STRONG-trigger sentence, same as the
@@ -789,7 +865,20 @@ function buildLiveEtaSnapshot(context) {
 // not appear at all when the facts carry no LIVE ETA line.
 function validateLiveEtaMinutes({ reply, factsBlock }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
-  const claims = findEtaMinutesClaims(reply);
+  // Every LIVE ETA line, not only the first (audit P1): a customer with two
+  // distinct live stops has two figures, and a reply about either is grounded.
+  const factsMinutes = new Set([...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10)));
+  // Structural default-deny (Codex round-7 P2): once the facts actually
+  // carry a LIVE ETA to check a claim against, stop relying on
+  // findEtaMinutesClaims's trigger-word list — union in
+  // findGroundedMinutesFigures, which catches a plain minutes figure with no
+  // trigger word at all. With no LIVE ETA fact, keep the trigger-based
+  // detection only (there's nothing to bind an untriggered figure to here
+  // anyway, and this keeps an ordinary duration mention in a reply about a
+  // non-live visit from being second-guessed).
+  const claims = factsMinutes.size
+    ? [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)]
+    : findEtaMinutesClaims(reply);
   if (!claims.length) {
     // Codex round-5 P2: a vague/approximate duration ("half an hour away",
     // "an hour out", "a few minutes", "a couple minutes", "quarter hour",
@@ -802,9 +891,6 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
     }
     return { ok: true, violations: [] };
   }
-  // Every LIVE ETA line, not only the first (audit P1): a customer with two
-  // distinct live stops has two figures, and a reply about either is grounded.
-  const factsMinutes = new Set([...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10)));
   if (!factsMinutes.size) {
     return { ok: false, violations: ['the reply states a minutes-away ETA but the facts carry no LIVE ETA line — never compute, round, or invent one'] };
   }
@@ -2976,6 +3062,7 @@ module.exports = {
   findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival,
   bodyHasTimedArrivalPhrase,
   bodyHasUnclassifiedArrivalDigit,
+  findGroundedMinutesFigures,
   replyClaimsEtaMinutes,
   buildLiveEtaSnapshot,
   replyBindsDeclaredDays,
