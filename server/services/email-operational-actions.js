@@ -73,13 +73,26 @@ function eligibleAskEmail(email) {
 }
 
 // Stable identity across passes, mirroring sms-operational-actions.js's
-// keyOf. Email obligations carry no property scope (plan scope: obligations
-// only, no property linkage in this PR).
+// keyOf exactly, property_id included (coordinator correction, 2026-09-29:
+// a resolved property now rides in identity here too — see recordEmailOperations).
 function keyOf(item) {
-  return `${item.party}:${item.kind}:${hashExtractionSource(JSON.stringify([item.quote, item.description])).slice(0, 20)}`;
+  return `${item.party}:${item.kind}:${hashExtractionSource(JSON.stringify([item.quote, item.property_id, item.description])).slice(0, 20)}`;
 }
 
-async function extractForEmail(email, { direction }) {
+// Mirrors sms-operational-actions.js's loadMessageContext (~L389-401): the
+// customer's own active properties, opaque id plus the address fields the
+// model may ground property_id against. Coordinator diagnostic, 2026-09-29:
+// without this, extractForEmail always passed properties: [], so the
+// extractor's own grounding (property_id valid only when it names the sole
+// provided property) could never resolve one, and an unscoped send_estimate
+// ask can never be closed by a delivered estimate (scopedToProperty refuses
+// an unscoped one for that record type).
+async function loadActiveProperties(conn, customerId) {
+  return conn('customer_properties').where({ customer_id: customerId, active: true })
+    .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip');
+}
+
+async function extractForEmail(email, { direction, properties = [] }) {
   const strippedBody = stripQuotedAndSignature(email.body_text);
   if (!strippedBody) return { obligations: [], facts: [], additional_properties: [], dropped: 0 };
   // subject rides on the message object itself (a `subject` key), not as a
@@ -90,14 +103,17 @@ async function extractForEmail(email, { direction }) {
   const message = { id: email.id, customer_id: email.customer_id, direction,
     message_body: strippedBody, created_at: email.received_at, from_phone: null, to_phone: null,
     subject: email.subject || null };
-  return extractSmsOperations({ message, history: [], properties: [], captureCommitments: true,
+  return extractSmsOperations({ message, history: [], properties, captureCommitments: true,
     captureAdditionalProperties: false, channel: 'email' });
 }
 
 // Mirrors recordMessageOperations's shape (customer lock, transaction, the
-// call_commitments insert), simplified: no fact capture, no property
-// scoping. Obligations only.
-async function recordEmailOperations(conn, email, extracted, { direction = 'inbound' } = {}) {
+// call_commitments insert), simplified: no fact capture. Obligations only.
+// `properties` is the SAME active-properties list extractForEmail was given
+// for this email (loaded by the caller before the extraction call, so the
+// SMS single-property rule below judges the model against the properties it
+// was actually shown — never a set re-read later that could have changed).
+async function recordEmailOperations(conn, email, extracted, { direction = 'inbound', properties = [] } = {}) {
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['email-operational-actions', String(email.customer_id)]);
     const customer = await trx('customers').where({ id: email.customer_id }).whereNull('deleted_at').forUpdate().first('id');
@@ -109,14 +125,21 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
     const obligations = extracted.obligations;
     if (obligations.length) {
       await trx('call_commitments').insert(obligations.map((item) => {
+        // Mirrors sms-operational-actions.js's own belt-and-suspenders check
+        // (~L569) on top of groundExtraction's already-applied rule: stamp a
+        // property only when it is the customer's SOLE active property and
+        // the model actually named that exact id — never guess among
+        // several, and never trust a stale/mismatched id even from a single
+        // extraction pass.
+        const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
         const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, email.received_at);
         return {
-          email_id: email.id, commitment_key: keyOf(item), party: item.party, kind: item.kind,
+          email_id: email.id, commitment_key: keyOf({ ...item, property_id: propertyId }), party: item.party, kind: item.kind,
           description: item.description, channel: 'email', due_at: dueAt, due_basis: dueBasis,
           source: 'ai', extractor_version: VERSION,
           evidence: JSON.stringify([{ quote: item.quote, email_id: email.id, matched: true,
             speaker: direction === 'outbound' ? 'agent' : 'caller' }]),
-          sms_context: { channel: 'email', basis: item.basis, due_text: item.due_text,
+          sms_context: { channel: 'email', basis: item.basis, due_text: item.due_text, property_id: propertyId,
             customer_id: customer.id, source_at: email.received_at,
             ...(item.basis === 'promise' && item.due_date ? { due_date: item.due_date } : {}) },
         };
@@ -211,8 +234,9 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       try {
         const skip = await shouldSkipExtraction({ ...source, trx: conn });
         if (skip.skip) { skipped += 1; continue; }
-        const extracted = await extractForEmail(email, { direction: 'inbound' });
-        const outcome = await recordEmailOperations(conn, email, extracted);
+        const properties = await loadActiveProperties(conn, email.customer_id);
+        const extracted = await extractForEmail(email, { direction: 'inbound', properties });
+        const outcome = await recordEmailOperations(conn, email, extracted, { properties });
         if (outcome.skipped) { skipped += 1; continue; }
         processed += 1;
       } catch {
@@ -232,8 +256,9 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
         resolvedCustomerId = await resolveEmailCustomerLink(conn, email);
         if (!resolvedCustomerId) { await markSeen(conn, email.id, { skipped: 'no_customer_link' }); skipped += 1; continue; }
         const withCustomer = { ...email, customer_id: resolvedCustomerId };
-        const extracted = await extractForEmail(withCustomer, { direction: 'outbound' });
-        const outcome = await recordEmailOperations(conn, withCustomer, extracted, { direction: 'outbound' });
+        const properties = await loadActiveProperties(conn, resolvedCustomerId);
+        const extracted = await extractForEmail(withCustomer, { direction: 'outbound', properties });
+        const outcome = await recordEmailOperations(conn, withCustomer, extracted, { direction: 'outbound', properties });
         if (outcome.skipped) { skipped += 1; continue; }
         processed += 1;
       } catch {

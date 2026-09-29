@@ -138,6 +138,64 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
+  // Coordinator diagnostic, 2026-09-29 (the "Corinne" miss): email intake
+  // always passed properties: [] to the extractor, so property_id could
+  // never ground and an unscoped send_estimate ask could never be closed by
+  // a delivered estimate (scopedToProperty refuses an unscoped one for that
+  // record type). Full pipeline: intake stamps the property, then a
+  // delivered estimate for that SAME property closes it end to end.
+  test('property fix: a single-property customer\'s emailed quote ask closes on a delivered estimate for that property', async () => {
+    const [property] = await mockPg('customer_properties').insert({ customer_id: customerId,
+      address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true }).returning('*');
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: 'Yes I would like a quote please', subject: 'Re: your estimate' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+      description: 'would like a quote', quote: 'Yes I would like a quote please', basis: 'request', property_id: property.id,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    const intake = await runEmailOperationalActions({ conn: mockPg, now: new Date(email.received_at.getTime() + 1000) });
+    expect(intake).toMatchObject({ processed: 1, failed: 0 });
+    const commitment = await mockPg('call_commitments').first();
+    expect(commitment).toMatchObject({ kind: 'send_estimate' });
+    // The fix under test: the model-named property, grounded against the
+    // customer's own SOLE active property, actually reaches sms_context —
+    // not silently dropped to null as it always was before this fix.
+    expect(commitment.sms_context).toMatchObject({ property_id: property.id });
+    const deliveredAt = new Date(email.received_at.getTime() + 10 * 60000);
+    const [estimate] = await mockPg('estimates').insert({ customer_id: customerId, property_id: property.id,
+      status: 'sent', service_interest: 'Lawn Care', estimate_data: { deliveryState: { lastDeliveredAt: deliveredAt.toISOString() } } }).returning('id');
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'fulfilled', record_ref: `estimate:${estimate.id}`, quote: 'Lawn Care' } });
+    // By design (module header: "an email-sourced obligation is only
+    // checked once its deadline has passed") a send_estimate ask with no
+    // stated timing gets R5's 24h default (resolveDueDeadline) and is never
+    // scanned before then, even with an early witness already on record —
+    // the first tick after due_at is where the early delivery is picked up.
+    const refresh = await refreshEmailCommitments({ conn: mockPg, now: new Date(commitment.due_at.getTime() + 60000) });
+    expect(refresh).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect((await mockPg('call_commitments').first())).toMatchObject({ status: 'fulfilled' });
+  });
+
+  // Same rule as SMS's own belt-and-suspenders check (sms-operational-actions.js
+  // ~L569): a property is stamped only when it is the customer's SOLE active
+  // property AND the model actually named that exact id — never guessed
+  // among several, even when the model (or, as here, a hand-built extraction
+  // bypassing groundExtraction's own redundant null-out) names one.
+  test('property fix: a two-property customer\'s ask never gets a guessed property_id', async () => {
+    const { recordEmailOperations } = require('../services/email-operational-actions');
+    const [p1] = await mockPg('customer_properties').insert({ customer_id: customerId,
+      address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true }).returning('*');
+    const [p2] = await mockPg('customer_properties').insert({ customer_id: customerId,
+      address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true }).returning('*');
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: 'Please send a quote for my 100 Example Lane house' });
+    const extracted = { dropped: 0, facts: [], obligations: [{ party: 'waves', kind: 'send_estimate', description: 'send a quote',
+      quote: email.body_text, basis: 'request', property_id: p1.id, due_text: null, due_at: null, due_date: null,
+      promise_firm: false, answered_by_payment: false }] };
+    const outcome = await recordEmailOperations(mockPg, email, extracted, { properties: [p1, p2] });
+    expect(outcome).toMatchObject({ recorded: 1 });
+    const row = await mockPg('call_commitments').first();
+    expect(row.sms_context).toMatchObject({ property_id: null });
+  });
+
   test('intake: a person-sent Gmail SENT reply, threaded to a customer-linked inbound email, becomes a staff promise', async () => {
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request' });
     const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
