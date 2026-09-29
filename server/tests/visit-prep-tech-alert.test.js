@@ -39,10 +39,18 @@ let mockLastTechChain = null;
 // takes only scheduledServiceId/visitId).
 function prime({
   svcTechnicianId = 'tech-1', techs = { 'tech-1': TECH }, visitId = 'visit-9', scheduledDate = '2026-10-02', status = 'confirmed',
+  alertableAtPush = true,
 } = {}) {
   // The card is written inside db.transaction; the trx is the same stub.
   db.transaction = jest.fn(async (fn) => fn(db));
   db.mockImplementation((table) => {
+    if (table === 'scheduled_services as s') {
+      // The last check right before the push.
+      const c = {};
+      for (const m of ['join', 'where', 'whereNotIn']) c[m] = jest.fn(() => c);
+      c.first = jest.fn(async () => (alertableAtPush ? { id: 'svc-1' } : null));
+      return c;
+    }
     if (table === 'scheduled_services') {
       mockLastSvcChain = chain(async () => ({
         id: 'svc-1', technician_id: svcTechnicianId, visit_id: visitId, scheduled_date: scheduledDate, status,
@@ -164,6 +172,13 @@ describe('notifyTechVisitPrepPhotos', () => {
       prime({ status });
       await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
       expect(mockInsertCard).not.toHaveBeenCalled();
+      expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    });
+
+    test('a reassignment between the card and the push → card written, NO push', async () => {
+      prime({ alertableAtPush: false });
+      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
+      expect(mockInsertCard).toHaveBeenCalledTimes(1);
       expect(mockSendToAdminUser).not.toHaveBeenCalled();
     });
 

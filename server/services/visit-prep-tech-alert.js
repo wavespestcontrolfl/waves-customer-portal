@@ -107,6 +107,16 @@ async function writeCard(scheduledServiceId) {
   });
 }
 
+async function stillAlertable(scheduledServiceId, technicianId) {
+  const q = db('scheduled_services as s')
+    .join('technicians as t', 't.id', 's.technician_id')
+    .where('s.id', scheduledServiceId)
+    .where('s.technician_id', technicianId)
+    .whereNotIn('s.status', OFF_ROUTE_STATUSES);
+  applyAssignable(q, 't');
+  return !!(await q.first('s.id'));
+}
+
 /**
  * @param {object} args
  * @param {string} args.scheduledServiceId  the row the photos were stored
@@ -132,6 +142,12 @@ async function sendPhotoAlert(scheduledServiceId) {
   try {
     const technicianId = await writeCard(scheduledServiceId);
     if (!technicianId) return;
+    // Last check before the push leaves: if the visit was reassigned, moved
+    // off the route, or its tech went office-only since the card was
+    // written, send nothing (the card itself is hidden by the feed's read-
+    // time scope). A push already handed to the provider cannot be recalled;
+    // this closes the window up to that point (Codex #5303 r8).
+    if (!(await stillAlertable(scheduledServiceId, technicianId))) return;
     try {
       const PushService = require('./push-notifications');
       await PushService.sendToAdminUser(technicianId, {
@@ -195,5 +211,5 @@ module.exports = {
   scopePhotoCardsToLiveVisits,
   refreshPhotoCardDates,
   isEnabled: enabled,
-  _internal: { loadVisitLocked, writeCard },
+  _internal: { loadVisitLocked, writeCard, stillAlertable },
 };
