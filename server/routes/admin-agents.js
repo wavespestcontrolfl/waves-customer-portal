@@ -165,7 +165,7 @@ function followUpDateFromPreset(preset, explicitDate) {
 
 function leadDraftMessage(lead, taskType) {
   const name = firstName(lead);
-  const greeting = `Hi${name ? ` ${name}` : ''}, this is Waves Pest Control.`;
+  const greeting = `Hi${name ? ` ${name}` : ''}, it's Waves.`;
   const service = compact(lead.service_interest || '', 42);
   const servicePhrase = service ? ` with ${service}` : '';
 

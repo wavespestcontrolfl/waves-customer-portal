@@ -260,7 +260,13 @@ async function loadDroppedFollowUps(cutoff = new Date(), { includeExpired = fals
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
            LEFT(COALESCE(cs.call_summary, ''), 120) AS call_context,
            COUNT(*) OVER () AS total_count,
-           ARRAY_AGG(t.id::text) OVER () AS all_ids
+           -- Item identity carries the task's own status (admin-alerts-ring
+           -- follow-up, codex r8 P1; mirrors reschedule-intent-watcher.js's
+           -- visit_status): pending/in_progress silently going expired (or
+           -- surfacing again through the bogus-verified branch) is a new
+           -- incident at the SAME task id — an id-only key would compare it
+           -- as "the same set" and never ring.
+           ARRAY_AGG(t.id::text || ':' || COALESCE(t.status, '')) OVER () AS all_ids
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
     LEFT JOIN csr_call_scores cs ON cs.id = t.call_score_id
@@ -627,7 +633,9 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   const laneKeys = [
     fullSetItemKeys(callbackCards, { prefix: 'card:' }),
     fullSetItemKeys(a, { prefix: 'call:' }),
-    fullSetItemKeys(b, { prefix: 'task:' }),
+    // The task's own status rides the key (see loadDroppedFollowUps' all_ids
+    // comment): pending/in_progress -> expired at the same id is new news.
+    fullSetItemKeys(b, { prefix: 'task:', idOf: (row) => (row.id == null ? null : `${row.id}:${row.status || ''}`) }),
     // Texts: the latest unanswered INBOUND message (source + our endpoint +
     // its id), so a customer texting again after a reply is a new item.
     fullSetItemKeys(c, { prefix: 'text:', idOf: (row) => (row.id == null ? null : `${row.source || 'sms'}:${row.endpoint || ''}:${row.id}`) }),

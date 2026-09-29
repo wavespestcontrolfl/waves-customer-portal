@@ -158,6 +158,7 @@
             "real_estate_agent",
             "lender",
             "home_buyer",
+            "family_member",
             "other",
             "unknown"
           ]

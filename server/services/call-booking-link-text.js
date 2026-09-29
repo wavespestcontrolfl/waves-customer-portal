@@ -251,8 +251,18 @@ const MIN_CONVERSATION_SECONDS = 30;
 // authorized — send-the-buyer-a-booking-link would text a free-consultation
 // link to someone who does not yet own the property, which the ruling
 // never covers. Fails closed, same as the property_manager/lender group.
+//
+// 'family_member' (schema 1.18.0, owner ruling 2026-09-28): a caller
+// arranging service at a RELATIVE's home is, by definition, not the
+// resident of that service address — a caller phoning about "my
+// grandfather's house" would receive a booking-link text at their own
+// number for a consultation at a property they don't live at. Same
+// reasoning as property_manager/lender/realtor: fails closed into the
+// third-party set.
+// An unconfirmed family_member call that reaches this lane (the confirmed-
+// booking case is filtered out above, same as home_buyer) gets no link.
 const THIRD_PARTY_RELATIONSHIPS = new Set([
-  'property_manager', 'real_estate_agent', 'lender', 'hoa_board_member', 'employee', 'other', 'home_buyer',
+  'property_manager', 'real_estate_agent', 'lender', 'hoa_board_member', 'employee', 'other', 'home_buyer', 'family_member',
 ]);
 
 const RESIDENTIAL_PROPERTY_TYPES = new Set([
