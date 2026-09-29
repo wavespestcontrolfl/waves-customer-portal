@@ -187,6 +187,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { recordPageView } = require('../services/customer-page-views');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
@@ -1584,6 +1585,10 @@ router.get('/:token', async (req, res, next) => {
     if (!lead) return res.json({ state: 'gone' });
 
     const custRow = await loadTrustedCustomer(db, lead, verified);
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    // Only the TRUSTED customer is attributed: leads.customer_id can come
+    // from unverified submitted contact info (see loadTrustedCustomer).
+    void recordPageView({ req, page: 'inspection', customerId: custRow?.id || null, subjectType: 'lead', subjectId: lead.id });
     const leadPayload = buildLeadPayload(lead, custRow);
 
     const eligibility = await readEligibility(lead, custRow, verified);

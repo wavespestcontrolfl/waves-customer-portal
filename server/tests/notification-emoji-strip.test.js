@@ -58,6 +58,7 @@ describe('NotificationService.notifyAdmin dedupeKey (PR #3496 — replayed emitt
     const chain = {
       where: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
+      orderBy: jest.fn(() => chain),
       first: jest.fn(async () => existingRow),
       insert,
     };

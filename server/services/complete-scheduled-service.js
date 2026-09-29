@@ -6624,6 +6624,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               if (serviceRecordCols.client_pest_rating_at) {
                 recordInsert.client_pest_rating_at = trx.fn.now();
               }
+              // Owner ruling 2026-09-29: mark whether this write IS the
+              // untouched first-visit default so email-division's activity
+              // averages can exclude it (a tech-chosen rating — including a
+              // deliberately re-entered 5 — still counts). By this point
+              // firstVisitDefaultApplied being true means the default
+              // survived confirmFirstVisitUnderLock above (otherwise
+              // effectiveClientPestRating was nulled out and this block
+              // never runs), so it is safe to use directly. Does not touch
+              // the Pest Pressure engine, the report score, or the recap.
+              if (serviceRecordCols.client_pest_rating_defaulted) {
+                recordInsert.client_pest_rating_defaulted = firstVisitDefaultApplied === true;
+              }
             }
           }
 

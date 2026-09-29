@@ -123,7 +123,11 @@
  *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
  *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). The appointment-page entry ALSO needs GATE_APPOINTMENT_PAGE (it rides that router). The Waves app entry — POST /api/schedule/:id/prep-photos and the prepPhotos field on GET /api/schedule/next — needs only this gate; flipping it opens both entry points. Off = the generic 404 on both POST routes: the anonymous appointment-page route answers it before any body parse (visitPrepPreParserGuard, mounted ahead of the shared parsers in index.js); the authenticated app route answers it after the schedule router's normal authentication and shared parsers (a logged-in route exposes nothing to an anonymous probe), before its own limiter and multipart parse. Neither GET payload carries a prepPhotos key. Surfaces when on: the appointment-page box, the app's Send photos button, the tech Visit Brief's Customer flagged block, the stop chip, and the office feed item. Sends nothing to a customer.)
  *   GATE_VISIT_PREP_TECH_ALERTS=true (PR 6, customer-visit-photos scope doc §5.4 item 4: the assigned field technician gets a tech-home card plus a one-line push — "A customer sent photos for a visit on your route" — when a customer submits visit prep photos. Strict opt-in, read at call time via visitPrepTechAlertsLive() in server/services/visit-prep-tech-alert.js. ALSO requires GATE_VISIT_PREP_PHOTOS live (nothing to alert about otherwise). Deliberately its OWN gate rather than GATE_TECH_VISIT_NOTIFICATIONS — that gate is off in production, and this can be the first tech visit card to go live; it reuses that mechanism's card/push plumbing (tech_notifications + PushService.sendToAdminUser) without depending on its gate. Recipient = the visit's CURRENT assigned technician, re-read fresh at send time — never the pre-lock row. No technician, or a non-assignable one → no card. Never fired for a duplicate-only resubmit. Sends nothing to a customer.)
+ *   GATE_SMS_LINK_WRAP=true (every portal link in an outbound customer/lead SMS becomes a tracked /l/<code> short link stamped to the text it went out in, so clicks show for ALL texts including manual ones typed with a full link — services/messaging/sms-link-wrap.js, wired at the sendCustomerMessage choke point before countSegments. Strict opt-in, read at call time via smsLinkWrapLive(). Customer/lead SMS only, never internal or MMS bodies, never non-portal hosts or links already /l/; any shortener error keeps the original link and logs a warn — never blocks a send. Dark = every body byte-identical to today.)
+ *   GATE_OUTLINK_TRACKING=true (prep guides: every link to an OUTSIDE site — Amazon, Chewy, Elanco, Bravecto, ... — in the prep email and the public /prep/:token page is rewritten at RENDER time to /go/<code> on the portal host, which logs the click (template key, prep visit, customer, sha256 ip hash, UA; bots skipped) and 302s to the exact original URL. Destinations are pre-registered outbound_links rows keyed by a hash of the URL — the route never reads a URL from the request, so it is not an open redirect — and are never tagged or altered. Own-site, portal, mailto and tel links are untouched; the prep PDF keeps direct links; template content is never edited. Strict opt-in, read at call time via outlinkTrackingLive(). The /go route itself stays live in every state so links already sent keep working after the gate is turned off. Off = byte-identical to today. Sends nothing to a customer.)
  *   GATE_VISIT_PREP_PEST_READ=true (PR 5 — automatic pest read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPestReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS live (the tech facts block is the only place a read is shown). Triggered from services/visit-prep.js's createVisitPrepSubmission — the ONE place a submission is created — fire-and-forget AFTER the submission's own transaction commits, never on the request path. A submission whose visit is a pest-only service (pest-production-calibration.js isPestOnlyServiceType — never a WDO inspection or assessment; a grouped stop counts if ANY live member at the same physical stop is), runs the same photo-id-v2 identifyPestV2 the app's Photo ID route calls and stores the result in pest_identifications with source='visit_prep', mode='internal' (already an allowed mode — no migration on that table). Lawn / tree & shrub / anything else resolves straight to read_status='unsupported', no engine call. VISIT_PREP_READ_DAILY_CAP (default 40) is this feature's OWN cap, separate from Photo ID's; a capped or failed read never blocks the submission — the technician still gets the photos, just with read_status='failed'. See docs in services/visit-prep-pest-read.js.)
+ *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep pest read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires visitPrepPestReadLive(). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same triggerVisitPrepPestRead for at most 10 of TODAY's (ET) submissions on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), and 'unsupported' where the stop is now a pest stop (an unsupported row checked and still not pest is skipped for an hour). Pending and failed rows are never retried. One retry per row per case (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP like a first read. A batch with failed retries fails the job run (job_health).)
+ *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -185,6 +189,18 @@ const gates = {
   // visitPrepPestReadLive() at call time below (its own strict opt-in,
   // ALSO requiring visitPrepPhotosLive()).
   visitPrepPestRead: process.env.GATE_VISIT_PREP_PEST_READ === 'true',
+  // Visit prep pest read — recovery sweep. Registered for logGateStatus
+  // only; services/visit-prep-pest-read-sweep.js reads
+  // visitPrepReadSweepLive() at call time below (its own strict opt-in,
+  // ALSO requiring visitPrepPestReadLive()).
+  visitPrepReadSweep: process.env.GATE_VISIT_PREP_READ_SWEEP === 'true',
+  // SMS portal-link wrap. Registered for logGateStatus only; the choke point
+  // reads smsLinkWrapLive() at call time below so a flip needs no redeploy.
+  smsLinkWrap: process.env.GATE_SMS_LINK_WRAP === 'true',
+  // Prep-guide outside-link click tracking (dark). Registered for
+  // logGateStatus only; services/outlink-tracking.js reads
+  // outlinkTrackingLive() at call time below.
+  outlinkTracking: process.env.GATE_OUTLINK_TRACKING === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -3423,6 +3439,9 @@ const gates = {
   // reader is ibCancelAppointmentLive() below, same discountStackingLive()
   // convention, so a flip needs no redeploy.
   ibCancelAppointment: process.env.GATE_IB_CANCEL_APPOINTMENT === 'true',
+  // Admin customer Activity timeline (read-only). For logGateStatus only; the
+  // route reads customerActivityTimelineLive() at call time.
+  customerActivityTimeline: process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true',
   // Retire the dormant legacy balance-reminder cron (dunning unification,
   // owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/
   // urgent pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/
@@ -3746,6 +3765,14 @@ function ibCancelAppointmentLive() {
   return process.env.GATE_IB_CANCEL_APPOINTMENT === 'true';
 }
 
+// GATE_CUSTOMER_ACTIVITY_TIMELINE read at CALL time — strict `=== 'true'`, dark
+// by default. The canonical reader for GET /api/admin/customers/:id/activity
+// (routes/admin-customers.js); the admin panel hides itself on the route's
+// `{ enabled: false }`. Read-only: no customer message, no write.
+function customerActivityTimelineLive() {
+  return process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true';
+}
+
 // GATE_VISIT_PREP_TECH_ALERTS read at CALL time — strict `=== 'true'`, same
 // convention as visitPrepPhotosLive(). The canonical reader for
 // server/services/visit-prep-tech-alert.js. Deliberately independent of
@@ -3756,6 +3783,15 @@ function ibCancelAppointmentLive() {
 // — see its own header for why.
 function visitPrepTechAlertsLive() {
   return process.env.GATE_VISIT_PREP_TECH_ALERTS === 'true';
+}
+
+// GATE_SMS_LINK_WRAP read at CALL time — strict `=== 'true'`, same convention
+// as visitPrepPhotosLive(). The canonical reader for the sendCustomerMessage
+// choke point's portal-link wrap (services/messaging/sms-link-wrap.js). Off =
+// every SMS body byte-identical to before; the `smsLinkWrap` gates-map entry
+// above is for logGateStatus only.
+function smsLinkWrapLive() {
+  return process.env.GATE_SMS_LINK_WRAP === 'true';
 }
 
 // GATE_VISIT_PREP_PEST_READ read at CALL time — strict `=== 'true'`, own
@@ -3772,6 +3808,17 @@ function visitPrepPestReadLive() {
   // read is shown: without it a paid read would be invisible (Codex #5305 r8).
   return process.env.GATE_VISIT_PREP_PEST_READ === 'true' && visitPrepPhotosLive()
     && process.env.GATE_VISIT_FACTS === 'true';
+}
+
+// GATE_VISIT_PREP_READ_SWEEP read at CALL time — strict `=== 'true'`, same
+// convention as visitPrepPestReadLive(). The canonical reader for
+// services/visit-prep-pest-read-sweep.js. ALSO requires
+// visitPrepPestReadLive() (which itself cascades to visitPrepPhotosLive()
+// and GATE_VISIT_FACTS) — a stray flip of this gate alone, with the read
+// lane itself dark, must retry nothing. The visitPrepReadSweep gates-map
+// entry above is for logGateStatus only.
+function visitPrepReadSweepLive() {
+  return process.env.GATE_VISIT_PREP_READ_SWEEP === 'true' && visitPrepPestReadLive();
 }
 
 // GATE_STAMPED_ZERO_FREE read at CALL time — strict `=== 'true'`, same
@@ -3795,6 +3842,18 @@ function adminAlertRelevanceLive() {
   return !['off', 'false', '0'].includes(String(process.env.ADMIN_ALERT_RELEVANCE ?? '').trim().toLowerCase());
 }
 
+// ALERT_EPISODES read at CALL time — ships LIVE: on unless set to exactly
+// 'off', 'false' or '0' (case-insensitive), so an unset env is the live state
+// and the env is a pure kill switch (owner-approved scope 2026-09-29, rule
+// 14). The canonical reader for the schedule-integrity watchdog's alert
+// episodes: each of its four classes closes its own bell when the problem is
+// fixed (notification-service's closeAdminAlertKeys) and rings again when the
+// problem comes back (raiseAdminAlertWithReopen). Off = byte-identical to
+// before: no close pass, no reopen, the same notifyAdmin calls.
+function alertEpisodesLive() {
+  return !['off', 'false', '0'].includes(String(process.env.ALERT_EPISODES ?? '').trim().toLowerCase());
+}
+
 // PROMISE_EVIDENCE_CLOSE read at CALL time — DEFAULT ON (owner ruling
 // 2026-09-28, "close it, show proof"); off only when set to 'off', 'false'
 // or '0' (case-insensitive). On, call-commitments' fulfillment refresh closes
@@ -3805,6 +3864,19 @@ function adminAlertRelevanceLive() {
 // live kill with no redeploy.
 function promiseEvidenceCloseLive() {
   return !['off', 'false', '0'].includes(String(process.env.PROMISE_EVIDENCE_CLOSE || '').trim().toLowerCase());
+}
+
+// PROMISE_CONTACT_CHECK read at CALL time — DEFAULT ON (owner ruling
+// 2026-09-29); off only when set to 'off', 'false' or '0' (case-insensitive).
+// On, a periodic job (call-commitment-contact-check.js) asks a model whether a
+// person's later delivered text or call back to the caller delivered what an
+// open Waves "other" promise from a call said it would, and closes the promise
+// on a grounded yes (evidence kept on the row, Reopen on the Owed tab). It
+// also needs PROMISE_EVIDENCE_CLOSE and GATE_CALL_COMMITMENTS. Off = no NEW
+// checks; a promise it already closed stays closed while its witness stands.
+// No customer message either way.
+function promiseContactCheckLive() {
+  return !['off', 'false', '0'].includes(String(process.env.PROMISE_CONTACT_CHECK || '').trim().toLowerCase());
 }
 
 function isEnabled(gate) {
@@ -3823,5 +3895,19 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, promiseEvidenceCloseLive, adminAlertRelevanceLive };
+// GATE_OUTLINK_TRACKING read at CALL time — strict `=== 'true'`, same
+// convention as visitPrepPhotosLive(). The canonical reader for
+// server/services/outlink-tracking.js (render-time rewrite of outside links
+// in the prep email and /prep page). Only the REWRITE is gated: the /go/:code
+// redirect route stays live so a link already sent keeps working after a
+// kill. The `outlinkTracking` gates-map entry above is for logGateStatus only.
+function outlinkTrackingLive() {
+  return process.env.GATE_OUTLINK_TRACKING === 'true';
+}
+
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive };
+// Exported on its own line (not in the shared list above) so concurrent gate
+// PRs appending to that one-line list never conflict with this one.
+module.exports.smsLinkWrapLive = smsLinkWrapLive;
+module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 // gates 1775330914

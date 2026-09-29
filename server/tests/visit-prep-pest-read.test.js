@@ -60,7 +60,7 @@ function fakeConn(tables = {}) {
   // The submission under test exists and was sent today (claimReadSlot
   // only lets a same-ET-day submission claim).
   if (!store.visit_prep_submissions.some((r) => r.id === 'sub-1')) {
-    store.visit_prep_submissions = [...store.visit_prep_submissions, { id: 'sub-1', created_at: new Date() }];
+    store.visit_prep_submissions = [...store.visit_prep_submissions, { id: 'sub-1', created_at: new Date(), read_status: 'none' }];
   }
   const writes = [];
   let nextId = 1;
@@ -74,6 +74,7 @@ function fakeConn(tables = {}) {
     };
     q.whereIn = (col, vals) => { q._whereIn = { col, vals }; return q; };
     q.forShare = () => q;
+    q.forUpdate = () => q;
     const rowsMatching = () => (store[table] || []).filter((r) => {
       if (q._whereIn && !q._whereIn.vals.includes(r[q._whereIn.col])) return false;
       return Object.entries(q._where).every(([k, v]) => {
@@ -101,6 +102,7 @@ function fakeConn(tables = {}) {
     q.update = async (patch) => {
       writes.push({ table, where: { ...q._where }, patch });
       for (const row of (store[table] || [])) {
+        if (q._whereIn && !q._whereIn.vals.includes(row[q._whereIn.col])) continue;
         if (Object.entries(q._where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
       }
       return 1;
@@ -428,7 +430,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     mockIdentifyPestV2.mockRejectedValue(new Error('vision provider down'));
     await expect(triggerVisitPrepPestRead({
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn,
-    })).resolves.toBeUndefined();
+    })).resolves.toBe('failed');
     expect(readStatusWrites(conn, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
 
@@ -472,7 +474,7 @@ describe('engine failure — never blocks the submission, always ends at failed'
     mockIdentifyPestV2.mockResolvedValue(okEngineResult());
     await expect(triggerVisitPrepPestRead({
       submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: wrapped,
-    })).resolves.toBeUndefined();
+    })).resolves.toBe('failed');
     expect(readStatusWrites(wrapped, 'sub-1').map((w) => w.read_status)).toEqual(['pending', 'failed']);
   });
 });
@@ -519,11 +521,49 @@ describe('_internal.etDayStart (cap day = America/New_York calendar day)', () =>
   });
 });
 
+describe('expected status (Codex #5319 r1 P1)', () => {
+  test('a read that finished meanwhile is never re-claimed or re-run', async () => {
+    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(), read_status: 'done' }] });
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    mockIdentifyPestV2.mockResolvedValue(okEngineResult());
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn, expectStatus: ['pending'] });
+    expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('done');
+  });
+
+  test('a stale pending row the caller expects is re-claimed and read', async () => {
+    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(), read_status: 'pending' }] });
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    mockIdentifyPestV2.mockResolvedValue(okEngineResult());
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn, expectStatus: ['pending'] });
+    expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
+  });
+
+  test('a pre-claim write never overwrites a finished read (photo load fails after the original finished)', async () => {
+    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(), read_status: 'done' }] });
+    mockGetPhotoBase64.mockRejectedValue(new Error('S3 down'));
+    await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn, expectStatus: ['pending'] });
+    expect(conn._store.visit_prep_submissions.find((r) => r.id === 'sub-1').read_status).toBe('done');
+  });
+});
+
 describe('claim day', () => {
   test('a submission from before today\'s ET midnight never claims a slot (photos still delivered)', async () => {
-    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000) }] });
+    const conn = fakeConn({ visit_prep_submissions: [{ id: 'sub-1', created_at: new Date(Date.now() - 36 * 3600 * 1000), read_status: 'none' }] });
     await triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn });
     expect(mockIdentifyPestV2).not.toHaveBeenCalled();
     expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'none', read_ref: null }]);
+  });
+});
+
+describe('trigger outcome', () => {
+  test('reports done on success, failed when the engine throws, skipped with the gate off', async () => {
+    mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+    mockIdentifyPestV2.mockResolvedValueOnce(okEngineResult());
+    await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() })).resolves.toBe('done');
+    mockIdentifyPestV2.mockRejectedValueOnce(new Error('down'));
+    await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() })).resolves.toBe('failed');
+    mockGateOn = false;
+    await expect(triggerVisitPrepPestRead({ submissionId: 'sub-1', svc: BASE_SVC, photos: PHOTOS, conn: fakeConn() })).resolves.toBe('skipped');
   });
 });
