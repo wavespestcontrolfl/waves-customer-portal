@@ -61,6 +61,18 @@ function fakeConn(tables) {
 }
 
 describe('customerFlaggedFacts', () => {
+  // The read line rides only while the pest-read gate is live.
+  beforeEach(() => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+  });
+  afterEach(() => {
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+    delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_FACTS;
+  });
+
   beforeEach(() => jest.clearAllMocks());
 
   test('no CURRENT-membership submissions → null (never an empty array)', async () => {
@@ -95,6 +107,10 @@ describe('customerFlaggedFacts', () => {
       locationOnProperty: 'back_yard',
       note: 'Brown spots spreading',
       photoIds: ['photo-a', 'photo-b'],
+      // No read_status on the fixture row (pre-PR-5 shape / column
+      // default) — reads back as 'none', same as gate-off or "engine
+      // never ran".
+      read: { status: 'none' },
     }]);
     // Never S3 keys or URLs in facts (scope §7).
     expect(JSON.stringify(facts)).not.toMatch(/visitprep|s3_key|signed:\/\//);
@@ -142,7 +158,161 @@ describe('customerFlaggedFacts', () => {
     expect(facts).toEqual([{
       id: 'sub-1', sentAt: '2026-09-30T10:00:00.000Z', topic: 'other',
       locationOnProperty: null, note: 'Ants near the mailbox', photoIds: [],
+      read: { status: 'none' },
     }]);
+  });
+
+  test('a stop reclassified to a non-pest service after the read shows no read (unsupported)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Lawn Weed & Feed' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_ref: 'pi-1' },
+      ],
+      visit_prep_photos: [],
+      pest_identifications: [{ id: 'pi-1', report_contract: JSON.stringify({ v2: { entry: { common_name: 'German cockroach' } } }) }],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a PENDING read on a stop reclassified to lawn shows no pending line (unsupported)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Lawn Weed & Feed' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_ref: null },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a failure loading the read keeps the note and photos (no read field)', async () => {
+    const base = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: 'Ants by the slider', read_status: 'done', read_ref: 'pi-1' },
+      ],
+      visit_prep_photos: [],
+    });
+    const conn = (table) => {
+      if (table === 'pest_identifications') throw new Error('db hiccup');
+      return base(table);
+    };
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].note).toBe('Ants by the slider');
+    expect(facts[0]).not.toHaveProperty('read');
+  });
+
+  test('pest-read gate off: stored reads are not served at all (the kill switch hides them)', async () => {
+    delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_FACTS;
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_ref: 'pi-1' },
+      ],
+      visit_prep_photos: [],
+      pest_identifications: [{ id: 'pi-1', report_contract: JSON.stringify({ v2: { entry: { common_name: 'German cockroach' } } }) }],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0]).not.toHaveProperty('read');
+  });
+
+  test('a DONE read merges ONLY the fixed engine fields from the stored contract, batched in one query', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
+      visit_prep_submissions: [
+        {
+          id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'),
+          topic: 'pest', location_on_property: null, note: null, read_status: 'done', read_ref: 'pi-1',
+        },
+        {
+          // Sent just now: a pending read is shown as pending only inside
+          // its 15-minute window, so a fixed date would go stale.
+          id: 'sub-2', scheduled_service_id: 'svc-1', created_at: new Date(),
+          topic: null, location_on_property: null, note: null, read_status: 'pending', read_ref: null,
+        },
+      ],
+      visit_prep_photos: [],
+      pest_identifications: [
+        {
+          id: 'pi-1',
+          report_contract: JSON.stringify({
+            contract_version: 'pest_id_v1',
+            identification: { slug: 'german-cockroach', label: 'German cockroach', category: 'pest_issue' },
+            safety: {
+              stinging: false, venomous: false, disease_vector: true, structural_threat: false,
+            },
+            // v1 model prose must never reach the tech read.
+            observations: ['MODEL PROSE: looks like a roach near the sink'],
+            distinguishing_features: ['MODEL PROSE: maybe'],
+            v2: {
+              answer: { wording: 'likely', node_id: 'german-cockroach' },
+              entry: { slug: 'german-cockroach', common_name: 'German cockroach' },
+              evidence: { matches: ['Two dark stripes behind the head'], still_need: ['A clear top-down photo'] },
+              referral: null,
+            },
+          }),
+        },
+      ],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    const sub1 = facts.find((s) => s.id === 'sub-1');
+    expect(sub1.read).toEqual({
+      status: 'done',
+      wordingTier: 'likely',
+      commonName: 'German cockroach',
+      groupLabel: null,
+      groupHeadline: null,
+      matches: ['Two dark stripes behind the head'],
+      stillNeed: ['A clear top-down photo'],
+      referralKind: null,
+      hazards: {
+        stinging: false, venomous: false, disease_vector: true, structural_threat: false,
+      },
+    });
+    // No free model prose anywhere in the facts payload — every string in
+    // the read object traces back to a fixed catalog/engine field.
+    expect(facts.find((s) => s.id === 'sub-2').read).toEqual({ status: 'pending' });
+  });
+});
+
+describe('readFactsFromContract', () => {
+  const { readFactsFromContract } = visitPrep._internal;
+  test('a group-only answer carries the catalog group label, never an entry name', () => {
+    const facts = readFactsFromContract('done', {
+      v2: { answer: { wording: 'group_only' }, entry: null, group: { id: 'ants', label: 'Ants' }, evidence: { matches: [], still_need: [] } },
+    });
+    expect(facts.commonName).toBeNull();
+    expect(facts.groupLabel).toBe('Ants');
+  });
+  test('a category-level answer (no group block) carries the engine\'s fixed headline', () => {
+    const facts = readFactsFromContract('done', {
+      v2: { answer: { wording: 'group_only', headline: 'Looks like a beetle' }, entry: null, group: null, evidence: { matches: [], still_need: [] } },
+    });
+    expect(facts.groupLabel).toBeNull();
+    expect(facts.groupHeadline).toBe('Looks like a beetle');
+  });
+
+  test('a done read with no stored contract reads as failed, never an empty result', () => {
+    expect(readFactsFromContract('done', null)).toEqual({ status: 'failed' });
+  });
+});
+
+describe('effectiveReadStatus (a read interrupted by a redeploy never sticks on pending)', () => {
+  const { effectiveReadStatus } = visitPrep._internal;
+  const created = new Date('2026-10-01T12:00:00Z');
+  test('pending within 15 minutes stays pending', () => {
+    expect(effectiveReadStatus('pending', created, created.getTime() + 14 * 60 * 1000)).toBe('pending');
+  });
+  test('pending older than 15 minutes reads as failed', () => {
+    expect(effectiveReadStatus('pending', created, created.getTime() + 16 * 60 * 1000)).toBe('failed');
+  });
+  test('other statuses pass through', () => {
+    for (const s of ['none', 'done', 'failed', 'unsupported']) {
+      expect(effectiveReadStatus(s, created, created.getTime() + 60 * 60 * 1000)).toBe(s);
+    }
   });
 });
 
@@ -196,8 +366,8 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
   // it, so its note and photo must not come back.
   function reassignedMidRead() {
     const before = [
-      { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
-      { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+      { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', service_type: 'Quarterly Pest Control' },
+      { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', service_type: 'Quarterly Pest Control' },
     ];
     const after = [before[0], { ...before[1], technician_id: 'tech-2' }];
     const base = fakeConn({
@@ -225,6 +395,74 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
   test('customerFlaggedFacts drops a sibling reassigned mid-read', async () => {
     const facts = await customerFlaggedFacts({ id: 'svc-A', visit_id: 'visit-9' }, reassignedMidRead());
     expect(facts.map((f) => f.id)).toEqual(['sub-A']);
+  });
+
+  test('with reads on, the read contracts are fetched BEFORE the final membership recheck (Codex #5305 r7 P1)', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+    try {
+      const inner = reassignedMidRead();
+      // Both submissions carry a finished read, so the contracts ARE fetched.
+      const withReads = fakeConn({
+        visit_prep_submissions: [
+          { id: 'sub-A', scheduled_service_id: 'svc-A', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: 'mine', read_status: 'done', read_ref: 'pi-A' },
+          { id: 'sub-B', scheduled_service_id: 'svc-B', created_at: new Date('2026-09-30T11:00:00Z'), topic: null, location_on_property: null, note: 'reassigned away', read_status: 'done', read_ref: 'pi-B' },
+        ],
+        pest_identifications: [
+          { id: 'pi-A', report_contract: JSON.stringify({ v2: { entry: { common_name: 'German cockroach' } } }) },
+          { id: 'pi-B', report_contract: JSON.stringify({ v2: { entry: { common_name: 'Fire ant' } } }) },
+        ],
+      });
+      const order = [];
+      const conn = (table) => {
+        order.push(table);
+        return (table === 'visit_prep_submissions' || table === 'pest_identifications') ? withReads(table) : inner(table);
+      };
+      const facts = await customerFlaggedFacts({ id: 'svc-A', visit_id: 'visit-9' }, conn);
+      expect(facts.map((f) => f.id)).toEqual(['sub-A']);
+      expect(facts[0].read.commonName).toBe('German cockroach');
+      expect(order).toContain('pest_identifications');
+      const lastMembership = order.lastIndexOf('scheduled_services');
+      expect(order.slice(lastMembership + 1)).not.toContain('pest_identifications');
+    } finally {
+      delete process.env.GATE_VISIT_PREP_PHOTOS;
+      delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_FACTS;
+    }
+  });
+
+  test('a pest sibling that leaves the stop during the final recheck: the lawn anchor\'s read is not served as pest (Codex #5305 r16)', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+    try {
+      const before = [
+        { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', service_type: 'Lawn Weed & Feed' },
+        { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', service_type: 'Quarterly Pest Control' },
+      ];
+      const after = [before[0], { ...before[1], technician_id: 'tech-2' }];
+      const base = fakeConn({
+        visit_prep_submissions: [
+          { id: 'sub-A', scheduled_service_id: 'svc-A', created_at: new Date(), topic: null, location_on_property: null, note: 'lawn spot', read_status: 'done', read_ref: 'pi-A' },
+        ],
+        visit_prep_photos: [],
+        pest_identifications: [{ id: 'pi-A', report_contract: JSON.stringify({ v2: { entry: { common_name: 'German cockroach' } } }) }],
+      });
+      let memberReads = 0;
+      const conn = (table) => {
+        if (table !== 'scheduled_services') return base(table);
+        memberReads += 1;
+        return fakeConn({ scheduled_services: memberReads <= 2 ? before : after })(table);
+      };
+      const facts = await customerFlaggedFacts({ id: 'svc-A', visit_id: 'visit-9' }, conn);
+      expect(facts.map((f) => f.id)).toEqual(['sub-A']);
+      expect(facts[0].read).toEqual({ status: 'unsupported' });
+    } finally {
+      delete process.env.GATE_VISIT_PREP_PHOTOS;
+      delete process.env.GATE_VISIT_PREP_PEST_READ;
+      delete process.env.GATE_VISIT_FACTS;
+    }
   });
 
   test('stopPhotoViewUrls drops a sibling reassigned while URLs were signed, and never returns the internal row id', async () => {

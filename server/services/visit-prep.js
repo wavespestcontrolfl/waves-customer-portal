@@ -372,7 +372,19 @@ async function persistLocked(trx, {
   // Counts come from THIS transaction (Codex r1 P2): a post-commit read
   // that failed would 500 a request whose photos were already durably
   // stored and invite a retry of a write that had succeeded.
-  return { created: true, stored: toStore.length, dropped, current, summary: await visitPrepSummary(current, trx) };
+  // `submissionId` + `photos` (S3 key/mime only, never the buffers) ride
+  // out so the caller can trigger PR 5's fire-and-forget pest read AFTER
+  // this transaction commits — never from in here (see the file header:
+  // no I/O from inside the stop lock beyond this write's own).
+  return {
+    created: true,
+    stored: toStore.length,
+    dropped,
+    current,
+    summary: await visitPrepSummary(current, trx),
+    submissionId,
+    photos: toStore.map((u) => ({ s3Key: u.s3Key, mimeType: u.mimeType })),
+  };
 }
 
 // A resubmit of already-stored photos carrying a corrected or newly added
@@ -490,6 +502,35 @@ async function createVisitPrepSubmission({
     }
   }
 
+  // PR 5 — automatic pest read (GATE_VISIT_PREP_PEST_READ). This is THE
+  // single place a submission is created (both today's public
+  // appointment-page POST and the upcoming customer-auth app route call
+  // through here), so hooking it here — rather than in either route —
+  // means every entry point inherits it with no extra wiring. Fired
+  // AFTER `result` above (withStopLock's db.transaction has already
+  // resolved, so the submission is durably committed), fire-and-forget:
+  // never awaited, so a slow or failing vision call can never add latency
+  // to, or fail, the customer's own upload response. Only for a NEW
+  // submission (`result.created`) — an all-duplicate resubmit stored
+  // nothing new to read. A lazy require keeps the pest v2 engine (and the
+  // species catalog it loads) out of every caller of this module that
+  // never actually creates a submission.
+  // Gate first, and the engine module (catalog + validators, built at load)
+  // is required only on the next tick, never on this response path
+  // (Codex #5305 r3 P2). The upload is already committed: a failure to load
+  // or start the read is logged, never a 500 to the customer.
+  if (result.created && require('../config/feature-gates').visitPrepPestReadLive()) {
+    const readArgs = { submissionId: result.submissionId, svc: result.current, photos: result.photos };
+    setImmediate(() => {
+      try {
+        require('./visit-prep-pest-read').triggerVisitPrepPestRead(readArgs)
+          .catch((err) => logger.error(`[visit-prep] pest read trigger failed for submission ${readArgs.submissionId}: ${err.message}`));
+      } catch (err) {
+        logger.error(`[visit-prep] pest read could not start for submission ${readArgs.submissionId}: ${err.message}`);
+      }
+    });
+  }
+
   return { created: result.created, stored: result.stored, summary: result.summary, svc: result.current };
 }
 
@@ -587,6 +628,78 @@ async function stopPhotoViewUrls(svc, conn = db) {
     .map(({ scheduledServiceId, ...photo }) => photo);
 }
 
+function parseJsonMaybe(value) {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// The `read` object attached to each facts.customerFlagged entry (PR 5,
+// GATE_VISIT_PREP_PEST_READ) — built ONLY from FIXED engine fields, never
+// free model prose: the wording tier (a fixed enum:
+// pretty_sure/likely/group_only/unknown), an APPROVED catalog common name
+// (photo-id-v2/pest-engine.js's buildEntryBlock only ever sets `entry` to
+// an approved, reviewed species — see its `entryLevelAnswer` gate), the
+// matched/still-needed trait strings the catalog itself authored
+// (v2.evidence.matches/still_need), a referral kind, and the fixed boolean
+// hazard flags (`safety.{stinging,venomous,disease_vector,
+// structural_threat}` — the SAME v1SafetyFallback shape pest-engine.js's
+// mapToV1 already computes for every named/generic/legacy answer). No
+// product or rate guidance rides here — that stays out of this lane
+// entirely (protocols.json, the tree & shrub field guide). `contract` is
+// the stored pest_identifications.report_contract (v1 shape + embedded
+// `v2`), the SAME JSON shape the customer Photo ID route stores.
+// A read runs in-process after the submission commits; a redeploy or
+// crash mid-read would otherwise leave 'pending' on the row forever. A
+// read still pending this long after the photos arrived is shown as
+// failed (quiet) instead of "Photo read pending".
+const READ_PENDING_STALE_MS = 15 * 60 * 1000;
+
+function effectiveReadStatus(status, createdAt, now = Date.now()) {
+  if (status !== 'pending') return status;
+  const at = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
+  return Number.isFinite(at) && now - at > READ_PENDING_STALE_MS ? 'failed' : status;
+}
+
+// How the engine's answer is named, most specific first: an approved
+// species (entry), else its catalog group label (pest-engine.js
+// groupBlockFor), else for a category-level climb the engine's fixed
+// headline template ("Looks like <generic>", climbedOrDisagreedAnswer).
+// Never model text.
+function answerName(v2) {
+  if (v2.entry) return { commonName: v2.entry.common_name || null, groupLabel: null, groupHeadline: null };
+  const groupLabel = v2.group?.label || null;
+  const groupHeadline = !groupLabel && v2.answer?.wording === 'group_only' ? (v2.answer.headline || null) : null;
+  return { commonName: null, groupLabel, groupHeadline };
+}
+
+const asList = (value) => (Array.isArray(value) ? value : []);
+
+function readFactsFromContract(status, contract) {
+  // A 'done' row whose stored result is gone or unreadable (a purge, the
+  // FK's ON DELETE SET NULL) is shown as failed, never as an empty "done"
+  // the tech would read as "the AI looked and named nothing".
+  if (status === 'done' && !contract) return { status: 'failed' };
+  if (status !== 'done') return { status };
+  const v2 = contract.v2 || {};
+  return {
+    status,
+    wordingTier: v2.answer?.wording || null,
+    ...answerName(v2),
+    // v2.evidence is picked from the approved catalog entry's own traits
+    // (pest-engine.js evidenceFor), never model prose.
+    matches: asList(v2.evidence?.matches),
+    stillNeed: asList(v2.evidence?.still_need),
+    referralKind: v2.referral?.kind || null,
+    hazards: contract.safety || null,
+  };
+}
+
 // Deterministic-facts entry point for `facts.customerFlagged`
 // (previsit-brief.js's deterministicVisitFacts) — called ONLY when
 // visitPrepPhotosLive() (the caller's job, not re-checked here so this
@@ -596,13 +709,32 @@ async function stopPhotoViewUrls(svc, conn = db) {
 // off or no submissions must both read as "key absent," not "empty list."
 // Never returns S3 keys or URLs — photoIds only; the thumbnails endpoint
 // above signs those on its own authorized read.
+const FINAL_CHECK_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
+
+// The stop's final member set and, when asked, whether it is still a pest
+// stop, from one consistent snapshot. A conn without transactions (unit-test
+// fakes) runs the same reads directly.
+async function finalStopSnapshot(svc, conn, needPest) {
+  const run = async (c) => {
+    const current = await stillOnTechStop(svc, c);
+    const stillPest = needPest
+      ? await require('./visit-prep-pest-applicability').membersArePest([...current], c)
+      : true;
+    return { current, stillPest };
+  };
+  // Inside a caller's transaction (or a test fake) the reads already share
+  // that connection; only a pool-level conn opens the snapshot.
+  if (typeof conn.transaction !== 'function' || conn.isTransaction) return run(conn);
+  return conn.transaction((trx) => run(trx), FINAL_CHECK_SNAPSHOT);
+}
+
 async function customerFlaggedFacts(svc, conn = db) {
   const ids = await techStopMemberIds(svc, conn);
   if (ids.length === 0) return null;
   const submissions = await conn('visit_prep_submissions')
     .whereIn('scheduled_service_id', ids)
     .orderBy('created_at', 'asc')
-    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note');
+    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note', 'read_status', 'read_ref');
   if (submissions.length === 0) return null;
   const photos = await conn('visit_prep_photos')
     .whereIn('submission_id', submissions.map((s) => s.id))
@@ -613,9 +745,53 @@ async function customerFlaggedFacts(svc, conn = db) {
     if (!photoIdsBySubmission.has(p.submission_id)) photoIdsBySubmission.set(p.submission_id, []);
     photoIdsBySubmission.get(p.submission_id).push(p.id);
   }
-  const current = await stillOnTechStop(svc, conn);
+  // Batch-fetch the stored contract for every DONE read on this stop —
+  // one query regardless of how many submissions carry a result. A
+  // submission whose read_ref points at a row that no longer exists (a
+  // purge, or the FK's ON DELETE SET NULL racing this read) just falls
+  // back to `{ status }` with no fixed fields — never a thrown error over
+  // an otherwise-informative section. Fetched BEFORE the membership
+  // recheck below, so every read this function does is covered by it
+  // (Codex #5305 r7 P1).
+  // The read line is optional enrichment: if it can't be loaded, the
+  // customer's note and photos are still served, just without a read
+  // (Codex #5305 r14 P2).
+  let readsLive = require('../config/feature-gates').visitPrepPestReadLive();
+  const contractsByRef = new Map();
+  if (readsLive) {
+    try {
+      const readRefs = [...new Set(submissions.filter((s) => s.read_status === 'done' && s.read_ref).map((s) => s.read_ref))];
+      if (readRefs.length) {
+        const rows = await conn('pest_identifications').whereIn('id', readRefs).select('id', 'report_contract');
+        for (const row of rows) contractsByRef.set(row.id, parseJsonMaybe(row.report_contract));
+      }
+    } catch (err) {
+      logger.warn(`[visit-prep] read enrichment failed for ${svc.id}: ${err.message}`);
+      readsLive = false;
+    }
+  }
+
+  // Membership and pest-ness are read in ONE repeatable-read snapshot (the
+  // FINAL_CHECK_SNAPSHOT pattern of estimate-consultation-offer.js), so the
+  // member set that filters what is served and the member set judged pest
+  // are the same rows at the same instant (Codex #5305 r16/r17 P1). Checked
+  // for running reads too, so "Photo read pending" never outlives a
+  // reclassification (r13). The applicability module never loads the
+  // vision engine here.
+  const needPest = readsLive && submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
+  let snapshot;
+  try {
+    snapshot = await finalStopSnapshot(svc, conn, needPest);
+  } catch (err) {
+    if (!needPest) throw err;
+    logger.warn(`[visit-prep] read applicability failed for ${svc.id}: ${err.message}`);
+    readsLive = false;
+    snapshot = { current: await stillOnTechStop(svc, conn), stillPest: true };
+  }
+  const { current, stillPest } = snapshot;
   const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
   if (kept.length === 0) return null;
+
   return kept.map((s) => ({
     id: s.id,
     sentAt: s.created_at instanceof Date ? s.created_at.toISOString() : new Date(s.created_at).toISOString(),
@@ -623,6 +799,12 @@ async function customerFlaggedFacts(svc, conn = db) {
     locationOnProperty: s.location_on_property || null,
     note: s.note || null,
     photoIds: photoIdsBySubmission.get(s.id) || [],
+    // The read's own kill switch hides stored reads too (Codex #5305 r1 P1).
+    ...(readsLive ? {
+      read: stillPest
+        ? readFactsFromContract(effectiveReadStatus(s.read_status || 'none', s.created_at), s.read_ref ? contractsByRef.get(s.read_ref) : null)
+        : { status: 'unsupported' },
+    } : {}),
   }));
 }
 
@@ -640,6 +822,6 @@ module.exports = {
   customerFlaggedFacts,
   techStopMemberIds,
   _internal: {
-    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg,
+    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg, readFactsFromContract, effectiveReadStatus,
   },
 };
