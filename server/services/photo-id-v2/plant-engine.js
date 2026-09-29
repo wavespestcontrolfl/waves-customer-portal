@@ -2327,7 +2327,11 @@ async function identifyPlantV2({
   // (Codex #5307 r2): its answer could never be returned anyway.
   const failure = legFailureReason(run, identity, conditions, escalation);
   if (failure) return { ok: false, reason: failure };
-  const refereed = await runReferee(run, identity, conditions, escalation, { skip: photosUnusable });
+  // Every prior leg's own photo-quality verdict, combined exactly as the
+  // final answer's will be: a read already unusable can never surface the
+  // referee's answer, so it never draws the billed call (Codex #5307 r6).
+  const priorUnusable = namingGateFor(photoReadFor(identity, conditions, escalation)).unusable;
+  const refereed = await runReferee(run, identity, conditions, escalation, { skip: photosUnusable || priorUnusable });
 
   const quality = photoReadFor(identity, conditions, refereed);
   const lane = mode === 'identify' ? identifyLaneFor(subject, refereed.slots, refereed.identityFlags) : null;

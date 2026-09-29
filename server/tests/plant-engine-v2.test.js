@@ -1847,6 +1847,18 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(lanes).not.toContain('photo_id_v2_plant_referee');
     });
 
+    test('Codex #5307 r6: a prior leg that judged the photos unusable skips the billed referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const unusableEscalation = {
+        ...disagreeingEscalationLeg,
+        json: { ...disagreeingEscalationLeg.json, quality: { usable: false, issue: 'blurry' } },
+      };
+      [candidatesLeg, verifyLeg, unusableEscalation, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.referee.triggered).toBe(false);
+    });
+
     test('gate off: no 4th dispatch, result identical to the pre-referee disagreement outcome', async () => {
       delete process.env.GATE_PLANT_ID_REFEREE;
       [candidatesLeg, verifyLeg, disagreeingEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
