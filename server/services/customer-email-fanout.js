@@ -163,6 +163,32 @@ async function resolveOpenEmailReviewCards({ customerId, email, source = 'custom
 }
 
 /**
+ * Merge helper: re-point a soon-to-be-deleted newsletter subscriber's delivery
+ * history at the surviving subscriber. newsletter_send_deliveries.subscriber_id
+ * is ON DELETE SET NULL, so without this the person's send history is orphaned
+ * (the activity timeline joins deliveries through the subscriber). Runs in the
+ * caller's transaction, BEFORE the old row's delete. Delivery rows carry their
+ * own email snapshot, so each keeps the address it was actually mailed at.
+ *  - Only onto a survivor that belongs to THIS customer (already linked, or
+ *    adopted just before): a row linked to ANOTHER customer must never inherit
+ *    this history (it would show on their timeline and take this customer's
+ *    bounce/unsubscribe events).
+ *  - UNIQUE (send_id, subscriber_id): an issue the survivor already has its own
+ *    delivery for is skipped (re-pointing it would abort the whole edit); those
+ *    rows fall to SET NULL as before.
+ * @returns {Promise<number>} deliveries re-pointed
+ */
+async function repointNewsletterDeliveries(conn, { fromId, toId, customerId, now }) {
+  return conn('newsletter_send_deliveries')
+    .where({ subscriber_id: fromId })
+    .whereExists(conn('newsletter_subscribers')
+      .where({ id: toId, customer_id: customerId }).select(conn.raw('1')))
+    .whereNotIn('send_id', conn('newsletter_send_deliveries')
+      .where({ subscriber_id: toId }).select('send_id'))
+    .update({ subscriber_id: toId, updated_at: now });
+}
+
+/**
  * `reviewReasonCodes` narrows which review cards the fanout settles, exactly
  * as in resolveOpenEmailReviewCards. The CALL path passes
  * ['customer_email_missing'] when it REPLACES a garbled stored email with a
@@ -511,20 +537,7 @@ async function propagateCustomerEmailChange({
         // wins — the opt-out record is never deleted. oldSub is the FOR UPDATE
         // re-read, so its status cannot change under us before the del below.
         if (['pending', 'active'].includes(String(oldSub.status || ''))) {
-          // newsletter_send_deliveries.subscriber_id is ON DELETE SET NULL:
-          // deleting the redundant row would orphan the person's send history
-          // (the activity timeline joins deliveries through the subscriber).
-          // Re-point it at the surviving row first, in this same transaction.
-          // (Delivery rows carry their own email snapshot, so each keeps the
-          // address it was actually mailed at.)
-          // UNIQUE (send_id, subscriber_id): an issue the surviving row already
-          // has its own delivery for cannot be re-pointed (it would abort the
-          // whole edit), so those rows are skipped and fall to SET NULL as before.
-          await conn('newsletter_send_deliveries')
-            .where({ subscriber_id: oldSub.id })
-            .whereNotIn('send_id', conn('newsletter_send_deliveries')
-              .where({ subscriber_id: targetSub.id }).select('send_id'))
-            .update({ subscriber_id: targetSub.id, updated_at: now });
+          await repointNewsletterDeliveries(conn, { fromId: oldSub.id, toId: targetSub.id, customerId, now });
         }
         counts.newsletter += await conn('newsletter_subscribers')
           .where({ id: oldSub.id })
@@ -1763,4 +1776,5 @@ module.exports = {
   EMAIL_FANOUT_DISCLOSURE,
   applyCustomerUpdatesWithEmailClaimGuard,
   backfillCustomerEmailInTrx,
+  repointNewsletterDeliveries,
 };

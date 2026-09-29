@@ -93,6 +93,7 @@ function makeConn(cfg = {}) {
       orWhereNot: () => qb,
       orWhereNotIn: () => qb,
       whereNull: () => qb,
+      whereExists: (sub) => { calls.push({ table, op: 'whereExists', arg: sub }); return qb; },
       whereIn: (col, vals) => { calls.push({ table, op: 'whereIn', arg: { col, vals } }); return qb; },
       whereNotIn: (col, vals) => { calls.push({ table, op: 'whereNotIn', arg: { col, vals } }); return qb; },
       forUpdate: () => { calls.push({ table, op: 'forUpdate' }); return qb; },
@@ -345,6 +346,10 @@ describe('propagateCustomerEmailChange', () => {
     const scopes = conn.__calls.filter((c) => c.table === 'newsletter_send_deliveries' && c.op === 'where').map((c) => c.arg);
     expect(scopes).toEqual(expect.arrayContaining([{ subscriber_id: 739 }, { subscriber_id: 900 }]));
     expect(conn.__calls.some((c) => c.table === 'newsletter_send_deliveries' && c.op === 'whereNotIn' && c.arg.col === 'send_id')).toBe(true);
+    // ...and only onto a survivor owned by THIS customer (a row linked to another customer never inherits the history)
+    expect(conn.__calls.some((c) => c.table === 'newsletter_send_deliveries' && c.op === 'whereExists')).toBe(true);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'where'
+      && c.arg && c.arg.id === 900 && c.arg.customer_id === 'cust-1')).toBe(true);
   });
 
   test('newsletter merge: an unsubscribed old row is not deleted, so its deliveries are not re-pointed', async () => {
