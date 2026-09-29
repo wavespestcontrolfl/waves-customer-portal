@@ -72,21 +72,38 @@ describe('neighborhood average chart', () => {
     return () => q;
   }
   const rec = { id: 'r', county: 'Sarasota', service_line: 'pest' };
-  const win = (start, avg) => ({ period_start: start, period_end: start, avg_pressure_index: avg, sample_size: 40 });
+  // period_end is exclusive: a window is [start, end).
+  const win = (start, end, avg) => ({ period_start: start, period_end: end, avg_pressure_index: avg, sample_size: 40 });
 
   test('windows from before the cutover are not charted next to windows after it', async () => {
     const ctx = await buildNeighborhoodPressureContext({
       record: rec,
-      knex: knexWith([win('2026-11-01', 2.0), win('2026-10-01', 1.9), win('2026-09-01', 0.6)]),
+      knex: knexWith([win('2026-11-01', '2026-12-01', 2.0), win('2026-10-01', '2026-10-31', 1.9), win('2026-08-01', '2026-08-31', 0.6)]),
     });
     expect(ctx.points.map((p) => p.avgPressureIndex)).toEqual([1.9, 2.0]);
     expect(ctx.customerSummary).toBe('Nearby WaveGuard homes averaged 2.0 this month.');
   });
 
+  test('a window spanning the cutover mixes scales: dropped from the chart', async () => {
+    const ctx = await buildNeighborhoodPressureContext({
+      record: rec,
+      knex: knexWith([win('2026-11-01', '2026-12-01', 2.0), win('2026-09-10', '2026-10-10', 1.1), win('2026-08-01', '2026-08-31', 0.6)]),
+    });
+    expect(ctx.points.map((p) => p.avgPressureIndex)).toEqual([2.0]);
+  });
+
+  test('when the newest window spans the cutover there is no honest average yet', async () => {
+    const ctx = await buildNeighborhoodPressureContext({
+      record: rec,
+      knex: knexWith([win('2026-09-01', '2026-09-30', 1.1), win('2026-08-01', '2026-08-31', 0.6)]),
+    });
+    expect(ctx).toBeUndefined();
+  });
+
   test('all-old-scale windows still chart together', async () => {
     const ctx = await buildNeighborhoodPressureContext({
       record: rec,
-      knex: knexWith([win('2026-08-01', 0.7), win('2026-07-01', 0.6)]),
+      knex: knexWith([win('2026-08-01', '2026-08-31', 0.7), win('2026-07-01', '2026-07-31', 0.6)]),
     });
     expect(ctx.points).toHaveLength(2);
   });

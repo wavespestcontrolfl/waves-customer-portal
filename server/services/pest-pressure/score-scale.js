@@ -21,6 +21,7 @@ const { scoreSourceFromComponents } = require('./calculate');
 const SCALE_TECHNICIAN_RATING = 'technician_rating';
 const SCALE_BLENDED = 'blended';
 const TECH_RATING_CUTOVER_AT = Date.parse('2026-09-24T04:00:00Z');
+const TECH_RATING_CUTOVER_DATE = '2026-09-24'; // the same day, as a calendar date (ET)
 
 function scaleFromComponentScores(componentScores) {
   return scoreSourceFromComponents(componentScores) === 'technician_rating'
@@ -89,6 +90,7 @@ module.exports = {
   SCALE_TECHNICIAN_RATING,
   SCALE_BLENDED,
   TECH_RATING_CUTOVER_AT,
+  TECH_RATING_CUTOVER_DATE,
   scaleFromComponentScores,
   scaleFromCutoverDate,
   classifyScoreScale,

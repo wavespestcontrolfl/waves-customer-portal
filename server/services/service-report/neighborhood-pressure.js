@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
-const { scaleFromCutoverDate } = require('../pest-pressure/score-scale');
+const { TECH_RATING_CUTOVER_DATE, SCALE_BLENDED, SCALE_TECHNICIAN_RATING } = require('../pest-pressure/score-scale');
 
 async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
   if (!record?.id) return undefined;
@@ -32,12 +32,20 @@ async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
     .sort((a, b) => Date.parse(a.periodStart) - Date.parse(b.periodStart));
 
   if (!points.length) return undefined;
-  // #4741 (2026-09-24): an aggregate window that starts before the technician-
-  // tap cutover averages old blended scores, so it is not on the same scale as
-  // a window that starts after it. Chart only windows on the newest window's
-  // scale (a window is dated by its start; a straddling one counts as old).
-  const windowScale = (point) => scaleFromCutoverDate(`${String(point.periodStart).slice(0, 10)}T12:00:00Z`);
+  // #4741 (2026-09-24): each aggregate averages a rolling window of stored
+  // scores. A window entirely before the technician-tap cutover is blended, one
+  // entirely after is tap-scored, and one that spans it averages BOTH (its
+  // period_end is exclusive) - a scale of its own, comparable to nothing. Chart
+  // only windows on the newest window's scale; when the newest window itself
+  // spans the cutover there is no honest average to show yet.
+  const ymd = (value) => String(value).slice(0, 10);
+  const windowScale = (point) => {
+    if (ymd(point.periodEnd) <= TECH_RATING_CUTOVER_DATE) return SCALE_BLENDED;
+    if (ymd(point.periodStart) >= TECH_RATING_CUTOVER_DATE) return SCALE_TECHNICIAN_RATING;
+    return 'mixed';
+  };
   const newestScale = windowScale(points[points.length - 1]);
+  if (newestScale === 'mixed') return undefined;
   const sameScale = points.filter((point) => windowScale(point) === newestScale);
   const latest = sameScale[sameScale.length - 1];
   return {
