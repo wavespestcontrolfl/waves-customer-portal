@@ -313,6 +313,88 @@ describe('rescheduleOnce — mid-route insertion certification (options.capacity
   });
 });
 
+// Arrival grace in capacity mode (Codex round 3 on #5310): the reschedule
+// counterpart to slot-reservation.js's enforceCapacityArrivalGrace, shared
+// via scheduling/capacity-arrival-grace.js. GATED on options.arrivalGraceMinutes
+// (mirroring withArrivalGrace just above it in rebooker.js) — reschedule()
+// serves staff/SMS/voice/auto-dispatch moves too, and none of those ever
+// set arrivalGraceMinutes (decision 6: byte-identical for every
+// non-self-serve caller), so the check must never fire purely because
+// grace happens to be configured for the target date.
+describe('rescheduleOnce — arrival grace in capacity mode (Codex round 3 on #5310)', () => {
+  const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SELF_SERVE_ARRIVAL_GRACE_MINUTES'];
+  const savedEnv = {};
+  beforeAll(() => { for (const k of ENV_KEYS) savedEnv[k] = process.env[k]; });
+  afterAll(() => {
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = rawFactory('db.raw');
+    findConflictingVisits.mockResolvedValue([]);
+    prepareArrivalCapacity.mockResolvedValue({ options: {}, fingerprint: 'fp-1', travel: null });
+    persistArrivalOrder.mockResolvedValue(undefined);
+    bookInsertionOffersLive.mockReturnValue(true);
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '90';
+  });
+
+  test('grace 90, options.arrivalGraceMinutes: 90, a 100-minute simulated arrival delay is refused (SLOT_UNAVAILABLE) and nothing is written', async () => {
+    verifyArrivalCapacity.mockResolvedValue({
+      feasible: true, arrivalDelayMinutes: 100, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
+    });
+    const { trxScheduled } = wireRescheduleMocks(service());
+
+    await expect(
+      SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true, arrivalGraceMinutes: 90 }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_UNAVAILABLE' });
+
+    expect(persistArrivalOrder).not.toHaveBeenCalled();
+    expect(trxScheduled.update).not.toHaveBeenCalled();
+  });
+
+  test('grace 90, options.arrivalGraceMinutes: 90, an 80-minute simulated arrival delay commits fine', async () => {
+    verifyArrivalCapacity.mockResolvedValue({
+      feasible: true, arrivalDelayMinutes: 80, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
+    });
+    wireRescheduleMocks(service());
+
+    const result = await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true, arrivalGraceMinutes: 90 });
+
+    expect(result.success).toBe(true);
+    expect(persistArrivalOrder).toHaveBeenCalled();
+  });
+
+  test('grace configured for the date (90) but THIS caller never sets options.arrivalGraceMinutes — unchanged, a 100-minute delay still commits (byte-identical for staff/SMS/voice/auto-dispatch callers, decision 6)', async () => {
+    verifyArrivalCapacity.mockResolvedValue({
+      feasible: true, arrivalDelayMinutes: 100, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
+    });
+    wireRescheduleMocks(service());
+
+    const result = await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true });
+
+    expect(result.success).toBe(true);
+    expect(persistArrivalOrder).toHaveBeenCalled();
+  });
+
+  test('grace 0 (env unset) with options.arrivalGraceMinutes: 90 passed anyway — unchanged, a 100-minute delay still commits (the reader itself zeroes grace when the gate is off)', async () => {
+    delete process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
+    verifyArrivalCapacity.mockResolvedValue({
+      feasible: true, arrivalDelayMinutes: 100, routeOrder: ['svc-before', 'svc-1', 'svc-after'], target: { scheduled_date: TARGET, technician_id: TECH },
+    });
+    wireRescheduleMocks(service());
+
+    const result = await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true, arrivalGraceMinutes: 90 });
+
+    expect(result.success).toBe(true);
+    expect(persistArrivalOrder).toHaveBeenCalled();
+  });
+});
+
 describe('rescheduleSeries never reads options.capacityPlacement (source guard — series stays append-only)', () => {
   test('the function body between "async rescheduleSeries(" and its closing brace never references capacityPlacement', () => {
     const fs = require('fs');

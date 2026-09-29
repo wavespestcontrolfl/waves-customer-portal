@@ -930,6 +930,36 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
   });
 });
 
+// Arrival grace offer/commit parity for the single-reschedule capacity path
+// (Codex round 3 on #5310): the OFFER built here must be grace-filtered the
+// SAME way the commit now enforces (rebooker.js's enforceCapacityArrivalGrace
+// on verifyArrivalCapacity's capacityCommitFit), or a customer could be
+// offered a slot the commit then refuses. buildAvailabilityForService is
+// the ONLY picker on this page (GET, the AI find-slots search, and the
+// commit route's own anti-forgery re-check all funnel through it — see its
+// own header comment) and delegates entirely to routes/booking.js's
+// buildBookingAvailability, which booking-slot-commit-validation.test.js's
+// "arrival grace commit parity" describe block already proves threads
+// `arrivalGraceMinutes: selfServeNotice ? selfServeArrivalGraceMinutes() : 0`
+// and `packEnds: true` into findAvailableSlots (packCapacityEnds' own
+// `arrival_delay_minutes > grace` filter runs whenever packEnds is true —
+// scheduling/find-time.js) — so the only fact this file's own offer builder
+// needs to prove is that it actually opts in with `selfServeNotice: true`.
+describe('buildAvailabilityForService opts into the SAME grace-filtered offer buildBookingAvailability builds for /book (Codex round 3 on #5310)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/reschedule-public.js'), 'utf8');
+
+  test('the availability call passes selfServeNotice: true', () => {
+    const fnIdx = src.indexOf('async function buildAvailabilityForService(');
+    expect(fnIdx).toBeGreaterThan(-1);
+    const callIdx = src.indexOf('const availability = await buildBookingAvailability({', fnIdx);
+    expect(callIdx).toBeGreaterThan(fnIdx);
+    const closeIdx = src.indexOf('});', callIdx);
+    expect(src.slice(callIdx, closeIdx)).toMatch(/selfServeNotice: true,/);
+  });
+});
+
 describe('withSelfServeNotice (self-serve notice window, owner ruling 2026-09-23)', () => {
   const { withSelfServeNotice } = reschedulePublicRouter._test;
 
