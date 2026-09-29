@@ -746,14 +746,19 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     const weekendShift = riderParent.weekend_shift === 'back' ? 'back' : 'forward';
 
     // Owner blackout days — same shared read-only lookup every series
-    // generator uses; fails open (null) on a read error, same posture as
-    // every other blackout consumer in this codebase.
+    // generator uses. A read error still plans (without blackout clearing)
+    // but adds blackout_check_error, so the pair is never shown as eligible.
     let blackoutDates = null;
     try {
       const from = standaloneAnchor < todayStr ? standaloneAnchor : todayStr;
       const to = horizonDate > from ? horizonDate : from;
       blackoutDates = await conn.transaction((sp) => getBlackoutLayers(from, to, sp));
-    } catch { blackoutDates = null; }
+    } catch {
+      // The plan still computes (without blackout clearing), but the pair is
+      // flagged so the office never approves dates it couldn't check.
+      blackoutDates = null;
+      reasons.push('blackout_check_error');
+    }
 
     const plan = planRiderDates({
       hostDates,

@@ -966,4 +966,20 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     expect(preview.reasons).toContain('no_anchor');
     expect(preview.plan).toEqual([]);
   });
+
+  test('a failed blackout lookup still plans but flags blackout_check_error, so the pair is not eligible', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    await jest.isolateModulesAsync(async () => {
+      jest.doMock('../services/scheduling/blackout-dates', () => ({
+        ...jest.requireActual('../services/scheduling/blackout-dates'),
+        getBlackoutLayers: jest.fn(async () => { throw new Error('synthetic blackout read failure'); }),
+      }));
+      const { previewRiderPair: freshPreviewRiderPair } = require('../services/rider-series-preview');
+      const preview = await freshPreviewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.reasons).toContain('blackout_check_error');
+      expect(preview.eligible).toBe(false);
+      expect(preview.plan.length).toBeGreaterThan(0);
+    });
+    jest.dontMock('../services/scheduling/blackout-dates');
+  });
 });
