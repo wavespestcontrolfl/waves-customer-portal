@@ -124,6 +124,7 @@ jest.mock('../models/db', () => {
     trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
     trx.fn = fn.fn;
     trx.transaction = jest.fn(async (cb) => cb(trx));
+    trx.isTransaction = true;
     mockTrxs.push(trx);
     return trx;
   };
@@ -897,6 +898,23 @@ describe('ring time, through the existing ringGate seam', () => {
     expect(mockTables.notifications).toHaveLength(1);
     expect(stored()[0]).toMatchObject({ dedupeKey: key, rungAt: expect.any(String) });
     expect(stored()[0].quiet).toBeUndefined();
+  });
+
+  test('inside the ring-time savepoint the annual-prepay validator runs strict: a failure rolls the savepoint back and the bell rings, never an insert on an aborted transaction', async () => {
+    const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+    mockTables['scheduled_services as ss'] = [visit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '98.01', annual_prepay_term_id: PARENT })];
+    mockAnnualCovered = new Error('canceling statement due to statement timeout');
+    const key = `unpriced-series:${PARENT}`;
+    const created = await NotificationService.notifyAdmin('alert', 'Recurring service has no price', 'body', {
+      bell: true, dedupeKey: key, metadata: { dedupeKey: key, scheduled_service_id: VISIT, customer_id: CUST },
+    });
+    expect(created.deduped).toBe(false);
+    expect(stored()[0]).toMatchObject({ dedupeKey: key, rungAt: expect.any(String) });
+    expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: VISIT }), expect.anything(), { throwOnError: true });
+    // The sweep reads outside any transaction: the default, fail-closed mode.
+    annualPrepayCoversVisit.mockClear();
+    await loadSubjects([note({ category: 'alert', metadata: { dedupeKey: key, scheduled_service_id: VISIT } })]);
+    expect(annualPrepayCoversVisit.mock.calls[0]).toHaveLength(2);
   });
 
   test('ringTimeCheck is null when the switch is off or the row is not in the table', () => {

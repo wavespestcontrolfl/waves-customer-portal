@@ -165,10 +165,18 @@ async function loadSubjects(rows, conn = db) {
     // suppresses the unpriced page only once annualPrepayCoversVisit validates
     // its term. Same validator, same fail-closed stance (an unverifiable stamp
     // is not coverage, so the alert stays).
+    // Inside a transaction — the ring-time savepoint — every failure must
+    // surface (the validator's strict mode): its default mode catches a
+    // failed query and answers false, which would leave the savepoint's
+    // transaction aborted and fail the bell's own insert. Thrown, the
+    // savepoint rolls back and the gate rings (fail open). The sweep reads
+    // outside a transaction and keeps the fail-closed default.
     const { annualPrepayCoversVisit, ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
     for (const visit of data.visits.values()) {
       if (visit.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) continue;
-      visit.annual_prepay_covered = await annualPrepayCoversVisit(visit, conn).catch(() => false);
+      visit.annual_prepay_covered = conn.isTransaction
+        ? await annualPrepayCoversVisit(visit, conn, { throwOnError: true })
+        : await annualPrepayCoversVisit(visit, conn).catch(() => false);
     }
   }
   if (invoiceIds.length) {
