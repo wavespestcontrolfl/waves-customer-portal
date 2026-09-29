@@ -779,21 +779,39 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     }
   }
 
-  // Codex P2 (:699): a 'no_longer_live' outcome is specific to the ONE
-  // candidate that just failed its write-time recheck (archived/re-staged
-  // since the projection) — it says nothing about the mailbox's OTHER
-  // sharing profiles, so retry each of mailboxFallbacks' surviving
-  // candidates, in the SAME canonical order the projection picked them,
-  // before giving up on the address. Every other outcome ('row_appeared'
-  // — the mailbox is already claimed, retrying can't help; an exclusion —
-  // address-level, so every sharing profile would see the SAME reason)
-  // stops immediately, exactly as before.
-  async function importAddressWithFallback(customerId, fallbackIds) {
-    let result = await importOneCustomer(conn, customerId);
-    for (let i = 0; result.outcome === 'no_longer_live' && i < fallbackIds.length; i += 1) {
-      result = await importOneCustomer(conn, fallbackIds[i]);
+  // Codex P2 (:795) — "Retry fallbacks when the selected profile changes
+  // address": a 'no_longer_live' outcome isn't the only way an attempt can
+  // fail to fulfil the projected mailbox — the attempted profile's address
+  // may simply have CHANGED to a DIFFERENT mailbox since the projection
+  // (this run's own candidate read, or a later fallback retry), and
+  // importOneCustomer would then classify — and possibly import — THAT new
+  // address instead, which is a different candidate's business entirely,
+  // never this mailbox's. So this loop judges by MAILBOX, never by outcome
+  // code: before each attempt, a cheap unlocked peek of that profile's
+  // CURRENT address (fetchLiveCandidate, no lock, no transaction —
+  // importOneCustomer's own decision re-reads the real address under lock)
+  // is checked against the SAME mailbox identity the projection used
+  // (googleMailboxIdentity). A profile that moved to a different mailbox is
+  // skipped WITHOUT ever calling importOneCustomer — its new address is
+  // left to its own candidate row, never imported here as a side effect of
+  // THIS mailbox's fallback chain — and the next fallback (in the SAME
+  // canonical order the projection picked them) is tried. Only an attempt
+  // still in the projected mailbox is even attempted, and its outcome
+  // (imported / excluded / row_appeared / a race-driven no_longer_live)
+  // settles the mailbox — counted once, as the FINAL outcome, never once
+  // per attempt.
+  async function importAddressWithFallback(customerId, mailbox, fallbackIds) {
+    for (const id of [customerId, ...fallbackIds]) {
+      const peek = await fetchLiveCandidate(conn, id);
+      if (peek) {
+        const peekMailbox = googleMailboxIdentity(normalizeEmail(peek.email)) || normalizeEmail(peek.email);
+        if (peekMailbox !== mailbox) continue;
+      }
+      const result = await importOneCustomer(conn, id);
+      if (result.outcome === 'no_longer_live') continue;
+      return result;
     }
-    return result;
+    return { outcome: 'no_longer_live' };
   }
 
   let imported = 0;
@@ -804,7 +822,7 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     await guardedEach(importableRows, (row) => ({ customerId: row.customer_id }), async (row) => {
       const address = normalizeEmail(row.email);
       const mailbox = googleMailboxIdentity(address) || address;
-      const result = await importAddressWithFallback(row.customer_id, mailboxFallbacks.get(mailbox) || []);
+      const result = await importAddressWithFallback(row.customer_id, mailbox, mailboxFallbacks.get(mailbox) || []);
       if (result.outcome === 'imported') {
         imported += 1;
         appliedCityCounts.set(result.city, (appliedCityCounts.get(result.city) || 0) + 1);

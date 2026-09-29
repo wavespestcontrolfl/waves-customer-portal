@@ -715,4 +715,91 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
       await cleanupCommitted([cust.id], [email]);
     }
   });
+
+  // Codex P2 (:795) — "Retry fallbacks when the selected profile changes
+  // address": the projection picks `primary` for this mailbox and keeps
+  // `secondary` as its fallback; between the projection's own last read and
+  // the write phase's first (pre-check) read on `primary`, a genuinely
+  // committed race moves `primary` to a totally DIFFERENT mailbox. The old
+  // outcome-code judgment would let importOneCustomer classify (and
+  // import) `primary`'s NEW address — it's still live, so the outcome is
+  // never 'no_longer_live' — and never try `secondary`. The fix judges by
+  // mailbox: `primary`'s re-addressed profile is skipped WITHOUT being
+  // imported here, and `secondary` — still in the projected mailbox — is
+  // tried and imported.
+  test('the selected profile moves to a DIFFERENT mailbox between projection and write: the fallback imports the ORIGINAL mailbox, and the moved profile is never imported here (real Postgres)', async () => {
+    const tag = randomUUID().slice(0, 8).replace(/-/g, '');
+    const primary = synthCustomer({ email: `moved${tag}@example.invalid`, is_primary_profile: true, first_name: 'Primary' });
+    const secondary = synthCustomer({ email: `moved${tag}@example.invalid`, first_name: 'Secondary' });
+    const movedEmail = `elsewhere${tag}@example.invalid`;
+    await seedCommitted([primary, secondary], [
+      { customer_id: primary.id, marketing_offers: true, email_enabled: true },
+      { customer_id: secondary.id, marketing_offers: true, email_enabled: true },
+    ]);
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    try {
+      // Projection processes primary then secondary (is_primary_profile
+      // DESC first): 2 raw "WHERE c.id = ?" reads each (peek + FOR SHARE
+      // fresh) = reads #1-4. Pausing at #4 traps the run right as the
+      // projection finishes, BEFORE the write phase's own first (pre-check)
+      // read on `primary` — read #5 — has a chance to run.
+      const { conn: pausedA, reached, release } = pauseNthRawCall(connA, 'WHERE c.id = ?', 4);
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: pausedA }).then((r) => { settled = true; return r; });
+      await reached;
+      expect(settled).toBe(false);
+      await db('customers').where({ id: primary.id }).update({ email: movedEmail });
+      release();
+      const result = await resultPromise;
+      expect(result.errors).toEqual([]);
+      expect(result.imported).toBe(1);
+      expect(result.excluded.no_longer_live).toBe(0);
+      const rows = await db('newsletter_subscribers').whereRaw('email LIKE ?', [`%${tag}%`]);
+      expect(rows).toHaveLength(1);
+      // secondary's mailbox — never primary's new address.
+      expect(rows[0].email).toBe(`moved${tag}@example.invalid`);
+      expect(rows[0].customer_id).toBe(secondary.id);
+    } finally {
+      await connA.destroy();
+      await cleanupCommitted([primary.id, secondary.id], [`moved${tag}@example.invalid`, movedEmail]);
+    }
+  });
+
+  // The same race, but `primary` is re-addressed to a DIFFERENT SPELLING of
+  // the SAME mailbox (a Google dot/tag alias) — the mailbox key still
+  // matches, so the write phase's own attempt on `primary` settles it and
+  // `secondary` is never even attempted.
+  test('the selected profile is re-addressed to an ALIAS SPELLING of the same mailbox between projection and write: the attempt settles it without trying a fallback (real Postgres)', async () => {
+    const tag = randomUUID().slice(0, 8).replace(/-/g, '');
+    const primary = synthCustomer({ email: `johndoe${tag}@gmail.com`, is_primary_profile: true, first_name: 'Primary' });
+    const secondary = synthCustomer({ email: `johndoe${tag}@gmail.com`, first_name: 'Secondary' });
+    const aliasEmail = `j.o.h.n.d.o.e${tag}+work@gmail.com`;
+    await seedCommitted([primary, secondary], [
+      { customer_id: primary.id, marketing_offers: true, email_enabled: true },
+      { customer_id: secondary.id, marketing_offers: true, email_enabled: true },
+    ]);
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    try {
+      const { conn: pausedA, reached, release } = pauseNthRawCall(connA, 'WHERE c.id = ?', 4);
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: pausedA }).then((r) => { settled = true; return r; });
+      await reached;
+      expect(settled).toBe(false);
+      await db('customers').where({ id: primary.id }).update({ email: aliasEmail });
+      release();
+      const result = await resultPromise;
+      expect(result.errors).toEqual([]);
+      expect(result.imported).toBe(1);
+      expect(result.excluded.no_longer_live).toBe(0);
+      const rows = await db('newsletter_subscribers').whereRaw('email LIKE ?', [`%${tag}%`]);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].email).toBe(aliasEmail);
+      // Settled by the FIRST attempt (primary, still the same mailbox) —
+      // never fell through to secondary.
+      expect(rows[0].customer_id).toBe(primary.id);
+    } finally {
+      await connA.destroy();
+      await cleanupCommitted([primary.id, secondary.id], [`johndoe${tag}@gmail.com`, aliasEmail]);
+    }
+  });
 });

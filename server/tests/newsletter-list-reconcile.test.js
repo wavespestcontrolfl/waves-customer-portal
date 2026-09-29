@@ -824,6 +824,75 @@ test('when every mailbox candidate is archived before its write-time recheck, no
   expect(state.subscribers).toHaveLength(0);
 });
 
+// Codex P2 (:795) — "Retry fallbacks when the selected profile changes
+// address": the projected/kept candidate (c1) moves to an ENTIRELY
+// DIFFERENT mailbox between the projection and its write-time attempt. The
+// old outcome-code judgment let importOneCustomer classify and import c1's
+// NEW address (it's still live, so the outcome is never 'no_longer_live')
+// and never tried c2, the fallback that still holds the ORIGINAL mailbox.
+// The fix judges by mailbox, not outcome code: c1's re-addressed profile is
+// skipped WITHOUT ever being imported here, and c2 — still in the
+// projected mailbox — is tried and imported instead.
+test('when the selected profile moves to a DIFFERENT mailbox before its write-time attempt, the fallback imports the ORIGINAL mailbox and the moved profile is never imported here', async () => {
+  const state = {
+    customers: [
+      cust({ id: 'c1', email: 'moved@example.com', is_primary_profile: true, created_at: '2026-01-01', first_name: 'Primary' }),
+      cust({ id: 'c2', email: 'moved@example.com', created_at: '2026-02-01', first_name: 'Secondary' }),
+    ],
+    subscribers: [],
+    prefs: [],
+  };
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  let reads = 0;
+  conn.raw = jest.fn(async (sql, bindings) => {
+    // Projection processes c1 then c2 (canonical order): 2 reads each (peek
+    // + FOR SHARE) = reads #1-4. c1's write-time attempt's OWN first read —
+    // the fix's new pre-check peek — is #5: move c1 to a totally different
+    // mailbox right there, simulating the race the finding describes.
+    if (sql.includes('WHERE c.id = ?') && ++reads === 5) state.customers[0].email = 'elsewhere@example.com';
+    return rawImpl(sql, bindings);
+  });
+  const write = await reconcileCustomers({ dryRun: false, conn });
+  expect(write.imported).toBe(1);
+  expect(write.excluded.no_longer_live).toBe(0);
+  expect(write.excluded.duplicate_address).toBe(1); // from the projection, unaffected by the later mutation
+  expect(state.subscribers).toHaveLength(1);
+  // The ORIGINAL mailbox's fallback (c2) was imported — never c1's new address.
+  expect(state.subscribers[0].email).toBe('moved@example.com');
+  expect(state.subscribers[0].customer_id).toBe('c2');
+});
+
+// The same race, but the selected profile's address changes to a DIFFERENT
+// SPELLING of the SAME mailbox (a Google dot/tag alias) — the mailbox key
+// still matches, so the attempt itself settles it and no fallback is ever
+// tried.
+test('when the selected profile is re-addressed to an ALIAS SPELLING of the same mailbox, the attempt settles it without trying a fallback', async () => {
+  const state = {
+    customers: [
+      cust({ id: 'c1', email: 'johndoe@gmail.com', is_primary_profile: true, created_at: '2026-01-01', first_name: 'Primary' }),
+      cust({ id: 'c2', email: 'johndoe@gmail.com', created_at: '2026-02-01', first_name: 'Secondary' }),
+    ],
+    subscribers: [],
+    prefs: [],
+  };
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  let reads = 0;
+  conn.raw = jest.fn(async (sql, bindings) => {
+    if (sql.includes('WHERE c.id = ?') && ++reads === 5) state.customers[0].email = 'j.o.h.n.d.o.e+work@gmail.com';
+    return rawImpl(sql, bindings);
+  });
+  const write = await reconcileCustomers({ dryRun: false, conn });
+  expect(write.imported).toBe(1);
+  expect(write.excluded.no_longer_live).toBe(0);
+  expect(state.subscribers).toHaveLength(1);
+  // Settled by the FIRST attempt (c1, still the same mailbox) — never fell
+  // through to c2.
+  expect(state.subscribers[0].email).toBe('j.o.h.n.d.o.e+work@gmail.com');
+  expect(state.subscribers[0].customer_id).toBe('c1');
+});
+
 test('the dry run keys duplicates by mailbox identity: equivalent Google spellings are projected once', async () => {
   const state = {
     customers: [cust({ id: 'c1', email: 'john.doe+work@gmail.com' }), cust({ id: 'c2', email: 'johndoe@gmail.com' })],
