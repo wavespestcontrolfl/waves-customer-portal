@@ -1855,6 +1855,11 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
       expect(dispatch).toHaveBeenCalledTimes(4);
       expect(dispatch.mock.calls[3][1].laneId).toBe('plant_id_referee');
+      // Codex #5307 r8: ledger rows join the switchboard lanes by exact id;
+      // each step stays attributable through its prompt version.
+      expect(dispatch.mock.calls.map(([, p]) => [p.laneId, p.promptVersion.split(':')[1]])).toEqual([
+        ['plant_id', 'candidates'], ['plant_id', 'verify'], ['plant_id', 'escalation'], ['plant_id_referee', 'referee'],
+      ]);
       // A tie-break never holds the request for the whole 4-minute ladder budget.
       expect(dispatch.mock.calls[3][1].timeoutMs).toBeLessThanOrEqual(engine._test.REFEREE_MAX_MS);
       // Settled on Gemini's own top — never pretty_sure, even though its own

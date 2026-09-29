@@ -1245,7 +1245,7 @@ async function callIdentityCandidates(images, subject, indexTexts, timeoutMs) {
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
     laneId: 'plant_id',
-    promptVersion: PROMPT_VERSION,
+    promptVersion: `${PROMPT_VERSION}:candidates`,
   });
 }
 
@@ -1260,7 +1260,7 @@ async function callIdentityVerify(images, candidateContext, timeoutMs) {
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
     laneId: 'plant_id',
-    promptVersion: PROMPT_VERSION,
+    promptVersion: `${PROMPT_VERSION}:verify`,
   });
 }
 
@@ -1275,7 +1275,7 @@ async function callConditionSelection(images, promptArgs, timeoutMs) {
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
     laneId: 'plant_id',
-    promptVersion: PROMPT_VERSION,
+    promptVersion: `${PROMPT_VERSION}:conditions`,
   });
 }
 
@@ -1290,7 +1290,7 @@ async function callEscalation(images, promptArgs, timeoutMs) {
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
     laneId: 'plant_id',
-    promptVersion: PROMPT_VERSION,
+    promptVersion: `${PROMPT_VERSION}:escalation`,
   });
 }
 
@@ -1921,7 +1921,7 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
     maxTokens: REFEREE_MAX_TOKENS,
     timeoutMs: Math.min(remainingMs, REFEREE_MAX_MS),
     laneId: 'plant_id_referee',
-    promptVersion: PROMPT_VERSION,
+    promptVersion: `${PROMPT_VERSION}:referee`,
   });
   const json = validJson(result, 'escalation');
   const refereeInfo = {
