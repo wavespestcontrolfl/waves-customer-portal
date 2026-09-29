@@ -173,9 +173,27 @@ describe('mapUsage — Responses usage -> Anthropic shape', () => {
     });
   });
 
-  test('a missing/malformed usage block returns undefined, never throws', () => {
+  test('a missing usage block stays absent', () => {
     expect(mapUsage(null)).toBeUndefined();
     expect(mapUsage(undefined)).toBeUndefined();
+  });
+
+  test.each([
+    ['empty', {}],
+    ['renamed counters', { prompt_tokens: 100, completion_tokens: 10 }],
+    ['invalid required counter', { input_tokens: '100', output_tokens: 10 }],
+    ['invalid cache counter', { input_tokens: 100, input_tokens_details: { cached_tokens: '20' }, output_tokens: 10 }],
+    ['cache exceeds total input', { input_tokens: 10, input_tokens_details: { cached_tokens: 20 }, output_tokens: 2 }],
+  ])('a present %s usage block keeps unknown counters for incomplete telemetry', (_label, usage) => {
+    expect(mapUsage(usage)).toEqual({
+      input_tokens: null, cache_read_input_tokens: null, cache_creation_input_tokens: null, output_tokens: null,
+    });
+  });
+
+  test('genuine zero counters remain a valid measured round', () => {
+    expect(mapUsage({ input_tokens: 0, output_tokens: 0 })).toEqual({
+      input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0,
+    });
   });
 });
 
