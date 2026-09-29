@@ -1044,55 +1044,7 @@ class AutonomousRunner {
     let qualityResult = { ok: false, error: 'quality_gate_unavailable' };
     if (qualityGate) {
       const t5 = Date.now();
-      const sitemap = getSitemap();
-      const ctx = {};
-      const checkSitemapBeforePublish = ['refresh_existing_page'].includes(brief.action_type);
-      if (sitemap && draft.url && checkSitemapBeforePublish) {
-        const has = await sitemap.hasUrl(draft.url).catch(() => null);
-        if (has) ctx.sitemapHasUrl = has.present;
-      }
-      // Hydrate the live page body so the quality gate's improvement_over_prior
-      // hard check has a prior version to compare against. Without this every
-      // refresh fails that check (no_previous_version_to_compare) and can never
-      // publish. On load failure we leave previousVersion unset → the hard
-      // check fails closed and the refresh routes to review (safe).
-      let gateBrief = brief;
-      if (brief.action_type === 'refresh_existing_page') {
-        const publisher = getAstroPublisher();
-        if (publisher?.loadExistingPageBody) {
-          const prior = await publisher
-            .loadExistingPageBody(brief.target_url || brief.page_url || draft.url)
-            .catch((err) => {
-              logger.warn(`[autonomous-runner] previousVersion load failed: ${err.message}`);
-              return null;
-            });
-          if (prior) ctx.previousVersion = prior;
-        }
-        // publishRefresh ships the LIVE frontmatter, so the gate classifies
-        // the refresh (answer-first / licensed-photo checks) by the live
-        // post_type / page_type, not the draft's (Codex r2 on #5216) — the
-        // SAME snapshot gate 3c loaded. Without one the gate fails CLOSED
-        // (holds the refresh to the identification checks).
-        if (refreshLiveFrontmatter && typeof refreshLiveFrontmatter === 'object') ctx.liveFrontmatter = refreshLiveFrontmatter;
-        else ctx.liveFrontmatterUnavailable = true;
-        // Same resolved-target derivation as the metadata lane: page_type
-        // 'refresh' says nothing about the target, and a refresh that
-        // rewrites a blog post's meta_description must keep the full blog
-        // meta-completeness contract. Resolution failure fails CLOSED to
-        // the stricter blog contract — such a target cannot publish anyway.
-        let targetPageType = 'supporting-blog';
-        let targetFilePath = null;
-        try {
-          const resolved = publisher?.resolveExistingAstroFileForTarget
-            ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.url)
-            : null;
-          if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
-          if (resolved?.path) targetFilePath = String(resolved.path);
-        } catch (_) { /* keep the stricter blog contract */ }
-        // target_file_path lets the citability comparison signal skip legacy
-        // .md targets, which publishRefresh cannot give an MDX component.
-        gateBrief = { ...brief, target_page_type: targetPageType, target_file_path: targetFilePath };
-      }
+      const { ctx, gateBrief } = await this._buildQualityGateContext(brief, draft, { refreshLiveFrontmatter });
       try {
         qualityResult = qualityGate.evaluate(draft, gateBrief, ctx);
       } catch (err) {
@@ -3788,6 +3740,41 @@ class AutonomousRunner {
       }
     }
 
+    // Re-run the quality gate on the stored draft too (Codex r10 on #5216,
+    // "Revalidate quality before approving a parked refresh"): the checks
+    // above re-validate the comparison gate, guardrails and topic
+    // targeting, but nothing re-ran verdict-box-first / licensed-photo-slot
+    // / improvement-over-prior against a possibly-edited draft_payload
+    // before this approval publish. SAME context-building runNext uses
+    // (_buildQualityGateContext), off the SAME live-frontmatter snapshot
+    // guardOptions just derived above — never a second, possibly-divergent
+    // fetch. A failing gate keeps the run parked, same outcome shape as the
+    // guardrails/topic re-checks above.
+    const qualityGateMod = getQualityGate();
+    if (!qualityGateMod) {
+      const e = new Error('Quality gate unavailable — cannot re-validate the stored draft before publishing (fail closed)');
+      e.statusCode = 409;
+      throw e;
+    }
+    const { ctx: qualityCtx, gateBrief: qualityBrief } = await this._buildQualityGateContext(
+      brief, draft, { refreshLiveFrontmatter: guardOptions.liveFrontmatter || null },
+    );
+    let qualityRecheck;
+    try {
+      qualityRecheck = qualityGateMod.evaluate(draft, qualityBrief, qualityCtx);
+    } catch (err) {
+      const e = new Error(`Quality gate could not re-validate the stored draft (${err.message}) — retry once the underlying issue clears`);
+      e.statusCode = 409;
+      throw e;
+    }
+    if (!qualityRecheck.ok) {
+      const codes = (qualityRecheck.hard_failures || []).map((f) => f.name).join('; ') || 'below_min_total_score';
+      const e = new Error(`Quality gate no longer passes on the stored draft: ${codes}`);
+      e.statusCode = 409;
+      e.details = qualityRecheck;
+      throw e;
+    }
+
     // Same canary / publish-cap guards as the autonomous lane (now serialized
     // under the engine lock so the cap read is authoritative).
     const seoRes = parseJsonMaybe(run.seo_completion_gate_result) || {};
@@ -4176,6 +4163,55 @@ class AutonomousRunner {
     }
     options.priorBody = priorBody;
     return options;
+  }
+
+  /**
+   * The quality-gate context + brief for a draft — ONE derivation shared by
+   * runNext's gate and the named-competitor/affiliate approval re-check
+   * (Codex r10 on #5216: "Revalidate quality before approving a parked
+   * refresh" — the approval path re-ran guardrails on the stored draft but
+   * never the quality gate, so an edited draft_payload could move the
+   * verdict box or add an unlicensed photo and still publish on approval),
+   * so a re-check can never drift from what runNext itself evaluated the
+   * draft against.
+   *
+   * - Sitemap presence only applies (and only matters) for a refresh.
+   * - Refresh drafts additionally hydrate the live prior body
+   *   (improvement_over_prior), the live frontmatter snapshot the caller
+   *   already loaded for this same refresh (post_type / page_type
+   *   classification — Codex r2/r9 on #5216), the durable
+   *   customer-question ledger marker (Codex r8), and the resolved target
+   *   page_type/file_path (blog vs. page meta contract).
+   */
+  async _buildQualityGateContext(brief, draft, { refreshLiveFrontmatter = null } = {}) {
+    const ctx = {};
+    if (brief.action_type !== 'refresh_existing_page') return { ctx, gateBrief: brief };
+    const targetUrl = brief.target_url || brief.page_url || draft.url;
+    const sitemapHas = await refreshSitemapPresence(draft.url);
+    if (sitemapHas !== null) ctx.sitemapHasUrl = sitemapHas;
+    // Hydrate the live page body so the quality gate's improvement_over_prior
+    // hard check has a prior version to compare against. Without this every
+    // refresh fails that check (no_previous_version_to_compare) and can never
+    // publish. On load failure we leave previousVersion unset → the hard
+    // check fails closed and the refresh routes to review (safe).
+    const publisher = getAstroPublisher();
+    const prior = await loadRefreshPriorBody(publisher, targetUrl);
+    if (prior) ctx.previousVersion = prior;
+    // publishRefresh ships the LIVE frontmatter, so the gate classifies
+    // the refresh (answer-first / licensed-photo checks) by the live
+    // post_type / page_type, not the draft's (Codex r2 on #5216) — the
+    // SAME snapshot gate 3c loaded. Without one the gate fails CLOSED
+    // (holds the refresh to the identification checks).
+    if (refreshLiveFrontmatter && typeof refreshLiveFrontmatter === 'object') ctx.liveFrontmatter = refreshLiveFrontmatter;
+    else ctx.liveFrontmatterUnavailable = true;
+    // The durable customer-question marker: the page itself carries no
+    // page type (not in the blog schema), but the run ledger records
+    // which run first published it (Codex r8 on #5216). A failed read
+    // makes the gate fail closed on a page that opens on the box.
+    const questionLedger = await publishedAsCustomerQuestion(targetUrl);
+    if (questionLedger === null) ctx.liveQuestionLedgerUnavailable = true;
+    else ctx.liveIsCustomerQuestion = questionLedger;
+    return { ctx, gateBrief: { ...brief, ...(await refreshTargetFields(publisher, targetUrl)) } };
   }
 
   // Load + JSONB-parse the brief the reviewed run was generated against
@@ -5191,9 +5227,88 @@ function firstReturnedId(rows) {
   return null;
 }
 
+// Quality-gate context pieces for a refresh (_buildQualityGateContext).
+// Sitemap presence of the draft URL; null when there is no sitemap/URL or
+// the read fails.
+async function refreshSitemapPresence(url) {
+  const sitemap = getSitemap();
+  if (!sitemap || !url) return null;
+  const has = await sitemap.hasUrl(url).catch(() => null);
+  return has ? has.present : null;
+}
+
+// The live page body the refresh is compared against; null on failure.
+async function loadRefreshPriorBody(publisher, targetUrl) {
+  if (!publisher?.loadExistingPageBody) return null;
+  return publisher.loadExistingPageBody(targetUrl).catch((err) => {
+    logger.warn(`[autonomous-runner] previousVersion load failed: ${err.message}`);
+    return null;
+  });
+}
+
+// Same resolved-target derivation as the metadata lane: page_type 'refresh'
+// says nothing about the target, and a refresh that rewrites a blog post's
+// meta_description must keep the full blog meta-completeness contract.
+// Resolution failure fails CLOSED to the stricter blog contract — such a
+// target cannot publish anyway. target_file_path lets the citability
+// comparison signal skip legacy .md targets, which publishRefresh cannot
+// give an MDX component.
+async function refreshTargetFields(publisher, targetUrl) {
+  let targetPageType = 'supporting-blog';
+  let targetFilePath = null;
+  try {
+    const resolved = publisher?.resolveExistingAstroFileForTarget
+      ? await publisher.resolveExistingAstroFileForTarget(targetUrl)
+      : null;
+    if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+    if (resolved?.path) targetFilePath = String(resolved.path);
+  } catch { /* keep the stricter blog contract */ }
+  return { target_page_type: targetPageType, target_file_path: targetFilePath };
+}
+
+/**
+ * Was this target first published by a customer-question run? true / false
+ * from autonomous_runs (page_type + published_url, path-compared), null when
+ * the ledger cannot be read.
+ */
+// Host + path of a URL. A bare path is the hub's (the brief builder keeps
+// relative page_url values for hub pages) — never a wildcard across fleet
+// domains (Codex r3 on #5272). www. is ignored.
+const LEDGER_HUB_HOST = 'wavespestcontrol.com';
+function ledgerUrlKey(value) {
+  const { _internals: { normalizePathForCompare } } = require('./related-posts');
+  const raw = String(value || '').trim();
+  let host = LEDGER_HUB_HOST;
+  if (/^https?:\/\//i.test(raw)) {
+    try { host = new URL(raw).hostname.toLowerCase().replace(/^www\./, ''); } catch { host = null; }
+  }
+  return { host, path: normalizePathForCompare(raw) };
+}
+
+async function publishedAsCustomerQuestion(targetUrl) {
+  const target = ledgerUrlKey(targetUrl);
+  if (!target.path || target.path === '/') return false;
+  try {
+    const rows = await db('autonomous_runs')
+      .where('page_type', 'customer-question')
+      .whereNotNull('published_url')
+      .select('published_url');
+    // Same path; and when both sides name a host, the same host — two fleet
+    // domains can carry different posts at one path (Codex r2 on #5272).
+    return rows.some((row) => {
+      const run = ledgerUrlKey(row.published_url);
+      return run.path === target.path && run.host !== null && run.host === target.host;
+    });
+  } catch (err) {
+    logger.warn(`[autonomous-runner] customer-question ledger read failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = new AutonomousRunner();
 module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
+  publishedAsCustomerQuestion,
   isShadow,
   autoPublishEnabled,
   OPERATOR_INTERCEPT_BUCKET,
