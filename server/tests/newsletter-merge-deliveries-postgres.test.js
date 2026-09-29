@@ -30,7 +30,7 @@ pg('repointNewsletterDeliveries on Postgres', () => {
     await db('newsletter_send_deliveries').del();
     await db('newsletter_subscribers').del();
     await db('newsletter_subscribers').insert(rows.subs);
-    await db('newsletter_send_deliveries').insert(rows.deliveries);
+    await db('newsletter_send_deliveries').insert(rows.deliveries.map((d) => ({ status: 'sent', ...d })));
   };
   const owners = async () => (await db('newsletter_send_deliveries').orderBy(['send_id', 'email'])).map((d) => `${d.send_id}:${d.subscriber_id}`);
 
