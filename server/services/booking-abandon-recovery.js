@@ -387,6 +387,12 @@ async function runSmsStage(now, sentPhones) {
         logger.info(`[booking-recovery] SMS skip ${intent.id}: booked after select (pre-send recheck)`);
         continue;
       }
+      // B11 last look, AFTER the claim and immediately before the send: the
+      // pre-claim check above is a cheap filter, but a promotion to
+      // established (or a new established sibling) can land between it and
+      // here. Blocked or lookup error → nothing is sent; `continue` releases
+      // the claim and a hit is already marked suppressed.
+      if (await blockedByContactLinkedHandoff(intent)) continue;
 
       const result = await sendCustomerMessage({
         to: intent.phone,
@@ -490,13 +496,17 @@ async function runEmailStage(now, sentPhones) {
         logger.info(`[booking-recovery] email skip ${intent.id}: booked after select (pre-send recheck)`);
         continue;
       }
+      const bookingUrl = await bookingUrlFor(intent);
+      // B11 last look, AFTER the claim and right before dispatch (see the SMS
+      // stage): blocked or lookup error → no send, claim released.
+      if (await blockedByContactLinkedHandoff(intent)) continue;
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'booking.abandonment_recovery',
         to: intent.email,
         payload: {
           first_name: firstNameOf(intent),
           service_type: serviceLabelOf(intent),
-          booking_url: await bookingUrlFor(intent),
+          booking_url: bookingUrl,
         },
         recipientType: intent.customer_id ? 'customer' : 'lead',
         recipientId: intent.customer_id || null,

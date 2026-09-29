@@ -478,6 +478,90 @@ describe('B11 backstop — contact-linked wizard draft linked to an ESTABLISHED 
     expect(updates).toEqual([]); // no claim, no suppress: retried next tick
   });
 
+  test('r4: classifier flips to ESTABLISHED after the claim → no SMS, claim released, row suppressed', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    // pre-claim filter: still a lead
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { id: 'cust-1', pipeline_stage: 'new_lead' } });
+    enqueue('customers', { rows: [] }); // account siblings (shared loader's 2nd read)
+    enqueue('booking_intents', { update: 1 }); // claim wins
+    // scheduled_services active-booking recheck: none (default)
+    // last look before send: promoted meanwhile
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { id: 'cust-1', pipeline_stage: 'won' } });
+    enqueue('customers', { rows: [] });
+    enqueue('booking_intents', { update: 1 }); // suppress mark
+
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const payloads = updates.map((u) => u.payload);
+    expect(payloads[0]).toEqual(expect.objectContaining({ followup_sms_sent: true })); // claimed…
+    expect(payloads).toEqual(expect.arrayContaining([expect.objectContaining({ suppressed: true })])); // …then suppressed
+    expect(payloads[payloads.length - 1]).toEqual(expect.objectContaining({ followup_sms_sent: false })); // claim released
+  });
+
+  test('r4: lookup error after the claim → no SMS (fail closed)', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('messages', { first: null });
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { id: 'cust-1', pipeline_stage: 'new_lead' } });
+    enqueue('customers', { rows: [] }); // account siblings (shared loader's 2nd read)
+    enqueue('booking_intents', { update: 1 }); // claim wins
+    let estimateReads = 0;
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'estimates') {
+        estimateReads += 1;
+        if (estimateReads === 2) throw new Error('db blip'); // the post-claim last look
+      }
+      return base(table);
+    });
+
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('r4: email — classifier flips to ESTABLISHED after the claim → no email', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { id: 'cust-1', pipeline_stage: 'new_lead' } });
+    enqueue('customers', { rows: [] }); // account siblings (shared loader's 2nd read)
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { id: 'cust-1', pipeline_stage: 'active_customer' } });
+    enqueue('customers', { rows: [] });
+    enqueue('booking_intents', { update: 1 });
+
+    expect(await _internals.runEmailStage(NOW, new Set())).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(updates.map((u) => u.payload)).toEqual(expect.arrayContaining([expect.objectContaining({ suppressed: true })]));
+  });
+
+  test('r4: email — lookup error after the claim → no email', async () => {
+    gate(true);
+    enqueue('booking_intents', { rows: [linked()] });
+    enqueue('estimates', { first: { customer_id: 'cust-1' } });
+    enqueue('customers', { first: { id: 'cust-1', pipeline_stage: 'new_lead' } });
+    enqueue('customers', { rows: [] }); // account siblings (shared loader's 2nd read)
+    enqueue('booking_intents', { update: 1 });
+    let estimateReads = 0;
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'estimates') {
+        estimateReads += 1;
+        if (estimateReads === 2) throw new Error('db blip');
+      }
+      return base(table);
+    });
+
+    expect(await _internals.runEmailStage(NOW, new Set())).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('account-wide (r3 P1): a lead root row under an account with an ESTABLISHED sibling property is blocked too', async () => {
     gate(true);
     enqueue('booking_intents', { rows: [linked()] });
