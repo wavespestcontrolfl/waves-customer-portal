@@ -318,6 +318,12 @@ async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { n
 
 // ── Keeping a close (called by refreshFulfillment's re-judge) ───────────────
 
+// Per witness table: its query, its type, and whether a row still counts.
+const WITNESS_BY_RECORD_TYPE = {
+  sms_log: { type: 'sms', query: smsWitnessQuery, counts: (row) => operatorReply(row) && smsDelivered(row) },
+  call_log: { type: 'call', query: callWitnessQuery, counts: personCallBack },
+};
+
 // Whether a model-judged close still stands, with no model call: the promise
 // is still the untouched Waves "other" promise the model judged (its md5), the
 // call still has the customer the close was judged for, and the one record it
@@ -337,16 +343,11 @@ async function contactCloseStands(conn, commitment, call, prior) {
   const from = associationFrom(commitment, after);
   const until = windowEnd(after);
   const bounds = { customerId, callId: commitment.call_log_id, from, to: until, id: prior.record_id };
-  const sameWords = (type, row) => typeof prior.witness_md5 === 'string' && textMd5(rawText(type, row)) === prior.witness_md5;
-  if (prior.record_type === 'sms_log') {
-    const row = await smsWitnessQuery(conn, bounds).first();
-    return Boolean(row && operatorReply(row) && smsDelivered(row) && sameWords('sms', row));
-  }
-  if (prior.record_type === 'call_log') {
-    const row = await callWitnessQuery(conn, bounds).first();
-    return Boolean(row && personCallBack(row) && sameWords('call', row));
-  }
-  return false;
+  const witness = WITNESS_BY_RECORD_TYPE[prior.record_type];
+  if (!witness) return false;
+  const row = await witness.query(conn, bounds).first();
+  return Boolean(row && witness.counts(row) && typeof prior.witness_md5 === 'string'
+    && textMd5(rawText(witness.type, row)) === prior.witness_md5);
 }
 
 // ── The periodic job ────────────────────────────────────────────────────────
