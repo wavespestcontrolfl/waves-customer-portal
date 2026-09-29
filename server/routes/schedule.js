@@ -978,10 +978,11 @@ const visitPrepAppLimiter = require('express-rate-limit')({
 
 router.post(
   '/:id/prep-photos',
+  // Gate first: dark is the generic 404 before the limiter or anything else.
+  (req, res, next) => (visitPrepPhotosLive() ? next() : res.status(404).json({ error: 'Not found' })),
   visitPrepAppLimiter,
   async (req, res, next) => {
     try {
-      if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
       // A malformed id would reach the uuid column as a 22P02 (500); it is
       // just another unknown visit (Codex #5306 r2 P2).
       if (!VISIT_ID_RE.test(String(req.params.id || ''))) return res.status(404).json({ error: 'Not found' });
