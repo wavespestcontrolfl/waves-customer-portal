@@ -25,6 +25,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
+const { applicationAreaValues, uniqueStrings } = require('../service-report/report-data');
 
 // Every label entry cites a fact in the email-division fact register
 // (server/services/email-division/fact-register-data.js, PR #5187) and says
@@ -108,6 +109,22 @@ const ADJUVANT_CATEGORY_RE = /adjuvant|surfactant|wetting|spreader|sticker|penet
 // is not caught here.
 const NUTRITION_CATEGORY_RE = /fertili[sz]er|nutrition|nutrient|biostimulant|soil\s+amendment|amendments?\b/i;
 
+// The recorded category also decides the three generic pesticide families
+// (codex round 8 P2): a catalogued herbicide or fungicide outside the narrow
+// ingredient/name lists above — Prodiamine 65 WDG (products_catalog.category
+// 'herbicide'), Pillar G Intrinsic ('fungicide'; both
+// 20260401000017_dispatch.js:50-53) — was falling through to 'other' and
+// losing to a nutrition product on the primary-family rank. Checked only
+// after every ingredient/name match above has had its shot, and only for the
+// three neutral, no-label families, so it never attaches a label claim or
+// fact slug and never outranks a specific chemistry/name match. Real
+// strings: products_catalog.category ('herbicide', 'fungicide', 'IGR') and
+// pricing.csv's Category column ('Herbicide', 'Fungicide', 'Insect Growth
+// Regulator').
+const HERBICIDE_CATEGORY_RE = /herbicide/i;
+const FUNGICIDE_CATEGORY_RE = /fungicide/i;
+const IGR_CATEGORY_RE = /\bigr\b|insect growth regulator/i;
+
 // Nutrients named only when the recorded active ingredient lists them.
 // [nutrient, word (any case), two-letter element symbol (exact case,
 // standalone), single-letter symbol (only attached to a percentage, "4%S",
@@ -159,6 +176,10 @@ function classifyProduct({ productName, activeIngredient, productCategory, catal
   const name = String(productName || '').toLowerCase();
   for (const family of FAMILY_ORDER) if (FAMILIES[family].ai.some((s) => ai.includes(s))) return family;
   for (const family of FAMILY_ORDER) if (FAMILIES[family].name.some((s) => name.includes(s))) return family;
+  const categories = [productCategory, catalogCategory, catalogProductType].filter(Boolean).map(String);
+  if (categories.some((c) => HERBICIDE_CATEGORY_RE.test(c))) return 'herbicide';
+  if (categories.some((c) => FUNGICIDE_CATEGORY_RE.test(c))) return 'fungicide';
+  if (categories.some((c) => IGR_CATEGORY_RE.test(c))) return 'igr';
   return 'other';
 }
 
@@ -185,7 +206,13 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
   const rows = await conn('service_products as sp')
     .leftJoin('products_catalog as pc', 'pc.id', 'sp.product_id')
     .where('sp.service_record_id', serviceRecordId)
-    .orderBy('sp.applied_at', 'asc')
+    // Completion inserts never set applied_at (complete-scheduled-service.js
+    // ~7003-7019), so it defaults to the transaction timestamp and every
+    // product written in one completion ties. A tied applied_at leaves
+    // Postgres free to return either order, which would flip which product
+    // is primary/secondary on repeated reads of the same visit. `sp.id` is a
+    // stable secondary key (codex round 8 P2 on #5164).
+    .orderBy([{ column: 'sp.applied_at', order: 'asc' }, { column: 'sp.id', order: 'asc' }])
     .select('sp.*', 'pc.category as catalog_category', 'pc.product_type as catalog_product_type');
   const products = rows.map((row) => {
     const family = classifyProduct({
@@ -318,10 +345,15 @@ const asArray = (v) => { const p = parseJson(v); return Array.isArray(p) ? p : [
 // the same way the canonical service-report scope reader does
 // (service-report/report-data.js scopeTextValues + snapshotAreaValues):
 // service_records.areas_serviced, structured_notes.areasServiced,
-// structured_notes.areasTreated, and the typed-report snapshot area fields.
-// Case-insensitive de-duplication keeps the first spelling seen.
+// structured_notes.areasTreated, the typed-report snapshot area fields, and
+// — reusing that reader's own `applicationAreaValues` helper rather than a
+// third copy (codex round 8 P2 on #5164) — each visit product's
+// service_products.application_area, which a historical or alternate
+// completion may record scope on when the service-level fields are empty.
+// Case-insensitive de-duplication (report-data.js's `uniqueStrings`) keeps
+// the first spelling seen.
 const TYPED_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'];
-function visitAreas(service) {
+function visitAreas(service, products = []) {
   const structured = asObject(service.structured_notes);
   const serviceData = asObject(service.service_data);
   const snapshots = [serviceData.typedReportSnapshot, ...asArray(serviceData.companionReportSnapshots)]
@@ -329,18 +361,9 @@ function visitAreas(service) {
   const values = [
     ...asArray(service.areas_serviced), ...asArray(structured.areasServiced), ...asArray(structured.areasTreated),
     ...snapshots.flatMap((snap) => TYPED_AREA_FIELD_KEYS.flatMap((key) => String(snap.values[key] ?? '').split(','))),
+    ...applicationAreaValues(products),
   ];
-  const seen = new Set();
-  const out = [];
-  for (const value of values) {
-    if (typeof value !== 'string') continue;
-    const area = value.trim();
-    const key = area.toLowerCase();
-    if (!area || seen.has(key)) continue;
-    seen.add(key);
-    out.push(area);
-  }
-  return out;
+  return uniqueStrings(values);
 }
 
 /** One visit's plain-language summary for a lifecycle email. */
@@ -348,6 +371,7 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
   const service = await conn('service_records').where({ id: serviceRecordId }).first();
   if (!service) return null;
 
+  const { products } = await readVisitProducts(serviceRecordId, { conn });
   const advisory = asObject(service.advisory);
   const conditions = asObject(service.conditions);
 
@@ -375,7 +399,7 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
 
   return {
     customerId: service.customer_id, serviceType: service.service_type || null, serviceLine: service.service_line || null,
-    visitDate: service.service_date || null, areasTreated: visitAreas(service),
+    visitDate: service.service_date || null, areasTreated: visitAreas(service, products),
     pestsNamed: parsePestsNamed(service.technician_notes),
     activityRating: service.client_pest_rating != null ? Number(service.client_pest_rating) : null,
     advisory: {

@@ -206,6 +206,31 @@ suite('email division against real Postgres', () => {
     expect(pointSource).toMatchObject({ family: 'igr', verified: false, notes: [], factSlugs: [], phrase: 'an insect growth regulator' });
   });
 
+  test('readVisitProducts: a stable secondary tie-breaker on tied applied_at (codex round 8 P2) — repeated reads always agree', async () => {
+    const customerId = await makeCustomer();
+    const visitId = await makeVisit(customerId);
+    // Completion inserts never set applied_at, so it defaults to the
+    // transaction timestamp and every product written in one completion
+    // ties — reproduced here with the SAME explicit timestamp. Both products
+    // are the same customer-primacy rank (non_repellent), so which one is
+    // primary depends entirely on the tie-breaker.
+    const tiedAt = new Date('2026-09-10T10:00:00Z');
+    const [smallerId, largerId] = [randomUUID(), randomUUID()].sort();
+    // Insert with the LARGER id first, so a plain "insertion order" or
+    // "first row wins" tie-breaker would pick the wrong product.
+    await trx('service_products').insert([
+      { id: largerId, service_record_id: visitId, product_name: 'Alpine WSG', active_ingredient: 'dinotefuran', applied_at: tiedAt },
+      { id: smallerId, service_record_id: visitId, product_name: 'Taurus SC', active_ingredient: 'fipronil', applied_at: tiedAt },
+    ]);
+    // ORDER BY sp.id ASC puts the smaller id first, so it wins primary — and
+    // every repeated read must agree.
+    for (let i = 0; i < 3; i++) {
+      const { primary, secondary } = await readVisitProducts(visitId, { conn: trx });
+      expect(primary.productName).toBe('Taurus SC');
+      expect(secondary.productName).toBe('Alpine WSG');
+    }
+  });
+
   test('readVisitSummary: structured fields, advisory/conditions keys, and pests named', async () => {
     const customerId = await makeCustomer();
     const visitId = await makeVisit(customerId, {
@@ -249,6 +274,34 @@ suite('email division against real Postgres', () => {
     expect((await readVisitSummary(legacyOnly, { conn: trx })).areasTreated).toEqual(['Perimeter', 'Lanai']);
     expect((await readVisitSummary(altOnly, { conn: trx })).areasTreated).toEqual(['Front yard']);
     expect((await readVisitSummary(everything, { conn: trx })).areasTreated).toEqual(['Perimeter', 'Garage', 'Kitchen', 'Attic', 'Bathroom']);
+  });
+
+  test('readVisitSummary: merges service_products.application_area into areasTreated (codex round 8 P2) — same union the canonical scope reader runs, case-insensitively deduped against the service-level fields', async () => {
+    const customerId = await makeCustomer();
+    // No service-level area field at all — application_area is the ONLY scope.
+    const productAreaOnly = await makeVisit(customerId);
+    // Explicit, distinct applied_at — readVisitProducts' own row order (which
+    // areasTreated preserves) must not depend on the products' random ids.
+    await trx('service_products').insert([
+      { id: randomUUID(), service_record_id: productAreaOnly, product_name: 'Talstar P', active_ingredient: 'bifenthrin', application_area: 'Perimeter', applied_at: new Date('2026-09-10T10:00:00Z') },
+      { id: randomUUID(), service_record_id: productAreaOnly, product_name: 'Taurus SC', active_ingredient: 'fipronil', application_area: 'Garage', applied_at: new Date('2026-09-10T10:05:00Z') },
+    ]);
+    expect((await readVisitSummary(productAreaOnly, { conn: trx })).areasTreated).toEqual(['Perimeter', 'Garage']);
+
+    // A service-level area and a product's own application_area overlap
+    // case-insensitively — the shared value appears once, first spelling kept.
+    const mixed = await makeVisit(customerId, { structured_notes: { areasTreated: ['Kitchen'] } });
+    await trx('service_products').insert([
+      { id: randomUUID(), service_record_id: mixed, product_name: 'Talstar P', active_ingredient: 'bifenthrin', application_area: 'kitchen', applied_at: new Date('2026-09-10T10:00:00Z') },
+      { id: randomUUID(), service_record_id: mixed, product_name: 'Taurus SC', active_ingredient: 'fipronil', application_area: 'Attic', applied_at: new Date('2026-09-10T10:05:00Z') },
+    ]);
+    expect((await readVisitSummary(mixed, { conn: trx })).areasTreated).toEqual(['Kitchen', 'Attic']);
+
+    // No application_area recorded at all -> unaffected, still just the
+    // service-level field.
+    const noProductArea = await makeVisit(customerId, { areas_serviced: JSON.stringify(['Lanai']) });
+    await trx('service_products').insert({ id: randomUUID(), service_record_id: noProductArea, product_name: 'Talstar P', active_ingredient: 'bifenthrin' });
+    expect((await readVisitSummary(noProductArea, { conn: trx })).areasTreated).toEqual(['Lanai']);
   });
 
   test('readVisitSummary: excludes a past appointment between the service date and today from "next visit"', async () => {

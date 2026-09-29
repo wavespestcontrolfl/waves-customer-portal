@@ -132,6 +132,37 @@ describe('classifyProduct', () => {
     expect(classifyProduct({ productName: 'Taurus SC', activeIngredient: 'fipronil', catalogCategory: 'termiticide' })).toBe('non_repellent');
   });
 
+  test('a catalogued/recorded category decides the generic herbicide, fungicide and IGR families (codex round 8 P2) — ingredient/name matches still win first', () => {
+    // Real rows from 20260401000017_dispatch.js:50-53 — neither name nor
+    // active ingredient is in any FAMILIES list, so only the recorded
+    // category can save them from 'other'.
+    expect(classifyProduct({ productName: 'Prodiamine 65 WDG', activeIngredient: 'Prodiamine', catalogCategory: 'herbicide' })).toBe('herbicide');
+    expect(classifyProduct({ productName: 'Pillar G Intrinsic', activeIngredient: 'Pyraclostrobin + Triticonazole', catalogCategory: 'fungicide' })).toBe('fungicide');
+    // pricing.csv Category column spelling, and product_category too.
+    expect(classifyProduct({ productName: 'Some Broadleaf Mix', activeIngredient: 'unlisted-chemistry', productCategory: 'Herbicide' })).toBe('herbicide');
+    expect(classifyProduct({ productName: 'Some Turf Fungicide', activeIngredient: 'unlisted-chemistry', catalogProductType: 'Fungicide' })).toBe('fungicide');
+    expect(classifyProduct({ productName: 'Some IGR Blend', activeIngredient: 'unlisted-chemistry', catalogCategory: 'IGR' })).toBe('igr');
+    expect(classifyProduct({ productName: 'Some IGR Blend', activeIngredient: 'unlisted-chemistry', productCategory: 'Insect Growth Regulator' })).toBe('igr');
+    // A specific ingredient/name match still wins over a misleading category.
+    expect(classifyProduct({ productName: 'Taurus SC', activeIngredient: 'fipronil', catalogCategory: 'herbicide' })).toBe('non_repellent');
+    // No matching category at all -> still 'other'.
+    expect(classifyProduct({ productName: 'Mystery Blend 42', activeIngredient: 'unobtanium', catalogCategory: 'termiticide' })).toBe('other');
+  });
+
+  test('a catalogued herbicide/fungicide caught only by category carries no label claim or fact slug, and ranks above nutrition', async () => {
+    const { products, primary, secondary } = await readVisitProducts('sr-1', { conn: stubConn([
+      { product_name: 'LESCO 6-0-0 Liquid', active_ingredient: '6-0-0', catalog_category: 'Fertilizer' },
+      { product_name: 'Prodiamine 65 WDG', active_ingredient: 'Prodiamine', catalog_category: 'herbicide' },
+    ]) });
+    const prodiamine = products.find((p) => p.productName === 'Prodiamine 65 WDG');
+    expect(prodiamine).toMatchObject({
+      family: 'herbicide', verified: false, notes: [], factSlugs: [], dryRule: null, source: null, phrase: 'a weed control',
+    });
+    // The pesticide ranks primary over the fertilizer's feeding-goal phrase.
+    expect(primary.productName).toBe('Prodiamine 65 WDG');
+    expect(secondary.productName).toBe('LESCO 6-0-0 Liquid');
+  });
+
   test('a catalogued nutrition category decides nutrition even when name and analysis miss the lists (codex round 7 P2)', () => {
     for (const fields of [
       { catalogCategory: 'Fertilizer' }, { catalogCategory: 'Micronutrient Fertilizer' }, { productCategory: 'Soil Amendment / Biostimulant' },
