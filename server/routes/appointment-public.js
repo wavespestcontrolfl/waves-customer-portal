@@ -58,6 +58,7 @@ const { visitInsideMoveNoticeWindow } = require('../services/scheduling/self-ser
 const { visitTimeElapsed } = require('../services/reschedule-eligibility');
 const visitPrep = require('../services/visit-prep');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const { recordPageView } = require('../services/customer-page-views');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -692,6 +693,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'appointment', customerId: svc.customer_id, subjectType: 'scheduled_service', subjectId: svc.id });
 
     const visitInfoRaw = await visitServicesFor(svc);
     // Unknown membership fails closed: the page can't be changed online
