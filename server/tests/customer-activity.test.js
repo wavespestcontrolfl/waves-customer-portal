@@ -115,6 +115,28 @@ describe('last_seen_at stamp (foreground beacons only)', () => {
     expect(updates()).toHaveLength(1);
   });
 
+  test('the heartbeat stamps last_seen_at only: no customer_page_views row', async () => {
+    const res = await call('POST', '/api/customer/activity/heartbeat', { body: {} });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, enabled: true });
+    await tick();
+    expect(updates()).toHaveLength(1);
+    expect(updates()[0][0]).toMatch(/last_seen_at IS NULL OR last_seen_at < now\(\)/);
+    expect(inserts()).toHaveLength(0);
+  });
+
+  test('the heartbeat is authenticated, gate-dark safe, and skips staff browsers', async () => {
+    expect((await call('POST', '/api/customer/activity/heartbeat', { auth: false, body: {} })).status).toBe(401);
+    const marker = jwt.sign({ kind: 'admin_marker', sub: 'staff-1' }, config.jwt.secret);
+    const staff = await call('POST', '/api/customer/activity/heartbeat', { body: {}, headers: { cookie: `waves_admin=${encodeURIComponent(marker)}` } });
+    expect(staff.status).toBe(200);
+    delete process.env.GATE_PORTAL_ACTIVITY;
+    const dark = await call('POST', '/api/customer/activity/heartbeat', { body: {} });
+    expect(dark.body).toEqual({ ok: true, enabled: false });
+    await tick();
+    expect(updates()).toHaveLength(0);
+  });
+
   test('a refused (invalid route) beacon does not stamp', async () => {
     const res = await call('POST', '/api/customer/activity/page-view', { body: { route: 'a1b2c3' } });
     expect(res.status).toBe(400);
@@ -243,6 +265,8 @@ describe('POST /api/customer/activity/page-view', () => {
     try {
       const res = await call('POST', '/api/customer/activity/page-view', { body: { route: 'billing' } });
       expect(res.status).toBe(200);
+      expect((await call('POST', '/api/customer/activity/push-open', { body: {} })).status).toBe(200);
+      expect((await call('POST', '/api/customer/activity/heartbeat', { body: {} })).status).toBe(200);
     } finally { delete process.env.GATE_CANCEL_FLOW_V2; }
   });
 });
@@ -269,6 +293,25 @@ describe('POST /api/customer/activity/push-open', () => {
     });
     await tick();
     expect(inserts()[0][1].slice(1, 4)).toEqual(['push:open', 'ios', 'type:appointment_reminder']);
+  });
+
+  test('a routed push tap records a per-tap subject; retries of one tap share it, separate taps do not', async () => {
+    const TAP_A = '33333333-3333-4333-8333-333333333333';
+    const TAP_B = '44444444-4444-4444-8444-444444444444';
+    const body = (tapId) => ({ platform: 'ios', tag: 'push-routed:appointment_reminder', category: 'appointment', tapId });
+    await call('POST', '/api/customer/activity/push-open', { body: body(TAP_A) });
+    await call('POST', '/api/customer/activity/push-open', { body: body(TAP_A.toUpperCase()) });
+    await call('POST', '/api/customer/activity/push-open', { body: body(TAP_B) });
+    await tick();
+    expect(inserts().map((c) => c[1][3])).toEqual([`tap:${TAP_A}`, `tap:${TAP_A}`, `tap:${TAP_B}`]);
+  });
+
+  test('a bell notification id still wins over the tap id; a malformed tap id falls back to type', async () => {
+    const TAP = '33333333-3333-4333-8333-333333333333';
+    await call('POST', '/api/customer/activity/push-open', { body: { notificationId: NOTIFICATION_ID, tapId: TAP } });
+    await call('POST', '/api/customer/activity/push-open', { body: { tag: 'push-routed:receipt', tapId: 'nope' } });
+    await tick();
+    expect(inserts().map((c) => c[1][3])).toEqual([`notification:${NOTIFICATION_ID}`, 'type:receipt']);
   });
 
   test('a tag that is not a routed tag is never stored; category is the fallback', async () => {
@@ -305,6 +348,7 @@ describe('sanitisers', () => {
   test('pushSubjectId prefers a uuid notification id, then type, else null', () => {
     expect(activity.pushSubjectId({ notificationId: NOTIFICATION_ID.toUpperCase() })).toBe(`notification:${NOTIFICATION_ID}`);
     expect(activity.pushSubjectId({ tag: 'push-routed:receipt' })).toBe('type:receipt');
+    expect(activity.pushSubjectId({ tapId: '33333333-3333-4333-8333-333333333333', tag: 'push-routed:receipt' })).toBe('tap:33333333-3333-4333-8333-333333333333');
     expect(activity.pushSubjectId({ category: 'billing' })).toBe('type:billing');
     expect(activity.pushSubjectId({})).toBeNull();
     expect(activity.pushSubjectId()).toBeNull();

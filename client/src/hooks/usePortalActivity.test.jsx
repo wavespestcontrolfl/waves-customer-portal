@@ -4,13 +4,15 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const report = vi.hoisted(() => vi.fn());
 const flushPending = vi.hoisted(() => vi.fn());
-vi.mock('../lib/portalActivity', () => ({ reportPortalPageView: report, flushPendingPushOpen: flushPending }));
+const heartbeat = vi.hoisted(() => vi.fn());
+vi.mock('../lib/portalActivity', () => ({ reportPortalPageView: report, flushPendingPushOpen: flushPending, reportPortalHeartbeat: heartbeat }));
 
 import usePortalActivity from './usePortalActivity';
 
 beforeEach(() => {
   report.mockReset();
   flushPending.mockReset();
+  heartbeat.mockReset();
   vi.useFakeTimers();
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
 });
@@ -111,4 +113,49 @@ it('retries a push open that never got an answer, once per mount', () => {
   const { rerender } = renderHook(({ tab }) => usePortalActivity(tab), { initialProps: { tab: 'dashboard' } });
   rerender({ tab: 'visits' });
   expect(flushPending).toHaveBeenCalledTimes(1);
+});
+
+const MIN = 60 * 1000;
+
+it('heartbeats while visible and the customer has interacted within five minutes', () => {
+  renderHook(() => usePortalActivity('visits'));
+  vi.advanceTimersByTime(2 * MIN);
+  expect(heartbeat).toHaveBeenCalled(); // mount counts as the first interaction
+  heartbeat.mockClear();
+  vi.advanceTimersByTime(4 * MIN); // idle since mount: 6 minutes in, past the window
+  window.dispatchEvent(new Event('pointerdown'));
+  vi.advanceTimersByTime(MIN);
+  expect(heartbeat).toHaveBeenCalled();
+});
+
+it('sends no heartbeat when idle for more than five minutes', () => {
+  renderHook(() => usePortalActivity('visits'));
+  vi.advanceTimersByTime(5 * MIN + 1000);
+  heartbeat.mockClear();
+  vi.advanceTimersByTime(10 * MIN);
+  expect(heartbeat).not.toHaveBeenCalled();
+});
+
+it.each(['keydown', 'scroll', 'touchstart'])('a %s keeps the session active', (name) => {
+  renderHook(() => usePortalActivity('visits'));
+  vi.advanceTimersByTime(5 * MIN + 1000);
+  heartbeat.mockClear();
+  window.dispatchEvent(new Event(name));
+  vi.advanceTimersByTime(MIN);
+  expect(heartbeat).toHaveBeenCalledTimes(1);
+});
+
+it('sends no heartbeat while the page is hidden, even with recent interaction', () => {
+  renderHook(() => usePortalActivity('visits'));
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+  window.dispatchEvent(new Event('pointerdown'));
+  vi.advanceTimersByTime(3 * MIN);
+  expect(heartbeat).not.toHaveBeenCalled();
+});
+
+it('stops the heartbeat on unmount', () => {
+  const { unmount } = renderHook(() => usePortalActivity('visits'));
+  unmount();
+  vi.advanceTimersByTime(10 * MIN);
+  expect(heartbeat).not.toHaveBeenCalled();
 });

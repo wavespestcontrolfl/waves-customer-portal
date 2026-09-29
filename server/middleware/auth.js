@@ -101,6 +101,7 @@ const CANCELLED_READ_ROUTES = [
   // caller's own session — nothing is read back.
   ['POST', '/api/customer/activity/page-view'],
   ['POST', '/api/customer/activity/push-open'],
+  ['POST', '/api/customer/activity/heartbeat'],
 ];
 
 function cancelledReadRoute(req) {

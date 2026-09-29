@@ -3,7 +3,8 @@
  * session only, fire-and-forget from the portal SPA and the Capacitor app.
  *
  *   POST /api/customer/activity/page-view  { route, platform? }
- *   POST /api/customer/activity/push-open  { platform?, notificationId?, tag?, category? }
+ *   POST /api/customer/activity/push-open  { platform?, notificationId?, tapId?, tag?, category? }
+ *   POST /api/customer/activity/heartbeat  {}
  *
  * While the gate is off both answer 200 { enabled: false } without writing;
  * the client reads that once and stops beaconing for the session (the gate
@@ -12,10 +13,13 @@
  * silent), so a beacon reveals nothing about the recorder's filters. Row
  * conventions: see services/customer-activity.js. Sends nothing.
  *
- * These two foreground beacons are the ONLY writers of customers.last_seen_at
+ * These three foreground beacons are the ONLY writers of customers.last_seen_at
  * (throttled in SQL, staff/bot skipped): the client sends them only while the
  * page is visible, so background polling on authenticated routes (bell count,
- * visit tracker) never makes an idle hidden portal look active.
+ * visit tracker) never makes an idle hidden portal look active. The heartbeat
+ * exists so a long visible session on one tab keeps last_seen_at fresh: it
+ * ONLY stamps last_seen_at and writes no customer_page_views row, so it can
+ * never inflate tab-view counts (the page-view dedupe window is unaffected).
  */
 const express = require('express');
 const router = express.Router();
@@ -38,6 +42,11 @@ router.post('/page-view', (req, res) => {
   return res.json({ ok: true, enabled: true });
 });
 
+router.post('/heartbeat', (req, res) => {
+  activity.stampLastSeen(req, req.customerId);
+  return res.json({ ok: true, enabled: true });
+});
+
 router.post('/push-open', (req, res) => {
   const body = req.body || {};
   activity.stampLastSeen(req, req.customerId);
@@ -45,6 +54,7 @@ router.post('/push-open', (req, res) => {
     customerId: req.customerId,
     platform: body.platform,
     notificationId: body.notificationId,
+    tapId: body.tapId,
     tag: body.tag,
     category: body.category,
   });

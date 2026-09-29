@@ -130,7 +130,9 @@ async function bindPushListeners(PushNotifications) {
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
       // Best-effort "opened from a push" beacon (server-gated by
       // GATE_PORTAL_ACTIVITY). It goes out BEFORE the navigation below (which
-      // replaces the page) and can never block or break the tap handling.
+      // replaces the page) and can never block or break the tap handling. When
+      // the link targets another profile of a multi-profile account, the lib
+      // only parks it: it is sent after ProtectedRoute switches to that profile.
       try { reportPushOpen(action?.notification?.data); } catch { /* best-effort */ }
       const url = action?.notification?.data?.url;
       if (url && typeof window !== 'undefined') navigateToCustomerUrl(url);

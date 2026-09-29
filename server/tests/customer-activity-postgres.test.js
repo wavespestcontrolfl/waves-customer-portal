@@ -94,4 +94,18 @@ const settle = () => new Promise((r) => setTimeout(r, 200));
     expect(rows.map((r) => r.customer_id).sort()).toEqual([a, b].sort());
     expect(rows[0]).toMatchObject({ subject_type: 'ios', subject_id: 'type:appointment_reminder' });
   });
+
+  test('routed pushes: a retried tap dedupes, two separate taps of the same type both count', async () => {
+    const c = randomUUID();
+    await mockPg('customers').insert({ id: c, first_name: 'F' });
+    const tap = (tapId) => recordPushOpen(HUMAN_REQ, {
+      customerId: c, platform: 'ios', tag: 'push-routed:appointment_reminder', tapId,
+    });
+    const [t1, t2] = [randomUUID(), randomUUID()];
+    expect(await tap(t1)).toBe(true);
+    expect(await tap(t1)).toBe(false);
+    expect(await tap(t2)).toBe(true);
+    const rows = await mockPg('customer_page_views').where({ page: 'push:open', customer_id: c }).select('subject_id');
+    expect(rows.map((r) => r.subject_id).sort()).toEqual([`tap:${t1}`, `tap:${t2}`].sort());
+  });
 });

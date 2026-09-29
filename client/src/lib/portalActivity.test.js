@@ -13,7 +13,7 @@ vi.mock('../utils/api', async () => {
 });
 vi.mock('../native/platform', () => ({ nativePlatform: () => platform.value }));
 
-import { flushPendingPushOpen, reportPortalPageView, reportPushOpen, resetPortalActivityForTests } from './portalActivity';
+import { flushPendingPushOpen, reportPortalHeartbeat, reportPortalPageView, reportPushOpen, resetPortalActivityForTests } from './portalActivity';
 
 beforeEach(() => {
   beacon.mockReset();
@@ -23,6 +23,7 @@ beforeEach(() => {
   resetPortalActivityForTests();
 });
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe('portal page-view beacon', () => {
@@ -96,7 +97,7 @@ describe('push-open beacon', () => {
     reportPushOpen({ notificationId: 'n-1', category: 'billing', tag: 'push-routed:receipt', url: '/?tab=billing', extra: 'ignored' });
     await flush();
     expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', {
-      platform: 'android', notificationId: 'n-1', category: 'billing', tag: 'push-routed:receipt',
+      platform: 'android', notificationId: 'n-1', tapId: expect.stringMatching(UUID), category: 'billing', tag: 'push-routed:receipt',
     });
   });
 
@@ -104,7 +105,7 @@ describe('push-open beacon', () => {
     reportPushOpen(undefined);
     await flush();
     expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', {
-      platform: 'web', notificationId: undefined, category: undefined, tag: undefined,
+      platform: 'web', notificationId: undefined, tapId: expect.stringMatching(UUID), category: undefined, tag: undefined,
     });
   });
 });
@@ -211,6 +212,108 @@ describe('push-open survives a page navigation', () => {
     expect(pending()).toBeNull();
     reportPushOpen({ notificationId: 'n-4' });
     expect(pending()).toBeNull();
+    expect(beacon).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('per-tap id', () => {
+  const pending = () => JSON.parse(localStorage.getItem('waves_pending_push_open') || 'null');
+
+  it('each tap gets its own id; a retry of the same tap reuses it', async () => {
+    beacon.mockRejectedValueOnce(new Error('page unloaded'));
+    reportPushOpen({ tag: 'push-routed:receipt' });
+    await flush();
+    const first = beacon.mock.calls[0][1].tapId;
+    expect(pending().body.tapId).toBe(first);
+    flushPendingPushOpen(); // the retry
+    await flush();
+    expect(beacon.mock.calls[1][1].tapId).toBe(first);
+    reportPushOpen({ tag: 'push-routed:receipt' }); // a second, separate tap
+    await flush();
+    expect(beacon.mock.calls[2][1].tapId).not.toBe(first);
+  });
+});
+
+describe('push-open for another profile of the account', () => {
+  const KEY = 'waves_pending_push_open';
+  const pending = () => JSON.parse(localStorage.getItem(KEY) || 'null');
+  const tapFor = (target) => ({ notificationId: 'n-t', url: `/?tab=visits&notificationProperty=${target}` });
+
+  it('is only parked when the link targets a different profile: nothing is sent with the wrong token', async () => {
+    reportPushOpen(tapFor('cust-b'));
+    await flush();
+    expect(beacon).not.toHaveBeenCalled();
+    expect(pending().targetCustomerId).toBe('cust-b');
+  });
+
+  it('is sent once, with the target profile token, after the switch (flush on portal mount)', async () => {
+    reportPushOpen(tapFor('cust-b'));
+    flushPendingPushOpen(); // still profile A: keeps waiting
+    await flush();
+    expect(beacon).not.toHaveBeenCalled();
+    expect(pending()).not.toBeNull();
+
+    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-b', sessionId: 'fam-a' })); // switched, same family
+    flushPendingPushOpen();
+    await flush();
+    expect(beacon).toHaveBeenCalledTimes(1);
+    expect(beacon).toHaveBeenCalledWith('/customer/activity/push-open', expect.objectContaining({ notificationId: 'n-t' }));
+    expect(pending()).toBeNull();
+    flushPendingPushOpen(); // a later mount does not send it again
+    await flush();
+    expect(beacon).toHaveBeenCalledTimes(1);
+  });
+
+  it('a tap for the profile already signed in (or a link naming none) sends immediately', async () => {
+    reportPushOpen(tapFor('cust-a'));
+    reportPushOpen({ notificationId: 'n-u', url: '/?tab=billing' });
+    await flush();
+    expect(beacon).toHaveBeenCalledTimes(2);
+  });
+
+  it('a targeted open that is stale is dropped even when the session now matches the target', async () => {
+    reportPushOpen(tapFor('cust-b'));
+    const at = pending().at;
+    localStorage.setItem('waves_token', jwtFor({ customerId: 'cust-b', sessionId: 'fam-a' })); // manual switch, much later
+    flushPendingPushOpen(at + 3 * 60 * 60_000);
+    await flush();
+    expect(beacon).not.toHaveBeenCalled();
+    expect(pending()).toBeNull();
+  });
+
+  it('a switch that never happens is dropped after ten minutes, never sent', async () => {
+    reportPushOpen(tapFor('cust-b'));
+    const at = pending().at;
+    flushPendingPushOpen(at + 9 * 60_000);
+    expect(pending()).not.toBeNull();
+    flushPendingPushOpen(at + 11 * 60_000);
+    expect(pending()).toBeNull();
+    await flush();
+    expect(beacon).not.toHaveBeenCalled();
+  });
+});
+
+describe('foreground heartbeat', () => {
+  it('posts to the lightweight endpoint and holds a five-minute floor', () => {
+    reportPortalHeartbeat(1_000);
+    reportPortalHeartbeat(1_000 + 4 * 60_000);
+    reportPortalHeartbeat(1_000 + 5 * 60_000 + 1);
+    expect(beacon.mock.calls.map((c) => c[0])).toEqual(['/customer/activity/heartbeat', '/customer/activity/heartbeat']);
+  });
+
+  it('a page-view send counts as a heartbeat, and a heartbeat never posts a page view', () => {
+    reportPortalPageView('visits', 1_000);
+    reportPortalHeartbeat(1_000 + 60_000); // page-view just stamped last_seen
+    expect(beacon).toHaveBeenCalledTimes(1);
+    reportPortalHeartbeat(1_000 + 6 * 60_000);
+    expect(beacon.mock.calls.map((c) => c[0])).toEqual(['/customer/activity/page-view', '/customer/activity/heartbeat']);
+  });
+
+  it('stops for the session when the gate is dark', async () => {
+    beacon.mockResolvedValue({ ok: true, enabled: false });
+    reportPortalHeartbeat(1_000);
+    await flush();
+    reportPortalHeartbeat(1_000 + 10 * 60_000);
     expect(beacon).toHaveBeenCalledTimes(1);
   });
 });
