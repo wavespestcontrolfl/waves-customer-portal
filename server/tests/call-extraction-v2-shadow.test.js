@@ -156,6 +156,9 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('- relative_date_used: for a slot the call agreed');
     expect(prompt).toContain('RESOLVE it against the call date');
     expect(prompt).toContain('- moved_appointment_relative_date_used:');
+    // The contract states the verifier's closed set of weekday-less forms.
+    expect(prompt).toContain('the verifier computes such dates only for these forms');
+    expect(prompt).toContain('sends every other weekday-less relative date');
     expect(prompt).toContain('- scheduling.relative_date_used (when true');
   });
 

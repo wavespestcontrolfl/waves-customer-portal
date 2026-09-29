@@ -609,6 +609,68 @@ describe('groundRescheduleAgreement', () => {
         .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     });
 
+    // Weekday-less relative dates: only a closed arithmetic set, computed by
+    // the code from the pinned quote and the call's day (Wed Sep 23), and it
+    // must EQUAL the extraction's resolved date.
+    test('weekday-less relative dates ground only for the closed arithmetic forms, when the computed date equals the extraction\'s', () => {
+      const at = (date) => `${date}T14:00:00-04:00`;
+      const FORMS = [
+        ['We will see you tomorrow at two PM.', 'tomorrow', '2026-09-24'],
+        ['We will see you the day after tomorrow at two PM.', 'the day after tomorrow', '2026-09-25'],
+        ['We will see you in three days at two PM.', 'in three days', '2026-09-26'],
+        ['We will see you in 5 days at two PM.', 'in 5 days', '2026-09-28'],
+        ['We will see you eight days from now at two PM.', 'eight days from now', '2026-10-01'],
+        ['We will see you 2 days from today at two PM.', '2 days from today', '2026-09-25'],
+        ['We will see you two weeks from now at two PM.', 'two weeks from now', '2026-10-07'],
+        ['We will see you in 3 weeks at two PM.', 'in 3 weeks', '2026-10-14'],
+        ['We will see you one week from today at two PM.', 'one week from today', '2026-09-30'],
+      ];
+      for (const [said, day, date] of FORMS) {
+        const words = { day, hour: 'two', period: 'PM' };
+        expect([said, judged({ said, slot: at(date), words, flags: relativeTrue }).ok]).toEqual([said, true]);
+        // The extraction's date must equal the computed one: a day either way fails.
+        const off = new Date(`${date}T12:00:00Z`); off.setUTCDate(off.getUTCDate() + 1);
+        expect([said, judged({ said, slot: at(off.toISOString().slice(0, 10)), words, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+      // The quote, not the recorded words, is what is computed; a missing pin fails.
+      expect(judged({ said: FORMS[4][0], slot: at('2026-10-01'), words: { day: 'eight days from now', hour: 'two', period: 'PM' }, flags: relativeTrue, relativeQuote: null }))
+        .toMatchObject({ ok: false, reason: 'relative_date_ungrounded' });
+      // Past today, and beyond the 60-day horizon, fail even when they equal the computed date.
+      expect(judged({ said: 'We will see you in 8 weeks at two PM.', slot: at('2026-11-18'), words: { day: 'in 8 weeks', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok).toBe(true);
+      expect(judged({ said: 'We will see you in 9 weeks at two PM.', slot: at('2026-11-25'), words: { day: 'in 9 weeks', hour: 'two', period: 'PM' }, flags: relativeTrue }).ok).toBe(false);
+      // Everything else weekday-less stays manual.
+      for (const [said, day] of [
+        ['We will see you sometime next month at two PM.', 'sometime next month'],
+        ['We will see you in a few days at two PM.', 'in a few days'],
+        ['We will see you in a couple of weeks at two PM.', 'in a couple of weeks'],
+        ['We will see you in nine days at two PM.', 'in nine days'],
+        ['We will see you eight days away at two PM.', 'eight days away'],
+        ['We will see you in two days or three days at two PM.', 'in two days'],
+      ]) {
+        expect([said, judged({ said, slot: at('2026-09-25'), words: { day, hour: 'two', period: 'PM' }, flags: relativeTrue }).ok]).toEqual([said, false]);
+      }
+    });
+
+    test('a weekday-less relative moved appointment follows the same closed forms', () => {
+      const SAME = 'We will see you at two in the afternoon.';
+      const movedQuote = 'my appointment the day after tomorrow';
+      const movedCase = (date) => ground(v2({
+        scheduling: {
+          confirmed_start_at: `${date}T14:00:00-04:00`, moved_appointment_date: date, moved_appointment_words: 'the day after tomorrow',
+          moved_appointment_relative_date_used: true, agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' },
+        },
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', SAME),
+          quote('/scheduling/confirmed_start_at', 'agent', SAME),
+          quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+          quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+          quote('/scheduling/moved_appointment_relative_date_used', 'caller', movedQuote),
+        ],
+      }), `Caller: Can you move ${movedQuote}?\nAgent: ${SAME}\nCaller: ${ACCEPT}`);
+      expect(movedCase('2026-09-25').ok).toBe(true);
+      expect(movedCase('2026-09-26').ok).toBe(false);
+    });
+
     test('an extraction that dropped the qualifier disagrees with the code and fails closed', () => {
       // Bare Thursday, not flagged relative, but the extraction resolved Oct 1:
       // the nearest-Thursday rule disagrees -> manual (never a silent pick).

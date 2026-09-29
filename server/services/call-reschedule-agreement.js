@@ -318,21 +318,50 @@ function namesDate(words, date, started) {
 // so. The words recorded for it are the bare weekday; the code checks the
 // resolution is possible and never one the nearest-date rule would give.
 const RELATIVE_DATE_HORIZON_DAYS = 60;
-function namesRelativeDate(words, date, started) {
+// Weekday-less relative dates are accepted only in this closed arithmetic set,
+// computed from the pinned verbatim relative quote and the call's day:
+// tomorrow, the day after tomorrow, in N days/weeks, N days/weeks from
+// now/today (N digits, or a number word one to eight). Anything else
+// ("sometime next month", "a few days") stays manual.
+const OFFSET_NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };
+const OFFSET_NUMBER = String.raw`(\d{1,2}|${Object.keys(OFFSET_NUMBER_WORDS).join('|')})`;
+const OFFSET_FORMS = [
+  new RegExp(String.raw`\bin ${OFFSET_NUMBER} (days?|weeks?)\b`, 'g'),
+  new RegExp(String.raw`\b${OFFSET_NUMBER} (days?|weeks?) from (?:now|today)\b`, 'g'),
+];
+function quoteOffsetDays(quote) {
+  const offsets = [];
+  const text = normalize(quote).replace(/\b(?:the )?day after tomorrow\b/g, () => { offsets.push(2); return ' '; })
+    .replace(/\btomorrow\b/g, () => { offsets.push(1); return ' '; });
+  OFFSET_FORMS.forEach((re) => [...text.matchAll(re)].forEach(([, n, unit]) => {
+    const count = OFFSET_NUMBER_WORDS[n] ?? Number(n);
+    offsets.push(count * (unit.startsWith('week') ? 7 : 1));
+  }));
+  return offsets.length && offsets.every((o) => o === offsets[0]) ? offsets[0] : null;
+}
+function namesRelativeDate(words, date, started, relativeQuotes = []) {
   const said = statedDateComponents(String(words).replace(NEAREST_LEAD, ''), started);
-  if (!said || said.weekday === undefined || said.month !== undefined || said.day !== undefined || said.year !== undefined) return false;
-  if (new Date(`${date}T12:00:00Z`).getUTCDay() !== said.weekday) return false;
   const today = etDateString(started);
-  return date > today && date <= etDateString(addETDays(started, RELATIVE_DATE_HORIZON_DAYS))
-    && nearestDate(said, started) !== date;
+  const withinHorizon = date > today && date <= etDateString(addETDays(started, RELATIVE_DATE_HORIZON_DAYS));
+  if (said?.weekday === undefined) {
+    // Weekday-less: the code computes the date itself and it must equal the
+    // extraction's resolved date.
+    return withinHorizon && relativeQuotes.some((q) => {
+      const days = quoteOffsetDays(q);
+      return days !== null && etDateString(addETDays(started, days)) === date;
+    });
+  }
+  if (said.month !== undefined || said.day !== undefined || said.year !== undefined) return false;
+  if (new Date(`${date}T12:00:00Z`).getUTCDay() !== said.weekday) return false;
+  return withinHorizon && nearestDate(said, started) !== date;
 }
 
 // Do the recorded slot words state exactly this slot? No day words only
 // when the slot keeps `movedDate`.
-function wordsStateSlot(words, slot, started, movedDate, relative) {
+function wordsStateSlot(words, slot, started, movedDate, relative, relativeQuotes = []) {
   if (statedHour(words.hour, words.period) !== slot.hour24) return false;
   if (!words.day) return !relative && slot.date === movedDate;
-  return relative ? namesRelativeDate(words.day, slot.date, started) : namesDate(words.day, slot.date, started);
+  return relative ? namesRelativeDate(words.day, slot.date, started, relativeQuotes) : namesDate(words.day, slot.date, started);
 }
 
 // The moved appointment's recorded words name its date, and a grounded
@@ -343,8 +372,10 @@ function movedAppointmentGrounded(scheduling, quotes, relativeQuotes, started) {
   if (typeof words !== 'string' || typeof relative !== 'boolean') return false;
   // A relative phrase is pinned by its own real quote.
   if (relative && !relativeQuotes.length) return false;
-  const names = relative ? namesRelativeDate : namesDate;
-  return names(words, scheduling.moved_appointment_date, started) && quotes.some((q) => holds(q, words));
+  const named = relative
+    ? namesRelativeDate(words, scheduling.moved_appointment_date, started, relativeQuotes)
+    : namesDate(words, scheduling.moved_appointment_date, started);
+  return named && quotes.some((q) => holds(q, words));
 }
 
 // Every quote the grounding uses is screened; a question fails the agent's
@@ -707,8 +738,9 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   // A relative date is pinned by its own real quote, which the slot words'
   // quote need not repeat.
-  if (relative && !grounded('/scheduling/relative_date_used').length) return fail('relative_date_ungrounded');
-  if (!wordsStateSlot(words, slot, started, movedDate, relative)) return fail('agreed_slot_words_mismatch');
+  const relativeQuotes = relative ? grounded('/scheduling/relative_date_used') : [];
+  if (relative && !relativeQuotes.length) return fail('relative_date_ungrounded');
+  if (!wordsStateSlot(words, slot, started, movedDate, relative, relativeQuotes)) return fail('agreed_slot_words_mismatch');
   const agreementQuotes = [...commitments, ...grounded('/scheduling/caller_accepted_slot', 'caller')];
   if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes, relative))) return fail('agreed_slot_ungrounded');
   // The agent committed to THIS slot: the commitment quote says its hour,
