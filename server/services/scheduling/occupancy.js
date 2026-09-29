@@ -824,14 +824,20 @@ async function findConflictingVisitsWithTravel({
   // the by-row lookup below. Synthesize a conflict entry instead (same
   // precedent as findConflictingVisits' own arrivalWindow branch above,
   // which already returns a non-DB-row conflict shaped from `fit.target`)
-  // — every caller of this function only ever checks `.length`, never a
-  // specific field, so a synthetic entry is safe wherever it can occur
-  // (grace > 0, self-serve only).
+  // — it can only occur at grace > 0 (self-serve callers only).
   const dayEndHit = conflicts.find((c) => c.stop === null && c.reason === 'day_end');
   const reasonByRow = new Map(conflicts.filter((c) => c.stop).map(({ stop, reason }) => [stop.row.id, reason]));
   // Query order (window_start asc), not conflict order.
   const rowConflicts = rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
-  return dayEndHit ? [...rowConflicts, { id: null, conflict_reason: 'day_end' }] : rowConflicts;
+  // Row-shaped like a real conflict (stable id, date, the candidate's own
+  // window) so callers that snapshot conflicts field by field — rebooker's
+  // conflictSnapshotItem/expectConflictSnapshot — get a stable, non-null
+  // entry rather than `id: null`.
+  const dateStr = String(date).split('T')[0];
+  return dayEndHit ? [...rowConflicts, {
+    id: `day_end:${dateStr}`, scheduled_date: dateStr,
+    window_start: windowStart, window_end: windowEnd, conflict_reason: 'day_end',
+  }] : rowConflicts;
 }
 
 /**

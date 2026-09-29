@@ -178,6 +178,20 @@ describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () =>
       expect(found.map((r) => r.id)).toEqual(['other-tech-before']);
     });
 
+    test('a graced candidate that cannot finish before day close returns a stable, row-shaped day_end conflict', async () => {
+      process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+      const q = makeQuery([]);
+      db.mockReturnValue(q);
+      const found = await findConflictingVisits({
+        db, date: '2099-01-05', windowStart: '17:00', windowEnd: '23:30',
+        travel: { lat: null, lng: null, graceMinutes: 90 },
+      });
+      expect(found).toEqual([{
+        id: 'day_end:2099-01-05', scheduled_date: '2099-01-05',
+        window_start: '17:00', window_end: '23:30', conflict_reason: 'day_end',
+      }]);
+    });
+
     test('a live hold still gets no grace at all (A6), regardless of grace or any technician identity', async () => {
       process.env.GATE_SLOT_TRAVEL_GAP = 'true';
       const hold = {
