@@ -12298,6 +12298,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // invoice manually after on-site confirmation.
         if (!billByInvoice && !isCommercialAccept && !holdFirstInvoiceForSiteConfirmation
           && standardConversionResult?.recurringConversionSkipped !== true) {
+          // Multi-program first day: link the property and form the one
+          // first-day stop BEFORE the invoice below attaches to the anchor —
+          // once it does, createOrJoinVisit refuses the row as carrying a
+          // completion artifact (r13) and combined closeout never gets its
+          // one stop. No-op with the gates off or fewer than two rows
+          // sharing the invoice; the post-commit linkage below still runs.
+          if (standardConversionResult?.firstScheduledServiceId
+            && standardConversionResult?.combinedInvoiceMemberIds?.length) {
+            await require('../services/estimate-property-linkage').linkFirstDayRowsBeforeFirstInvoice({
+              estimateId: estimate.id,
+              customerId,
+              database: trx,
+              serviceIds: [standardConversionResult.firstScheduledServiceId,
+                ...standardConversionResult.combinedInvoiceMemberIds],
+            });
+          }
           const conversionEstData = acceptedEstimateForScheduling.estimate_data || {};
           const conversionRecurringServices = EstimateConverter.recurringServicesFromEstimateData(conversionEstData);
           const setupFeeApplies = EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({

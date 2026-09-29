@@ -645,6 +645,51 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
   }
 }
 
+/**
+ * Accept-time property link + first-stop grouping for the FIRST-DAY rows,
+ * run INSIDE the caller's accept transaction and BEFORE it mints the
+ * first-application draft invoice.
+ *
+ * Why here: a slot-reserved accept leaves the hold row with no property_id,
+ * so the converter defers grouping to the post-commit linkage above. By then
+ * the accept has attached the shared first-application invoice to the anchor
+ * row, and createOrJoinVisit (codex #3590 r13) refuses any row that already
+ * carries an invoice/service record ("child_artifact") — so a multi-service
+ * booking's first-day rows never formed the one stop combined closeout needs.
+ * Linking first lets the rows group while they still carry no artifact; the
+ * r13 refusal itself is unchanged.
+ *
+ * Scope is exactly `serviceIds` (the anchor + the rows sharing the invoice):
+ * later-quarter children stay for the unchanged post-commit pass, which is
+ * idempotent over what this already did. Gate-off behavior is identical: with
+ * GATE_CUSTOMER_PROPERTIES or GATE_VISIT_GROUPS off this is a no-op.
+ *
+ * linkAcceptedEstimateProperty never throws, but a swallowed SQL error leaves
+ * the surrounding PostgreSQL transaction aborted (codex #3504 r15), so the
+ * call runs inside an explicit SAVEPOINT that is rolled back when it cannot
+ * be released. Best-effort: on any failure the accept proceeds exactly as it
+ * did before this seam existed (post-commit linkage, rows ungrouped).
+ */
+async function linkFirstDayRowsBeforeFirstInvoice({ estimateId, customerId, database, serviceIds }) {
+  if (!estimateId || !customerId || !database || !database.isTransaction) return null;
+  const ids = [...new Set((Array.isArray(serviceIds) ? serviceIds : []).filter(Boolean).map(String))];
+  if (ids.length < 2) return null;
+  if (!customerPropertiesGateOn()) return null;
+  if (!require('../config/feature-gates').gates.visitGroups) return null;
+  await database.raw('SAVEPOINT accept_first_day_linkage');
+  try {
+    const result = await linkAcceptedEstimateProperty({
+      estimateId, customerId, database, onlyServiceIds: ids,
+    });
+    await database.raw('RELEASE SAVEPOINT accept_first_day_linkage');
+    return result;
+  } catch (err) {
+    logger.warn(`[estimate-property-linkage] first-day linkage for estimate ${estimateId} rolled back to savepoint (non-blocking): ${err.message}`);
+    await database.raw('ROLLBACK TO SAVEPOINT accept_first_day_linkage');
+    return null;
+  }
+}
+
 // Canonical street extraction + normalization for property-scope compares
 // (series guard, rate classifier, tier scoping, duplicate-address checks).
 // parseEstimateAddress keeps the WHOLE street portion — "Unit 4, 100 Beach
@@ -889,4 +934,5 @@ module.exports = {
   estimateQuotesCustomerAddress,
   refreshHasMultiHome,
   linkAcceptedEstimateProperty,
+  linkFirstDayRowsBeforeFirstInvoice,
 };
