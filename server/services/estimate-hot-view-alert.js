@@ -197,16 +197,23 @@ async function closeSettledHotViewAlerts({
       : [];
     const byId = new Map(rows.map((row) => [String(row.id).toLowerCase(), row]));
 
-    const byReason = new Map();
-    for (const key of keys) {
-      const id = idOf(key);
-      const reason = settledReason(UUID_RE.test(id) ? byId.get(id.toLowerCase()) : null);
-      if (reason) byReason.set(reason, [...(byReason.get(reason) || []), key]);
-    }
-    for (const [reason, reasonKeys] of byReason) {
-      const closed = Number(await alertEpisodes.closeAdminAlertKeys(conn, reasonKeys, reason, { now })) || 0;
-      result.closed += closed;
-      result.reasons[reason] = closed;
+    // Each settled key closes in its own transaction, under the same per-key
+    // advisory lock raiseAdminAlertWithReopen takes, after reading its
+    // estimate AGAIN: an estimate made active and viewed hot since the read
+    // above either raised first (the re-read sees it open, and nothing closes)
+    // or raises after the close (the bell is auto-cleared, so it rings again).
+    const settled = keys.filter((key) => settledReason(UUID_RE.test(idOf(key)) ? byId.get(idOf(key).toLowerCase()) : null));
+    for (const key of settled) {
+      const reason = await conn.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
+        const id = idOf(key);
+        const why = settledReason(UUID_RE.test(id) ? await trx('estimates').where({ id }).first('id', 'status', 'archived_at') : null);
+        const closed = why ? Number(await alertEpisodes.closeAdminAlertKeys(trx, [key], why, { now })) || 0 : 0;
+        return closed > 0 ? why : null;
+      });
+      if (!reason) continue;
+      result.closed += 1;
+      result.reasons[reason] = (result.reasons[reason] || 0) + 1;
     }
     if (result.closed > 0) {
       logger.info(`[est-hot-view] closed ${result.closed} settled hot-estimate alert(s): ${JSON.stringify(result.reasons)}`);

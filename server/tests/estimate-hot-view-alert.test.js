@@ -292,12 +292,22 @@ describe('maybeRaiseHotViewAlert — alert episodes', () => {
 describe('closeSettledHotViewAlerts', () => {
   const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
   const keyOf = (n) => `estimate_hot_view:${id(n)}`;
-  // A minimal estimates read: whereIn(ids).select(...) resolving the fixture rows.
-  function fakeConn(rows) {
+  // A minimal estimates read: whereIn(ids).select(...) resolving the fixture
+  // rows; each close runs in a transaction whose re-read (where({id}).first())
+  // resolves the row as `now` says it is (defaults to the same fixtures).
+  function fakeConn(rows, { now = rows } = {}) {
     const conn = jest.fn(() => {
       const b = { whereIn: jest.fn(() => b), select: jest.fn(async () => rows) };
       return b;
     });
+    const trx = jest.fn(() => {
+      let wanted = null;
+      const b = { where: jest.fn(({ id: rowId }) => { wanted = rowId; return b; }), first: jest.fn(async () => now.find((r) => r.id === wanted) || undefined) };
+      return b;
+    });
+    trx.raw = jest.fn(async () => {});
+    conn.transaction = jest.fn(async (fn) => fn(trx));
+    conn.trx = trx;
     return conn;
   }
   const rows = [
@@ -321,7 +331,7 @@ describe('closeSettledHotViewAlerts', () => {
     alertEpisodes.openAdminAlertKeys.mockResolvedValue([1, 2, 3, 4, 5, 6, 7].map(keyOf).concat(keyOf(9), 'estimate_hot_view:not-a-uuid'));
     const out = await run();
     expect(alertEpisodes.openAdminAlertKeys).toHaveBeenCalledWith(expect.any(Function), 'estimate_hot_view:');
-    const closedBy = Object.fromEntries(alertEpisodes.closeAdminAlertKeys.mock.calls.map(([, keys, reason]) => [reason, keys]));
+    const closedBy = alertEpisodes.closeAdminAlertKeys.mock.calls.reduce((by, [, keys, reason]) => ({ ...by, [reason]: [...(by[reason] || []), ...keys] }), {});
     expect(closedBy).toEqual({
       'estimate accepted': [keyOf(2), keyOf(7)],
       'estimate declined': [keyOf(3)],
@@ -356,7 +366,19 @@ describe('closeSettledHotViewAlerts', () => {
     const conn = fakeConn(rows);
     await run({ conn });
     expect(conn).not.toHaveBeenCalled();
-    expect(alertEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, ['estimate_hot_view:est-1'], 'estimate gone', { now: NOW });
+    expect(conn.trx).not.toHaveBeenCalled();
+    expect(alertEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn.trx, ['estimate_hot_view:est-1'], 'estimate gone', { now: NOW });
+  });
+
+  test('each close re-reads its estimate under the raise path\'s own advisory lock: one made active again since the first read is left open', async () => {
+    alertEpisodes.openAdminAlertKeys.mockResolvedValue([keyOf(5), keyOf(2)]);
+    // Between the batch read and the close, estimate 5 was unarchived (and may be hot again).
+    const reopened = rows.map((r) => (r.id === id(5) ? { ...r, archived_at: null } : r));
+    const conn = fakeConn(rows, { now: reopened });
+    const out = await run({ conn });
+    expect(conn.trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${keyOf(5)}`]);
+    expect(alertEpisodes.closeAdminAlertKeys.mock.calls.map(([, keys]) => keys)).toEqual([[keyOf(2)]]);
+    expect(out).toMatchObject({ closed: 1, reasons: { 'estimate accepted': 1 } });
   });
 
   test('gate off: nothing runs (no key read, no close)', async () => {
