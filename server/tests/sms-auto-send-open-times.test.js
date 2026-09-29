@@ -32,6 +32,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   // ETA", so it never reaches the DB/track-transitions leg. See
   // sms-eta-freshness.test.js for that check's own coverage.
   findEtaMinutesClaims: jest.fn(() => []),
+  bodyMentionsArrival: jest.fn(() => false),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));

@@ -498,9 +498,26 @@ function sentenceSpans(str) {
   spans.push([start, str.length]);
   return spans;
 }
+// Written-out minutes ("twelve minutes away", "twenty-five mins") are read
+// as digits before claim detection (audit P1, round 4), so a spelled number
+// is checked exactly like "12 minutes".
+const NUMBER_WORD_UNITS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const NUMBER_WORD_TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const NUMBER_WORD_RE = new RegExp(`\\b(?:(${Object.keys(NUMBER_WORD_TENS).join('|')})(?:[\\s-]+(${Object.keys(NUMBER_WORD_UNITS).slice(0, 9).join('|')}))?|(${Object.keys(NUMBER_WORD_UNITS).join('|')}))\\b`, 'gi');
+function normalizeNumberWords(text) {
+  return String(text || '').replace(NUMBER_WORD_RE, (m, tens, unit, single) => {
+    if (single) return String(NUMBER_WORD_UNITS[single.toLowerCase()]);
+    return String(NUMBER_WORD_TENS[tens.toLowerCase()] + (unit ? NUMBER_WORD_UNITS[unit.toLowerCase()] : 0));
+  });
+}
+// Does the body talk about the tech arriving at all? The send-time freshness
+// check uses this as a backstop for ETA wording the claim parser can't read.
+function bodyMentionsArrival(text) {
+  return STRONG_ARRIVAL_TRIGGER_RE.test(String(text || ''));
+}
 function findEtaMinutesClaims(text) {
   const claims = [];
-  const str = String(text || '');
+  const str = normalizeNumberWords(text);
   const spans = sentenceSpans(str);
   const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
   let m;
@@ -2705,7 +2722,7 @@ module.exports = {
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
   validateLiveEtaMinutes,
-  findEtaMinutesClaims,
+  findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival,
   replyClaimsEtaMinutes,
   buildLiveEtaSnapshot,
   replyBindsDeclaredDays,

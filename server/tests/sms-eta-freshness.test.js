@@ -16,6 +16,7 @@
  */
 jest.mock('../services/sms-shadow-drafter', () => ({
   findEtaMinutesClaims: jest.fn(),
+  bodyMentionsArrival: jest.fn(() => false),
 }));
 jest.mock('../services/track-transitions', () => ({
   customerTrackState: jest.fn((row) => row?.track_state || null),
@@ -193,3 +194,38 @@ describe('per-claim binding (pre-push audit P1): two distinct stops must never c
     expect(reason).toBeNull();
   });
 });
+
+describe('round 4 (audit P1): written-out minutes and unparsed arrival wording still get the freshness check', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    drafter.findEtaMinutesClaims.mockReset().mockImplementation(real.findEtaMinutesClaims);
+    drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
+  });
+  const liveEtaSnapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] };
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+
+  test('"twelve minutes away" is bound like "12 minutes" and blocked once the visit is done', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: new Date().toISOString(),
+      outgoingBody: 'The tech is twelve minutes away.',
+      dbh: dbWith([{ id: 'svc-1', status: 'completed', track_state: 'complete' }]),
+    });
+    expect(reason).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('arrival wording with no readable figure is still checked when the draft carried a LIVE ETA', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      outgoingBody: 'He is on the way and should be there in a few.',
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_stale_facts');
+  });
+
+  test('ordinary text with no arrival wording is untouched', async () => {
+    const reason = await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'Thanks, see you next quarter!' });
+    expect(reason).toBeNull();
+  });
+});
+

@@ -65,9 +65,16 @@ function parseDraftedAt(factsGeneratedAt) {
  * instead of round-tripping through JSON.
  */
 async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, now = new Date(), dbh = db }) {
-  const { findEtaMinutesClaims } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
+  const { findEtaMinutesClaims, bodyMentionsArrival } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
   const claims = findEtaMinutesClaims(outgoingBody);
-  if (!claims.length) return null;
+  // Backstop (audit P1, round 4): the claim parser can't read every way a
+  // person or model writes an ETA. A body that talks about the tech arriving
+  // is checked whenever the draft carried a LIVE ETA, or whenever it mentions
+  // minutes at all — every snapshot entry must then still be live and fresh.
+  const snapshotHasEntries = Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0;
+  const unparsedArrivalClaim = !claims.length && bodyMentionsArrival(outgoingBody)
+    && (snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || '')));
+  if (!claims.length && !unparsedArrivalClaim) return null;
 
   // Only the current grouped shape is accepted — { entries: [{ minutes,
   // scheduledServiceIds }] }. A missing/malformed snapshot, or the old flat
@@ -86,7 +93,9 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // round fixes (a claim about a completed stop must not pass on some other
   // stop's still-en_route status).
   const claimedMinutes = [...new Set(claims.map((c) => c.minutes))];
-  const boundEntries = [];
+  // An arrival claim with no readable figure binds conservatively to EVERY
+  // entry: each must still be live.
+  const boundEntries = unparsedArrivalClaim ? [...entries] : [];
   for (const minutes of claimedMinutes) {
     const matches = entries.filter((e) => e.minutes === minutes);
     if (matches.length === 0) return 'eta_claim_unbound';
