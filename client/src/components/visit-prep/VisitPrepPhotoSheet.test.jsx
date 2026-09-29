@@ -45,6 +45,14 @@ describe('VisitPrepPhotoSheet', () => {
     expect(onSent).toHaveBeenCalledWith(counts);
   });
 
+  it('closes, never re-targets, when the card\'s visit changes while it is open', () => {
+    const onClose = vi.fn();
+    const { rerender } = render(<VisitPrepPhotoSheet open onClose={onClose} scheduledServiceId="svc-1" photosRemaining={6} />);
+    expect(onClose).not.toHaveBeenCalled();
+    rerender(<VisitPrepPhotoSheet open onClose={onClose} scheduledServiceId="svc-2" photosRemaining={6} />);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('closes from its 48px close button', () => {
     const onClose = vi.fn();
     render(<VisitPrepPhotoSheet open onClose={onClose} scheduledServiceId="svc-1" photosRemaining={6} />);

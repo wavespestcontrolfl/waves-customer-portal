@@ -929,13 +929,16 @@ const VISIT_PREP_SVC_COLUMNS = [
 // customer between the pre-check and the lock — defense in depth; there is
 // no token here for a regroup to invalidate, unlike the public route, since
 // this route always addresses the SAME scheduled_services id throughout).
-async function reloadEligibleVisitPrepRowForApp(id, expectedCustomerId, trx) {
+async function reloadEligibleVisitPrepRowForApp(id, expectedCustomerId, expectedPropertyId, trx) {
   const customer = await trx('customers').where({ id: expectedCustomerId }).whereNull('deleted_at')
     .forShare().first('id', 'active');
   if (!customer) return null;
   await trx('scheduled_services').where({ id }).forUpdate().first('id');
   const svc = await trx('scheduled_services').where({ id }).first(...VISIT_PREP_SVC_COLUMNS);
   if (!svc || String(svc.customer_id) !== String(expectedCustomerId)) return null;
+  // The property the scoped precheck authorized: a staff move to another
+  // property between the precheck and this lock invalidates the upload.
+  if (String(svc.property_id || '') !== String(expectedPropertyId || '')) return null;
   const appointmentPublic = require('./appointment-public');
   return appointmentPublic.reloadEligibleVisitPrepRowCore(
     { ...svc, customer_active: customer.active === true },
@@ -977,7 +980,13 @@ router.post(
   async (req, res, next) => {
     try {
       if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
-      const row = await db('scheduled_services').where({ id: req.params.id }).first(...VISIT_PREP_SVC_COLUMNS);
+      // Saved-property scope (GATE_APP_PROPERTY_SCOPE), same predicate as
+      // confirm/reschedule: a visit at another of the customer's properties
+      // is not this session's (Codex #5306 r1 P1).
+      const scope = await resolveSessionScope(req);
+      const rowQuery = db('scheduled_services').where({ id: req.params.id });
+      applyPropertyPredicate(rowQuery, scope);
+      const row = await rowQuery.first(...VISIT_PREP_SVC_COLUMNS);
       // Ownership gets the SAME generic 404 as an unknown id or a dark gate
       // — a customer probing another customer's visit id must not learn
       // anything from the response.
@@ -1009,6 +1018,7 @@ router.post(
   async (req, res, next) => {
     const expectedId = req.visitPrepSvc.id;
     const expectedCustomerId = req.customerId;
+    const expectedPropertyId = req.visitPrepSvc.property_id || null;
     try {
       const result = await visitPrepService().createVisitPrepSubmission({
         svc: req.visitPrepSvc,
@@ -1020,7 +1030,7 @@ router.post(
         // Re-proves eligibility on FRESH state under the stop lock, on the
         // write's own transaction — never the global pool (see the loader
         // above).
-        recheck: (trx) => reloadEligibleVisitPrepRowForApp(expectedId, expectedCustomerId, trx),
+        recheck: (trx) => reloadEligibleVisitPrepRowForApp(expectedId, expectedCustomerId, expectedPropertyId, trx),
       });
       // Office feed item — same rule as the public route (scope §5.4 item
       // 2/3): ONE per NEW submission, detached, never awaited, built from

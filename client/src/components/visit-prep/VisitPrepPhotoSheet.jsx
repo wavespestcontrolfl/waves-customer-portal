@@ -18,6 +18,7 @@
  * everything else (caps, dedupe, response shape) is identical, so the form
  * itself needed no changes.
  */
+import { useEffect, useRef } from 'react';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useModalFocus from '../../hooks/useModalFocus';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -45,11 +46,21 @@ export default function VisitPrepPhotoSheet({
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
   const compact = useIsMobile(760);
+  // The visit the sheet was opened for. Photos picked for it must never go
+  // to a different visit: if the card's next visit changes while the sheet
+  // is open (a refresh after the camera returns, the visit went en route or
+  // was cancelled), the sheet closes and drops the picks (Codex #5306 r1 P1).
+  const openedFor = useRef(null);
+  useEffect(() => {
+    if (!open) { openedFor.current = null; return; }
+    if (openedFor.current == null) { openedFor.current = scheduledServiceId; return; }
+    if (String(openedFor.current) !== String(scheduledServiceId)) onClose?.();
+  }, [open, scheduledServiceId, onClose]);
 
   if (!open) return null;
 
   const handleSubmit = async (formData) => {
-    const response = await api.sendVisitPrepPhotos(scheduledServiceId, formData);
+    const response = await api.sendVisitPrepPhotos(openedFor.current ?? scheduledServiceId, formData);
     onSent?.(response?.prepPhotos || null);
     return response;
   };

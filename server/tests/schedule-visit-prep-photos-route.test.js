@@ -25,6 +25,15 @@ jest.mock('../middleware/auth', () => {
   return { ...jest.requireActual('../middleware/auth'), authenticate: asCustomer, authenticateAllowInactive: asCustomer };
 });
 
+const mockScope = { enabled: true, scoped: true, property: { id: 'prop-7', is_primary: false } };
+const mockResolveScope = jest.fn(async () => mockScope);
+const mockApplyPredicate = jest.fn((qb) => qb);
+jest.mock('../services/account-properties', () => ({
+  ...jest.requireActual('../services/account-properties'),
+  resolveSessionScope: (...args) => mockResolveScope(...args),
+  applyPropertyPredicate: (...args) => mockApplyPredicate(...args),
+}));
+
 const mockCreate = jest.fn();
 jest.mock('../services/visit-prep', () => ({
   ...jest.requireActual('../services/visit-prep'),
@@ -146,6 +155,18 @@ describe('POST /api/schedule/:id/prep-photos', () => {
     expect(args.files).toHaveLength(1);
     expect(typeof args.recheck).toBe('function');
     expect(mockNotifyOffice).toHaveBeenCalledTimes(1);
+    // The session's saved-property scope was applied to the lookup.
+    expect(mockApplyPredicate).toHaveBeenCalledWith(expect.anything(), mockScope);
+  });
+
+  test('a visit outside the session property scope → the same generic 404', async () => {
+    // The scoped lookup matches nothing.
+    db.mockImplementation(() => chain(null));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/schedule/svc-1/prep-photos`, { method: 'POST', body: photoForm() });
+      expect(res.status).toBe(404);
+    });
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 
   test('duplicate-only resubmit → 200, no office item', async () => {
@@ -212,6 +233,13 @@ describe('POST /api/schedule/:id/prep-photos', () => {
     test('a visit that moved to another customer under the lock → null (nothing stored)', async () => {
       const recheck = await captureRecheck();
       const trx = fakeTrx({ svc: { ...OWN_VISIT, customer_id: 'cust-OTHER' } });
+      await expect(recheck(trx)).resolves.toBeNull();
+      expect(mockRecheckCore).not.toHaveBeenCalled();
+    });
+
+    test('a visit moved to another property under the lock → null (nothing stored)', async () => {
+      const recheck = await captureRecheck();
+      const trx = fakeTrx({ svc: { ...OWN_VISIT, property_id: 'prop-OTHER' } });
       await expect(recheck(trx)).resolves.toBeNull();
       expect(mockRecheckCore).not.toHaveBeenCalled();
     });
