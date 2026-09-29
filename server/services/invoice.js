@@ -469,18 +469,24 @@ async function invoiceBillsAnotherUpcomingVisit(conn, invoiceRow) {
     && lines.some((li) => lineIsBaseApplication(li));
   if (!invoiceRow.id && !lineIds.length) return false; // nothing to match on
   try {
+    // The stamp column postdates some schemas (dev/preview/rolling deploys);
+    // without it only the invoice's own member lines can match (Codex r9 P2).
+    const hasStamp = await conn.schema.hasColumn("scheduled_services", "first_application_invoice_id");
+    if (!hasStamp && !lineIds.length) return false;
     const row = await conn("scheduled_services")
       .where(function () {
-        this.where("first_application_invoice_id", invoiceRow.id);
+        if (hasStamp) this.where("first_application_invoice_id", invoiceRow.id);
         if (lineIds.length) this.orWhereIn("id", lineIds);
-        if (aggregateOnAnchor) {
+        if (hasStamp && aggregateOnAnchor) {
           this.orWhereIn("first_application_invoice_id", function () {
             this.select("id").from("invoices").where("scheduled_service_id", invoiceRow.scheduled_service_id);
           });
         }
       })
       .whereNot("id", invoiceRow.scheduled_service_id)
-      .whereNotIn("status", ["cancelled", "canceled", "completed", "no_show", "skipped", "rescheduled"])
+      // Only statuses that prove the billed work won't be charged; a COMPLETED
+      // member can still be re-priced (Codex r9 P1 on #5301).
+      .whereNotIn("status", ["cancelled", "canceled", "no_show", "skipped", "rescheduled"])
       .first("id");
     return Boolean(row);
   } catch (err) {
