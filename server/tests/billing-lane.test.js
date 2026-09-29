@@ -368,6 +368,156 @@ describe('predictCompletionBilling', () => {
   });
 });
 
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28, waves-billing skill
+// invariant #8): "Unpriced = NULL, never $0. $0 means charge nothing." Off
+// (default, exercised by every test above and below this block — none of
+// them set the gate) is byte-identical to today: a bare stamped 0 with no
+// primaryLinePrice still defers to the fee/rate fallback. On, ANY stamped 0
+// is authoritative in every lane, no primaryLinePrice needed.
+describe('GATE_STAMPED_ZERO_FREE — a bare stamped $0 bills nothing, every lane', () => {
+  afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
+
+  const memberBase = {
+    lane: 'monthly_membership',
+    billingMode: 'monthly_membership',
+    autopayActive: true,
+    estimatedPrice: 0,
+    monthlyRate: 33.33,
+    perApplicationFee: null,
+    isRecurring: false,
+    isCallback: false,
+    payerBilled: false,
+    prepaidAmount: null,
+  };
+
+  test('hasAuthoritativeZeroPrice: off requires primaryLinePrice, on does not', () => {
+    expect(hasAuthoritativeZeroPrice(0, null)).toBe(false);
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(hasAuthoritativeZeroPrice(0, null)).toBe(true);
+    // A genuinely blank row is unaffected either way — gate or no gate,
+    // NULL/'' is never a stamped zero.
+    expect(hasAuthoritativeZeroPrice(null, null)).toBe(false);
+    expect(hasAuthoritativeZeroPrice('', null)).toBe(false);
+    // A non-'true' value keeps the gate off (strict opt-in convention).
+    process.env.GATE_STAMPED_ZERO_FREE = '1';
+    expect(hasAuthoritativeZeroPrice(0, null)).toBe(false);
+  });
+
+  test('completionInvoiceAmount: monthly_membership — a bare stamped 0 bills nothing on, monthly_rate off', () => {
+    const args = {
+      estimatedPrice: 0, isCallback: false, perApplicationBilling: false,
+      perApplicationFee: null, monthlyRate: 33.33, billingMode: 'monthly_membership',
+    };
+    expect(completionInvoiceAmount(args)).toBe(33.33);
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(completionInvoiceAmount(args)).toBe(0);
+  });
+
+  test('completionInvoiceAmount: per_application — a bare stamped 0 bills nothing on, the fee off', () => {
+    const args = {
+      estimatedPrice: 0, isCallback: false, perApplicationBilling: true,
+      perApplicationFee: 97.2, monthlyRate: null, billingMode: 'per_application',
+    };
+    expect(completionInvoiceAmount(args)).toBe(97.2);
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(completionInvoiceAmount(args)).toBe(0);
+  });
+
+  test('completionInvoiceAmount: legacy null lane (no billing_mode) — a bare stamped 0 bills nothing on, monthly_rate off', () => {
+    const args = {
+      estimatedPrice: 0, isCallback: false, perApplicationBilling: false,
+      perApplicationFee: null, monthlyRate: 50, billingMode: null,
+    };
+    expect(completionInvoiceAmount(args)).toBe(50);
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(completionInvoiceAmount(args)).toBe(0);
+  });
+
+  test('completionInvoiceAmount: a genuinely NULL/blank row still falls to the fallback on either setting', () => {
+    const args = {
+      estimatedPrice: null, isCallback: false, perApplicationBilling: false,
+      perApplicationFee: null, monthlyRate: 50, billingMode: null,
+    };
+    expect(completionInvoiceAmount(args)).toBe(50);
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(completionInvoiceAmount(args)).toBe(50);
+  });
+
+  test('predictCompletionBilling: monthly_membership one-off stamped $0 reads fully_discounted only with the gate on', () => {
+    // Off: a bare stamped 0 (no primaryLinePrice) reads as "no price on
+    // file" — dues cover it exactly like a genuinely blank row would
+    // (today's behavior, byte-identical).
+    expect(predictCompletionBilling(memberBase))
+      .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 33.33, conflictStampedPrice: false });
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    // On: the stamp is now this ONE-OFF visit's own deliberate price —
+    // dues do not "cover" a visit that is already free on its own terms.
+    expect(predictCompletionBilling(memberBase))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+  });
+
+  test('predictCompletionBilling: per_application stamped $0 reads fully_discounted only with the gate on', () => {
+    const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 97.2, monthlyRate: null };
+    expect(predictCompletionBilling(perApp))
+      .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(predictCompletionBilling(perApp))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+  });
+
+  test('predictCompletionBilling: a callback stamped $0 is unaffected by the gate (still plain "callback", never fully_discounted)', () => {
+    // autopayActive: false so dues coverage never masks the callback
+    // exclusion this test actually targets.
+    const callback = { ...memberBase, isCallback: true, isRecurring: false, autopayActive: false };
+    const offResult = predictCompletionBilling(callback);
+    expect(offResult).toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(predictCompletionBilling(callback)).toEqual(offResult);
+  });
+
+  test('predictCompletionBilling: a RECURRING member stamped $0 stays dues-covered on either setting, but the gate surfaces the stamp as a conflict (like any other stamped price already does)', () => {
+    const recurring = { ...memberBase, isRecurring: true };
+    expect(predictCompletionBilling(recurring))
+      .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 33.33, conflictStampedPrice: false });
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    // Coverage itself is unchanged (isRecurring alone satisfies it) — but
+    // the widened hasVisitPrice now recognizes the $0 as the visit's own
+    // stamped price, so grossAmount follows completionInvoiceAmount's own
+    // (now-widened) reading of it, and conflictStampedPrice flags it the
+    // SAME way a stamped $100 already does two tests above — a real
+    // stamped price beside dues coverage, worth a heads-up either way.
+    expect(predictCompletionBilling(recurring))
+      .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 0, conflictStampedPrice: true });
+  });
+
+  test('attachedInvoiceAutoChargeLikely: per_application stamped $0 anchors at $0 (no charge) only with the gate on', () => {
+    const { attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
+    const base = {
+      invoice: { subtotal: 0, total: 0, discount_amount: 0 },
+      autopayActive: true,
+      estimatedPrice: 0,
+      isRecurring: false,
+      isCallback: false,
+      serviceType: 'Pest Control',
+      billingMode: 'per_application',
+      perApplicationFee: 97.2,
+    };
+    // Off: the bare stamped 0 still defers to the fee anchor, so a $0
+    // invoice is well under it — no assertion needed beyond "does not
+    // throw"; the gate-on case below is the one this PR changes.
+    expect(() => attachedInvoiceAutoChargeLikely(base)).not.toThrow();
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    // A $0 subtotal invoice is still <= a $0 anchor, so this alone doesn't
+    // distinguish the two settings; assert the anchor logic directly via a
+    // subtotal that WOULD pass the old fee anchor but must now be refused.
+    expect(attachedInvoiceAutoChargeLikely({ ...base, invoice: { subtotal: 40, total: 40, discount_amount: 0 } }))
+      .toBe(false);
+    delete process.env.GATE_STAMPED_ZERO_FREE;
+    expect(attachedInvoiceAutoChargeLikely({ ...base, invoice: { subtotal: 40, total: 40, discount_amount: 0 } }))
+      .toBe(true);
+  });
+});
+
 // Mid-month autopay lapse after the cron already collected the month's dues:
 // coverage must follow the COLLECTED dues, not the autopay flag, or every
 // remaining plan visit that month mints a full monthly_rate invoice on top
@@ -760,5 +910,64 @@ describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () =
     expect(attachedInvoiceAutoChargeLikely({
       ...base, billingMode: 'per_application', estimatedPrice: null, perApplicationFee: null,
     })).toBe(false);
+  });
+});
+
+// Parallel review P2s on #5256: the gate reaches the in-lock extended
+// anchor, the sheet's membership/self-pay auto-charge promise, and the
+// annual-prepay label. Off stays exactly as before.
+describe('GATE_STAMPED_ZERO_FREE — in-lock anchor, sheet promise, annual-prepay label', () => {
+  const {
+    verifyExtendedCompletionAnchor, attachedInvoiceAutoChargeLikely, predictCompletionBilling,
+  } = require('../services/billing-lane');
+  afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
+  const noDuesConn = () => {
+    const chain = {};
+    for (const m of ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'orWhere', 'andWhereRaw', 'andWhere']) chain[m] = () => chain;
+    chain.first = async () => null;
+    return () => chain;
+  };
+  const legacyLane = { id: 'c1', billing_mode: null, monthly_rate: 33.33, waveguard_tier: null };
+  const zeroVisit = { id: 's1', customer_id: 'c1', status: 'completed', is_recurring: false, estimated_price: 0, is_callback: false, prepaid_method: null };
+  const invoice30 = { subtotal: 30, total: 30, discount_amount: 0, scheduled_service_id: 's1' };
+
+  test('in-lock extended anchor: a stamped $0 refuses with the gate on', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: noDuesConn(), lockedCustomer: legacyLane, lockedSvc: zeroVisit, lockedInvoice: invoice30,
+    })).resolves.toEqual({ ok: false, reason: 'anchor_exceeded' });
+  });
+
+  test('sheet promise: a stamped $0 on a legacy lane with a monthly rate never promises auto-charge with the gate on', () => {
+    const args = {
+      invoice: { subtotal: 30, total: 30, discount_amount: 0 },
+      autopayActive: true,
+      estimatedPrice: 0,
+      primaryLinePrice: null,
+      isRecurring: false,
+      isCallback: false,
+      serviceType: 'Pest Control',
+      billingMode: null,
+      monthlyRate: 33.33,
+      waveguardTier: null,
+      duesCollectedThisMonth: false,
+    };
+    const off = attachedInvoiceAutoChargeLikely(args);
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(attachedInvoiceAutoChargeLikely(args)).toBe(false);
+    delete process.env.GATE_STAMPED_ZERO_FREE;
+    expect(attachedInvoiceAutoChargeLikely(args)).toBe(off);
+  });
+
+  test('annual-prepay lane: an uncovered stamped $0 reads as free, not "prepaid", with the gate on', () => {
+    const args = {
+      lane: 'annual_prepay', billingMode: 'annual_prepay', autopayActive: true,
+      estimatedPrice: 0, primaryLinePrice: null, monthlyRate: 33.33, perApplicationFee: null,
+      isRecurring: false, isCallback: false, prepaidMethod: null, prepaidAmount: 0,
+    };
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(predictCompletionBilling(args)).toMatchObject({ kind: 'no_charge', amount: 0, reason: 'fully_discounted' });
+    delete process.env.GATE_STAMPED_ZERO_FREE;
+    expect(predictCompletionBilling(args).kind).not.toBe('prepaid');
   });
 });

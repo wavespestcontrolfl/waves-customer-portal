@@ -887,7 +887,7 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
-  // consent.sms_declined (schema 1.18.0, codex P1 on #5292): the dedicated
+  // consent.sms_declined (schema 1.19.0, codex P1 on #5292): the dedicated
   // explicit-SMS-refusal field the booking-link staging check reads
   // (call-booking-link-text.js) — without it in FIELD_GROUPS, a model that
   // stops catching (or starts hallucinating) a refusal would go unnoticed

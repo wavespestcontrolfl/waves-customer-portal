@@ -147,6 +147,10 @@ describe('reconciled todaysResult leads with the visit summary', () => {
   });
 });
 
+// PR #5033 P2 (thread PRRT_kwDOR3YQi86mlJsv): water/irrigation/sprinkler as
+// a noun never reaches a watering branch.
+const INCIDENTAL_WATER_NOUNS = ['Is this water damage?', 'What caused the water stains?', 'Is the irrigation meter broken?'];
+
 describe('watering questions answer with the weekly plan when the report carries one (codex #3565 gh-r29)', () => {
   const plan = { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now; run one cycle only if less than ½" has fallen.' };
   test('plan present → the plan, before re-entry / trend routing', () => {
@@ -162,12 +166,26 @@ describe('watering questions answer with the weekly plan when the report carries
       'I spotted fungus; do we need to run the sprinklers?',
       'I observed dry spots; do I still need to water?',
       'I found mushrooms; is it okay to still water?',
+      // Passive / impersonal subjects and other modals (PR #5033 P2).
+      'I found mushrooms; may I water?',
+      'I found mushrooms; would I water this week?',
+      'I found mushrooms; should the lawn be watered?',
+      'I spotted dry areas; is the lawn getting watered enough?',
+      'I observed dry spots; was it watered?',
+      'I found dry spots; does it need water?',
+      'I spotted fungus; does my lawn still need watering?',
     ]) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
     }
     // gh-r38: controller phrasing without the word "water" is a watering question too.
     for (const q of ['How long should I run each zone?', 'How many minutes per zone?']) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
+    }
+    // PR #5033 P2: a verbless watering-schedule topic is still a watering request.
+    expect(answerServiceReportQuestion({ question: 'What’s my watering schedule this week?', data })).toBe(`${plan.title} ${plan.detail}`);
+    // PR #5033 P2: an incidental watering noun is not a watering request.
+    for (const q of INCIDENTAL_WATER_NOUNS) {
+      expect(answerServiceReportQuestion({ question: q, data })).not.toBe(`${plan.title} ${plan.detail}`);
     }
     // gh-r46: "time zone" is not watering intent — the appointment router answers it.
     expect(answerServiceReportQuestion({ question: 'What time zone is my next appointment?', data })).not.toBe(`${plan.title} ${plan.detail}`);
@@ -244,6 +262,14 @@ describe('watering questions answer with the weekly plan when the report carries
       'I found mushrooms; is it still okay to water?',
       'I found mushrooms; is it fine to water?',
       'I spotted fungus; am I allowed to water?',
+      // Passive / impersonal subjects and other modals (PR #5033 P2).
+      'I found mushrooms; may I water?',
+      'I found mushrooms; would I water this week?',
+      'I found mushrooms; should the lawn be watered?',
+      'I spotted dry areas; is the lawn getting watered enough?',
+      'I observed dry spots; was it watered?',
+      'I found dry spots; does it need water?',
+      'I spotted fungus; does my lawn still need watering?',
     ]) {
       const answer = answerServiceReportQuestion({ question, data });
       expect(answer).toMatch(expected);
@@ -251,10 +277,24 @@ describe('watering questions answer with the weekly plan when the report carries
     }
     for (const question of [
       'What did you observe in the dry spots?',
+      'Did you find mushrooms by the sprinkler?',
+      'What fungus did you spot near the irrigation zone?',
+      'What did you find by the sprinkler?',
+      'How much fungus did you find by the sprinkler?',
+      'I observed mushrooms by the sprinkler, do you know what they are?',
+      // Water as a noun modifier is not a watering ask.
+      'I found mushrooms by the sprinkler; is it water damage?',
     ]) {
       const findingsAnswer = answerServiceReportQuestion({ question, data });
       expect(findingsAnswer).toMatch(/Sprinkler area checked/);
       expect(findingsAnswer).not.toMatch(expected);
+    }
+    // Unresolved aftercare answers watering requests only — an incidental
+    // watering noun keeps its findings / trend routing.
+    for (const question of INCIDENTAL_WATER_NOUNS) {
+      const answer = answerServiceReportQuestion({ question, data });
+      expect(answer).not.toMatch(expected);
+      expect(answer).not.toMatch(/Confirm the product watering directions|Follow the product-specific watering restriction/);
     }
   });
 
@@ -309,7 +349,7 @@ describe('watering questions answer with the weekly plan when the report carries
       findings: [{ title: 'Mushrooms observed' }],
       reportV2: { aftercare: { watering: 'Product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' } },
     };
-    for (const question of ['What should I do next?', 'What should I do to take care of my lawn?', 'What do you recommend for my lawn?', 'What is the next step for my lawn?', 'What action should I take?']) {
+    for (const question of ['What should I do next?', 'What should I do about the mushrooms I observed?', 'What do you recommend based on what you spotted?', 'What do I do about the mushrooms I observed?', 'I observed mushrooms. What can I do about them?', 'What could we do about the areas you spotted?', 'What do I need to do about the mushrooms I observed?', 'Is there anything I should do about what you observed?', 'Any action needed for what you spotted?', 'What are the next steps for the mushrooms you found?', 'How do I handle the fungus you spotted?']) {
       const answer = answerServiceReportQuestion({ question, data });
       expect(answer).toMatch(/^Confirm the product watering directions/);
       if (source !== 'fallback') expect(answer).toContain(mowing);
@@ -334,6 +374,97 @@ describe('watering questions answer with the weekly plan when the report carries
     expect(routed.topic).toBe('next_steps');
     expect(routed.answer).not.toMatch(/Confirm the product watering directions/);
     expect(routed.answer).toMatch(/^No special repair or prep was flagged/);
+  });
+
+  // PR #5033 round 5 (moved to this follow-up): a stored watering
+  // recommendation must not be answered beside the restriction it contradicts.
+  const HELD = { watering: 'Do not water for 24 hours.', wateringHold: true, evidenceSource: 'product_instruction' };
+  const REVIEW = { watering: 'Product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' };
+  const withAftercare = (aftercare, source) => ({
+    serviceLine: 'lawn',
+    dynamicContext: {},
+    lawnAssessment: source === 'snapshot'
+      ? { snapshot: {}, recommendationCards: [{ customerCopy: 'Increase irrigation to twice this week.' }, { customerCopy: 'Keep mowing at 3.5 inches.' }] }
+      : {},
+    recommendations: source === 'recommendation' ? ['Run sprinklers 20 minutes per zone.', 'Keep mowing at 3.5 inches.'] : [],
+    findings: [{ title: 'Mushrooms observed' }],
+    reportV2: { aftercare },
+  });
+  test.each([
+    ['held', HELD, /^Follow the product-specific watering restriction/],
+    ['review', REVIEW, /^Confirm the product watering directions/],
+  ])('generic next steps withhold watering recommendations while aftercare is %s', (_state, aftercare, task) => {
+    for (const source of ['snapshot', 'recommendation']) {
+      const answer = answerServiceReportQuestion({ question: 'What should I do next?', data: withAftercare(aftercare, source) });
+      expect(answer).toMatch(task);
+      expect(answer).not.toMatch(/Increase irrigation|Run sprinklers/);
+      expect(answer).toContain('Keep mowing at 3.5 inches.');
+    }
+  });
+
+  test('controller and cycle directives count as watering recommendations under a restriction (PR #5258 P1)', () => {
+    const data = {
+      ...withAftercare(HELD, 'snapshot'),
+      lawnAssessment: {
+        snapshot: {},
+        recommendationCards: ['Run each zone for 20 minutes.', 'Add another cycle this week.', 'Resume the normal schedule tomorrow.', 'Set the sprinklers for 20 minutes tomorrow.', 'Schedule two irrigation cycles this week.', 'Turn the sprinkler heads back on tonight.', 'Turn the damaged irrigation system back on tomorrow.', 'Keep mowing at 3.5 inches.']
+          .map((customerCopy) => ({ customerCopy })),
+      },
+    };
+    const answer = answerServiceReportQuestion({ question: 'What should I do next?', data });
+    expect(answer).not.toMatch(/each zone|another cycle|normal schedule|Set the sprinklers|irrigation cycles|sprinkler heads|damaged irrigation/);
+    expect(answer).toContain('Keep mowing at 3.5 inches.');
+    // A watering noun with no watering action is not a directive (round 2).
+    for (const keep of ['Watch the sprinkler area for recurring mushrooms.', 'Replace the damaged controller battery.', 'Set a timer to inspect the treated area tomorrow.']) {
+      const other = { ...withAftercare(HELD, 'recommendation'), recommendations: [keep] };
+      expect(answerServiceReportQuestion({ question: 'What should I do next?', data: other })).toContain(keep);
+    }
+    // A zone or cycle outside the controller sense is not a watering directive.
+    for (const keep of ['A second visit breaks the flea life cycle.', 'Treat the weed zone by the fence.', 'Mow on a 5-day cycle.', 'Resume your normal mowing schedule.']) {
+      const other = { ...withAftercare(HELD, 'recommendation'), recommendations: [keep] };
+      expect(answerServiceReportQuestion({ question: 'What should I do next?', data: other })).toContain(keep);
+    }
+  });
+
+  test.each([
+    ['What can we do to move the appointment?', 'next_visit'],
+    ['What action did you take after you spotted fungus?', 'findings'],
+    ['What action was taken after you spotted fungus?', 'findings'],
+    ['What can I do to confirm my appointment?', 'next_visit'],
+    ['What do I do about my next appointment?', 'next_visit'],
+    ['What could we do to get an earlier appointment?', 'next_visit'],
+    ['What can I do about the weeds before my next appointment?', 'next_steps'],
+    ['What do I do until the next visit?', 'next_steps'],
+    ['Did you find any broken sprinklers?', 'findings'],
+    ['What mowing action caused the damage you observed?', 'findings'],
+    ['What action should I take after spraying?', 'next_steps'],
+    ['What can we do to move our next service?', 'next_visit'],
+    ['Can I turn the sprinkler heads back on?', 'watering'],
+    ['Can I turn the damaged sprinklers back on?', 'watering'],
+    ['Did you find fungus near sprinklers?', 'findings'],
+    ['Were mushrooms found around sprinkler heads?', 'findings'],
+    ['I found brown spots, do they indicate damage?', 'findings'],
+    ['Any action needed for what you spotted?', 'next_steps'],
+  ])('"%s" routes to %s (PR #5258 P2)', (question, topic) => {
+    const data = withAftercare(REVIEW, 'none');
+    expect(routeServiceReportQuestion({ question, data, nextAppointment: { scheduled_date: '2026-10-05' } }).topic).toBe(topic);
+  });
+
+  test('a word that only starts with "water" is not watering (PR #5258 round 2)', () => {
+    const data = { ...withAftercare(HELD, 'none'), reportV2: { aftercare: HELD, water: { weekPlan: { title: 'This week: run once', detail: 'One cycle.' } } } };
+    expect(routeServiceReportQuestion({ question: 'Should I waterproof the deck?', data }).topic).not.toBe('watering');
+  });
+
+  test.each(['Is the irrigation meter broken?', 'What caused the irrigation leak?'])('incidental irrigation noun "%s" never gets the re-entry answer (PR #5258 P2)', (question) => {
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: null } } };
+    expect(routeServiceReportQuestion({ question, data }).topic).not.toBe('reentry');
+  });
+
+  test('watering recommendations still answer when the aftercare restricts nothing', () => {
+    for (const source of ['snapshot', 'recommendation']) {
+      const answer = answerServiceReportQuestion({ question: 'What should I do next?', data: withAftercare(null, source) });
+      expect(answer).toMatch(/Increase irrigation|Run sprinklers/);
+    }
   });
 });
 

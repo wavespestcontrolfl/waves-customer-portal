@@ -251,8 +251,18 @@ const MIN_CONVERSATION_SECONDS = 30;
 // authorized — send-the-buyer-a-booking-link would text a free-consultation
 // link to someone who does not yet own the property, which the ruling
 // never covers. Fails closed, same as the property_manager/lender group.
+//
+// 'family_member' (schema 1.18.0, owner ruling 2026-09-28): a caller
+// arranging service at a RELATIVE's home is, by definition, not the
+// resident of that service address — a caller phoning about "my
+// grandfather's house" would receive a booking-link text at their own
+// number for a consultation at a property they don't live at. Same
+// reasoning as property_manager/lender/realtor: fails closed into the
+// third-party set.
+// An unconfirmed family_member call that reaches this lane (the confirmed-
+// booking case is filtered out above, same as home_buyer) gets no link.
 const THIRD_PARTY_RELATIONSHIPS = new Set([
-  'property_manager', 'real_estate_agent', 'lender', 'hoa_board_member', 'employee', 'other', 'home_buyer',
+  'property_manager', 'real_estate_agent', 'lender', 'hoa_board_member', 'employee', 'other', 'home_buyer', 'family_member',
 ]);
 
 const RESIDENTIAL_PROPERTY_TYPES = new Set([
@@ -280,7 +290,7 @@ const WANTS_ONSITE_INTENTS = new Set([
 // ANI/dialed-number path, implied consent); explicit refusals still block it,
 // through do_not_contact_requested above, STOP suppression at send, and the
 // dedicated consent.sms_declined / sms_refusal_unrecorded check in
-// STAGING_CHECKS (schema 1.18.0) — sms_declined is a raw consent field, not
+// STAGING_CHECKS (schema 1.19.0) — sms_declined is a raw consent field, not
 // a triage_flags enum value, so it is never one of the flags excluded here.
 // destination_not_consented still blocks it too.
 const EXCLUDED_TRIAGE_FLAGS = new Set([
@@ -704,13 +714,13 @@ const STAGING_CHECKS = [
   // still block, but through the dedicated field below (and STOP suppression
   // at send) rather than sms_consent_given, which cannot tell "never asked"
   // from "said no".
-  // sms_declined (schema 1.18.0, codex P1 on #5292): sms_consent_given=false
+  // sms_declined (schema 1.19.0, codex P1 on #5292): sms_consent_given=false
   // ALSO covers an explicit "no" to "may I text you?" — the dry-run removal
   // above stopped catching that refusal along with the "never asked"
   // majority it was meant to unblock. sms_declined is the model's
   // separately-judged field, true ONLY on an explicit decline. It is
   // additive/optional in both schemas (AGENTS.md: extraction schema changes
-  // never add to `required`), so a pre-1.18 extraction — or any row the
+  // never add to `required`), so a pre-1.19 extraction — or any row the
   // field is simply absent or null on — fails CLOSED here rather than
   // assume no refusal was made.
   (call, extraction) => {

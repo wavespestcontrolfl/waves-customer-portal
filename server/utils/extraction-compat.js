@@ -65,10 +65,10 @@ function flatView(extraction) {
     // Watched by replay variance (FIELD_GROUPS medium).
     caller_id_disclaimed: typeof caller.caller_id_disclaimed === 'boolean' ? caller.caller_id_disclaimed : null,
     phone_note: caller.phone_note || null,
-    // sms_declined (schema 1.18.0, codex P1 on #5292) — the dedicated
+    // sms_declined (schema 1.19.0, codex P1 on #5292) — the dedicated
     // explicit-SMS-refusal field, distinct from sms_consent_given=false
     // ("never asked"). Tri-state like caller_id_disclaimed: null (never
-    // judged, including every pre-1.18 row) is distinct from an explicit
+    // judged, including every pre-1.19 row) is distinct from an explicit
     // false. Watched by replay variance (FIELD_GROUPS medium).
     sms_declined: typeof consent.sms_declined === 'boolean' ? consent.sms_declined : null,
 

@@ -43,6 +43,8 @@ function chain({ first, returning, select } = {}) {
   q.whereRaw = jest.fn(() => q);
   q.whereNull = jest.fn(() => q);
   q.forUpdate = jest.fn(() => q);
+  q.forShare = jest.fn(() => q);
+  q.join = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.returning = jest.fn(async () => returning || []);
@@ -573,5 +575,148 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(chain({ first: { status: 'finalized' } }));
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/finalized payer statement/);
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+});
+
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): assertUnvoidableLinkedVisit
+// today refuses a $0 visit only when it is a callback (test above,
+// "converted to a free re-service"). Under the gate, ANY visit now stamped
+// $0 refuses the restore, including a combined-visit packet invoice where
+// any billed member is stamped $0, and an invoice linked only by
+// service_record_id. Exercised directly via the test-only seam so a minimal
+// table-dispatch conn covers every branch without driving the whole
+// unvoidInvoice call chain.
+describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
+  afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
+
+  // Table-dispatch conn: each call is (tableOrAlias) => a chain() serving
+  // the configured rows for that table. Aliased table strings ("scheduled_services as s")
+  // are matched by their leading table name.
+  function makeConn(tables = {}) {
+    return jest.fn((table) => {
+      const key = Object.keys(tables).find((k) => String(table).startsWith(k));
+      if (!key) throw new Error(`unexpected table ${JSON.stringify(table)}`);
+      const spec = tables[key];
+      if (spec instanceof Error) {
+        const q = chain();
+        q.first = jest.fn(async () => { throw spec; });
+        return q;
+      }
+      return chain({ first: spec });
+    });
+  }
+
+  test('off: a bare stamped 0 (no primaryLinePrice) does not refuse — narrow, byte-identical to today', async () => {
+    const conn = makeConn({ scheduled_services: { id: 'svc-1', status: 'confirmed', is_callback: false, estimated_price: 0, primary_line_price: null } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { scheduled_service_id: 'svc-1' })).resolves.toBeUndefined();
+  });
+
+  test('on: a bare stamped 0 refuses, even though it is not a callback', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const conn = makeConn({ scheduled_services: { id: 'svc-1', status: 'confirmed', is_callback: false, estimated_price: 0, primary_line_price: null } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { scheduled_service_id: 'svc-1' }))
+      .rejects.toThrow('Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge');
+  });
+
+  test('on: a genuinely blank (never-priced) row is unaffected — never refuses on price alone', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const conn = makeConn({ scheduled_services: { id: 'svc-1', status: 'confirmed', is_callback: false, estimated_price: null, primary_line_price: null } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { scheduled_service_id: 'svc-1' })).resolves.toBeUndefined();
+  });
+
+  test('on: a POSITIVE stamped price never refuses on price, gate or not', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const conn = makeConn({ scheduled_services: { id: 'svc-1', status: 'confirmed', is_callback: false, estimated_price: 55 } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { scheduled_service_id: 'svc-1' })).resolves.toBeUndefined();
+  });
+
+  test('on: a callback stamped $0 still refuses — via the pre-existing narrow callback check, unchanged', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const conn = makeConn({ scheduled_services: { id: 'svc-1', status: 'confirmed', is_callback: true, estimated_price: 0 } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { scheduled_service_id: 'svc-1' }))
+      .rejects.toThrow(/converted to a free re-service/);
+  });
+
+  test('off: a combined-invoice packet member stamped $0 is never checked (no query, no refusal)', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = ''; // explicit off
+    const conn = jest.fn(() => { throw new Error('conn should not be called at all when the gate is off and scheduled_service_id is absent'); });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', visit_completion_packet_id: 'packet-1' }))
+      .resolves.toBeUndefined();
+  });
+
+  test('on: a combined-invoice packet member stamped $0 refuses, even though the owner visit itself is priced', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const packetQuery = chain({ first: { id: 'svc-member-1' } }); // a member row matched the $0 filter
+    const conn = jest.fn((table) => {
+      if (String(table).startsWith('visit_completion_packet_items')) return packetQuery;
+      if (String(table).startsWith('scheduled_services')) return chain({ first: { id: 'svc-owner', status: 'confirmed', is_callback: false, estimated_price: 129 } });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: 'svc-owner', visit_completion_packet_id: 'packet-1' }))
+      .rejects.toThrow('Cannot unvoid — a visit on this combined invoice is now priced at $0; re-price that visit before restoring a charge');
+    expect(packetQuery.where).toHaveBeenCalledWith('p.packet_id', 'packet-1');
+    expect(packetQuery.where).toHaveBeenCalledWith('p.invoice_id', 'inv-1');
+  });
+
+  test('on: a combined invoice with no $0 member proceeds to the owner-visit checks normally', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const conn = jest.fn((table) => {
+      if (String(table).startsWith('visit_completion_packet_items')) return noRow(); // no member matched
+      if (String(table).startsWith('scheduled_services')) return chain({ first: { id: 'svc-owner', status: 'confirmed', is_callback: false, estimated_price: 129 } });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: 'svc-owner', visit_completion_packet_id: 'packet-1' }))
+      .resolves.toBeUndefined();
+  });
+
+  test('on: the packet-member read failing closed refuses to unvoid', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const failing = chain();
+    failing.first = jest.fn(async () => { throw new Error('db down'); });
+    const conn = jest.fn((table) => {
+      if (String(table).startsWith('visit_completion_packet_items')) return failing;
+      throw new Error(`unexpected table ${table}`);
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', visit_completion_packet_id: 'packet-1' }))
+      .rejects.toThrow('Could not verify the combined invoice\'s visits — refusing to unvoid (db down)');
+  });
+
+  test('on: no scheduled_service_id — resolves the visit through service_record_id and refuses on its stamped $0', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const conn = jest.fn((table) => {
+      if (String(table).startsWith('service_records')) return chain({ first: { estimated_price: 0, primary_line_price: null } });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: null, service_record_id: 'sr-1' }))
+      .rejects.toThrow('Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge');
+  });
+
+  test('on: no scheduled_service_id — a service-record-resolved visit that is NOT $0 does not refuse', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const conn = jest.fn((table) => {
+      if (String(table).startsWith('service_records')) return chain({ first: { estimated_price: 129, primary_line_price: null } });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: null, service_record_id: 'sr-1' }))
+      .resolves.toBeUndefined();
+  });
+
+  test('off: no scheduled_service_id and no packet — never queries service_records, and never refuses', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = '';
+    const conn = jest.fn(() => { throw new Error('conn should not be called at all when the gate is off'); });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: null, service_record_id: 'sr-1' }))
+      .resolves.toBeUndefined();
+  });
+
+  test('on: the service-record fallback read failing closed refuses to unvoid', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const failing = chain();
+    failing.first = jest.fn(async () => { throw new Error('db down'); });
+    const conn = jest.fn((table) => {
+      if (String(table).startsWith('service_records')) return failing;
+      throw new Error(`unexpected table ${table}`);
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: null, service_record_id: 'sr-1' }))
+      .rejects.toThrow('Could not verify the linked service record\'s visit — refusing to unvoid (db down)');
   });
 });

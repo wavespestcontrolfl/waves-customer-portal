@@ -138,8 +138,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.18.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.18.0');
+  test('schema version is 1.19.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.19.0');
   });
 
   describe('model-output schema', () => {
@@ -204,6 +204,27 @@ describe('schema validation', () => {
       persisted.meta.schema_version = '1.15.0';
       persisted.caller.relationship_to_property = 'home_buyer';
       expect(validatePersisted(persisted).valid).toBe(true);
+    });
+
+    test('1.18.0: a family_member caller validates in both schemas', () => {
+      const out = validModelOutput();
+      out.caller.relationship_to_property = 'family_member';
+      expect(validateModelOutput(out).valid).toBe(true);
+      const persisted = validPersisted();
+      persisted.meta.schema_version = SCHEMA_VERSION;
+      persisted.caller.relationship_to_property = 'family_member';
+      expect(validatePersisted(persisted).valid).toBe(true);
+    });
+
+    test('1.18.0: family_member survives normalization unchanged (normalizeCaller spreads caller fields — no relationship_to_property allowlist to silently coerce it to "other"/"unknown")', () => {
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      data.caller.relationship_to_property = 'family_member';
+      data.caller.on_site_authorization = false;
+      expect(validatePersisted(data).valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(normalized.caller.relationship_to_property).toBe('family_member');
+      expect(normalized.caller.on_site_authorization).toBe(false);
     });
 
     test('1.16.0: a reschedule agreement and the appointment it moves survive validation, normalization and flattening', () => {
@@ -290,15 +311,15 @@ describe('schema validation', () => {
       expect(validateModelOutput(out).valid).toBe(false);
     });
 
-    // consent.sms_declined (schema 1.18.0, codex P1 on #5292): the
+    // consent.sms_declined (schema 1.19.0, codex P1 on #5292): the
     // booking-link dry run's removal of the sms_consent_given===false
     // staging check also stopped catching an explicit refusal, which the
     // model recorded the same way. Additive/optional in BOTH schemas
     // (AGENTS.md: extraction schema changes are never added to `required`)
-    // — a pre-1.18 row, which never has the field at all, still validates.
+    // — a pre-1.19 row, which never has the field at all, still validates.
     // The booking-link staging check itself (not schema validation) is what
     // fails closed on that absent-field shape (call-booking-link-text.js).
-    test('1.18.0: sms_declined is optional and nullable in the model output, and older rows without it still validate', () => {
+    test('1.19.0: sms_declined is optional and nullable in the model output, and older rows without it still validate', () => {
       const out = validModelOutput();
       delete out.consent.sms_declined;
       expect(validateModelOutput(out).valid).toBe(true);
@@ -314,7 +335,7 @@ describe('schema validation', () => {
       expect(validatePersisted(old).valid).toBe(true);
     });
 
-    test('1.18.0: sms_declined must be a boolean or null', () => {
+    test('1.19.0: sms_declined must be a boolean or null', () => {
       const out = validModelOutput();
       out.consent.sms_declined = 'yes';
       expect(validateModelOutput(out).valid).toBe(false);
@@ -855,7 +876,7 @@ describe('normalize extraction v2', () => {
     expect(validatePersisted(result).valid).toBe(true);
   });
 
-  // consent.sms_declined (schema 1.18.0, codex P1 on #5292) MUST survive
+  // consent.sms_declined (schema 1.19.0, codex P1 on #5292) MUST survive
   // normalizeExtractionV2 — the top-level spread passes `consent` through
   // unchanged (no per-field consent normalizer exists), so it is never
   // explicitly overridden. Asserted directly through the real normalizer
@@ -1272,8 +1293,8 @@ describe('extraction compat adapter', () => {
     expect(flatView(v2).preferred_date_time).toBeNull();
   });
 
-  // sms_declined (schema 1.18.0, codex P1 on #5292) — tri-state like
-  // caller_id_disclaimed: null (never judged, including every pre-1.18 row,
+  // sms_declined (schema 1.19.0, codex P1 on #5292) — tri-state like
+  // caller_id_disclaimed: null (never judged, including every pre-1.19 row,
   // which lacks the field entirely) is distinct from an explicit false.
   // Watched by replay variance (FIELD_GROUPS medium).
   test('flatView maps consent.sms_declined, tri-state like caller_id_disclaimed', () => {
