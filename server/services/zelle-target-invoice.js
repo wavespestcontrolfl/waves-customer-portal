@@ -72,6 +72,15 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
     return { invoiceId: open[0].id, reason: 'single_open' };
   }
 
+  // Codex round-31 P2: an amount the customer ties to an INVOICE / BILL ("my $200 invoice") identifies the target; a bare
+  // amount elsewhere in the message ("…did you receive my $100 payment?") does not. Scoped amounts win; bare amounts
+  // are the fallback ONLY when the message has no invoice-scoped amount.
+  if (namedAmounts.length) {
+    const byScoped = open.filter((inv) => namedAmounts.includes(Math.round(Number(inv.amountDue) * 100)));
+    if (byScoped.length === 1) return { invoiceId: byScoped[0].id, reason: 'unique_amount' };
+    if (byScoped.length > 1) return { invoiceId: null, reason: 'ambiguous_amount' };
+    return { invoiceId: null, reason: 'named_amount_differs' }; // the invoice-scoped amount matches no open invoice
+  }
   const amounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
   if (amounts.length) {
     const byAmount = open.filter((inv) => amounts.includes(Math.round(Number(inv.amountDue) * 100)));

@@ -291,3 +291,30 @@ describe('truncated open-invoice list (round 28)', () => {
     expect(resolveZelleTargetInvoice({ openInvoices: open, openInvoicesTruncated: true }, 'Zelle invoice WPC-2026-0002').invoiceId).toBe('b');
   });
 });
+
+// Codex round-31 P2: invoice-scoped amounts identify the target; bare amounts are only a fallback.
+describe('invoice-scoped amount vs bare amounts (round 31)', () => {
+  const open = [
+    { id: 'a', invoiceNumber: 'WPC-2026-0001', amountDue: 200 },
+    { id: 'b', invoiceNumber: 'WPC-2026-0002', amountDue: 100 },
+    { id: 'c', invoiceNumber: 'WPC-2026-0003', amountDue: 55 },
+  ];
+  test('the auditor case: "my $200 invoice" + a bare $100 payment question resolves to the $200 invoice', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle my $200 invoice? Did you receive my $100 payment?')).toEqual({ invoiceId: 'a', reason: 'unique_amount' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Did you receive my $100 payment? Can I Zelle the $200 bill?').invoiceId).toBe('a');
+  });
+  test('with NO invoice-scoped amount the bare amounts still decide (unique => that invoice, several matches => ambiguous)', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle the $55?').invoiceId).toBe('c');
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $200 or $100?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
+  });
+  test('a scoped amount that matches no open invoice is an explicit mismatch — never rescued by a bare amount that happens to match', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle my $999 invoice? I also paid $100 before.')).toEqual({ invoiceId: null, reason: 'named_amount_differs' });
+  });
+  test('two scoped amounts that each match an open invoice are ambiguous', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle for the $200 invoice or the $100 invoice?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
+  });
+  test('a number still outranks any amount', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle invoice WPC-2026-0003, not my $200 invoice').invoiceId).toBeNull(); // number vs scoped amount conflict => abstain
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle invoice WPC-2026-0003. I paid $200 last time.').invoiceId).toBe('c');
+  });
+});

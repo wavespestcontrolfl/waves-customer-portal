@@ -102,7 +102,7 @@ async function amountsBlock({ decision, outgoingBody }) {
     // Codex round-28 P2: with no customer to re-read billing for, ANY body the recheck gate selects (an amount, a
     // Zelle offer or DENIAL, a payment-status claim, price grammar) cannot be verified — fail closed, not just Zelle offers.
     // PRECISE classifier (round 29): the broad prescreen would block benign copy like "Your invoice is attached"
-    return (hasZelleOffer || bodyMakesPaymentClaim(outgoingBody)) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
+    return (hasZelleOffer || bodyMakesPaymentClaim(outgoingBody, { inboundMessage: resolveInboundMessage(decision) })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
   }
   // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
   // built for, so a body carrying a Zelle contact is rechecked against that

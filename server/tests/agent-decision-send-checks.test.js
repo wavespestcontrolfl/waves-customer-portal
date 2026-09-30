@@ -270,3 +270,17 @@ describe('customerless decisions: precise classifier (round 29)', () => {
     await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
   });
 });
+
+// Codex round-31 P2: a customerless decision's body is judged in the decision's own payment ENVIRONMENT (its inbound).
+describe('customerless decisions carry their inbound into the precise classifier (round 31)', () => {
+  const withInbound = (inbound, over = {}) => decision({
+    input_snapshot: JSON.stringify({ sms: { body: inbound } }), prompt_version: 'house_voice_v11', customer_id: null, ...over,
+  });
+  test.each(['It settled.', 'It failed.', "That cleared out.", "They're sorted."])('%s after a payment question is blocked (cannot verify, no customer)', async (body) => {
+    await expect(agentDecisionSendBlockReason({ decision: withInbound('Did my payment go through?'), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+  });
+  test('...but is clean after an unrelated inbound or with no inbound', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: withInbound('What time is my visit Tuesday?'), outgoingBody: 'It settled.' })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11', customer_id: null }), outgoingBody: 'It settled.' })).resolves.toBeNull();
+  });
+});

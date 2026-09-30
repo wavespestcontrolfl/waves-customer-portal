@@ -433,13 +433,14 @@ async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null, b
 // grammar)? Unlike bodyNeedsPaymentRecheck (the broad prescreen that decides whether a billing READ is worth doing)
 // it does not fire on "Your invoice is attached" or "We updated your account details". A stubbed drafter falls back to
 // the broad prescreen per clause (fail closed).
-function bodyMakesPaymentClaim(body) {
+function bodyMakesPaymentClaim(body, { inboundMessage = null } = {}) {
   const text = String(body || '');
   if (!text) return false;
   if (bodyAmountCents(text).length) return true;
   if (hasAffirmativeZelleMention(text) || hasNegativeZelleAvailabilityClaim(text)) return true;
   const needs = typeof drafter.paymentClauseNeedsValidation === 'function'
-    ? (clause) => drafter.paymentClauseNeedsValidation(clause, {})
+    // the decision's own inbound is the payment ENVIRONMENT ("It settled." after "Did my payment go through?" — Codex round-31 P2)
+    ? (clause) => drafter.paymentClauseNeedsValidation(clause, { inboundText: String(inboundMessage || '') })
     : (clause) => mayAssertPaymentStatus(clause);
   if (text.split(CLAUSE_SPLIT_RE).some(needs)) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
