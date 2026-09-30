@@ -174,10 +174,31 @@ async function hasRecentPreferredTimeRequest(db, phone, { sessionId = null, sinc
   return !!(await q.first('id'));
 }
 
-// Serializes concurrent submits for one phone (two tabs, a retry) so exactly
-// one lead + one bell is created per 24h. Transaction-scoped advisory lock.
+// ONE per-phone chokepoint (transaction-scoped advisory lock) shared by the
+// submit path and the abandoned-booking recovery worker. A submit holds it
+// while it looks up + writes the lead; the worker holds it across its final
+// preferred-time re-check AND the send, so a submit can never commit between
+// the worker's last look and its dispatch: either the submit finishes first
+// (the worker then sees the lead and sends nothing) or the send finishes
+// first (the submit waits, and the send counts as already happened).
 async function lockPhone(trx, phone) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_time:${phone}`]);
+}
+
+/**
+ * Run `fn(trx)` holding the per-phone preferred-time lock. The lock is held
+ * only for the duration of `fn` (one provider call for the worker) and only
+ * ever contends with a submit for the SAME phone. A phone that cannot be
+ * normalized has nothing to serialize and runs `fn` on the plain handle. Any
+ * lock/transaction failure propagates — callers treat it as "do not send".
+ */
+async function withPreferredTimePhoneLock(db, phone, fn) {
+  const ten = tenDigitPhone(phone);
+  if (!ten) return fn(db);
+  return db.transaction(async (trx) => {
+    await lockPhone(trx, ten);
+    return fn(trx);
+  });
 }
 
 /**
@@ -221,7 +242,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     fbp: clickId(attr?.fbp),
   };
 
-  const { leadId, created } = await db.transaction(async (trx) => {
+  const { leadId, created, leadRow } = await db.transaction(async (trx) => {
     await lockPhone(trx, value.phone);
     const existing = await tenMatch(
       trx('leads')
@@ -268,9 +289,23 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
       transcript_summary: summary,
       extracted_data: JSON.stringify(extracted),
       ...attribution,
-    }).returning('id');
-    return { leadId: row && row.id ? row.id : row, created: true };
+    }).returning('*');
+    return { leadId: row.id, created: true, leadRow: row };
   });
+
+  // File the ONE ad_service_attribution funnel row a lead's own intake stamps,
+  // rebuilt from what the lead stored (its snapshot + click ids), so the later
+  // booking conversion has a row to advance to 'booked' and the request counts
+  // in channel reporting like every other public lead. Idempotent on the unique
+  // lead_id; best-effort like the other creators.
+  if (created) {
+    try {
+      const { stampLeadFunnelRow } = require('./lead-funnel-bridge');
+      await stampLeadFunnelRow(db, leadRow);
+    } catch (err) {
+      logger.warn(`[booking:preferred-time] funnel row stamp failed for lead ${leadId}: ${err.message}`);
+    }
+  }
 
   // Best effort from here: the lead is saved, so a failure below must not
   // become an error the visitor sees. The recovery worker re-checks for this
@@ -305,43 +340,52 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
 
 /**
  * A customer who just completed a booking no longer needs the office to chase
- * their preferred-time request: mark every OPEN preferred-time lead for their
- * phone (or funnel session) converted (status 'won', the status the Leads page
- * and the conversion helpers use), linked to the customer so the new_lead bell's
- * relevance sweep retires it. Server-side, keyed on the VERIFIED customer's
- * phone, so it covers every confirm path (one-time services included) with no
- * client cooperation. Returns the number of leads converted. Never throws into
- * the booking.
+ * their preferred-time request: convert every OPEN preferred-time lead for the
+ * booked customer's verified phone through the EXISTING lead lifecycle —
+ * convertLeadFromEvent (an explicit lead id) → markConverted → the funnel
+ * settlement that advances the lead's ad_service_attribution row to 'booked'.
+ * No raw status write. The lead is linked to the customer by markConverted, so
+ * the new_lead bell's relevance sweep retires the bell. A Waves Assessment
+ * booking is not a win (convertLeadFromEvent's own rule) and leaves the lead
+ * open. Idempotent: a converted lead is no longer open, so the normal commit
+ * path and the txResult.existing replay path can both call it. Never throws
+ * into the booking. Returns { converted } — the number of leads converted — so
+ * the caller can tell attributeSelfBooking that the funnel entry is the lead's.
  */
-async function convertPreferredTimeLeadsOnBooking(db, { customerId, sessionId = null } = {}) {
-  if (!customerId) return 0;
+async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = null } = {}) {
+  if (!customerId) return { converted: 0 };
   try {
     const customer = await db('customers').where({ id: customerId }).first('phone');
     const ten = tenDigitPhone(customer && customer.phone);
-    if (!ten && !sessionId) return 0;
+    if (!ten) return { converted: 0 };
     const q = db('leads')
       .where({ lead_type: LEAD_TYPE })
       .whereNull('deleted_at')
       .whereIn('status', OPEN_LEAD_STATUSES)
-      .whereNull('converted_at')
-      .where((w) => {
-        if (ten) tenMatch(w, ten);
-        if (sessionId) w.orWhereRaw("extracted_data->>'session_id' = ?", [sessionId]);
+      .whereNull('converted_at');
+    const open = await tenMatch(q, ten).select('id');
+    const { convertLeadFromEvent } = require('./lead-estimate-link');
+    let converted = 0;
+    for (const lead of open || []) {
+      const result = await convertLeadFromEvent({
+        source: 'preferred_time_booked',
+        customerId,
+        leadId: lead.id,
+        booking,
+        database: db,
       });
-    return await q.update({
-      status: 'won',
-      converted_at: db.fn.now(),
-      customer_id: customerId,
-      updated_at: db.fn.now(),
-    });
+      if (result && result.converted) converted += result.count || 1;
+    }
+    return { converted };
   } catch (err) {
     logger.warn(`[booking:preferred-time] converting preferred-time lead on booking failed for customer=${customerId}: ${err.message}`);
-    return 0;
+    return { converted: 0 };
   }
 }
 
 module.exports = {
   convertPreferredTimeLeadsOnBooking,
+  withPreferredTimePhoneLock,
   LEAD_TYPE,
   TIME_OF_DAY_LABELS,
   validatePreferredTimeRequest,

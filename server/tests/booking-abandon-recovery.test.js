@@ -57,6 +57,33 @@ function makeBuilder(table, cfg = {}) {
   return b;
 }
 
+// db.transaction with REAL per-key mutual exclusion for pg_advisory_xact_lock:
+// a second transaction asking for the same lock key waits until the holder's
+// callback settles (commit/rollback), like Postgres. Lets the tests order a
+// preferred-time submit against the recovery worker deterministically.
+const lockTails = new Map();
+function installKeyedLockTransaction() {
+  lockTails.clear();
+  db.transaction = jest.fn(async (cb) => {
+    const held = [];
+    const trx = (table) => db(table);
+    trx.fn = db.fn;
+    trx.raw = jest.fn(async (sql, bindings) => {
+      if (/pg_advisory_xact_lock/.test(sql)) {
+        const key = bindings[0];
+        const prior = lockTails.get(key) || Promise.resolve();
+        let release;
+        const mine = new Promise((r) => { release = r; });
+        lockTails.set(key, prior.then(() => mine));
+        held.push(release);
+        await prior;
+      }
+      return { rows: [] };
+    });
+    try { return await cb(trx); } finally { held.forEach((r) => r()); }
+  });
+}
+
 let queues;
 function enqueue(table, cfg) { (queues[table] = queues[table] || []).push(cfg); }
 
@@ -82,6 +109,7 @@ beforeEach(() => {
   updates.length = 0;
   queues = {};
   db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
+  installKeyedLockTransaction();
   isEnabled.mockReturnValue(true);
   sendCustomerMessage.mockResolvedValue({ sent: true });
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({});
@@ -634,5 +662,104 @@ describe('B11 backstop — contact-linked wizard draft linked to an ESTABLISHED 
 
     expect(await _internals.runSmsStage(NOW, new Set())).toBe(1);
     expect(db.mock.calls.map((c) => c[0])).not.toContain('estimates');
+  });
+});
+
+// A preferred-time submit ("Can't find a time?") and the recovery worker share
+// ONE per-phone lock (booking-preferred-time.js). The worker holds it across its
+// final preferred-time re-check AND the send, so a submit can never land between
+// the last look and the dispatch.
+describe('preferred-time submit vs the recovery send (per-phone lock)', () => {
+  const { withPreferredTimePhoneLock } = require('../services/booking-preferred-time');
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  const tick = () => new Promise((r) => setTimeout(r, 15));
+
+  function wireLeadsLookup(state) {
+    db.mockImplementation((table) => makeBuilder(table, table === 'leads'
+      ? { first: state.leadFiled ? { id: 'lead-1' } : undefined }
+      : (queues[table] || []).shift() || {}));
+  }
+
+  test('a submit that commits first: the worker\'s final check sees it and sends NOTHING (sms)', async () => {
+    const state = { leadFiled: false };
+    wireLeadsLookup(state);
+    const submitGate = gate();
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+
+    // The submit takes the lock, is mid-flight, then commits the lead.
+    const submit = withPreferredTimePhoneLock(db, '+19415550101', async () => {
+      await submitGate.p;
+      state.leadFiled = true; // "commit"
+    });
+    await tick();
+    const worker = _internals.runSmsStage(NOW, new Set());
+    await tick();
+    expect(sendCustomerMessage).not.toHaveBeenCalled(); // worker is parked on the lock
+    submitGate.open();
+    await submit;
+    expect(await worker).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a worker that is already dispatching: the submit waits for the send to finish, then proceeds (the send counts as already happened)', async () => {
+    const state = { leadFiled: false };
+    wireLeadsLookup(state);
+    const sendGate = gate();
+    const order = [];
+    sendCustomerMessage.mockImplementation(async () => { order.push('send-start'); await sendGate.p; order.push('send-end'); return { sent: true }; });
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // sibling mark
+
+    const worker = _internals.runSmsStage(NOW, new Set());
+    await tick();
+    expect(order).toEqual(['send-start']);
+    // The submit arrives mid-send and cannot enter its critical section.
+    const submit = withPreferredTimePhoneLock(db, '+19415550101', async () => { order.push('submit'); state.leadFiled = true; });
+    await tick();
+    expect(order).toEqual(['send-start']);
+    sendGate.open();
+    expect(await worker).toBe(1);
+    await submit;
+    expect(order).toEqual(['send-start', 'send-end', 'submit']);
+  });
+
+  test('email channel: same lock — a submit that commits first blocks the email', async () => {
+    const state = { leadFiled: false };
+    wireLeadsLookup(state);
+    const submitGate = gate();
+    enqueue('booking_intents', { rows: [intent({ last_activity_at: new Date('2026-06-09T13:00:00Z'), captured_at: new Date('2026-06-09T13:00:00Z') })] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    const submit = withPreferredTimePhoneLock(db, '+19415550101', async () => { await submitGate.p; state.leadFiled = true; });
+    await tick();
+    const worker = _internals.runEmailStage(NOW, new Set());
+    await tick();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    submitGate.open();
+    await submit;
+    expect(await worker).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a lock/transaction failure means nothing is sent and the claim is released for the next tick', async () => {
+    db.transaction = jest.fn(async () => { throw new Error('lock unavailable'); });
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // release
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates.some((u) => u.payload && u.payload.followup_sms_sent === false)).toBe(true);
+  });
+
+  test('the submit path takes the very same lock (one chokepoint, one key)', () => {
+    const svc = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
+    expect((svc.match(/book_preferred_time:\$\{phone\}/g) || []).length).toBe(1);
+    expect(svc).toMatch(/await lockPhone\(trx, value\.phone\)/);
+    expect(svc).toMatch(/await lockPhone\(trx, ten\)/);
   });
 });

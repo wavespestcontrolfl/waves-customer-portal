@@ -1544,6 +1544,12 @@ async function convertLeadFromEvent({
   // Every booking/completion trigger passes its row; estimate-driven and
   // invoice-driven events have no visit and pass nothing.
   booking = null,
+  // Explicit lead the event is about (a caller that already identified THE
+  // lead — e.g. the /book preferred-time request keyed on the booked
+  // customer's verified phone). It replaces the estimate/customer/contact
+  // resolution: only that one lead, and only while it is still open, converts
+  // — through the same markConverted + funnel settlement as every other win.
+  leadId = null,
   database = db,
   leadAttributionService = leadAttribution,
 }) {
@@ -1625,12 +1631,16 @@ async function convertLeadFromEvent({
     //     gated to the customer's FIRST close + a single open lead.
     //  3. contact fallback — an open, never-linked lead matched by phone/email.
     let candidates = [];
-    let resolution = null; // 'estimate' | 'customer_link' | 'contact'
-    if (estimateId) {
+    let resolution = null; // 'estimate' | 'customer_link' | 'contact' | 'explicit'
+    if (leadId) {
+      const explicit = await database('leads').where({ id: leadId }).first();
+      candidates = explicit && OPEN_LEAD_STATUSES.includes(explicit.status) && !explicit.converted_at ? [explicit] : [];
+      resolution = 'explicit';
+    } else if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
       if (candidates.length) resolution = 'estimate';
     }
-    if (!candidates.length) {
+    if (!candidates.length && resolution !== 'explicit') {
       if (!resolvedPhone && !resolvedEmail && resolvedCustomerId) {
         const customer = await database('customers').where({ id: resolvedCustomerId }).first();
         resolvedPhone = customer?.phone || null;
@@ -1701,6 +1711,9 @@ async function convertLeadFromEvent({
       if (estimateId) conversion.estimateId = estimateId;
       if (resolvedCustomerId) conversion.customerId = resolvedCustomerId;
       else if (lead.customer_id) conversion.customerId = lead.customer_id;
+      // An explicit-lead conversion wins only while the lead is still in the
+      // open state it was read in (a staff transition in between wins).
+      if (resolution === 'explicit') conversion.onlyIfStatusIn = OPEN_LEAD_STATUSES;
       // Pass revenue fields only when an estimate supplied them — otherwise
       // markConverted preserves whatever the lead already has.
       if (haveEstimateHints) {

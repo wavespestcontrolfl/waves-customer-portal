@@ -5831,6 +5831,19 @@ async function createSelfBooking(payload = {}) {
       } catch (err) {
         logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
       }
+      // A first attempt that committed but died before its post-commit
+      // conversion leaves the customer's preferred-time lead open: run the same
+      // idempotent conversion on the replay.
+      if (!callbackVisit) {
+        try {
+          const replayBooked = await db('scheduled_services')
+            .where({ self_booking_id: txResult.existing.id })
+            .first();
+          await convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: replayBooked || null });
+        } catch (err) {
+          logger.warn(`[booking:confirm] replay preferred-time conversion failed for ${txResult.existing.id} (non-blocking): ${err.message}`);
+        }
+      }
       return { ok: true, body: {
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
@@ -6220,13 +6233,16 @@ async function createSelfBooking(payload = {}) {
     }
 
     // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
-    // customer is moot once they have booked: mark it converted so staff don't
-    // chase someone who already booked. Keyed on the verified customer's phone,
-    // so it covers one-time services too. Best-effort;
-    // runs whatever the gate reads (a request already filed still closes).
+    // customer is moot once they have booked: convert it through the existing
+    // lead lifecycle (convertLeadFromEvent → markConverted → funnel settle) so
+    // staff don't chase someone who already booked and the booking counts on the
+    // lead's own funnel row. Keyed on the verified customer's phone, so it covers
+    // one-time services too. Best-effort and idempotent; runs whatever the gate
+    // reads (a request already filed still closes). The replay branch runs the
+    // same helper.
     let preferredLeadConverted = false;
     if (!callbackVisit) {
-      preferredLeadConverted = (await convertPreferredTimeLeadsOnBooking(db, { customerId: custId })) > 0;
+      preferredLeadConverted = (await convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: serviceRow })).converted > 0;
     }
 
     // Persist an ad-tracked self-booking's click id onto a won lead so the

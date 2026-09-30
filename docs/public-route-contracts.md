@@ -896,16 +896,23 @@ lookup and write run under a per-phone advisory lock, so a repeat or overlapping
 submit from the same phone inside 24h refreshes that still-open lead (no second
 row or bell). Recency is `extracted_data.last_requested_at`, written only by a
 submit — office edits (status, notes, assignment) never extend the dedupe
-window or the suppression. A completed self-booking (`createSelfBooking`,
-every service type) marks the booked customer's open preferred-time leads
-`won`/converted and links them to the customer, so staff do not chase someone
-who already booked. It sends NOTHING to the customer — no SMS, no email — and
+window or the suppression. Filing a lead also stamps its
+`ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
+public lead. A completed self-booking (`createSelfBooking`, every service type,
+on both the first commit and the `txResult.existing` replay) hands the booked
+customer's open preferred-time leads to the existing lifecycle —
+`convertLeadFromEvent` with an explicit `leadId` → `markConverted` → funnel
+settle — so staff do not chase someone who already booked and the booking counts
+on the lead's own funnel row (never a raw status write). It sends NOTHING to the customer — no SMS, no email — and
 retires every open abandoned-booking intent for the same phone or session, and
 capture-intent skips a phone that filed a request in the last day, and the
 recovery worker itself re-checks for a request filed since the intent was
 captured (fail closed on a lookup error) immediately before every text and
-email, so neither a failed suppression write nor a racing capture can lead to a
-message. Success is a constant
+email — and runs that last look AND the send while holding the same per-phone
+advisory lock a submit takes (`withPreferredTimePhoneLock`), so a submit can
+never commit between the worker's last look and its dispatch: neither a failed
+suppression write nor a racing capture nor a racing submit can lead to a message
+after the visitor's confirmation. Success is a constant
 `{"ok": true}`.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the

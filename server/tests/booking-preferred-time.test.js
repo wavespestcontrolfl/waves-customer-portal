@@ -14,6 +14,7 @@ jest.setTimeout(30000);
 const mockOps = [];            // { table, op, arg }
 let mockExistingLead = null;   // what a phone lookup on leads returns
 let mockCustomer = null;       // what customers .first() returns
+let mockOpenLeads = [];        // what an awaited leads select() resolves to
 
 function builder(table) {
   const b = {
@@ -27,10 +28,12 @@ function builder(table) {
     orWhereRaw: () => b,
     leftJoin: () => b,
     orderBy: () => b,
+    select: () => b,
+    then: (resolve, reject) => Promise.resolve(table === 'leads' ? mockOpenLeads : []).then(resolve, reject),
     first: () => Promise.resolve(table === 'leads' ? mockExistingLead : (table === 'customers' ? mockCustomer : null)),
     insert: (row) => {
       mockOps.push({ table, op: 'insert', arg: row });
-      return { returning: () => Promise.resolve([{ id: 'lead-1' }]) };
+      return { returning: () => Promise.resolve([{ id: 'lead-1', ...row }]) };
     },
     update: (patch) => {
       mockOps.push({ table, op: 'update', arg: patch });
@@ -70,6 +73,13 @@ jest.mock('../services/sendgrid-mail', () => ({
   sendTemplated: (...a) => mockSendEmail(...a),
   sendBroadcast: (...a) => mockSendEmail(...a),
 }));
+const mockMarkConverted = jest.fn(async () => true);
+jest.mock('../services/lead-attribution', () => ({ markConverted: (...a) => mockMarkConverted(...a) }));
+const mockStampFunnel = jest.fn(async () => 'funnel-1');
+jest.mock('../services/lead-funnel-bridge', () => {
+  const actual = jest.requireActual('../services/lead-funnel-bridge');
+  return { ...actual, stampLeadFunnelRow: (...a) => mockStampFunnel(...a) };
+});
 jest.mock('../services/lead-source-resolver', () => ({
   resolveLeadSource: jest.fn(async () => ({ leadSourceId: 'src-main' })),
 }));
@@ -130,6 +140,9 @@ beforeEach(() => {
   mockLocks.length = 0;
   mockExistingLead = null;
   mockCustomer = null;
+  mockOpenLeads = [];
+  mockMarkConverted.mockClear();
+  mockStampFunnel.mockClear();
   mockTriggerNotification.mockClear();
   mockSendCustomerMessage.mockClear();
   mockSendSMS.mockClear();
@@ -507,36 +520,91 @@ describe('request recency is the customer\'s own latest submit, not lead edits',
   });
 });
 
-describe('a completed booking closes the customer\'s open preferred-time lead', () => {
+describe('a completed booking converts the customer\'s open preferred-time lead through the existing lifecycle', () => {
   const { convertPreferredTimeLeadsOnBooking } = require('../services/booking-preferred-time');
+  const openLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
 
-  test('marks open request leads for the booked customer\'s phone won + converted, linked to the customer', async () => {
+  test('hands the lead to convertLeadFromEvent -> markConverted (funnel settle) with the customer; no raw status write', async () => {
     mockCustomer = { phone: '+1 (941) 555-0100' };
-    const n = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' });
-    expect(n).toBe(1);
-    const upd = mockOps.find((o) => o.table === 'leads' && o.op === 'update');
-    expect(upd.arg).toMatchObject({ status: 'won', customer_id: 'cust-1' });
-    expect(upd.arg.converted_at).toBeTruthy();
+    mockOpenLeads = [{ id: 'lead-1' }];
+    mockExistingLead = openLead; // convertLeadFromEvent's explicit-lead read
+    const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: null });
+    expect(out).toEqual({ converted: 1 });
+    expect(mockMarkConverted).toHaveBeenCalledTimes(1);
+    expect(mockMarkConverted).toHaveBeenCalledWith('lead-1', expect.objectContaining({
+      triggerSource: 'preferred_time_booked', customerId: 'cust-1', onlyIfStatusIn: expect.arrayContaining(['new']),
+    }));
+    // The service itself never writes leads.status.
+    expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'update')).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockSendSMS).not.toHaveBeenCalled();
   });
 
-  test('no customer, or no phone and no session: nothing is touched', async () => {
-    expect(await convertPreferredTimeLeadsOnBooking(mockDb, {})).toBe(0);
+  test('idempotent: a second run (or the replay path) finds nothing open and converts nothing', async () => {
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [];
+    expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).toEqual({ converted: 0 });
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+  });
+
+  test('a lead that is no longer open when the bridge reads it (staff moved it) is not converted', async () => {
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }];
+    for (const stale of [{ ...openLead, status: 'won' }, { ...openLead, status: 'lost' }, { ...openLead, converted_at: new Date() }, null]) {
+      mockExistingLead = stale;
+      expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).toEqual({ converted: 0 });
+    }
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+  });
+
+  test('a Waves Assessment booking is not a win: the lead stays open', async () => {
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }];
+    mockExistingLead = openLead;
+    const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: { service_type: 'Waves Assessment' } });
+    expect(out.converted).toBe(0);
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+  });
+
+  test('no customer / no phone: nothing is touched; a failure never reaches the booking', async () => {
+    expect(await convertPreferredTimeLeadsOnBooking(mockDb, {})).toEqual({ converted: 0 });
     mockCustomer = { phone: null };
-    expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).toBe(0);
-    expect(mockOps.filter((o) => o.table === 'leads')).toHaveLength(0);
-  });
-
-  test('a failure never reaches the booking', async () => {
+    expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).toEqual({ converted: 0 });
     mockDb.mockImplementationOnce(() => { throw new Error('db down'); });
-    await expect(convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).resolves.toBe(0);
+    await expect(convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).resolves.toEqual({ converted: 0 });
   });
 
-  test('createSelfBooking runs it for the verified customer and stops attributeSelfBooking double-minting (source guard)', () => {
+  test('filing the lead stamps its funnel row (attribution present), so the win has a row to advance', async () => {
+    await recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody({
+      attribution: { gclid: 'g-9', referrer: 'https://www.google.com/', landing_url: 'https://portal.test/book' },
+    })).value, { notify: false });
+    expect(mockStampFunnel).toHaveBeenCalledTimes(1);
+    const stamped = mockStampFunnel.mock.calls[0][1];
+    expect(stamped).toMatchObject({ id: 'lead-1', lead_type: 'book_preferred_time', gclid: 'g-9', lead_source_id: 'src-main' });
+    // A refresh of an existing lead never stamps a second row.
+    mockStampFunnel.mockClear();
+    mockExistingLead = { id: 'lead-existing' };
+    await recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody()).value, { notify: false });
+    expect(mockStampFunnel).not.toHaveBeenCalled();
+  });
+
+  test('attributeSelfBooking does not mint a second won lead once the bridge converted this one', async () => {
+    const { attributeSelfBooking } = require('../services/lead-estimate-link');
+    const out = await attributeSelfBooking({ customerId: 'cust-1', attribution: { gclid: 'g-9' }, customerCreated: true, leadConverted: true });
+    expect(out).toEqual({ attributed: false, reason: 'lead_converted' });
+  });
+
+  test('wiring: the normal commit path AND the txResult.existing replay path both run it (source guard)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
-    expect(src).toContain('convertPreferredTimeLeadsOnBooking(db, { customerId: custId })');
+    const replayStart = src.indexOf('if (txResult.existing) {');
+    const replayEnd = src.indexOf('const { booking, serviceRow } = txResult;');
+    expect(replayStart).toBeGreaterThan(-1);
+    expect(src.slice(replayStart, replayEnd)).toContain('convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: replayBooked || null })');
+    expect(src.slice(replayEnd)).toContain('convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: serviceRow })');
     expect(src).toMatch(/leadConverted: !!leadConversion\?\.converted \|\| preferredLeadConverted/);
+    // No raw status write anywhere in the service.
+    const svc = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
+    expect(svc).not.toMatch(/status:\s*'won'/);
   });
 });
 
