@@ -301,7 +301,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     // incomplete (the caller holds) rather than a set built on an unread fence.
     const StripeService = require('./stripe');
     const fenceOne = readOnly
-      ? (inv) => memberCollectionPending(inv, { database })
+      ? (inv) => memberCollectionPending(inv, { database, customerId: anchorInvoice.customer_id })
       : (inv) => StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database).then(() => ({ row: inv }));
     const cleared = [];
     for (const inv of eligible) {
@@ -413,6 +413,8 @@ const isCombinedPiMetadata = (piMetadata) => !!piMetadata?.combined_allocation;
  * invoice row the checks ran on, and it is what the caller must build the set
  * (amounts, digest) from, never the row it passed in — else `{ reason }`:
  *   not_collectible | nothing_due | payer_billed | withdrawn (ownership / status)
+ *   customer_changed (the refreshed row no longer belongs to `customerId`,
+ *                     when the caller passes one — read-only callers must)
  *   deposit_settlement | charge_reconciliation   (money may already be moving)
  * A recognised pending fence state is a REASON; anything unexpected (a DB
  * error, a payer lookup failure) THROWS — callers hold on that, never treat it
@@ -421,7 +423,7 @@ const isCombinedPiMetadata = (piMetadata) => !!piMetadata?.combined_allocation;
  * claim from a read path). tests/customer-dunning-member-fence-parity.test.js
  * pins this list against the verifier's own source.
  */
-async function memberCollectionPending(inv, { database = db } = {}) {
+async function memberCollectionPending(inv, { database = db, customerId = null } = {}) {
   const { isCollectionPendingFenceError } = require('./invoice-helpers');
   if (!inv?.id) return { reason: 'not_collectible' };
   // Always vet the FULL, current invoice row: sibling rows from
@@ -430,6 +432,10 @@ async function memberCollectionPending(inv, { database = db } = {}) {
   // ownership checks (pre-push audit P1). A read failure throws (caller holds).
   inv = await database('invoices').where({ id: inv.id }).first();
   if (!inv) return { reason: 'not_collectible' };
+  // Ownership moved since the caller's read (a customer merge repoints
+  // customer_id): the row belongs to someone else now, so it must never be
+  // named in — or pull siblings into — this customer's reminder (codex r6 P1).
+  if (customerId != null && String(inv.customer_id) !== String(customerId)) return { reason: 'customer_changed' };
   if (!isInvoiceCollectibleStatus(inv.status)) return { reason: 'not_collectible' };
   if (!(amountDueCents(inv) > 0)) return { reason: 'nothing_due' };
   if (inv.payer_id || inv.payer_statement_id) return { reason: 'payer_billed' };

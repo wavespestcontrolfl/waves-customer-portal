@@ -144,6 +144,15 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     expect(mockDeposit.mock.calls.at(-1)[1]).toMatchObject({ customer_id: 'cust-real' });
   });
 
+  test('a row that moved to another customer since the caller\'s read is customer_changed, before any query (codex r6 P1)', async () => {
+    stored = { ...base(), customer_id: 'c2' }; // a merge repointed it
+    expect(await PayCombined.memberCollectionPending({ id: 'i1' }, { database, customerId: 'c1' })).toEqual({ reason: 'customer_changed' });
+    expect(mockResolveForInvoice).not.toHaveBeenCalled();
+    expect(mockDeposit).not.toHaveBeenCalled();
+    stored = base();
+    expect((await PayCombined.memberCollectionPending({ id: 'i1' }, { database, customerId: 'c1' })).row).toBe(stored);
+  });
+
   test('a row that has vanished is not_collectible; a failed re-read THROWS (caller holds)', async () => {
     stored = undefined;
     expect(await PayCombined.memberCollectionPending({ id: 'gone' }, { database })).toEqual({ reason: 'not_collectible' });

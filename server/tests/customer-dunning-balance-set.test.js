@@ -563,6 +563,21 @@ describe('members are built from the REFRESHED row (an amount that moved after t
     expect(ids(set)).toEqual(['A', 'C']);
   });
 
+  test('a sibling merged into another customer since the read is dropped, never named in this customer\'s set (codex r6 P1)', async () => {
+    staleOpen((r) => r);
+    state.invoices[1].customer_id = 'cust-survivor';
+    const set = await resolve();
+    expect(ids(set)).toEqual(['A', 'C']);
+  });
+
+  test('an anchor merged into another customer since the read holds, and no sibling set is read under its new owner (codex r6 P1)', async () => {
+    staleOpen((r) => r);
+    state.invoices[0].customer_id = 'cust-survivor';
+    const set = await resolve();
+    expect(set).toMatchObject({ kind: 'hold', reason: 'balance_incomplete' });
+    expect(mockOpenBalance.mock.calls.some(([cid]) => cid === 'cust-survivor')).toBe(false);
+  });
+
   test('the anchor\'s amount also comes from the refreshed row', async () => {
     reset([inv('A'), inv('B')], { A: 'active', B: 'active' });
     const full = mockOpenBalance.getMockImplementation();

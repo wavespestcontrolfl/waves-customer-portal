@@ -292,7 +292,7 @@ describe('readOnly siblings arrive in the REAL openBalanceInvoices column shape'
   test('the payer resolve receives the sibling\'s REAL customer_id (from the full row), never undefined', async () => {
     mockOpenBalance.mockResolvedValue([openShaped('s1', { scheduled_service_id: 'visit-9' })]);
     fullRows.set('s1', { ...openShaped('s1', { scheduled_service_id: 'visit-9' }), customer_id: 'cust-real', payer_id: null, payer_statement_id: null, scheduled_send_error: null });
-    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }));
+    const out = await PayCombined.combinedEligibleSiblings(anchor({ customer_id: 'cust-real' }), opts({ readOnly: true }));
     expect(out.map((i) => i.id)).toEqual(['s1']);
     const siblingResolve = mockResolveForInvoice.mock.calls.map((c) => c[0]).find((a) => a.scheduledServiceId === 'visit-9');
     expect(siblingResolve).toMatchObject({ customerId: 'cust-real', throwOnError: true });

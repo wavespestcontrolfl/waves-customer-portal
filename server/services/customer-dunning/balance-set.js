@@ -147,6 +147,7 @@ function memberOf(inv, seq) {
 const ANCHOR_HOLD_BY_REASON = Object.freeze({
   not_collectible: 'balance_incomplete',
   nothing_due: 'balance_incomplete',
+  customer_changed: 'balance_incomplete',
   payer_billed: 'payer_anchor',
   withdrawn: 'payer_anchor',
   deposit_settlement: 'anchor_reconciliation',
@@ -161,9 +162,9 @@ const ANCHOR_HOLD_BY_REASON = Object.freeze({
 // REFRESHED row, which is what the set and its digest are built from. Anything
 // unreadable holds — never a send: a payer lookup failure is payer_unresolved,
 // any other throw anchor_reconciliation. Returns { hold, row }.
-async function anchorProblem(anchorRow, database) {
+async function anchorProblem(anchorRow, customerId, database) {
   try {
-    const verdict = await PayCombined.memberCollectionPending(anchorRow, { database });
+    const verdict = await PayCombined.memberCollectionPending(anchorRow, { database, customerId });
     if (verdict.row) return { hold: null, row: verdict.row };
     logger.info(`[customer-dunning] anchor ${anchorRow.id} held (${verdict.code || verdict.reason})`);
     return { hold: ANCHOR_HOLD_BY_REASON[verdict.reason], row: anchorRow };
@@ -233,8 +234,8 @@ function memberHolds(members) {
 
 // Steps 5-6: the anchor's predicates, then the page's sibling set. Returns
 // the anchor's hold reasons, the REFRESHED anchor row and the sibling rows.
-async function anchorAndSiblings(anchorRow, database) {
-  const { hold, row } = await anchorProblem(anchorRow, database);
+async function anchorAndSiblings(anchorRow, customerId, database) {
+  const { hold, row } = await anchorProblem(anchorRow, customerId, database);
   // A non-collectible / payer-owned / fenced anchor: the page would not
   // combine, so there is no sibling set to compute.
   if (hold) return { holds: [hold], anchor: row, siblings: [] };
@@ -272,7 +273,7 @@ async function resolveUnguarded(customerId, database, now) {
   const balance = await CustomerCredit.getBalance(customerId, database);
   if (balance === null) return result('hold', 'balance_incomplete', { excluded });
 
-  const { holds, anchor, siblings } = await anchorAndSiblings(anchorRow, database);
+  const { holds, anchor, siblings } = await anchorAndSiblings(anchorRow, customerId, database);
   if (balance > 0) holds.push('account_credit_available');
   const fullSeq = await sequencesForSiblings(siblings, seqMap, database);
   // Every member is built from its REFRESHED row (the one the predicate just
