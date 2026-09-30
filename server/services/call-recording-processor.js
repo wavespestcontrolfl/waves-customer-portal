@@ -880,6 +880,7 @@ const CONFIRM_REASON_TEXT = {
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
+  street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
   callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
@@ -1717,6 +1718,14 @@ function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
 // bell:true, deduped on the visit id). No existing bell fires for a pending
 // office-review call booking (voice-agent rows file an outbound_booking_review
 // triage card instead), so this is the only one.
+// The dispatch schedule link for a held visit: ?appointment opens the visit,
+// ?date selects its day. Shared by the admin bell and the review card.
+function streetLevelVisitLink(visitId, visitDate) {
+  return `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`;
+}
+function streetLevelVisitWhen(scheduledDate, windowStart) {
+  return [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
+}
 function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDate, windowStart }) {
   const visitDate = dateOnlyISO(scheduledDate);
   const when = [visitDate, windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
@@ -1736,7 +1745,7 @@ function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDat
     opts: {
       icon: '📍',
       // Dispatch schedule tab: ?appointment opens the visit, ?date selects its day.
-      link: `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`,
+      link: streetLevelVisitLink(visitId, visitDate),
       bell: true,
       dedupeKey: `street-level-address-hold:${visitId}`,
       // Ids only: the name and address are in the body the owner asked for; the visit link carries the rest.
@@ -10572,6 +10581,12 @@ const CallRecordingProcessor = {
             // existing office-review pending path — decided here, applied at the
             // insert, announced by one admin bell after commit.
             v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });
+            // The open review is call-level state too: without a reason here the call
+            // reads fully processed (review_status, the lead's needs_confirmation,
+            // review_open metrics) while its address hold waits for the office.
+            if (v2StreetLevelHold && !bridgeNeedsConfirmation.includes('street_level_address_review')) {
+              bridgeNeedsConfirmation.push('street_level_address_review');
+            }
             // Fail-open recovery: this appointment was allowed only because
             // recoverable flags were dropped from the blocking set. Surface
             // them as ADVISORY review items so the office confirms the field
@@ -17377,16 +17392,20 @@ const CallRecordingProcessor = {
                   // rolls back), as in that lane.
                   if (streetLevelPending) {
                     const cardBase = v2ApprovedExtraction || extracted;
-                    const cardExtraction = callFollowUpPlan
-                      ? {
-                        ...cardBase,
-                        meta: {
-                          ...(cardBase?.meta || {}),
-                          call_summary: `${cardBase?.meta?.call_summary || 'Booking on the web-form address (Google matched the street only).'} `
-                            + `Book the promised follow-up visit${callFollowUpPlan.scheduledDate ? ` (${dateOnlyISO(callFollowUpPlan.scheduledDate)})` : ''} once the address is confirmed.`,
-                        },
-                      }
-                      : cardBase;
+                    // The card's own summary names the address and the visit (the office
+                    // works this card from here), then any owed follow-up.
+                    const cardWhen = streetLevelVisitWhen(created.scheduled_date, created.window_start);
+                    const cardExtraction = {
+                      ...cardBase,
+                      meta: {
+                        ...(cardBase?.meta || {}),
+                        call_summary: `Web-form address ${v2StreetLevelHold?.address_on_file || 'on file'}: Google matched the street only. `
+                          + `Visit booked pending${cardWhen ? ` for ${cardWhen}` : ''} — confirm the address with the customer, then confirm, correct, or cancel the visit.`
+                          + (callFollowUpPlan
+                            ? ` Book the promised follow-up visit${callFollowUpPlan.scheduledDate ? ` (${dateOnlyISO(callFollowUpPlan.scheduledDate)})` : ''} once the address is confirmed.`
+                            : ''),
+                      },
+                    };
                     const [card] = await trx('triage_items')
                       .insert(buildTriageItem({
                         callLogId: call.id,
@@ -17405,6 +17424,11 @@ const CallRecordingProcessor = {
                           // of the row must not activate it, and no follow-up visit
                           // is created off it until the office confirms.
                           street_level_address: true,
+                          // What the office needs on the card itself: the form address, when
+                          // the visit is, and a link to it (TriageInboxTabV2 renders these).
+                          address_on_file: v2StreetLevelHold?.address_on_file || null,
+                          visit_when: streetLevelVisitWhen(created.scheduled_date, created.window_start) || null,
+                          visit_link: streetLevelVisitLink(created.id, dateOnlyISO(created.scheduled_date)),
                           // The promised second treatment, if any, rides on the card
                           // (as the held-attach cards do); the office books it on confirm.
                           ...(callFollowUpPlan ? { follow_up_plan: { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null } } : {}),
@@ -21276,6 +21300,8 @@ CallRecordingProcessor._test = {
   streetLevelMatch,
   buildStreetLevelHold,
   buildStreetLevelHoldAlert,
+  streetLevelVisitLink,
+  streetLevelVisitWhen,
   isStreetLevelHoldRow,
   summarizePriorCall,
   providerTimeoutSignal,

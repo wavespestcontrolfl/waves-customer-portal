@@ -350,21 +350,26 @@ async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTa
 // card whose payload.street_level_address is set. It is settled by the linked
 // visit — confirmed (runOutboundReviewConfirmHook resolves it), corrected, or
 // cancelled — never by a generic call verdict / Resolve / Dismiss, which would
-// hide the work while the visit stays pending. True only while the visit is
-// still pending and unconfirmed.
+// hide the work while the visit stays pending. Protected until the activation
+// finishes: office confirm commits status 'confirmed' BEFORE the hook stamps
+// customer_confirmed (and a transient hook failure leaves it unstamped), and
+// the hook is what files the owed follow-up, so the key is customer_confirmed
+// = false — not status = 'pending'. A cancelled / skipped / rescheduled visit
+// releases the card.
 // COALESCE keeps the predicate two-valued: a card with no such key must read
 // FALSE here, never NULL (NOT NULL would drop it from the bulk resolve).
 const STREET_LEVEL_HOLD_OPEN_SQL = `(triage_items.reason_code = 'outbound_booking_review'
   AND COALESCE(triage_items.payload->>'street_level_address', '') = 'true'
   AND EXISTS (SELECT 1 FROM scheduled_services hold_ss
     WHERE hold_ss.id::text = triage_items.payload->>'scheduled_service_id'
-      AND hold_ss.status = 'pending' AND hold_ss.customer_confirmed = false))`;
+      AND hold_ss.customer_confirmed = false
+      AND hold_ss.status NOT IN ('cancelled', 'skipped', 'rescheduled')))`;
 async function streetLevelHoldStillPending(conn, item) {
   if (!item || item.reason_code !== 'outbound_booking_review') return false;
   const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
   if (!payload?.street_level_address || !payload.scheduled_service_id) return false;
   const svc = await conn('scheduled_services').where({ id: payload.scheduled_service_id }).first('status', 'customer_confirmed');
-  return !!svc && svc.status === 'pending' && !svc.customer_confirmed;
+  return !!svc && !svc.customer_confirmed && !['cancelled', 'skipped', 'rescheduled'].includes(String(svc.status || ''));
 }
 const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending visit: confirm the address with the customer, then confirm (or correct or cancel) the visit itself. It resolves when the visit does.';
 

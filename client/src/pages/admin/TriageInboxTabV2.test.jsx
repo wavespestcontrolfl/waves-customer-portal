@@ -427,3 +427,38 @@ describe('ConfirmEvidence — unit-number ask', () => {
     expect(container.firstChild).toBeNull();
   });
 });
+
+describe('street-level address hold card', () => {
+  const holdPayload = {
+    origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1',
+    address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', visit_when: '2026-10-05 13:00',
+    visit_link: '/admin/dispatch?tab=schedule&date=2026-10-05&appointment=visit-1',
+  };
+
+  it('ConfirmEvidence shows the form address, the visit, the instruction and an Open visit link', () => {
+    render(<ConfirmEvidence payload={holdPayload} />);
+    expect(screen.getByText('Form address:').parentElement).toHaveTextContent('1234 Sample Newbuild Trl, Parrish, FL, 34219');
+    expect(screen.getByText('Visit:').parentElement).toHaveTextContent('2026-10-05 13:00');
+    expect(screen.getByText(/Confirm, correct, or cancel the visit to close this\./)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open visit' })).toHaveAttribute('href', holdPayload.visit_link);
+  });
+
+  it('does not render a link that leaves the admin app', () => {
+    render(<ConfirmEvidence payload={{ ...holdPayload, visit_link: 'https://example.com/x' }} />);
+    expect(screen.queryByRole('link', { name: 'Open visit' })).not.toBeInTheDocument();
+  });
+
+  it('hides Accept, Deny and Dismiss (the server refuses them while the visit is unconfirmed)', async () => {
+    const hold = { ...ordinary, id: 'hold', first_name: 'Hold', last_name: 'Card', reason_code: 'outbound_booking_review',
+      feedback_verdict: null, payload: JSON.stringify(holdPayload) };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [hold], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { success: true }));
+    render(<TriageInboxTabV2 />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    expect(within(card).queryByRole('button', { name: /accept/i })).not.toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: /deny/i })).not.toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument();
+    expect(within(card).getByRole('link', { name: 'Open visit' })).toBeInTheDocument();
+  });
+});

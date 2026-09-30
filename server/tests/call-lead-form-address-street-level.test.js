@@ -16,6 +16,8 @@ const {
   streetLevelMatch,
   buildStreetLevelHold,
   buildStreetLevelHoldAlert,
+  streetLevelVisitLink,
+  streetLevelVisitWhen,
   isStreetLevelHoldRow,
 } = CallRecordingProcessor._test;
 
@@ -442,7 +444,7 @@ describe('office-review pending path (owner ruling 2026-09-30)', () => {
     const s = src();
     const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: cardExtraction,");
     expect(at).toBeGreaterThan(s.indexOf("const [created] = await trx('scheduled_services')"));
-    const block = s.slice(at, at + 2000);
+    const block = s.slice(at, at + 3200);
     expect(block).toContain('lead_id: leadId || null');
     // Same origin as the voice agent's card: the confirm hook never guesses a lead when lead_id is null.
     expect(block).toContain("origin: 'voice_agent',");
@@ -642,5 +644,37 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(await onFileAddressIsFromWebForm(lead(), conn('voicemail_callback'))).toBe(false);
     // The stage string is the one public-property-lookup.js actually writes.
     expect(read('../routes/public-property-lookup.js')).toContain("stage: 'property_lookup_complete'");
+  });
+
+  test('r10: the review card carries the form address, the visit time and the same visit link as the bell', () => {
+    expect(streetLevelVisitLink('v-1', '2026-10-05')).toBe('/admin/dispatch?tab=schedule&date=2026-10-05&appointment=v-1');
+    expect(streetLevelVisitWhen(new Date('2026-10-05T00:00:00Z'), '13:00:00')).toBe('2026-10-05 13:00');
+    const s = src();
+    const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: cardExtraction,");
+    const block = s.slice(at, at + 3000);
+    expect(block).toContain('address_on_file: v2StreetLevelHold?.address_on_file || null,');
+    expect(block).toContain('visit_when: streetLevelVisitWhen(created.scheduled_date, created.window_start) || null,');
+    expect(block).toContain('visit_link: streetLevelVisitLink(created.id, dateOnlyISO(created.scheduled_date)),');
+    // The summary itself says what to do (the inbox renders it).
+    const summary = s.slice(s.indexOf('const cardWhen = streetLevelVisitWhen'), at);
+    expect(summary).toContain('Web-form address ');
+    expect(summary).toContain('confirm, correct, or cancel the visit');
+    expect(s).toContain('link: streetLevelVisitLink(visitId, visitDate),');
+  });
+
+  test('r10: an open street-level hold is call-level review state (bridgeNeedsConfirmation -> review_status, lead needs_confirmation)', () => {
+    const s = src();
+    const decide = s.indexOf('v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });');
+    const push = s.indexOf("bridgeNeedsConfirmation.push('street_level_address_review');", decide);
+    expect(push).toBeGreaterThan(decide);
+    expect(push - decide).toBeLessThan(900);
+    expect(s.slice(decide, push)).toContain('if (v2StreetLevelHold && !bridgeNeedsConfirmation.includes(\'street_level_address_review\'))');
+    // Pushed BEFORE the bridge is consumed by the lead's needs_confirmation merge and the triage notes.
+    expect(push).toBeLessThan(s.indexOf('const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);'));
+    expect(push).toBeLessThan(s.indexOf("triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH:"));
+    // And it reads as a plain instruction on the lead's activity.
+    expect(s).toMatch(/street_level_address_review: 'web-form address: Google matched only the street/);
+    // Gate off: buildStreetLevelHold is null (no knownCaller.onFileStreetLevel), so nothing is pushed.
+    expect(buildStreetLevelHold({ knownCaller: { addressLine1: '1 X St' }, routingResult: { usesOnFileAddress: true } })).toBeNull();
   });
 });

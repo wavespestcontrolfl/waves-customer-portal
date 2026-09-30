@@ -17,11 +17,15 @@ const card = (extra = {}) => ({
 const connWithVisit = (visit) => () => ({ where() { return this; }, first: async () => visit });
 
 describe('streetLevelHoldStillPending', () => {
-  test('true only while the linked visit is pending and unconfirmed', async () => {
+  test('protected until the activation stamps customer_confirmed: pending, or confirmed-but-unstamped', async () => {
     expect(await streetLevelHoldStillPending(connWithVisit({ status: 'pending', customer_confirmed: false }), card())).toBe(true);
-    // confirmed, corrected-and-confirmed, cancelled, skipped or gone: the card may settle.
+    // Office confirm committed status but the hook has not stamped (or failed transiently): still protected.
+    expect(await streetLevelHoldStillPending(connWithVisit({ status: 'confirmed', customer_confirmed: false }), card())).toBe(true);
+    // Activation finished, or the visit was cancelled / skipped / rescheduled / gone: the card may settle.
     expect(await streetLevelHoldStillPending(connWithVisit({ status: 'confirmed', customer_confirmed: true }), card())).toBe(false);
-    expect(await streetLevelHoldStillPending(connWithVisit({ status: 'cancelled', customer_confirmed: false }), card())).toBe(false);
+    for (const status of ['cancelled', 'skipped', 'rescheduled']) {
+      expect(await streetLevelHoldStillPending(connWithVisit({ status, customer_confirmed: false }), card())).toBe(false);
+    }
     expect(await streetLevelHoldStillPending(connWithVisit(undefined), card())).toBe(false);
   });
 
@@ -42,7 +46,9 @@ describe('the routes keep the hold out of generic verdicts and single-card actio
     // Two-valued: an ordinary card (no street_level_address key) must evaluate FALSE, not NULL,
     // or `NOT (...)` would silently drop it from the bulk resolve.
     expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain("COALESCE(triage_items.payload->>'street_level_address', '') = 'true'");
-    expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain("hold_ss.status = 'pending' AND hold_ss.customer_confirmed = false");
+    expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain('hold_ss.customer_confirmed = false');
+    expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain("hold_ss.status NOT IN ('cancelled', 'skipped', 'rescheduled')");
+    expect(STREET_LEVEL_HOLD_OPEN_SQL).not.toContain("status = 'pending'");
     const bulk = src.indexOf('.whereRaw(`NOT ${STREET_LEVEL_HOLD_OPEN_SQL}`)');
     expect(bulk).toBeGreaterThan(src.indexOf('.whereRaw("payload->\'reschedule_proposal\' IS NULL")'));
     expect(src.indexOf('.update({', bulk)).toBeGreaterThan(bulk);

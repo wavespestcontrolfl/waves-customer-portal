@@ -222,6 +222,12 @@ export function ConfirmEvidence({ payload }) {
       label: "Promised follow-up",
       value: `Visit 2 was promised${p.follow_up_plan.scheduled_date ? ` for ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""} — book it with the primary appointment.`,
     },
+    // Street-level address hold: the visit is booked pending on the address the
+    // lead typed into their web form (Google matched only the street). It is
+    // settled by the visit itself, so the card shows what to confirm and where.
+    p.street_level_address && p.address_on_file && { label: "Form address", value: `${p.address_on_file} — Google matched the street only` },
+    p.street_level_address && p.visit_when && { label: "Visit", value: p.visit_when },
+    p.street_level_address && { label: "To resolve", value: "Confirm, correct, or cancel the visit to close this." },
     // A same-call visit the dispute retained on the caller's number: the
     // work is to correct THAT appointment's address, not to book another.
     // …after a DENIED call the visit is to be cancelled or reviewed, never
@@ -283,6 +289,9 @@ export function ConfirmEvidence({ payload }) {
       ))}
       {p.confirmation_question && (
         <div className="text-14 text-zinc-900 mt-1">Ask: “{p.confirmation_question}”</div>
+      )}
+      {p.street_level_address && typeof p.visit_link === "string" && p.visit_link.startsWith("/admin/") && (
+        <a href={p.visit_link} className="inline-block mt-1 text-13 font-medium text-zinc-900 underline">Open visit</a>
       )}
     </div>
   );
@@ -824,6 +833,10 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
                 const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
+                // A street-level address hold settles with its visit (confirm,
+                // correct or cancel it) — the server 409s Accept / Deny / Dismiss
+                // on it while the visit is unconfirmed, so no verdict buttons.
+                const isStreetLevelHoldCard = isTriage && item.reason_code === "outbound_booking_review" && !!parsePayload(item.payload)?.street_level_address;
                 // V1/V2 email disagreement — Accept/Deny 400/409 on this
                 // card until the confirm-email form below satisfies it.
                 const isEmailDisagreementCard = isTriage && !!parsePayload(item.payload)?.email_disagreement;
@@ -860,7 +873,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && (
+                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -874,7 +887,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                           Auto-routed rows keep both buttons even after a verdict
                           so an accidental deny (or a changed mind) can be flipped
                           back to accept — the verdict badge shows current state. */}
-                      {(isOpenView || !isTriage) && (
+                      {(isOpenView || !isTriage) && !isStreetLevelHoldCard && (
                         <div className="flex items-center gap-2 flex-wrap sm:shrink-0">
                           {isOpenView && (
                             <Button
