@@ -100,6 +100,7 @@
  *   GATE_IB_MERGE_CUSTOMERS=true (Intelligence Bar merge_customers: the confirmed duplicate-merge write is offered in admin tool lists and executes; off = the tool is not offered on either the legacy or the platform path and a forced call refuses; the admin duplicates-queue route is unaffected; kill = unset)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
+ *   GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT=true (call routing: a call with a confirmed on-the-hour time and a trusted address is no longer held only because the service is unclear — ambiguous_pest_or_service fails open so the Waves Assessment fallback books it; needs GATE_CALL_FAIL_OPEN_BOOKING; the office still gets the advisory card; off = byte-identical today)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
@@ -1618,6 +1619,15 @@ const gates = {
   // hard blocks stay. Independent of callFailOpenBooking. Creates real
   // appointments — owner-flip only.
   callAgentCommitBooking: process.env.GATE_CALL_AGENT_COMMIT_BOOKING === 'true',
+  // Unclear-service assessment booking (owner-approved review item, 2026-09-30):
+  // a call with a CONFIRMED on-the-hour time and a trusted address is not held
+  // on ambiguous_pest_or_service — the existing fail-open
+  // "Waves Assessment" fallback books it and the office keeps its advisory
+  // card to set the real service. Ships DARK: strict `=== 'true'`, default
+  // off. Rides GATE_CALL_FAIL_OPEN_BOOKING (inert without it). Read through
+  // isEnabled('callUnclearServiceAssessment') by the call processor, which
+  // hands canAutoRoute the boolean as opts.unclearServiceAssessment.
+  callUnclearServiceAssessment: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
   // Companion trust gate for callAgentCommitBooking: the Agent:/Caller:
   // transcript labels the commitment-grounding relies on are LLM-inferred
   // today (labelTranscriptWithOpenAI infers unclear identities; its integrity
