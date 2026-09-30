@@ -1739,7 +1739,8 @@ function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDat
       link: `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`,
       bell: true,
       dedupeKey: `street-level-address-hold:${visitId}`,
-      metadata: { scheduledServiceId: visitId, callSid, address_on_file: hold.address_on_file, google_street: hold.google_street },
+      // Ids only: the name and address are in the body the owner asked for; the visit link carries the rest.
+      metadata: { scheduledServiceId: visitId, callSid },
     },
   };
 }

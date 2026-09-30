@@ -375,9 +375,6 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
   const item = await conn('triage_items').where({ id }).first();
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
-  if (await streetLevelHoldStillPending(conn, item)) {
-    throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE), { statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
-  }
 
   // Per-call advisory lock + transaction: the shared lockTriageCall contract
   // with the nightly auto-resolve sweep. Serializing per call removes both
@@ -413,6 +410,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // r33 guarantee against the email-correction fanout, which pre-locks
     // the same way.
     await lockTriageCall(trx, item.call_log_id);
+    // A street-level address hold settles with its visit, never by Resolve /
+    // Dismiss. Checked HERE, under the per-call lock and inside the
+    // transaction, so the decision and the write cannot straddle a concurrent
+    // office confirm.
+    if (await streetLevelHoldStillPending(trx, item)) {
+      throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE), { statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+    }
     if (holdsTable) {
       await trx('first_touch_holds')
         .where({ call_log_id: item.call_log_id })

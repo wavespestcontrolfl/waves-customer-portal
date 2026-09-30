@@ -49,14 +49,29 @@ describe('the routes keep the hold out of generic verdicts and single-card actio
   });
   test('the clicked hold card is refused by the verdict route and by Resolve / Dismiss', () => {
     expect(src).toContain("if (await streetLevelHoldStillPending(db, item)) {\n      return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });");
-    expect(src).toContain("if (await streetLevelHoldStillPending(conn, item)) {\n    throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE), { statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });");
+    // Inside the transaction, after the per-call lock (atomic with the write).
+    const guard = src.indexOf("if (await streetLevelHoldStillPending(trx, item)) {\n      throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE)");
+    expect(guard).toBeGreaterThan(src.indexOf('const result = await conn.transaction(async (trx) => {'));
+    expect(guard).toBeGreaterThan(src.indexOf('await lockTriageCall(trx, item.call_log_id);', src.indexOf('async function transitionCore')));
   });
-  test('transitionCore refuses a pending hold before touching the card', async () => {
-    const conn = (table) => {
-      const q = { where() { return q; }, first: async () => (table === 'triage_items' ? { id: 't1', status: 'open', ...card() } : { status: 'pending', customer_confirmed: false }) };
-      return q;
+  test('transitionCore refuses a pending hold inside the locked transaction, before any write', async () => {
+    const writes = [];
+    const make = () => {
+      const t = (table) => {
+        const q = {
+          where() { return q; }, whereIn() { return q; }, forUpdate() { return q; },
+          first: async () => (table === 'triage_items' ? { id: 't1', status: 'open', ...card() } : { status: 'pending', customer_confirmed: false }),
+          update: async (u) => { writes.push(u); return 1; },
+        };
+        return q;
+      };
+      t.raw = async () => ({ rows: [{}] });
+      t.schema = { hasTable: async () => false };
+      t.transaction = async (fn) => fn(t);
+      return t;
     };
-    await expect(adminTriage.transitionCore({ id: 't1', nextStatus: 'resolved', conn })).rejects.toMatchObject({ statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+    await expect(adminTriage.transitionCore({ id: 't1', nextStatus: 'resolved', conn: make() })).rejects.toMatchObject({ statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+    expect(writes).toHaveLength(0);
   });
 });
 
