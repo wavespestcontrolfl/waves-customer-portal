@@ -3582,6 +3582,41 @@ describe('free re-service is an entitlement resolved through the existing mechan
       }
     });
 
+    // Codex round-30 P1 (PR #5336): a request whose object IS the re-service is the re-service itself.
+    test('a request for the re-service itself is the SOLE need; a request for a distinct appointment/service is separate', () => {
+      const { reserviceIsOnlySchedulingNeed } = require('../services/sms-shadow-drafter');
+      const only = (inboundMessage) => reserviceIsOnlySchedulingNeed({ inboundMessage });
+      for (const m of [
+        'The ants are back. Can you book a re-service?', 'The ants are back. Can someone come back out?', 'The ants are back. Can you schedule that?',
+        'the ants are back, can you book it?', 'the ants are back, please send someone out', 'ants are back, move the re-service to Friday',
+        'ants are back, can I move it to Friday?', 'ants are back, can you get someone out here',
+      ]) expect(only(m)).toBe(true);
+      for (const m of [
+        'The ants are back. Can I move my lawn visit?', 'ants are back, reschedule my regular service', 'ants are back, please book me a time',
+        'ants are back, I want to book a mosquito treatment', 'ants are back, book a visit', 'ants are back, change my address',
+      ]) expect(only(m)).toBe(false);
+    });
+
+    test('"Can you book a re-service?" with pest booked / bookable: the slot guards stay ON (no offered_times, no book_appointment)', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const inboundMessage = 'The ants are back. Can you book a re-service?';
+      const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+      const bookableFacts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      // pest booked: another pest visit + times + book_appointment is rejected
+      const booked = validateReserviceOffer({ reply: 'I can book another visit for Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [{ type: 'book_appointment' }], inboundMessage, offeredTimes: slot });
+      expect(booked.ok).toBe(false);
+      expect(booked.violations[0]).toMatch(/ALREADY BOOKED/);
+      // pest bookable: the promise checks reject times / book_appointment
+      const withTimes = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. I can also do Friday 9-11am.", factsBlock: bookableFacts, intendedActions: sendLink, inboundMessage, offeredTimes: slot });
+      expect(withTimes.ok).toBe(false);
+      expect(withTimes.violations[0]).toMatch(/offered_times/);
+      const withBook = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now.", factsBlock: bookableFacts, intendedActions: [...sendLink, { type: 'book_appointment' }], inboundMessage });
+      expect(withBook.ok).toBe(false);
+      expect(withBook.violations[0]).toMatch(/book_appointment/);
+    });
+
     test('a bare "appointment" mention is history, not a separate request; request language is', () => {
       const { reserviceIsOnlySchedulingNeed } = require('../services/sms-shadow-drafter');
       const only = (inboundMessage) => reserviceIsOnlySchedulingNeed({ inboundMessage });

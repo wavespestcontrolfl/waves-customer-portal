@@ -1360,8 +1360,37 @@ function reserviceReplyHasOfferWording(text) {
 // Codex round-29 P1: the shortcut applies ONLY when the re-service is the customer's sole need. A pest report that also
 // cancels / complains, asks to move or book another visit, or names another service ("The ants are back, cancel my
 // plan"; "The ants are back. Can I move my lawn visit to Friday?") still needs the normal OPEN TIMES lookup.
-const RESERVICE_OTHER_REQUEST_RE = /\b(?:re-?schedul\w*|re-?book\w*|move|moving|push|pushing|change|changing|switch|swap|skip|postpone|delay|cancel\w*|book|booking|another\s+(?:day|time)|different\s+(?:day|time)|what\s+times?|which\s+times?|any\s+(?:openings?|availability)|availab\w+|openings?|earlier|later\s+(?:date|time|day)|next\s+(?:week|available))\b|\b(?:can|could|would|will|may)\s+(?:i|you|we|someone|somebody)\b[^.?!]{0,40}\b(?:get|make|set\s+up|schedule|have)\s+(?:an?|another|my|the)\s+appointment\b|\b(?:please|pls|i\s+need|i\s+want|i['’]d\s+like|i\s+would\s+like|we\s+need|we\s+want|want\s+to|need\s+to|like\s+to)\b[^.?!]{0,40}\b(?:an?|another|my|the)\s+appointment\b/i;
+// Codex round-30 P1: a request is a SEPARATE need only when its OBJECT is a distinct appointment / service. A request
+// whose object is the re-service itself ("book a re-service", "someone to come back out", "schedule that", "book it")
+// is the re-service — sole need, guards stay on. Three kinds of evidence remain:
+//   * a move-type verb (reschedule / move / push / change / switch / swap / skip / postpone / delay) governing an object
+//     that is not the re-service and not a bare pronoun ("move my lawn visit", "reschedule my regular service");
+//   * a book-type verb (book / schedule / set up / arrange / make / get) governing a distinct appointment or service
+//     noun that is not the re-service ("book a mosquito treatment", "get me a time");
+//   * an explicit ask for times / another day, or an appointment request ("can I get an appointment").
+const RESERVICE_MOVE_VERB_RE = /\b(?:re-?schedul\w*|re-?book\w*|move|moving|push|pushing|change|changing|switch|swap|skip|postpone|delay)\b([^.?!;]{0,60})/gi;
+const RESERVICE_BOOK_VERB_RE = /\b(?:book|booking|schedule|scheduling|set\s+up|arrange|make|get)\b([^.?!;]{0,60})/gi;
+const RESERVICE_SELF_OBJECT_RE = /\b(?:re-?service|re-?treat\w*|re-?spray|call-?back|revisit|follow-?up|free\s+(?:visit|service|treatment|callback)|come\s+(?:back|out)|coming\s+(?:back|out)|stop\s+by|send\s+(?:someone|somebody|a\s+tech\w*)|someone|somebody|(?:a|the)\s+tech\w*|return|again)\b/i;
+const RESERVICE_BARE_PRONOUN_OBJECT_RE = /^\W*(?:it|that|this|them|those|one)\b|^\W*$/i;
+const RESERVICE_DISTINCT_BOOK_OBJECT_RE = /\b(?:appointments?|visits?|services?|treatments?|sprays?|applications?|inspections?|estimates?|quotes?|slots?|times?|days?|dates?|lawn|turf|mosquito|termite|rodent|tree|shrub)\b/i;
+const RESERVICE_TIME_ASK_RE = /\b(?:another\s+(?:day|time)|different\s+(?:day|time)|what\s+times?|which\s+times?|any\s+(?:openings?|availability)|availab\w+|openings?|earlier|later\s+(?:date|time|day)|next\s+(?:week|available))\b/i;
+const RESERVICE_APPOINTMENT_REQUEST_RE = /\b(?:can|could|would|will|may)\s+(?:i|you|we|someone|somebody)\b[^.?!]{0,40}\b(?:get|make|set\s+up|schedule|have)\s+(?:an?|another|my|the)\s+appointment\b|\b(?:please|pls|i\s+need|i\s+want|i['’]d\s+like|i\s+would\s+like|we\s+need|we\s+want|want\s+to|need\s+to|like\s+to)\b[^.?!]{0,40}\b(?:an?|another|my|the)\s+appointment\b/i;
 // (A bare mention of an appointment — "The ants are back after my appointment" — is history, not a request; round-29 P2.)
+function reserviceHasSeparateRequest(text) {
+  const t = String(text || '');
+  if (RESERVICE_TIME_ASK_RE.test(t) || RESERVICE_APPOINTMENT_REQUEST_RE.test(t)) return true;
+  for (const m of t.matchAll(RESERVICE_MOVE_VERB_RE)) {
+    const object = m[1];
+    if (RESERVICE_SELF_OBJECT_RE.test(object) || RESERVICE_BARE_PRONOUN_OBJECT_RE.test(object)) continue;
+    if (/\b(?:my|our|the|an?|another)\s+[\w-]+/i.test(object) || RESERVICE_DISTINCT_BOOK_OBJECT_RE.test(object)) return true;
+  }
+  for (const m of t.matchAll(RESERVICE_BOOK_VERB_RE)) {
+    const object = m[1];
+    if (RESERVICE_SELF_OBJECT_RE.test(object) || RESERVICE_BARE_PRONOUN_OBJECT_RE.test(object)) continue;
+    if (RESERVICE_DISTINCT_BOOK_OBJECT_RE.test(object)) return true;
+  }
+  return false;
+}
 // Codex round-31 P1: the bypass rests on INDEPENDENT EVIDENCE IN THE INBOUND TEXT of a separate need — never on the
 // upstream `schedulingIntent` flag or the classified intent. Traced: sms-intent.hasSchedulingIntent is a keyword /
 // weekday / month-day / clock-time detector, so it is TRUE for a plain pest report that merely carries a time word
@@ -1370,7 +1399,7 @@ const RESERVICE_OTHER_REQUEST_RE = /\b(?:re-?schedul\w*|re-?book\w*|move|moving|
 // slot guards. (The plain "The ants are back" / "they're back" produce false, but time-word reports do not.)
 function reserviceIsOnlySchedulingNeed({ inboundMessage }) {
   const text = String(inboundMessage || '');
-  if (SAVE_SALE_NON_PEST_TEXT_RE.test(text) || RESERVICE_OTHER_REQUEST_RE.test(text)) return false;
+  if (SAVE_SALE_NON_PEST_TEXT_RE.test(text) || reserviceHasSeparateRequest(text)) return false;
   return !require('./reservice-scheduler').namesOtherService(text, 'pest');
 }
 function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) {
