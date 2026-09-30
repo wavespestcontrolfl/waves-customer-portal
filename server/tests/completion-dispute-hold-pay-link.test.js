@@ -82,12 +82,12 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
   test('the hold is read once, only when the text could carry a pay link, via the fail-closed reader', () => {
-    expect(src).toMatch(/const payLinkHeldByDisputeHold = \(invoiceCreated && payUrl && svc\.customer_id\)\s*\?\s*await require\('\.\.\/services\/collections\/collection-hold'\)\.shouldWithholdPayLink\(svc\.customer_id\)\s*:\s*false;/);
-    expect(src.match(/const payLinkHeldByDisputeHold =/g)).toHaveLength(1);
+    expect(src).toMatch(/let payLinkHeldByDisputeHold = \(invoiceCreated && payUrl && svc\.customer_id\)\s*\?\s*await require\('\.\.\/services\/collections\/collection-hold'\)\.shouldWithholdPayLink\(svc\.customer_id\)\s*:\s*false;/);
+    expect(src.match(/let payLinkHeldByDisputeHold =/g)).toHaveLength(1);
   });
 
   test('the lookup runs before the decline notice, which comes before the completion SMS composition', () => {
-    const lookup = src.indexOf('const payLinkHeldByDisputeHold =');
+    const lookup = src.indexOf('let payLinkHeldByDisputeHold =');
     const notice = src.indexOf('let paymentFailedNoticeSent = false;');
     const sms = src.indexOf('const allowCompletionInvoiceLinkBase =');
     expect(lookup).toBeGreaterThan(0);
@@ -96,7 +96,7 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
   });
 
   test('a withheld pay link is HANDED OVER to the invoice sender before any customer text, durably, and a failure is never swallowed (owner ruling 2026-09-30)', () => {
-    const lookup = src.indexOf('const payLinkHeldByDisputeHold =');
+    const lookup = src.indexOf('let payLinkHeldByDisputeHold =');
     const handOver = src.indexOf('queueHeldInvoiceForSender(invoice.id, db)', lookup);
     const firstSmsBranch = src.indexOf('completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery', lookup);
     expect(handOver).toBeGreaterThan(lookup);
@@ -115,6 +115,25 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(block).toMatch(/releaseCompletionAttemptForResume\(completionAttempt, handOverErr\)/);
     expect(block).toMatch(/status: 503/);
     expect(block).toMatch(/code: 'invoice_hold_handover_failed'/);
+  });
+
+  test('the hold is re-read right before each pay-link-bearing send and before the body is composed, reusing the ONE hand-over (owner ruling 2026-09-30, PRRT_kwDOR3YQi86nez0O)', () => {
+    // one live-recheck helper, citing the window B10 accepts for charges; fails closed via shouldWithholdPayLink
+    expect(src.match(/const recheckPayLinkHoldBeforeSend = async/g)).toHaveLength(1);
+    const helper = src.slice(src.indexOf('// Live recheck immediately before each completion-time send'), src.indexOf('let paymentFailedNoticeSent = false;'));
+    expect(helper).toMatch(/milliseconds after the check races the charge/);
+    expect(helper).toMatch(/shouldWithholdPayLink\(svc\.customer_id\)/);
+    expect(helper.slice(helper.indexOf('const recheckPayLinkHoldBeforeSend'))).not.toMatch(/forUpdate|lock/i);
+    // the decline notice: recheck after the body renders, before the 'sending' marker and the provider call
+    const noticeGate = src.indexOf('if (paymentFailedBody && !(await recheckPayLinkHoldBeforeSend()))');
+    expect(noticeGate).toBeGreaterThan(0);
+    expect(noticeGate).toBeLessThan(src.indexOf("entryPoint: 'autopay_completion_decline'"));
+    // the completion text: recheck ahead of the body composition, then the same hand-over function (not a copy)
+    const recheckAt = src.indexOf('if (await recheckPayLinkHoldBeforeSend()) {');
+    expect(recheckAt).toBeGreaterThan(0);
+    expect(src.slice(recheckAt, recheckAt + 200)).toMatch(/await handOverInvoiceToSender\(\)/);
+    expect(recheckAt).toBeLessThan(src.indexOf('const allowCompletionInvoiceLinkBase ='));
+    expect(src.match(/queueHeldInvoiceForSender\(invoice\.id, db\)/g)).toHaveLength(1);
   });
 
   test('a retry or resume finds the invoice owned by the sender and sends REPORT-ONLY (no second pay link)', () => {

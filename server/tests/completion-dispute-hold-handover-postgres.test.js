@@ -167,6 +167,50 @@ postgres('completion under a dispute hold: hand the invoice to the sender, text 
     } finally { await cleanup(f); }
   });
 
+  test('a hold placed AFTER the up-front read but BEFORE the send: the live recheck sends report-only and queues the invoice (accepted millisecond window, no locking)', async () => {
+    const f = await seedVisit();
+    const Hold = require('../services/collections/collection-hold');
+    const real = Hold.shouldWithholdPayLink;
+    // The completion's up-front read answers "no hold"; the dispute then lands, before the send.
+    const upFront = jest.spyOn(Hold, 'shouldWithholdPayLink').mockImplementationOnce(async (...args) => {
+      const answer = await real(...args);
+      await placeHold(f);
+      return answer;
+    });
+    try {
+      const out = await complete(f);
+      expect(out).toMatchObject({ status: 200 });
+      expect(upFront).toHaveBeenCalledTimes(2); // the up-front read and the live recheck
+      const inv = await invoiceFor(f);
+      expect(inv).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0 });
+      expect(sendCustomerMessage).toHaveBeenCalled();
+      for (const text of bodies()) expect(payLinkIn(text, inv)).toBe(false);
+      expect((await recordFor(f)).structured_notes.invoiceSenderOwnsPayLinkFor).toBe(String(inv.id));
+      // the sender holds it while the dispute stands, then sends it once after the release
+      await InvoiceService.processScheduledSends();
+      expect(sentInvoiceIds()).not.toContain(inv.id);
+      await releaseViaOpsScript(f);
+      await mockMakeDue(inv.id);
+      await InvoiceService.processScheduledSends();
+      expect(sentInvoiceIds().filter((x) => x === inv.id)).toHaveLength(1);
+    } finally { upFront.mockRestore(); await cleanup(f); }
+  });
+
+  test('a hold-lookup failure at the live recheck fails closed: report-only text, invoice queued', async () => {
+    const f = await seedVisit();
+    const Hold = require('../services/collections/collection-hold');
+    const real = Hold.shouldWithholdPayLink;
+    const spy = jest.spyOn(Hold, 'shouldWithholdPayLink')
+      .mockImplementationOnce((...args) => real(...args))
+      .mockImplementationOnce(async () => true); // shouldWithholdPayLink answers true when its lookup cannot
+    try {
+      expect(await complete(f)).toMatchObject({ status: 200 });
+      const inv = await invoiceFor(f);
+      expect(inv.status).toBe('scheduled');
+      for (const text of bodies()) expect(payLinkIn(text, inv)).toBe(false);
+    } finally { spy.mockRestore(); await cleanup(f); }
+  });
+
   test('no hold: the completion text carries the pay link and nothing is queued (unchanged behavior)', async () => {
     const f = await seedVisit();
     try {

@@ -11792,9 +11792,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // omits the link). The mobile in-person payment sheet
     // (invoicePaymentActionRequired) is a tech-facing prompt, not a customer
     // message, and is left untouched.
-    const payLinkHeldByDisputeHold = (invoiceCreated && payUrl && svc.customer_id)
+    let payLinkHeldByDisputeHold = (invoiceCreated && payUrl && svc.customer_id)
       ? await require('../services/collections/collection-hold').shouldWithholdPayLink(svc.customer_id)
       : false;
+    // Live recheck immediately before each completion-time send that would carry
+    // the pay link (the decline notice, then the completion text, both ahead of
+    // the message body being composed/committed to the provider). A dispute hold
+    // committed after the up-front read above flips the same flag the up-front
+    // read sets, so the send goes report-only and the invoice is handed to the
+    // sender through the ONE hand-over below. No cross-writer locking: the hold
+    // writer must never wait. What remains is the millisecond window B10
+    // explicitly accepts for charges (collections/collection-hold.js header: "a
+    // hold committing in the milliseconds after the check races the charge
+    // exactly like a dispute call landing just after the card was charged").
+    // Fail closed: a lookup that cannot answer counts as a hold. Returns true
+    // when THIS call found the hold newly active.
+    const recheckPayLinkHoldBeforeSend = async () => {
+      if (payLinkHeldByDisputeHold || !(invoiceCreated && payUrl && svc.customer_id)) return false;
+      payLinkHeldByDisputeHold = await require('../services/collections/collection-hold').shouldWithholdPayLink(svc.customer_id);
+      return payLinkHeldByDisputeHold;
+    };
     let paymentFailedNoticeSent = false;
     // Resume dedupe: the side-effects resume path reruns the auto-charge, so
     // a crash after this notice delivered but before the completion attempt
@@ -11944,7 +11961,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             entity_type: 'service_record',
             entity_id: record.id,
           });
-          if (paymentFailedBody) {
+          if (paymentFailedBody && !(await recheckPayLinkHoldBeforeSend())) {
             // Durable 'sending' marker BEFORE the send — the resume-dedupe
             // above keys off it. Mutate the in-memory notes too so the later
             // completion-SMS writes (which spread recordStructuredNotes)
@@ -12300,7 +12317,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // report-only, never a second pay link), then queues; a failure of either
     // releases the attempt for resume (503) and raises an office alert - it is
     // never swallowed. A retry re-runs the queue idempotently.
-    {
+    const handOverInvoiceToSender = async () => {
       const completionTextWouldCarryPayLink = effectiveSendCompletionSms && !!svc.cust_phone
         && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
         && completionPayLinkAllowedSansHold() && !paymentFailedNoticeSent;
@@ -12348,7 +12365,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } });
         }
       }
-    }
+      return null;
+    };
+    const handOverExit = await handOverInvoiceToSender();
+    if (handOverExit) return handOverExit;
 
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
       && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
@@ -12454,6 +12474,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           serviceRecordId: record.id,
         } });
       };
+      // Recheck the dispute hold right before the body is composed and handed to
+      // the provider (see recheckPayLinkHoldBeforeSend above): a hold newly
+      // active takes the same report-only path and the same hand-over.
+      if (await recheckPayLinkHoldBeforeSend()) {
+        const lateHandOverExit = await handOverInvoiceToSender();
+        if (lateHandOverExit) return lateHandOverExit;
+      }
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
         // Use the recap STORED on the record (the server-generated effectiveCustomerRecap,
