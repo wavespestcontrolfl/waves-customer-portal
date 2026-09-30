@@ -63,7 +63,7 @@ const LABEL_FACTS_HEADER_PREFIX = 'LABEL FACTS (from the labels of products appl
 const LABEL_FACTS_TIMEOUT_MS = 3000;
 const WATER_CONDITIONER_RE = /water\s*condition|buffer|acidifier|\bph\b|conditioner/i;
 // The catalog's generic placeholder is not a re-entry statement.
-const REENTRY_PLACEHOLDER_RE = /^Follow the product label and technician service report/i;
+const REENTRY_PLACEHOLDER_RE = /^follow the product label and technician service report[^.]*\.?$/i;
 
 function singleLine(text, cap) {
   return String(text || '').replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, cap);
@@ -117,12 +117,12 @@ function frozenFactsFor(row, snapshot) {
 
 // The snapshot writes rei_hours through Number(), so a catalog NULL (unknown)
 // is frozen as 0, indistinguishable from the residential "0 = until dry"
-// value. Trust a frozen 0 only when the frozen summary itself says until dry.
+// value. Trust a frozen 0 only when the frozen summary itself says a plain until dry.
 function frozenReiHours(frozen) {
   const hours = frozen.reentryHours == null ? null : Number(frozen.reentryHours);
   if (hours !== 0) return hours;
-  const summary = String(frozen.reentrySummary || '');
-  return UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) ? 0 : null;
+  const parsed = parseReentryText(frozen.reentrySummary);
+  return parsed && parsed.kind === 'until_dry' ? 0 : null;
 }
 
 // One service_products row -> a customer-visible verified product, 'unverified'
@@ -249,42 +249,47 @@ function rainfastDuration(minutes) {
 // LONGEST re-entry and the LONGEST rainfast time (only when EVERY product has
 // one) across the verified customer-visible products, never per product or area.
 //
-// Re-entry level per product, in hours: rei_hours > 0 -> that many hours;
-// rei_hours = 0 (the residential value) or a summary that says "until dry" ->
-// 0 (the shortest, "until dry"); anything else is unknown, and one unknown
-// product makes the whole-visit re-entry unstatable (line omitted).
-const UNTIL_DRY_RE = /\buntil\b[^.]{0,30}\bdr(?:y|ied)\b/i;
-// A summary/text that states its own duration (a number, a spelled-out figure,
-// overnight, next day, weeks) makes rei_hours = 0 untrustworthy: unknown.
-const STATED_DURATION_RE = /\d\s*-?\s*(?:minutes?|mins?|hours?|hrs?|days?|weeks?)\b|\bovernight\b|\bnext\s+day\b|\bweeks?\b/i;
-function statesOwnDuration(product) {
-  return [product.reentrySummary, product.reentryText].some((t) => t && (STATED_DURATION_RE.test(String(t)) || new RegExp(SPELLED_QTY_RE.source, 'i').test(String(t))));
+// A re-entry text is understood ONLY in these accepted shapes (an allowlist):
+//   [lead] [plain until-dry | ONE plain duration in digits] [.]
+// where the lead is a plain keep-off / do-not-enter / safe-for phrase. Anything
+// else - a second clause, "or", "for pets", "watered in", "unless", a range, a
+// spelled or vague figure, children, at least ... - is not understood, so the
+// re-entry is unknown. The whole text is read (no truncation).
+const REENTRY_SUBJECT_SRC = 'people\\s+and\\s+pets|pets\\s+and\\s+people|people|persons|pets|everyone';
+const REENTRY_AREA_SRC = '(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawn|grass|yard|surfaces?)';
+const REENTRY_LEAD_SRC = `(?:(?:keep|stay)\\s+(?:(?:${REENTRY_SUBJECT_SRC})\\s+)?(?:off|out\\s+of)(?:\\s+${REENTRY_AREA_SRC})?|(?:do\\s+not|don't)\\s+(?:re-?enter|enter)(?:\\s+${REENTRY_AREA_SRC})?|(?:safe|ok|okay)\\s+for\\s+(?:${REENTRY_SUBJECT_SRC})|re-?entry(?:\\s+(?:is\\s+)?(?:allowed|permitted))?|wait)`;
+const REENTRY_UNTIL_DRY_SRC = "(?:until|once|when)\\s+(?:(?:it(?:\\s+is|'s|\\s+has)?|the\\s+(?:spray|treatment|application|product|areas?|surfaces?)\\s+(?:is|are|has|have))\\s+)?(?:(?:completely|fully|thoroughly)\\s+)?(?:dry|dried)";
+const REENTRY_DURATION_SRC = '(?:for\\s+)?(\\d+(?:\\.\\d+)?)\\s*(hours?|hrs?|minutes?|mins?|days?)(?:\\s+after\\s+(?:the\\s+)?(?:application|spraying|treatment))?';
+const REENTRY_SHAPE_RE = new RegExp(`^(?:${REENTRY_LEAD_SRC})?\\s*(?:(${REENTRY_UNTIL_DRY_SRC})|${REENTRY_DURATION_SRC})?\\s*\\.?$`, 'i');
+const HOURS_PER_UNIT = { m: 1 / 60, h: 1, d: 24 };
+// { kind: 'none' } (no statement / the catalog placeholder), { kind: 'until_dry' },
+// { kind: 'hours', hours }, or null (not an accepted shape: unknown).
+function parseReentryText(text) {
+  const t = singleLine(canonText(text), Infinity);
+  if (!t || REENTRY_PLACEHOLDER_RE.test(t)) return { kind: 'none' };
+  const m = REENTRY_SHAPE_RE.exec(t);
+  // belt and braces: the generic quantity matchers (digits, spelled, vague) must find exactly what the shape did
+  const stated = [...t.matchAll(new RegExp(TIME_EXPR_RE.source, 'gi'))].length + [...t.matchAll(new RegExp(SPELLED_QTY_RE.source, 'gi'))].length;
+  if (!m) return null;
+  if (m[1]) return stated === 0 ? { kind: 'until_dry' } : null;
+  if (m[2]) return stated === 1 ? { kind: 'hours', hours: Number(m[2]) * HOURS_PER_UNIT[m[3][0].toLowerCase()] } : null;
+  return stated === 0 ? { kind: 'none' } : null;
 }
-// A positive frozen figure stands only when the product's own re-entry text
-// AGREES with it: every duration the text states equals the figure and it adds
-// no condition of its own (until dry, whichever is later, overnight, at least,
-// a rain / watering condition ...). A text that says anything else - longer,
-// shorter, another unit, "until dry", a range - makes the re-entry unknown.
-const REENTRY_CONDITION_RE = /\b(?:until|till|til|after|before|once|when|whenever|while|dr(?:y|ies|ied|ying)|overnight|whichever|at\s+least|minimum|up\s+to|longer|more\s+than|next\s+day|weeks?|wet|damp|water(?:ed|ing)?|irrigat\w*|rain\w*)\b/i;
-const HOURS_PER_UNIT = { m: 1 / 60, h: 1, d: 24, w: 168 };
-function statedHourFigures(text) {
-  return [...text.matchAll(new RegExp(TIME_EXPR_RE.source, 'gi'))]
-    .flatMap((m) => [m[1], m[2]].filter((n) => n != null).map((n) => Number(n) * HOURS_PER_UNIT[m[3][0].toLowerCase()]));
-}
-function reentryTextAgrees(text, hours) {
-  const t = singleLine(text, 160).replace(/\bafter\s+(?:the\s+)?(?:application|spraying|treatment)\b/gi, ' ');
-  if (!t || REENTRY_PLACEHOLDER_RE.test(t)) return true; // states nothing
-  if (new RegExp(SPELLED_QTY_RE.source, 'i').test(t) && !/\d/.test(t)) return false; // a spelled figure is not compared: unknown
-  const figures = statedHourFigures(t);
-  return figures.every((h) => Math.abs(h - hours) < 1e-9) && !REENTRY_CONDITION_RE.test(t);
-}
+// Re-entry level per product, in hours: a positive frozen figure stands only when
+// every text the product carries says the same figure or nothing; 0 (the
+// residential value, "until dry") only when no text states a duration; a null
+// figure only from a plain until-dry text. Anything else is unknown, and one
+// unknown product makes the whole-visit re-entry unstatable (line omitted).
 function reentryLevelHours(product) {
+  const parsed = [product.reentrySummary, product.reentryText].filter(Boolean).map(parseReentryText);
+  if (parsed.includes(null)) return null;
+  const figures = parsed.filter((x) => x.kind === 'hours');
+  const untilDry = parsed.some((x) => x.kind === 'until_dry');
   if (Number.isFinite(product.reiHours) && product.reiHours > 0) {
-    return [product.reentrySummary, product.reentryText].every((t) => reentryTextAgrees(t, product.reiHours)) ? product.reiHours : null;
+    return !untilDry && figures.every((x) => Math.abs(x.hours - product.reiHours) < 1e-9) ? product.reiHours : null;
   }
-  if (product.reiHours === 0) return statesOwnDuration(product) ? null : 0;
-  const summary = singleLine(product.reentrySummary || product.reentryText, 160);
-  return summary && UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) && !statesOwnDuration(product) ? 0 : null;
+  if (product.reiHours === 0) return figures.length ? null : 0;
+  return untilDry && !figures.length ? 0 : null;
 }
 // { hours, untilDry } for the whole visit, or null when ANY product's re-entry
 // is unknown. `untilDry` with hours > 0 is the mixed case (a fixed figure on
@@ -394,22 +399,38 @@ function canonText(text) {
     .replace(/\s+/g, ' ')
     .trim();
 }
-const sentenceCore = (text) => canonText(text).replace(/\.+$/, '');
+// A COMPLETE copy of an authorized sentence: the whole sentence including its
+// terminal period, starting at a word boundary and followed only by the end of
+// the text or whitespace and a NEW sentence (not a lowercase continuation).
+// "... for 4 hours or less.", "... for 4 hours, unless it rains." and
+// "... for 4 hours. or so" are therefore not copies and are never stripped.
+// Copying, stripping and the send-time recheck all use this one matcher.
+// [{ start, end }] over `canon` (canonText output).
+function completeCopies(canon, sentence) {
+  const out = [];
+  for (const m of canon.matchAll(new RegExp(escapeRegex(canonText(sentence)), 'gi'))) {
+    const end = m.index + m[0].length;
+    if ((m.index === 0 || !/[\p{L}\p{N}]/u.test(canon[m.index - 1])) && /^(?:$|\s+(?![a-z]))/.test(canon.slice(end))) out.push({ start: m.index, end });
+  }
+  return out;
+}
+const copiesSentence = (reply, sentence) => completeCopies(canonText(reply), sentence).length > 0;
 
-/** The rendered sentences of `sectionText` that `reply` copies verbatim (case-insensitive after canonText). */
+/** The rendered sentences of `sectionText` that `reply` copies completely and verbatim (case-insensitive after canonText). */
 function labelSentencesCopiedIn(reply, sectionText) {
-  const body = canonText(reply).toLowerCase();
-  return labelSentencesIn(sectionText).filter((s) => body.includes(sentenceCore(s.text).toLowerCase()));
+  return labelSentencesIn(sectionText).filter((s) => copiesSentence(reply, s.text));
 }
 
 /**
- * `text` (canonText-normalized) with every verbatim copy of a LABEL FACTS
- * sentence replaced by a clause break, so what remains is exactly the part of
- * the reply the guard must judge. Every other screen reads this same remainder.
+ * `text` (canonText-normalized) with every complete verbatim copy of a LABEL
+ * FACTS sentence replaced by a clause break, so what remains is exactly the
+ * part of the reply the guard must judge. Every other screen reads this same remainder.
  */
 function stripLabelSentences(text, sectionText) {
   let out = canonText(text);
-  for (const s of labelSentencesIn(sectionText)) out = out.replace(new RegExp(escapeRegex(sentenceCore(s.text)), 'gi'), ' ; labelsentence ; ');
+  for (const s of labelSentencesIn(sectionText)) {
+    for (const { start, end } of completeCopies(out, s.text).reverse()) out = `${out.slice(0, start)} ; labelsentence ; ${out.slice(end)}`;
+  }
   return out;
 }
 
@@ -745,8 +766,7 @@ function labelFactsSnapshotFor({ labelFacts, reply, sectionText }) {
 async function labelFactsSendBlockReason({ snapshot, body, conn = db, today } = {}) {
   const sentences = snapshot && Array.isArray(snapshot.sentences) ? snapshot.sentences : [];
   if (replyClaimsUngroundedLabelTiming(body, sentences.map((s) => `- ${s}`).join('\n'))) return 'label_facts_unauthorized_claim';
-  const text = canonText(body).toLowerCase();
-  const present = sentences.filter((s) => text.includes(sentenceCore(s).toLowerCase()));
+  const present = sentences.filter((s) => copiesSentence(body, s));
   if (!present.length) return null;
   if (!snapshot.customer_id) return 'label_facts_recheck_no_customer';
   let current;

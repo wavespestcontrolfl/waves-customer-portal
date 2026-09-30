@@ -183,6 +183,32 @@ describe('gate on — section rendering (one exact sentence per kind)', () => {
     expect(section([product({ reiHours: 6, reentrySummary: null }), product({ reiHours: 4, reentrySummary: '12 hours' })]).text).not.toContain('keep people');
   });
 
+  test('re-entry text is an ALLOWLIST of plain shapes: spelled, vague or extra clauses beside the figure, or beside until dry, make it unknown', () => {
+    const re = (reiHours, reentrySummary) => section([product({ rainfastMinutes: 180, reiHours, reentrySummary })]).text;
+    // the two reproduced cases
+    expect(re(4, 'Keep off for 4 hours, or twelve hours for pets.')).not.toContain('keep people');
+    expect(re(0, 'Keep people and pets off treated areas until dry and watered in.')).not.toContain('keep people');
+    for (const summary of ['Keep off for 4 hours or 12 hours for children.', 'Keep off for 4 hours except pets.', 'Keep off for 4 hours unless it rains.', 'Keep off for 4 hours; pets stay in overnight.',
+      'Keep off for 4 hours (children 24 hours).', 'Keep off for 4 hours and until dry.', 'Keep off for four hours or a couple of days.', 'Keep off for 4 hours after irrigation.', 'Keep off for a day or two.']) {
+      expect(re(4, summary)).not.toContain('keep people');
+    }
+    for (const summary of ['Keep people and pets off treated areas until dry and after irrigation.', 'Keep off until dry, unless pets.', 'Keep off until dry, or 12 hours for children.', 'Keep off until dry except the pool deck.', 'Stay off until dry or overnight.']) {
+      expect(re(0, summary)).not.toContain('keep people');
+      expect(re(null, summary)).not.toContain('keep people');
+    }
+    // a long text is read in full: a condition past 160 characters still counts
+    const long = `Keep people and pets off treated areas until dry. ${'x'.repeat(200)} Children must stay off for 12 hours.`;
+    expect(re(0, long)).not.toContain('keep people');
+    // the plain shapes still work
+    for (const summary of ['Keep people and pets off treated areas until dry.', 'Do not re-enter until the spray has dried.', 'Safe for pets once dry.', 'Stay off until completely dry']) {
+      expect(re(0, summary)).toContain('areas until dry.');
+      expect(re(null, summary)).toContain('areas until dry.');
+    }
+    expect(re(4, 'Keep everyone off the lawn for 4 hours.')).toContain('areas for 4 hours.');
+    // the frozen-zero reader is the same allowlist
+    expect(labelFactsLib.renderLabelFactsSection({ serviceDate: '2026-06-05', products: [product({ reiHours: 0, reentrySummary: 'Keep off until dry and watered in.' })], unverifiedCount: 0 }, { formatDate: (d) => d })).not.toContain('keep people');
+  });
+
   test('fail closed: any unverified product at the visit means no whole-visit figures at all', () => {
     const facts = buildFactsBlock(context, { now: NOW, labelFacts: { ...labelFacts([product({ rainfastMinutes: 180 })]), unverifiedCount: 1 } });
     expect(facts).toContain('LABEL FACTS (none on file for the last visit):');
@@ -684,6 +710,35 @@ describe('exact-sentence contract — the guard', () => {
     expect(labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences('Keep pets off for 4 hours.', sec))).toBe(true);
     expect(hasBannedCustomerCopy('Keep pets off for 4 hours.', { rainTimeGuard: true, labelFactsText: sec })).toBe(true);
     expect(hasBannedCustomerCopy(re, { rainTimeGuard: true, labelFactsText: sec })).toBe(false);
+  });
+});
+
+describe('complete-sentence matching: an authorized sentence with anything attached is not a copy', () => {
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [rain, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const core = (t) => t.replace(/\.$/, '');
+  const claim = (body) => labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences(body, section));
+  test('the exact sentence, alone or followed by a new sentence or line, is stripped and clean', () => {
+    for (const body of [reentry, `Sure. ${reentry}`, `${reentry} Let us know if you need anything.`, `${reentry}\nThanks!`, `${rain} ${reentry}`]) expect(claim(body)).toBe(false);
+    expect(labelFactsLib.labelSentencesCopiedIn(`${reentry} Thanks.`, section).map((x) => x.text)).toEqual([reentry]);
+  });
+  test('"or less", "or so", ", unless it rains", "at most" and other attached modifiers are NOT copies and are held', () => {
+    for (const body of [
+      `${core(reentry)} or less.`, `${core(reentry)} or so.`, `${core(reentry)}, unless it rains.`, reentry.replace('for 4 hours', 'for at most 4 hours'),
+      `${reentry} or so`, `${reentry} unless it rains`, `${core(reentry)}, or 12 hours for pets.`, `${core(rain)} or so.`, `${rain.replace('after 3 hours', 'after at least 3 hours')}`,
+      core(reentry), // no terminal period: not a complete sentence
+    ]) {
+      expect(labelFactsLib.labelSentencesCopiedIn(body, section)).toEqual([]);
+      expect(claim(body)).toBe(true);
+    }
+  });
+  test('send time: the same matcher - an attached modifier is unauthorized, a complete copy still rechecks', async () => {
+    const snap = { customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [reentry] };
+    const boom = () => { throw new Error('must not read'); };
+    for (const body of [`${core(reentry)} or less.`, `${core(reentry)}, unless it rains.`, `${core(reentry)} or so.`]) {
+      await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body, conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+    }
   });
 });
 
