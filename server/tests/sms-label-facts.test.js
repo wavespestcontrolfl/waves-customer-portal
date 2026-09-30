@@ -982,6 +982,75 @@ describe('r10: a month or season named on its own is another visit unless it is 
   });
 });
 
+describe('r12: asked kinds over the thread, framing around a copy, and ordinal visit references', () => {
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [rain, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const copied = (body) => labelFactsLib.labelSentencesCopiedIn(body, section).length;
+  const claim = (body) => labelFactsLib.replyClaimsUngroundedLabelTiming(body, section);
+
+  test('thread: the union of the recent customer messages; an elliptical follow-up with no classifiable thread asks both', () => {
+    const asked = labelFactsLib.askedLabelKinds;
+    expect(asked(['Is it okay now?', 'Can the dogs go out?'])).toEqual(['reentry']);
+    expect(asked(['What about now?', 'Will rain wash it off?'])).toEqual(['rain']);
+    expect(asked(['And the kids?', 'Will rain wash it off?'])).toEqual(['reentry', 'rain']);
+    for (const q of ['Is it okay now?', 'What about now?', 'now?', 'and outside?', 'Is it ok now?']) expect([q, asked([q])]).toEqual([q, ['reentry', 'rain']]);
+    expect(asked(['Is it okay now?', 'What time are you coming Thursday?'])).toEqual(['reentry', 'rain']);
+    expect(asked(['How about the kids'])).toEqual(['reentry']);
+    // a plain non-label question, or one about the business, is not elliptical
+    for (const q of ['What time are you coming Thursday?', 'Is the invoice paid?', 'Can I pay online?', 'Thanks!']) expect([q, asked([q])]).toEqual([q, []]);
+    expect(asked('Is it okay now?')).toEqual(['reentry', 'rain']); // a bare string is the same as a one-message thread
+  });
+  test('thread: answer-shaped replies are held for the union, and the stored inbound alone still fails closed at send time', async () => {
+    const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, section, labelFactsLib.askedLabelKinds(inbound));
+    expect(guard('Yes.', ['Is it okay now?', 'Can the dogs go out?'])).toBe(true);
+    expect(guard('Yes.', ['What time are you coming Thursday?'])).toBe(false);
+    expect(guard(reentry, ['Is it okay now?', 'Can the dogs go out?'])).toBe(false);
+    const boom = () => { throw new Error('must not read'); };
+    await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body: 'Yes.', inbound: 'Is it okay now?', conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+    await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: { sentences: [], asked: ['reentry'] }, body: 'Yes.', conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+  });
+
+  test('framing: a copy with a negating, disregarding or correcting frame around it is not a copy', () => {
+    for (const body of [
+      `This is false: ${reentry}`, `Ignore this. ${reentry}`, `${reentry} Just kidding.`, `Old info: ${reentry}`, `Not anymore: ${reentry}`, `Actually. ${reentry}`,
+      `${reentry} That is outdated.`, `Correction: ${reentry}`, `${reentry} Scratch that.`, `Sure! Ignore what I said before. ${reentry}`, `${reentry} Disregard the above.`,
+      `That used to be true. ${reentry}`, `${reentry} That no longer applies.`, `${rain} No, that was wrong.`, `Note - ${reentry}`, `"${reentry}"`,
+    ]) {
+      expect([body, copied(body)]).toEqual([body, 0]);
+      expect([body, claim(body)]).toEqual([body, true]);
+    }
+  });
+  test('framing: a plain copy with a normal greeting before and a normal sentence after still counts', () => {
+    for (const body of [
+      reentry, `Hi Jane! ${reentry}`, `Hi Jane,\n${reentry}`, `Good question! ${reentry} Your technician can answer anything else.`, `${rain} ${reentry}`,
+      `Thanks for asking. ${reentry} Let us know if you need anything.`,
+    ]) {
+      expect([body, copied(body) > 0]).toEqual([body, true]);
+      expect([body, claim(body)]).toEqual([body, false]);
+    }
+  });
+  test('framing at send time: the same matcher', async () => {
+    const snap = { customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [reentry], asked: [] };
+    const boom = () => { throw new Error('must not read'); };
+    for (const body of [`This is false: ${reentry}`, `Ignore this. ${reentry}`, `${reentry} Just kidding.`, `Old info: ${reentry}`]) {
+      await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body, conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+    }
+  });
+
+  test('ordinals: the first / initial / original / second / previous visit is another visit; the last / latest / most recent is the facts', () => {
+    const other = (text) => labelFactsLib.inboundRefersToOtherVisit(text, '2026-06-05', '2026-06-06');
+    for (const text of [
+      'the first treatment - is it ok?', 'the first service, dogs ok?', 'the first visit, rain?', 'the first application', 'the first spray', 'the initial treatment', 'the original visit',
+      'the second treatment', 'the third spray', 'the previous treatment', 'the prior visit', 'last-but-one visit', 'the one before', 'the treatment before that', 'your 1st visit',
+      'the very first application', 'the first pest treatment', 'the 2nd visit',
+    ]) expect([text, other(text)]).toEqual([text, true]);
+    for (const text of ['the last treatment - dogs?', 'your latest visit, rain?', 'the most recent spray - pets ok?', 'You sprayed on the 22nd, pets?', 'the Jun 5 treatment']) {
+      expect([text, other(text)]).toEqual([text, false]);
+    }
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
@@ -1451,9 +1520,9 @@ describe('C: the section is for the latest visit only - a text about another vis
       return { messages: { create: () => Promise.resolve({ content: [{ text: JSON.stringify(queue.shift()) }] }) } };
     };
     const draft = (reply) => ({ reply, intended_actions: [], missing_info: null, offered_times: [] });
-    const run = (inboundMessage, replies) => generateGroundedDraft({
+    const run = (inboundMessage, replies, smsHistory = []) => generateGroundedDraft({
       client: makeClient([...replies, { supported: true, violations: [] }]),
-      context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [] },
+      context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], smsHistory },
       inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
     });
     const RE = 'For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas until dry.';
@@ -1477,6 +1546,28 @@ describe('C: the section is for the latest visit only - a text about another vis
       expect(r.factsBlock).not.toContain('keep people and pets off');
       expect(r.converged).toBe(false);
       expect(r.labelFactsSnapshot ?? null).toBeNull();
+    });
+
+    test('r12: a follow-up like "is it okay now?" inherits the label kind of the recent thread; a bare "Yes." is held', async () => {
+      const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
+      const thread = [
+        { direction: 'inbound', body: 'Is it okay now?', date: ago(0) },
+        { direction: 'outbound', body: 'Happy to help - are the dogs out there?', date: ago(1) },
+        { direction: 'inbound', body: 'Can the dogs go out after you sprayed?', date: ago(2) },
+      ];
+      const yes = draft('Yes.');
+      let r = await run('Is it okay now?', [yes, yes, yes], thread);
+      expect(r.converged).toBe(false);
+      // the same follow-up on a thread about something else is elliptical with nothing classifiable: still both kinds asked
+      r = await run('Is it okay now?', [yes, yes, yes], [{ direction: 'inbound', body: 'What time are you coming Thursday?', date: ago(1) }]);
+      expect(r.converged).toBe(false);
+      // an old (over 24 h) pet question does not carry; a non-elliptical message about something else is not a label question
+      r = await run('What time are you coming Thursday?', [draft('Sure, Thursday works.')], [{ direction: 'inbound', body: 'Can the dogs go out?', date: ago(30) }]);
+      expect(r.converged).toBe(true);
+      // the authorized sentence answers it
+      r = await run('Is it okay now?', [draft(RE)], thread);
+      expect(r.converged).toBe(true);
+      expect(r.labelFactsSnapshot.asked).toEqual(['reentry']);
     });
 
     test('a text in another language gets the none-on-file section (the sentences are English); a Spanish paraphrase is held', async () => {

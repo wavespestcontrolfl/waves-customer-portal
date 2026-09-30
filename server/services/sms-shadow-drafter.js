@@ -711,7 +711,7 @@ function hasBannedCustomerCopy(text, opts = {}) {
 function validateComplianceCopy({ reply, factsBlock, inboundMessage } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const labelFactsText = labelFactsLib.labelFactsSectionFrom(factsBlock);
-  const asked = typeof inboundMessage === 'string' ? labelFactsLib.askedLabelKinds(inboundMessage) : [];
+  const asked = inboundMessage == null ? [] : labelFactsLib.askedLabelKinds(inboundMessage);
   if (!reply || !hasBannedCustomerCopy(reply, { labelFactsText, rainTimeGuard: true, asked })) return { ok: true, violations: [] };
   const answerNote = asked.length ? ' - and when the customer asks about re-entry or rain, never answer yes / no / ok / "you can" / "not yet": copy the LABEL FACTS sentence, or say the technician will confirm' : '';
   // The LABEL FACTS wording only when the section actually carries a sentence.
@@ -1399,6 +1399,18 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
 // The LABEL FACTS source a delayed send re-verifies (sms-label-facts
 // labelFactsSendBlockReason): persisted next to open_times_snapshot, null when
 // the final reply copies no label sentence.
+// The customer's own messages the label-question check reads: the current inbound first, then the recent
+// inbound messages of the thread window the drafter shows (a follow-up like "is it ok now?" asks whatever
+// the thread was about). Inbound only, newest first, last 24 hours (an unreadable date is kept: fail closed).
+const ASKED_THREAD_WINDOW_MS = 24 * 60 * 60 * 1000;
+function recentInboundTexts(context, inboundMessage) {
+  const cutoff = Date.now() - ASKED_THREAD_WINDOW_MS;
+  const thread = (context?.smsHistory || []).slice(0, 10)
+    .filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && !(new Date(m.date) < cutoff))
+    .map((m) => m.body);
+  return [String(inboundMessage ?? ''), ...thread];
+}
+
 function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage }) {
   if (!labelFacts || !reply) return null;
   return labelFactsLib.labelFactsSnapshotFor({
@@ -2335,6 +2347,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // file too (a paraphrase in that language would slip past the English guard;
   // the guard also holds that language's timing words, sms-label-facts).
   const labelFacts = labelFactsLib.labelFactsForInbound(fetchedLabelFacts, inboundMessage);
+  const askedTexts = recentInboundTexts(context, inboundMessage);
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -2435,7 +2448,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
       }),
-      labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage }),
+      labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts }),
     };
   }
 
@@ -2455,7 +2468,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
-    const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage });
+    const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts });
     for (const check of [reserviceCheck, complianceCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
@@ -2527,7 +2540,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
     }),
     // The LABEL FACTS source, only when the final reply copies a label sentence.
-    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage }),
+    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts }),
   };
 }
 

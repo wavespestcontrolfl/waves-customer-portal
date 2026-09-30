@@ -409,12 +409,24 @@ function canonText(text) {
 // ". At the latest.", ". Unless it rains.") is a modifier, so it is no new sentence.
 const MODIFIER_FRAGMENT_RE = /^(?:or|unless|at\s+(?:the\s+)?(?:most|least|latest|earliest)|max|maybe|perhaps|roughly|approx\w*|give\s+or\s+take|sooner|earlier|though|but|however|usually|typically|sometimes|depending|weather)\b/i;
 const copyEndsCleanly = (rest) => rest === '' || (/^\s+(?![a-z])/.test(rest) && !MODIFIER_FRAGMENT_RE.test(rest.trim()));
+// A copy is authorized only as its own sentence with nothing framing it: it starts the text, follows a sentence
+// end (or a plain "Hi Jane," greeting) - never a colon or other lead-in ("This is false: ...", "Old info: ...") -
+// and the two sentences on each side carry no meta or negation vocabulary ("Ignore this.", "Just kidding.",
+// "That is outdated.", "Not anymore."). Draft, snapshot and send time all use this one matcher.
+const META_FRAME_RE = /\b(?:false|untrue|not\s+(?:true|correct|accurate|right|apply|valid)|isn'?t\s+(?:true|correct|accurate|right)|ignore|disregard|do(?:n'?t|\s+not)\s+follow|does(?:n'?t|\s+not)\s+apply|outdated|out\s+of\s+date|old\s+info|wrong|incorrect|kidding|joking|not\s+anymore|no\s+longer|actually|scratch\s+that|correction|used\s+to|mistake|never\s*mind|forget\s+(?:that|this|it)|however|but|although|except|unless)\b/i;
+const OWN_SENTENCE_START_RE = /(?:^|[.!?]|labelsentence\s*;)\s*$|(?:^|[.!?]\s*)(?:hi|hello|hey|thanks|thank\s+you)\b[^.!?:;]{0,30},\s*$/i;
+const SENTENCE_GAP_RE = /(?<=[.!?])\s+/;
+function standsAlone(before, after) {
+  if (!OWN_SENTENCE_START_RE.test(before)) return false;
+  const near = [...before.split(SENTENCE_GAP_RE).slice(-2), ...after.split(SENTENCE_GAP_RE).slice(0, 2)];
+  return !near.some((sentence) => META_FRAME_RE.test(sentence));
+}
 // [{ start, end }] over `canon` (canonText output).
 function completeCopies(canon, sentence) {
   const out = [];
   for (const m of canon.matchAll(new RegExp(escapeRegex(canonText(sentence)), 'gi'))) {
     const end = m.index + m[0].length;
-    if ((m.index === 0 || !/[\p{L}\p{N}]/u.test(canon[m.index - 1])) && copyEndsCleanly(canon.slice(end))) out.push({ start: m.index, end });
+    if ((m.index === 0 || !/[\p{L}\p{N}]/u.test(canon[m.index - 1])) && copyEndsCleanly(canon.slice(end)) && standsAlone(canon.slice(0, m.index), canon.slice(end))) out.push({ start: m.index, end });
   }
   return out;
 }
@@ -780,12 +792,30 @@ const ASKED_RAIN_RE = new RegExp([RAIN_WORD_RE.source, RAINFAST_RE.source, /\bwa
 // "should I keep the dogs in when you arrive?" asks about access, not re-entry.
 const ASKED_ACCESS_RE = /\b(?:when|before|while|as)\s+(?:you|y'?all|we|the\s+(?:tech|technician|guy|team))\s+(?:arrive|arrives|come|comes|get|gets|show|stop|are\s+here|is\s+here)\b/;
 
-/** ['reentry' | 'rain'] the inbound message asks about ([] = no label question). */
-function askedLabelKinds(inboundText) {
+// A short follow-up with no topic word ("is it ok now?", "what about now", "and outside?") asks whatever the
+// thread was about; with nothing classifiable in the thread it is treated as asking both kinds (fail closed).
+const ELLIPTICAL_RE = /^(?:(?:and|so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this)|are\s+(?:they|we)|can\s+(?:they|we|i|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
+const NOT_ELLIPTICAL_RE = new RegExp([BUSINESS_RE.source, SCHEDULE_WORD_RE.source, /\b(?:arrive|arrives|come|coming|call|text|schedule|reschedule|appointment)\b/.source].join('|'));
+function isEllipticalInbound(text) {
+  return text.split(/\s+/).length <= 8 && ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text);
+}
+
+function askedKindsOf(inboundText) {
   const text = canonText(inboundText).toLowerCase();
-  if (!text || !ASKED_QUESTION_RE.test(text)) return [];
-  if (ASKED_ACCESS_RE.test(text) && !POST_TREATMENT_SIGNAL_RE.test(text)) return [];
-  return [ASKED_REENTRY_RE.test(text) && 'reentry', ASKED_RAIN_RE.test(text) && 'rain'].filter(Boolean);
+  if (!text || !ASKED_QUESTION_RE.test(text)) return { kinds: [], elliptical: false };
+  if (ASKED_ACCESS_RE.test(text) && !POST_TREATMENT_SIGNAL_RE.test(text)) return { kinds: [], elliptical: false };
+  return { kinds: [ASKED_REENTRY_RE.test(text) && 'reentry', ASKED_RAIN_RE.test(text) && 'rain'].filter(Boolean), elliptical: isEllipticalInbound(text) };
+}
+
+/**
+ * ['reentry' | 'rain'] asked by the inbound message, or by any of the customer's recent messages when an
+ * array is given (the FIRST is the current one). [] = no label question; an elliptical current message
+ * with nothing classifiable anywhere in the thread asks both.
+ */
+function askedLabelKinds(inbound) {
+  const reads = (Array.isArray(inbound) ? inbound : [inbound]).map(askedKindsOf);
+  const kinds = ['reentry', 'rain'].filter((k) => reads.some((r) => r.kinds.includes(k)));
+  return !kinds.length && reads[0]?.elliptical ? ['reentry', 'rain'] : kinds;
 }
 
 const ANSWER_LEAD_RE = /^(?:(?:hi|hello|hey|thanks|thank\s+you|great\s+question|good\s+question)[^a-z]*\s*)?(?:yes|no|yeah|yep|yup|nope|sure|ok|okay|fine|alright|absolutely|definitely|certainly|of\s+course|correct|right|go\s+ahead|not\s+yet|not\s+really|not\s+quite)\b/;
@@ -862,7 +892,7 @@ function labelFactsSnapshotFor({ labelFacts, reply, sectionText, asked = [] }) {
 // decision's stored inbound text, else unknown (both kinds: only an answer-shaped reply is then held).
 function askedForSend(snapshot, inbound) {
   if (snapshot && Array.isArray(snapshot.asked)) return snapshot.asked;
-  return typeof inbound === 'string' ? askedLabelKinds(inbound) : ['reentry', 'rain'];
+  return typeof inbound === 'string' || Array.isArray(inbound) ? askedLabelKinds(inbound) : ['reentry', 'rain'];
 }
 
 async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, today } = {}) {
@@ -894,7 +924,7 @@ const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'frida
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
-const OLDER_VISIT_RE = /\b(?:previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|two\s+visits?\s+ago|second\s+to\s+last)\b/;
+const OLDER_VISIT_RE = /\b(?:(?:(?:the\s+)?(?:very\s+)?(?:first|initial|original|second|third|fourth|fifth|(?<![\d/-])[1-5](?:st|nd|rd|th))|last[-\s]but[-\s]one)\s+(?:\w+\s+)?(?:treatment|service|visit|application|spray|spraying|round|appointment|one)|the\s+one\s+before|(?:treatment|service|visit|application|spray|spraying|one|time)\s+before\s+(?:that|last)|previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|two\s+visits?\s+ago|second\s+to\s+last)\b/;
 
 function isoAddDays(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);
