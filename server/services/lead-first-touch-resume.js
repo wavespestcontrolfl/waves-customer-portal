@@ -725,7 +725,12 @@ async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {
   }
   const CRP = require('./call-recording-processor');
   if (typeof CRP.resumeNewsletterForCallCustomer !== 'function') return null;
-  const outcome = await CRP.resumeNewsletterForCallCustomer(payload);
+  // Hand the caller's transaction through (B13): the send must run on the
+  // SAME connection that holds the address lock and the hold-row gates, so
+  // there is one connection and one address-first order (a second connection
+  // taking the blocking address lock while this one holds hold rows is a
+  // cycle PostgreSQL cannot see).
+  const outcome = await CRP.resumeNewsletterForCallCustomer(payload, { dbh });
   // Link the resumed subscriber to the held customer (Codex #3084 r35):
   // subscribeOrResubscribe links only when the address matches
   // customers.email, and a held extraction can deliberately DIFFER from
@@ -1301,6 +1306,11 @@ async function resumeHeldFirstTouch({
             // would roll the gate back (marker restored, lease
             // unrenewed) with the DOI already out.
             await dbh.transaction(async (trx) => {
+              // Address key BEFORE the hold-row gate (B13): the correction
+              // fanout takes address -> hold rows, and the DOI send below takes
+              // the same key. First on THIS connection, with the send running
+              // on it, keeps one connection and one order.
+              if (sendEmail) await require('../utils/customer-comms-lock').lockCustomerEmail(trx, String(sendEmail).trim().toLowerCase());
               // Target-bound (r35): a correction retargeting this
               // releasing row after the pre-send re-read preserves the
               // fence, so the gate's held_email CAS is what refuses the
@@ -1705,6 +1715,11 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     if (holdIds.length) {
       try {
         await dbh.transaction(async (trx) => {
+          // Address key BEFORE any hold row is gated (B13): the correction
+          // fanout takes address -> hold rows, and the confirmation send below
+          // takes the same key. Taking it first on THIS connection (and
+          // running the send on it) keeps one connection, one order.
+          if (sentEmailLc) await require('../utils/customer-comms-lock').lockCustomerEmail(trx, sentEmailLc);
           for (const holdId of holdIds) {
             // Target-bound (r35): a correction retargeting a releasing row
             // preserves its fence, so only the held_email CAS can refuse

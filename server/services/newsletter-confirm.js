@@ -32,11 +32,6 @@ function confirmationUrl(token) {
   return `${publicPortalUrl()}/api/public/newsletter/confirm/${token}`;
 }
 
-// Suppression types that are a fact about the ADDRESS, not one mailing list
-// (mirrors GLOBAL_SUPPRESSION_TYPES in email-template-library.js and
-// newsletter-sender.js). A DOI must never reach one of these.
-const GLOBAL_SUPPRESSION_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
-
 // The customers columns that can hold a sendable address. CUSTOMER_EMAIL_COLUMNS
 // also lists billing_email, which lives on notification_prefs (migration
 // 20260927000150), NOT on customers — querying it there is a 42703 that would
@@ -65,44 +60,17 @@ class ConfirmationVetoedError extends Error {
 const OWNERSHIP_WAIT_MS = 3000;
 
 /**
- * lockEmailOwnershipForSend refuses immediately when an ownership assignment
- * is in progress. For this send that would mean a failed confirmation the
- * public form cannot retry, so wait a bounded moment instead: the non-blocking
- * try first (the common case), then blocking exclusive locks on the same keys,
- * in the same sorted order, under a short lock_timeout.
- *
- * Lock-order safety: we already hold the address key(s) exclusively. Ownership
- * writers take the address key BEFORE the shared ownership lock (the DB trigger
- * takes the shared lock at assignment time, after the writer's own
- * lockCustomerEmail), so a writer holding the shared lock is one that already
- * passed the address key, never one waiting for it. A raw writer that skipped
- * the address key and later wanted it would be the only cycle: PostgreSQL's
- * deadlock detector or the lock_timeout ends it and this send fails closed
- * (no email), so the worst case is a refused send, never a delivery.
- * The wait runs in a savepoint so a timeout cannot poison the caller's
- * transaction, and lock_timeout is restored afterwards.
+ * Ownership fence for the send: the shared helper's bounded wait
+ * (customer-comms-lock.lockEmailOwnershipForSend, waitMs) owns key
+ * construction, order and hashing. We already hold the address key(s), so the
+ * wait cannot cycle with a normal ownership writer (see the helper). A writer
+ * that outlasts the wait refuses the send; any other failure fails closed.
  */
 async function fenceOwnership(trx, emailLc, waitMs) {
-  const locks = require('../utils/customer-comms-lock');
   try {
-    await locks.lockEmailOwnershipForSend(trx, emailLc);
-    return;
+    await require('../utils/customer-comms-lock').lockEmailOwnershipForSend(trx, emailLc, { waitMs });
   } catch (err) {
-    if (!err || err.code !== 'EMAIL_OWNERSHIP_CHECK_BUSY' || !(waitMs > 0)) {
-      if (err && err.code === 'EMAIL_OWNERSHIP_CHECK_BUSY') throw new ConfirmationVetoedError('ownership_busy');
-      throw err;
-    }
-  }
-  const keys = locks.customerEmailLockKeys(emailLc).map((value) => `email-ownership:${value}`).sort();
-  try {
-    await trx.transaction(async (sp) => {
-      const previous = (await sp.raw("SELECT current_setting('lock_timeout') AS value")).rows[0].value;
-      await sp.raw("SELECT set_config('lock_timeout', ?, true)", [`${Math.ceil(waitMs)}ms`]);
-      for (const key of keys) await sp.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
-      await sp.raw("SELECT set_config('lock_timeout', ?, true)", [previous]);
-    });
-  } catch (err) {
-    if (err && err.code === '55P03') throw new ConfirmationVetoedError('ownership_busy');
+    if (err && err.code === 'EMAIL_OWNERSHIP_CHECK_BUSY') throw new ConfirmationVetoedError('ownership_busy');
     throw err;
   }
 }
@@ -154,11 +122,14 @@ async function assertConfirmationAllowed(subscriber, dbh = db, { ownershipWaitMs
     // caller's transaction; the locks above (taken outside it) survive.
     await dbh.transaction(async (sp) => {
       const { suppressionCoversEmail } = require('../utils/email-equivalence');
+      // The canonical list (email-template-library), required lazily: that
+      // module pulls in most of the mail stack and some callers mock pieces of it.
+      const globalTypes = [...require('./email-template-library').GLOBAL_SUPPRESSION_TYPES];
       const suppression = await sp('email_suppressions')
         .where(suppressionCoversEmail(emailLc))
         .where({ status: 'active' })
         .where(function globalOrUngrouped() {
-          this.whereRaw('LOWER(suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES)
+          this.whereRaw(`LOWER(suppression_type) IN (${globalTypes.map(() => '?').join(', ')})`, globalTypes)
             .orWhereNull('group_key')
             .orWhere('group_key', '');
         })

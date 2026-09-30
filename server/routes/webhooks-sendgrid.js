@@ -436,7 +436,12 @@ async function handleEvent(ev) {
 async function processWebhookEvent(ev, messageId, email, handler) {
   const eventId = ev.sg_event_id ? String(ev.sg_event_id) : null;
   if (!eventId) {
-    await handler(db);
+    // Still one transaction (no dedupe ledger row without an event id): the
+    // handlers take the address key before their row writes and record the
+    // suppression on the same connection, so an autocommitted opt-out can never
+    // land ahead of the locked suppression write and let a concurrent
+    // confirmation send in the gap.
+    await db.transaction((trx) => handler(trx));
     return true;
   }
 

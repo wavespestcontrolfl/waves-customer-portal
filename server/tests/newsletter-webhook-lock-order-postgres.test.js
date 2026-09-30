@@ -17,14 +17,20 @@ const { randomUUID } = require('crypto');
   let db;
   let locks;
   let handleNewsletterEvent;
+  let handleEvent;
   const made = [];
+  const sendIds = [];
 
   beforeAll(() => {
     db = require('../models/db');
     locks = require('../utils/customer-comms-lock');
-    ({ handleNewsletterEvent } = require('../routes/webhooks-sendgrid'));
+    ({ handleNewsletterEvent, handleEvent } = require('../routes/webhooks-sendgrid'));
   });
   afterAll(async () => {
+    if (sendIds.length) {
+      await db('newsletter_send_deliveries').whereIn('send_id', sendIds).del();
+      await db('newsletter_sends').whereIn('id', sendIds).del();
+    }
     if (made.length) {
       await db('email_suppressions').whereIn('email', made).del();
       await db('newsletter_subscribers').whereIn('email', made).del();
@@ -115,5 +121,47 @@ const { randomUUID } = require('crypto');
     const failures = settled.filter((s) => s.status === 'rejected');
     expect(failures).toHaveLength(1);
     expect(failures[0].reason.code).toBe('40P01');
+  });
+
+  // Events WITHOUT sg_event_id used to run the handler on the global db: no
+  // transaction, so the upfront address lock was skipped and the subscriber
+  // opt-out autocommitted ahead of the locked suppression write.
+  test('an event WITHOUT sg_event_id runs in one transaction: the opt-out waits for the address key and lands with the suppression', async () => {
+    const row = await subscriber();
+    const [send] = await db('newsletter_sends').insert({ subject: 'b13 lock order' }).returning('id');
+    const sendId = send.id || send;
+    sendIds.push(sendId);
+    const messageId = `b13msg${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+    await db('newsletter_send_deliveries').insert({
+      send_id: sendId, email: row.email, subscriber_id: row.id, provider_message_id: messageId, status: 'sent',
+    });
+
+    let signalKey;
+    const resendHasKey = new Promise((r) => { signalKey = r; });
+    let release;
+    const released = new Promise((r) => { release = r; });
+    const seenWhileHeld = {};
+    const resend = db.transaction(async (trx) => {
+      await locks.lockCustomerEmail(trx, row.email);
+      signalKey();
+      await released;
+      await trx('newsletter_subscribers').where({ id: row.id }).forUpdate().first('id');
+    });
+    await resendHasKey;
+    const webhook = handleEvent({
+      event: 'dropped', reason: 'Group Unsubscribe', email: row.email, sg_message_id: `${messageId}.filter0`,
+    });
+    await sleep(500); // the webhook is now blocked on the address key
+    seenWhileHeld.status = (await db('newsletter_subscribers').where({ id: row.id }).first()).status;
+    seenWhileHeld.suppression = await db('email_suppressions').where({ email: row.email, status: 'active' }).first();
+    release();
+    await expect(Promise.all([resend, webhook])).resolves.toBeDefined();
+
+    // While the confirmation send held the key, the opt-out had NOT autocommitted.
+    expect(seenWhileHeld.status).toBe('pending');
+    expect(seenWhileHeld.suppression).toBeUndefined();
+    // After it finished, both landed.
+    expect((await db('newsletter_subscribers').where({ id: row.id }).first()).status).toBe('unsubscribed');
+    expect(await db('email_suppressions').where({ email: row.email, status: 'active' }).first()).toBeTruthy();
   });
 });

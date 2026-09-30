@@ -4889,7 +4889,11 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
   }
 }
 
-async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }) {
+// `dbh`: a caller already inside a transaction that holds the address lock (and
+// possibly hold rows) passes it so the confirmation send runs on THAT
+// connection (a savepoint here) instead of opening a second one that would
+// block on the address lock the caller holds (B13).
+async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }, { dbh = null } = {}) {
   const emailLc = String(email || '').trim().toLowerCase();
   if (!customerId || !emailLc) return null;
 
@@ -4937,7 +4941,7 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     // durable.
     let sendRefused = false;
     try {
-      await db.transaction(async (trx) => {
+      await (dbh && dbh.isTransaction ? dbh : db).transaction(async (trx) => {
         // Address key BEFORE the row lock (suppression / ownership writers
         // take the key first, then rows); sendConfirmationEmail re-enters it
         // and runs its vetoes on THIS connection (B13).
