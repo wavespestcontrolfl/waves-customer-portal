@@ -474,6 +474,34 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect(trx._updates.filter(update => update.table === 'customer_turf_profiles')).toEqual([]);
   });
 
+  test.each([
+    ['unreviewed keeps the lawn it already describes', false, []],
+    ['reviewed still replaces it', true, [expect.objectContaining({ upsert: true, patch: { lawn_sqft: 3900, updated_at: expect.any(Date) } })]],
+  ])('a same-address primary flip: %s', async (scenario, reviewed, expected) => {
+    const previousGate = process.env.GATE_PROPERTY_SERVICE_AREAS;
+    delete process.env.GATE_PROPERTY_SERVICE_AREAS;
+    try {
+      const old = { ...OLD_HOME, active: true, customer_id: 'cust-1' };
+      const neu = { ...NEW_HOME, active: true, customer_id: 'cust-1', property_sqft: 3900 };
+      if (reviewed) {
+        neu.service_area_measurements = {
+          addressKey: require('../services/customer-properties').addressKey(neu),
+          areas: { lawn: { sqft: 3900, source: 'field', reviewedAt: '2026-09-27T12:00:00Z', reviewedBy: 'tech-1' } },
+        };
+      }
+      const customer = { id: 'cust-1', address_line1: neu.address_line1, address_line2: neu.address_line2 || null, city: neu.city, state: neu.state || 'FL', zip: neu.zip };
+      const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [customer], scheduled_services: [] } });
+      const result = await applyPropertyRoleProposals(trx, {
+        customerId: 'cust-1',
+        proposals: [{ kind: 'primary_flip', new_primary_property_id: neu.id, old_primary_property_id: old.id }],
+      });
+      expect(result.applied).toBe(1);
+      expect(trx._updates.filter(update => update.table === 'customer_turf_profiles')).toEqual(expected);
+    } finally {
+      if (previousGate !== undefined) process.env.GATE_PROPERTY_SERVICE_AREAS = previousGate;
+    }
+  });
+
   test('canonical premise match repairs equivalent-spelling stamps: coords + missing locality (codex r6→r26)', async () => {
     const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
     const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };

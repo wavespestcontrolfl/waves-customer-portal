@@ -1095,6 +1095,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       };
       const loc = resolveLocation(newPrimary.city || '');
       if (loc?.id) mirror.nearest_location_id = loc.id;
+      const formerHomeKey = addressKey(await trx('customers').where({ id: customerId }).first() || {});
       await trx('customers').where({ id: customerId }).update(mirror);
       const { reviewedAreas, hasAreaMeasurementsColumn } = require('./property-service-areas');
       const { withTurfProfileFence } = require('./customer-pricing-ai');
@@ -1102,10 +1103,12 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       // lawn, so there is nothing to mirror and the turf row stays as is.
       if (await hasAreaMeasurementsColumn(trx)) await withTurfProfileFence(trx, customerId, async fencedTrx => {
         // A promoted property's own reviewed lawn becomes the primary turf
-        // mirror. An unknown lawn must clear the former home's measurement.
+        // mirror. An unknown lawn must clear the former home's measurement,
+        // but a same-address flip keeps the lawn it already describes.
         // Persisted measurements survive the UI kill switch. Keep this
         // invariant active while dark, under the canonical customer fence.
         const lawnSqft = reviewedAreas(newPrimary).lawn?.sqft ?? null;
+        if (lawnSqft === null && formerHomeKey && formerHomeKey === addressKey(newPrimary)) return;
         await fencedTrx('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: lawnSqft })
           .onConflict('customer_id').merge({ lawn_sqft: lawnSqft, updated_at: fencedTrx.fn.now() });
       });

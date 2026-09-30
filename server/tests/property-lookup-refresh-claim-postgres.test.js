@@ -30,15 +30,9 @@ postgres('claimLiveRefresh on PostgreSQL', () => {
     admin = knex({ client: 'pg', connection });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 8 } });
-    await mockPg.schema.createTable('property_lookups', (t) => {
-      t.increments('id');
-      t.string('address_hash', 64).unique().notNullable();
-      t.text('normalized_address').notNullable();
-      t.jsonb('property_record');
-      t.integer('attempt_count');
-      t.text('last_attempt_status');
-      t.timestamp('last_attempt_at', { useTz: true });
-    });
+    // The real schema, from the migrations that own it.
+    await require('../models/migrations/20260611000011_property_lookups').up(mockPg);
+    await require('../models/migrations/20260812000001_property_lookup_attempt_status').up(mockPg);
   });
   afterAll(async () => {
     await mockPg?.destroy();
@@ -52,8 +46,9 @@ postgres('claimLiveRefresh on PostgreSQL', () => {
     expect(claims.filter(Boolean)).toHaveLength(1);
     const rows = await mockPg('property_lookups');
     expect(rows).toHaveLength(1);
-    // A claim row is a stub: it never reads as cached property data.
-    expect(rows[0]).toMatchObject({ address_hash: addressKey(ADDRESS).hash, property_record: null });
+    // A claim row is a stub: it never reads as cached property data, and the
+    // attempt counter only moves on the lookup's own stamps.
+    expect(rows[0]).toMatchObject({ address_hash: addressKey(ADDRESS).hash, property_record: null, attempt_count: 0 });
   });
 
   test('a recent attempt refuses the claim without touching the lookup stamps; an old one grants it', async () => {
