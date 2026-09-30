@@ -166,7 +166,7 @@ const TEMPLATES = Object.freeze([
     headline: 'Away Mode on pest, hold on lawn',
     body:
       'Away Mode keeps the outside of the house treated while you are gone — nobody needs to be home, reports land in your inbox. ' +
-      'Lawn and mosquito go on hold: no visits, no charges, and both switch back the day you land. Your prices stay locked.',
+      'Lawn and mosquito pause: visits while you are gone are skipped, there are no charges for them, and your regular schedule picks up after you are back. Your prices stay locked.',
     slots: {},
     action: { type: 'away_pairing', holdMaxDays: 180 },
   },
@@ -182,7 +182,7 @@ const TEMPLATES = Object.freeze([
     id: 'away_hold',
     reason: 'away',
     headline: 'On hold until you are back',
-    body: 'No visits, no charges, we restart on the date you pick (up to six months). We text you seven days before the restart. Your other prices stay locked.',
+    body: 'Visits while you are away are skipped and there are no charges for them (up to six months). Your regular schedule picks up after you are back, and we text you a week before your first visit back. Your other prices stay locked.',
     slots: {},
     action: { type: 'hold', holdMaxDays: 180 },
   },

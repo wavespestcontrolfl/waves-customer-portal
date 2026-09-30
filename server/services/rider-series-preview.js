@@ -859,6 +859,6 @@ module.exports = {
   resolveSeriesPropertyScope,
   seriesPropertyVerdict,
   _internals: {
-    dateOnly, addDaysStr, classifyRiderRow, diffPlan, attributeReasonMap, computeRiderHorizon, nextRiderDate,
+    dateOnly, addDaysStr, classifyRiderRow, diffPlan, attributeReasonMap, computeRiderHorizon, nextRiderDate, rowPropertyScope,
   },
 };

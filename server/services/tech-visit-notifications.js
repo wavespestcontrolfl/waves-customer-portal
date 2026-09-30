@@ -300,7 +300,9 @@ function cardStands({ kind, technicianId, snapshot, previousStatus }, row) {
     if (snapshotSuperseded(snapshot, row)) return false;
   }
   if (kind === 'unassigned' && holder === recipient) return false;
-  if (kind === 'cancelled' && String(row.status) !== 'cancelled') return false;
+  // A plan pause skips the visits inside it (cancellation-resolution/
+  // holds.js applyHoldSkips): the stop leaves the route the same way.
+  if (kind === 'cancelled' && !['cancelled', 'skipped'].includes(String(row.status))) return false;
   // A moved-off card after the visit ended (codex r10 P2 + pre-push audit):
   // a delayed A→B card across a deploy overlap must not say "Now with B"
   // about a visit B has since completed or cancelled — but A still has to
