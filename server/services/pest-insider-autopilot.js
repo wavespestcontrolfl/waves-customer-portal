@@ -60,6 +60,9 @@ const PROOF_RETRY_LAST_DAY = 10;
 // catch-up can tell "edited since the last attempt" from "same blocked
 // draft as yesterday" without guessing from timestamps.
 const PROOF_ATTEMPT_ACTION = 'newsletter.pest_insider_proof_attempted';
+// sendNewsletterProof outcomes that come from the locked event lineup (live
+// official-page recheck, eligibility) rather than the validator or audience.
+const LIVE_RECHECK_REASONS = new Set(['live_reverify_failed', 'event_selection_invalid']);
 
 function proofGateOn() {
   return require('../config/feature-gates').pestInsiderProofLive();
@@ -253,6 +256,18 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
     if (lastAttempt.reason === 'validation_failed' && await draftFailsValidation(draft)) {
       logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: draft still fails validation and has not been edited since the last attempt`);
       return { skipped: true, reason: 'validation_failed', sendId: draft.id };
+    }
+    // A blocked live event recheck / event selection is deterministic for an
+    // unedited draft too: the notice already told the owner to swap the
+    // event, and only an edit (a new lineup) changes the answer. Without this
+    // a refusal after the day-10 cutoff (proof_refused_at set, validator
+    // passing) would be re-proofed — and re-notified — on every tick for the
+    // rest of the month (codex #5414 round 3 P2). The edit check above is the
+    // whole test: a corrected draft has updated_at after the last attempt and
+    // is re-proofed once.
+    if (LIVE_RECHECK_REASONS.has(lastAttempt.reason)) {
+      logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: ${lastAttempt.reason} and the draft has not been edited since the last attempt`);
+      return { skipped: true, reason: lastAttempt.reason, sendId: draft.id };
     }
     if (lastAttempt.reason === 'zero_recipients' && await audienceStillEmpty(draft)) {
       logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: segment still matches 0 subscribers since the last attempt`);

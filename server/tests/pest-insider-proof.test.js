@@ -377,6 +377,51 @@ describe('pest-insider proof catch-up', () => {
       expect(mockSendProof).not.toHaveBeenCalled();
     });
 
+    // codex #5414 round 3 P2: a refusal from the live event recheck leaves the
+    // validator passing, so the late retry fires — once; the next tick must not
+    // re-proof (and re-notify) an unedited draft every day.
+    const LIVE_ATTEMPT_AT = new Date('2026-06-11T16:00:00Z');
+    const attemptWith = (reason, notified = true) => ({ created_at: LIVE_ATTEMPT_AT, metadata: { sent: false, reason, notified } });
+
+    test.each(['live_reverify_failed', 'event_selection_invalid'])('an unchanged draft whose last attempt was blocked by %s is not retried (no daily notice)', async (reason) => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: REFUSED, lastAttempt: attemptWith(reason) });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result).toEqual({ skipped: true, reason, sendId: 'send-pi-1' });
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('…the same guard holds before the cutoff', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: attemptWith('live_reverify_failed') });
+
+      const result = await retryPestInsiderProof({ now: new Date('2026-06-05T18:15:00Z') });
+
+      expect(result.skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test.each(['live_reverify_failed', 'event_selection_invalid'])('a draft corrected (edited) after a %s block is re-proofed once', async (reason) => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: { ...REFUSED, updated_at: new Date('2026-06-11T17:00:00Z') }, lastAttempt: attemptWith(reason) });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+      expect(result.skipped).toBe(false);
+    });
+
+    test('a block whose notice was never delivered does not suppress the retry', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: REFUSED, lastAttempt: attemptWith('live_reverify_failed', false) });
+
+      await retryPestInsiderProof({ now: LATE });
+
+      expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    });
+
     test('…and a draft with no refused approval stays cut off, however clean it is', async () => {
       process.env.GATE_PEST_INSIDER_PROOF = 'true';
       wireDb({ draft: { id: 'send-pi-1', proof_sent_at: null, proof_approved_at: null, proof_refused_at: null, proof_approval_email_id: null } });
