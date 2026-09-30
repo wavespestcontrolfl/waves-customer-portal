@@ -1343,7 +1343,11 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // settlement claim ("you're paid up") is fabricated confidence about a
   // fact the draft literally could not check, structurally as dangerous as
   // stating a wrong balance.
-  const billingUnavailable = !!context?.billing?.unavailable;
+  // Codex round-6 pre-push audit P1 (PR #5331): a MISSING billing object ({}
+  // context, no billing key, an unknown customer) is exactly as unknowable as
+  // billing.unavailable — never a successfully loaded account with zero
+  // obligations. Settlement claims require billing present and available.
+  const billingUnavailable = !context?.billing || typeof context.billing !== 'object' || !!context.billing.unavailable;
   // Independent-review P1 (round 6, PR #5331): the customer's own inbound
   // wording, threaded through by every caller that has it (draft time:
   // generateGroundedDraft; send time: outgoingAmountsStale, from the

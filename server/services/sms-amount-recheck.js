@@ -63,7 +63,23 @@ function zelleBodyContacts(body) {
 // re-check a body only when it named a phone/email (zelleBodyContacts(...).length),
 // so "Yes, you can use Zelle" (no contact) sailed through unchecked even
 // after ZELLE_RECIPIENT was disabled or the invoice became ineligible.
-const ZELLE_NEGATION_RE = /\b(?:don't|do not|doesn't|does not|didn't|did not|isn't|is not|aren't|are not|can't|cannot|can not|won't|will not|couldn't|could not|wouldn't|would not|no longer|not able|unable|unavailable|not currently|not right now|stopped (?:taking|accepting))\b/i;
+// Codex round-6 pre-push audit P1 (PR #5331): negation is scoped to the Zelle
+// OFFER itself — a negator DIRECTLY governing Zelle ("we don't take/accept
+// Zelle", "can't use Zelle", "no longer accept payments by Zelle") or Zelle as
+// the subject of a negated/unavailable predicate ("Zelle isn't available").
+// The old rule suppressed every Zelle check when ANY negation appeared
+// anywhere in the clause, so "You don't need a card to use Zelle to
+// old@example.com." (an affirmative instruction) skipped the recipient and
+// invoice-eligibility rechecks at every send seam. classifyZelleClause also
+// never lets negation suppress a clause carrying a transfer contact.
+const ZELLE_NEGATOR = "(?:don'?t|do not|doesn'?t|does not|didn'?t|did not|can'?t|cannot|can not|won'?t|will not|couldn'?t|could not|wouldn'?t|would not|no longer|not currently|not able to|not able|unable to|unable|stopped)";
+const ZELLE_NEGATION_RE = new RegExp(
+  `\\b${ZELLE_NEGATOR}\\s+(?:(?:be\\s+able\\s+to|able\\s+to|currently|right\\s+now|really|anymore)\\s+)*`
+  + '(?:(?:take|taking|accept|accepting|offer|offering|support|supporting|use|using|do|have|allow|process|processing)\\s+)?'
+  + '(?:(?:any|payments?|transfers?|us|our|the|a)\\s+)*(?:(?:via|by|through|with|using)\\s+)?zelle\\b'
+  + "|\\bzelle\\b\\s+(?:(?:payments?|transfers?)\\s+)?(?:isn'?t|is\\s+not|aren'?t|are\\s+not|is\\s+unavailable|is\\s+no\\s+longer|not\\s+available|unavailable|not\\s+currently|no\\s+longer|not\\s+right\\s+now|not\\s+accepted|not\\s+supported|won'?t\\s+work|doesn'?t\\s+work)\\b",
+  'i',
+);
 // Same clause-boundary split as the drafter's own CLAUSE_SPLIT_RE (not
 // exported — kept as a parallel literal since both only ever need to agree
 // on how a reply is split into clauses, never on a shared regex object). The
@@ -113,7 +129,11 @@ const ZELLE_INSTRUCTION_MARKER_RE = /\b(?:use|send|pay|can|please)\b/i;
 // null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
 function classifyZelleClause(clause) {
   const text = String(clause || '');
-  if (!ZELLE_WORD_RE.test(text) || ZELLE_NEGATION_RE.test(text)) return null;
+  if (!ZELLE_WORD_RE.test(text)) return null;
+  // A clause carrying ANY transfer contact is a live instruction — always
+  // checked, negation or not (Codex round-6 pre-push audit P1).
+  if (zelleBodyContacts(text).length) return 'offer';
+  if (ZELLE_NEGATION_RE.test(text)) return null;
   if (ZELLE_OFFER_RE.test(text)) return 'offer';
   // A clause naming a specific contact (email/phone) is ALWAYS live payment
   // instructions, whatever verb it does or doesn't carry (finding 2):
@@ -254,7 +274,11 @@ async function amountFreeStatusClaimStale({
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
-    const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
+    // Codex round-6 pre-push audit P1 (PR #5331): no customer row (or no
+    // loadable context) is NOT an empty account — never substitute {} and let
+    // a settlement claim read the emptiness as "nothing owed". Fail closed.
+    const ctx = customerRow ? await require('./context-aggregator').getContextForCustomer(customerRow) : null;
+    if (!ctx) return { stale: true, reason: 'amount_recheck_no_customer' };
     const stale = drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts, inboundMessage });
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {
@@ -344,7 +368,10 @@ async function outgoingAmountsStale({
   if (trustOwedAmounts && !strict) return { stale: false };
   try {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
-    const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
+    // Same sweep (round-6 pre-push audit P1): a missing customer/context is a
+    // failed read, not an empty account — fail closed instead of {}.
+    const ctx = customerRow ? await require('./context-aggregator').getContextForCustomer(customerRow) : null;
+    if (!ctx) return { stale: true, reason: 'amount_recheck_no_customer' };
     // With real answers on, the drafter's clause-aware guard is the whole
     // rule (Codex #5194 r1 P1; r5: its checks are a superset of the pooled
     // one below): each amount binds to the meaning of its own clause, and

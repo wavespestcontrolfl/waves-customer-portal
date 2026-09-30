@@ -406,6 +406,7 @@ describe('Codex round 4 P1 (finding 1): a Zelle RECEIPT clause never runs the re
 
   test('outgoingAmountsStale: a receipt-only body never runs the invoice-eligibility recheck, and reaches the amount binder instead', async () => {
     realAnswersGateOn.mockReturnValue(true);
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
     await expect(outgoingAmountsStale({
       customerId: 'c1', body: 'We received your $120 Zelle payment from Sep 12.', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }),
     })).resolves.toEqual({ stale: false }); // replyQuotesUngroundedAmount is mocked to return false
@@ -623,5 +624,64 @@ describe('P1 (round 6, PR #5331): the customer\'s inbound wording threads throug
       expect.any(Object),
       { byMeaning: true, trustOwedAmounts: false, inboundMessage: 'Did I pay in full?' },
     );
+  });
+});
+
+describe('Codex round-6 pre-push audit P1: negation is scoped to the Zelle offer itself', () => {
+  const saved = process.env.ZELLE_RECIPIENT;
+  afterEach(() => { if (saved === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = saved; });
+
+  test('"You don\'t need a card to use Zelle to old@example.com." is still an offer and is stale when Zelle is disabled', () => {
+    delete process.env.ZELLE_RECIPIENT;
+    const body = "You don't need a card to use Zelle to old@example.com.";
+    expect(classifyZelleClause(body)).toBe('offer');
+    expect(hasAffirmativeZelleMention(body)).toBe(true);
+    expect(outgoingZelleStale(body)).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+  });
+
+  test('...and stale when the contact is not the CURRENT recipient; fine when it is', () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    expect(outgoingZelleStale("You don't need a card to use Zelle to old@example.com.")).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+    expect(outgoingZelleStale("You don't need a card to use Zelle to pay@example.com.")).toEqual({ stale: false });
+  });
+
+  test('a contact makes even a negator-bearing clause an offer ("we don\'t take Zelle at old@example.com")', () => {
+    expect(classifyZelleClause("Sorry, we don't take Zelle at old@example.com")).toBe('offer');
+  });
+
+  test('a contact-free affirmative clause with an unrelated negator is still an offer', () => {
+    expect(classifyZelleClause("You don't need a card to use Zelle.")).toBe('offer');
+    expect(classifyZelleClause("Don't worry, you can use Zelle.")).toBe('offer');
+  });
+
+  test('genuinely negated Zelle offers are NOT offers', () => {
+    for (const c of [
+      "We don't accept Zelle.", "Sorry, we don't take Zelle anymore.", "Zelle isn't available right now.",
+      "We can't use Zelle at the moment.", 'We no longer accept payments by Zelle.', "We've stopped taking Zelle.",
+      'Zelle is not currently supported.', "we don't accept payments via Zelle",
+    ]) {
+      expect(classifyZelleClause(c)).toBeNull();
+      expect(hasAffirmativeZelleMention(c)).toBe(false);
+    }
+  });
+});
+
+describe('Codex round-6 pre-push audit P1: a missing customer row / context is not an empty account', () => {
+  test('amount-free settlement claim with NO customer row ⇒ stale (fail closed), drafter never asked', async () => {
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "You're paid up!", strict: true, dbh: dbWithCustomer(null) }))
+      .resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+    expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
+  });
+
+  test('a customer row whose context comes back empty ⇒ stale too', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(null);
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "You're paid up!", strict: true, dbh: dbWithCustomer({ id: 'c1' }) }))
+      .resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+  });
+
+  test('outgoingAmountsStale (strict, amounts) with no customer row ⇒ stale', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $95.', dbh: dbWithCustomer(null) }))
+      .resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
   });
 });

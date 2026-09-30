@@ -29,3 +29,13 @@ test('an open invoice with nothing due is not debt; unavailable billing still fa
   expect(check("You're paid up.", monthly({ openInvoice: { amountDue: 0 } }))).toBe(false);
   expect(check("You're paid up.", monthly({ unavailable: true }))).toBe(true);
 });
+
+test('missing billing context is unknowable, never an empty account: {}, no billing key, null all reject a settlement claim', () => {
+  expect(check("You're paid up.", {})).toBe(true);
+  expect(check('Your account is current.', {})).toBe(true);
+  expect(check("You're paid up.", { customer: { billingLane: null } })).toBe(true);
+  expect(check("You're paid up.", null)).toBe(true);
+  expect(check("You're paid up.", { billing: null })).toBe(true);
+  // a successfully loaded billing object with nothing owed still passes
+  expect(check("You're paid up.", { billing: { outstandingBalance: 0, recentPayments: [] } })).toBe(false);
+});
