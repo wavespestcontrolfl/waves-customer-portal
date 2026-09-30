@@ -42,7 +42,7 @@ const sib = (id, over = {}) => ({
 
 let reasons;
 let fullRows;
-const defaultFullRow = (id) => ({ id, invoice_number: `INV-${id}`, customer_id: 'cust-1', status: 'overdue', payer_id: null, payer_statement_id: null, scheduled_send_error: null });
+const defaultFullRow = (id) => ({ id, invoice_number: `INV-${id}`, customer_id: 'cust-1', status: 'overdue', total: '50.00', credit_applied: 0, payer_id: null, payer_statement_id: null, scheduled_send_error: null });
 const serveFullRow = (table) => ({
   where: (cond) => ({
     first: async () => {
@@ -309,6 +309,30 @@ describe('readOnly siblings arrive in the REAL openBalanceInvoices column shape'
     fullRows.set('s1', { ...openShaped('s1'), customer_id: 'cust-1', payer_id: null, payer_statement_id: null, scheduled_send_error: null, ...over });
     const out = await PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }));
     expect(out.map((i) => i.id)).toEqual(['s2']);
+  });
+
+  test('a clear readOnly sibling comes back as its REFRESHED row: an amount that moved since the candidate read is the fresh one', async () => {
+    mockOpenBalance.mockResolvedValue([openShaped('s1', { total: '100.00' })]);
+    fullRows.set('s1', { ...openShaped('s1', { total: '60.00' }), customer_id: 'cust-1', payer_id: null, payer_statement_id: null, scheduled_send_error: null });
+    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }));
+    expect(out.map((i) => [i.id, i.total])).toEqual([['s1', '60.00']]);
+    expect(PayCombined.amountDueCents(out[0])).toBe(6000);
+  });
+
+  test('a readOnly sibling that became fully covered since the read is excluded (nothing due)', async () => {
+    mockOpenBalance.mockResolvedValue([openShaped('s1', { total: '100.00' }), openShaped('s2')]);
+    fullRows.set('s1', { ...openShaped('s1', { total: '100.00', credit_applied: 100 }), customer_id: 'cust-1', payer_id: null, payer_statement_id: null, scheduled_send_error: null });
+    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }));
+    expect(out.map((i) => i.id)).toEqual(['s2']);
+  });
+
+  test('NOT readOnly: the sibling rows come back exactly as the candidate read returned them (pay page unchanged)', async () => {
+    const rows = [openShaped('s1', { total: '100.00' })];
+    mockOpenBalance.mockResolvedValue(rows);
+    fullRows.set('s1', { ...openShaped('s1', { total: '60.00' }), customer_id: 'cust-1' });
+    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts());
+    expect(out[0]).toBe(rows[0]);
+    expect(out[0].total).toBe('100.00');
   });
 
   test('a sibling row that vanished between the open read and the check is excluded', async () => {

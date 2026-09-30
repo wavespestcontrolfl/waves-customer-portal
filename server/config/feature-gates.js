@@ -3970,7 +3970,7 @@ function logGateStatus() {
     console.log(allow.valid.length
       ? `  ↳ dunning customer-schedule allowlist: ${allow.valid.length} customer(s)`
       : '  ↳ dunning customer-schedule allowlist configured but has no valid ids → nobody');
-    if (allow.invalid.length) console.log(`  ↳ dunning customer-schedule allowlist ignored malformed id(s): ${allow.invalid.join(', ')}`);
+    if (allow.invalidCount) console.log(`  ↳ dunning customer-schedule allowlist ignored ${allow.invalidCount} malformed entr${allow.invalidCount === 1 ? 'y' : 'ies'}`);
   }
 }
 
@@ -4013,19 +4013,21 @@ function dunningCustomerScheduleLive() {
 //   configured, >= 1 valid uuid    -> Set       (only those customers)
 //   configured, NO valid uuid      -> empty Set (nobody — a typo'd canary must
 //                                    fail closed, never widen to everyone)
-// A malformed entry (not a uuid) is dropped, and reported by
-// dunningCustomerScheduleAllowlistStatus() / logGateStatus.
+// A malformed entry (not a uuid) is dropped and only COUNTED in
+// dunningCustomerScheduleAllowlistStatus() / logGateStatus — an entry is never
+// logged (it may be a mistyped id or something that should not be in a log).
 const ALLOWLIST_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function dunningCustomerScheduleAllowlistStatus() {
   const raw = String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '');
-  if (raw.trim() === '') return { configured: false, valid: [], invalid: [] };
+  if (raw.trim() === '') return { configured: false, valid: [], invalidCount: 0 };
   const valid = [];
-  const invalid = [];
+  let invalidCount = 0;
   for (const id of raw.split(',').map((x) => x.trim()).filter(Boolean)) {
-    if (ALLOWLIST_UUID.test(id)) { if (!valid.includes(id.toLowerCase())) valid.push(id.toLowerCase()); } else if (!invalid.includes(id)) invalid.push(id);
+    if (!ALLOWLIST_UUID.test(id)) invalidCount += 1;
+    else if (!valid.includes(id.toLowerCase())) valid.push(id.toLowerCase());
   }
-  return { configured: true, valid, invalid };
+  return { configured: true, valid, invalidCount };
 }
 
 function dunningCustomerScheduleAllowlist() {

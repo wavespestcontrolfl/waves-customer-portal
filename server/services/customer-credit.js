@@ -246,78 +246,7 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
   return row?.auto_apply_account_credit === true;
 }
 
-// Sequence statuses on which the customer-dunning draw may consume credit:
-// exactly the set applyCreditBeforeResolve selects candidates from.
-const DUNNING_DRAW_SEQUENCE_STATUSES = Object.freeze(['active', 'none']);
-
-// dunningDraw, step 1 (right after the invoice lock, BEFORE the customer row
-// lock): refuse while a submitted-but-unresolved saved-card attempt, an orphan
-// charge or a received deposit awaiting settlement means Stripe may already
-// have taken (or be taking) this invoice's money.
-//  - The deposit check runs with its ledger lock ENABLED (default), so the
-//    draw waits for an in-flight markDepositReceived (which holds only that
-//    advisory lock in its own transaction, then commits its receipt) and sees
-//    the received row; a check without the lock could read "nothing pending"
-//    a moment before that receipt commits.
-//  - Lock order is invoice row -> estimate-deposit advisory lock -> customer
-//    row: the order returnAppliedCreditOnRefund / restoreDepositCredit /
-//    reconcileReceivedDepositToInvoice use. That is why this runs BEFORE the
-//    customer FOR UPDATE rather than next to the other pre-apply guards.
-//    markDepositReceived takes the advisory lock with no invoice or customer
-//    lock held, so it cannot form a cycle with this path.
-//  - A recognised pending state returns a skip SENTINEL, never a throw, so the
-//    fence's own promotion of a stale claim to 'ambiguous' commits with this
-//    transaction (apply-credit-claim-fence-promotion-postgres.test.js). Any
-//    other error proves nothing and propagates: the trx rolls back and nothing
-//    is applied.
-async function dunningDrawCollectionFence(t, invoice) {
-  try {
-    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(t, invoice);
-    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, t);
-  } catch (fenceErr) {
-    if (require('./invoice-helpers').isCollectionPendingFenceError(fenceErr)) {
-      return { applied: 0, skipped: 'collection_pending', pendingCode: fenceErr.code || null };
-    }
-    throw fenceErr;
-  }
-  return null;
-}
-
-// dunningDraw, step 2 (after the customer opt-in lock and the sequence lock):
-// re-decide, from the LOCKED invoice row and a LIVE payer re-resolve on this
-// connection, that the invoice is still the homeowner's own debt. The
-// resolver's earlier payer read is a stale hint: a payer assigned since then
-// (on the visit, or as the customer's default) leaves invoices.payer_id null,
-// so the visit row is locked (customer -> service, the order the requireSelfPay
-// path uses) and the payer re-resolved under those locks. Fail closed: a payer
-// hit, a withdrawal stamp or a lookup failure consumes nothing.
-async function dunningDrawOwnershipRefusal(t, invoice) {
-  const { invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
-  if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
-    return { applied: 0, skipped: 'payer_billed' };
-  }
-  try {
-    const serviceId = invoice.scheduled_service_id || null;
-    if (serviceId) {
-      const svc = await t('scheduled_services').where({ id: serviceId }).forUpdate().first('id', 'customer_id');
-      if (!svc) return { applied: 0, skipped: 'service_missing' };
-      if (String(svc.customer_id) !== String(invoice.customer_id)) return { applied: 0, skipped: 'customer_mismatch' };
-    }
-    const resolved = await require('./payer').resolveForInvoice({
-      database: t,
-      customerId: String(invoice.customer_id),
-      ...(serviceId ? { scheduledServiceId: String(serviceId) } : {}),
-      throwOnError: true,
-    });
-    if (resolved?.payerId) return { applied: 0, skipped: 'payer_billed' };
-  } catch (payerErr) {
-    logger.warn(`[customer-credit] dunning draw live payer re-check failed for invoice ${invoice.id} — credit not applied: ${payerErr.message}`);
-    return { applied: 0, skipped: 'payer_check_failed' };
-  }
-  return null;
-}
-
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false, customerRequested = false, dunningDraw = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -332,17 +261,6 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
-    // dunningDraw (ONLY customer-dunning's applyCreditBeforeResolve passes it):
-    // the caller's pre-read merely chose this invoice as a CANDIDATE; every
-    // eligibility decision is re-made here, under this transaction's locks.
-    // First the collection fence, then (below, after the customer opt-in lock)
-    // the dunning sequence and the live payer — see dunningDrawCollectionFence
-    // and dunningDrawOwnershipRefusal. Each refusal is a returned skip
-    // SENTINEL, never a throw.
-    if (dunningDraw) {
-      const pending = await dunningDrawCollectionFence(t, invoice);
-      if (pending) return pending;
-    }
     // The customer's opt-in gates every AUTOMATIC apply (owner ruling
     // 2026-08-28). `customerRequested` marks the one non-automatic caller
     // — estimate acceptance, where the customer just accepted a price
@@ -359,23 +277,14 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     // mail) must not have account credit consumed — or the invoice flipped
     // prepaid — under lock, exactly like chargeInvoiceWithSavedCard's
     // refuseWhenDunningStopped. Opt-in; fail-closed on a hit.
-    // dunningDraw extends this same lock: only an ACTIVE sequence, or none
-    // (a quiet member the resolver still names), may have credit drawn;
-    // stopped / paused / autopay_hold / completed refuse.
-    if (refuseWhenDunningStopped || dunningDraw) {
+    if (refuseWhenDunningStopped) {
       const seq = await t('invoice_followup_sequences')
         .where({ invoice_id: invoiceId })
         .forUpdate()
         .first('status');
-      const seqStatus = seq ? String(seq.status || '').toLowerCase() : 'none';
-      if (seqStatus === 'stopped') return { applied: 0, skipped: 'dunning_stopped' };
-      if (dunningDraw && !DUNNING_DRAW_SEQUENCE_STATUSES.includes(seqStatus)) {
-        return { applied: 0, skipped: 'dunning_not_active', sequenceStatus: seqStatus };
+      if (seq && String(seq.status || '').toLowerCase() === 'stopped') {
+        return { applied: 0, skipped: 'dunning_stopped' };
       }
-    }
-    if (dunningDraw) {
-      const notMine = await dunningDrawOwnershipRefusal(t, invoice);
-      if (notMine) return notMine;
     }
     // Live payer SERIALIZED with the credit apply (Codex #3153 r21 P1):
     // payer assignment updates scheduled_services while a reused invoice
@@ -696,11 +605,11 @@ async function runPostFullCoverageSideEffects(invoiceId) {
  * seams and after the completion-time apply. Returns the applyAccountCreditToInvoice
  * result (with `applied` / `fullyCovered`), or null when gated off / on error.
  */
-async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system', trx = null, deferFullCoverageSideEffects = false, dunningDraw = false } = {}) {
+async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system', trx = null, deferFullCoverageSideEffects = false } = {}) {
   try {
      
     if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return null;
-    const result = await applyAccountCreditToInvoice({ invoiceId, createdBy, ...(dunningDraw ? { dunningDraw: true } : {}) }, trx);
+    const result = await applyAccountCreditToInvoice({ invoiceId, createdBy }, trx);
     // When a seam-time apply FULLY covers the invoice (now prepaid / paid_at), run
     // the same post-payment side effects the manual apply-credit + record-payment
     // paths run — otherwise a credit-covered invoice keeps dunning followups armed

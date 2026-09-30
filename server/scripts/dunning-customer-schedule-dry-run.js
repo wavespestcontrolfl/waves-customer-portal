@@ -16,8 +16,8 @@
 //   - the customers that would be HELD (paused / autopay-held members,
 //     payer or credit conditions, an incomplete read).
 // It applies no account credit, mints no short link, reserves nothing and
-// sends nothing (resolveDunnableSet is a pure read; applyCreditBeforeResolve
-// and the mint are deliberately never called here).
+// sends nothing (resolveDunnableSet is a pure read and the engine never applies credit;
+// a customer holding unused credit is reported as HELD for the office).
 //
 // Prints invoice / sequence / customer ids only — never a customer name.
 //

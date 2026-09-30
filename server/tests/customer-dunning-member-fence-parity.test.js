@@ -92,7 +92,7 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
   });
 
   // Behavioural half: every 'predicate:<reason>' row above is actually produced.
-  const base = () => ({ id: 'i1', invoice_number: 'INV-1', customer_id: 'c1', status: 'overdue', total: '10.00', payer_id: null, payer_statement_id: null, scheduled_send_error: null, scheduled_service_id: null });
+  const base = () => ({ id: 'i1', invoice_number: 'INV-1', customer_id: 'c1', status: 'overdue', total: '10.00', credit_applied: 0, payer_id: null, payer_statement_id: null, scheduled_send_error: null, scheduled_service_id: null });
   // The predicate re-reads the FULL current row by id on `database`; `stored`
   // is what that read returns (default: the row under test).
   let stored;
@@ -111,8 +111,10 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     mockRecon.mockResolvedValue(undefined);
   });
 
-  test('clear member: null, and both fences ran read-only on the given database', async () => {
-    expect(await run(base())).toBeNull();
+  test('clear member: { row } (the refreshed row), and both fences ran read-only on the given database', async () => {
+    const out = await run(base());
+    expect(out).toEqual({ row: stored });
+    expect(out.reason).toBeUndefined();
     expect(mockDeposit).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'i1' }), { lock: false });
     expect(mockRecon).toHaveBeenCalledWith('i1', database, { readOnly: true });
     expect(mockResolveForInvoice.mock.calls[0][0]).toMatchObject({ database, throwOnError: true });
@@ -136,7 +138,8 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     stored = { ...base(), scheduled_send_error: 'payer_billed:p1' };
     expect(await PayCombined.memberCollectionPending(sparse, { database })).toEqual({ reason: 'withdrawn' });
     stored = { ...base(), customer_id: 'cust-real' };
-    expect(await PayCombined.memberCollectionPending(sparse, { database })).toBeNull();
+    const clear = await PayCombined.memberCollectionPending(sparse, { database });
+    expect(clear.row).toBe(stored); // the REFRESHED row, not the sparse one handed in
     expect(mockResolveForInvoice.mock.calls.at(-1)[0].customerId).toBe('cust-real');
     expect(mockDeposit.mock.calls.at(-1)[1]).toMatchObject({ customer_id: 'cust-real' });
   });
@@ -148,6 +151,15 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     stored = base();
     readError = new Error('connection terminated');
     await expect(PayCombined.memberCollectionPending({ id: 'i1' }, { database })).rejects.toThrow('connection terminated');
+  });
+
+  test('the returned row carries the CURRENT amount: a total that moved since the caller\'s copy is what the caller sees', async () => {
+    const stale = { ...base(), total: '100.00' };
+    stored = { ...base(), total: '60.00' };
+    const out = await PayCombined.memberCollectionPending(stale, { database });
+    expect(out.row.total).toBe('60.00');
+    stored = { ...base(), total: '60.00', credit_applied: 60 };
+    expect(await PayCombined.memberCollectionPending(stale, { database })).toEqual({ reason: 'nothing_due' });
   });
 
   test('payer_billed from the LIVE resolve', async () => {

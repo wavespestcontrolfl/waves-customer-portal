@@ -73,7 +73,7 @@ test('unset or whitespace-only = no allowlist (null = everyone)', () => {
   expect(fg.dunningCustomerScheduleAllowlist()).toBeNull();
   process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = '   ';
   expect(fg.dunningCustomerScheduleAllowlist()).toBeNull();
-  expect(fg.dunningCustomerScheduleAllowlistStatus()).toEqual({ configured: false, valid: [], invalid: [] });
+  expect(fg.dunningCustomerScheduleAllowlistStatus()).toEqual({ configured: false, valid: [], invalidCount: 0 });
 });
 
 test.each([' , ', ',', 'not-a-uuid', '12345, abc'])('configured but no valid id (%p) = an EMPTY set (nobody), never everyone', (value) => {
@@ -84,11 +84,11 @@ test.each([' , ', ',', 'not-a-uuid', '12345, abc'])('configured but no valid id 
   expect(set.size).toBe(0);
 });
 
-test('a malformed id is dropped and reported; the valid ones still stand', () => {
+test('a malformed id is dropped and only COUNTED; the valid ones still stand', () => {
   process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = `${U1}, 11111111-aaaa ,zzz`;
   const fg = load();
   expect([...fg.dunningCustomerScheduleAllowlist()]).toEqual([U1]);
-  expect(fg.dunningCustomerScheduleAllowlistStatus()).toEqual({ configured: true, valid: [U1], invalid: ['11111111-aaaa', 'zzz'] });
+  expect(fg.dunningCustomerScheduleAllowlistStatus()).toEqual({ configured: true, valid: [U1], invalidCount: 2 });
 });
 
 describe('logGateStatus reports the allowlist state', () => {
@@ -97,11 +97,23 @@ describe('logGateStatus reports the allowlist state', () => {
   afterEach(() => logSpy.mockRestore());
   const lines = () => logSpy.mock.calls.map((c) => String(c[0])).join('\n');
 
-  test('configured but empty says nobody; malformed ids are named', () => {
-    process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = 'oops';
+  test('configured but empty says nobody; malformed entries are counted, never printed', async () => {
+    process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = 'oops-secret-looking-value, another';
     load().logGateStatus();
     expect(lines()).toContain('configured but has no valid ids → nobody');
-    expect(lines()).toContain('ignored malformed id(s): oops');
+    expect(lines()).toContain('ignored 2 malformed entries');
+    expect(lines()).not.toContain('oops');
+    expect(lines()).not.toContain('secret');
+    expect(lines()).not.toContain('another');
+  });
+
+  test('valid ids are never printed either, only their count', () => {
+    process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = `${U1},bad`;
+    load().logGateStatus();
+    expect(lines()).toContain('allowlist: 1 customer(s)');
+    expect(lines()).toContain('ignored 1 malformed entry');
+    expect(lines()).not.toContain(U1);
+    expect(lines()).not.toContain('bad');
   });
 
   test('a valid list is counted; unset prints nothing extra', () => {

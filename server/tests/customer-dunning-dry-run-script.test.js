@@ -19,7 +19,7 @@ describe('static guard: the script cannot write, mint or send', () => {
     ['.delete(', /\.delete\(/],
     ['.truncate(', /\.truncate\(/],
     ['a raw write', /raw\(\s*['"`]\s*(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)\b/i],
-    ['applyCreditBeforeResolve', /applyCreditBeforeResolve/],
+    ['an account-credit apply', /applyAccountCreditToInvoice|autoApplyAccountCreditIfEnabled|postCreditMovement/],
     ['a short-link mint', /shortenOrPassthrough|createShortCode/],
     ['a send', /sendCustomerMessage|sendReminderChannels|sendTemplate|sendOne\(/],
     ['a --execute flag', /--execute/],

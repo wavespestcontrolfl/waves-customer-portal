@@ -302,10 +302,10 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     const StripeService = require('./stripe');
     const fenceOne = readOnly
       ? (inv) => memberCollectionPending(inv, { database })
-      : (inv) => StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database).then(() => null);
+      : (inv) => StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database).then(() => ({ row: inv }));
     const cleared = [];
     for (const inv of eligible) {
-      let verdict = null;
+      let verdict;
       try {
         verdict = await fenceOne(inv);
       } catch (fenceErr) {
@@ -315,8 +315,10 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
         }
         verdict = { reason: fenceErr.message };
       }
-      if (verdict) logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${verdict.reason}`);
-      else cleared.push(inv);
+      // A clear sibling is carried as its REFRESHED row (read-only mode), so
+      // an amount that moved since the candidate read reaches the caller.
+      if (verdict.reason) logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${verdict.reason}`);
+      else cleared.push(verdict.row);
     }
     if (!cleared.length) return degrade('none');
     eligible.length = 0;
@@ -407,8 +409,10 @@ const isCombinedPiMetadata = (piMetadata) => !!piMetadata?.combined_allocation;
  * used for the ANCHOR and for EVERY sibling by the customer-dunning resolver,
  * so a reminder can never name a member the page would refuse.
  *
- * Returns null when the member is clear, else `{ reason }`:
- *   not_collectible | payer_billed | withdrawn   (ownership / status)
+ * Returns `{ row }` when the member is clear — `row` is the REFRESHED full
+ * invoice row the checks ran on, and it is what the caller must build the set
+ * (amounts, digest) from, never the row it passed in — else `{ reason }`:
+ *   not_collectible | nothing_due | payer_billed | withdrawn (ownership / status)
  *   deposit_settlement | charge_reconciliation   (money may already be moving)
  * A recognised pending fence state is a REASON; anything unexpected (a DB
  * error, a payer lookup failure) THROWS — callers hold on that, never treat it
@@ -427,6 +431,7 @@ async function memberCollectionPending(inv, { database = db } = {}) {
   inv = await database('invoices').where({ id: inv.id }).first();
   if (!inv) return { reason: 'not_collectible' };
   if (!isInvoiceCollectibleStatus(inv.status)) return { reason: 'not_collectible' };
+  if (!(amountDueCents(inv) > 0)) return { reason: 'nothing_due' };
   if (inv.payer_id || inv.payer_statement_id) return { reason: 'payer_billed' };
   if (invoiceWithdrawnFromCustomer(inv)) return { reason: 'withdrawn' };
   // LIVE payer re-resolution, fail closed (a lookup failure throws).
@@ -457,7 +462,7 @@ async function memberCollectionPending(inv, { database = db } = {}) {
     if (isCollectionPendingFenceError(err)) return { reason: 'charge_reconciliation', code: err.code || null };
     throw err;
   }
-  return null;
+  return { row: inv };
 }
 
 /**

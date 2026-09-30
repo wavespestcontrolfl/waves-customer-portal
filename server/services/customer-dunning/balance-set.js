@@ -19,10 +19,10 @@
  * run it on the handoff's transaction handle (DB_POOL_MAX=2, Codex A-17).
  * Never throws: any failure is a `hold`, never a send.
  *
- * `applyCreditBeforeResolve` is the ONE writer in this file, kept apart on
- * purpose: only the runner calls it (never the boundary), before the set is
- * resolved, so the total the message names is already net of account credit
- * (Codex B-1).
+ * The customer-level engine NEVER applies account credit (owner ruling). A
+ * customer holding ANY unused credit is held with `account_credit_available`
+ * ("office should apply credit"): the reminder's total would otherwise name
+ * money the customer no longer owes once the office applies it.
  */
 
 const crypto = require('crypto');
@@ -31,6 +31,7 @@ const logger = require('../logger');
 const featureGates = require('../../config/feature-gates');
 const { openBalanceInvoices } = require('../open-balance');
 const PayCombined = require('../pay-combined');
+const CustomerCredit = require('../customer-credit');
 
 // Which hold wins when several apply (highest first). payer_* = payer_anchor
 // and payer_unresolved. 'none' is never a hold (it means genuinely single).
@@ -38,7 +39,7 @@ const HOLD_PRECEDENCE = Object.freeze([
   'balance_incomplete',
   'member_paused',
   'member_autopay_hold',
-  'credit_covers_anchor',
+  'account_credit_available',
   'anchor_reconciliation',
   'payer_anchor',
   'payer_unresolved',
@@ -145,6 +146,7 @@ function memberOf(inv, seq) {
 // The anchor's hold reason for a member-predicate verdict.
 const ANCHOR_HOLD_BY_REASON = Object.freeze({
   not_collectible: 'balance_incomplete',
+  nothing_due: 'balance_incomplete',
   payer_billed: 'payer_anchor',
   withdrawn: 'payer_anchor',
   deposit_settlement: 'anchor_reconciliation',
@@ -155,32 +157,20 @@ const ANCHOR_HOLD_BY_REASON = Object.freeze({
 // check (status, payer, withdrawal, live payer, received-deposit settlement,
 // charge reconciliation) is PayCombined.memberCollectionPending — the ONE
 // predicate that also vets every sibling inside combinedEligibleSiblings, so
-// anchor and siblings can never be judged by different rules. Only the
-// credit-coverage probe is anchor-specific (the page's capture step). Returns a
-// hold reason or null. Anything unreadable holds — never a send: a payer
-// lookup failure is payer_unresolved, any other throw anchor_reconciliation.
+// anchor and siblings can never be judged by different rules. It hands back the
+// REFRESHED row, which is what the set and its digest are built from. Anything
+// unreadable holds — never a send: a payer lookup failure is payer_unresolved,
+// any other throw anchor_reconciliation. Returns { hold, row }.
 async function anchorProblem(anchorRow, database) {
-  let verdict = null;
-  let unreadable = null;
   try {
-    verdict = await PayCombined.memberCollectionPending(anchorRow, { database });
+    const verdict = await PayCombined.memberCollectionPending(anchorRow, { database });
+    if (verdict.row) return { hold: null, row: verdict.row };
+    logger.info(`[customer-dunning] anchor ${anchorRow.id} held (${verdict.code || verdict.reason})`);
+    return { hold: ANCHOR_HOLD_BY_REASON[verdict.reason], row: anchorRow };
   } catch (err) {
-    unreadable = err;
     logger.info(`[customer-dunning] anchor ${anchorRow.id} check unreadable (${err.code || err.memberCheck || 'error'}): ${err.message}`);
+    return { hold: err.memberCheck === 'payer_resolve' ? 'payer_unresolved' : 'anchor_reconciliation', row: anchorRow };
   }
-  const held = verdict ? ANCHOR_HOLD_BY_REASON[verdict.reason] : null;
-  // Ownership / status verdicts stop before the credit probe, as the page's
-  // preview does.
-  if (held === 'balance_incomplete' || held === 'payer_anchor') return held;
-  if (unreadable?.memberCheck === 'payer_resolve') return 'payer_unresolved';
-  // credit_covers_anchor outranks the reconciliation holds (HOLD_PRECEDENCE).
-  if (await PayCombined.invoiceCreditWouldFullyCover(anchorRow, { database })) return 'credit_covers_anchor';
-  if (unreadable) return 'anchor_reconciliation';
-  if (held) {
-    logger.info(`[customer-dunning] anchor ${anchorRow.id} fenced (${verdict.code || verdict.reason})`);
-    return held;
-  }
-  return null;
 }
 
 // combinedEligibleSiblings with its degrade reason captured. `reason` is null
@@ -242,17 +232,14 @@ function memberHolds(members) {
 }
 
 // Steps 5-6: the anchor's predicates, then the page's sibling set. Returns
-// the anchor's hold reasons and the sibling rows.
+// the anchor's hold reasons, the REFRESHED anchor row and the sibling rows.
 async function anchorAndSiblings(anchorRow, database) {
-  const holds = [];
-  const problem = await anchorProblem(anchorRow, database);
-  if (problem) holds.push(problem);
-  // A non-collectible / payer-owned / credit-covered anchor: the page would
-  // not combine, so there is no sibling set to compute.
-  if (problem) return { holds, siblings: [] };
-  const { siblings, reason } = await readSiblings(anchorRow, database);
-  if (reason && reason !== 'none') holds.push(reason);
-  return { holds, siblings };
+  const { hold, row } = await anchorProblem(anchorRow, database);
+  // A non-collectible / payer-owned / fenced anchor: the page would not
+  // combine, so there is no sibling set to compute.
+  if (hold) return { holds: [hold], anchor: row, siblings: [] };
+  const { siblings, reason } = await readSiblings(row, database);
+  return { holds: reason && reason !== 'none' ? [reason] : [], anchor: row, siblings };
 }
 
 async function resolveUnguarded(customerId, database, now) {
@@ -276,24 +263,30 @@ async function resolveUnguarded(customerId, database, now) {
 
   const anchorId = candidates[0].invoice_id;
   // The open read carries no token/title/payer columns; the anchor needs the
-  // full row (also what combinedEligibleSiblings and the credit probe read).
+  // full row (also what combinedEligibleSiblings reads).
   const anchorRow = await database('invoices').where({ id: anchorId }).first();
   if (!anchorRow) return result('hold', 'balance_incomplete', { excluded });
 
-  const { holds, siblings } = await anchorAndSiblings(anchorRow, database);
+  // Any unused account credit holds the customer for the OFFICE to apply it
+  // (the engine never applies credit). null = no such customer row: unreadable.
+  const balance = await CustomerCredit.getBalance(customerId, database);
+  if (balance === null) return result('hold', 'balance_incomplete', { excluded });
+
+  const { holds, anchor, siblings } = await anchorAndSiblings(anchorRow, database);
+  if (balance > 0) holds.push('account_credit_available');
   const fullSeq = await sequencesForSiblings(siblings, seqMap, database);
-  // The anchor's cents come from the FRESH full row (the same one the credit
-  // probe read), so a credit landing between the two reads cannot leave a
-  // stale figure in the digest.
+  // Every member is built from its REFRESHED row (the one the predicate just
+  // re-read), so an amount that moved between the open read and the check
+  // reaches the total and the digest.
   const members = [
-    memberOf(anchorRow, seqMap.get(anchorId)),
+    memberOf(anchor, seqMap.get(anchorId)),
     ...sortOldestFirst(siblings).map((s) => memberOf(s, fullSeq.get(String(s.id)))),
   ];
   const parts = {
-    anchor: anchorSummary(anchorRow),
+    anchor: anchorSummary(anchor),
     members,
     totalCents: members.reduce((sum, m) => sum + m.cents, 0),
-    digest: setDigest(String(anchorRow.id), members),
+    digest: setDigest(String(anchor.id), members),
     activeCount: members.filter((m) => m.seqStatus === 'active').length,
     excluded,
     asOf: now.toISOString(),
@@ -324,58 +317,8 @@ async function resolveDunnableSet(customerId, { database = db, now = new Date() 
   }
 }
 
-/**
- * RUNNER ONLY, never at the boundary. Draws the customer's account credit
- * onto their open invoices (oldest first) before the set is resolved, the
- * same auto-apply fireTouch runs per invoice today, so the reminder's total is
- * net of credit. Only invoices whose sequence is active or absent are drawn
- * (not stopped, paused, autopay-held, completed or microdeposit-pending).
- * Returns the draws `[{ invoiceId, amount }]` so the caller can reverse them
- * (customer-credit.reverseAppliedCredit) when nothing was delivered.
- *
- * Deliberately takes NO database handle: every draw is its own transaction,
- * committed here. autoApplyAccountCreditIfEnabled only runs the full-coverage
- * side effects (stop dunning, activate an annual-prepay term) when it owns the
- * transaction; handed a caller's `trx` it skips them and leaves them to that
- * caller, so threading a handle in would strand a credit-covered invoice with
- * dunning still armed. The reads below use the shared pool for the same reason
- * (a draw must never be visible only inside an uncommitted caller handle).
- *
- * The reads below only choose CANDIDATES. Every eligibility decision that
- * matters is re-made inside each draw's own locked transaction (`dunningDraw`
- * in customer-credit.js): collection fence, sequence active/none and live payer.
- * The apply's own unconditional locked guard 'has_payment_intent' (any
- * attached PaymentIntent, checked on the locked invoice row for EVERY caller)
- * also covers what the microdeposit pre-check below looks for: a microdeposit
- * wait needs an attached PI, so the unlocked Stripe read is only an early skip.
- */
-async function applyCreditBeforeResolve(customerId) {
-  const { autoApplyAccountCreditIfEnabled } = require('../customer-credit');
-  const draws = [];
-  const open = await openBalanceInvoices(customerId, { database: db });
-  const seqMap = await readSequences(open.map((i) => i.id), db);
-  for (const inv of open) {
-    const status = seqMap.get(String(inv.id))?.status || 'none';
-    if (status !== 'active' && status !== 'none') continue;
-    let mdPending = true; // unreadable = do not draw
-    try { mdPending = await isMicrodepositPending(inv); } catch (err) {
-      logger.warn(`[customer-dunning] credit draw skipped for invoice ${inv.id}: microdeposit state unreadable: ${err.message}`);
-    }
-    if (mdPending) continue;
-    // dunningDraw: the pre-read above only chose this invoice as a CANDIDATE.
-    // Inside the draw's own transaction, under the invoice lock, it re-decides
-    // the collection fence, the sequence status (active / none) and the live
-    // payer — a decision made from this earlier read could race a saved-card
-    // submit, a stop / pause, or a payer assignment landing in between.
-    const drawn = await autoApplyAccountCreditIfEnabled(inv.id, { dunningDraw: true });
-    if (drawn?.applied > 0) draws.push({ invoiceId: String(inv.id), amount: drawn.applied });
-  }
-  return draws;
-}
-
 module.exports = {
   resolveDunnableSet,
-  applyCreditBeforeResolve,
   setDigest,
   HOLD_PRECEDENCE,
 };
