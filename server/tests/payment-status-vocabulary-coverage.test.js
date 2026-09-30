@@ -594,3 +594,91 @@ describe('round-17: "...but it was refunded" — continuations bind to the SAME 
     expect(enumeratePaymentClaims('it failed', {}).claims).toEqual([]);
   });
 });
+
+// Codex round-18 P1: every claim in one clause must hold for ONE row — the receipt included.
+describe('round-18: a receipt and another status in the same clause bind the SAME row', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c) => replyQuotesUngroundedAmount(r, c, { byMeaning: true });
+  const row = (status, over = {}) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card', ...over });
+  const R = 'We received your $120 card payment from Sep 12';
+  test('paid row + a SEPARATE processing row (same amount/date/tender) does not launder "received ... while it is processing"', () => {
+    expect(rq(`${R} while it is processing.`, ctx([row('paid'), row('processing')]))).toBe(true);
+    expect(rq(`${R} while it is processing.`, ctx([row('processing')]))).toBe(true);
+    expect(rq(`${R} while it is processing.`, ctx([row('paid')]))).toBe(true);
+  });
+  test('received + failed / refunded / disputed in one clause are never one row either', () => {
+    for (const status of ['failed', 'refunded', 'disputed']) {
+      const claim = { failed: 'it failed', refunded: 'it was refunded', disputed: 'it was disputed' }[status];
+      expect({ status, r: rq(`${R} while ${claim}.`, ctx([row('paid'), row(status)])) }).toEqual({ status, r: true });
+    }
+  });
+  test('the one legitimate combination: received + PARTIALLY refunded on a single paid row', () => {
+    const partial = row('paid', { refund_status: 'partial', refund_amount: 30 });
+    expect(rq(`${R} while part of it was refunded.`, ctx([partial]))).toBe(false);
+    expect(rq(`${R} while part of it was refunded.`, ctx([row('paid')]))).toBe(true);
+  });
+  test('a receipt alone still binds its paid row', () => {
+    expect(rq(`${R}.`, ctx([row('paid'), row('processing')]))).toBe(false);
+  });
+});
+
+// Codex round-18 P1: one tender resolver over both writers' shapes (metadata.payment_method AND metadata.method).
+describe('round-18: manual-writer tenders (metadata.method) resolve to a tender', () => {
+  const { paymentTenderLabel } = require('../services/sms-shadow-drafter');
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  // annual prepay (admin-customers.js): description "Invoice X - annual prepay (zelle)", metadata.method
+  const prepay = (method, over = {}) => ({
+    amount: 480, status: 'paid', payment_date: '2026-09-12',
+    description: `Invoice INV-77 - annual prepay (${method.replace(/_/g, ' ')})`,
+    metadata: JSON.stringify({ source: 'customer360_annual_prepay', method, invoice_id: 'i-1' }), ...over,
+  });
+  // account credit prepayment: description "Account credit prepayment — zelle (note)", metadata.method
+  const credit = (method) => ({
+    amount: 200, status: 'paid', payment_date: '2026-09-12',
+    description: `Account credit prepayment — ${method} (thanks)`,
+    metadata: { source: 'account_credit_prepayment', method },
+  });
+  test('the allowlisted methods resolve; "other" and unknown values name no tender', () => {
+    expect(paymentTenderLabel(prepay('zelle'))).toBe('Zelle');
+    expect(paymentTenderLabel(prepay('check'))).toBe('Check');
+    expect(paymentTenderLabel(prepay('cash'))).toBe('Cash');
+    expect(paymentTenderLabel(prepay('venmo'))).toBe('Venmo');
+    expect(paymentTenderLabel(prepay('paypal'))).toBe('PayPal');
+    expect(paymentTenderLabel(prepay('card_present'))).toBe('card');
+    expect(paymentTenderLabel(prepay('other'))).toBeNull();
+    expect(paymentTenderLabel(prepay('bitcoin'))).toBeNull(); // not on the writers' allowlist
+    expect(paymentTenderLabel(credit('zelle'))).toBe('Zelle');
+    expect(paymentTenderLabel(credit('check'))).toBe('Check');
+    expect(paymentTenderLabel({ ...prepay('zelle'), metadata: 'not json' })).toBeNull();
+  });
+  test('the gateway shape (metadata.payment_method) still wins and is unchanged', () => {
+    expect(paymentTenderLabel({ amount: 1, status: 'paid', metadata: { payment_method: 'us_bank_account' } })).toBe('bank/ACH');
+    expect(paymentTenderLabel({ amount: 1, status: 'paid', metadata: { payment_method: 'card', method: 'zelle' } })).toBe('card');
+  });
+  test('a recorded Zelle annual prepay binds the customer\'s named Zelle payment; a check prepay does not', () => {
+    const ask = 'Did you get my $480 Zelle payment from Sep 12?';
+    const reply = 'We received your $480 Zelle payment from Sep 12.';
+    expect(rq(reply, { billing: { outstandingBalance: 0, recentPayments: [prepay('zelle')] } }, ask)).toBe(false);
+    expect(rq(reply, { billing: { outstandingBalance: 0, recentPayments: [prepay('check')] } }, ask)).toBe(true);
+    expect(rq('We received your $200 Zelle payment from Sep 12.', { billing: { outstandingBalance: 0, recentPayments: [credit('zelle')] } }, 'Did you get my $200 Zelle payment?')).toBe(false);
+  });
+  test('gate-on facts render "via <tender>" for both writers\' rows', () => {
+    const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      const block = buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [prepay('zelle'), credit('check')] } }, { now: new Date('2026-09-29T15:00:00Z') });
+      expect(block).toMatch(/\$480\.00 paid [^;]*Sep 12 via Zelle/);
+      expect(block).toMatch(/\$200\.00 paid [^;]*Sep 12 via Check/);
+    } finally { delete process.env.GATE_SMS_REAL_ANSWERS; }
+  });
+});
+
+// Codex round-18 P1: correct payment-policy answers from COMPANY FACTS are not payment-claim fabrications.
+describe('round-18: COMPANY FACTS payment policy answers pass the deterministic checks', () => {
+  const rq = (r) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: [] } }, { byMeaning: true });
+  test('"You can mail us a check" and "We don\'t accept cash" are not ungrounded payment claims', () => {
+    expect(rq('You can mail us a check.')).toBe(false);
+    expect(rq("We don't accept cash.")).toBe(false);
+    expect(rq('Technicians accept cards at the visit, never cash.')).toBe(false);
+  });
+});

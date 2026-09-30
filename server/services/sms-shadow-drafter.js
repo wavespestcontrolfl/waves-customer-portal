@@ -1521,6 +1521,7 @@ const TENDER_VOCABULARY = [
   { word: 'billpay', label: 'bank/ACH', manual: false },
   { word: 'bank', label: 'bank/ACH', manual: false },
 ];
+const MANUAL_TENDER_WORDS = new Set(TENDER_VOCABULARY.filter((t) => t.manual).map((t) => t.word));
 const tenderLabelForWord = (word) => (
   TENDER_VOCABULARY.find((t) => t.word === String(word || '').toLowerCase().replace(/\s+/g, ' '))?.label || null
 );
@@ -1791,6 +1792,28 @@ function paymentClaimBinding(clauseText, inboundText) {
   const claimedDate = replyDate || inboundDate || null;
   const inboundNamedPayment = !!inboundText && /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?)\b/i.test(inboundText);
   return { claimedTender, claimedDate, inboundNamedPayment };
+}
+
+// Codex round-18 P2: the payment identity (amount / date / tender) a message names — what the customer's
+// question is ABOUT — and whether a payments row is that payment. Used to pull an older, referenced row
+// into the facts BEFORE the model answers (payment-history.surfaceReferencedPayments).
+function paymentIdentityFromText(text) {
+  const tender = replyClaimedTender(text);
+  return {
+    amounts: amountCentsIn(text),
+    date: parseClaimedPaymentDate(text),
+    tender: tender && tender !== TENDER_AMBIGUOUS ? tender : null,
+  };
+}
+function paymentRowMatchesIdentity(row, identity) {
+  if (!row || !identity) return false;
+  if (identity.amounts.length) {
+    const cents = Math.round(Number(row.amount) * 100);
+    if (!identity.amounts.includes(cents) && !identity.amounts.includes(partialRefundCents(row))) return false;
+  }
+  if (identity.date && !paymentDateMatchesClaim(row, identity.date)) return false;
+  if (identity.tender && paymentTenderLabel(row) !== identity.tender) return false;
+  return true;
 }
 
 // `opts.byMeaning` pins the strict clause/status-aware rule regardless of
@@ -2101,11 +2124,15 @@ function clauseUngrounded(clause, env) {
     const figures = claim.kind === 'owed_figures' ? owedFigureCents(masked, amounts) : null;
     if (KIND_VALIDATORS[claim.kind]({ ...claim, text, amounts: claim.zero ? [] : (figures || amounts) }, env)) return true;
     if (claim.kind === 'status' && PRESENCE_FAMILIES.has(claim.family)) presence.push(claim.family);
+    if (claim.kind === 'ack') presence.push('paid'); // "received" is itself a row-status claim (Codex round-18 P1)
   }
-  // Presence families ("refunded", "failed", "disputed", "pending") describe ONE payment's status, so
-  // they must share at least one row status — "refunded after it failed" is never a single row.
+  // Presence claims (receipt = paid, plus "refunded", "failed", "disputed", "pending") describe ONE payment's
+  // status, so they must share at least one row status — "refunded after it failed" and "received ... while
+  // it is processing" are never a single row.
   if (presence.length > 1) {
-    const sets = presence.map((f) => new Set(PAYMENT_STATUS_VOCABULARY[f].rowStatuses));
+    // a partial refund keeps status 'paid', so partial refund wording is a claim about a PAID row
+    const partial = partialRefundWording(text);
+    const sets = presence.map((f) => new Set(partial && (f === 'refunded' || f === 'reversed') ? ['paid'] : PAYMENT_STATUS_VOCABULARY[f].rowStatuses));
     if (![...sets[0]].some((st) => sets.every((set) => set.has(st)))) return true;
   }
   env.paymentContext = true;
@@ -2523,6 +2550,12 @@ function paymentTenderLabel(p) {
   const metaMethod = String(meta.payment_method || '').toLowerCase();
   if (metaMethod.includes('bank') || metaMethod === 'ach') return 'bank/ACH';
   if (metaMethod === 'card') return 'card';
+  // Codex round-18 P1: the annual-prepay and account-credit writers (admin-customers.js) persist their
+  // VALIDATED tender as metadata.method — an allowlist (cash / check / zelle / venmo / paypal /
+  // card_present / other). Resolve it through the same vocabulary; "other" names no tender.
+  const writerMethod = String(meta.method || '').trim().toLowerCase();
+  if (writerMethod === 'card_present') return 'card';
+  if (MANUAL_TENDER_WORDS.has(writerMethod)) return tenderLabelForWord(writerMethod);
   if (p.card_brand) return 'card';
   const m = MANUAL_TENDER_FIELD_RE.exec(String(p.description || '').trim());
   return m ? tenderLabelForWord(m[1]) : null;
@@ -3489,6 +3522,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const context = customer
       ? await ContextAggregator.getContextForCustomer(customer)
       : await ContextAggregator.getFullCustomerContext(fromPhone);
+    // A question about an OLDER payment (4th or earlier) must reach the model WITH that row in the facts,
+    // not only be rejected after the fact (Codex round-18 P2). Reads history only when the window is truncated.
+    await require('./payment-history').surfaceReferencedPayments(context, inboundMessage);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -3865,6 +3901,8 @@ module.exports = {
   paymentAckPolarity,
   classifyPaymentClause,
   enumeratePaymentClaims,
+  paymentIdentityFromText,
+  paymentRowMatchesIdentity,
   paymentStatusClaimKind,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,

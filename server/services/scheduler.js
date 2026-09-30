@@ -15,6 +15,7 @@ const AMOUNT_BLOCK_NOTES = {
   zelle_invoice_unresolved: 'The invoice this scheduled reply\u2019s Zelle instructions were written for no longer resolves (paid off, reassigned, or none open)',
   zelle_invoice_ineligible: 'This scheduled reply offers Zelle for an invoice that can no longer be paid that way',
   zelle_recheck_failed: 'The Zelle eligibility recheck could not be completed for this scheduled reply',
+  zelle_now_available: 'This scheduled reply says Zelle is not available, but Zelle can now be used for this account',
   credit_unverifiable: 'The account-credit state for this scheduled reply\u2019s Zelle instructions could not be verified',
   payer_owned: 'The invoice in this scheduled reply\u2019s Zelle instructions is now billed to a third-party payer',
   payer_unverifiable: 'Who owns the invoice in this scheduled reply\u2019s Zelle instructions could not be verified',

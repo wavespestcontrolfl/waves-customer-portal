@@ -180,6 +180,13 @@ function isTransferInstructionClause(clause) {
   if (zelleBodyContacts(`zelle ${text}`).length) return true;
   return TRANSFER_INSTRUCTION_RE.test(text) && !NON_ZELLE_DESTINATION_RE.test(text);
 }
+// Codex round-18 P2: a NEGATIVE availability claim ("Zelle isn't available right now", "we don't take
+// Zelle") is excluded from hasAffirmativeZelleMention on purpose, but it is a live claim too: the recipient
+// is an env setting and the invoice's eligibility moves, so the denial can go stale before it sends.
+function hasNegativeZelleAvailabilityClaim(body) {
+  return String(body || '').split(CLAUSE_SPLIT_RE)
+    .some((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause));
+}
 function hasAffirmativeZelleMention(body) {
   const clauses = String(body || '').split(CLAUSE_SPLIT_RE);
   if (clauses.some((clause) => classifyZelleClause(clause) === 'offer')) return true;
@@ -361,9 +368,33 @@ function bodyNeedsPaymentRecheck(body) {
   const text = String(body || '');
   if (!text) return false;
   if (bodyAmountCents(text).length) return true;
-  if (hasAffirmativeZelleMention(text)) return true;
+  if (hasAffirmativeZelleMention(text) || hasNegativeZelleAvailabilityClaim(text)) return true;
   if (mayAssertPaymentStatus(text)) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
+}
+
+/**
+ * Is a Zelle DENIAL still true? { stale: false } when Zelle still is not offered to this customer (no
+ * recipient configured, no open invoice, or the invoice fails the pay page's Zelle visibility); stale
+ * ('zelle_now_available') when it would be offered now. An unverifiable check fails CLOSED.
+ */
+async function zelleDenialStale({ customerId, dbh = db } = {}) {
+  const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
+  if (!manualPayOptionsFromEnv()?.zelle?.recipient) return { stale: false };
+  if (!customerId) return { stale: true, reason: 'zelle_recheck_failed' };
+  try {
+    const customerRow = await dbh('customers').where({ id: customerId }).first();
+    const ctx = customerRow ? await require('./context-aggregator').getContextForCustomer(customerRow) : null;
+    if (!ctx) return { stale: true, reason: 'zelle_recheck_failed' };
+    const invoiceId = ctx?.billing?.openInvoice?.id || null;
+    if (!invoiceId) return { stale: false }; // nothing to pay by Zelle => "not available" is true
+    const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
+    if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
+    return eligibility.reason === 'zelle_recheck_failed' ? { stale: true, reason: 'zelle_recheck_failed' } : { stale: false };
+  } catch (err) {
+    logger.warn(`[sms-amount-recheck] Zelle denial recheck failed for customer ${customerId}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'zelle_recheck_failed' };
+  }
 }
 
 async function outgoingAmountsStale({
@@ -414,6 +445,9 @@ async function outgoingAmountsStale({
     }
     const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: effectiveZelleInvoiceId, dbh });
     if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
+  } else if (hasNegativeZelleAvailabilityClaim(text)) {
+    const denial = await zelleDenialStale({ customerId, dbh });
+    if (denial.stale) return denial;
   }
   const strict = strictForVersion(promptVersion);
   // The clause-aware binder runs for every strict decision AND for any
@@ -475,5 +509,6 @@ async function outgoingAmountsStale({
 
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention, classifyZelleClause, amountFreeStatusClaimStale, bodyNeedsPaymentRecheck,
+  hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, zelleDenialStale, classifyZelleClause,
+  amountFreeStatusClaimStale, bodyNeedsPaymentRecheck,
 };

@@ -41,6 +41,8 @@ jest.mock('../services/sms-amount-recheck', () => ({
   outgoingZelleStale: jest.fn(),
   hasAffirmativeZelleMention: jest.fn(),
   zelleInvoiceStillEligible: jest.fn(),
+  hasNegativeZelleAvailabilityClaim: jest.fn(() => false),
+  zelleDenialStale: jest.fn(async () => ({ stale: false })),
   // Independent-review P1 (round 5, finding 1): dispatchClaimedSend's own
   // amount-free status-claim recheck, right alongside the Zelle recheck this
   // suite exercises. Defaults clean; the dedicated describe below overrides it.
@@ -87,6 +89,8 @@ beforeEach(() => {
   amountRecheck.hasAffirmativeZelleMention.mockReturnValue(false);
   amountRecheck.outgoingZelleStale.mockReturnValue({ stale: false });
   amountRecheck.zelleInvoiceStillEligible.mockResolvedValue({ eligible: true });
+  amountRecheck.hasNegativeZelleAvailabilityClaim.mockReturnValue(false);
+  amountRecheck.zelleDenialStale.mockResolvedValue({ stale: false });
   amountRecheck.amountFreeStatusClaimStale.mockResolvedValue({ stale: false });
   sendCustomerMessage.mockResolvedValue({
     sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}`,
@@ -266,5 +270,26 @@ describe('the claim is released on every other pre-send error path', () => {
     await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: false, reason: 'amount_recheck_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+  });
+});
+
+// Codex round-18 P2: a Zelle DENIAL is rechecked on the autonomous lane too.
+describe('a stale Zelle denial is held by auto-send', () => {
+  test('Zelle became available since the draft => not sent, claim released, siblings reopened', async () => {
+    amountRecheck.hasAffirmativeZelleMention.mockReturnValue(false);
+    amountRecheck.hasNegativeZelleAvailabilityClaim.mockReturnValue(true);
+    amountRecheck.zelleDenialStale.mockResolvedValue({ stale: true, reason: 'zelle_now_available' });
+    await expect(attempt({ reply: "Zelle isn't available right now, but your pay link works." })).resolves.toMatchObject({ sent: false, reason: 'zelle_now_available' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+    expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
+  });
+  test('a throwing denial recheck fails closed; a still-true denial sends', async () => {
+    amountRecheck.hasAffirmativeZelleMention.mockReturnValue(false);
+    amountRecheck.hasNegativeZelleAvailabilityClaim.mockReturnValue(true);
+    amountRecheck.zelleDenialStale.mockRejectedValue(new Error('pg down'));
+    await expect(attempt({ reply: "Zelle isn't available right now." })).resolves.toMatchObject({ sent: false, reason: 'zelle_recheck_failed' });
+    amountRecheck.zelleDenialStale.mockResolvedValue({ stale: false });
+    await expect(attempt({ reply: "Zelle isn't available right now." })).resolves.toMatchObject({ sent: true });
   });
 });

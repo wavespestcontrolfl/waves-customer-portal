@@ -88,6 +88,21 @@ describe('verifier — prompt contract', () => {
     expect(p).toMatch(/never the Payment options line/i);
   });
 
+  // Codex round-18 P1: COMPANY FACTS ("Paying: technicians accept cards at the visit, never cash. Checks are
+  // mailed to <office>") is a second valid source for how-to-pay claims.
+  test('real answers on: how-to-pay grounds on Payment options OR the COMPANY FACTS payment policy; an unlisted method stays a fabrication', () => {
+    const p = buildVerifierSystemPrompt({ realAnswers: true });
+    expect(p).toMatch(/Payment options line in BILLING exactly OR the owner-approved COMPANY FACTS payment policy/);
+    expect(p).toMatch(/checks mailed to the office, no cash/);
+    expect(p).toMatch(/appears in NEITHER is a fabrication/);
+    expect(p).toMatch(/unlisted method[^)]*stays a fabrication/);
+    // the facts the rule points at really do carry that policy
+    const { renderCompanyFactsSection } = require('../services/sms-company-facts');
+    const facts = renderCompanyFactsSection();
+    expect(facts).toMatch(/technicians accept cards at the visit, never cash/i);
+    expect(facts).toMatch(/Checks are mailed to/);
+  });
+
   test('gate off (real answers not passed): neither payment-method bullet appears', () => {
     const p = buildVerifierSystemPrompt();
     expect(p).not.toMatch(/payment method or contact/i);

@@ -38,8 +38,11 @@ const MODELS = require('../config/models');
 // PayPal row from a manual entry). Treating Payment options as the ONLY
 // source for a payment-method claim rejected a genuinely grounded receipt
 // tender whenever it didn't also appear on Payment options.
+// Codex round-18 P1: the gate-on facts block ALSO carries the owner-approved COMPANY FACTS "Paying:"
+// policy (sms-company-facts.js — checks are mailed to the office, technicians never take cash), so a
+// correct "You can mail us a check" / "We don't accept cash" is grounded there and must not be flagged.
 const PAYMENT_METHOD_BULLET = `
-- a payment method or contact for HOW TO PAY (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly; a contact that matches it is fine, one that doesn't appear there at all is a fabrication
+- a payment method or contact for HOW TO PAY (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly OR the owner-approved COMPANY FACTS payment policy (the "Paying:" fact: which methods are accepted or declined — e.g. checks mailed to the office, no cash — and where a check goes); a contact or method that matches one of those two sources is fine, one that appears in NEITHER is a fabrication (an unlisted method — Venmo, PayPal, a phone number, a made-up address — stays a fabrication)
 - a RECEIPT confirmation naming HOW a payment was made ("we received your $120 check payment", "your Zelle payment came through") — grounded ONLY against that SPECIFIC Recent payments row's own "via <tender>" tag (never the Payment options line, which lists how to pay NOW, not how a past payment arrived); a tender that row does not show is a fabrication`;
 
 function buildVerifierSystemPrompt({ realAnswers = false } = {}) {

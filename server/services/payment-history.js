@@ -106,4 +106,32 @@ async function hasInFlightMoney(customerId, dbh = db) {
   }
 }
 
-module.exports = { loadPaymentHistory, ensureAbsenceHistory, hasInFlightMoney, IN_FLIGHT_SQL, PAYMENT_HISTORY_CAP };
+// Codex round-18 P2: for a customer message that asks about a payment with a NAMED identity (amount, date
+// and/or tender), pull the matching rows out of the authoritative history into billing.recentPayments
+// BEFORE the facts are built — a payment older than the 3-row display window would otherwise be absent
+// from the facts and the model would (correctly, per its rules) answer "not showing". Reads history
+// only when the window was truncated and the message names an identity; never throws (a failed read
+// leaves the context as it was — the post-draft absence check still fails closed).
+async function surfaceReferencedPayments(context, inboundMessage, dbh = db) {
+  try {
+    const billing = context?.billing;
+    if (!billing || typeof billing !== 'object' || !billing.recentPaymentsTruncated) return context;
+    const { inboundNamesPayment } = require('./payment-receipt-vocabulary');
+    if (!inboundNamesPayment(inboundMessage)) return context;
+    const drafter = require('./sms-shadow-drafter');
+    if (typeof drafter.paymentIdentityFromText !== 'function') return context;
+    const identity = drafter.paymentIdentityFromText(inboundMessage);
+    if (!identity.amounts.length && !identity.date && !identity.tender) return context;
+    if (billing.paymentHistory === undefined) billing.paymentHistory = await loadPaymentHistory(context.customer?.id, dbh);
+    const rows = billing.paymentHistory?.rows;
+    if (!Array.isArray(rows)) return context;
+    const shown = new Set((billing.recentPayments || []).map((p) => p && p.id).filter(Boolean));
+    const extra = rows.filter((p) => p && !(p.id && shown.has(p.id)) && drafter.paymentRowMatchesIdentity(p, identity));
+    if (extra.length) billing.recentPayments = [...(billing.recentPayments || []), ...extra];
+  } catch (err) {
+    logger.warn(`[payment-history] could not surface referenced payments: ${err.message}`);
+  }
+  return context;
+}
+
+module.exports = { loadPaymentHistory, ensureAbsenceHistory, surfaceReferencedPayments, hasInFlightMoney, IN_FLIGHT_SQL, PAYMENT_HISTORY_CAP };

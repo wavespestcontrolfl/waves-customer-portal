@@ -141,3 +141,38 @@ describe('hasInFlightMoney', () => {
     expect(await hasInFlightMoney(null, rawDb(async () => ({ rows: [] })))).toBeNull();
   });
 });
+
+// Codex round-18 P2: a payment older than the display window reaches the FACTS before the model answers.
+describe('surfaceReferencedPayments', () => {
+  const { surfaceReferencedPayments } = require('../services/payment-history');
+  const older = { id: 'p-old', amount: 120, status: 'paid', payment_date: '2026-06-12', payment_method_type: 'card' };
+  const other = { id: 'p-other', amount: 45, status: 'paid', payment_date: '2026-05-01', payment_method_type: 'card' };
+  const newest = [1, 2, 3].map((n) => ({ id: `p${n}`, amount: 60 + n, status: 'paid', payment_date: `2026-09-0${n}`, payment_method_type: 'card' }));
+  const ctx = (billing) => ({ customer: { id: 'c1' }, billing: { recentPayments: [...newest], recentPaymentsTruncated: true, ...billing } });
+
+  test('a question naming an OLDER payment\'s amount/date puts that row into recentPayments (and only that row)', async () => {
+    const context = ctx();
+    await surfaceReferencedPayments(context, 'Did you get my $120 payment from June 12?', fakeDb([older, other]));
+    expect(context.billing.recentPayments.map((p) => p.id)).toEqual(['p1', 'p2', 'p3', 'p-old']);
+    expect(context.billing.paymentHistory.rows).toHaveLength(2); // history stays attached for the absence checks
+  });
+  test('a tender-only identity matches by tender; a row already shown is not duplicated', async () => {
+    const zelle = { id: 'p-z', amount: 90, status: 'paid', payment_date: '2026-05-05', description: 'Invoice INV-9 — zelle' };
+    const context = ctx();
+    await surfaceReferencedPayments(context, 'Did my Zelle payment go through?', fakeDb([zelle, newest[0], older]));
+    expect(context.billing.recentPayments.map((p) => p.id)).toEqual(['p1', 'p2', 'p3', 'p-z']);
+  });
+  test('no read when the window is not truncated, the message is not about a payment, or it names no identity', async () => {
+    const dbh = fakeDb([older]);
+    const notTruncated = ctx({ recentPaymentsTruncated: false });
+    await surfaceReferencedPayments(notTruncated, 'Did you get my $120 payment from June 12?', dbh);
+    await surfaceReferencedPayments(ctx(), 'What time are you coming Tuesday?', dbh);
+    await surfaceReferencedPayments(ctx(), 'Did you get my payment?', dbh); // no amount / date / tender
+    expect(dbh).not.toHaveBeenCalled();
+  });
+  test('a failed history read leaves the context untouched (never throws)', async () => {
+    const context = ctx();
+    await expect(surfaceReferencedPayments(context, 'Did you get my $120 payment from June 12?', fakeDb([], { fail: true }))).resolves.toBe(context);
+    expect(context.billing.recentPayments).toHaveLength(3);
+  });
+});

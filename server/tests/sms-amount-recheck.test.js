@@ -866,3 +866,50 @@ describe('Codex round-11 P1: absence claims load authoritative history lazily at
     expect(ctx.billing.paymentHistory).toBeUndefined();
   });
 });
+
+// Codex round-18 P2: a DENIAL of Zelle availability is a live claim — rechecked at send time.
+describe('negative Zelle availability claims are revalidated before sending', () => {
+  const { hasNegativeZelleAvailabilityClaim, zelleDenialStale, bodyNeedsPaymentRecheck } = require('../services/sms-amount-recheck');
+  let priorZelle;
+  beforeEach(() => { priorZelle = process.env.ZELLE_RECIPIENT; });
+  afterEach(() => { if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = priorZelle; });
+  const dbh = dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'inv-1', customer_id: 'c1', status: 'open' } });
+  const DENIALS = ["Zelle isn't available right now.", "We don't take Zelle.", 'Zelle is not available for this account right now, so use your pay link.'];
+
+  test('detected as denials (not offers); the scheduler prescreen sends them to the recheck', () => {
+    for (const d of DENIALS) {
+      expect({ d, neg: hasNegativeZelleAvailabilityClaim(d), aff: hasAffirmativeZelleMention(d), screen: bodyNeedsPaymentRecheck(d) }).toEqual({ d, neg: true, aff: false, screen: true });
+    }
+    expect(hasNegativeZelleAvailabilityClaim('You can Zelle us at pay@example.com')).toBe(false);
+    expect(hasNegativeZelleAvailabilityClaim('Thanks, see you Tuesday!')).toBe(false);
+  });
+
+  test('Zelle now visible for the open invoice => the denial is STALE (zelle_now_available)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
+    for (const d of DENIALS) {
+      await expect(outgoingAmountsStale({ customerId: 'c1', body: d, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
+    }
+  });
+
+  test('still unavailable => the denial stands: no recipient configured, no open invoice, or the invoice is ineligible', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false });
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null } });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+  });
+
+  test('an unverifiable check fails CLOSED (blocks the send)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('db down'));
+    await expect(zelleDenialStale({ customerId: 'c1', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
+    await expect(zelleDenialStale({ customerId: null, dbh })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
+  });
+});

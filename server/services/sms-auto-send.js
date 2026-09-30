@@ -892,6 +892,25 @@ async function dispatchClaimedSend({
         return outcome;
       }
     }
+    // Codex round-18 P2: a DENIAL ("Zelle isn't available right now") is a live claim too — if Zelle became
+    // available since the draft, the denial is stale. (Guarded: partial test doubles omit the helper.)
+    const zelleDenialRecheck = require('./sms-amount-recheck');
+    if (!hasAffirmativeZelleMention(reply) && typeof zelleDenialRecheck.hasNegativeZelleAvailabilityClaim === 'function'
+        && zelleDenialRecheck.hasNegativeZelleAvailabilityClaim(reply)) {
+      let denial;
+      try {
+        denial = await zelleDenialRecheck.zelleDenialStale({ customerId });
+      } catch (err) {
+        logger.warn(`[sms-auto-send] Zelle denial recheck threw (decision ${claim.decisionId}): ${err.message}`);
+        denial = { stale: true, reason: 'zelle_recheck_failed' };
+      }
+      if (denial.stale) {
+        logger.warn(`[sms-auto-send] Zelle denial stale (decision ${claim.decisionId}): ${denial.reason}`);
+        const outcome = await notSent(denial.reason);
+        await reopenParked('Auto-send held: Zelle availability changed since the draft — suggestion reopened.');
+        return outcome;
+      }
+    }
     // Amount-free payment-status recheck (independent-review P1, round 5,
     // finding 1): (3.7) above already refuses any DOLLAR-bearing reply
     // before the claim, but a payment-status/receipt claim with no dollar
