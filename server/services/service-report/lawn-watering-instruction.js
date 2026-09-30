@@ -254,16 +254,21 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
     return out;
   }
 
-  // Each hold is timed or until-dry. The effective hold end below is used for
-  // the conflict check only; only the timed end is ever printed.
-  const timedHolds = holds.filter((r) => r.hold_until !== 'dry');
+  // Each hold is timed or until-dry. An until-dry rule's EXPLICIT hold_hours
+  // is a recorded minimum, so it counts as a timed hold too (printed as a
+  // clock time beside the drying condition). The synthetic six-hour floor is
+  // for the conflict check only and is never printed.
   const dryHolds = holds.filter((r) => r.hold_until === 'dry');
-  const timedEnd = timedHolds.length
-    ? ceilToHour(new Date(at.getTime() + Math.max(...timedHolds.map((r) => finitePositive(r.hold_hours, 24))) * HOUR_MS))
-    : null;
   const dryHours = dryHolds.map((r) => Number(r.hold_hours)).filter((h) => Number.isFinite(h) && h > 0);
-  const dryEnd = dryHolds.length
-    ? new Date(at.getTime() + (dryHours.length ? Math.max(...dryHours) : DRY_HOLD_FLOOR_HOURS) * HOUR_MS)
+  const timedHours = [
+    ...holds.filter((r) => r.hold_until !== 'dry').map((r) => finitePositive(r.hold_hours, 24)),
+    ...dryHours,
+  ];
+  const timedEnd = timedHours.length
+    ? ceilToHour(new Date(at.getTime() + Math.max(...timedHours) * HOUR_MS))
+    : null;
+  const dryEnd = dryHolds.length && !dryHours.length
+    ? new Date(at.getTime() + DRY_HOLD_FLOOR_HOURS * HOUR_MS)
     : null;
   const effectiveHoldEnd = [timedEnd, dryEnd].filter(Boolean).sort((x, y) => y - x)[0] || null;
 

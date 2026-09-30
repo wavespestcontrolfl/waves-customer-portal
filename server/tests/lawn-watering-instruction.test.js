@@ -426,6 +426,19 @@ describe('hold until the treatment has dried (no invented duration)', () => {
     noDryFigure(r);
   });
 
+  test('an until-dry rule with a recorded minimum keeps both: the clock time and the drying', () => {
+    const r = build([{ ...DRY, hold_hours: 24 }]);
+    expect(r.state).toBe('hold');
+    expect(r.holdUntil).toBe('2026-10-01T19:00:00.000Z');
+    expect(r.lines[0]).toBe('Skip your turf watering until Thu 3 PM, and not before today’s treatment has dried.');
+    expect(r.holdUntilPlanLabel).toBe('Thu 3 PM and the spray has dried');
+    expect(r.expiresAt).toBeNull();
+    expectCleanCopy(r);
+    noDryFigure(r);
+    // With no recorded minimum, no clock time is invented.
+    expect(build([DRY]).holdUntil).toBeNull();
+  });
+
   test('a late-evening until-dry visit gets no clock expiry', () => {
     const r = buildWateringInstruction({ rules: [DRY], completedAt: '2026-10-01T03:50:00Z' }); // 11:50 PM ET
     expect(r.expiresAt).toBeNull();
