@@ -28,7 +28,7 @@ const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers')
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
-const { lockTriageCall } = require('../utils/triage-locks');
+const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
 const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
@@ -2165,7 +2165,7 @@ function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, pro
 // definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
 // the util; semantics unchanged.
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION, isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
-const { findStreetLevelHoldCard, isStreetLevelHoldVisit, refreshHoldFollowUpPlan } = require('./street-level-hold');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit, refreshHoldFollowUpPlan, hasOwedFollowUpForStreetLevelVisit } = require('./street-level-hold');
 const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
@@ -9417,13 +9417,18 @@ const CallRecordingProcessor = {
         // open cards under an already-cleared review_status.
         const dismissed = await db.transaction(async (trx) => {
           await lockTriageCall(trx, call.id);
-          return trx('triage_items')
+          const n = await trx('triage_items')
             .where({ call_log_id: call.id })
             .whereIn('status', ['open', 'in_progress'])
             // A street-level address hold's card belongs to its VISIT, not to the
             // transcript: it stays until the office confirms, corrects or cancels it.
             .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
             .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+          // The rejection write cleared review_status; a preserved hold card (or any
+          // other card still open) means the call is still under review, so recompute
+          // it (null when nothing is open, as the rejection left it).
+          await syncCallReviewStatus(trx, call.id, null);
+          return n;
         });
         if (dismissed > 0) logger.info(`[call-proc] Dismissed ${dismissed} stale triage card(s) for ${maskSid(callSid)} after transcript rejection`);
       } catch (trErr) {
@@ -16943,6 +16948,12 @@ const CallRecordingProcessor = {
                       .orWhere({ followup_source_service_id: primaryRow.id }))
                     .first('id');
                   if (existingChild) return null;
+                  // A street-level hold's owed follow-up (the confirm hook filed it, or
+                  // the office already handled it) is OWNED by the office: a reprocess
+                  // after the confirm must not also create the child. The card, in any
+                  // status, is the ownership marker (open: to be booked by hand;
+                  // resolved / dismissed: booked or declined).
+                  if (await hasOwedFollowUpForStreetLevelVisit(trx, primaryRow)) return null;
                   // A reused primary may have been RESCHEDULED since the call
                   // was first processed — callFollowUpPlan above was spaced
                   // from the extraction's date, so a retry that lost the child
@@ -18154,10 +18165,17 @@ const CallRecordingProcessor = {
                 if (!bridgeNeedsConfirmation.includes('street_level_address_review')) bridgeNeedsConfirmation.push('street_level_address_review');
                 if (v2StreetLevelHold) {
                   try {
+                    // Read the visit LIVE right before ringing: staff may have confirmed (or
+                    // cancelled) it since the booking committed, and a "confirm the address"
+                    // bell for a confirmed visit is noise. A lookup blip rings (fail open).
+                    if (!(await isStreetLevelHoldVisit(svc.id, db, { failClosed: false }))) {
+                      logger.info(`[call-proc] street-level confirm-address bell skipped for ${maskSid(callSid)}: visit ${svc.id} is no longer an unconfirmed hold`);
+                    } else {
                     const alert = buildStreetLevelHoldAlert({
                       hold: v2StreetLevelHold, visitId: svc.id, callSid, scheduledDate: svc.scheduled_date, windowStart: svc.window_start,
                     });
                     await require('./notification-service').notifyAdmin(alert.category, alert.title, alert.body, alert.opts);
+                    }
                   } catch (notifyErr) {
                     logger.warn(`[call-proc] street-level confirm-address admin bell failed for ${maskSid(callSid)}: ${notifyErr.message}`);
                   }

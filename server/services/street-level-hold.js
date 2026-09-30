@@ -28,9 +28,14 @@ function heldVisitSubquery(q, visitAlias = 'ss') {
     .whereRaw(`${visitAlias}.status NOT IN ('cancelled', 'skipped', 'rescheduled')`);
 }
 
-// True while the visit is an unconfirmed street-level hold. Fails CLOSED (true)
-// on a lookup error: a reminder must never go out on a blip.
-async function isStreetLevelHoldVisit(scheduledServiceId, conn = db) {
+// THE live predicate: true while the visit is an unconfirmed street-level hold
+// (card present, customer_confirmed false, not cancelled / skipped / rescheduled),
+// read fresh from the database. (findStreetLevelHoldCard below is the different
+// question — "was this ever a hold", status-agnostic.) Fails CLOSED (true) on a
+// lookup error by default, since a reminder must never go out on a blip; a caller
+// where the safe direction is the other way (the confirm-address bell) passes
+// { failClosed: false }.
+async function isStreetLevelHoldVisit(scheduledServiceId, conn = db, { failClosed = true } = {}) {
   if (!scheduledServiceId) return false;
   try {
     const row = await conn('scheduled_services as ss')
@@ -40,7 +45,7 @@ async function isStreetLevelHoldVisit(scheduledServiceId, conn = db) {
     return !!row;
   } catch (err) {
     logger.warn(`[street-level-hold] hold lookup failed for ${scheduledServiceId}: ${err.message}`);
-    return true;
+    return failClosed;
   }
 }
 
@@ -113,4 +118,18 @@ async function refreshHoldFollowUpPlan(conn, { callLogId, visitId, plan }) {
   return true;
 }
 
-module.exports = { heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
+// True when the confirm hook filed the owed-follow-up card for this visit's
+// street-level hold (any status). Only the hook's own card counts (its reason
+// marker), so other owed-follow-up cards on the call are untouched.
+async function hasOwedFollowUpForStreetLevelVisit(conn, visit) {
+  if (!visit?.id || !visit.source_call_log_id) return false;
+  const hold = await findStreetLevelHoldCard(conn, { callLogId: visit.source_call_log_id, visitId: visit.id });
+  if (!hold) return false;
+  const owed = await conn('triage_items')
+    .where({ call_log_id: visit.source_call_log_id, reason_code: 'attached_booking_followup_unbooked' })
+    .whereRaw("payload->>'skipped_reason' = 'street_level_address_confirmed_follow_up_unbooked'")
+    .first('id');
+  return !!owed;
+}
+
+module.exports = { hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
