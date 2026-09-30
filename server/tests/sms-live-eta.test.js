@@ -1811,6 +1811,8 @@ describe('round 20 P2s: bare-past arrival, en-route hyphen, destination identity
   test('bodyMentionsVisitStatus: broad status vocabulary, minus conditionals / corrections / windows', () => {
     const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
     for (const t of ['The technician arrived.', 'Your tech is en-route.', 'The crew is outside.', 'The tech has pulled up.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
+    // Round-30 audit P1: plural technician subjects (grouped visits) are status claims too.
+    for (const t of ['Your techs are on the way.', 'Your technicians have arrived.', 'The crews are heading over.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
     // Round-28 audit P1: arrive / coming / headed need a technician-type subject.
     for (const t of ['Your payment has arrived at our office.', 'We are coming up on your renewal.']) expect(bodyMentionsVisitStatus(t)).toBe(false);
     for (const t of ['He will be arriving shortly.', 'Your tech Sam is heading over.', 'The tech is on the way.']) expect(bodyMentionsVisitStatus(t)).toBe(true);

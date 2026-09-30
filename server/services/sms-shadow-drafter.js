@@ -1130,7 +1130,7 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // payment has arrived at our office" is not a visit claim. Up to two words may
 // sit between the subject and the verb ("the tech, Sam, has arrived" / "your tech
 // Sam just arrived").
-const COMPLETED_ARRIVAL_RE = /\b(?:(?:tech(?:nician)?|he|she|they|driver|crew|team)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+)?arrived|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+const COMPLETED_ARRIVAL_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+)?arrived|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
 // way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
@@ -1173,7 +1173,8 @@ function bodyClaimsCompletedArrival(text) {
 // arriving", "The tech is now en route"). EN_ROUTE_STATUS_RE (bodyMentionsArrival,
 // the en-route classifier etaClaimBlockReason uses) and VISIT_STATUS_RE (the
 // send-time default-deny vocabulary) are both built from this prefix.
-const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?|driver|crew|he|she|they)";
+// Plural subjects count too (round-30 audit P1): grouped visits send "Your techs are on the way".
+const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?s?|drivers?|crews?|he|she|they)";
 const TECH_STATUS_PREFIX = `${VISIT_STATUS_SUBJECT}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+`;
 const ROUTE_IDIOM = '(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way)';
 const EN_ROUTE_PREDICATES = [
