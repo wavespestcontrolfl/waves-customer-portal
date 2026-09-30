@@ -223,7 +223,9 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
     // windows you offered" (a re-service request came back quoting the
     // customer's own words about roaches and glue traps). The grounded LLM
     // draft in processInboundSms is the only draft; when it is unavailable
-    // the card is empty and a person writes the reply.
+    // this row carries no draft and a person writes the reply (/agent-draft
+    // may still show an older pending card on the thread, which the send
+    // check refuses as superseded).
     suggestedMessage: null,
     reasoningSummary: activeSchedulingThread
       ? 'existing customer text answers a recent service scheduling prompt; route as service scheduling, not estimate conversion.'
