@@ -1201,3 +1201,39 @@ describe('round 14 P1: status-only recheck requires an affirmative en-route clai
     expect(await run(body, rowsBy.completed)).toBe('eta_claim_no_longer_en_route');
   });
 });
+
+// Codex round 15 (PR #5334) — at the send seam.
+describe('round 15: corrections pass on done visits, coming/headed still recheck', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+      drafter[name].mockReset().mockImplementation(real[name]);
+    }
+  });
+  const snapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] };
+  const rowsBy = {
+    en_route: [{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }],
+    on_site: [{ id: 'svc-1', status: 'on_site', track_state: 'on_property' }],
+    completed: [{ id: 'svc-1', status: 'completed', track_state: 'complete' }],
+  };
+  const run = (outgoingBody, rows) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW, dbh: fakeDb(rows) });
+
+  test.each([
+    'He is no longer en route.', 'The tech is not on the way yet.', 'The tech has not arrived yet.', "The tech isn't here yet.",
+  ])('%p (accurate correction) passes on en_route, on_site and completed rows', async (body) => {
+    for (const rows of Object.values(rowsBy)) expect(await run(body, rows)).toBeNull();
+  });
+
+  test.each([
+    'The tech is on the way.', 'The tech is coming now.', 'The tech is headed your way.',
+  ])('%p still blocks once on site or done', async (body) => {
+    expect(await run(body, rowsBy.en_route)).toBeNull();
+    expect(await run(body, rowsBy.on_site)).toBe('eta_claim_no_longer_en_route');
+    expect(await run(body, rowsBy.completed)).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('"ETA is 20 or so" against a live 12 is unbound', async () => {
+    expect(await run('ETA is 20 or so.', rowsBy.en_route)).toBe('eta_claim_unbound');
+  });
+});

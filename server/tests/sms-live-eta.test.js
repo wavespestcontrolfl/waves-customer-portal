@@ -37,7 +37,7 @@ const {
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
-  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords, bodyHasTimedArrivalPhrase, bodyMentionsArrival,
+  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords, bodyHasTimedArrivalPhrase, bodyMentionsArrival, bodyClaimsCompletedArrival, findGroundedMinutesFigures,
 } = require('../services/sms-shadow-drafter');
 const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
 
@@ -1489,6 +1489,51 @@ describe('bodyMentionsArrival — affirmative en-route status only (round 14 P1)
     "I'll text you once he's on the way.", 'If the tech is en route we will let you know.',
   ])('%p is not', (body) => {
     expect(bodyMentionsArrival(body)).toBe(false);
+  });
+});
+
+// Codex round-15 (PR #5334): negated corrections, coming/headed, qualified bare
+// numbers, and equal live ETA entries.
+describe('round 15: negation, coming/headed, qualified ETAs, equal entries', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  test.each([
+    'He is no longer en route.', 'The tech is not on the way yet.', "The tech isn't coming today.",
+    'The tech is not headed your way.', "He hasn't left for your place.",
+  ])('%p is a correction, not an affirmative en-route claim', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(false);
+  });
+  test.each([
+    'The tech is coming now.', 'The tech is headed your way.', "He's heading over.", 'The technician is coming.',
+    'Not yet, but the tech is on the way.', 'The tech is on the way.',
+  ])('%p is an affirmative en-route claim', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(true);
+  });
+  test.each([
+    'The tech has not arrived yet.', "The tech isn't here yet.", "He hasn't pulled up.", 'The tech is not here.',
+  ])('%p is not a completed-arrival claim', (body) => {
+    expect(bodyClaimsCompletedArrival(body)).toBe(false);
+  });
+  test('"We are coming to help" is not a tech status claim', () => {
+    expect(bodyMentionsArrival('We are coming to help.')).toBe(false);
+  });
+
+  test.each(['ETA is 20 max', 'ETA is 20 or so', 'ETA 20 tops', 'His ETA is 20 give or take.'])('%p is a 20-minute claim', (body) => {
+    expect(findEtaMinutesClaims(body).map((c) => c.minutes)).toEqual([20]);
+    expect(findGroundedMinutesFigures(body).map((c) => c.minutes)).toEqual([20]);
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    expect(validateLiveEtaMinutes({ reply: body, factsBlock: facts(9) }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: body, factsBlock: facts(20) }).ok).toBe(true);
+  });
+  test.each(['You have 20 or so visits left.', 'ETA is 20 visits'])('%p stays a count, not an ETA', (body) => {
+    expect(findEtaMinutesClaims(body)).toEqual([]);
+  });
+
+  test('two LIVE ETA lines with the SAME figure still count as two stops — no number approved', () => {
+    const facts = 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away.', factsBlock: facts }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: 'The techs are on the way!', factsBlock: facts }).ok).toBe(true);
   });
 });
 

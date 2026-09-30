@@ -744,6 +744,11 @@ const DATE_SLASH_BEFORE_RE = /\d{1,4}\s*\/\s*$/;
 // A hyphenated word right after the figure ("2-hour", "3-bug") reads as its
 // unit/noun too, except "-ish" (a timed approximation).
 const WORD_AFTER_RE = /^(?:\s*|-(?!ish\b))[A-Za-z]+\b/i;
+// Qualifier words that belong to the ETA figure itself, not to a counted noun
+// (Codex round-15 P2): "ETA is 20 max", "20 or so", "20 tops", "about 20 at
+// most", "20 give or take", "20 approx". Only when the qualifier ends the
+// phrase, so "20 or so visits" still reads as a count.
+const ETA_QUALIFIER_AFTER_RE = /^\s*(?:max(?:imum)?|tops|or\s+so|or\s+less|or\s+more|or\s+thereabouts|at\s+(?:most|least)|give\s+or\s+take|approx(?:\.|imately)?|roughly|min(?:imum)?)(?=\s*(?:[.,;:!?)\u2014]|$|\s(?:away|out|from)\b))/i;
 function classifyBareEtaNumber(str, index, length) {
   const before = str.slice(Math.max(0, index - 15), index);
   const after = str.slice(index + length, index + length + 24);
@@ -761,6 +766,7 @@ function classifyBareEtaNumber(str, index, length) {
   // A count with a non-time noun directly after it ("3 bugs", "2 visits",
   // "4 traps", "12 months", "30 days") — any other word sitting right after
   // the number reads as its unit/noun, so it is never a bare arrival figure.
+  if (ETA_QUALIFIER_AFTER_RE.test(after)) return 'claim';
   if (WORD_AFTER_RE.test(after)) return 'excluded';
   return 'claim';
 }
@@ -988,8 +994,25 @@ function bodyHasUnconvertedNumberWord(text) {
 // door", "pulled up" state the tech IS on site — a different fact from "on
 // the way". "Will arrive"/"arriving"/"hasn't arrived" are not matched.
 const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|at\s+(?:your|the)\s+(?:house|home|place|property|door))|pulled\s+up)\b/i;
+// A negator governing a status phrase within the SAME clause (Codex pre-push
+// P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
+// way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
+// affirmative claims, and must not be blocked when the visit is done. Clause =
+// text since the last sentence/clause break (. , ; : ! ? — or "but"/"and").
+const NEGATOR_RE = /\b(?:not|no\s+longer|never|nobody|none|\w+n't)\b/i;
+const CLAUSE_BREAK_RE = /[.,;:!?\n\u2014\u2013]|\b(?:but|and|however|though)\b/gi;
+function isNegatedInClause(str, index) {
+  const before = str.slice(Math.max(0, index - 80), index);
+  let last = 0;
+  for (const m of before.matchAll(CLAUSE_BREAK_RE)) last = m.index + m[0].length;
+  return NEGATOR_RE.test(before.slice(last));
+}
 function bodyClaimsCompletedArrival(text) {
-  return COMPLETED_ARRIVAL_RE.test(String(text || ''));
+  const str = String(text || '');
+  for (const m of str.matchAll(new RegExp(COMPLETED_ARRIVAL_RE.source, 'gi'))) {
+    if (!isNegatedInClause(str, m.index)) return true;
+  }
+  return false;
 }
 // Does the body AFFIRMATIVELY say the tech is on the way? (Codex pre-push P1,
 // round 14, PR #5334.) The send-time freshness check treats such a body as an
@@ -1004,13 +1027,14 @@ function bodyClaimsCompletedArrival(text) {
 //   - a conditional ("I'll text you once he's on the way", "when the tech
 //     is en route"), or
 //   - part of a scheduling window (isWindowQuantity).
-const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
+const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|(?:head(?:ing|ed)|coming)\s+(?:over|your\s+way|to\s+you|to\s+your\s+\w+)|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:coming|headed|heading)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
 const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
 function bodyMentionsArrival(text) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(EN_ROUTE_STATUS_RE.source, EN_ROUTE_STATUS_RE.flags))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (CONDITIONAL_BEFORE_RE.test(before)) continue;
+    if (isNegatedInClause(str, m.index)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
     return true;
   }
@@ -1349,7 +1373,8 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
   }
   // Every LIVE ETA line, not only the first (audit P1): a customer with two
   // distinct live stops has two figures, and a reply about either is grounded.
-  const factsMinutes = new Set([...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10)));
+  const factsLineMinutes = [...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10));
+  const factsMinutes = new Set(factsLineMinutes);
   // Structural default-deny (Codex round-7 P2): once the facts actually
   // carry a LIVE ETA to check a claim against, stop relying on
   // findEtaMinutesClaims's trigger-word list — union in
@@ -1390,7 +1415,10 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
   // Two distinct live ETAs (two techs en route at once): prose can't be
   // bound to the right visit deterministically, so no minutes figure may
   // go out at all (Codex r3) — rare, and failing closed costs one revision.
-  if (factsMinutes.size > 1) {
+  // Count LIVE ETA lines, not distinct values (Codex round-15 P2): two stops
+  // with the same figure are still two entries, which send-time binding
+  // rejects as ambiguous — so the number must never be approved here.
+  if (factsLineMinutes.length > 1) {
     return { ok: false, violations: ['more than one tech is en route, so a minutes-away figure cannot be tied to the right visit — say the techs are on the way and share the tracking link instead of stating minutes'] };
   }
   const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => !factsMinutes.has(m)))];
