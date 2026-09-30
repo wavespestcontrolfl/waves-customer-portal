@@ -743,6 +743,14 @@ postgres('Email commitments on PostgreSQL', () => {
     await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
   });
 
+  test('resolveEmailCustomerLink: an unthreaded send naming the customer only in Cc or Bcc still resolves (Codex #5422 r6)', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const base = { id: randomUUID(), gmail_thread_id: null, to_address: null, cc_address: '', bcc_address: '' };
+    await expect(resolveEmailCustomerLink(mockPg, { ...base, bcc_address: 'customer@example.invalid' })).resolves.toBe(customerId);
+    await expect(resolveEmailCustomerLink(mockPg, { ...base, to_address: '', cc_address: 'Synthetic <customer@example.invalid>' })).resolves.toBe(customerId);
+    await expect(resolveEmailCustomerLink(mockPg, base)).resolves.toBeNull();
+  });
+
   test('resolveEmailCustomerLink: two recipients matching two different customers resolves to nobody (never guesses)', async () => {
     const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
     const otherId = randomUUID();

@@ -86,7 +86,8 @@ async function threadSendReachesCustomer(conn, row, customerId) {
 }
 
 async function resolveEmailCustomerLink(conn, row) {
-  if (!row?.gmail_thread_id && !row?.to_address) return null;
+  // A send may name its customer only in Cc or Bcc (an empty To).
+  if (!row?.gmail_thread_id && !row?.to_address && !row?.cc_address && !row?.bcc_address) return null;
   // Cc/Bcc never captured (a row synced before capture existed, or a caller
   // that did not select them): who else the send reached is unknown, so it
   // never links to a customer. A captured "no Cc/Bcc" is '', not NULL.
