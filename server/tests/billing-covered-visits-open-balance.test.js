@@ -512,15 +512,15 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
 
   test('a date moved INTO coverage in the same save blocks (the proposed, not the stored, date)', async () => {
     // Stored OUTSIDE the term window; the save proposes a date INSIDE it —
-    // _effectiveScheduledDate is how admin-schedule.js's update-details
-    // handler threads updates.scheduled_date through (Codex requirement 3).
+    // _proposed is how admin-schedule.js's update-details handler
+    // threads the save's coverage columns through (Codex requirement 3).
     const v1 = visit({ scheduled_date: '2027-01-10' });
     const conn = fixture({ visits: [v1] });
     const storedOnly = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
     expect(storedOnly.has('v1')).toBe(false);
     const covered = await findBillingCoveredVisits(
       conn,
-      [{ ...v1, _effectiveScheduledDate: '2026-03-15' }],
+      [{ ...v1, _proposed: { scheduled_date: '2026-03-15' } }],
       { liveInvoice: true },
     );
     expect(covered.get('v1')).toMatch(/card-confirmation page/);
@@ -528,8 +528,8 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
 
   test('a same-day start time moved EARLIER in the same save takes the sold slot (the proposed, not the stored, start)', async () => {
     // One sold slot, two same-day visits: v2 (09:00) stored ahead of v1
-    // (10:00). The save moves v1 to 08:00 — _effectiveWindowStart threads
-    // updates.window_start through, so v1 competes at its final position.
+    // (10:00). The save moves v1 to 08:00 — _proposed carries
+    // updates.window_start, so v1 competes at its final position.
     const v1 = visit({ id: 'v1', scheduled_date: '2026-03-15', window_start: '10:00:00' });
     const v2 = visit({ id: 'v2', scheduled_date: '2026-03-15', window_start: '09:00:00' });
     const conn = fixture({ visits: [v2, v1] });
@@ -537,7 +537,7 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     expect(storedOnly.has('v1')).toBe(false);
     const covered = await findBillingCoveredVisits(
       conn,
-      [{ ...v1, _effectiveWindowStart: '08:00:00' }],
+      [{ ...v1, _proposed: { window_start: '08:00:00' } }],
       { liveInvoice: true },
     );
     expect(covered.get('v1')).toMatch(/card-confirmation page/);
@@ -551,10 +551,34 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     const conn = fixture({ visits: [v2] });
     const covered = await findBillingCoveredVisits(
       conn,
-      [{ ...v1, _effectiveScheduledDate: '2026-03-15' }],
+      [{ ...v1, _proposed: { scheduled_date: '2026-03-15' } }],
       { liveInvoice: true },
     );
     expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a service change INTO the covered family in the same save blocks (the proposed, not the stored, service)', async () => {
+    const v1 = visit({ service_type: 'Lawn Care' });
+    const conn = fixture({ visits: [v1] });
+    const storedOnly = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(storedOnly.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _proposed: { service_type: 'Quarterly Pest Control Service' } }],
+      { liveInvoice: true },
+    );
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a service change OUT of the covered family in the same save does not block', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _proposed: { service_type: 'Lawn Care' } }],
+      { liveInvoice: true },
+    );
+    expect(covered.has('v1')).toBe(false);
   });
 
   test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {

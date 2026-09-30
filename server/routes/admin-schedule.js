@@ -13552,27 +13552,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // straight off this SAME locked row — never a second query of its
         // own — so every column coverageRowsForTerm's matching needs rides
         // along here too, each column-guarded like the ones above.
-        for (const col of ['customer_id', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot',
-          'status', 'is_recurring', 'recurring_pattern', 'recurring_parent_id', 'property_id', 'is_callback', 'prepaid_method', 'window_start']) {
+        for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
           if (priceGuardCols[col] && !priceGuardSelect.includes(col)) priceGuardSelect.push(col);
         }
         const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
         const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
         if (priceActuallyChanging) {
           // The secure-prepay coverage rail inside findBillingCoveredVisits
-          // (liveInvoice) matches against this visit's POST-SAVE date — this
-          // same save can move scheduled_date in the same request, and the
-          // row above is read pre-write (Codex requirement 3, "the final
-          // date"). Threading the proposed date lets that rail evaluate
-          // coverage as it will actually stand once this save commits.
-          if (priceGuardRow && updates.scheduled_date !== undefined) {
-            priceGuardRow._effectiveScheduledDate = updates.scheduled_date;
-          }
-          // Same for the start time: coverage slots are ordered scheduled_date,
-          // window_start, id, so a same-day start-time change moves the visit
-          // ahead of (or behind) another one competing for a sold slot.
-          if (priceGuardRow && updates.window_start !== undefined) {
-            priceGuardRow._effectiveWindowStart = updates.window_start;
+          // (liveInvoice) must judge this visit as it will stand once this
+          // save commits — the row above is read pre-write, and the same
+          // save can move its date or start time (slot order), change its
+          // service (coverage family) or move it to another property
+          // (renewal scope). Every coverage-relevant column this save posts
+          // is overlaid on the locked row (_proposed), never one column at a
+          // time: pre-push audits found the date, then the start time, then
+          // the service identity missing from narrower overlays.
+          if (priceGuardRow) {
+            const proposed = {};
+            for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
+              if (updates[col] !== undefined) proposed[col] = updates[col];
+            }
+            if (addressPlan) proposed.property_id = addressPlan.propertyId;
+            priceGuardRow._proposed = proposed;
           }
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
@@ -13623,9 +13624,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // priceGuardSelect above — read once here, off this SAME locked
           // sibling row, rather than a second query inside
           // findBillingCoveredVisits.
-          for (const col of ['customer_id', 'service_type', 'service_id', 'service_key_snapshot', 'status',
-            'is_recurring', 'recurring_pattern', 'recurring_parent_id', 'property_id', 'is_callback',
-            'prepaid_method', 'source_estimate_id', 'window_start']) {
+          for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
             if (sibGuardCols[col] && !sibSelect.includes(col)) sibSelect.push(col);
           }
           const convSiblings = await trx('scheduled_services')
@@ -17763,6 +17762,14 @@ async function memberBillingInvoiceRows(conn, ids) {
 // customer_id (a rare bare `{ id }` fallback when the row itself wasn't
 // found) is simply skipped here — every other check in this function still
 // covers it.
+// Every scheduled_services column coverageRowsForTerm's predicates read
+// (window, slot order, service family, callback, term ownership, renewal
+// scope). The update-details price guard selects these on its locked row
+// and overlays whichever this save posts (_proposed).
+const SECURE_PREPAY_COVERAGE_COLUMNS = ['customer_id', 'scheduled_date', 'window_start', 'service_type',
+  'service_id', 'service_key_snapshot', 'status', 'is_recurring', 'recurring_pattern', 'recurring_parent_id',
+  'property_id', 'is_callback', 'prepaid_method', 'source_estimate_id', 'annual_prepay_term_id'];
+
 async function securePendingPrepayCoverageReasons(conn, visits) {
   const marks = new Map();
   if (!visits.length) return marks;
@@ -17807,15 +17814,14 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
     const customerId = customerIdFor(v);
     const terms = customerId ? termsByCustomer.get(String(customerId)) : null;
     if (!terms || terms.length === 0) continue;
-    // Overlaid with the proposed date when this save is moving it (Codex
-    // requirement 3, "the final date"): the guard runs on the PRE-save row,
-    // and a visit moved INTO a pending term's window in the SAME save must
-    // block exactly as one already inside it does — coverageRowsForTerm's
+    // Overlaid with the save's proposed coverage columns (_proposed — the
+    // final date, start time, service, property; Codex requirement 3): the
+    // guard runs on the PRE-save row, and a visit moved INTO a pending
+    // term's coverage in the SAME save must block exactly as one already
+    // inside it does — coverageRowsForTerm's
     // extraCandidateRows applies the same window (and, for a renewal
     // successor, scope) test a fresh DB read of the written date would.
-    const effectiveDate = v._effectiveScheduledDate !== undefined ? v._effectiveScheduledDate : v.scheduled_date;
-    const candidateRow = { ...v, scheduled_date: effectiveDate };
-    if (v._effectiveWindowStart !== undefined) candidateRow.window_start = v._effectiveWindowStart;
+    const candidateRow = { ...v, ...(v._proposed || {}) };
     for (const term of terms) {
       const covered = await coverageRowsForTerm(term, conn, { extraCandidateRows: [candidateRow] });
       if (covered.some((row) => String(row.id) === String(v.id))) {
