@@ -16,6 +16,17 @@ const {
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
+// Read at call time; tolerant of a test double for feature-gates that predates
+// this reader (undefined = off).
+const bookPreferredTimeLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.bookPreferredTimeLive === 'function' && gates.bookPreferredTimeLive() === true;
+};
+const {
+  validatePreferredTimeRequest,
+  recordPreferredTimeRequest,
+  hasRecentPreferredTimeRequest,
+} = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
@@ -923,6 +934,10 @@ router.get('/config', async (req, res, next) => {
       multi_service: isEnabled('multiServiceBooking'),
       // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
       van_scene: isEnabled('vanScene'),
+      // "Can't find a time?" block + preferred day/time request form
+      // (GATE_BOOK_PREFERRED_TIME) — fail-closed dark-ship flag; the POST
+      // route also answers 404 while off.
+      preferred_time: bookPreferredTimeLive(),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -6457,6 +6472,19 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     if (phoneDigits.length < 10) return res.status(400).json({ error: 'valid phone required' });
     const ten = phoneDigits.slice(-10);
 
+    // A visitor who filed a "can't find a time" request asked the office to
+    // reach out — never stage an abandoned-booking recovery row (an automated
+    // text/email) for the same phone afterwards. Gate-off: untouched.
+    if (bookPreferredTimeLive()) {
+      try {
+        if (await hasRecentPreferredTimeRequest(db, ten)) return accepted('preferred_time_request');
+      } catch (ptErr) {
+        // Fail closed: a lookup error must not risk an automated send.
+        logger.warn(`[booking:capture-intent] preferred-time check failed — skipping capture: ${ptErr.message}`);
+        return accepted('lookup_failed');
+      }
+    }
+
     const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
     const sessionId = str(b.session_id, 80);
@@ -6731,6 +6759,58 @@ router.get('/embed-snippet', (req, res) => {
   });
 </script>`;
   res.json({ source, url: iframeSrc, snippet });
+});
+
+// Per-IP limiters for the preferred-time request (an internal lead + one
+// admin bell per new phone). Generous for a real visitor, tight against bulk
+// office-inbox spam. Same shape as capture-intent's.
+const preferredTimeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+const preferredTimeHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' },
+});
+
+// POST /api/booking/preferred-time — the /book "Can't find a time?" form
+// (GATE_BOOK_PREFERRED_TIME, dark). Files ONE internal lead the office answers
+// by hand and rings the admin bell; it sends NOTHING to the customer (no SMS,
+// no email) and retires any open abandoned-booking intent for the phone so the
+// recovery worker can't text them either. Gate off = the generic 404 before
+// the limiter. Proof-of-funnel: the same IP-bound token /availability mints
+// for capture-intent (the funnel always fetches availability first).
+router.post('/preferred-time', (req, res, next) => {
+  if (!bookPreferredTimeLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}, preferredTimeLimiter, preferredTimeHourlyLimiter, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const parsed = validatePreferredTimeRequest(b);
+    // Honeypot: pretend success, store nothing.
+    if (parsed.honeypot) return res.json({ ok: true });
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
+      return res.status(400).json({ error: 'session_expired' });
+    }
+    const serviceKey = normalizeBookingServiceKey(b.service_id)
+      || normalizeBookingServiceKey(b.service_type)
+      || null;
+    const serviceLabel = canonicalBookingServiceLabel(b.service_id)
+      || canonicalBookingServiceLabel(b.service_type)
+      || null;
+    await recordPreferredTimeRequest(db, parsed.value, { serviceLabel, serviceKey });
+    return res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[booking:preferred-time] failed: ${err.message}`);
+    return res.status(500).json({ error: 'We could not save that. Please text us instead.' });
+  }
 });
 
 // GET /api/booking/sources — aggregate by source (for admin dashboard / intelligence bar)

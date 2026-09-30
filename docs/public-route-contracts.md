@@ -875,6 +875,23 @@ suppression writes are best effort: the abandoned-booking recovery worker
 re-checks at send time (SMS and email) and skips, marking suppressed, any intent
 whose draft is so linked — a lookup error skips that tick — so a failed
 suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
+`/book` "Can't find a time?" request (owner 2026-09-29, dark behind
+`GATE_BOOK_PREFERRED_TIME`, strict opt-in read at call time via
+`bookPreferredTimeLive()`; `GET /api/booking/config` reports it as
+`preferred_time`): `POST /api/booking/preferred-time` answers the generic 404
+while the gate is off (before its limiter). On: the same IP-bound funnel token
+`/availability` mints for capture-intent is required (`400 session_expired`
+otherwise), a hidden honeypot field answers success and stores nothing, and
+two per-IP limiters apply (5/min, 15/hour). A valid request files ONE internal
+lead (`lead_type = 'book_preferred_time'`, status `new`, the preferred days /
+time of day / note as plain English in `transcript_summary` and structured in
+`extracted_data`) that the office answers by hand and rings one `new_lead`
+admin bell; a repeat from the same phone inside 24h refreshes that lead (no
+second row or bell). It sends NOTHING to the customer — no SMS, no email — and
+retires every open abandoned-booking intent for the same phone or session, and
+capture-intent skips a phone that filed a request in the last day, so the
+recovery worker cannot text them either. Success is a constant
+`{"ok": true}`.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`

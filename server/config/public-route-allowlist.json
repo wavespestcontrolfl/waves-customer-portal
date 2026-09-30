@@ -644,7 +644,8 @@
         "GET /api/booking/status/:code",
         "POST /api/booking/capture-intent",
         "POST /api/booking/confirm",
-        "POST /api/booking/find-slots"
+        "POST /api/booking/find-slots",
+        "POST /api/booking/preferred-time"
       ]
     },
     {

@@ -9,6 +9,7 @@ import { COLORS, FONTS } from '../theme-brand';
 import { fireGlassConfetti, useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import SchedulePicker from '../components/booking/SchedulePicker';
+import CantFindTimeBlock from '../components/booking/CantFindTimeBlock';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../utils/api';
@@ -182,6 +183,14 @@ export default function PublicBookingPage() {
   // renders only when /booking/config affirms; the server also refuses
   // composite service keys while the gate is off.
   const [multiServiceEnabled, setMultiServiceEnabled] = useState(false);
+  // "Can't find a time?" block + preferred-time form (GATE_BOOK_PREFERRED_TIME)
+  // — fail-closed: renders only when /booking/config affirms.
+  const [preferredTimeEnabled, setPreferredTimeEnabled] = useState(false);
+  // True once a preferred-time request was filed: stop staging the
+  // abandoned-booking capture for this visit (the office is following up).
+  const preferredSubmittedRef = useRef(false);
+  // The base availability fetch came back with no times at all.
+  const [noTimesOffered, setNoTimesOffered] = useState(false);
   const [gatePhone, setGatePhone] = useState('');
   const [gateCode, setGateCode] = useState('');
   const [gateStep, setGateStep] = useState('phone');
@@ -201,6 +210,7 @@ export default function PublicBookingPage() {
         if (cancelled) return;
         setCustomersOnly(cfg?.customers_only === true);
         setVanScene(cfg?.van_scene === true);
+        setPreferredTimeEnabled(cfg?.preferred_time === true);
         const multiOn = cfg?.multi_service === true;
         setMultiServiceEnabled(multiOn);
         // Kill-switch fail-closed for deep/recovery links: a composite
@@ -371,6 +381,7 @@ export default function PublicBookingPage() {
     const seq = addressLookupSeqRef.current;
     setLoading(true);
     setError('');
+    setNoTimesOffered(false);
     try {
       // The unit has one authority: the dedicated `unit` parameter. Google
       // formatted text can retain the originally selected subpremise after
@@ -426,6 +437,7 @@ export default function PublicBookingPage() {
       }
       if ((!data.slots || data.slots.length === 0) && (!data.days || data.days.length === 0)) {
         setError('No times available in the next 2 weeks. Call (941) 297-5749 and we\'ll get you on the schedule.');
+        setNoTimesOffered(true);
       }
     } catch (err) {
       // A stale request's failure must not clear the current request's slots
@@ -549,6 +561,7 @@ export default function PublicBookingPage() {
   const captureBookingIntent = () => {
     const digits = phoneDigits(contact.phone);
     if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current) return;
+    if (preferredSubmittedRef.current) return;
     try {
       fetch(`${API_BASE}/booking/capture-intent`, {
         method: 'POST',
@@ -1221,6 +1234,19 @@ export default function PublicBookingPage() {
                     Show all open times
                   </button>
                 ) : null}
+                {preferredTimeEnabled && (
+                  <CantFindTimeBlock
+                    zeroTimes={noTimesOffered}
+                    contact={contact}
+                    address={address}
+                    serviceId={service.id}
+                    serviceLabel={quotedServiceLabel || service.label}
+                    getCaptureToken={() => captureTokenRef.current}
+                    sessionId={sessionIdRef.current}
+                    apiBase={API_BASE}
+                    onSubmitted={() => { preferredSubmittedRef.current = true; }}
+                  />
+                )}
               </>
             )}
 
