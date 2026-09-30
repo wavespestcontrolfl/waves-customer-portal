@@ -18,6 +18,7 @@ const {
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
+const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -1549,9 +1550,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     : null;
 
   const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
+  // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): a
+  // self-serve caller resolves the request's zone FROM COORDINATES (not city
+  // text — 'North Venice' / 'Northport' are not in service_zones.cities) so
+  // find-time can lift the detour cap on that zone's route day. Null (and no
+  // db call at all) with the gate off; the phone agent (selfServeNotice
+  // false) never asks.
+  const zoneSlug = selfServeNotice ? await resolveZoneRouteDaySlug({ lat, lng, conn: db }) : null;
   const result = await findAvailableSlots({
     lat,
     lng,
+    zoneSlug,
     durationMinutes: duration,
     serviceTypes: normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]),
     // This booking's own expected-minutes credit — the same number the
