@@ -612,7 +612,36 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     const v1 = visit();
     const conn = fixture({ visits: [v1], terms: [term({ status: 'active' })] });
     const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
-    expect(covered.get('v1')).toMatch(/just paid at the old price/);
+    expect(covered.get('v1')).toMatch(/annual prepay paid at the old price/);
+  });
+
+  test('every visit in one save is judged in ONE pass: a sibling entering coverage takes the slot the edited visit vacates (Codex r2 P1 on #5387)', async () => {
+    // One sold slot. v1 (edited) is stored in-window and moves OUT; v2 is
+    // stored as Lawn Care and is propagated INTO the covered service.
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-03-15' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-06-15', service_type: 'Lawn Care' });
+    const conn = fixture({ visits: [v1, v2] });
+    const covered = await findBillingCoveredVisits(conn, [
+      { ...v1, _proposed: { scheduled_date: '2027-06-01' } },
+      { ...v2, _proposed: { service_type: 'Quarterly Pest Control Service' } },
+    ], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+    expect(covered.get('v2')).toMatch(/card-confirmation page/);
+  });
+
+  test('an ACTIVE term that already has linked visits is judged on its stored window (no first-activation slide)', async () => {
+    pinToday('2026-03-01T17:00:00Z');
+    const v1 = visit({ scheduled_date: '2027-01-10' });
+    const conn = fixture({ visits: [v1], terms: [term({ status: 'active', has_linked_visit: true })] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('an ACTIVE term with old links still blocks an unstamped visit in its current coverage (repaid dispute; Codex r2 P1 on #5387)', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1], terms: [term({ status: 'active', has_linked_visit: true })] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/annual prepay paid at the old price/);
   });
 
   test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {

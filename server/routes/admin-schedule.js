@@ -1055,6 +1055,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   prefNoWeekends: prefNoWeekendsSnapshot,
 }) {
   const dates = new Set();
+  dates.cadenceTargetById = new Map();
   if (!isRecurring) return dates;
   const before = await conn('scheduled_services').where({ id }).first();
   if (!before) return dates;
@@ -1122,6 +1123,13 @@ async function planUpdateDetailsRecurrenceDates(conn, {
       });
       for (const d of childTargets.values()) dates.add(d);
       for (const d of boosterTargets.values()) dates.add(d);
+      // Per-visit destination of the cadence rewrite, for the re-price
+      // guard's secure-prepay coverage overlay (Codex r2 P1 on #5387): the
+      // guards run BEFORE the rewrite re-dates these rows, so a repriced
+      // sibling must be judged at the date the rewrite will give it. A
+      // mismatch with the in-trx rewrite already aborts the save
+      // (guardRecurrenceDestination), so this peek is authoritative.
+      for (const [visitId, d] of [...childTargets, ...boosterTargets]) dates.cadenceTargetById.set(String(visitId), d);
     }
   }
 
@@ -4678,6 +4686,7 @@ const ANCHORED_PRICE_AUTHORITY_KEYS = new Set(['estimated_price', 'primary_line_
 // pass only re-checks. Returns the locked sibling targets.
 async function lockAndGuardFollowingSiblings(conn, {
   editedId, editedRow = null, parentId, fromDateStr, serviceChanged, priceChanged, proposedFields = null,
+  proposedDateById = null,
 }) {
   // C (owner ruling 2026-09-28): this loop re-derives and writes a sibling's
   // estimated_price below whenever billingRelevant, so each affected sibling
@@ -4764,8 +4773,15 @@ async function lockAndGuardFollowingSiblings(conn, {
   for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
     if (proposedFields && proposedFields[col] !== undefined) overlay[col] = proposedFields[col];
   }
-  const withProposed = (row) => (Object.keys(overlay).length === 0 ? row
-    : { ...row, _proposed: { ...overlay, ...(row._proposed || {}) } });
+  // Plus each sibling's cadence-rewrite destination (proposedDateById): the
+  // rewrite runs after these guards and can move a repriced sibling INTO a
+  // pending term's window (Codex r2 P1 on #5387).
+  const withProposed = (row) => {
+    const cadenceDate = proposedDateById?.get(String(row.id));
+    const rowOverlay = cadenceDate ? { ...overlay, scheduled_date: cadenceDate } : overlay;
+    return Object.keys(rowOverlay).length === 0 ? row
+      : { ...row, _proposed: { ...rowOverlay, ...(row._proposed || {}) } };
+  };
   const guardRows = (editedRow ? [editedRow, ...targets] : targets).map(withProposed);
   let invoiceLinkColumn = false;
   if (billingRelevant && guardRows.length > 0) {
@@ -4819,9 +4835,11 @@ async function lockAndGuardFollowingSiblings(conn, {
 
 async function propagatePriceServiceToFollowingSiblings(conn, {
   editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+  proposedDateById = null,
 }) {
   const targets = await lockAndGuardFollowingSiblings(conn, {
     editedId, editedRow, parentId, fromDateStr, serviceChanged, priceChanged, proposedFields: fields,
+    proposedDateById,
   });
   const billingRelevant = priceChanged || serviceChanged;
   // Missing-table compat probe, ONCE — inside the loop the add-on reads run
@@ -13709,6 +13727,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               serviceChanged: earlyGroups.serviceChanged,
               priceChanged: earlyGroups.priceChanged,
               proposedFields: earlyGroups.fields,
+              proposedDateById: plannedRecurrenceDates.cadenceTargetById,
             });
           }
         }
@@ -14631,6 +14650,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // refuses a 'following' save exactly like a sibling's would
             // (Codex #3505 r8 P1).
             editedRow: priceServiceBeforeRow ? { ...priceServiceBeforeRow, _proposed: saveCoverageProposed() } : priceServiceBeforeRow,
+            proposedDateById: plannedRecurrenceDates.cadenceTargetById,
             parentId: scopeParentId,
             // A parent edit covers the WHOLE remaining plan — a date
             // threshold there would race the cadence rewrite that re-dates
@@ -17813,28 +17833,25 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
   }
 
   const NO_MONEY_HELD = ['void', 'refunded', 'canceled', 'cancelled'];
+  // Every term that has money held at the price it was minted with and
+  // whose canonical coverage decides which visits it stamps: payment_pending
+  // (the /secure pick, not yet paid) AND active / renewal_pending (Codex r2
+  // P1 on #5387). An active term's canonical set is exactly what its next
+  // refreshTermSnapshot stamps — completed visits stay in the sold count
+  // (COVERAGE_EXCLUDED_STATUSES only drops cancelled/no-show/skipped/
+  // rescheduled) — so a visit in it is committed money whether or not it is
+  // stamped yet: mid-activation (the webhook commits active BEFORE linking),
+  // a refresh that threw after the flip, or a repaid dispute whose OLD
+  // links survive while the current set moved on. has_linked_visit decides
+  // only whether the first-activation window slide is projected.
   const pendingTerms = await conn('annual_prepay_terms as t')
     .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
     .whereIn('t.customer_id', customerIds)
-    // payment_pending, OR active but never activated — no visit ever linked
-    // (ensureCoverageRowsForTerm's own alreadyActivated test). The webhook
-    // commits pending→active in its own transaction BEFORE coverage rows are
-    // linked and stamped, and a refresh that throws after the flip leaves
-    // the term active-and-unlinked until the daily sweep; the direct
-    // annual_prepay_term_id rail sees neither (Fable review P2 on #5387).
-    // A term with ANY linked row is fully owned by that direct rail.
-    .where(function () {
-      this.where('t.status', 'payment_pending')
-        .orWhere(function () {
-          this.whereIn('t.status', ['active', 'renewal_pending'])
-            .whereNotExists(function () {
-              this.select(conn.raw('1')).from('scheduled_services as ss_link')
-                .whereRaw('ss_link.annual_prepay_term_id = t.id');
-            });
-        });
-    })
+    .whereIn('t.status', ['payment_pending', 'active', 'renewal_pending'])
     .whereNotIn('inv.status', NO_MONEY_HELD)
-    .select('t.*');
+    .select('t.*', conn.raw(
+      'EXISTS (SELECT 1 FROM scheduled_services ss_link WHERE ss_link.annual_prepay_term_id = t.id) AS has_linked_visit',
+    ));
   if (pendingTerms.length === 0) return marks;
 
   const termsByCustomer = new Map();
@@ -17845,32 +17862,35 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
   }
 
   const { coverageRowsForTerm } = require('../services/annual-prepay-renewals');
-  for (const v of visits) {
-    if (marks.has(v.id)) continue;
-    const customerId = customerIdFor(v);
-    const terms = customerId ? termsByCustomer.get(String(customerId)) : null;
-    if (!terms || terms.length === 0) continue;
-    // Overlaid with the save's proposed coverage columns (_proposed — the
-    // final date, start time, service, property; Codex requirement 3): the
-    // guard runs on the PRE-save row, and a visit moved INTO a pending
-    // term's coverage in the SAME save must block exactly as one already
-    // inside it does — coverageRowsForTerm's
-    // extraCandidateRows applies the same window (and, for a renewal
-    // successor, scope) test a fresh DB read of the written date would.
-    const candidateRow = { ...v, ...(v._proposed || {}) };
+  const today = etDateString();
+  const reasonFor = (term) => (term.status === 'payment_pending'
+    ? 'on an annual prepay invoice from the card-confirmation page that is still open at the old price'
+    : 'covered by an annual prepay paid at the old price');
+  // ONE coverage pass per customer and term with EVERY visit this save
+  // touches overlaid together (Codex r2 P1 on #5387): judged one at a time,
+  // each check saw the other rows' stale DB state — an edited visit moving
+  // OUT of the window kept its stale in-window row consuming the sold slot
+  // while a sibling propagated INTO the covered service went unmarked.
+  // Each row carries its post-save state (_proposed: date incl. the cadence
+  // rewrite, start time, service, property); coverageRowsForTerm's
+  // extraCandidateRows swaps them in by id and re-applies the window,
+  // scope and slot order.
+  for (const [customerId, terms] of termsByCustomer) {
+    const customerVisits = visits.filter((v) => String(customerIdFor(v)) === customerId);
+    if (customerVisits.length === 0) continue;
+    const candidateRows = customerVisits.map((v) => ({ ...v, ...(v._proposed || {}) }));
     for (const term of terms) {
       const covered = await coverageRowsForTerm(term, conn, {
-        extraCandidateRows: [candidateRow],
-        // Judged on the window a payment TODAY would give it (the late-
-        // payment slide; Fable review P2 on #5387). A later payment slides
-        // further — a known limit, stated on the PR.
-        projectFirstActivationOn: etDateString(),
+        extraCandidateRows: candidateRows,
+        // A never-activated term is judged on the window a payment TODAY
+        // would give it (the first-activation slide; Fable review P2 on
+        // #5387). A later payment slides further — a known limit, stated on
+        // the PR. An activated term keeps its stored window.
+        projectFirstActivationOn: term.has_linked_visit ? null : today,
       });
-      if (covered.some((row) => String(row.id) === String(v.id))) {
-        marks.set(v.id, term.status === 'payment_pending'
-          ? 'on an annual prepay invoice from the card-confirmation page that is still open at the old price'
-          : 'covered by an annual prepay that was just paid at the old price and is still being applied to its visits');
-        break;
+      const coveredIds = new Set(covered.map((row) => String(row.id)));
+      for (const v of customerVisits) {
+        if (!marks.has(v.id) && coveredIds.has(String(v.id))) marks.set(v.id, reasonFor(term));
       }
     }
   }
