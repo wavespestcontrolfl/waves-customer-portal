@@ -99,6 +99,18 @@ const STORED = {
   annual_prepay_term_id: null, prepaid_amount: null, is_callback: false,
 };
 
+// Two shapes share `.raw()` here: plain embedded column expressions (e.g.
+// `to_char(...)`, used synchronously as a query-builder argument — 'raw' is
+// enough) and the secure-prepay coverage rail's per-customer advisory
+// try-lock (securePendingPrepayCoverageReasons, admin-schedule.js), which is
+// AWAITED and needs the real `{ rows: [{ locked: … }] }` shape
+// advisoryTryLockAcquired reads. None of these tests are about that rail, so
+// it always answers "acquired".
+function rawImpl(sql) {
+  if (/AS locked/.test(String(sql))) return Promise.resolve({ rows: [{ locked: true }] });
+  return 'raw';
+}
+
 let invoiceFixture = [];
 // Every jest.fn() created for the scheduled_services table's `forUpdate` —
 // used to prove the mint lock is acquired before the FIRST row lock this
@@ -174,12 +186,12 @@ beforeEach(() => {
   acquireScheduledInvoiceMintLock.mockClear();
   mockReleaseCombined.mockClear();
   db.mockImplementation((table) => chain(table));
-  db.raw = jest.fn(() => 'raw');
+  db.raw = jest.fn(rawImpl);
   db.fn = { now: jest.fn(() => 'now()') };
   db.schema = { hasTable: jest.fn(async () => true), hasColumn: jest.fn(async () => true) };
   db.transaction = jest.fn(async (fn) => {
     const trx = jest.fn((table) => db(table));
-    trx.raw = jest.fn(() => 'raw');
+    trx.raw = jest.fn(rawImpl);
     trx.fn = { now: jest.fn(() => 'now()') };
     trx.schema = db.schema;
     trx.commit = jest.fn();

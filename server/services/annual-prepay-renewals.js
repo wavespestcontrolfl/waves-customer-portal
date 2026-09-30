@@ -825,7 +825,7 @@ async function coverageCandidateRows(term, conn, termStart, termEnd) {
   return scope ? rows.filter((row) => rowInRenewalScope(row, scope)) : rows;
 }
 
-async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
+async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false, extraCandidateRows = null } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const termStart = dateOnly(term?.term_start);
@@ -836,6 +836,41 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
 
   const rows = await coverageCandidateRows(term, conn, termStart, termEnd);
 
+  // extraCandidateRows: a read-only caller's OWN in-memory rows, substituted
+  // for this term's ordinary DB-backed candidates by id — the re-price
+  // guard's "would paying this payment_pending term's invoice today stamp
+  // THIS visit" question (admin-schedule.js's findBillingCoveredVisits),
+  // where the visit's date is about to move in the SAME save the guard is
+  // deciding and the live scheduled_services row still carries the OLD one.
+  // Put through the exact SAME two gates the DB query already applies —
+  // the term's own date window, and (for a renewal successor only) its
+  // resolved coverage scope — so an override can only ever stand in for a
+  // row the ordinary query would have returned once its date is actually
+  // written, never see more than that.
+  let candidateRows = rows;
+  if (extraCandidateRows && extraCandidateRows.length > 0) {
+    let overrides = extraCandidateRows.filter((row) => {
+      const d = dateOnly(row?.scheduled_date);
+      return !!(d && d >= termStart && d <= termEnd);
+    });
+    if (overrides.length > 0 && term?.renewed_from_term_id) {
+      const scope = await successorCoverageScope(term, conn);
+      overrides = !scope ? overrides : (!scope.resolved ? [] : overrides.filter((row) => rowInRenewalScope(row, scope)));
+    }
+    // Substituted IN PLACE, never reordered to the end (the slicing below,
+    // when more rows match than are sold, keeps the EARLIEST — coverageCandidateRows'
+    // own date-ordered query — so moving an unmoved row's position would
+    // change who gets kept for no reason the caller asked for). Only a row
+    // with no DB-fetched counterpart at all (the "moved INTO the window"
+    // case: the ordinary query's date filter excluded it) is appended.
+    const overrideById = new Map(overrides.map((row) => [String(row.id), row]));
+    const dbIds = new Set(rows.map((row) => String(row.id)));
+    candidateRows = [
+      ...rows.map((row) => overrideById.get(String(row.id)) || row),
+      ...overrides.filter((row) => !dbIds.has(String(row.id))),
+    ];
+  }
+
   // A callback / re-service is never a SOLD visit: it is free by definition
   // and completion never bills it, but its service_type reads as the covered
   // family ("Pest Control Re-Service" → the same coverage key as "Quarterly
@@ -843,7 +878,7 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // pushed the customer's real fourth quarterly visit out of coverage
   // (2026-09-07, prod). Excluded up front, in every mode — a callback must
   // neither consume a sold slot nor count toward the seeder's existing rows.
-  const nonCallbackRows = rows.filter((row) => !isCallbackRow(row));
+  const nonCallbackRows = candidateRows.filter((row) => !isCallbackRow(row));
   const filtered = includeTerminalStatuses
     ? nonCallbackRows
     : nonCallbackRows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));

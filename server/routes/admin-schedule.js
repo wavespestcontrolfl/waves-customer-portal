@@ -13547,9 +13547,27 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
         if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
         if (priceGuardCols.source_estimate_id) priceGuardSelect.push('source_estimate_id');
+        // The secure-prepay coverage rail inside findBillingCoveredVisits
+        // (securePendingPrepayCoverageReasons) reads its canonical predicates
+        // straight off this SAME locked row — never a second query of its
+        // own — so every column coverageRowsForTerm's matching needs rides
+        // along here too, each column-guarded like the ones above.
+        for (const col of ['customer_id', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot',
+          'status', 'is_recurring', 'recurring_pattern', 'recurring_parent_id', 'property_id', 'is_callback', 'prepaid_method']) {
+          if (priceGuardCols[col] && !priceGuardSelect.includes(col)) priceGuardSelect.push(col);
+        }
         const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
         const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
         if (priceActuallyChanging) {
+          // The secure-prepay coverage rail inside findBillingCoveredVisits
+          // (liveInvoice) matches against this visit's POST-SAVE date — this
+          // same save can move scheduled_date in the same request, and the
+          // row above is read pre-write (Codex requirement 3, "the final
+          // date"). Threading the proposed date lets that rail evaluate
+          // coverage as it will actually stand once this save commits.
+          if (priceGuardRow && updates.scheduled_date !== undefined) {
+            priceGuardRow._effectiveScheduledDate = updates.scheduled_date;
+          }
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
             : await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id);
@@ -13595,6 +13613,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           const sibSelect = ['id', 'scheduled_date'];
           if (sibGuardCols.annual_prepay_term_id) sibSelect.push('annual_prepay_term_id');
           if (sibGuardCols.prepaid_amount) sibSelect.push('prepaid_amount');
+          // Same secure-prepay coverage columns as the primary price guard's
+          // priceGuardSelect above — read once here, off this SAME locked
+          // sibling row, rather than a second query inside
+          // findBillingCoveredVisits.
+          for (const col of ['customer_id', 'service_type', 'service_id', 'service_key_snapshot', 'status',
+            'is_recurring', 'recurring_pattern', 'recurring_parent_id', 'property_id', 'is_callback',
+            'prepaid_method', 'source_estimate_id']) {
+            if (sibGuardCols[col] && !sibSelect.includes(col)) sibSelect.push(col);
+          }
           const convSiblings = await trx('scheduled_services')
             .where({ recurring_parent_id: req.params.id })
             .whereIn('status', ['pending', 'confirmed'])
@@ -17689,6 +17716,110 @@ async function memberBillingInvoiceRows(conn, ids) {
     })));
 }
 
+// The /secure card-confirmation page's annual-prepay PICK, not yet paid
+// (owner ruling 2026-09-29, "rebuild on the canonical coverage rule"). A
+// payment_pending term stamps nothing on scheduled_services until its
+// invoice is paid (annual-prepay-renewals.js seeds/stamps coverage only on
+// activation — deliberately, per its own comments), so the direct
+// annual_prepay_term_id / prepaid_amount checks in findBillingCoveredVisits
+// never see it: a visit that term would stamp on payment could otherwise be
+// repriced right out from under a card-confirmation page the customer
+// already committed to. Coverage here is decided with the EXACT SAME
+// canonical predicates payment activation itself uses
+// (annual-prepay-renewals.js's coverageRowsForTerm: customer, service type,
+// callback exclusion, term ownership, term window, sold visit count/slots)
+// — never a hand-built date/service-type window of this route's own (a
+// first attempt hand-rolled that window and Codex kept finding edges).
+//
+// Lock order (Codex requirement 4): selectSecurePlan
+// (secure-appointment-plans.js) takes the SAME per-customer advisory
+// namespace (admin-customers.js's ANNUAL_PREPAY_LOCK_NS, via
+// lockAndAssertNoAnnualPrepayOverlap) as the FIRST lock of its own mint
+// transaction, before any row lock — topUpRecurringSeriesLocked's try-lock
+// just below documents that every other acquirer of this namespace holds it
+// the same way. This guard already holds the edited visit's row (and,
+// upstream in the update-details save, the customer row FOR UPDATE — Codex
+// #4716) by the time it runs, so a BLOCKING acquire of this namespace here
+// could open a new ABBA cycle against selectSecurePlan's own
+// visit-then-customer order; pg_try_advisory_xact_lock (never blocks)
+// cannot. A miss means a prepay_annual selection is minting for this exact
+// customer right now — refuse with a retry rather than let this save's price
+// write and that mint's price read race each other (VISIT_BUSY_RETRY, same
+// contract as the sibling mint-lock refusals elsewhere in this file).
+// Deliberately reads ONLY what the caller's own `visits` rows already carry
+// (no fresh scheduled_services query of its own): the three callers
+// (the price guard's priceGuardRow, the series-conversion convSiblings, the
+// 'following' propagation's guardRows) each already lock and select this
+// row once, widened below to carry what coverageRowsForTerm's predicates
+// need — never a second, differently-shaped read that every one of this
+// file's many bespoke test fakes for 'scheduled_services' would also have
+// to grow a chain for. A visit whose caller happens not to carry
+// customer_id (a rare bare `{ id }` fallback when the row itself wasn't
+// found) is simply skipped here — every other check in this function still
+// covers it.
+async function securePendingPrepayCoverageReasons(conn, visits) {
+  const marks = new Map();
+  if (!visits.length) return marks;
+  const customerIdFor = (v) => v.customer_id || null;
+  const customerIds = [...new Set(visits.map(customerIdFor).filter(Boolean).map(String))].sort();
+  if (customerIds.length === 0) return marks;
+  if (!(await conn.schema.hasTable('annual_prepay_terms'))) return marks;
+
+  const busy = () => Object.assign(
+    new Error('An annual prepay selection for this customer is being confirmed right now — try the price change again in a moment.'),
+    { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+  );
+
+  const { ANNUAL_PREPAY_LOCK_NS } = require('./admin-customers')._private;
+  for (const customerId of customerIds) {
+    const lockResult = await conn.raw(
+      'SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked',
+      [ANNUAL_PREPAY_LOCK_NS, String(customerId)],
+    );
+    if (!advisoryTryLockAcquired(lockResult)) throw busy();
+  }
+
+  const NO_MONEY_HELD = ['void', 'refunded', 'canceled', 'cancelled'];
+  const pendingTerms = await conn('annual_prepay_terms as t')
+    .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
+    .whereIn('t.customer_id', customerIds)
+    .where('t.status', 'payment_pending')
+    .whereNotIn('inv.status', NO_MONEY_HELD)
+    .select('t.*');
+  if (pendingTerms.length === 0) return marks;
+
+  const termsByCustomer = new Map();
+  for (const term of pendingTerms) {
+    const key = String(term.customer_id);
+    if (!termsByCustomer.has(key)) termsByCustomer.set(key, []);
+    termsByCustomer.get(key).push(term);
+  }
+
+  const { coverageRowsForTerm } = require('../services/annual-prepay-renewals');
+  for (const v of visits) {
+    if (marks.has(v.id)) continue;
+    const customerId = customerIdFor(v);
+    const terms = customerId ? termsByCustomer.get(String(customerId)) : null;
+    if (!terms || terms.length === 0) continue;
+    // Overlaid with the proposed date when this save is moving it (Codex
+    // requirement 3, "the final date"): the guard runs on the PRE-save row,
+    // and a visit moved INTO a pending term's window in the SAME save must
+    // block exactly as one already inside it does — coverageRowsForTerm's
+    // extraCandidateRows applies the same window (and, for a renewal
+    // successor, scope) test a fresh DB read of the written date would.
+    const effectiveDate = v._effectiveScheduledDate !== undefined ? v._effectiveScheduledDate : v.scheduled_date;
+    const candidateRow = { ...v, scheduled_date: effectiveDate };
+    for (const term of terms) {
+      const covered = await coverageRowsForTerm(term, conn, { extraCandidateRows: [candidateRow] });
+      if (covered.some((row) => String(row.id) === String(v.id))) {
+        marks.set(v.id, 'on an annual prepay invoice from the card-confirmation page that is still open at the old price');
+        break;
+      }
+    }
+  }
+  return marks;
+}
+
 async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
@@ -17867,6 +17998,16 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
         mark(inv.scheduled_service_id, inv._openReason || 'attached to an invoice that is still open at the old price');
       }
     }
+  }
+  // The /secure card-confirmation page's unpaid annual-prepay pick — its own
+  // rail, not part of the invoice-status ladder above (see
+  // securePendingPrepayCoverageReasons' own header comment). liveInvoice-only
+  // (Codex requirement 5): the plan trim and the series-cancel fee rails
+  // never called findBillingCoveredVisits with it and must stay
+  // byte-identical.
+  if (liveInvoice) {
+    const securePending = await securePendingPrepayCoverageReasons(conn, visits);
+    for (const [id, reason] of securePending) mark(id, reason);
   }
   return covered;
 }

@@ -1270,7 +1270,7 @@ async function selectSecurePlan({ token, plan }) {
       const liveVisit = await trx('scheduled_services')
         .where({ id: visit.id })
         .forUpdate()
-        .first('id', 'status', 'scheduled_date');
+        .first('id', 'status', 'scheduled_date', 'estimated_price');
       // Also lock the CUSTOMER row (Codex #2980 r4): resolveForInvoice
       // falls back to customers.payer_id, which staff can change from
       // Customer360 — a default-payer attach must serialize behind this
@@ -1302,6 +1302,20 @@ async function selectSecurePlan({ token, plan }) {
         || !LIVE_VISIT_STATUSES.includes(liveVisit.status)
         || (liveDate && liveDate < today)) {
         throw fail('no_longer_needed');
+      }
+      // Live-price re-check UNDER the advisory lock (owner ruling 2026-09-29,
+      // secure-prepay coverage rail, Codex requirement 4): admin-schedule.js's
+      // re-price guard now takes this SAME per-customer ANNUAL_PREPAY_LOCK_NS
+      // namespace (non-blocking) before it allows a price change to commit,
+      // so a save that started first has either already committed by the
+      // time this transaction reaches the lock above, or is waiting behind
+      // it. coverageAmount/amount were derived from context.perVisit, read
+      // OUTSIDE this transaction (buildSecurePlanContext, well before the
+      // lock) — re-checked here against the row this lock chain just froze,
+      // so a price that moved in that window is never minted into a prepay
+      // invoice. The customer retries and re-quotes at the current price.
+      if (cents(liveVisit.estimated_price) !== cents(context.perVisit)) {
+        throw fail('plan_unavailable');
       }
       let payerNow = null;
       try {
