@@ -575,6 +575,9 @@ function ownSignatureSettleIt(top) {
   if (sig.confirmableBy === 'photo') return { kind: 'photo', text: sig.signatureText };
   if (sig.confirmableBy === 'field_test' && sig.fieldTests[0]) return fieldTestBlock(sig.fieldTests[0]);
   if (sig.confirmableBy === 'lab') return { kind: 'technician', text: LAB_CONFIRM_TEXT };
+  // Technician-found but arborist-confirmed (Thielaviopsis, shot-hole borers):
+  // name the arborist, never a routine visit (Codex #5433 r3).
+  if (sig.confirmableBy === 'technician' && top.entry.service?.referral === 'arborist') return { kind: 'technician', text: REFERRAL_TEMPLATES.arborist };
   if (sig.confirmableBy === 'technician' || sig.confirmableBy === 'field_test') return { kind: 'technician', text: TECHNICIAN_CONFIRM_TEXT };
   return { kind: 'technician', text: TECHNICIAN_CONFIRM_TEXT };
 }

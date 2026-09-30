@@ -1860,13 +1860,13 @@
         "slug": "powderpost-beetle",
         "difference": "Powderpost beetles work dry, seasoned wood and leave fine powder; shot-hole borers and ambrosia beetles attack living or stressed trees and leave frass columns.",
         "next_photo": "A wide shot showing whether the holes are in a living tree or in finished wood, then a close-up of the frass.",
-        "photo_can_confirm": true
+        "photo_can_confirm": false
       },
       {
         "slug": "drywood-termite-frass",
         "difference": "Drywood termite pellets are tiny, uniform and pile up under wood; borer frass pushes out of bark as thin, toothpick-like columns or a sugary crust.",
         "next_photo": "A close-up of the frass shape and where it is coming from, tree bark or structural wood.",
-        "photo_can_confirm": true
+        "photo_can_confirm": false
       }
     ],
     "size": "tiny",

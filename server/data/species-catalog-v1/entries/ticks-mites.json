@@ -782,7 +782,7 @@
       "what_it_means": "Tufted, bushy growth with short, bunched leaves on bermudagrass can suggest bermudagrass mite, a microscopic pest that distorts new growth. A photo cannot confirm it; a technician checks the tufts with a hand lens and weighs the season and turf stress.",
       "fact": "Bermudagrass mites are too small to see unaided, so the swollen, tufted growth they cause is usually what gets noticed first."
     },
-    "tech_notes": "Check swollen tufts with a hand lens for mites between the leaf sheaths. Mowing low (scalping) in late spring is reported to help; confirm against the source before advising. Consider turf stress, fertility and irrigation.",
+    "tech_notes": "Check swollen tufts with a hand lens for mites between the leaf sheaths. Mowing low (scalping) in late spring is reported to help; confirm against the source before advising. Consider turf stress and irrigation; any fertilizer timing follows the property's local ordinance.",
     "links": {
       "site_page": null,
       "guides": []
@@ -838,7 +838,7 @@
       ],
       "site_factors": [],
       "outcome": "manageable",
-      "recovery_note": "Scalping and good fertility help bermudagrass outgrow mild damage; recovery follows new growth."
+      "recovery_note": "Scalping in late spring and steady watering help bermudagrass outgrow mild damage; recovery follows new growth."
     }
   }
 ]

@@ -1185,7 +1185,7 @@
       "what_it_means": "Irregular yellow patches that keep declining despite watering can suggest ground pearls, but drought, chinch bugs, nematodes and root diseases look similar. A photo cannot confirm it; a technician digs into the root zone and checks the roots.",
       "fact": "Ground pearls live in the soil as small pearl-like cysts on grass roots, and UF/IFAS does not recommend an insecticide for them; easing turf stress is the main approach."
     },
-    "tech_notes": "Dig into the root zone at the margin of a declining patch and look for pearl-like cysts on the roots; rule out drought, chinch bug, nematodes and root disease. UF/IFAS recommends no chemical control; monitor and support the turf with sound irrigation and fertility practices.",
+    "tech_notes": "Dig into the root zone at the margin of a declining patch and look for pearl-like cysts on the roots; rule out drought, chinch bug, nematodes and root disease. UF/IFAS recommends no chemical control; monitor and reduce turf stress with sound irrigation and mowing; any fertilizer timing follows the property's local ordinance.",
     "links": {
       "site_page": null,
       "guides": []
@@ -1245,7 +1245,7 @@
       ],
       "site_factors": [],
       "outcome": "manageable",
-      "recovery_note": "There is no reliable chemical control; turf recovers slowly as watering and fertility reduce stress."
+      "recovery_note": "There is no reliable chemical control; turf recovers slowly as watering and mowing reduce stress."
     }
   }
 ]

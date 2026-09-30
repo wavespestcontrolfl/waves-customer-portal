@@ -2356,6 +2356,11 @@ describe('plant-engine — real catalog', () => {
     expect(referral && referral.kind).toBe('arborist');
   });
 
+  test.each(['thielaviopsis-trunk-rot', 'shot-hole-borers-ambrosia-beetles'])('%s settle step names the arborist, not a routine visit (Codex #5433 r3)', (slug) => {
+    const entry = catalog.getEntry(slug);
+    expect(engine.settleItFor([{ entry, sig: engine.signatureFor(entry), confidence: 0.9 }], 'plant').text).toMatch(/arborist/);
+  });
+
   test('sting nematode is not a pest possibility', () => {
     expect(engine.signatureFor(catalog.getEntry('sting-nematode')).isPestPossibility).toBe(false);
   });
