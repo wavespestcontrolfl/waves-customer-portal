@@ -670,6 +670,8 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       // snapshot draftShadowReply persists — this lane shares the same
       // agentDecisionSendBlockReason choke point at send time.
       liveEtaSnapshot: drafter.buildLiveEtaSnapshot(context),
+      // Technician first name(s) independent of live entries (round-42 P2).
+      techNames: drafter.techNamesFromContext(context),
     };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
@@ -789,6 +791,7 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
           : {}),
         // Independent review finding (PR #5334) — see generateLlmReviewDraft's comment above.
         ...(llmDraft?.liveEtaSnapshot ? { live_eta_snapshot: llmDraft.liveEtaSnapshot } : {}),
+        ...(Array.isArray(llmDraft?.techNames) && llmDraft.techNames.length ? { tech_names: llmDraft.techNames } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),

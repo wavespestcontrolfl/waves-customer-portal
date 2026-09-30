@@ -3849,6 +3849,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta });
     // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
     const liveEtaSnapshot = buildLiveEtaSnapshot(context);
+    // The technician first name(s) this draft may have used as a status subject ("Sam is on
+    // the way"), persisted INDEPENDENTLY of live entries (round-42 P2): a decision with no
+    // live snapshot still needs them so the send-time no-snapshot check can read name-subjected
+    // status wording. Names only.
+    const techNames = techNamesFromContext(context);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -4040,6 +4045,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // draft's LIVE ETA fact was drawn from — dispatchClaimedSend
           // rechecks them are still en_route immediately before sending.
           liveEtaSnapshot,
+          techNames,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -4080,6 +4086,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               factsGeneratedAt,
               // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
               liveEtaSnapshot,
+              techNames,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -4133,6 +4140,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             factsGeneratedAt,
             // Independent review finding (PR #5334) — see the maybeAutoSend call's comment above.
             liveEtaSnapshot,
+            techNames,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }

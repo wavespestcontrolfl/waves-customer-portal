@@ -1943,6 +1943,23 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-42 P2 (PR #5334): the draft's technician names are persisted with the decision
+// (input_snapshot.tech_names) by every lane that persists live_eta_snapshot.
+describe('round 42 P2: tech_names plumbing (source pins)', () => {
+  const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
+  test('the drafter hands techNames to auto-send and to both publishSuggestion calls', () => {
+    const src = read('../services/sms-shadow-drafter.js');
+    expect(src).toContain('const techNames = techNamesFromContext(context);');
+    expect((src.match(/liveEtaSnapshot,\n\s+techNames,\n/g) || []).length).toBe(3);
+  });
+  test('publishSuggestion, claimAutoSend and the estimate lane persist tech_names only when non-empty', () => {
+    expect(read('../services/sms-suggest-mode.js')).toContain("{ tech_names: techNames }");
+    expect(read('../services/sms-auto-send.js')).toContain("{ tech_names: techNames }");
+    expect(read('../services/estimate-conversion-agent.js')).toContain("{ tech_names: llmDraft.techNames }");
+    expect(read('../services/estimate-conversion-agent.js')).toContain('techNames: drafter.techNamesFromContext(context)');
+  });
+});
+
 // Codex round-41 P2 (PR #5334): the tracker-remap GENERATION is part of the memo key and of the
 // persisted identity, so A->B->A invalidates earlier ETA facts although the device returns to A.
 describe('round 41 P2: mapping generation (bouncie_imei_changed_at) in the memo key and entry identity', () => {

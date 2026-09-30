@@ -236,6 +236,16 @@ function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
   return (!claims.length && unreadTimed) || unreadHours || unreadNumbers;
 }
 
+// Reasons that mean "the recheck COULD NOT READ the state" — infrastructure, not a verdict
+// about the message (Codex round-42 P2). ONE exported set that every wrapper and seam
+// consults (provider-boundary predicates, scheduler, Agent Review, auto-send): such a
+// failure is retryable / non-terminal, never a permanent "stale". 'eta_recheck_failed' is
+// the decision-row read / parse failure agent-decision-send-checks reports.
+const ETA_INFRASTRUCTURE_FAILURE_REASONS = Object.freeze(['eta_claim_recheck_failed', 'eta_recheck_failed']);
+function isEtaInfrastructureFailure(reason) {
+  return ETA_INFRASTRUCTURE_FAILURE_REASONS.includes(reason);
+}
+
 // A plural technician/team/"we" subject: plural nouns (techs, technicians, drivers,
 // crews), a team, or first-person plural ("we're", "we'll", "we are/will").
 const PLURAL_STATUS_SUBJECT_RE = /\b(?:tech(?:nician)?s|drivers|crews|teams?|we(?:'re|'ll|\s+(?:are|will|should)))\b/i;
@@ -284,9 +294,9 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames
   // the hour") keeps its exemption.
   const ungroundedStatus = !liveContext && realAnswersGateOn()
     && !require('./sms-followup-sla').replyPromisesFollowup(outgoingBody)
-    && Boolean(drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true })
-      || drafter.bodyMentionsArrival(outgoingBody)
-      || drafter.bodyMentionsVisitStatus(outgoingBody));
+    && Boolean(drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true, techNames })
+      || drafter.bodyMentionsArrival(outgoingBody, { techNames })
+      || drafter.bodyMentionsVisitStatus(outgoingBody, { techNames }));
   // Round-16 structural backstop: nothing above read a claim, yet a number sits
   // beside a time unit / arrival word — hold it to the status-claim checks.
   const unclassifiedClaim = liveContext && !classified && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unclassifiedSignalOnly: true });
@@ -380,13 +390,20 @@ function bindEtaClaim(claim, entries, freshness) {
  * through; the auto-send executor passes its in-memory claim copies
  * instead of round-tripping through JSON.
  */
-async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, now = new Date(), dbh = db }) {
+async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, techNames: persistedTechNames = [], now = new Date(), dbh = db }) {
   // Codex round-13 P2: any /track/ link that is not the canonical origin's exact
   // token path is refused outright, claim or not.
   if (scanTrackLinks(outgoingBody).violation) return 'eta_claim_link_untrusted';
   // This draft's recorded technician names ride as extra status subjects (persisted
   // in the snapshot: no extra DB read). Older snapshots carry none.
-  const techNames = sanitizeTechNames((liveEtaSnapshot?.entries || []).flatMap((e) => (Array.isArray(e?.technicianNames) ? e.technicianNames : [])));
+  // Two sources: the live entries' names AND the names persisted with the decision itself
+  // (input_snapshot.tech_names, round-42 P2) — the latter exist even when there is no live
+  // snapshot, so name-subjected status wording ("Sam is on the way") is classified on the
+  // no-snapshot path too. Older decisions without the field keep the entries-only behavior.
+  const techNames = sanitizeTechNames([
+    ...(Array.isArray(persistedTechNames) ? persistedTechNames : []),
+    ...(liveEtaSnapshot?.entries || []).flatMap((e) => (Array.isArray(e?.technicianNames) ? e.technicianNames : [])),
+  ]);
   const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0, techNames });
   const entries = usableSnapshotEntries(liveEtaSnapshot);
   // Round-20 structural rule: wording classification decides WHICH claim to
@@ -671,4 +688,4 @@ async function checkEntriesStillLive({ boundEntries: entriesIn, allowOnSite, req
   return null;
 }
 
-module.exports = { etaClaimBlockReason, ETA_FRESHNESS_WINDOW_MS };
+module.exports = { etaClaimBlockReason, ETA_FRESHNESS_WINDOW_MS, ETA_INFRASTRUCTURE_FAILURE_REASONS, isEtaInfrastructureFailure };

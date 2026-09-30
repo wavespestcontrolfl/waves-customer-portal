@@ -185,7 +185,11 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
     if (blockReason) {
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
-      await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+      // A recheck that could not READ the live state (round-42 P2) refuses this attempt but
+      // does NOT retire the card: nothing is known to be stale, so the reviewer can retry.
+      if (!require('../services/agent-decision-send-checks').blockReasonIsEtaInfrastructure(blockReason)) {
+        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+      }
       return null;
     }
     return decision;

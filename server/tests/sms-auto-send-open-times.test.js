@@ -223,3 +223,20 @@ describe('auto-send supplies the live-ETA provider-boundary check', () => {
     }
   });
 });
+
+// Codex round-42 P2 (PR #5334): the draft's technician first name(s) are persisted with the
+// decision itself (input_snapshot.tech_names), independent of live entries.
+describe('auto-send persists the draft\'s technician names with the claimed decision', () => {
+  const insertedSnapshot = () => {
+    const row = decisions.insert.mock.calls[0][0];
+    return typeof row.input_snapshot === 'string' ? JSON.parse(row.input_snapshot) : row.input_snapshot;
+  };
+  test('tech_names rides in input_snapshot (names only) and in the claim used for the send-time check', async () => {
+    await expect(attempt({ reply: 'Sounds good, thanks!', techNames: ['Sam'] })).resolves.toMatchObject({ sent: true });
+    expect(insertedSnapshot().tech_names).toEqual(['Sam']);
+  });
+  test('no names -> the field is absent (older-decision shape)', async () => {
+    await attempt({ reply: 'Sounds good, thanks!' });
+    expect('tech_names' in insertedSnapshot()).toBe(false);
+  });
+});

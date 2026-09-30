@@ -2109,3 +2109,55 @@ describe('status wording with no snapshot (GATE_SMS_REAL_ANSWERS on)', () => {
     expect(await noSnap('The tech is 9 minutes away.', false)).toBe('eta_claim_no_snapshot');
   });
 });
+
+// Codex round-42 P2 (PR #5334): technician names persisted with the decision itself.
+describe('persisted tech_names classify name-subjected status wording with no snapshot', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  let prior;
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); prior = process.env.GATE_SMS_REAL_ANSWERS; process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; });
+  const run = (body, techNames, gate = true) => {
+    if (!gate) delete process.env.GATE_SMS_REAL_ANSWERS;
+    return etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, techNames, now: NOW, dbh: fakeDb([]) });
+  };
+
+  test.each(['Sam is on the way.', 'Sam has arrived.', "Sam's en route.", 'Sam is running late.', 'Sam just got there.', 'Sam isn’t there yet, but is on the way.'])('%p with Sam persisted: fails closed (eta_claim_no_snapshot)', async (body) => {
+    expect(await run(body, ['Sam'])).toBe('eta_claim_no_snapshot');
+  });
+  test('older decisions without the field keep current behavior (the name is not a subject)', async () => {
+    expect(await run('Sam is on the way.', undefined)).toBeNull();
+    expect(await run('Sam is on the way.', [])).toBeNull();
+  });
+  test("another first name is not a status subject: \"Dana's order is on the way.\" is untouched", async () => {
+    expect(await run("Dana's order is on the way.", ['Sam'])).toBeNull();
+    expect(await run('Samuel is on the way.', ['Sam'])).toBeNull();
+  });
+  test('gate off: unchanged', async () => {
+    expect(await run('Sam is on the way.', ['Sam'], false)).toBeNull();
+  });
+  test('questions, negations and the SLA wording keep their exemptions', async () => {
+    expect(await run('Is Sam on the way?', ['Sam'])).toBeNull();
+    expect(await run("Sam isn't on the way yet.", ['Sam'])).toBeNull();
+    expect(await run('Sam should arrive within the hour.', ['Sam'])).toBeNull();
+  });
+  test('names persisted beside a snapshot union with the entries\' own names', async () => {
+    const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', technicianNames: ['Alex'] }] };
+    const rows = [{ id: 'svc-1', status: 'completed', track_state: 'completed', track_view_token: 'tok-1', track_token_expires_at: FUTURE }];
+    for (const name of ['Sam', 'Alex']) {
+      expect(await etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: `${name} is on the way.`, techNames: ['Sam'], now: NOW, dbh: fakeDb(rows) })).toBe('eta_claim_no_longer_en_route');
+    }
+  });
+  test('the retryable-reason set is exported from this module', () => {
+    const mod = require('../services/sms-eta-freshness');
+    expect(mod.isEtaInfrastructureFailure('eta_claim_recheck_failed')).toBe(true);
+    expect(mod.isEtaInfrastructureFailure('eta_claim_stale_facts')).toBe(false);
+  });
+  test('a real recheck query failure returns a reason in that set', async () => {
+    const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+    const reason = await etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: 'The technician is on the way.', now: NOW, dbh: () => { throw new Error('db down'); } });
+    expect(reason).toBe('eta_claim_recheck_failed');
+    expect(require('../services/sms-eta-freshness').isEtaInfrastructureFailure(reason)).toBe(true);
+  });
+});

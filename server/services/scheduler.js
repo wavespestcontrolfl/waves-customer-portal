@@ -4457,7 +4457,15 @@ function initScheduledJobs() {
             // same fail-closed block+retire path, no new mechanism.
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
             const priorStale = anchorStale || amountsStale || openTimesStale || slaStale;
-            const etaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
+            const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
+            // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
+            // retire the decision as stale here. The send proceeds to the provider-boundary
+            // check, which re-reads and, if still unreadable, refuses RETRYABLY onto the
+            // bounded retry rail — never sent unverified, never permanently stale.
+            const etaReason = require('./agent-decision-send-checks').isEtaInfrastructureFailure(rawEtaReason) ? null : rawEtaReason;
+            if (etaReason == null && rawEtaReason != null) {
+              logger.warn(`[scheduled-sms] ${msg.id} live ETA recheck unreadable (${rawEtaReason}); deferring to the provider-boundary check`);
+            }
             if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'

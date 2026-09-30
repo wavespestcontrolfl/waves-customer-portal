@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, liveEtaSnapshot = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null, liveEtaSnapshot = null, techNames = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -259,6 +259,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // Independent review finding (PR #5334): the same live-ETA
           // send-time snapshot publishSuggestion persists — see its comment.
           ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
+          ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
         }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
@@ -308,7 +309,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       // Independent review finding (PR #5334): carried in-memory so
       // dispatchClaimedSend's pre-send LIVE ETA recheck needs no round trip
       // through the row it just inserted.
-      liveEtaSnapshot, factsGeneratedAt,
+      liveEtaSnapshot, factsGeneratedAt, techNames,
     };
   });
 }
@@ -753,7 +754,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
       const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         laneFields.providerPreSendCheck,
-        etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, getBody: () => reply }),
+        etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, getBody: () => reply }),
       );
     })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an
@@ -858,6 +859,7 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
     const etaReason = await etaClaimBlockReason({
       liveEtaSnapshot: claim.liveEtaSnapshot,
       factsGeneratedAt: claim.factsGeneratedAt,
+      techNames: claim.techNames,
       outgoingBody: reply,
     });
     if (etaReason) {

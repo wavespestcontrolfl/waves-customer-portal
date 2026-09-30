@@ -16,7 +16,11 @@ jest.mock('../services/sms-followup-sla', () => ({
   followupPromiseBlockReason: jest.fn(() => null),
 }));
 jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
-jest.mock('../services/sms-eta-freshness', () => ({ etaClaimBlockReason: jest.fn(async () => null) }));
+jest.mock('../services/sms-eta-freshness', () => ({
+  etaClaimBlockReason: jest.fn(async () => null),
+  // The ONE shared infrastructure-failure set (round-42 P2) is consulted by the wrappers.
+  isEtaInfrastructureFailure: (reason) => jest.requireActual('../services/sms-eta-freshness').isEtaInfrastructureFailure(reason),
+}));
 jest.mock('../models/db', () => jest.fn());
 const db = require('../models/db');
 const drafter = require('../services/sms-shadow-drafter');
@@ -238,12 +242,71 @@ describe('etaSnapshotProviderPreSendCheck', () => {
     const check = etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', getBody: () => body });
     body = 'The tech is 9 minutes away.';
     await expect(check()).resolves.toEqual({ ok: true });
-    expect(etaClaimBlockReason).toHaveBeenCalledWith({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', outgoingBody: 'The tech is 9 minutes away.' });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', techNames: [], outgoingBody: 'The tech is 9 minutes away.' });
   });
   test('stale -> terminal refusal; a throwing recheck -> retryable', async () => {
     etaClaimBlockReason.mockResolvedValue('eta_claim_stale_facts');
     await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
     etaClaimBlockReason.mockRejectedValue(new Error('db down'));
     await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+});
+
+// Codex round-42 P2 (PR #5334): ONE shared set of infrastructure-failure reasons.
+describe('infrastructure failures are retryable at every wrapper, never permanently stale', () => {
+  const { ETA_INFRASTRUCTURE_FAILURE_REASONS, isEtaInfrastructureFailure } = jest.requireActual('../services/sms-eta-freshness');
+  const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
+
+  test('the exported set names both codes; verdicts about the message are not in it', () => {
+    expect([...ETA_INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(['eta_claim_recheck_failed', 'eta_recheck_failed']);
+    for (const verdict of ['eta_claim_stale_facts', 'eta_claim_no_longer_en_route', 'eta_claim_no_snapshot', 'eta_claim_superseded_fix', 'eta_claim_visit_not_today']) {
+      expect(isEtaInfrastructureFailure(verdict)).toBe(false);
+    }
+    expect(Object.isFrozen(ETA_INFRASTRUCTURE_FAILURE_REASONS)).toBe(true);
+  });
+
+  test.each(['eta_claim_recheck_failed', 'eta_recheck_failed'])('the provider-boundary predicate (row-reading variant) treats %p as RETRYABLE', async (reason) => {
+    db.mockImplementation(() => ({ where: () => ({ first: async () => ({ input_snapshot: {} }) }) }));
+    etaClaimBlockReason.mockResolvedValue(reason);
+    await expect(etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  test.each(['eta_claim_recheck_failed', 'eta_recheck_failed'])('the provider-boundary predicate (in-memory snapshot variant) treats %p as RETRYABLE', async (reason) => {
+    etaClaimBlockReason.mockResolvedValue(reason);
+    await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  test('a real verdict stays terminal in both variants', async () => {
+    db.mockImplementation(() => ({ where: () => ({ first: async () => ({ input_snapshot: {} }) }) }));
+    etaClaimBlockReason.mockResolvedValue('eta_claim_no_longer_en_route');
+    await expect(etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+    await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+  });
+
+  test('the immediate Agent Review seam can tell an unreadable recheck from a stale verdict', async () => {
+    etaClaimBlockReason.mockResolvedValue('eta_claim_recheck_failed');
+    const unreadable = await agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}) }), outgoingBody: 'The tech is on the way.' });
+    expect(unreadable).toBe('live ETA unsendable (eta_claim_recheck_failed)');
+    expect(blockReasonIsEtaInfrastructure(unreadable)).toBe(true);
+    expect(blockReasonIsEtaInfrastructure('live ETA unsendable (eta_claim_stale_facts)')).toBe(false);
+    expect(blockReasonIsEtaInfrastructure('amount no longer authorized (x)')).toBe(false);
+    expect(blockReasonIsEtaInfrastructure(null)).toBe(false);
+  });
+
+  test('the persisted tech_names ride into the shared check; older decisions send an empty list', async () => {
+    etaClaimBlockReason.mockResolvedValue(null);
+    await agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({ tech_names: ['Sam'] }) }), outgoingBody: 'x' });
+    expect(etaClaimBlockReason).toHaveBeenLastCalledWith(expect.objectContaining({ techNames: ['Sam'] }));
+    await agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}) }), outgoingBody: 'x' });
+    expect(etaClaimBlockReason).toHaveBeenLastCalledWith(expect.objectContaining({ techNames: [] }));
+  });
+
+  test('the scheduler defers an unreadable early recheck to the provider-boundary check (source pin)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(src).toContain("isEtaInfrastructureFailure(rawEtaReason) ? null : rawEtaReason");
+  });
+  test('the Agent Review route does not retire a card over an unreadable recheck (source pin)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-communications.js'), 'utf8');
+    expect(src).toContain('blockReasonIsEtaInfrastructure(blockReason)');
   });
 });

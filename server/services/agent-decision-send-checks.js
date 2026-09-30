@@ -74,12 +74,29 @@ async function amountsBlock({ decision, outgoingBody }) {
 // scheduler's queued-send path and the auto-send executor check (see
 // sms-eta-freshness.js): the visit is still customer-facing en_route AND
 // the draft's facts are still fresh. Fails closed on any missing evidence.
+// ONE consult point for "the recheck could not READ the state" (Codex round-42 P2): the set
+// lives in sms-eta-freshness (both its own 'eta_claim_recheck_failed' and this module's
+// 'eta_recheck_failed'). Lazy require: that module and this one reference each other's
+// callers, and tests replace it wholesale.
+function isEtaInfrastructureFailure(reason) {
+  return require('./sms-eta-freshness').isEtaInfrastructureFailure(reason);
+}
+// Does an agentDecisionSendBlockReason string ('live ETA unsendable (<reason>)') carry an
+// infrastructure failure rather than a verdict about the message?
+function blockReasonIsEtaInfrastructure(blockReason) {
+  const m = /^live ETA unsendable \(([a-z_]+)\)$/.exec(String(blockReason || ''));
+  return Boolean(m) && isEtaInfrastructureFailure(m[1]);
+}
+
 async function etaBlockReason({ decision, outgoingBody }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
   const { etaClaimBlockReason } = require('./sms-eta-freshness');
   return etaClaimBlockReason({
     liveEtaSnapshot: snapshot?.live_eta_snapshot || null,
     factsGeneratedAt: snapshot?.facts_generated_at || null,
+    // The draft's technician first name(s), persisted independently of live entries
+    // (round-42 P2); absent on older decisions, which keep the entries-only behavior.
+    techNames: Array.isArray(snapshot?.tech_names) ? snapshot.tech_names : [],
     outgoingBody,
   });
 }
@@ -118,7 +135,7 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     const reason = await scheduledEtaBlockReason({ decisionId, outgoingBody });
     if (reason == null) return { ok: true };
-    const retryable = reason === 'eta_recheck_failed';
+    const retryable = isEtaInfrastructureFailure(reason);
     return {
       ok: false,
       code: retryable ? 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY' : 'LIVE_ETA_STALE_AT_BOUNDARY',
@@ -131,19 +148,19 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
 // Snapshot-carrying variant for a caller that already holds the decision's live-ETA
 // snapshot in memory (the auto-send executor's claim): same check, same verdicts, no
 // extra row read.
-function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, getBody }) {
+function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, techNames = [], getBody }) {
   return async () => {
     const { etaClaimBlockReason } = require('./sms-eta-freshness');
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     let reason;
     try {
-      reason = await etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, outgoingBody });
+      reason = await etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, techNames, outgoingBody });
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LIVE ETA boundary recheck failed: ${err.message}; blocking send`);
       reason = 'eta_recheck_failed';
     }
     if (reason == null) return { ok: true };
-    const retryable = reason === 'eta_recheck_failed';
+    const retryable = isEtaInfrastructureFailure(reason);
     return {
       ok: false,
       code: retryable ? 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY' : 'LIVE_ETA_STALE_AT_BOUNDARY',
@@ -179,4 +196,4 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await etaBlock({ decision, outgoingBody }));
 }
 
-module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks };
+module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks };
