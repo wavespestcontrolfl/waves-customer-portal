@@ -266,32 +266,38 @@ const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s
 // Re-entry and aftercare wording without a number ("stay off until dry").
 const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\bstay\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
+// Checked in order; the first hit names the rejection. Active ingredients
+// (a common list plus the caller's catalog actives) are checked last.
+const WRITER_RULE_SCREENS = Object.freeze([
+  [UNIT_WORD_RE, 'amount'],
+  [FOOTAGE_RE, 'footage'],
+  [PERCENT_RE, 'percent'],
+  [RATE_RE, 'rate'],
+  [PER_VISIT_RE, 'per_visit'],
+  [COMPANY_NAME_RE, 'company_name'],
+  [SAFE_WORD_RE, 'safe_word'],
+  [CHEMICAL_RE, 'chemical'],
+  [OWNER_PHRASE_RE, 'owner_phrase'],
+  [REENTRY_RE, 'reentry'],
+  [TIMEFRAME_RE, 'timeframe'],
+  [PRICE_RE, 'price'],
+  [ENTITLEMENT_RE, 'price'],
+  [(copy) => forwardMention(copy, MONTH_DAY_RE), 'date'],
+  [WEEKDAY_RE, 'date'],
+  [(copy) => forwardMention(copy, CLOCK_RE, ARRIVAL_CUE_RE), 'time'],
+]);
+
 // Returns a short rejection reason, or null when the copy passes. Runs on
 // top of the report's existing screens (banned words, access codes, shape,
 // this visit's trade names), only while the rules apply.
 function writerRulesRejection(text, { activeIngredients = [] } = {}) {
   const copy = String(text || '');
-  if (UNIT_WORD_RE.test(copy)) return 'amount';
-  if (FOOTAGE_RE.test(copy)) return 'footage';
-  if (PERCENT_RE.test(copy)) return 'percent';
-  if (RATE_RE.test(copy)) return 'rate';
-  if (PER_VISIT_RE.test(copy)) return 'per_visit';
-  if (COMPANY_NAME_RE.test(copy)) return 'company_name';
-  if (SAFE_WORD_RE.test(copy)) return 'safe_word';
-  if (CHEMICAL_RE.test(copy)) return 'chemical';
-  if (OWNER_PHRASE_RE.test(copy)) return 'owner_phrase';
-  if (REENTRY_RE.test(copy)) return 'reentry';
-  if (TIMEFRAME_RE.test(copy)) return 'timeframe';
-  if (PRICE_RE.test(copy) || ENTITLEMENT_RE.test(copy)) return 'price';
-  if (forwardMention(copy, MONTH_DAY_RE) || WEEKDAY_RE.test(copy)) return 'date';
-  if (forwardMention(copy, CLOCK_RE, ARRIVAL_CUE_RE)) return 'time';
-  const patterns = [...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
+  const hit = WRITER_RULE_SCREENS.find(([check]) => (typeof check === 'function' ? check(copy) : check.test(copy)));
+  if (hit) return hit[1];
+  const patterns = [...new Set([...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
     .map(activeIngredientPattern)
-    .filter(Boolean);
-  if (patterns.length && new RegExp(`\\b(?:${[...new Set(patterns)].join('|')})\\b`, 'i').test(copy)) {
-    return 'active_ingredient';
-  }
-  return null;
+    .filter(Boolean))];
+  return new RegExp(`\\b(?:${patterns.join('|')})\\b`, 'i').test(copy) ? 'active_ingredient' : null;
 }
 
 module.exports = {

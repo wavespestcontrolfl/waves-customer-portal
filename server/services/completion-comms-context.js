@@ -185,22 +185,6 @@ async function resolveContextWindow({
   return { floor: cap, reason: `last ${ONE_TIME_CAP_DAYS} days`, serviceLine, isRecurring };
 }
 
-// Credential-shaped tokens (the redactor's 3+ digit codes, all-caps word
-// codes) masked outright where the context that would anchor them is gone.
-function maskCredentialShapes(text) {
-  return String(text || '').replace(/\d{3,}/g, '[redacted]').replace(/\b[A-Z]{3,}\b/g, '[redacted]');
-}
-
-// Words that name a credential anywhere in an email (see customerEmailText).
-const CREDENTIAL_ANCHOR_RE = /\b(?:gate|codes?|lock\s*box(?:es)?|alarm|keypad|pins?|pass(?:code|word)s?|combo|combination)\b/i;
-
-// A mailbox copy of something Waves sent (Gmail SENT label or a Waves
-// address), which is never the customer's own words.
-function wavesSentEmail(email) {
-  const labels = Array.isArray(email?.label_ids) ? email.label_ids : [];
-  return labels.includes('SENT') || /@wavespestcontrol\.com\s*>?\s*$/i.test(String(email?.from_address || ''));
-}
-
 /**
  * Build the compact comms-context block for an AI draft.
  *
@@ -212,11 +196,6 @@ async function buildCompletionCommsContext({
   customerId,
   scheduledServiceId = null,
   originDate = null,
-  // GATE_REPORT_WRITER_RULES (the report writer only): the customer's own
-  // words — inbound texts and emails, plus call summaries labeled by who
-  // called — and a hint that they are never a finding. Waves' own texts and
-  // emails stay out. Every other caller keeps the mixed log unchanged.
-  customerWordsOnly = false,
   knex = db,
 } = {}) {
   if (!customerId) return { text: '', floor: null, reason: '', serviceLine: null, promptHint: '' };
@@ -228,23 +207,9 @@ async function buildCompletionCommsContext({
     knex('call_log')
       .where({ customer_id: customerId })
       .where('created_at', '>=', floor)
-      // customerWordsOnly: the canonical call reader's exclusions
-      // (context-aggregator getRecentCalls). Caller-ID linkage happens before
-      // classification, so sandbox, spam and wrong-number calls can carry
-      // this customer's id; their summaries are never the customer's words.
-      .modify((q) => {
-        if (customerWordsOnly) {
-          whereNotSandboxCall(q);
-          q.where((w) => w.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']));
-        }
-      })
-      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes',
-        ...(customerWordsOnly ? ['processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status'] : []))
+      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes')
       .orderBy('created_at', 'desc')
-      // customerWordsOnly: read the whole bounded window (the floor above
-      // already bounds it); extraction-classified misdials are dropped in JS
-      // below, and only then are six kept, so they never use up the pick.
-      .limit(customerWordsOnly ? 50 : 6)
+      .limit(6)
       .catch((err) => {
         logger.warn(`[comms-context] call context unavailable: ${err.message}`);
         return [];
@@ -254,9 +219,6 @@ async function buildCompletionCommsContext({
     excludeUnresolvedSendReservations(knex('sms_log')
       .where({ customer_id: customerId }))
       .where('created_at', '>=', floor)
-      // customerWordsOnly: only the customer's own texts count against the
-      // cap, so a run of Waves texts can never crowd theirs out.
-      .modify((q) => { if (customerWordsOnly) q.where('direction', 'inbound'); })
       .select('created_at', 'direction', 'message_body', 'message_type')
       .orderBy('created_at', 'desc')
       .limit(8)
@@ -267,14 +229,7 @@ async function buildCompletionCommsContext({
     knex('emails')
       .where({ customer_id: customerId })
       .where('received_at', '>=', floor)
-      // customerWordsOnly: Waves' own mail never takes a slot either.
-      .modify((q) => {
-        if (customerWordsOnly) {
-          q.whereRaw("NOT (COALESCE(label_ids, '[]'::jsonb) @> '[\"SENT\"]'::jsonb)")
-            .whereRaw("COALESCE(from_address, '') NOT ILIKE '%@wavespestcontrol.com%'");
-        }
-      })
-      .select('received_at', 'subject', 'snippet', 'body_text', ...(customerWordsOnly ? ['from_address', 'label_ids'] : []))
+      .select('received_at', 'subject', 'snippet', 'body_text')
       .orderBy('received_at', 'desc')
       .limit(6)
       .catch((err) => {
@@ -283,72 +238,32 @@ async function buildCompletionCommsContext({
       }),
   ]);
 
-  // customerWordsOnly: access codes are scrubbed from each whole source field
-  // BEFORE compaction; a code whose anchor sits past the cut ("4821 … is the
-  // gate code") would otherwise survive as an unlabelled number.
-  const source = (text) => (customerWordsOnly ? redactAccessCodes(String(text || '')) : text);
-  // customerWordsOnly email text: only what the customer wrote (quoted
-  // history and signature stripped, so a quoted Waves promise is never read
-  // as theirs), redacted over the whole of it before the preview is cut.
-  // A bare reply can answer a credential question the strip removed ("What
-  // is the gate code?" → "4821" or "BLUE"), and a snippet with no body has
-  // lost its context entirely: in either case anything credential-shaped
-  // (three or more digits, an all-caps word) is masked outright.
-  const customerEmailText = (email) => {
-    const body = String(email.body_text || '').trim();
-    const text = body || String(email.snippet || '');
-    let own = source(stripQuotedAndSignature(text));
-    if (!body || CREDENTIAL_ANCHOR_RE.test(text)) own = maskCredentialShapes(own);
-    return compactText(own, 260);
-  };
-  const callRows = customerWordsOnly
-    ? calls.filter((call) => !ContextAggregator.isExcludedCall(call)).slice(0, 6)
-    : calls;
   const entries = [];
-  for (const call of callRows) {
-    // customerWordsOnly: a raw transcript mixes both speakers, so only the
-    // call's summary or notes may stand in for it.
-    const summary = compactText(source(customerWordsOnly
-      ? call.lead_synopsis || call.notes
-      : call.lead_synopsis || call.notes || call.transcription));
+  for (const call of calls) {
+    const summary = compactText(call.lead_synopsis || call.notes || call.transcription);
     if (summary) {
-      const who = call.direction === 'inbound' ? 'the customer called'
-        : call.direction === 'outbound' ? 'Waves called the customer' : 'caller unknown';
       entries.push({
         ts: contextTs(call.created_at),
-        line: customerWordsOnly
-          ? `Call ${contextDate(call.created_at)} (${who}; AI summary of the whole conversation, not verified): ${summary}`
-          : `Call ${contextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`,
+        line: `Call ${contextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`,
       });
     }
   }
   for (const msg of sms) {
-    if (customerWordsOnly && msg.direction !== 'inbound') continue;
-    // customerWordsOnly: the Waves text a reply answers is left out, so a
-    // bare credential ("4821", "BLUE") has lost its anchor; anything
-    // credential-shaped in a customer text is masked outright.
-    const summary = customerWordsOnly
-      ? compactText(maskCredentialShapes(source(msg.message_body)), 260)
-      : compactText(msg.message_body, 260);
+    const summary = compactText(msg.message_body, 260);
     if (summary) {
       entries.push({
         ts: contextTs(msg.created_at),
-        line: customerWordsOnly
-          ? `Customer text ${contextDate(msg.created_at)}: ${summary}`
-          : `Text ${contextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`,
+        line: `Text ${contextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`,
       });
     }
   }
   for (const email of emails) {
-    if (customerWordsOnly && wavesSentEmail(email)) continue;
-    const summary = customerWordsOnly
-      ? customerEmailText(email)
-      : compactText(email.snippet || email.body_text, 260);
-    const subject = compactText(source(email.subject), 120);
+    const summary = compactText(email.snippet || email.body_text, 260);
+    const subject = compactText(email.subject, 120);
     if (summary || subject) {
       entries.push({
         ts: contextTs(email.received_at),
-        line: `${customerWordsOnly ? 'Customer email' : 'Email'} ${contextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`,
+        line: `Email ${contextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`,
       });
     }
   }
@@ -360,17 +275,153 @@ async function buildCompletionCommsContext({
     .join('\n');
 
   // Ratified relevance rule: window + prompt hint, never a keyword filter.
-  const promptHint = customerWordsOnly
-    ? `Recent contact with this customer (${reason}). Texts and emails are the customer's own words. A call entry is an AI summary of a conversation between the customer and Waves: use only what it says the customer reported, never what Waves said or promised. It is never a finding: use it only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote it, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`
-    : serviceLine
+  const promptHint = serviceLine
     ? `These are the customer's recent communications (${reason}). Use only what is relevant to this ${serviceLine} visit; ignore unrelated topics.`
     : `These are the customer's recent communications (${reason}). Use only what is relevant to this visit; ignore unrelated topics.`;
 
   return { text, floor, reason, serviceLine, promptHint };
 }
 
+// ---------------------------------------------------------------------------
+// GATE_REPORT_WRITER_RULES: what the customer told us, for the report writer.
+// Same window as above, but only the customer's own words: inbound texts and
+// emails, and call summaries labeled by who called (a summary covers both
+// sides of the call). Waves' own texts and mail never appear, and every line
+// is scrubbed before it is cut, since the writer turns these into "You
+// mentioned…" copy.
+
+// Credential-shaped tokens (the redactor's 3+ digit codes, all-caps word
+// codes), masked outright wherever the context that would anchor them is gone.
+function maskCredentialShapes(text) {
+  return String(text || '').replace(/\d{3,}/g, '[redacted]').replace(/\b[A-Z]{3,}\b/g, '[redacted]');
+}
+// Words that name a credential anywhere in an email.
+const CREDENTIAL_ANCHOR_RE = /\b(?:gate|codes?|lock\s*box(?:es)?|alarm|keypad|pins?|pass(?:code|word)s?|combo|combination)\b/i;
+
+// A mailbox copy of something Waves sent (Gmail SENT label or a Waves
+// address). The query already leaves these out; this guards the lines.
+function wavesSentEmail(email) {
+  const labels = Array.isArray(email?.label_ids) ? email.label_ids : [];
+  return labels.includes('SENT') || /@wavespestcontrol\.com\s*>?\s*$/i.test(String(email?.from_address || ''));
+}
+
+// Only what the customer wrote (quoted history and signature stripped, so a
+// quoted Waves promise is never read as theirs), redacted over the whole of
+// it before the preview is cut. A bare reply can answer a credential
+// question the strip removed ("What is the gate code?" → "4821"), and a
+// snippet with no body has lost its context: then anything credential-shaped
+// is masked outright.
+function customerEmailText(email) {
+  const body = String(email.body_text || '').trim();
+  const text = body || String(email.snippet || '');
+  const own = redactAccessCodes(stripQuotedAndSignature(text));
+  return compactText(!body || CREDENTIAL_ANCHOR_RE.test(text) ? maskCredentialShapes(own) : own, 260);
+}
+
+const CALLER = { inbound: 'the customer called', outbound: 'Waves called the customer' };
+
+// One entry per channel: its query, which rows count, how many are kept,
+// and its line. Every line is scrubbed; texts and subjects are also masked
+// for bare codes, because the Waves message they answer is left out.
+const CUSTOMER_WORDS_CHANNELS = Object.freeze([
+  {
+    name: 'call',
+    // The canonical call reader's exclusions (context-aggregator
+    // getRecentCalls): caller-ID linkage happens before classification, so
+    // sandbox, spam and wrong-number calls can carry this customer's id. The
+    // whole bounded window is read and extraction-classified misdials are
+    // dropped before six are kept, so they never use up the pick.
+    read: (knex, customerId, floor) => whereNotSandboxCall(knex('call_log')
+      .where({ customer_id: customerId })
+      .where('created_at', '>=', floor))
+      .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
+      .select('created_at', 'direction', 'lead_synopsis', 'notes', 'processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status')
+      .orderBy('created_at', 'desc')
+      .limit(50),
+    keep: (row) => !ContextAggregator.isExcludedCall(row),
+    max: 6,
+    // A raw transcript mixes both speakers, so only the summary or notes.
+    line: (row) => {
+      const summary = compactText(redactAccessCodes(row.lead_synopsis || row.notes || ''));
+      return summary && `Call ${contextDate(row.created_at)} (${CALLER[row.direction] || 'caller unknown'}; AI summary of the whole conversation, not verified): ${summary}`;
+    },
+    ts: (row) => row.created_at,
+  },
+  {
+    name: 'sms',
+    read: (knex, customerId, floor) => excludeUnresolvedSendReservations(knex('sms_log')
+      .where({ customer_id: customerId }))
+      .where('created_at', '>=', floor)
+      .where('direction', 'inbound')
+      .select('created_at', 'direction', 'message_body')
+      .orderBy('created_at', 'desc')
+      .limit(8),
+    keep: (row) => row.direction === 'inbound',
+    max: 8,
+    line: (row) => {
+      const summary = compactText(maskCredentialShapes(redactAccessCodes(row.message_body)), 260);
+      return summary && `Customer text ${contextDate(row.created_at)}: ${summary}`;
+    },
+    ts: (row) => row.created_at,
+  },
+  {
+    name: 'email',
+    read: (knex, customerId, floor) => knex('emails')
+      .where({ customer_id: customerId })
+      .where('received_at', '>=', floor)
+      .whereRaw("NOT (COALESCE(label_ids, '[]'::jsonb) @> '[\"SENT\"]'::jsonb)")
+      .whereRaw("COALESCE(from_address, '') NOT ILIKE '%@wavespestcontrol.com%'")
+      .select('received_at', 'subject', 'snippet', 'body_text', 'from_address', 'label_ids')
+      .orderBy('received_at', 'desc')
+      .limit(6),
+    keep: (row) => !wavesSentEmail(row),
+    max: 6,
+    line: (row) => {
+      const summary = customerEmailText(row);
+      const subject = compactText(maskCredentialShapes(redactAccessCodes(row.subject)), 120);
+      return (summary || subject) && `Customer email ${contextDate(row.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`;
+    },
+    ts: (row) => row.received_at,
+  },
+]);
+
+/**
+ * The customer's own words for the report writer (GATE_REPORT_WRITER_RULES).
+ * Same window rules as buildCompletionCommsContext.
+ *
+ * @returns {{ text: string, promptHint: string }} text is '' when the window
+ *   holds nothing the customer said.
+ */
+async function buildCustomerWordsContext({
+  customerId,
+  scheduledServiceId = null,
+  originDate = null,
+  knex = db,
+} = {}) {
+  if (!customerId) return { text: '', promptHint: '' };
+  const { floor, reason, serviceLine } = await resolveContextWindow({
+    customerId, scheduledServiceId, originDate, knex,
+  });
+  const perChannel = await Promise.all(CUSTOMER_WORDS_CHANNELS.map((channel) => channel.read(knex, customerId, floor)
+    .then((rows) => rows.filter(channel.keep).slice(0, channel.max)
+      .map((row) => ({ ts: contextTs(channel.ts(row)), line: channel.line(row) }))
+      .filter((entry) => entry.line))
+    .catch((err) => {
+      logger.warn(`[comms-context] customer ${channel.name} context unavailable: ${err.message}`);
+      return [];
+    })));
+  const text = perChannel.flat()
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, MAX_CONTEXT_LINES)
+    .map((entry) => entry.line)
+    .join('\n');
+  const promptHint = `Recent contact with this customer (${reason}). Texts and emails are the customer's own words. A call entry is an AI summary of a conversation between the customer and Waves: use only what it says the customer reported, never what Waves said or promised. It is never a finding: use it only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote it, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`;
+  return { text, promptHint };
+}
+
 module.exports = {
   buildCompletionCommsContext,
+  buildCustomerWordsContext,
   resolveContextWindow,
   RECURRING_CAP_DAYS,
   ONE_TIME_CAP_DAYS,

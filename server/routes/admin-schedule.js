@@ -24666,11 +24666,12 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let commsBlock = '';
     if (includeCustomerComms === true && groundingCustomerId) {
       try {
-        const { buildCompletionCommsContext } = require('../services/completion-comms-context');
-        const comms = await buildCompletionCommsContext({
+        const { buildCompletionCommsContext, buildCustomerWordsContext } = require('../services/completion-comms-context');
+        // Under the writer rules only the customer's own words, labeled and
+        // scrubbed (buildCustomerWordsContext); otherwise the mixed log.
+        const comms = await (writerRulesOn ? buildCustomerWordsContext : buildCompletionCommsContext)({
           customerId: groundingCustomerId,
           scheduledServiceId,
-          ...(writerRulesOn ? { customerWordsOnly: true } : {}),
         });
         if (comms.text) {
           commsBlock = writerRulesOn

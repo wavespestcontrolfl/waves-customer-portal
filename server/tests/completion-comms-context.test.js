@@ -7,6 +7,7 @@
  */
 const {
   buildCompletionCommsContext,
+  buildCustomerWordsContext,
   resolveContextWindow,
   RECURRING_CAP_DAYS,
   ONE_TIME_CAP_DAYS,
@@ -229,12 +230,11 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.promptHint).toContain('rodent');
   });
 
-  test('customerWordsOnly email text: quoted history stripped, snippet-only digits masked', async () => {
+  test('customer words: quoted history stripped, bare codes masked in texts, snippets, replies and subjects', async () => {
     const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
-    const ctx = await buildCompletionCommsContext({
+    const ctx = await buildCustomerWordsContext({
       customerId: 'c1',
       scheduledServiceId: 'svc-1',
-      customerWordsOnly: true,
       knex: stubKnex({
         scheduled_services: [
           { id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Service', created_at: mk(20) },
@@ -256,6 +256,8 @@ describe('buildCompletionCommsContext', () => {
           // stripped with the history, so the reply alone must be masked.
           { received_at: mk(3), subject: 'Re: Gate', body_text: '4821\n\nOn Mon, Sep 28, 2026 at 9:00 AM Waves Pest Control <contact@wavespestcontrol.com> wrote:\n> What is the gate code for the side gate?', from_address: 'pat@example.com', label_ids: ['INBOX'] },
           { received_at: mk(4), subject: 'Re: Gate again', body_text: 'BLUE\n\nOn Mon, Sep 28, 2026 at 9:00 AM Waves Pest Control <contact@wavespestcontrol.com> wrote:\n> What is the gate code for the side gate?', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+          // A bare code as the subject, with an innocuous body.
+          { received_at: mk(7), subject: '7719', body_text: 'Thanks for coming out.', from_address: 'pat@example.com', label_ids: ['INBOX'] },
         ],
       }),
     });
@@ -265,6 +267,8 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toContain('4821');
     expect(ctx.text).not.toContain('BLUE');
     expect(ctx.text).toMatch(/Customer text .*: \[redacted\]/);
+    expect(ctx.text).not.toContain('7719');
+    expect(ctx.text).toContain('Thanks for coming out.');
   });
 
   test('no customerId returns an empty context', async () => {
@@ -274,7 +278,7 @@ describe('buildCompletionCommsContext', () => {
 
   // GATE_REPORT_WRITER_RULES: the report writer reads only the customer's
   // own words, each labeled; Waves' own texts and emails stay out.
-  test('customerWordsOnly keeps the customer\'s own words, labeled, and drops what Waves sent', async () => {
+  test('customer words keep the customer\'s own words, labeled, and drop what Waves sent', async () => {
     const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
     const knexWith = (whereArgs) => stubKnex({
       scheduled_services: [
@@ -307,8 +311,8 @@ describe('buildCompletionCommsContext', () => {
       ],
     }, whereArgs);
     const whereArgs = {};
-    const ctx = await buildCompletionCommsContext({
-      customerId: 'c1', scheduledServiceId: 'svc-1', customerWordsOnly: true, knex: knexWith(whereArgs),
+    const ctx = await buildCustomerWordsContext({
+      customerId: 'c1', scheduledServiceId: 'svc-1', knex: knexWith(whereArgs),
     });
     // The filters run in the queries, before each channel's cap, so Waves'
     // own texts and mail can never crowd the customer's words out.

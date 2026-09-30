@@ -12,6 +12,7 @@ let mockCatalogFails = false;
 const mockProvider = jest.fn();
 const mockBuildContext = jest.fn(async () => ({ contextText: '', signals: {} }));
 const mockComms = jest.fn(async () => ({ text: '', promptHint: '' }));
+const mockCustomerWords = jest.fn(async () => ({ text: '', promptHint: '' }));
 jest.mock('../services/llm/call', () => ({ callOpenAI: (...args) => mockProvider(...args), callAnthropic: (...args) => mockProvider(...args) }));
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: async () => null }));
 jest.mock('../services/service-completion-profiles', () => ({
@@ -19,7 +20,10 @@ jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: async () => mockProfile,
 }));
 jest.mock('../services/service-report/report-copy-context', () => ({ buildReportCopyContext: (...args) => mockBuildContext(...args) }));
-jest.mock('../services/completion-comms-context', () => ({ buildCompletionCommsContext: (...args) => mockComms(...args) }));
+jest.mock('../services/completion-comms-context', () => ({
+  buildCompletionCommsContext: (...args) => mockComms(...args),
+  buildCustomerWordsContext: (...args) => mockCustomerWords(...args),
+}));
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     const chain = {};
@@ -61,6 +65,8 @@ beforeEach(() => {
   mockBuildContext.mockClear();
   mockComms.mockReset();
   mockComms.mockImplementation(async () => ({ text: '', promptHint: '' }));
+  mockCustomerWords.mockReset();
+  mockCustomerWords.mockImplementation(async () => ({ text: '', promptHint: '' }));
   mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
   mockServiceType = 'Quarterly Pest Control Service';
   mockCatalogRows = [];
@@ -228,13 +234,14 @@ test('gate off: the same amount is not screened by the rules', async () => {
 
 test("gate on: customer messages arrive as the customer's own words with access codes scrubbed", async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
-  mockComms.mockImplementation(async () => ({
+  mockCustomerWords.mockImplementation(async () => ({
     text: 'Customer text Sep 28: The ants are back by the dishwasher. Gate code 4821 if you need it.',
     promptHint: 'These are the customer\'s own recent messages.',
   }));
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Ants on the slider track (comms case).', includeCustomerComms: true }), res);
-  expect(mockComms).toHaveBeenCalledWith(expect.objectContaining({ customerWordsOnly: true }));
+  expect(mockCustomerWords).toHaveBeenCalledTimes(1);
+  expect(mockComms).not.toHaveBeenCalled();
   const { text } = mockProvider.mock.calls[0][0];
   expect(text).toContain(CUSTOMER_WORDS_HEADER);
   expect(text).toContain('The ants are back by the dishwasher.');
@@ -246,7 +253,8 @@ test('gate off: customer messages keep the legacy block and options', async () =
   mockComms.mockImplementation(async () => ({ text: 'Text Sep 28 (inbound): ants are back', promptHint: 'hint' }));
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Ants on the slider track (comms off case).', includeCustomerComms: true }), res);
-  expect(mockComms.mock.calls[0][0]).not.toHaveProperty('customerWordsOnly');
+  expect(mockComms).toHaveBeenCalledTimes(1);
+  expect(mockCustomerWords).not.toHaveBeenCalled();
   expect(mockProvider.mock.calls[0][0].text).toContain('RECENT CUSTOMER COMMUNICATIONS\nhint\nText Sep 28 (inbound): ants are back');
 });
 
