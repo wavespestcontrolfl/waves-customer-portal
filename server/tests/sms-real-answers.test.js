@@ -3305,6 +3305,26 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(validateReserviceOffer({ ...args, context: { customer: { id: 'cust-1' }, serviceHistory: [] } }).ok).toBe(true);
     });
 
+    // Codex round-27 P1: history never turns an excluded-specialty report into a pest report.
+    test('an excluded-specialty report never falls back to pest: termite / bed-bug times are allowed while a pest callback is booked', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const booked = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+      const slot = [{ date: 'Friday, October 9', window: '1-3pm' }];
+      const withHistory = { customer: { id: 'cust-1' }, serviceHistory: [{ type: 'General Pest Control' }] };
+      const send = (inboundMessage, extra = {}) => validateReserviceOffer({ reply: 'I can do Friday 1-3pm.', factsBlock: booked, intendedActions: [], inboundMessage, offeredTimes: slot, context: withHistory, ...extra });
+      for (const m of ['the termites are back', 'bed bugs are back', 'rats are back in the attic', "the termites are back and they're back", 'the mosquitoes came back']) {
+        expect(send(m).ok).toBe(true);
+        expect(send(m, { offeredTimes: [], intendedActions: [{ type: 'book_appointment' }] }).ok).toBe(true);
+      }
+      // a genuine pronoun-only report (or an explicit pest noun) with pest booked is still rejected
+      expect(send("they're back").ok).toBe(false);
+      expect(send('the ants are back').ok).toBe(false);
+      // the owed-offer inference shares the rule: eligible pest + history + termites → nothing owed
+      const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: eligible, intendedActions: [], inboundMessage: "the termites are back, they're back", context: withHistory }).ok).toBe(true);
+      expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: eligible, intendedActions: [], inboundMessage: "they're back", context: withHistory }).ok).toBe(false);
+    });
+
     test('bed bugs are an excluded specialty: never a general-pest report, never a free pest re-service (protocols.json bed_bug)', () => {
       const protocols = require('../config/protocols.json');
       expect(JSON.stringify(protocols.bed_bug)).toMatch(/Do not merge bed bug with general pest/);

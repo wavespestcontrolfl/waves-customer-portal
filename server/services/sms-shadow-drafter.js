@@ -1194,9 +1194,19 @@ function reportedPestLane({ inboundMessage, context, lanes }) {
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const text = String(inboundMessage || '');
   if (PEST_REPORT_TEXT_RE.test(text) && reportedReserviceLane(text) === 'pest' && lanes.includes('pest')) return 'pest';
-  if (context && PRONOUN_RETURN_TEXT_RE.test(text) && customerHasPestRelationship(context)
-    && !reportedReserviceLane(text) && lanes.includes('pest')) return 'pest';
+  if (pronounOnlyReportLane(text, context) && lanes.includes('pest')) return 'pest';
   return null;
+}
+// The ONE history-based lane inference (Codex round-27 P1, PR #5336): ONLY a genuine pronoun-only return
+// ("they're back") from a customer with a pest relationship reads as a pest report. A report that names its
+// own pest noun, lawn word or excluded specialty (termites, rodents, mosquitoes, bed bugs, tree & shrub) has
+// a lane of its own — resolved or deliberately null — and never falls back to "pest" from history.
+function pronounOnlyReportLane(text, context) {
+  const { reportedReserviceLane, reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
+  const t = String(text || '');
+  if (!context || !PRONOUN_RETURN_TEXT_RE.test(t) || !customerHasPestRelationship(context)) return null;
+  if (reportedReserviceExcludedSpecialty(t) || reportedReserviceLane(t)) return null;
+  return 'pest';
 }
 // Codex round-18 P2 (PR #5336): an ELIGIBLE pest report — the inbound reads as a pest report and its
 // lane is bookable — whose reply neither offers the covered free re-service nor carries the link
@@ -1246,7 +1256,7 @@ function reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, o
   const booked = bookedReserviceLanes(factsBlock);
   if (!booked.length || !pestReportSignal(inboundMessage, context)) return null; // pronoun-aware ("they're back" + a pest relationship)
   const { reportedReserviceLane } = require('./reservice-scheduler');
-  const lane = reportedReserviceLane(inboundMessage) || (context && customerHasPestRelationship(context) ? 'pest' : null);
+  const lane = reportedReserviceLane(inboundMessage) || pronounOnlyReportLane(inboundMessage, context); // an excluded specialty never falls back to pest
   return lane && booked.includes(lane)
     ? `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`
     : null;
