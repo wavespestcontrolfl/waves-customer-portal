@@ -126,11 +126,6 @@ const fixtures = (prefs = []) => ({
 });
 
 describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
-  // The fixtures complete 2026-09-30; pin the render clock inside their
-  // windows so the instructions stay live (an expired one is history).
-  let nowSpy;
-  beforeEach(() => { nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-30T19:00:00Z')); });
-  afterEach(() => { nowSpy.mockRestore(); });
   const OLD = process.env.GATE_LAWN_WATERING_RULE;
   afterEach(() => {
     if (OLD === undefined) delete process.env.GATE_LAWN_WATERING_RULE; else process.env.GATE_LAWN_WATERING_RULE = OLD;
@@ -422,14 +417,6 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
         return (await resolveCanonicalLawnRender({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex)).signature;
       };
       expect(await failedFor()).not.toBe(await failedFor());
-    });
-
-    test('a frozen visit re-keys when its instruction changes phase (a cached PDF never outlives the deadline)', async () => {
-      process.env.GATE_LAWN_WATERING_RULE = 'true';
-      const timed = { lawnWateringFreeze: { wateringInstruction: { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: '2026-10-01T19:00:00.000Z', expiresAt: '2026-10-01T19:00:00.000Z' } } };
-      const before = await signatureFor(record(timed), 24);
-      nowSpy.mockReturnValue(Date.parse('2026-10-01T19:00:01Z'));
-      expect(await signatureFor(record(timed), 24)).not.toBe(before);
     });
 
     test('gate off: no stamp at all, so the signature ignores the rule', async () => {

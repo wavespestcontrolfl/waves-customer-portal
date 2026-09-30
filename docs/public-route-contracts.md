@@ -1437,15 +1437,16 @@ finished customer sentences with absolute Eastern clock times; `holdUntil`,
 has dried" hold has no printed duration and `expiresAt: null` (dryness is a
 condition, so no instruction that waits for drying, including one followed by a
 water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
-`holdUntil: null`; the key is absent when there is no claim); `reportV2.aftercare`
-gains `evidenceSource: 'product_instruction'`, `wateringHold` (while a hold is
-live), `creditableWaterIn` (water-in only; a mixed visit is a hold), `holdTask`
-(the banner's first line verbatim, or its first two lines for hold-then-water-in),
-`waterInTask` (a banner line verbatim: an uncredited water-in, or the water-in
-step once a timed hold-then-water-in hold has ended; that step is credited
-against the plan like a standalone water-in), `wateringEnded: true` past
-`expiresAt` (the wording stays as a record, nothing is restricted, credited or
-promoted), `ruleSource`, `holdUntil` and `waterInBy`; and
+`holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
+"ended" note past it; the key is absent when there is no claim).
+`reportV2.aftercare` is a record of the visit and never changes by the clock
+(owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
+`wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
+is a hold), `holdTask` (the banner's first line verbatim, or its first two lines
+for hold-then-water-in), `waterInTask` (the banner's first line verbatim, for a
+water-in that earns no plan credit; it stays the customer's task in the hero,
+the follow-up card and the assistant within the visit's plan week), `ruleSource`,
+`holdUntil` and `waterInBy`; and
 `reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
 `{ title, detail }`, the week's plan with a "not before" sentence naming the hold's
 end time (the `{holdUntil}` placeholder is always filled or the key dropped; it

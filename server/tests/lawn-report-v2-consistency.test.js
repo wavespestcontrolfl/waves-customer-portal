@@ -11,7 +11,7 @@ const { findBannedCustomerCopy } = require('../services/service-report/activity-
 const { buildServiceReportV1SmsVars } = require('../services/service-report/delivery');
 const { frozenSmsSummary } = require('../services/service-report/lawn-report-write-gate');
 const {
-  hasCreditableWaterIn, normalizeLawnAftercare, renderedWeekPlan, resolveLawnAftercare,
+  aftercareCustomerTask, hasCreditableWaterIn, normalizeLawnAftercare, renderedWeekPlan, resolveLawnAftercare,
 } = require('../services/service-report/lawn-aftercare');
 
 const APPLICATIONS = [
@@ -754,11 +754,6 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
 // evidenceSource 'product_instruction' and rides the EXISTING verdict table
 // (no new verdict, no new flag); a mixed visit resolves to hold.
 describe('watering instruction drives the aftercare through the existing verdict table', () => {
-  // The fixtures complete 2026-09-30; pin the render clock inside their
-  // windows so the instructions stay live (an expired one is history).
-  let nowSpy;
-  beforeEach(() => { nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-30T19:00:00Z')); });
-  afterEach(() => { nowSpy.mockRestore(); });
   const { buildWateringInstruction, composeBannerLines } = require('../services/service-report/lawn-watering-instruction');
   const { findBannedCustomerCopy: banned } = require('../services/service-report/activity-indicators');
   const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
@@ -842,57 +837,6 @@ describe('watering instruction drives the aftercare through the existing verdict
     }
   });
 
-  test('past expiresAt the instruction is history: no hero task, no restriction, no credit; its wording stays as a record', () => {
-    for (const rules of [[HOLD_RULE], [WATER_IN_RULE], [HOLD_RULE, LATE_WATER_IN_RULE], [{ ...WATER_IN_RULE, water_in_inches: 0.5 }]]) {
-      const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED, runtime: { headTypes: ['rotor'] } });
-      const live = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction });
-      expect(live.snapshot.customerAction || '').toContain(instruction.lines[0]);
-      const later = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction, nowMs: Date.parse(instruction.expiresAt) + 1 });
-      expect(later.aftercare).toMatchObject({ wateringEnded: true, wateringHold: false, creditableWaterIn: false, evidenceSource: 'product_instruction' });
-      expect(later.aftercare).not.toHaveProperty('holdTask');
-      expect(later.aftercare).not.toHaveProperty('waterInTask');
-      expect(resolveLawnAftercare(later.aftercare, later.water.weekPlan)).toMatchObject({ verdict: 'none', customerTask: null, restricts: false, credited: false });
-      expect(later.snapshot.customerAction || '').not.toContain(instruction.lines[0]);
-      expect(later.aftercare.watering).toBe(`This visit’s watering note has ended. It read: ${instruction.lines.join(' ')}`);
-      expect(renderedWeekPlan(later.aftercare, later.water.weekPlan)).toBe(RUN_PLAN);
-      // At the instant itself it is still live.
-      const edge = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction, nowMs: Date.parse(instruction.expiresAt) });
-      expect(edge.aftercare.wateringEnded).toBeUndefined();
-    }
-  });
-
-  test('a timed hold-then-water-in advances to the water-in task once the hold has elapsed', () => {
-    const { buildWateringInstruction: build2 } = require('../services/service-report/lawn-watering-instruction');
-    const instruction = build2({ rules: [HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED, runtime: { headTypes: ['rotor'] } });
-    const at = (iso) => buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction, nowMs: Date.parse(iso) });
-    const during = at('2026-10-01T18:00:00Z');
-    expect(resolveLawnAftercare(during.aftercare, during.water.weekPlan).verdict).toBe('hold');
-    const after = at('2026-10-01T19:00:00Z'); // hold end, Thu 3 PM
-    expect(after.aftercare).toMatchObject({ wateringHold: false, creditableWaterIn: false, waterInRequired: true });
-    expect(after.aftercare.waterInTask).toBe('After that, water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.');
-    expect(after.aftercare.waterInTask).toBe(instruction.lines[1]);
-    expect(resolveLawnAftercare(after.aftercare, after.water.weekPlan).verdict).toBe('none');
-    expect(after.snapshot.customerAction).toContain(after.aftercare.waterInTask);
-    expect(after.snapshot.customerAction).not.toContain('Skip your turf watering');
-    expect(banned(after.aftercare.waterInTask)).toEqual([]);
-    // Past the water-in deadline: history.
-    expect(at('2026-10-03T18:00:01Z').aftercare.wateringEnded).toBe(true);
-    // A hold that also waits for drying never advances by the clock.
-    const dry = { mode: 'hold', hold_hours: null, hold_until: 'dry', source: 'label' };
-    const both = build2({ rules: [dry, HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED });
-    const later = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: both, nowMs: Date.parse('2026-10-02T12:00:00Z') });
-    expect(later.aftercare.wateringHold).toBe(true);
-  });
-
-  test('post-hold water-in is credited against the plan like a standalone one when deep enough', () => {
-    const { buildWateringInstruction: build2 } = require('../services/service-report/lawn-watering-instruction');
-    const deep = build2({ rules: [HOLD_RULE, { ...LATE_WATER_IN_RULE, water_in_inches: 0.5 }], completedAt: COMPLETED, runtime: { headTypes: ['rotor'] } });
-    const after = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: deep, nowMs: Date.parse('2026-10-01T19:00:00Z') });
-    expect(after.aftercare).toMatchObject({ wateringHold: false, creditableWaterIn: true });
-    expect(after.aftercare).not.toHaveProperty('waterInTask');
-    expect(renderedWeekPlan(after.aftercare, after.water.weekPlan)).toBe(RUN_PLAN.afterTreatment);
-  });
-
   test('mixed hold + water-in resolves to hold; the water-in is banner text only', () => {
     const { instruction, report } = build([HOLD_RULE, LATE_WATER_IN_RULE]);
     expect(instruction.state).toBe('hold_then_water_in');
@@ -927,6 +871,25 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(report.snapshot.customerAction).toBe(instruction.lines[0]);
     expect(report.snapshot.noActionNeeded).toBe(false);
     expect(banned(banner[2])).toEqual([]);
+    // The follow-up card reads the same shared task, never "No action is needed".
+    const { followUp } = reconcileLawnReport({
+      data: { lawnAssessment: { recommendations: { nextVisitFocus: 'Recheck the thin areas.' } } },
+      reportV2: report,
+    });
+    expect(followUp.customerAction).toBe(instruction.lines[0]);
+    // Outside the visit's plan week it is not promoted.
+    expect(aftercareCustomerTask(report.aftercare, { ...report.water.weekPlan, visitInPlanWeek: false })).toBeNull();
+  });
+
+  test('the payload is a record of the visit: rendering it later changes nothing (owner ruling 2026-09-30)', () => {
+    const { buildWateringInstruction: build2 } = require('../services/service-report/lawn-watering-instruction');
+    for (const rules of [[HOLD_RULE], [WATER_IN_RULE], [HOLD_RULE, LATE_WATER_IN_RULE]]) {
+      const instruction = build2({ rules, completedAt: COMPLETED, runtime: { headTypes: ['rotor'] } });
+      const render = () => JSON.stringify(buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction }));
+      const now = render();
+      const spy = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-12-31T12:00:00Z'));
+      try { expect(render()).toBe(now); } finally { spy.mockRestore(); }
+    }
   });
 
   test('a water-in with no plan to reduce is unchanged: creditable, and no "counts toward" line', () => {

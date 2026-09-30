@@ -27,7 +27,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule } = require('./lawn-watering-rule');
-const { buildWateringInstruction, composeBannerLines, instructionPhaseAt } = require('./lawn-watering-instruction');
+const { buildWateringInstruction, composeBannerLines } = require('./lawn-watering-instruction');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2552,7 +2552,7 @@ class PinnedAssessmentUnavailable extends Error {
 // overlay; PDFs rendered before the watering instruction existed must re-key.
 const LAWN_RENDER_STRATEGY = 'p7-watering-instruction-20260929';
 
-// ':wr=1:<phase>' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
+// ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a
 // cache-lookup caller stamps the same as the full one. A failed read stamps
 // random (fail-open to a re-render, like the prefs read above).
@@ -2560,10 +2560,9 @@ async function lawnWateringRuleStamp(service, knex) {
   if (!service?.id) return ':wr=1';
   try {
     const row = await knex('service_records').where({ id: service.id }).first('structured_notes', 'service_data');
-    // A frozen visit's payload changes only when its instruction changes phase
-    // (hold -> water-in -> ended), so the phase is the stamp.
-    const frozenInstruction = readFrozenWateringInstruction(parseJsonObject(row?.structured_notes));
-    if (frozenInstruction) return `:wr=1:${instructionPhaseAt(frozenInstruction) || 'none'}`;
+    // A frozen visit's payload never changes by the clock (owner ruling
+    // 2026-09-30: the report is a record), so its stamp is constant.
+    if (readFrozenWateringInstruction(parseJsonObject(row?.structured_notes))) return ':wr=1';
     const rawProducts = await knex('service_products').where({ service_record_id: service.id }).orderBy('created_at');
     const products = await attachApprovedReportProductFacts(knex, rawProducts, {
       frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
@@ -3647,9 +3646,9 @@ function buildWateringBanner(instruction, weekPlan = null) {
     }),
     holdUntil: instruction.holdUntil,
     waterInBy: instruction.waterInBy,
-    // The instruction's own expiry is authoritative (instructionPhaseAt reads
-    // the same field): a hold that waits for drying has none, and falling back
-    // to holdUntil would end its banner at the clock time.
+    // The instruction's own expiry is authoritative: a hold that waits for
+    // drying has none, and falling back to holdUntil would end its banner at
+    // the clock time.
     expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || null),
     ruleSource: instruction.ruleSource,
   };

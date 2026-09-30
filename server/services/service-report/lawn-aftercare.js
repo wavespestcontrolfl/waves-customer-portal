@@ -102,8 +102,16 @@ function wateringRestrictionAction(aftercare, weekPlan) {
 }
 
 // Any customer task the aftercare creates, including a credited water-in.
+// A required water-in that earns no plan credit resolves to verdict none,
+// which states no task: its own line (waterInTask) is still the customer's
+// task, for every consumer (hero, follow-up, assistant), and only for this
+// visit's plan week.
 function aftercareCustomerTask(aftercare, weekPlan) {
-  return resolveLawnAftercare(aftercare, weekPlan).customerTask;
+  const { verdict, customerTask } = resolveLawnAftercare(aftercare, weekPlan);
+  if (customerTask) return customerTask;
+  if (verdict !== 'none' || weekPlan?.visitInPlanWeek === false) return null;
+  const waterInTask = typeof aftercare?.waterInTask === 'string' ? aftercare.waterInTask.trim() : '';
+  return waterInTask || null;
 }
 
 // A visit outside the plan's week cannot qualify that week's plan with its

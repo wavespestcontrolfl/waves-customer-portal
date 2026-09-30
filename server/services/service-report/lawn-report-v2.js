@@ -16,7 +16,6 @@ const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-d
 const { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE } = require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
-const { instructionPhaseAt } = require('./lawn-watering-instruction');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const {
   LEGACY_WATER_IN_COPY,
@@ -446,9 +445,6 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
 // wateringHold, water_in sets creditableWaterIn, and a mixed visit is a hold.
 // State none keeps the neutral aftercare; state null (or no instruction)
 // leaves the legacy fail-closed reading exactly as it was.
-// Lead-in for an instruction whose window has passed (a permanent report link).
-const ENDED_WATERING_PREFIX = 'This visit’s watering note has ended. It read:';
-
 function buildAftercare(applications, opts = {}) {
   const apps = Array.isArray(applications) ? applications : [];
   const productNotes = [];
@@ -468,34 +464,11 @@ function buildAftercare(applications, opts = {}) {
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
   const instruction = opts && opts.instruction;
-  // The instruction's live phase at render time (instructionPhaseAt is the one
-  // clock reading every consumer shares).
-  const phase = instructionPhaseAt(instruction, Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now());
-  const recorded = {
-    reentry,
-    needsReview: false,
-    neutral: false,
-    evidenceSource: 'product_instruction',
-    ruleSource: instruction?.ruleSource || null,
-    holdUntil: instruction?.holdUntil || null,
-    waterInBy: instruction?.waterInBy || null,
-  };
-  // Past its expiresAt the instruction is history: its wording stays as a
-  // record of this visit, but it restricts nothing, credits nothing and is
-  // never promoted into the hero task or read by the assistant as current
-  // guidance (verdict none).
-  if (phase === 'ended') {
-    return normalizeLawnAftercare({
-      ...recorded,
-      watering: `${ENDED_WATERING_PREFIX} ${instruction.lines.join(' ')}`,
-      waterInRequired: false,
-      wateringHold: false,
-      creditableWaterIn: false,
-      wateringEnded: true,
-    });
-  }
-  if (phase) {
-    const holds = phase === 'hold';
+  // The instruction is a record of the visit, never re-phased by the clock
+  // (owner ruling 2026-09-30): only the live banner ends at expiresAt.
+  if (instruction && ['hold', 'water_in', 'hold_then_water_in'].includes(instruction.state)
+    && Array.isArray(instruction.lines) && instruction.lines.length >= 2) {
+    const holds = instruction.state !== 'water_in';
     // A water-in credits a full weekly run only when it is at least as deep as
     // the plan's per-run depth. Shallower, it counts toward the week but the
     // plan stays whole (no creditableWaterIn). No plan run to reduce: as before.
@@ -504,36 +477,28 @@ function buildAftercare(applications, opts = {}) {
     const runDepth = plan?.depthInches == null || plan.depthInches === '' ? NaN : Number(plan.depthInches);
     const creditsRun = !plan?.title || plan.prescribesRun !== true
       || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001);
-    // A timed hold-then-water-in whose hold has elapsed: the water-in is what
-    // is due now, credited against the plan exactly like a standalone one;
-    // uncredited, its own banner line (verbatim, so the PDF strips it) is the task.
-    if (phase === 'water_in' && instruction.state === 'hold_then_water_in') {
-      return normalizeLawnAftercare({
-        ...recorded,
-        watering: instruction.lines.join(' '),
-        waterInRequired: true,
-        wateringHold: false,
-        creditableWaterIn: creditsRun,
-        ...(creditsRun ? {} : { waterInTask: instruction.lines[1] }),
-      });
-    }
     return normalizeLawnAftercare({
-      ...recorded,
       // Every treatment sentence: the PDF and Ask Waves read only this field.
       watering: instruction.lines.join(' '),
+      reentry,
       waterInRequired: instruction.state !== 'hold',
       wateringHold: holds,
       creditableWaterIn: instruction.state === 'water_in' && creditsRun,
       // The task line when the water-in is real but earns no plan credit.
       ...(instruction.state === 'water_in' && !creditsRun ? { waterInTask: instruction.lines[0] } : {}),
-      // The hero task carries the banner's first line verbatim; a hold that is
-      // followed by a water-in carries both steps, so the water-in is never
-      // missing from the hero while the hold is live.
+      needsReview: false,
+      neutral: false,
+      evidenceSource: 'product_instruction',
+      ruleSource: instruction.ruleSource || null,
+      // The hero task carries banner lines verbatim (the PDF strips them): the
+      // first line, or both steps of a hold-then-water-in.
       ...(holds ? {
         holdTask: instruction.state === 'hold_then_water_in'
           ? `${instruction.lines[0]} ${instruction.lines[1]}`
           : instruction.lines[0],
       } : {}),
+      holdUntil: instruction.holdUntil || null,
+      waterInBy: instruction.waterInBy || null,
     });
   }
   if (instruction && instruction.state === 'none') {
@@ -581,10 +546,9 @@ const ISSUE_TOPIC = {
  *   has no gauge reading (same shape subset as mowingHeight)
  * @param {object} [input.wateringInstruction]  buildWateringInstruction(...) result
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
- * @param {number} [input.nowMs]  render clock; an instruction past its expiresAt is history (default now)
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nowMs = Date.now() } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -677,7 +641,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
-  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null, nowMs });
+  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null });
   const aftercareWaterAction = wateringRestrictionAction(aftercare, water ? water.weekPlan : null);
   if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
   const insights = buildLawnInsightCards({
@@ -740,11 +704,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // earned it: outside this week's plan (visitInPlanWeek === false) it stays
   // in the Aftercare section only, never promoted into the hero action,
   // noActionNeeded, or the SMS summary derived from it below (codex P2 r10).
-  // A required water-in that earns no plan credit resolves to verdict none, which
-  // states no task: keep its own line as the task so the hero never reads "no
-  // action needed" beside it (only for this visit's plan week).
-  const aftercareTask = aftercareCustomerTask(aftercare, water ? water.weekPlan : null)
-    || (aftercare.waterInTask && water?.weekPlan?.visitInPlanWeek !== false ? aftercare.waterInTask : null);
+  // An uncredited required water-in keeps its own line as the task through
+  // the shared resolver (aftercareCustomerTask).
+  const aftercareTask = aftercareCustomerTask(aftercare, water ? water.weekPlan : null);
   // A credited water-in the water/damp cards phrase generically ("as
   // directed") already carries this same task in different words — the
   // literal-instruction `includes` check below misses that semantic

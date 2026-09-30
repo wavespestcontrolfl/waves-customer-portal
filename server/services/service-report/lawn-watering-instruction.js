@@ -203,7 +203,6 @@ function emptyInstruction() {
     holdUntilLabel: null,
     holdUntilPlanLabel: null,
     expiresAt: null,
-    holdUntilDry: false,
     waterInBy: null,
     waterInByLabel: null,
     waterInInches: null,
@@ -306,11 +305,9 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
     out.holdUntilLabel = formatWhen(timedEnd, at);
     out.holdUntilPlanLabel = out.holdUntilLabel;
     holdLabel = dryHolds.length ? `${out.holdUntilLabel}, and not before ${DRY_LABEL}` : out.holdUntilLabel;
-    if (dryHolds.length) out.holdUntilDry = true;
   } else {
     out.holdUntilLabel = DRY_LABEL;
     out.holdUntilPlanLabel = DRY_PLAN_LABEL;
-    out.holdUntilDry = true;
     holdLabel = DRY_LABEL;
   }
   if (waterInDetail) {
@@ -355,30 +352,8 @@ function composeBannerLines(instruction, { hasWeekPlan = false, planRunInches = 
   return lines;
 }
 
-const ACTIONABLE_STATES = ['hold', 'water_in', 'hold_then_water_in'];
-
-// The ONE clock reading of a frozen instruction, for every live consumer
-// (aftercare verdict, hero task, assistant): 'hold' | 'water_in' | 'ended',
-// or null when the instruction asks for nothing.
-//   - past expiresAt: 'ended' (history; wording kept as a record)
-//   - hold_then_water_in: 'hold' until a TIMED hold's clock end, then
-//     'water_in'; a hold that also waits for the treatment to dry (or waits
-//     only for that) has no clock release and stays 'hold' until expiry
-//   - an until-dry-only hold has no expiresAt and never ends by the clock
-function instructionPhaseAt(instruction, nowMs = Date.now()) {
-  if (!instruction || !ACTIONABLE_STATES.includes(instruction.state)) return null;
-  if (!Array.isArray(instruction.lines) || instruction.lines.length < 2) return null;
-  const expiresMs = instruction.expiresAt ? Date.parse(instruction.expiresAt) : NaN;
-  if (Number.isFinite(expiresMs) && nowMs > expiresMs) return 'ended';
-  if (instruction.state !== 'hold_then_water_in') return instruction.state;
-  const holdEndMs = instruction.holdUntil ? Date.parse(instruction.holdUntil) : NaN;
-  if (instruction.holdUntilDry !== true && Number.isFinite(holdEndMs) && nowMs >= holdEndMs) return 'water_in';
-  return 'hold';
-}
-
 module.exports = {
   buildWateringInstruction,
-  instructionPhaseAt,
   composeBannerLines,
   GENERIC_MINUTES_PER_QUARTER_INCH,
   _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter },
