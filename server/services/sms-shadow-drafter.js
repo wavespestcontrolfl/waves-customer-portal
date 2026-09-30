@@ -1074,7 +1074,15 @@ function reserviceExistingApptGoverns([start, end], text) {
   const after = text.slice(end).split(clauseSplit)[0];
   // A marker AFTER the span (same clause) counts; one earlier in the sentence is a different statement
   // ("Your lawn treatment is scheduled and I'll send your free pest re-service link").
-  if (RESERVICE_EXISTING_APPT_RE.test(after)) return true;
+  // Codex round-29 P2: the marker must describe THE MATCHED RE-SERVICE itself — not a subordinate or a different
+  // subject ("We can offer a free pest re-service after your regular visit is scheduled": "is scheduled" belongs to
+  // the regular visit, so the offer stays an offer).
+  const marker = RESERVICE_EXISTING_APPT_RE.exec(after);
+  if (marker) {
+    const between = after.slice(0, marker.index).replace(/^\s*(?:visit|appointment|treatment|call-?back|call|trip)\b/i, '');
+    const otherSubject = /\b(?:after|once|when|whenever|if|until|before|because|since|as\s+soon\s+as|while|so\s+that|provided|unless|visit|appointment|treatment|service|inspection|spray|application|plan|regular|routine|next)\b/i;
+    if (!otherSubject.test(between)) return true;
+  }
   const beforeClause = text.slice(0, start).split(clauseSplit).pop();
   return RESERVICE_EXISTING_APPT_BEFORE_RE.test(beforeClause)
     && !RESERVICE_DENIAL_GAP_BREAK_RE.test(beforeClause)
@@ -1352,7 +1360,8 @@ function reserviceReplyHasOfferWording(text) {
 // Codex round-29 P1: the shortcut applies ONLY when the re-service is the customer's sole need. A pest report that also
 // cancels / complains, asks to move or book another visit, or names another service ("The ants are back, cancel my
 // plan"; "The ants are back. Can I move my lawn visit to Friday?") still needs the normal OPEN TIMES lookup.
-const RESERVICE_OTHER_REQUEST_RE = /\b(?:re-?schedul\w*|re-?book\w*|move|moving|push|pushing|change|changing|switch|swap|skip|postpone|delay|cancel\w*|book|booking|another\s+(?:day|time)|different\s+(?:day|time)|what\s+times?|which\s+times?|any\s+(?:openings?|availability)|availab\w+|openings?|earlier|later\s+(?:date|time|day)|next\s+(?:week|available)|appointment)\b/i;
+const RESERVICE_OTHER_REQUEST_RE = /\b(?:re-?schedul\w*|re-?book\w*|move|moving|push|pushing|change|changing|switch|swap|skip|postpone|delay|cancel\w*|book|booking|another\s+(?:day|time)|different\s+(?:day|time)|what\s+times?|which\s+times?|any\s+(?:openings?|availability)|availab\w+|openings?|earlier|later\s+(?:date|time|day)|next\s+(?:week|available))\b|\b(?:can|could|would|will|may)\s+(?:i|you|we|someone|somebody)\b[^.?!]{0,40}\b(?:get|make|set\s+up|schedule|have)\s+(?:an?|another|my|the)\s+appointment\b|\b(?:please|pls|i\s+need|i\s+want|i['’]d\s+like|i\s+would\s+like|we\s+need|we\s+want|want\s+to|need\s+to|like\s+to)\b[^.?!]{0,40}\b(?:an?|another|my|the)\s+appointment\b/i;
+// (A bare mention of an appointment — "The ants are back after my appointment" — is history, not a request; round-29 P2.)
 // Codex round-31 P1: the bypass rests on INDEPENDENT EVIDENCE IN THE INBOUND TEXT of a separate need — never on the
 // upstream `schedulingIntent` flag or the classified intent. Traced: sms-intent.hasSchedulingIntent is a keyword /
 // weekday / month-day / clock-time detector, so it is TRUE for a plain pest report that merely carries a time word
@@ -1574,7 +1583,22 @@ function reserviceEtDates() {
   next.setUTCDate(next.getUTCDate() + 1);
   return { today, tomorrow: next.toISOString().slice(0, 10) };
 }
-// What the body claims about the booked callback: { refers, relative: Set('today'|'tomorrow') }.
+// The absolute day / date a sentence ASSERTS, normalized ('thu' | 'oct 9' | '10/9'), so an edited "scheduled for Friday" can
+// be compared with the live callback (Codex round-29 P2).
+const RESERVICE_WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const RESERVICE_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+function reserviceAssertedDays(sentence) {
+  const out = [];
+  for (const m of sentence.matchAll(/\b(sun|mon|tues?|wed(?:nes)?|thur?s?|fri|sat(?:ur)?)(?:day)?\b/gi)) out.push(m[1].slice(0, 3).toLowerCase());
+  for (const m of sentence.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b/gi)) out.push(`${m[1].toLowerCase()} ${Number(m[2])}`);
+  for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\b/g)) out.push(`${Number(m[1])}/${Number(m[2])}`);
+  return out;
+}
+function reserviceLiveDayTokens(dateStr) {
+  const d = new Date(`${String(dateStr).slice(0, 10)}T12:00:00Z`);
+  return new Set([RESERVICE_WEEKDAYS[d.getUTCDay()], `${RESERVICE_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`, `${d.getUTCMonth() + 1}/${d.getUTCDate()}`]);
+}
+// What the body claims about the booked callback: { refers, relative: Set('today'|'tomorrow'), days: Set }.
 function reserviceBookedClaims(body, info, lane) {
   const named = reserviceBookedDayNames(info).map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
   const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
@@ -1584,7 +1608,7 @@ function reserviceBookedClaims(body, info, lane) {
   // already scheduled for Thursday". A plain "your visit is scheduled" still does not.
   const qualifiedVisitRe = /\b(?:free|complimentary|no[- ]charge|at\s+no\s+(?:additional\s+)?(?:charge|cost)|follow-?up|call-?back)\b/i;
   const visitNounRe = /\b(?:visit|appointment|treatment|service|trip)s?\b/i;
-  const claims = { refers: false, relative: new Set() };
+  const claims = { refers: false, relative: new Set(), days: new Set() };
   for (const sentence of String(body).split(/[.!?\n]+/)) {
     const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
     if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || named.some((rx) => rx.test(sentence)))) continue;
@@ -1592,6 +1616,7 @@ function reserviceBookedClaims(body, info, lane) {
     const lanesNamed = RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l);
     if (lanesNamed.length && !lanesNamed.includes(lane)) continue;
     claims.refers = true;
+    for (const d of reserviceAssertedDays(sentence)) claims.days.add(d);
     if (relative) claims.relative.add(relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today');
   }
   return claims;
@@ -1603,13 +1628,19 @@ async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
   if (!entries.length || !customerId) return null;
   const { open } = await liveReserviceLaneState(customerId);
   const now = entries.some(([, , claims]) => claims.relative.size) ? reserviceEtDates() : null;
+  // an absolute day/date the body asserts must be the LIVE callback's ("scheduled for Friday" vs a Thursday callback)
+  const assertedDayStale = (lane, claims) => {
+    if (!claims.days.size || !open[lane]) return false;
+    const live = reserviceLiveDayTokens(open[lane].date);
+    return [...claims.days].some((day) => !live.has(day));
+  };
   const relativeStale = (lane, claims) => {
     const live = open[lane] && String(open[lane].date).slice(0, 10);
     return [...claims.relative].some((rel) => live !== (rel === 'tomorrow' ? now.tomorrow : now.today));
   };
   const moved = entries.filter(([lane, info, claims]) => !open[lane] || String(open[lane].date).slice(0, 10) !== info.date
     || (info.windowStart && String(open[lane].windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5))
-    || relativeStale(lane, claims));
+    || relativeStale(lane, claims) || assertedDayStale(lane, claims));
   return moved.length ? `reservice_booking_changed — the already-booked ${moved.map(([lane]) => lane).join(' and ')} re-service appointment was cancelled or moved since this reply was drafted` : null;
 }
 // decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } comes from the send paths that

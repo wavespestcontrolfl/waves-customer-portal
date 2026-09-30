@@ -398,6 +398,14 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['they left', false, null, false],
     ['ants left for good', false, null, false],
     ["the ants haven't left", true, 'pest', false],
+    // round-29 P2: comma-coordinated lists share the predicate; if/whether scoped to the pest activity
+    ['termites, ants, and roaches are back', true, null, true],
+    ['ants, roaches and spiders are back', true, 'pest', false],
+    ['ants, spiders, and termites came back', true, null, true],
+    ['ants are back, roaches are back', true, 'pest', false],
+    ['Ants are back if you can believe it', true, 'pest', false],
+    ['ants are back, whether you believe it or not', true, 'pest', false],
+    ['Tell me whether the roaches are back', false, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],
@@ -436,7 +444,7 @@ describe('persistence constructions share one source', () => {
 
   test('mentionsAffirmed: a negated hand-off term does not count, an affirmed one does', () => {
     const re = /\b(?:cancel\w*|refund\w*)\b/i;
-    for (const t of ["I don't need a refund, the ants are back", "I don't want to cancel; ants are back", 'do not cancel my plan', 'no need to cancel']) expect(mentionsAffirmed(t, re)).toBe(false);
-    for (const t of ['I want a refund', 'the ants are back, cancel my service', 'I am going to cancel']) expect(mentionsAffirmed(t, re)).toBe(true);
+    for (const t of ["I don't need a refund, the ants are back", "I don't want to cancel; ants are back", 'do not cancel my plan', 'no need to cancel', "A refund isn't needed—the ants are back", "cancellation isn't what I want", "a refund is not necessary", "refund won't be needed"]) expect(mentionsAffirmed(t, re)).toBe(false);
+    for (const t of ['I want a refund', 'the ants are back, cancel my service', 'I am going to cancel', 'I want a refund not a credit', 'a refund is needed']) expect(mentionsAffirmed(t, re)).toBe(true);
   });
 });

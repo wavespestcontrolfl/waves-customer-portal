@@ -484,14 +484,26 @@ const RESERVICE_QUESTION_OPEN_RE = /^\W*(?:(?:and|but|so|also|please|then)\W+)*(
 const RESERVICE_WHY_QUESTION_RE = /^\W*(?:(?:and|but|so)\W+)*(?:why|how\s+come)\b/i;
 const RESERVICE_HYPOTHETICAL_RE = /\b(?:if|whether|unless|in\s+case|suppose|supposing)\b/i;
 function reserviceClauseIsQuestion(clause, delimiter) {
-  if (RESERVICE_WHY_QUESTION_RE.test(clause)) return RESERVICE_HYPOTHETICAL_RE.test(clause);
-  return /\?/.test(delimiter || '') || RESERVICE_QUESTION_OPEN_RE.test(clause) || RESERVICE_HYPOTHETICAL_RE.test(clause);
+  // if / whether / unless make the clause hypothetical only when they GOVERN the pest activity — i.e. a pest noun
+  // FOLLOWS the marker ("If ants are back…", "tell me if ants are back"). "Ants are back if you can believe it"
+  // asserts the recurrence (Codex round-29 P2).
+  const hyp = RESERVICE_HYPOTHETICAL_RE.exec(clause);
+  const hypothetical = Boolean(hyp) && new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b`, 'i').test(clause.slice(hyp.index + hyp[0].length));
+  if (RESERVICE_WHY_QUESTION_RE.test(clause)) return hypothetical;
+  return /\?/.test(delimiter || '') || RESERVICE_QUESTION_OPEN_RE.test(clause) || hypothetical;
 }
 // A clause that RESOLVES a sighting by pronoun ("…, but they are gone now", "…, but they disappeared") also resolves
 // the sighting just before it (Codex round-27 P2): "I saw ants yesterday, but they are gone now". A resolution
 // that names a pest of its own ("ants are gone but roaches are back" — the resolved clause names ants, the
 // next names roaches) does not reach back.
-const RESERVICE_COORDINATED_NOUNS_RE = new RegExp(`(\\b${RESERVICE_ANY_PEST_NOUN}\\b\\s+)(and|plus)(\\s+(?:the\\s+|some\\s+|those\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b)`, 'gi');
+// A coordinated list of pest NOUNS ("termites and ants", "termites, ants, and roaches") shares the predicate that
+// follows, so its commas and its and/plus are not clause boundaries (Codex round-28/29 P2). A list needs the
+// conjunction — "not bed bugs, the ants are back" is two clauses, not a list. Masked length-preservingly in the copy the
+// delimiters are read from.
+const RESERVICE_NOUN_LIST_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b(?:\\s*,\\s*(?:the\\s+|some\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b)*\\s*,?\\s+(?:and|plus)\\s+(?:the\\s+|some\\s+|those\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b`, 'gi');
+function maskCoordinatedNouns(text) {
+  return String(text).replace(RESERVICE_NOUN_LIST_RE, (m) => m.replace(/,/g, '&').replace(/\b(?:and|plus)\b/gi, (w) => '&'.repeat(w.length)));
+}
 const RESERVICE_PRONOUN_SUBJECT_RE = /^\W*(?:(?:but|and|yet|now|then|so|because)\W+)*(?:they|it|them|those|these|all\s+of\s+(?:them|it))\b/i;
 // { kept: clauses that still count, survivingText: the original text with dropped clauses blanked }
 function reservicePestReportFacts(text) {
@@ -501,7 +513,7 @@ function reservicePestReportFacts(text) {
   const flush = (end, delimiter) => segs.push({ clause: s.slice(cursor, end), delimiter });
   // "termites and ants are back": an "and" that coordinates two pest NOUNS shares the following predicate, so it is
   // not a clause boundary (Codex round-28 P2). Masked length-preservingly in the copy the delimiters are read from.
-  const splitCopy = s.replace(RESERVICE_COORDINATED_NOUNS_RE, (m, first, joiner, second) => `${first}${joiner.replace(/\w/g, '&')}${second}`);
+  const splitCopy = maskCoordinatedNouns(s);
   for (const m of splitCopy.matchAll(RESERVICE_CLAUSE_DELIMITER_RE)) {
     flush(m.index, m[0]);
     cursor = m.index + m[0].length;
@@ -558,9 +570,13 @@ function mentionsAffirmed(text, termRe) {
   // match on the WHOLE text (a phrase like "sick and tired" spans a clause delimiter), then judge negation
   // only within the match's own clause
   const boundaries = [...s.matchAll(RESERVICE_CLAUSE_DELIMITER_RE)].map((d) => d.index + d[0].length);
+  // Codex round-29 P2: negation may also FOLLOW the term ("A refund isn't needed", "cancellation isn't what I want").
+  const negatedAfter = /^\W*(?:[\w'’-]+\W+){0,2}?(?:isn['’]?t|is\s+not|aren['’]?t|are\s+not|wasn['’]?t|won['’]?t|will\s+not|no\s+longer|not\s+(?:needed|necessary|required|wanted|something|what|the\s+issue|a\s+concern|a\s+priority))\b/i;
   for (const m of s.matchAll(re)) {
     const clauseStart = boundaries.filter((at) => at <= m.index).pop() || 0;
-    if (!negatorBefore.test(s.slice(clauseStart, m.index))) return true;
+    const clauseEnd = boundaries.find((at) => at > m.index + m[0].length) ?? s.length;
+    const tail = s.slice(m.index + m[0].length, clauseEnd);
+    if (!negatorBefore.test(s.slice(clauseStart, m.index)) && !negatedAfter.test(tail)) return true;
   }
   return false;
 }

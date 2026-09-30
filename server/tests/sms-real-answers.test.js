@@ -3252,6 +3252,10 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["I'm free at 3 if you want to talk.", false, []],
   ["Free on Thursday after 5, we can send a tech.", false, []],
   ["The re-service is free Tuesday.", true, []],
+  ["We can offer a free pest re-service after your regular visit is scheduled.", true, ['pest']],
+  ["We can offer a free pest re-service once your regular visit is booked.", true, ['pest']],
+  ["Your free pest re-service visit is booked.", false, []],
+  ["Your free pest re-service is on the schedule.", false, []],
   ["Your free pest re-service was canceled.", false, []],
   ["We completed your free re-service Tuesday.", false, []],
   ["The no-charge callback was missed.", false, []],
@@ -3540,6 +3544,49 @@ describe('free re-service is an entitlement resolved through the existing mechan
       const book = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now.", factsBlock: bookableFacts, intendedActions: [...sendLink, { type: 'book_appointment' }], inboundMessage: 'the ants are back' });
       expect(book.ok).toBe(false);
       expect(book.violations[0]).toMatch(/book_appointment/);
+    });
+
+    // Codex round-29 P2s (PR #5336)
+    test('a booked marker that describes ANOTHER visit does not strip the offer: an ineligible customer is not offered a free callback', () => {
+      const { validateReserviceOffer, reserviceFactLine, isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
+      const reply = 'We can offer a free pest re-service after your regular visit is scheduled.';
+      expect(isReserviceOfferPromise(reply)).toBe(true);
+      const ineligible = `X\n${reserviceFactLine([], {}, 'none')}\nBILLING:`;
+      const out = validateReserviceOffer({ reply, factsBlock: ineligible, intendedActions: [], inboundMessage: 'hi' });
+      expect(out.ok).toBe(false);
+      expect(out.violations[0]).toMatch(/does not say this customer is eligible|eligible/);
+    });
+
+    test('an edited body asserting a DIFFERENT day than the live callback is blocked (Friday vs a Thursday callback)', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } }; // Thursday, October 8 2026
+        const send = async (open, body) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open, bookable: [], verified: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        const live = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        await expect(send(live, 'Your pest re-service is scheduled for Thursday.')).resolves.toBeNull();
+        await expect(send(live, 'Your pest re-service is scheduled for Thursday, October 8.')).resolves.toBeNull();
+        await expect(send(live, 'Your pest re-service is scheduled for Friday.')).resolves.toMatch(/reservice_booking_changed/);
+        await expect(send(live, 'Your pest re-service is booked for October 9.')).resolves.toMatch(/reservice_booking_changed/);
+        await expect(send(live, 'Your pest re-service is set for 10/9.')).resolves.toMatch(/reservice_booking_changed/);
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
+    test('a bare "appointment" mention is history, not a separate request; request language is', () => {
+      const { reserviceIsOnlySchedulingNeed } = require('../services/sms-shadow-drafter');
+      const only = (inboundMessage) => reserviceIsOnlySchedulingNeed({ inboundMessage });
+      for (const m of ['The ants are back after my appointment', 'ants are back since my last appointment', 'the ants came back after the appointment on Tuesday']) expect(only(m)).toBe(true);
+      for (const m of ['the ants are back, can I get an appointment for Friday?', 'ants are back and I need an appointment', 'ants are back, I want to schedule an appointment', 'ants are back, please move my appointment']) expect(only(m)).toBe(false);
     });
 
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {
