@@ -101,7 +101,7 @@ const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estima
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
-const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const { sendConfirmationEmail, releaseUnsentConfirmationStamp } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { attributionForSourceType, backfillCallLeadAttribution } = require('../services/ads/call-attribution');
@@ -4027,6 +4027,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             await sendConfirmationEmail(result.subscriber);
           } catch (e) {
             logger.error(`[public-quote] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
+            // Stamp was set before the send: clear it after a transient failure
+            // (permanent vetoes stay stamped and are not retried).
+            await releaseUnsentConfirmationStamp(result.subscriber, e);
           }
           logger.info(`[public-quote] newsletter confirmation queued for lead ${lead.id} subscriber id=${result.subscriber?.id}`);
         } else if (result.action === 'already_active') {

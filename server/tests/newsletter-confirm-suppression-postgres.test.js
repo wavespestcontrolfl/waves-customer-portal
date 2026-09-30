@@ -135,6 +135,31 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     });
   });
 
+
+  test('a LEGACY-only do-not-contact record (ai_extraction text, no V2 enriched blob) blocks', async () => {
+    await inRolledBackTx(async (trx) => {
+      const id = await customer(trx);
+      await trx('call_log').insert({ customer_id: id, v2_extraction_status: 'failed', ai_extraction: JSON.stringify({ consent: {}, do_not_contact_request: true }) });
+      await expect(assertConfirmationAllowed(sub(addr(), { customer_id: id }), trx)).rejects.toMatchObject({ reason: 'do_not_contact' });
+    });
+    await inRolledBackTx(async (trx) => {
+      const id = await customer(trx);
+      await trx('call_log').insert({ customer_id: id, ai_extraction: '{"do_not_contact_request" :  true}' });
+      await expect(assertConfirmationAllowed(sub(addr(), { customer_id: id }), trx)).rejects.toMatchObject({ reason: 'do_not_contact' });
+    });
+  });
+
+  test('a legacy record that says false, or no extraction at all, does not block', async () => {
+    await inRolledBackTx(async (trx) => {
+      const id = await customer(trx);
+      await trx('call_log').insert([
+        { customer_id: id, ai_extraction: JSON.stringify({ do_not_contact_request: false }) },
+        { customer_id: id },
+      ]);
+      await expect(assertConfirmationAllowed(sub(addr(), { customer_id: id }), trx)).resolves.toBeUndefined();
+    });
+  });
+
   test('owners without a do-not-contact request, or a request on someone else, allow', async () => {
     await inRolledBackTx(async (trx) => {
       const email = addr();

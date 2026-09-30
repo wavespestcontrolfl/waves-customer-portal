@@ -18,7 +18,7 @@ const {
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
-const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const { sendConfirmationEmail, releaseUnsentConfirmationStamp } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveAnswer, recordQuizResponse, getQuiz, quizBookingUrl } = require('../services/newsletter-quiz');
 const {
@@ -456,6 +456,10 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
         await sendConfirmationEmail(result.subscriber);
       } catch (e) {
         logger.error(`[newsletter] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
+        // The stamp was set before the send; a transient failure must not
+        // leave the row looking delivered (permanent vetoes stay stamped).
+        // The response below stays uniform either way.
+        await releaseUnsentConfirmationStamp(result.subscriber, e);
       }
     }
     res.json({ success: true, pending: true });

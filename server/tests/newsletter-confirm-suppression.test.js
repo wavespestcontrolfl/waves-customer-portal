@@ -9,6 +9,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 const mockOrder = [];
+const mockUpdates = [];
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: () => true,
   sendOne: jest.fn(async () => { mockOrder.push('send'); return { messageId: 'sg-1' }; }),
@@ -29,7 +30,7 @@ jest.mock('../services/newsletter-subscribers', () => ({
 const express = require('express');
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
-const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const { sendConfirmationEmail, releaseUnsentConfirmationStamp, ConfirmationVetoedError } = require('../services/newsletter-confirm');
 
 // Per-table canned results. A value that is an Error is thrown by the query.
 let tables;
@@ -44,6 +45,7 @@ function fakeQuery(table) {
   ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'whereNull', 'select'].forEach((m) => {
     q[m] = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q, q); return q; });
   });
+  q.update = jest.fn(async (patch) => { mockUpdates.push({ table, patch, wheres: q.where.mock.calls.map((c) => c[0]) }); return 1; });
   q.first = jest.fn(async () => { mockOrder.push(`read:${table}`); const v = settle(); return Array.isArray(v) ? v[0] || null : v || null; });
   q.then = (res, rej) => Promise.resolve().then(() => { mockOrder.push(`read:${table}`); return settle() || []; }).then(res, rej);
   return q;
@@ -71,6 +73,7 @@ const SUB = { id: 'sub-1', email: 'Neighbor@Example.com', first_name: 'Pat', con
 beforeEach(() => {
   jest.clearAllMocks();
   mockOrder.length = 0;
+  mockUpdates.length = 0;
   ownershipBusy = false;
   tables = { email_suppressions: [], customers: [], notification_prefs: [], call_log: [] };
   rootTrx = makeTrx();
@@ -270,6 +273,76 @@ describe('POST /api/public/newsletter/subscribe with a vetoed address', () => {
     const r = await post('neighbor@example.com');
     expect(r).toEqual({ status: 200, body: { success: true, pending: true } });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('pre-stamp release after a failed send (public callers)', () => {
+  async function post(email) {
+    const router = require('../routes/public-newsletter');
+    const app = express();
+    app.use(express.json());
+    app.use('/api/public/newsletter', router);
+    const server = app.listen(0);
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.address().port}/api/public/newsletter/subscribe`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
+      });
+      return { status: r.status, body: await r.json() };
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+  const stampClears = () => mockUpdates.filter((u) => u.table === 'newsletter_subscribers' && u.patch.confirmation_sent_at === null);
+
+  beforeEach(() => { mockSubscribe.mockResolvedValue({ action: 'confirmation_resent', subscriber: SUB }); });
+
+  test('a transient ownership_busy veto clears the pre-stamp; the response stays uniform', async () => {
+    ownershipBusy = true;
+    const r = await post('neighbor@example.com');
+    expect(r).toEqual({ status: 200, body: { success: true, pending: true } });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(stampClears()).toHaveLength(1);
+  });
+
+  test('an unverifiable veto lookup clears the pre-stamp', async () => {
+    tables.email_suppressions = new Error('connection terminated');
+    const r = await post('neighbor@example.com');
+    expect(r.status).toBe(200);
+    expect(stampClears()).toHaveLength(1);
+  });
+
+  test('permanent vetoes (suppressed, do-not-contact) leave the row stamped: no retry', async () => {
+    // Direct (the route's per-IP limiter caps posts per minute in one file).
+    tables.email_suppressions = [{ id: 's1', suppression_type: 'do_not_email' }];
+    const suppressed = await sendConfirmationEmail(SUB).catch((e) => e);
+    expect(await releaseUnsentConfirmationStamp(SUB, suppressed)).toBe(false);
+    tables.email_suppressions = [];
+    mockDnc.mockResolvedValue(true);
+    tables.customers = [{ id: 'c1' }];
+    const dnc = await sendConfirmationEmail(SUB).catch((e) => e);
+    expect(dnc.reason).toBe('do_not_contact');
+    expect(await releaseUnsentConfirmationStamp(SUB, dnc)).toBe(false);
+    expect(mockUpdates.filter((u) => u.patch.confirmation_sent_at === null)).toHaveLength(0);
+  });
+
+  test('a successful send leaves the stamp alone', async () => {
+    await sendConfirmationEmail(SUB);
+    expect(stampClears()).toHaveLength(0);
+  });
+
+  test('release is scoped to the attempted email + token + pending and never throws', async () => {
+    const ok = await releaseUnsentConfirmationStamp(SUB, new ConfirmationVetoedError('ownership_busy'));
+    expect(ok).toBe(true);
+    const u = mockUpdates.find((x) => x.table === 'newsletter_subscribers');
+    expect(u.wheres).toContainEqual({ id: 'sub-1', confirmation_token: 'tok-1', status: 'pending' });
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(releaseUnsentConfirmationStamp(SUB, new Error('sendgrid'))).resolves.toBe(false);
+  });
+
+  test('public-quote clears the stamp too (source pin)', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require('path').join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(src).toMatch(/confirmation email failed for subscriber id[^\n]*\n[^\n]*\n[^\n]*\n\s*await releaseUnsentConfirmationStamp\(result\.subscriber, e\)/);
   });
 });
 

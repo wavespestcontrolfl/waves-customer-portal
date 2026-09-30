@@ -28,6 +28,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { whereCallDoNotContact } = require('../utils/call-dnc');
 
 const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
 // Same permissive-but-real syntax class the fanout uses — releases are also
@@ -73,9 +74,10 @@ async function resolveFirstTouchLeadId({ metadataLeadId, fromPhone, dbh }) {
 }
 
 async function customerCallDoNotContact(customerId, dbh) {
-  const row = await dbh('call_log')
-    .where({ customer_id: customerId })
-    .whereRaw("ai_extraction_enriched->'consent'->>'do_not_contact_request' = 'true'")
+  // Both shapes (V2 consent object AND the legacy flat field a call processed
+  // with V2 off / unavailable / schema-failed leaves) — same predicate as the
+  // auto-text hold, so the outbound vetoes cannot drift apart.
+  const row = await whereCallDoNotContact(dbh('call_log').where({ customer_id: customerId }))
     .first('id');
   return !!row;
 }

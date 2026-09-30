@@ -45,6 +45,11 @@ const GLOBAL_SUPPRESSION_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
 const CUSTOMER_EMAIL_FIELDS = require('../utils/customer-comms-lock').CUSTOMER_EMAIL_COLUMNS
   .filter((column) => column !== 'billing_email');
 
+// Vetoes that will not clear by themselves: the address is suppressed or the
+// customer asked not to be contacted. Everything else (ownership busy, an
+// unverifiable lookup, a provider error) is transient and worth a retry.
+const PERMANENT_VETO_REASONS = new Set(['address_suppressed', 'do_not_contact']);
+
 class ConfirmationVetoedError extends Error {
   constructor(reason) {
     super(`confirmation email vetoed: ${reason}`);
@@ -149,6 +154,34 @@ async function assertConfirmationAllowed(subscriber, dbh = db) {
 }
 
 /**
+ * subscribeOrResubscribe stamps confirmation_sent_at BEFORE the send. When the
+ * send then fails for a TRANSIENT reason (ownership busy, unverifiable veto
+ * lookup, provider error) the row would look delivered: nothing retries, the
+ * DOI TTL runs against a mail that never left, and the purge sweep deletes the
+ * row. Clear the stamp so the row reads "not sent" again (a repeat signup
+ * re-sends, the stale-pending lifecycle stays honest) — the discipline the
+ * call pipeline and the email fanout already follow. A PERMANENT veto
+ * (suppressed / do-not-contact) is left stamped: it must not be retried, and
+ * the purge sweep retires the row. Conditional on the exact attempted
+ * email+token+pending so a correction that rotated the row keeps its own
+ * stamp. Best-effort; never throws.
+ */
+async function releaseUnsentConfirmationStamp(subscriber, err, dbh = db) {
+  try {
+    if (!subscriber || !subscriber.id) return false;
+    if (err && err.code === 'confirmation_vetoed' && PERMANENT_VETO_REASONS.has(err.reason)) return false;
+    const updated = await dbh('newsletter_subscribers')
+      .where({ id: subscriber.id, confirmation_token: subscriber.confirmation_token, status: 'pending' })
+      .whereRaw('LOWER(email) = ?', [String(subscriber.email || '').trim().toLowerCase()])
+      .update({ confirmation_sent_at: null, updated_at: new Date() });
+    return updated > 0;
+  } catch (clearErr) {
+    logger.warn(`[newsletter-confirm] confirmation_sent_at clear failed for subscriber id=${subscriber && subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
+    return false;
+  }
+}
+
+/**
  * Send (or re-send) a confirmation email. Idempotent at the SendGrid
  * level — re-firing it just lands a duplicate in the recipient's inbox,
  * which is the standard behavior for "didn't get my confirmation"
@@ -231,4 +264,6 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
   return result;
 }
 
-module.exports = { sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError };
+module.exports = {
+  sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError, releaseUnsentConfirmationStamp,
+};
