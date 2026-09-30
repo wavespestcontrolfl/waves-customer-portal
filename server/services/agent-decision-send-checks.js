@@ -88,7 +88,7 @@ async function reserviceBlock({ decision, outgoingBody }) {
     // Codex round-9 (PR #5336): lets a PRE-DEPLOY decision (no snapshot, older
     // prompt version) be grandfathered onto live eligibility instead of being
     // rejected outright; new-version decisions missing a snapshot stay closed.
-    decisionMeta: { promptVersion: decision.prompt_version, draftId: snapshot?.draft_id || null, intendedActions: Array.isArray(snapshot?.intended_actions) ? snapshot.intended_actions : null },
+    decisionMeta: { promptVersion: decision.prompt_version, draftId: snapshot?.draft_id || null, intendedActions: Array.isArray(snapshot?.intended_actions) ? snapshot.intended_actions : null, bookedCallbacks: snapshot?.reservice_booked_snapshot || null },
   });
   return reason ? `re-service promise unsendable (${reason})` : null;
 }

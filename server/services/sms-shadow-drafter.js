@@ -762,6 +762,17 @@ function reserviceSpanLaneText(text, [start, end], stops = []) {
   const after = afterRaw.split(segmentBreak)[0].split(contrast)[0].trim().split(/\s+/).filter(Boolean).slice(0, 8).join(' ');
   return `${before} ${span} ${after}`.trim();
 }
+// Codex round-18 P2 (PR #5336): an offer span with an existing-appointment marker in the SAME clause
+// ("Your free pest re-service is already scheduled for Thursday", "…is on the schedule", "…is coming
+// up") describes a booked appointment, not a new offer. The marker must follow the span within the
+// clause; "get it scheduled for Thursday" (a to-do) is not one.
+const RESERVICE_EXISTING_APPT_SOURCE = "already\\s+(?:scheduled|booked|set|on\\s+(?:the|our)\\s+(?:schedule|calendar))|(?:is|are|was)\\s+(?:scheduled|booked)|(?:is|are)\\s+set\\s+for|(?:on|in)\\s+(?:the|our)\\s+(?:schedule|calendar)|coming\\s+up";
+const RESERVICE_EXISTING_APPT_RE = new RegExp(`\\b(?:${RESERVICE_EXISTING_APPT_SOURCE})\\b`, 'i');
+function reserviceExistingApptGoverns([, end], text) {
+  // Only a marker AFTER the span (same clause) counts: one before it is a different statement
+  // ("Your lawn treatment is scheduled and I'll send your free pest re-service link").
+  return RESERVICE_EXISTING_APPT_RE.test(text.slice(end).split(/[,;:.!?\u2013\u2014]/)[0]);
+}
 function affirmativeReserviceOfferTexts(clause) {
   const text = String(clause || '');
   const offers = reserviceOfferSpans(text);
@@ -769,7 +780,7 @@ function affirmativeReserviceOfferTexts(clause) {
   const negators = [...text.matchAll(RESERVICE_DENIAL_SCAN_RE)].map((m) => [m.index, m.index + m[0].length]);
   const stops = [...offers.flatMap(([a, b]) => [a, b]), ...negators.flatMap(([a, b]) => [a, b])];
   return offers
-    .filter((o) => !negators.some((n) => reserviceNegatorGoverns(n, o, text)))
+    .filter((o) => !negators.some((n) => reserviceNegatorGoverns(n, o, text)) && !reserviceExistingApptGoverns(o, text))
     .map((o) => reserviceSpanLaneText(text, o, stops.filter((at) => at !== o[0] && at !== o[1])));
 }
 function rawReserviceOfferMatch(text) {
@@ -944,6 +955,17 @@ function reserviceExcludedSpecialtyInPromise(text) {
   const { reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
   return reservicePromiseClauses(text).some((c) => reportedReserviceExcludedSpecialty(c));
 }
+// Codex round-18 P2 (PR #5336): an ELIGIBLE pest report — the inbound reads as a pest report and its
+// lane is bookable — whose reply neither offers the covered free re-service nor carries the link
+// action must be revised, not accepted. Not forced when the lane is already booked / not eligible
+// (the facts then don't list it), and a draft that escalates to a person keeps its hand-off (a
+// complaint that also mentions pests is held for a human, never offered a link).
+function reserviceOfferOwed({ inboundMessage, lanes, actions }) {
+  const { reportedReserviceLane } = require('./reservice-scheduler');
+  const lane = reportedReserviceLane(inboundMessage);
+  return PEST_REPORT_TEXT_RE.test(String(inboundMessage || '')) && lane === 'pest' && lanes.includes(lane)
+    && !actions.some((a) => a && a.type === 'escalate');
+}
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
@@ -956,7 +978,11 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // bookable lane) or is rejected. Its body is classified over the WHOLE text for lanes/specialties
   // (reserviceBodyLanes); a detected promise scopes them to its offer spans.
   const promise = isReserviceOfferPromise(text);
-  if (!promise && !reserviceCarriesLinkAction(actions)) return { ok: true, violations: [] };
+  if (!promise && !reserviceCarriesLinkAction(actions)) {
+    return reserviceOfferOwed({ inboundMessage, lanes: eligibleReserviceLanes(factsBlock), actions })
+      ? { ok: false, violations: ['the customer reported a pest issue and FREE RE-SERVICE in the facts says they are eligible — offer the covered free re-service (say you are sending their free re-service booking link and add {"type":"escalate","note":"send_reservice_link"} to intended_actions)'] }
+      : { ok: true, violations: [] };
+  }
   // reservice-scheduler is the SAME classifier the no-named-lane path uses (NOT sms-service-intent.js's
   // lead-intake regexClassify, which lumps termite/rodent/mosquito words into its 'pest' bucket — that
   // bucket is for lead-intake ROUTING, not the re-service mechanism's own pest/lawn split, which
@@ -1078,6 +1104,33 @@ function draftIntendedActions(raw) {
     return [];
   }
 }
+// Codex round-18 P2 (PR #5336): the already-booked fact's callback rides the decision snapshot
+// ({ lane: { date, windowStart } }, reservice_booked_snapshot) so a reply that refers to that
+// appointment ("your re-service is already scheduled for Thursday") is rechecked at send time: it
+// must still be an OPEN callback on the same date/window (the shared availability's `open` map — the
+// same read the public page uses), else 'reservice_booking_changed'. The callback id is deliberately
+// not persisted: openReserviceCallbacks feeds the public page payload, which must not carry it.
+function reserviceBookedSnapshot(booked) {
+  return Object.fromEntries(Object.entries(booked || {})
+    .filter(([lane, info]) => (lane === 'pest' || lane === 'lawn') && info && info.date)
+    .map(([lane, info]) => [lane, { date: String(info.date).slice(0, 10), windowStart: info.windowStart || null }]));
+}
+// Does the body refer to the booked appointment — an existing-appointment phrase, or its stored day/date/time?
+function reserviceBodyRefersToBooked(body, info) {
+  const day = new Date(`${info.date}T12:00:00Z`);
+  const fmt = (opts) => day.toLocaleDateString('en-US', { timeZone: 'UTC', ...opts });
+  const names = [fmt({ weekday: 'long' }), fmt({ month: 'long', day: 'numeric' }), fmt({ month: 'short', day: 'numeric' }), `${day.getUTCMonth() + 1}/${day.getUTCDate()}`];
+  const time = info.windowStart ? require('../utils/sms-time-format').formatSmsTime(info.windowStart) : null;
+  const named = [...names, time, time && time.replace(':00', '')].filter(Boolean);
+  return RESERVICE_EXISTING_APPT_RE.test(body) || named.some((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i').test(body));
+}
+async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
+  const entries = Object.entries(reserviceBookedSnapshot(booked)).filter(([, info]) => reserviceBodyRefersToBooked(body, info));
+  if (!entries.length || !customerId) return null;
+  const { open } = await liveReserviceLaneState(customerId);
+  const moved = entries.filter(([lane, info]) => !open[lane] || String(open[lane].date).slice(0, 10) !== info.date || (info.windowStart && String(open[lane].windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5)));
+  return moved.length ? `reservice_booking_changed — the already-booked ${moved.map(([lane]) => lane).join(' and ')} re-service appointment was cancelled or moved since this reply was drafted` : null;
+}
 // decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } comes from the send paths that
 // hold a decision row (agent-decision-send-checks, scheduler.js); NO_DECISION (no row behind the body)
 // keeps the strict, snapshot-or-named-lane behavior.
@@ -1087,7 +1140,12 @@ function reserviceCarriesLinkAction(actions) {
   return Array.isArray(actions) && actions.some((a) => a && a.type === 'escalate' && /reservice/i.test(String(a.note || '')));
 }
 const NO_DECISION = { none: true };
-async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta: meta = NO_DECISION }) {
+async function reservicePromiseStillEligible(args) {
+  // Codex round-18 P2: a reply referring to the already-booked appointment is rechecked against the live callback first.
+  const changed = await reserviceBookedReferenceBlock({ body: String(args.outgoingBody || ''), customerId: args.customerId, booked: args.decisionMeta && args.decisionMeta.bookedCallbacks });
+  return changed || reserviceLanesStillEligible(args);
+}
+async function reserviceLanesStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta: meta = NO_DECISION }) {
   const body = String(outgoingBody || '');
   // STRUCTURAL BACKSTOP (pre-push audit P1, PR #5336): a decision whose intended_actions carry the
   // send-reservice-link action ALWAYS revalidates its snapshot lanes live, whatever the (possibly
@@ -2681,6 +2739,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
+  const reserviceBooked = reserviceState ? reserviceState.booked : {};
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -2726,7 +2785,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
   };
   let { parsed, model, servedModel } = first;
   // Kill switch / single-pass mode: no LLM verification claim, behave as
@@ -2748,7 +2807,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // also switches real answers off at the delivery boundary.
     logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
     return {
-      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
       openTimesSnapshot: null,
     };
   }
@@ -2770,12 +2829,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
-        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
         openTimesSnapshot: null,
       };
     }
     return {
-      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType,
       }),
@@ -2862,7 +2921,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   }
 
   return {
-    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion,
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
     // Computed off the FINAL parsed.reply (after every revision pass) — an
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
@@ -2988,7 +3047,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot, factsGeneratedAt,
+      openTimesSnapshot, factsGeneratedAt, reserviceBooked,
     } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null,
     });
@@ -3222,6 +3281,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               factsGeneratedAt,
               // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
               reserviceLanesSnapshot,
+              reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -3275,6 +3335,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             factsGeneratedAt,
             // Codex round-3 P2 — see reserviceLanesSnapshot's comment above.
             reserviceLanesSnapshot,
+            reserviceBookedSnapshot: reserviceBookedSnapshot(reserviceBooked),
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
@@ -3365,6 +3426,7 @@ module.exports = {
   namedReserviceLanesInText,
   reservicePromiseStillEligible,
   reserviceCarriesLinkAction,
+  reserviceBookedSnapshot,
   reserviceSnapshotVersionEmitted,
   reserviceBodyPrescreen,
   PRE_DEPLOY_PROMPT_IDENTITIES,

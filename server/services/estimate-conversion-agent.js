@@ -622,7 +622,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt, factsBlock } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt, factsBlock, reserviceBooked } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -702,6 +702,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
       reserviceLanesSnapshot,
+      reserviceBookedSnapshot: drafter.reserviceBookedSnapshot(reserviceBooked),
     };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
@@ -812,6 +813,10 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // reservice_lanes_snapshot (sms-suggest-mode.js).
         ...(Array.isArray(llmDraft?.reserviceLanesSnapshot) && llmDraft.reserviceLanesSnapshot.length
           ? { reservice_lanes_snapshot: llmDraft.reserviceLanesSnapshot }
+          : {}),
+        // Codex round-18 P2 — same as publishSuggestion's reservice_booked_snapshot.
+        ...(llmDraft?.reserviceBookedSnapshot && Object.keys(llmDraft.reserviceBookedSnapshot).length
+          ? { reservice_booked_snapshot: llmDraft.reserviceBookedSnapshot }
           : {}),
         // Same sanitized shape publishSuggestion persists, read back by
         // GET /agent-draft (pre-push audit P1). Template drafts carry none.

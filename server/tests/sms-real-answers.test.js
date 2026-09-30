@@ -2775,10 +2775,82 @@ describe('free re-service is an entitlement resolved through the existing mechan
       });
     });
 
+    // Codex round-18 P2 #2 (PR #5336): an eligible pest report whose reply omits the offer is revised, not accepted.
+    describe('an eligible pest report must be offered the covered re-service', () => {
+      const { reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const facts = (lanes, booked) => `X\n${reserviceFactLine(lanes, booked)}\nBILLING:`;
+      const report = 'the ants are back again';
+
+      test('reply with no offer and no link action → rejected so it revises', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const out = validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: report });
+        expect(out.ok).toBe(false);
+        expect(out.violations[0]).toMatch(/offer the covered free re-service/);
+      });
+
+      test('NOT forced when the lane is already booked, not eligible, an escalation hand-off, or not a pest report', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts([], { pest: { date: '2026-10-05' } }), intendedActions: [], inboundMessage: report }).ok).toBe(true);
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts([]), intendedActions: [], inboundMessage: report }).ok).toBe(true);
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [{ type: 'escalate' }], inboundMessage: report }).ok).toBe(true);
+        expect(validateReserviceOffer({ reply: 'Thanks!', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: 'thanks, no bugs since!' }).ok).toBe(true);
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['lawn']), intendedActions: [], inboundMessage: report }).ok).toBe(true);
+      });
+    });
+
+    // Codex round-18 P2 #1: the already-booked callback rides the snapshot and is rechecked at send time.
+    describe('an already-booked appointment reference is rechecked at send time', () => {
+      const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+      const body = 'Your free pest re-service is already scheduled for Thursday.';
+      const meta = { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked };
+      const state = (drafterLoad) => drafterLoad.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: meta });
+
+      test('snapshot keeps lane date + window only (no callback id / reschedule url)', () => {
+        const { reserviceBookedSnapshot } = require('../services/sms-shadow-drafter');
+        expect(reserviceBookedSnapshot({ pest: { date: '2026-10-08', windowStart: '09:00', rescheduleUrl: '/reschedule/x', id: 'abc' }, lawn: {} })).toEqual({ pest: { date: '2026-10-08', windowStart: '09:00' } });
+      });
+
+      test('callback cancelled or moved → blocked (reservice_booking_changed); unchanged → sends', async () => {
+        const open = (o) => { const d = loadWith({ lanes: ['pest'] }); return d; };
+        // still open, same date/window: the mock reports the booked lane as open with only a date, so use a custom loader
+        jest.resetModules();
+        const mk = (openMap) => {
+          jest.resetModules();
+          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane } = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({
+            reserviceSelfServeEnabled: () => true,
+            loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: openMap, bookable: openMap.pest ? [] : ['pest'] }),
+            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane,
+          }));
+          return { drafter: require('../services/sms-shadow-drafter') };
+        };
+        await expect(state(mk({}))).resolves.toMatch(/reservice_booking_changed/);
+        await expect(state(mk({ pest: { date: '2026-10-09', windowStart: '09:00' } }))).resolves.toMatch(/reservice_booking_changed/);
+        await expect(state(mk({ pest: { date: '2026-10-08', windowStart: '13:00' } }))).resolves.toMatch(/reservice_booking_changed/);
+        await expect(state(mk({ pest: { date: '2026-10-08', windowStart: '09:00' } }))).resolves.toBeNull();
+        // A body that does not reference the appointment is not held up by it.
+        await expect(mk({}).drafter.reservicePromiseStillEligible({ outgoingBody: 'See you soon!', customerId: 'cust-1', promisedLanes: null, decisionMeta: meta })).resolves.toBeNull();
+      });
+
+      test('the stored day/date also counts as a reference; through the real send check', async () => {
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        loadWith({ lanes: ['pest'] }); // no open callback at all
+        await expect(agentDecisionSendBlockReason({
+          decision: { id: 'd1', customer_id: 'cust-1', suggested_message: 'x', input_snapshot: JSON.stringify({ reservice_booked_snapshot: booked, intended_actions: [] }), prompt_version: 'house_voice_v12_real_answers2' },
+          outgoingBody: 'We will see you Thursday, October 8.',
+        })).resolves.toMatch(/reservice_booking_changed/);
+      });
+    });
+
     // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,
     // conjunctions, purpose clauses, new nouns, plurals, waive/comp wording), denials
     // and idioms. [sentence, isPromise, promisedLanes].
     const ADVERSARIAL = [
+  ["Your free pest re-service is already scheduled for Thursday.", false, []],
+  ["Your complimentary lawn re-service is on the schedule for Friday.", false, []],
+  ["Your free re-service is coming up on Tuesday.", false, []],
+  ["Your free pest re-service is booked for Thursday, and I'll send a free lawn re-service link.", true, ['lawn']],
+  ["We'll get your free pest re-service scheduled for Thursday.", true, ['pest']],
 
   ["We can't offer a free lawn re-service, but we can send another pest visit, free of charge.", true, ['pest']],
   ["A free visit to treat your lawn.", true, ['lawn']],
