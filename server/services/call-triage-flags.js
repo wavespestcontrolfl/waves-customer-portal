@@ -2188,6 +2188,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
       && appointmentBlockingFlags.includes('commercial_requires_quote')
       && require('./call-commercial-dictated-booking').commercialDictatedBookingGrounded({
         v2: extraction, transcript: opts.transcript, callStartedAt: opts.callStartedAt,
+        quoteBookable: opts.commercialQuoteBookable,
       }).ok) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'commercial_requires_quote') { failedOpenFlags.push(f); gateDemotedFlags.push(f); return false; }

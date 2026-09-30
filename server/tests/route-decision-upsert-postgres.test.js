@@ -263,8 +263,11 @@ jest.setTimeout(30000);
     const judged = r.find((x) => x.id === held.id);
     expect(judged.created_at).toEqual(held.created_at);
     expect(judged).toMatchObject({ final_action_taken: 'triage_review', validator_recommendation: 'needs_review' });
-    // the newest row repeats the judged decision: the inbox shows it REVIEWED
-    expect(await newest()).toMatchObject({ decision_version: `${V2_DECISION_VERSION}+r1`, verdict: 'accept' });
+    // the newest row is a new pass's decision (even though it repeats the judged
+    // recommendation): the verdict points at the OLD row only, so the inbox shows it
+    // UNREVIEWED — no sibling inheritance (codex #5377 r9 P1)
+    expect(await newest()).toMatchObject({ decision_version: `${V2_DECISION_VERSION}+r1`, verdict: null });
+    expect(await db('route_feedback').where({ call_log_id: callId, route_decision_id: held.id })).toHaveLength(1);
   });
 
   // codex #5377 r7 + r8 P1: a re-review repoints the one verdict to the +r1 row, so
@@ -278,14 +281,16 @@ jest.setTimeout(30000);
     return r1;
   }
 
-  test('reviewed +r1 + the SAME verdict: the pass writes the unreviewed BASE (its own row, for its outcome); the reviewed +r1 is untouched; the inbox shows the newest as reviewed', async () => {
+  test('reviewed +r1 + the SAME verdict: the pass writes the unreviewed BASE (its own row, for its outcome); the reviewed +r1 is untouched; the inbox shows the newest as UNREVIEWED (no sibling inheritance)', async () => {
     const r1 = await reviewedRevision();
     expect(await write(decision(true, 'auto_route'))).toBe(V2_DECISION_VERSION);
     const r = await rows();
     expect(r).toHaveLength(2);
     expect(r[0]).toMatchObject({ decision_version: V2_DECISION_VERSION, final_action_taken: 'auto_route' });
     expect(r[1].created_at).toEqual(r1.created_at); // reviewed row: not even created_at moved
-    expect(await newest()).toMatchObject({ decision_version: V2_DECISION_VERSION, verdict: 'accept' });
+    expect(await newest()).toMatchObject({ decision_version: V2_DECISION_VERSION, verdict: null });
+    // the verdict stays on the reviewed +r1 row it points at
+    expect((await db('route_feedback').where({ call_log_id: callId }))[0].route_decision_id).toBe(r1.id);
   });
 
   test('...and when that pass later SKIPS its booking, the outcome lands on ITS row: the reviewed row keeps what was judged and the inbox now shows the newest as unreviewed', async () => {
@@ -311,15 +316,14 @@ jest.setTimeout(30000);
     expect((await newest()).verdict).toBeNull();
   });
 
-  test('the calls-list join (inner) attaches the verdict to the chosen decision only when it is the judged row or an identical sibling', async () => {
+  test('the calls-list join (inner) attaches the verdict to the row it points at ONLY — never to a newer sibling, identical or not', async () => {
     const r1 = await reviewedRevision();
-    await write(decision(true, 'auto_route'));
+    await write(decision(true, 'auto_route')); // identical recommendation, new row
     const chosen = (await rows())[0];
+    expect(chosen.id).not.toBe(r1.id);
     const verdictFor = async (id) => innerJoinRouteFeedback(db('route_decisions').whereIn('route_decisions.id', [id])).select('route_feedback.verdict').first();
-    expect((await verdictFor(chosen.id))?.verdict).toBe('accept'); // identical to the judged +r1
-    expect((await verdictFor(r1.id))?.verdict).toBe('accept');
-    await write(decision(false, 'triage_review'));
-    expect(await verdictFor((await rows())[0].id)).toBeUndefined(); // a different decision: unreviewed
+    expect((await verdictFor(r1.id))?.verdict).toBe('accept'); // the judged row
+    expect(await verdictFor(chosen.id)).toBeUndefined(); // the new pass: unreviewed
   });
 
   test('a legacy verdict with no decision link still shows on the newest decision; a verdict on a different version does not', async () => {

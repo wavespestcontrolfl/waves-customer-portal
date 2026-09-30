@@ -2207,10 +2207,9 @@ router.get('/auto-routed', async (req, res) => {
       .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id'))
       // A verdict shows against the decision it judged (leftJoinRouteFeedback,
-      // the ONE join every reader uses): the row it points at, an identical
-      // family sibling of it (a pass that repeats an already-judged decision),
-      // or a legacy verdict with no link. A DIFFERENT newest decision shows
-      // unreviewed: nobody judged it.
+      // the ONE join every reader uses): only the row it points at, or a legacy
+      // verdict with no link. A newer pass's row is a new decision nobody has
+      // judged, so it reads unreviewed.
       // One row per call: a reprocessed call carries BOTH decision versions;
       // only its NEWEST supported enforce decision represents current state.
       // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the

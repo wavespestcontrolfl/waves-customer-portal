@@ -69,6 +69,11 @@ async function main() {
         ? Object.fromEntries(KNOWN_CUSTOMER_FIELDS.map((k) => [k, resolved[k] ?? null]))
         : null;
     }
+    // The bookable catalog rides in the dump (Phase B has no DB access): the
+    // commercial dictated-booking quote check resolves the catalog row the way the
+    // booking does (GATE_CALL_COMMERCIAL_DICTATED_BOOKING; codex #5377 r9 P1).
+    const bookableServices = await require('../services/call-booking-catalog').loadBookableCallServices(db).catch(() => []);
+    for (const row of rows) row.bookable_services = bookableServices;
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);
@@ -139,6 +144,8 @@ async function main() {
         failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
         // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
         unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
+        // the catalog the dump carried (commercial quote check; absent = held)
+        bookableServices: Array.isArray(r.bookable_services) ? r.bookable_services : null,
       });
       const route = CRP.applyUnclearServiceTranscriptVeto(
         CRP.demoteFailOpenOnV1AddressConflict(

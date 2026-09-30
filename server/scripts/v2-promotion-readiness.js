@@ -129,7 +129,8 @@ async function main() {
   // way the processor does and match THAT (not a bare `-cat.%` prefix, which
   // would fold stale catalog cohorts into the current gate).
   const { loadBookableCallServices } = require('../services/call-booking-catalog');
-  const liveCatalogNames = (await loadBookableCallServices(db)).map((s) => s.name).filter(Boolean);
+  const bookableCallServices = await loadBookableCallServices(db);
+  const liveCatalogNames = bookableCallServices.map((s) => s.name).filter(Boolean);
   const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
   const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
   const allRouteRows = await baseQuery()
@@ -348,6 +349,9 @@ async function main() {
       failOpenEnabled: auditFailOpen,
       // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
       unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
+      // GATE_CALL_COMMERCIAL_DICTATED_BOOKING's catalog-aware quote check reads the
+      // same bookable catalog the live pass loads (absent = the audit holds the call).
+      bookableServices: bookableCallServices,
     });
     const knownCustomer = failOpenOptions.knownCustomer;
     let routing = canAutoRoute(v2, {

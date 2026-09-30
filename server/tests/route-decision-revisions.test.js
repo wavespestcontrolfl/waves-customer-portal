@@ -2,8 +2,8 @@
 // by id), yet every pass needs ONE writable row for its decision and its later
 // outcome (codex #5377 r4 / r7 / r8 P1). A decision's family is its base row plus
 // a '+r1' revision; the pass always writes the family's UNREVIEWED member,
-// whatever its verdict, and readers attach a verdict to an identical sibling
-// through one shared join. Gate-agnostic: it lives in the write chokepoint. The
+// whatever its verdict; a verdict attaches only to the row it points at (one
+// shared join, no sibling inheritance — codex #5377 r9 P1). Gate-agnostic: it lives in the write chokepoint. The
 // PostgreSQL behavior is in route-decision-upsert-postgres.test.js; this file pins
 // the statement shapes and the wiring without a database.
 const fs = require('fs');
@@ -182,7 +182,7 @@ describe('wiring', () => {
     expect(sqls[0].bindings).toEqual(['c1', 'v2-1.50.0', 'v2-1.50.0+r1', 'enforce']);
   });
 
-  test('the auto-routed queue lists every revision version and joins a verdict through the ONE shared family-aware join', () => {
+  test('the auto-routed queue lists every revision version and joins a verdict through the ONE shared join', () => {
     const src = read('../routes/admin-triage.js');
     expect(src).toMatch(/whereIn\('decision_version', V2_DECISION_VERSIONS_WITH_REVISIONS\)/);
     expect(src).toMatch(/leftJoinRouteFeedback\(db\('route_decisions'\)/);
@@ -205,15 +205,10 @@ describe('wiring', () => {
     expect(offenders.sort()).toEqual(['admin-triage.js', 'ai-assistant.js']);
   });
 
-  test('the shared join compares the exact columns that define the decision the reviewer saw, within one call/mode/recording/base version', () => {
+  test('the shared join attaches a verdict ONLY to the row it points at (or a legacy unlinked verdict): no sibling inheritance (codex #5377 r9 P1)', () => {
     const sql = routeFeedbackJoinCondition();
-    for (const col of ['validator_recommendation', 'final_action_taken', 'blocked_reasons', 'allowed_reasons']) {
-      expect(sql).toContain(`reviewed_rd.${col} IS NOT DISTINCT FROM route_decisions.${col}`);
-    }
-    expect(sql).toContain("split_part(reviewed_rd.decision_version, '+', 1) = split_part(route_decisions.decision_version, '+', 1)");
-    for (const col of ['call_log_id', 'mode', 'recording_sid']) expect(sql).toContain(`reviewed_rd.${col} = route_decisions.${col}`);
-    expect(sql).toContain('route_feedback.route_decision_id IS NULL');
-    expect(sql).toContain('route_feedback.route_decision_id = route_decisions.id');
+    expect(sql).toBe('route_feedback.call_log_id = route_decisions.call_log_id AND (route_feedback.route_decision_id IS NULL OR route_feedback.route_decision_id = route_decisions.id)');
+    for (const word of ['EXISTS', 'reviewed_rd', 'split_part', 'validator_recommendation', 'blocked_reasons', 'decision_version']) expect(sql).not.toContain(word);
     const q = leftJoinRouteFeedback(knex('route_decisions').leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')).toSQL().sql;
     expect(q).toMatch(/left join "call_log".* LEFT JOIN route_feedback ON route_feedback\.call_log_id = route_decisions\.call_log_id/s);
     expect(innerJoinRouteFeedback(knex('route_decisions')).toSQL().sql).toMatch(/ JOIN route_feedback ON /);

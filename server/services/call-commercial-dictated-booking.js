@@ -42,7 +42,7 @@
  * it was. Only commercial_requires_quote is cleared, and it rides in
  * failedOpenFlags so the office still gets the advisory card (book-and-flag).
  *
- * Contract: commercialDictatedBookingGrounded({ v2, transcript, callStartedAt })
+ * Contract: commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable })
  *   -> { ok, reason }
  */
 'use strict';
@@ -94,7 +94,7 @@ function priceGrounded(v2, transcript, amount) {
   return accepted ? null : 'price_not_accepted_by_caller';
 }
 
-function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt } = {}) {
+function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable } = {}) {
   const fail = (reason) => ({ ok: false, reason });
   const scheduling = v2?.scheduling;
   if (!scheduling || typeof scheduling !== 'object') return fail('no_scheduling');
@@ -123,6 +123,12 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt } = {
   // caller's accepted amount would never reach the appointment: the office
   // books it instead.
   if (sanitizeQuotedCallPrice(quoted) !== quoted) return fail('quoted_total_not_bookable');
+  // ...and the catalog-aware half of the same resolver (resolveCallBookingPrice):
+  // it discards every quote when the resolved catalog row is recurring or a
+  // covered re-service. The caller supplies the check (it alone can load and
+  // resolve the catalog row the way the booking does); without one, or when the
+  // quote does not survive it, the office books it.
+  if (typeof quoteBookable !== 'function' || quoteBookable(quoted, v2) !== true) return fail('price_not_bookable_for_service');
   const grounding = groundNewBookingAgreement({ v2, transcript, callStartedAt });
   if (!grounding.ok) return fail(grounding.reason);
   const priceFailure = priceGrounded(v2, transcript, quoted);

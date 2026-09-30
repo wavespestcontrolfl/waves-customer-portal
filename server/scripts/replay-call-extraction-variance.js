@@ -1347,6 +1347,9 @@ async function replayCall(call, context) {
     failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
     // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
     unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
+    // GATE_CALL_COMMERCIAL_DICTATED_BOOKING's catalog-aware quote check reads the
+    // bookable catalog (absent = the replay holds the call).
+    bookableServices: await require('../services/call-booking-catalog').loadBookableCallServices(db).catch(() => null),
   });
   // The verdict was computed for the persisted (prior) extraction — it always
   // applies to priorV2 by construction.

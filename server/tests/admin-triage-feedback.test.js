@@ -53,15 +53,14 @@ describe('denyRejectsUnitEvidence (codex r15 P1 on #3804)', () => {
 });
 
 // GET /auto-routed reads the newest decision per call with its verdict through the
-// shared family-aware join (codex #5377 r8 P1): a verdict counts for the row it
-// points at, an identical family sibling, or a legacy unlinked verdict; a DIFFERENT
-// newest decision reads unreviewed.
+// shared join (codex #5377 r8 + r9 P1): a verdict counts only for the row it
+// points at (or a legacy unlinked verdict); a newer pass's row reads unreviewed.
 describe('/auto-routed attaches the verdict through the shared route_feedback join (codex #5377 r8 P1)', () => {
   const knex = require('knex')({ client: 'pg' });
   const db = require('../models/db');
   const router = require('../routes/admin-triage');
 
-  test('the query joins route_feedback with the family-aware condition and lists revision versions', async () => {
+  test('the query joins route_feedback with the shared condition and lists revision versions', async () => {
     const sqls = [];
     db.mockImplementation((table) => {
       const qb = knex(table);

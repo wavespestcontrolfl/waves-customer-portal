@@ -1748,6 +1748,10 @@ function buildFailOpenRoutingContext({
   // The transcript the routing decision is grounded in (default: the row's
   // own); `gates` lets a test inject the gate reads.
   transcript = undefined, gates = undefined,
+  // The bookable service catalog (loadBookableCallServices) and the call's V1
+  // record, for the commercial quote check; without a catalog the check fails
+  // closed (the audit holds the call, never over-admits it).
+  bookableServices = null, extracted = undefined,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
   // A new lead's trust comes from the verdict production persisted for this
@@ -1786,6 +1790,11 @@ function buildFailOpenRoutingContext({
         transcriptLabelsTrusted: (gates?.isEnabled || isEnabled)('callAgentCommitTrustedLabels') === true,
         transcript: transcript !== undefined ? transcript : call.transcription,
         callStartedAt: call.created_at,
+        commercialQuoteBookable: commercialQuoteBookableFor({
+          extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
+          transcription: transcript !== undefined ? transcript : call.transcription,
+          services: bookableServices,
+        }),
       } : {}),
     },
   };
@@ -6027,6 +6036,51 @@ function v2BookingServiceView(extracted = {}, v2Extraction = null) {
   if (v2Flat.requested_service) view.requested_service = v2Flat.requested_service;
   view.specific_service_name = v2Flat.specific_service_name || null;
   return view;
+}
+
+// GATE_CALL_COMMERCIAL_DICTATED_BOOKING (codex #5377 r9 P1): the dictated
+// booking is only safe when the agreed quote SURVIVES the booking path's own
+// catalog-aware price resolver. resolveCallBookingPrice discards every quote
+// when the resolved catalog row is not one_time (a recurring service bills
+// through the recurring machinery) or is a covered re-service, and books no
+// price at all: the caller's accepted amount would never reach the visit.
+// Returns `(quoted, v2Extraction) => boolean` that resolves the catalog row the
+// way the booking resolves it, on every view of the call's service (the V1
+// record before V2 adoption, the merged fields, the V2-overridden view — the same
+// views the whole-structure waiver judges), and requires resolveCallBookingPrice
+// to return exactly the quoted amount for each. FAILS CLOSED: no catalog loaded,
+// no row resolved (the booking's Waves Assessment fallback is not a settled
+// service), a re-service revisit, or any error. ONE builder for both processor
+// lanes and buildFailOpenRoutingContext (the offline audits).
+function parseLooseJson(value) {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value) || {}; } catch (_e) { return {}; }
+}
+
+function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = null, transcription = '', services = null } = {}) {
+  return (quoted, v2Extraction = null) => {
+    try {
+      if (!Array.isArray(services) || !services.length) return false;
+      const views = [];
+      if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+      views.push(extracted || {});
+      const finalView = v2BookingServiceView(extracted || {}, v2Extraction);
+      if (finalView) views.push(finalView);
+      if (views.some((view) => hasCallReServiceIntent(view))) return false;
+      return views.every((view) => {
+        const coarse = resolveSchedulableCallService(view, { transcription });
+        const row = resolveCallBookingCatalogService({
+          extracted: view,
+          transcription,
+          services,
+          coarseServiceLabel: coarse.ok ? coarse.service : null,
+        });
+        return !!row && resolveCallBookingPrice({ quotedPrice: quoted, catalogRow: row }).price === quoted;
+      });
+    } catch (_e) {
+      return false;
+    }
+  };
 }
 
 // Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
@@ -10475,6 +10529,13 @@ const CallRecordingProcessor = {
             // (upsertRouteDecision, gate-agnostic; codex #5377 r4 P1) — no
             // per-gate version is needed.
             commercialDictatedBooking: commercialDictatedBookingActive(call),
+            // The agreed quote must survive the booking path's own catalog-aware
+            // price resolver (codex #5377 r9 P1); absent when the gate is off.
+            ...(commercialDictatedBookingActive(call) ? {
+              commercialQuoteBookable: commercialQuoteBookableFor({
+                extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+              }),
+            } : {}),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: call.created_at,
@@ -20057,6 +20118,11 @@ const CallRecordingProcessor = {
           // Inbound-only and behind the agent-commit gate, mirroring the
           // enforce lane (owner ruling 2026-09-30; codex #5377 r1 P1).
           commercialDictatedBooking: commercialDictatedBookingActive(call),
+          ...(commercialDictatedBookingActive(call) ? {
+            commercialQuoteBookable: commercialQuoteBookableFor({
+              extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+            }),
+          } : {}),
           callStartedAt: call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),
@@ -21573,6 +21639,7 @@ CallRecordingProcessor._test = {
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
   commercialDictatedBookingActive,
+  commercialQuoteBookableFor,
   resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,

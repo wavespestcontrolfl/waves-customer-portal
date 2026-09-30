@@ -426,37 +426,20 @@ const routeDecisionFamilyVersions = (baseVersion) => [baseVersion, ...routeDecis
 const V2_DECISION_VERSIONS_WITH_REVISIONS = V2_DECISION_VERSIONS.flatMap(routeDecisionFamilyVersions);
 
 // THE join every reader uses to attach a route_feedback verdict to a
-// route_decisions row (codex #5377 r8 P1). A verdict counts for a decision when
-// it is on a call's decision that is:
-//   - the very row it points at, or
-//   - a FAMILY sibling (same call, mode, recording and base version, the row and
-//     its '+r1') recording the SAME decision — validator_recommendation,
-//     final_action_taken, blocked_reasons and allowed_reasons are the columns
-//     that define "the decision the reviewer saw" — so a pass identical to an
-//     already-judged one does not show as unreviewed, while a DIFFERENT newest
-//     decision (nobody judged it) does; or
-//   - a legacy verdict with no decision link.
-// Pure SQL text (no bindings) over the aliases given, so it drops into a knex
-// joinRaw. Nothing here writes: reviewed rows are never mutated.
+// route_decisions row (codex #5377 r8 + r9 P1). A verdict attaches ONLY to the
+// row it points at (or, for a legacy verdict, when it carries no decision link).
+// There is deliberately NO sibling inheritance: a later pass writes the family's
+// other row (see upsertRouteDecision), and that row is a new decision nobody has
+// judged — even when its recommendation and reasons repeat the judged one, the
+// extraction behind it (name, service, address, slot, model, prompt, schema) can
+// differ, and a verdict on the old row must not vouch for it. So the inbox shows
+// it unreviewed, which is correct. One shared helper so every reader stays in
+// lockstep. Pure SQL text (no bindings) over the aliases given, so it drops into
+// a knex joinRaw. Nothing here writes: reviewed rows are never mutated.
 function routeFeedbackJoinCondition(decisionAlias = 'route_decisions', feedbackAlias = 'route_feedback') {
   const d = decisionAlias;
   const f = feedbackAlias;
-  return `${f}.call_log_id = ${d}.call_log_id AND (
-    ${f}.route_decision_id IS NULL
-    OR ${f}.route_decision_id = ${d}.id
-    OR EXISTS (
-      SELECT 1 FROM route_decisions AS reviewed_rd
-      WHERE reviewed_rd.id = ${f}.route_decision_id
-        AND reviewed_rd.call_log_id = ${d}.call_log_id
-        AND reviewed_rd.mode = ${d}.mode
-        AND reviewed_rd.recording_sid = ${d}.recording_sid
-        AND split_part(reviewed_rd.decision_version, '+', 1) = split_part(${d}.decision_version, '+', 1)
-        AND reviewed_rd.validator_recommendation IS NOT DISTINCT FROM ${d}.validator_recommendation
-        AND reviewed_rd.final_action_taken IS NOT DISTINCT FROM ${d}.final_action_taken
-        AND reviewed_rd.blocked_reasons IS NOT DISTINCT FROM ${d}.blocked_reasons
-        AND reviewed_rd.allowed_reasons IS NOT DISTINCT FROM ${d}.allowed_reasons
-    )
-  )`;
+  return `${f}.call_log_id = ${d}.call_log_id AND (${f}.route_decision_id IS NULL OR ${f}.route_decision_id = ${d}.id)`;
 }
 // `query` already selects FROM route_decisions (alias `decisionAlias`).
 function leftJoinRouteFeedback(query, decisionAlias = 'route_decisions') {
@@ -534,8 +517,8 @@ async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mo
 // write the OTHER one: the base when nothing (or the revision) is reviewed, else
 // the revision, insert-or-refresh, WHATEVER the pass's verdict. A reviewed row
 // is never touched. So every pass has exactly one writable row that records its
-// decision and, later, its outcome; readers attach a verdict to an identical
-// unreviewed sibling with routeFeedbackJoinCondition.
+// decision and, later, its outcome; that row is a new, unreviewed decision (a
+// verdict attaches only to the row it points at: routeFeedbackJoinCondition).
 // `fence` ({ callLogId, processingToken }) makes ALL of it conditional on this
 // pass still owning the call's processing_token: the ownership row is locked FOR
 // UPDATE and re-read in the same transaction as the writes (the processor's own

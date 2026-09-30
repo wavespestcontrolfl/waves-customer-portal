@@ -27,6 +27,9 @@ const PRICE_LINES = [`Agent: ${PRICE_TALK}`, `Caller: ${PRICE_OK}`];
 const transcriptOf = (...lines) => [OPENING, ...PRICE_LINES, ...lines].join('\n');
 const TRANSCRIPT = transcriptOf(`Agent: ${COMMIT}`, `Caller: ${ACCEPT}`);
 
+const ONE_TIME_ROW = { id: 'svc-roach', service_key: 'cockroach_control', name: 'Cockroach Control Service', short_name: 'Cockroach Control', billing_type: 'one_time', pricing_type: 'fixed', base_price: '350.00' };
+const RECURRING_ROW = { id: 'svc-pest-q', service_key: 'pest_general_quarterly', name: 'General Pest Control (Quarterly)', short_name: 'Pest Quarterly', billing_type: 'recurring', pricing_type: 'variable', base_price: '65.00' };
+
 const quote = (fieldPath, speaker, text) => ({ field_path: fieldPath, speaker, quote: text });
 const PRICE_EVIDENCE = [
   quote('/service_request/price_offered_by_staff', 'agent', PRICE_QUOTE),
@@ -61,11 +64,14 @@ function extraction({
 // The processor's options for a gate-ON inbound call.
 const opts = (extra = {}) => ({
   commercialDictatedBooking: true, transcriptLabelsTrusted: true,
+  // the catalog-aware quote check the caller supplies (codex #5377 r9 P1); the real
+  // resolver is exercised in its own describe below
+  commercialQuoteBookable: () => true,
   transcript: TRANSCRIPT, callStartedAt: CALL_STARTED_AT, addressValidation: AV_CLEAN,
   ...extra,
 });
 const route = (ex, extra) => canAutoRoute(ex, opts(extra));
-const grounded = (ex, transcript = TRANSCRIPT) => commercialDictatedBookingGrounded({ v2: ex, transcript, callStartedAt: CALL_STARTED_AT });
+const grounded = (ex, transcript = TRANSCRIPT, quoteBookable = () => true) => commercialDictatedBookingGrounded({ v2: ex, transcript, callStartedAt: CALL_STARTED_AT, quoteBookable });
 
 // "Sure, that works." shapes.
 const SURE = 'Sure, that works.';
@@ -731,16 +737,19 @@ describe('the audits derive the commercial context the way the processor does (c
 
   test('canAutoRoute over the audit context books an admitted commercial call; gate off holds it (the audit no longer misclassifies)', () => {
     const ex = extraction();
-    const on = canAutoRoute(ex, { contactPhone: '+19415550100', addressValidation: AV_CLEAN, ...build() });
+    const on = canAutoRoute(ex, { contactPhone: '+19415550100', addressValidation: AV_CLEAN, ...build(inbound, gatesOf(), { bookableServices: [ONE_TIME_ROW, RECURRING_ROW], extracted: { requested_service: ONE_TIME_ROW.name, matched_service: ONE_TIME_ROW.name } }) });
     expect(on).toMatchObject({ allowed: true, gateDemotedFlags: ['commercial_requires_quote'] });
     const off = canAutoRoute(ex, { contactPhone: '+19415550100', addressValidation: AV_CLEAN, ...build(inbound, gatesOf({ commercial: false })) });
     expect(off.allowed).toBe(false);
+    // no catalog handed to the builder (an audit that could not load it): FAIL CLOSED
+    const noCatalog = canAutoRoute(ex, { contactPhone: '+19415550100', addressValidation: AV_CLEAN, ...build() });
+    expect(noCatalog.allowed).toBe(false);
   });
 
   test('replay-call-extraction-variance routes through it, on the transcript the extraction was made from', () => {
     const { routeForV2, defaultReplayHelpers } = require('../scripts/replay-call-extraction-variance');
     const helpers = defaultReplayHelpers();
-    const ctx = build();
+    const ctx = build(inbound, gatesOf(), { bookableServices: [ONE_TIME_ROW, RECURRING_ROW], extracted: { requested_service: ONE_TIME_ROW.name, matched_service: ONE_TIME_ROW.name } });
     const route = (extra) => routeForV2(extraction(), '+19415550100', helpers, AV_CLEAN, ctx, { demote: (r) => r, transcription: TRANSCRIPT, ...extra });
     expect(route().allowed).toBe(true);
     // a fresh extraction from a different (re-)transcription is judged against THAT text
@@ -758,5 +767,73 @@ describe('the audits derive the commercial context the way the processor does (c
     const replay = fs.readFileSync(path.join(__dirname, '../scripts/replay-call-extraction-variance.js'), 'utf8');
     for (const col of ["'created_at'", "'direction'", "'transcription'"]) expect(replay).toContain(`    ${col},`);
     for (const src of [readiness, verify, replay]) expect(src).toMatch(/buildFailOpenRoutingContext\(\{\s*call/);
+  });
+});
+
+// GATE_CALL_COMMERCIAL_DICTATED_BOOKING also needs the quote to survive the booking
+// path's catalog-aware resolver (codex #5377 r9 P1): resolveCallBookingPrice discards
+// every quote when the resolved catalog row is recurring, so a dictated booking of a
+// recurring service would book with estimated_price null.
+describe('the quote must survive the catalog-aware price resolver (codex #5377 r9 P1)', () => {
+  const { commercialQuoteBookableFor } = require('../services/call-recording-processor')._test;
+  const serviceOf = (name) => ({ ...extraction(), service_request: { ...extraction().service_request, specific_service_name: name, requested_service: name } });
+  const check = (name, services) => commercialQuoteBookableFor({
+    extracted: { requested_service: name, matched_service: name }, transcription: TRANSCRIPT, services,
+  });
+
+  test('the gate fails closed without the check, and when the check says no', () => {
+    expect(commercialDictatedBookingGrounded({ v2: extraction(), transcript: TRANSCRIPT, callStartedAt: CALL_STARTED_AT }))
+      .toEqual({ ok: false, reason: 'price_not_bookable_for_service' });
+    expect(grounded(extraction(), TRANSCRIPT, () => false)).toEqual({ ok: false, reason: 'price_not_bookable_for_service' });
+    expect(grounded(extraction(), TRANSCRIPT, () => 'true')).toEqual({ ok: false, reason: 'price_not_bookable_for_service' }); // strict === true
+    expect(grounded(extraction(), TRANSCRIPT, (q, v2) => q === 150 && !!v2).ok).toBe(true); // it is handed the quote and the extraction
+    expect(route(extraction(), { commercialQuoteBookable: undefined }).allowed).toBe(false);
+  });
+
+  test('a ONE-TIME catalog row books: the quote survives resolveCallBookingPrice', () => {
+    const ex = serviceOf(ONE_TIME_ROW.name);
+    const ok = check(ONE_TIME_ROW.name, [ONE_TIME_ROW, RECURRING_ROW]);
+    expect(ok(150, ex)).toBe(true);
+    const r = route(ex, { commercialQuoteBookable: ok });
+    expect(r).toMatchObject({ allowed: true, gateDemotedFlags: ['commercial_requires_quote'] });
+  });
+
+  test('a RECURRING catalog row goes to the office (price_not_bookable_for_service): the resolver would discard the quote', () => {
+    const ex = serviceOf(RECURRING_ROW.name);
+    const bad = check(RECURRING_ROW.name, [ONE_TIME_ROW, RECURRING_ROW]);
+    expect(bad(150, ex)).toBe(false);
+    expect(grounded(ex, TRANSCRIPT, bad)).toEqual({ ok: false, reason: 'price_not_bookable_for_service' });
+    expect(route(ex, { commercialQuoteBookable: bad }).allowed).toBe(false);
+  });
+
+  test('cannot resolve a catalog row at routing time (no catalog, no match, error): fail closed', () => {
+    const ex = serviceOf('Nothing Known');
+    expect(check('Nothing Known', [ONE_TIME_ROW, RECURRING_ROW])(150, ex)).toBe(false);
+    expect(check(ONE_TIME_ROW.name, [])(150, serviceOf(ONE_TIME_ROW.name))).toBe(false);
+    expect(check(ONE_TIME_ROW.name, null)(150, serviceOf(ONE_TIME_ROW.name))).toBe(false);
+    expect(commercialQuoteBookableFor({ extracted: null, services: [ONE_TIME_ROW] })(150, null)).toBe(false);
+  });
+
+  test('EVERY view of the call\'s service must survive: a V1 pick that V2 replaces with a recurring row holds', () => {
+    const ex = serviceOf(RECURRING_ROW.name); // V2 says recurring
+    ex.service_request.primary_service_category = 'pest_general';
+    ex.meta = { schema_version: '1.21.0' }; // a real V2 record: its service overrides the V1 pick at booking
+    const f = commercialQuoteBookableFor({
+      extracted: { requested_service: ONE_TIME_ROW.name, matched_service: ONE_TIME_ROW.name },
+      preAdoptionExtracted: { requested_service: ONE_TIME_ROW.name, matched_service: ONE_TIME_ROW.name },
+      transcription: TRANSCRIPT, services: [ONE_TIME_ROW, RECURRING_ROW],
+    });
+    expect(f(150, ex)).toBe(false);
+  });
+
+  test('both processor lanes and every audit hand the check the SAME way', () => {
+    const src = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+    const proc = src('../services/call-recording-processor.js');
+    expect(proc.match(/commercialQuoteBookable: commercialQuoteBookableFor\(\{\s*extracted, preAdoptionExtracted, transcription, services: bookableCallServices,/g)).toHaveLength(2);
+    expect(src('../scripts/v2-promotion-readiness.js')).toMatch(/bookableServices: bookableCallServices,/);
+    expect(src('../scripts/verify-v2-shadow-path.js')).toMatch(/bookableServices: Array\.isArray\(r\.bookable_services\)/);
+    expect(src('../scripts/verify-v2-shadow-path.js')).toMatch(/row\.bookable_services = bookableServices/);
+    expect(src('../scripts/replay-call-extraction-variance.js')).toMatch(/bookableServices: await require\('\.\.\/services\/call-booking-catalog'\)\.loadBookableCallServices\(db\)/);
+    expect(src('../services/call-triage-flags.js')).toMatch(/quoteBookable: opts\.commercialQuoteBookable,/);
   });
 });

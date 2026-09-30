@@ -420,9 +420,9 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
 
     if (callIds.length && await tableExists('route_feedback')) {
       // The verdict shown beside a call's decision is the one that decision
-      // carries (innerJoinRouteFeedback, the ONE join every reader uses: the row
-      // it points at or an identical family sibling of it — codex #5377 r8 P1),
-      // so a DIFFERENT newest decision reads unreviewed. Calls with no decision
+      // carries (innerJoinRouteFeedback, the ONE join every reader uses: only the
+      // row the verdict points at — codex #5377 r9 P1), so a newer decision
+      // reads unreviewed. Calls with no decision
       // row keep their by-call verdict.
       const chosenIds = [...routeDecisionByCall.values()].map((row) => row.id).filter(Boolean);
       const feedbackRows = [];
