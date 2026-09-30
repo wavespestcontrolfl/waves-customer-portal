@@ -245,18 +245,23 @@ async function activeFlags(customerId) {
     .where({ customer_id: customerId })
     .whereNull('released_at')
     .orderBy('created_at', 'asc')
-    .select('flag', 'reason', 'created_by', 'created_at');
+    .select('id', 'flag', 'reason', 'created_by', 'created_at');
 }
 
 /**
  * Release an active flag — stamp released_at, never delete (the row is the
  * paper trail). Idempotent: nothing active ⇒ { ok:true, released:0 }.
+ * `id` (optional) narrows the release to exactly that row — still only while
+ * it is active and belongs to this customer + flag — so a staff release of the
+ * hold they were looking at can never lift a newer hold placed since.
  */
-async function releaseFlag({ customerId, flag, trx = null }) {
+async function releaseFlag({ customerId, flag, id = null, trx = null }) {
   if (!customerId || !flag) return { ok: false, reason: 'missing_args' };
   try {
+    const where = { customer_id: customerId, flag };
+    if (id) where.id = id;
     const released = await (trx || db)('collections_flags')
-      .where({ customer_id: customerId, flag })
+      .where(where)
       .whereNull('released_at')
       .update({ released_at: (trx || db).fn.now() });
     return { ok: true, released: Number(released) || 0 };

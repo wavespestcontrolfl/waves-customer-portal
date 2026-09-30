@@ -17,6 +17,8 @@ async function listCollectionHolds(customerId) {
   return rows
     .filter((r) => r.flag === HOLD_FLAG)
     .map((r) => ({
+      // The row id: a release names exactly the hold staff were looking at.
+      id: r.id,
       flag: r.flag,
       reason: r.reason || null,
       created_by: r.created_by || null,
@@ -26,9 +28,14 @@ async function listCollectionHolds(customerId) {
     }));
 }
 
-async function releaseCollectionHold(customerId, { trx = null } = {}) {
-  const res = await releaseFlag({ customerId, flag: HOLD_FLAG, trx });
-  return res;
+// Releases exactly ONE hold row: `holdId` from listCollectionHolds, and only
+// while that row is still active and belongs to this customer. released: 0
+// means the hold changed since staff loaded it (already released, or replaced
+// by a newer hold) — the caller reports a conflict, never a blind release of
+// whatever hold is active now.
+async function releaseCollectionHold(customerId, { holdId, trx = null } = {}) {
+  if (!holdId) return { ok: false, reason: 'hold_id_required' };
+  return releaseFlag({ customerId, flag: HOLD_FLAG, id: holdId, trx });
 }
 
 module.exports = { listCollectionHolds, releaseCollectionHold };

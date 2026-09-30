@@ -10,19 +10,25 @@ const { listCollectionHolds, releaseCollectionHold } = require('../services/coll
 test('lists only collection_hold rows and says which ones stop charges', async () => {
   mockActive.mockResolvedValue([
     { flag: 'pays_by_check', reason: 'x' },
-    { flag: 'collection_hold', reason: 'dispute on call: bill wrong', created_by: 'system:collections_voice', created_at: 't' },
+    { id: 'hold-1', flag: 'collection_hold', reason: 'dispute on call: bill wrong', created_by: 'system:collections_voice', created_at: 't' },
     { flag: 'collection_hold', reason: 'wrong-party answer on billing follow-up call; review card failed to file' },
   ]);
   const holds = await listCollectionHolds('c-1');
   expect(holds).toHaveLength(2);
-  expect(holds[0]).toMatchObject({ stops_charges: true, reason: 'dispute on call: bill wrong' });
+  expect(holds[0]).toMatchObject({ id: 'hold-1', stops_charges: true, reason: 'dispute on call: bill wrong' });
   expect(holds[1].stops_charges).toBe(false);
 });
 
-test('release goes through the one writer, only for collection_hold', async () => {
+test('release goes through the one writer, only for collection_hold, and names the exact row', async () => {
   mockRelease.mockResolvedValue({ ok: true, released: 1 });
-  expect(await releaseCollectionHold('c-1')).toEqual({ ok: true, released: 1 });
-  expect(mockRelease).toHaveBeenCalledWith({ customerId: 'c-1', flag: 'collection_hold', trx: null });
+  expect(await releaseCollectionHold('c-1', { holdId: 'hold-1' })).toEqual({ ok: true, released: 1 });
+  expect(mockRelease).toHaveBeenCalledWith({ customerId: 'c-1', flag: 'collection_hold', id: 'hold-1', trx: null });
+});
+
+test('a release with no hold id is refused before it reaches the writer', async () => {
+  mockRelease.mockClear();
+  expect(await releaseCollectionHold('c-1')).toEqual({ ok: false, reason: 'hold_id_required' });
+  expect(mockRelease).not.toHaveBeenCalled();
 });
 
 test('the routes are admin-only and audited', () => {

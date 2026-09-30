@@ -8284,7 +8284,9 @@ function CustomerBillingPause({
 // charge (monthly dues, completion, sweeps) and the customer was told billing
 // follow-up is on hold. GET /collection-holds lists the active holds (admin
 // only, so the read is skipped for anyone else) and POST /collection-holds/
-// release lifts it (audited server-side; body `{ released: <rows released> }`).
+// release lifts it (audited server-side; body `{ holdId }` names exactly the
+// hold shown, reply `{ released: <rows released> }`). A 409 means that hold
+// changed since it was loaded — re-read the holds instead of releasing blind.
 // Errors arrive as `{ error }`, which adminFetch surfaces as err.message.
 function CustomerCollectionHold({ customerId, isAdmin }) {
   const [holds, setHolds] = useState([]);
@@ -8338,7 +8340,7 @@ function CustomerCollectionHold({ customerId, isAdmin }) {
     try {
       const result = await adminFetch(
         `/admin/customers/${forCustomerId}/collection-holds/release`,
-        { method: "POST" },
+        { method: "POST", body: JSON.stringify({ holdId: dispute.id }) },
       );
       if (!stillViewing()) return;
       setHolds([]);
@@ -8349,11 +8351,23 @@ function CustomerCollectionHold({ customerId, isAdmin }) {
       );
     } catch (err) {
       if (!stillViewing()) return;
-      setReleaseErr(
-        err.status === 403
-          ? "Only an admin can release a billing hold."
-          : err.message || "Could not release the billing hold",
-      );
+      if (err.status === 409) {
+        // The hold changed under us (released elsewhere, or replaced by a
+        // newer one): show what is current instead of releasing blind.
+        setReleaseErr("This hold changed — reload. Nothing was released; the current billing hold status has been reloaded.");
+        try {
+          const body = await adminFetch(`/admin/customers/${forCustomerId}/collection-holds`);
+          if (stillViewing()) setHolds(Array.isArray(body?.holds) ? body.holds : []);
+        } catch (_refetchErr) {
+          // The message above already says to reload.
+        }
+      } else {
+        setReleaseErr(
+          err.status === 403
+            ? "Only an admin can release a billing hold."
+            : err.message || "Could not release the billing hold",
+        );
+      }
     } finally {
       if (stillViewing()) setReleasing(false);
     }
@@ -8385,6 +8399,14 @@ function CustomerCollectionHold({ customerId, isAdmin }) {
           {releaseErr && (
             <div className="text-ui-label text-alert-fg mt-1">{releaseErr}</div>
           )}
+        </div>
+      )}
+      {!dispute && releaseErr && (
+        <div
+          role="alert"
+          className="mb-3 rounded border border-hairline p-2.5 text-ui-label text-alert-fg"
+        >
+          {releaseErr}
         </div>
       )}
       {releaseNote && (

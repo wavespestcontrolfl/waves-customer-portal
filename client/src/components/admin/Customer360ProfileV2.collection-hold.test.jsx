@@ -8,7 +8,7 @@
  */
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Customer360ProfileV2 from './Customer360ProfileV2';
 
@@ -62,6 +62,7 @@ afterEach(() => {
 });
 
 const HOLD = {
+  id: 'hold-1',
   flag: 'collection_hold',
   reason: 'dispute: says the lawn visit was never done',
   created_by: 'voice-agent',
@@ -76,6 +77,8 @@ function setRole(role) {
 }
 
 function installFetch({ holds = [HOLD], release } = {}) {
+  // holds may be a function so a test can change what the next read returns
+  const currentHolds = () => (typeof holds === 'function' ? holds() : holds);
   const fetchMock = vi.fn((url, options) => {
     const path = String(url);
     if (path.endsWith('/admin/payers')) return response({ payers: [] });
@@ -83,7 +86,7 @@ function installFetch({ holds = [HOLD], release } = {}) {
     if (path.endsWith('/collection-holds/release')) {
       return release ? release(options) : response({ released: 1 });
     }
-    if (path.endsWith('/collection-holds')) return response({ holds });
+    if (path.endsWith('/collection-holds')) return response({ holds: currentHolds() });
     if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
     return response({});
   });
@@ -145,6 +148,52 @@ describe('Customer 360 collections dispute-hold notice', () => {
     expect(await screen.findByText(/Billing hold released/i)).toBeInTheDocument();
     expect(screen.queryByText(/Billing on hold — customer disputed/i)).not.toBeInTheDocument();
     expect(releaseCalls(fetchMock)).toHaveLength(1);
+    // the release names exactly the hold that was on screen
+    expect(JSON.parse(releaseCalls(fetchMock)[0][1].body)).toEqual({ holdId: 'hold-1' });
+  });
+
+  it('on a 409 (hold changed) shows the conflict inline, re-reads the holds, and releases nothing blind', async () => {
+    let current = [HOLD];
+    const fetchMock = installFetch({
+      holds: () => current,
+      release: () => {
+        // another office session replaced the hold before this click landed
+        current = [{ ...HOLD, id: 'hold-2', reason: 'dispute: second call' }];
+        return response({ error: 'This hold changed — reload' }, 409);
+      },
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Release hold/i }));
+
+    expect(await screen.findByText(/This hold changed — reload/i)).toBeInTheDocument();
+    // re-fetched: the newer hold is now the one shown, and nothing was released
+    expect(await screen.findByText(/second call/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Billing hold released/i)).not.toBeInTheDocument();
+    expect(releaseCalls(fetchMock)).toHaveLength(1);
+    expect(JSON.parse(releaseCalls(fetchMock)[0][1].body)).toEqual({ holdId: 'hold-1' });
+  });
+
+  it('on a 409 where the hold is now gone, the conflict message still shows', async () => {
+    let current = [HOLD];
+    installFetch({
+      holds: () => current,
+      release: () => {
+        current = [];
+        return response({ error: 'This hold changed — reload' }, 409);
+      },
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Release hold/i }));
+
+    // the message first shows in the hold box, then moves out of it when the re-read finds no hold
+    await waitFor(() => {
+      expect(screen.queryByText(/Billing on hold — customer disputed/i)).not.toBeInTheDocument();
+      expect(screen.getByText(/This hold changed — reload/i)).toBeInTheDocument();
+    });
   });
 
   it('shows the server error and keeps the hold when the release fails', async () => {

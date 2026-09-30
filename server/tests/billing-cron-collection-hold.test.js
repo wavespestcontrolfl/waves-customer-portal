@@ -124,6 +124,8 @@ test.each(['COLLECTION_HOLD_ACTIVE', 'COLLECTION_HOLD_CHECK_FAILED'])(
     expect(row).toMatchObject({ customer_id: 'cust-held', status: 'failed', retry_count: 0 });
     expect(row.next_retry_at).toBeInstanceOf(Date);
     expect(row.description).toEqual(expect.stringContaining('WaveGuard Monthly'));
+    // ordinary description: the retry sweep reuses it as the charge label the customer sees
+    expect(row.description).not.toMatch(/DEFERRED|hold/i);
     expect(JSON.parse(row.metadata)).toMatchObject({ type: 'monthly_autopay', deferred_reason: 'collection_hold' });
 
     // a distinct skip event — never a failed charge

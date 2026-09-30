@@ -351,7 +351,11 @@ async function deferMonthlyForCollectionHold(customer, monthKey, now, err) {
           status: 'failed',
           payment_date: etDateString(now),
           amount: customer.monthly_rate,
-          description: `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name} — DEFERRED (collections hold)`,
+          // The ordinary monthly description, no hold marker: the retry sweep
+          // reuses it verbatim as the Stripe charge's description and the
+          // customer portal lists it, so a collected month must read like any
+          // other. The hold shows in metadata.deferred_reason + failure_reason.
+          description: `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name}`,
           failure_reason: 'Not charged: the customer has an active collections dispute hold. Collected automatically after the office releases the hold.',
           retry_count: 0,
           next_retry_at: new Date(),
@@ -1224,6 +1228,9 @@ const BillingCron = {
           : (originalMeta.base_amount != null ? parseFloat(originalMeta.base_amount) : parseFloat(payment.amount));
         const description = payment.description
           .replace(' — FAILED', '')
+          // A deferral row's "— DEFERRED (…)" marker (lock contention, or a
+          // legacy hold row) is bookkeeping, never part of the charge label.
+          .replace(/ — DEFERRED \([^)]*\)/, '')
           .replace(/ \(includes \$[\d.]+ credit card surcharge\)/, '');
 
         // Key on the failed payment + ladder rung: overlapping sweep

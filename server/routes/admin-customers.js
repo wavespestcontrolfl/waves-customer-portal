@@ -2632,22 +2632,36 @@ router.get('/:id/collection-holds', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/customers/:id/collection-holds/release — lift the hold after
-// the dispute is resolved. Audited; every charge lane resumes on its next attempt.
+// the dispute is resolved. Body { holdId } (the id GET returned) releases
+// exactly that row, only while it is still active for this customer; a stale
+// or mismatched id is a 409 so a release can never lift a different (newer)
+// hold than the one staff were looking at. Audited; every charge lane resumes
+// on its next attempt.
 router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next) => {
   try {
     const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+    const holdId = typeof req.body?.holdId === 'string' ? req.body.holdId.trim() : '';
+    if (!holdId) {
+      return res.status(400).json({ error: 'holdId is required', code: 'HOLD_ID_REQUIRED' });
+    }
+    const conflict = () => Object.assign(new Error('This hold changed — reload'), {
+      statusCode: 409, status: 409, isOperational: true, code: 'HOLD_CHANGED',
+    });
+    // A non-uuid id can never match a hold row: stale/foreign, not a server fault.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(holdId)) throw conflict();
     // The release and its CRITICAL audit row commit together: a failed audit
     // write rolls the release back and the request errors.
     const result = await db.transaction(async (trx) => {
-      const released = await releaseCollectionHold(req.params.id, { trx });
+      const released = await releaseCollectionHold(req.params.id, { holdId, trx });
       if (!released.ok) throw Object.assign(new Error('Could not release the hold'), { statusCode: 500 });
+      if (released.released < 1) throw conflict();
       await recordAuditEvent({
         actor_type: 'technician',
         actor_id: req.technicianId || null,
         action: 'customer.collection_hold_released',
         resource_type: 'customer',
         resource_id: req.params.id,
-        metadata: { released: released.released },
+        metadata: { released: released.released, hold_id: holdId },
         ip_address: req.ip,
         user_agent: req.get('user-agent') || null,
         critical: true,
