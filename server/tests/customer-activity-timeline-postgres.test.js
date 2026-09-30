@@ -11,6 +11,7 @@ const knex = require('knex');
 const timeline = require('../services/customer-activity-timeline');
 
 const url = process.env.ACTIVITY_TIMELINE_TEST_DATABASE_URL || process.env.DATABASE_URL;
+const PUSH_NOTE = '0b6f3c1e-1f6a-4a52-9a7e-2f0f4f0f9a11';
 const pg = url ? describe : describe.skip;
 
 const TEMP_TABLES = `
@@ -28,7 +29,7 @@ const TEMP_TABLES = `
   CREATE TEMP TABLE newsletter_sends (id uuid PRIMARY KEY, subject text);
   CREATE TEMP TABLE newsletter_subscribers (id int PRIMARY KEY, customer_id uuid, email text);
   CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY, send_id uuid, subscriber_id int, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
-  CREATE TEMP TABLE customer_page_views (id uuid PRIMARY KEY, customer_id uuid, page text, viewed_at timestamptz);
+  CREATE TEMP TABLE customer_page_views (id uuid PRIMARY KEY, customer_id uuid, page text, subject_type text, subject_id text, viewed_at timestamptz);
   CREATE TEMP TABLE estimates (id uuid PRIMARY KEY, customer_id uuid, address text);
   CREATE TEMP TABLE estimate_views (id uuid PRIMARY KEY, estimate_id uuid, viewed_at timestamp);
   CREATE TEMP TABLE scheduled_services (id uuid PRIMARY KEY, customer_id uuid);
@@ -147,6 +148,7 @@ pg('getCustomerActivity on Postgres', () => {
     await db('customer_page_views').insert([
       { id: randomUUID(), customer_id: cust, page: 'appointment', viewed_at: T(40) },
       { id: randomUUID(), customer_id: cust, page: 'portal:home', viewed_at: T(41) },
+      { id: randomUUID(), customer_id: cust, page: 'push:open', subject_type: 'ios', subject_id: `notification:${PUSH_NOTE}`, viewed_at: T(39) },
       { id: randomUUID(), customer_id: other, page: 'track', viewed_at: T(91) },
     ]);
     await db('estimates').insert({ id: est, customer_id: cust, address: '1 Synthetic Way' });
@@ -178,7 +180,7 @@ pg('getCustomerActivity on Postgres', () => {
       'Text delivered (reminder)', 'Text failed (billing)', 'Replied by text',
       'Clicked the invoice link', 'Clicked the estimate link',
       'Email sent', 'Link clicked (reported by email provider — may be a scanner)', 'Email bounced',
-      'Opened the appointment page', 'Opened the portal', 'Viewed their estimate (unfiltered)', 'Viewed the prep guide (unfiltered)',
+      'Opened the appointment page', 'Opened the portal', 'Opened app from a notification', 'Viewed their estimate (unfiltered)', 'Viewed the prep guide (unfiltered)',
       'Viewed their service report (unfiltered)', 'Viewed their inspection report (unfiltered)', 'Viewed a contract (unfiltered)',
       'Viewed the price-change notice (unfiltered)', 'Called us',
     ]));
@@ -317,7 +319,7 @@ pg('getCustomerActivity on Postgres', () => {
 
   test('a push-proof row is an app notification, not a text, and is not engagement', async () => {
     const r = await run({ limit: 200 });
-    const push = r.events.find((e) => e.channel === 'push');
+    const push = r.events.find((e) => e.channel === 'push' && e.kind === 'delivered');
     expect(push).toMatchObject({ kind: 'delivered', engaged: false, title: 'App notification delivered (appointment reminder)', at: T(6).toISOString() });
     expect(r.events.some((e) => e.channel === 'sms' && e.detail === 'Tomorrow at 9')).toBe(false);
   });
@@ -419,7 +421,9 @@ pg('getCustomerActivity on Postgres', () => {
     const r = await run({ limit: 200 });
     const engaged = r.events.filter((e) => e.engaged);
     expect(new Set(engaged.map((e) => e.source))).toEqual(new Set(['sms', 'link', 'pageview']));
-    expect(engaged.every((e) => ['replied', 'clicked', 'viewed'].includes(e.kind))).toBe(true);
+    expect(engaged.every((e) => ['replied', 'clicked', 'viewed', 'opened'].includes(e.kind))).toBe(true);
+    // the only engaged 'opened' is the verified push open (an email open never is)
+    expect(engaged.filter((e) => e.kind === 'opened').map((e) => [e.source, e.channel, e.ref])).toEqual([['pageview', 'push', { type: 'notification', id: PUSH_NOTE }]]);
     // every other event is shown but never engaged
     const rest = r.events.filter((e) => !engaged.includes(e));
     expect(rest.some((e) => e.kind === 'opened')).toBe(true);

@@ -272,6 +272,29 @@ describe('enrollConsentedMethod', () => {
     expect(result.sendEnrollmentConfirmation).toBeUndefined();
     expect(sendAutopayEnrollmentConfirmation).toHaveBeenCalledWith({ customerId: 'cust-1', paymentMethodRowId: 'pm-new' });
   });
+
+  // ONE SIGNUP EMAIL (owner 2026-09-30): the combined signup email carries no
+  // payment section, so the "Auto Pay is set up" confirmation stays its own
+  // email and enrollment sends it inline exactly as it always has, gate or no.
+  test('GATE_SIGNUP_SINGLE_EMAIL on: the Auto Pay confirmation still sends inline, no hold, no owed record', async () => {
+    process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+    try {
+      const queues = {
+        customers: [qb({ first: custRow() }), qb()],
+        payment_methods: [qb({ first: TARGET }), qb({ first: null }), qb(), qb()],
+      };
+      setQueues(queues);
+
+      const result = await enrollConsentedMethod({ customerId: 'cust-1', paymentMethodId: 'pm-new', source: 'estimate_accept' });
+
+      expect(result).toEqual({ enrolled: true, methodId: 'pm-new', inChargeMethodId: 'pm-new' });
+      expect(sendAutopayEnrollmentConfirmation).toHaveBeenCalledTimes(1);
+      expect(sendAutopayEnrollmentConfirmation).toHaveBeenCalledWith({ customerId: 'cust-1', paymentMethodRowId: 'pm-new' });
+      expect(Object.keys(result)).not.toContain('owedEmailId');
+    } finally {
+      delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
+    }
+  });
 });
 
 describe('enrollConsentedMethod — savepoint mode side effects honor the outer commit (Codex #3361 r27 P1)', () => {
