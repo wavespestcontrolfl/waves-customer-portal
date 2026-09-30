@@ -57,6 +57,31 @@ function makeOutlineKnexWithChains(outlineRow) {
 }
 
 describe('service report approved product facts', () => {
+  test('freezes the resolved watering rule with the approved facts; unapproved products get none', () => {
+    const approved = {
+      approved_for_service_report: true,
+      name: 'Celsius WG',
+      category: 'herbicide',
+      product_type: 'pesticide',
+      formulation: 'WG',
+      epa_reg_number: '432-1507',
+      irrigation_required: false,
+      rainfast_minutes: 60,
+    };
+    expect(approvedReportProductFacts(approved).wateringRule)
+      .toMatchObject({ mode: 'hold', hold_hours: 24, source: 'default' });
+    expect(approvedReportProductFacts({
+      ...approved,
+      post_application_watering: { mode: 'hold', hold_hours: 6, source: 'label' },
+    }).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 6, source: 'label' });
+    // Unknown stays null (a spray insecticide never derives 'none').
+    expect(approvedReportProductFacts({
+      approved_for_service_report: true, name: 'Talak 7.9 F', category: 'insecticide',
+      product_type: 'pesticide', formulation: 'liquid', epa_reg_number: '91234-145',
+    }).wateringRule).toBeNull();
+    expect(approvedReportProductFacts({ ...approved, approved_for_service_report: false })).toBeNull();
+  });
+
   test('exposes approved pesticide facts with EPA number and customer copy', () => {
     const facts = approvedReportProductFacts({
       approved_for_service_report: true,

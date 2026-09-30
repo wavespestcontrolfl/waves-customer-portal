@@ -36,6 +36,16 @@ function canFallbackFromAutomationEmailError(err) {
   return /relation .*email_template_automation|automation .*not found|does not define an idempotency key|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
+// A processTrigger failure whose partialResults include a run that is
+// actually delivering (sent, or on its way: queued/scheduled/running/
+// retry_scheduled) — not a dedupe, a skip, a shadow-only or a blocked run,
+// none of which emails the customer.
+const DELIVERING_RUN_STATUSES = new Set(['sent', 'queued', 'scheduled', 'running', 'retry_scheduled']);
+function siblingDeliveringEmail(err) {
+  const results = Array.isArray(err?.partialResults) ? err.partialResults : [];
+  return results.some((r) => r && !r.deduped && DELIVERING_RUN_STATUSES.has(r.run?.status));
+}
+
 // estimate_data.noEngagementAutomation — the durable zero-comms opt-out
 // stamped by publish-without-delivery mints (report click-to-estimate).
 // ONE shared rule with the engagement engine, the legacy follow-up cron,
@@ -220,7 +230,16 @@ const EstimateAutoRenew = {
                   }
                 } catch (e) {
                   if (!canFallbackFromTemplateEmailError(e) && !canFallbackFromAutomationEmailError(e)) throw e;
-                  logger.warn(`[est-auto-renew] Template unavailable for estimate ${est.id}; falling back to SMTP: ${e.message}`);
+                  if (siblingDeliveringEmail(e)) {
+                    // Another automation on this trigger already sent or
+                    // queued the customer's email; only a sibling failed on
+                    // configuration. Falling back now would send a second
+                    // email (codex #5418 r4). Logged, never retried here.
+                    logger.error(`[est-auto-renew] Email automation partially failed for estimate ${est.id}; a sibling automation is delivering: ${e.message}`);
+                    sentWithTemplateLibrary = true;
+                  } else {
+                    logger.warn(`[est-auto-renew] Template unavailable for estimate ${est.id}; falling back to SMTP: ${e.message}`);
+                  }
                 }
               }
               if (!sentWithTemplateLibrary) {

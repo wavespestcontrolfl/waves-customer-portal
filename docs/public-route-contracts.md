@@ -771,7 +771,22 @@ cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
 `SCHEDULING_MAX_DETOUR_MINUTES` (default 30; an empty day counts the whole trip
-from HQ). Staff and phone booking see every fit. The finder's per-slot `return_time`
+from HQ). Staff and phone booking see every fit. **Zone route days**
+(`GATE_ZONE_ROUTE_DAYS`, owner 2026-09-29, default OFF): when on, that cap is
+lifted per candidate for an address in a configured zone on that zone's route
+weekday, so an empty route day can be offered and seeded (default: Friday for
+Venice / North Port, lifted cap 150 minutes; override with the
+`system_settings` key `schedule_zone_route_days`, e.g.
+`{"venice":{"weekdays":[5],"max_detour_minutes":150,"technician_id":null}}`;
+`{}` switches the lift off, a `technician_id` pins it to one technician). The
+zone is resolved from the request's coordinates (nearest `service_zones`
+center within 35 miles, so 'North Venice' / 'Northport' resolve), passed to the
+finder as `zoneSlug` by `/api/booking/availability` (and everything sharing its
+builder) and the estimate slot routes, and only ever raises the cap — route
+feasibility (return time, overcommit, arrival window, travel gap) is still
+checked. The estimate picker's south-zone funnel seeds the route day first. The phone
+agent, office Find-a-Time, the Intelligence Bar and auto-dispatch are not
+customer-facing and never had the cap. The finder's per-slot `return_time`
 (modeled return to HQ) and result-level `rejections` tally are staff/diagnostic
 fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
@@ -799,6 +814,32 @@ point, even when both points share the public rounded grid.
 A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
+
+Tech-aware confirm conflict checks for a second field technician
+(`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; needs
+`GATE_SCHEDULING_CAPACITY` live too). The offer side (`buildBookingAvailability`'s
+occupancy mirror) already keeps an occupied row only when it is unassigned or on
+the offered slot's own technician; the confirm side used to be tech-blind (built
+for one active technician), so a slot offered on technician B's day could be
+refused at confirm because technician A had an overlapping or nearby stop. With
+both gates on, `createSelfBooking` (`/api/booking/confirm`, the re-service commit
+and the consultation-page commit) scopes its whole conflict check to the booked
+technician: the zone/city/hold fast-path legs are AND-ed with "technician_id is
+NULL or equals the booked technician", and the global backstop
+(`findConflictingVisits`, which takes an opt-in `technicianId`) counts only the
+same technician's rows plus unassigned ones. Unassigned rows still block every
+technician, so the offer/commit predicates stay identical. The public reschedule
+commit (`SmartRebooker.reschedule` with `capacityPlacement: true`, the same
+offer builder) opts into the same scope for its kept technician. Either gate
+off, or a booking with no technician, is byte-for-byte the tech-blind check
+above. Every other caller — admin schedule/leads, rebooker series and
+rain-out/SMS moves, the phone agent, the zone-engine confirm, estimate slot
+reserve (which already verifies per technician in capacity mode), auto-dispatch
+and follow-up seeders — never passes `technicianId` and is unchanged. The
+date-wide occupancy advisory lock (rung 1) that every one of these writers takes
+still serializes concurrent confirms per calendar day regardless of technician,
+so two technicians' bookings and an unassigned insert cannot race past each
+other's probe.
 
 Public-confirm location freshness applies with either capacity gate on or
 off. After the scheduling and customer-communications fences, the customer
@@ -929,7 +970,8 @@ and still accepted at commit — `arrival-route.js`'s `verifyArrivalCapacity`
 — only while its certified delay stays within that same grace, tighter than
 but never wider than the existing 120-minute arrival promise every capacity
 booking already carries.
-**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314 — narrowed from an earlier
+**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314; `/book` later joined under its own
+gate and opt-in — see "Online-booking arrival grace" below — narrowed from an earlier
 draft that also covered `/book` and public reschedule): those two surfaces'
 commit paths (`createSelfBooking`, the rebooker's single-visit move) each
 run a STRICT pre-verify travel probe ahead of their capacity check, so a
@@ -999,6 +1041,86 @@ booking tools never opt in and are unaffected. Default 0 is byte-identical
 to before this lane. A slotId minted before this v3 bump fails verification
 once (the same accepted trade the v1→v2 canonical-string bump already made)
 — the client's existing "pick another time" 409 recovery re-signs fresh.
+**Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved
+2026-09-29; ships dark).** `/book`'s offers and commit join the same grace,
+and the "ESTIMATE PICKER ONLY" carve-out above is lifted for exactly the
+surfaces whose commit is `createSelfBooking`: `/api/booking/availability`,
+`/find-slots`, the `/capture-intent` revalidation, public re-service and
+inspection booking — each passes `bookArrivalGrace: true` to
+`buildBookingAvailability`, which takes effect only with mid-route insertion
+(`capacityPlacement`, i.e. `bookInsertionOffersLive()`: `GATE_BOOK_CAPACITY_
+COMMIT` + `GATE_SCHEDULING_CAPACITY`), the new gate, and a positive
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES` for the slot's date (0 on a same-day pick).
+The **phone agent** (its commit stays end-of-day only), **public reschedule**
+(its rebooker commit still runs the strict pre-verify travel probe), office
+Find-a-Time, the Intelligence Bar and auto-dispatch never opt in and are
+byte-identical. Gate off (or grace 0) is today's strict drive+15-minute
+travel-gap offer and commit, byte for byte, on every surface.
+
+*Why.* Fable's read-only production runs found find-time seeing 8 bookable
+Parrish days at cap 30 while `/book` showed 3: every dropped slot failed
+`/book`'s own both-neighbour travel-gap mirror, because
+`find-time.js`'s `packCapacityEnds` tested each group's earliest pick against
+the previous stop ONLY and its latest pick against the next stop ONLY, so a
+pick that cleared its own neighbour but crowded the other survived find-time
+and was then dropped by the mirror — often emptying 4-7-stop days. The commit
+side had the mirror image: `findConflictingVisits`' strict travel probe ran
+before `verifyArrivalCapacity` and refused any buffer shortfall, so a
+grace-kept offer would have 409'd.
+
+*The one rule* (`services/scheduling/book-arrival-grace.js`, read by find-time's
+`packCapacityEnds`, `/book`'s offer mirror in `buildBookingAvailability`, and
+`createSelfBooking`'s commit probe — so offer and commit cannot drift):
+1. A real window overlap is never waived (the commit's own SQL overlap probe
+   and the raw-window check in `travel-gap.js` keep refusing it).
+2. Only the travel BUFFER against the PREVIOUS stop may be waived, and only
+   when that stop is committed and assigned to THIS technician and the
+   whole-route arrival simulation's own delay for this slot is within grace
+   (`arrival_delay_minutes` at offer, `verifyArrivalCapacity`'s fit at commit).
+   The NEXT stop's side is never waived — the next customer's promised start is
+   not this customer's to spend — nor an unassigned or other-technician stop, a
+   live hold (every hold on the route must clear the strict gap), or an
+   interview.
+3. `packCapacityEnds` (`/book` mode) checks every candidate against EVERY
+   route neighbour under rule 1-2 BEFORE a group picks its earliest/latest
+   endpoint, so a later candidate that clears both sides is never lost to an
+   earlier one that crowds the far side. Without the gate the default
+   one-neighbour-per-side pick is unchanged (the estimate picker's grace
+   still opts in through `arrivalGrace: true` and keeps its own rule).
+4. Independently of any gap, a graced build never offers a slot whose
+   simulated arrival delay is past the grace, because the commit's
+   `verifyArrivalCapacity(…, { arrivalGraceMinutes })` would refuse it:
+   `createSelfBooking` now passes the OFFER's grace (the guard test
+   `verify-arrival-capacity-grace-callers-guard.test.js` counts it).
+
+*Commit.* `createSelfBooking` tolerates a strict-probe clash only when the
+offer was graced, a prepared capacity proof exists, and EVERY clash is a
+previous-side `travel_gap` row (a row that starts before the candidate;
+`findConflictingVisits` itself is unchanged and stays tech-blind) on the same
+assigned committed technician;
+everything else stays `SLOT_TAKEN`. The grace it enforces is the exact value
+that justified the offer: a signed `/book` offer carries it as an HMAC-bound
+field (`slot_sig` = `<exp>.<grace>.<sig>`, only when grace > 0; a zero-grace
+offer keeps the exact `<exp>.<sig>` shape), never a live re-read; an internal
+callback booking (re-service, inspection — no signed field, offer proof is a
+same-request rebuild) reads the live grace for its date.
+
+*Zero grace is the gate off.* Grace mode applies only where the applicable
+grace is positive: a build whose range has no positive-grace date (env unset/0)
+is plain insertion mode, and per slot a zero-grace date (a same-day pick)
+keeps the old one-neighbour packing, the strict mirror, the
+`BOOK_INSERTION_OFFER_POLICY` tag and the `<exp>.<sig>` field.
+
+*Flip safety.* Every `/book` offer for a positive-grace date carries
+`BOOK_ARRIVAL_GRACE_OFFER_POLICY` (`utils/slot-offer-token.js`) instead of
+`BOOK_INSERTION_OFFER_POLICY`, and `/confirm` verifies with
+`bookOfferPolicyLive(date)`, so a gate flip in either direction between mint and
+confirm fails the signature into the standard "pick your time again" 409
+(same mechanism as `GATE_BOOK_CAPACITY_COMMIT`, #5231). Tests:
+`book-arrival-grace-parity.test.js` (real whole-route simulation +
+find-time + commit probe, both directions, gate on and off),
+`booking-availability-arrival-grace.test.js` (offer mirror + signing),
+`booking-confirm-signed-offer.test.js` (commit matrix), `slot-offer-token.test.js`.
 Catalog-sized estimate offers resolve the primary appointment allowance from
 `services.scheduling_duration_policy`; independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.
@@ -2636,8 +2758,9 @@ nothing in the request names or changes the target. The query carries only an
 HMAC-signed attribution context (template key, customer id, visit or project
 id, surface — row ids only, NEVER the bearer prep token, which would land in
 the request log; it is resolved to ids at render time) — an invalid signature is ignored, never trusted. Human clicks log
-to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs still redirect but
-log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
+to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs and staff — the
+`waves_admin` marker cookie or `WAVES_ADMIN_IPS`, the same `shouldRecord`
+filter `/l` uses — still redirect but log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
 is on, but the route stays live regardless of the gate so links already sent
 keep working. Destinations are never tagged or altered.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
@@ -3770,26 +3893,37 @@ contract as security-critical).
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).
 `/api/review/:token` (GET + POST; token-gated customer review flow — GET
-returns the review-request context by token, POST submits the customer's
-review. No auth beyond the review-request token. Baseline guards
+returns the review-request context by token. POST is RETIRED (owner ruling
+2026-09-29, the 1-10 rating is gone): it answers 410 Gone with no DB access
+(it used to be an unauthenticated rating write that stamped the click fields and
+fired a referral invite). No auth beyond the review-request token. Baseline guards
 (`server/routes/review-public.js`): `REVIEW_TOKEN_RE` format gate (the
 shape `services/review-request.js` mints — 32-64 url-safe chars) via
 `router.param` before any DB read, one generic 404 body for malformed,
-unknown, and expired tokens on both verbs, a router-wide 30 req/min limiter
+unknown, and expired tokens on GET, a router-wide 30 req/min limiter
 on the shared IPv6-safe `rateLimitKey`, and the shared `noStore` privacy
 headers (`no-store`, `noindex`, `no-referrer`) on every response. The GET
 stamps open state and returns customer name data, so those guards are the
 whole defense.)
-`/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
-`/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
-rating flow from a review-request link — high → the nearest GBP
-write-a-review URL, low → private feedback capture. Router-wide url-safe
+`/api/rate/:token` (+ `/:token/go`) (review-gate; token-scoped thank-you
+page from a review-request link. The 1-10 rating, its feedback form and the AI
+review writer are retired (owner ruling 2026-09-29): the page GET returns
+`reviewUrl` — ALWAYS the tracked `/api/rate/:token/go` link (whatever
+GATE_REVIEW_DIRECT_LINK says), null for a customer already
+marked as a reviewer — and the page shows one "Open Google" button; going to
+Google is always the customer's own click. `POST /:token/score`, `/:token/submit`
+and `/:token/generate-review` no longer exist (404). Finalized (legacy-rated)
+requests answer `alreadySubmitted` with no button. Router-wide url-safe
 32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
 the /rate page per its every-failure-lands-somewhere contract); the page
-GET and score/submit writes carry a 30/min limiter. `/:token/go` is the
-GATE_REVIEW_DIRECT_LINK tracked redirect: the same 32–64 URL-safe token format gate, 30
+GET carries a 30/min limiter. `/:token/go` is the
+tracked redirect (ALWAYS live, not gate-dependent; GATE_REVIEW_DIRECT_LINK now only decides whether ask texts and emails link here or to the /rate thank-you page): the same 32–64 URL-safe token format gate, 30
 req/min per-IP limit, stamps open/click on the review_requests row, stops
-the customer's active review cadence, and 302s to the location's GBP review
+EVERY later review-ask path for the customer in one click (`ReviewService.stopFutureAsks`: the clicked request's cadence and any active/deferred cadence, a cadence parked for visit-summary recovery, queued one-off asks, due Day-3 follow-ups; run best-effort under the per-customer `review-send:<customerId>` lock with a bounded ~2 s wait; the stamp/claim lands first and every review sender re-checks `redirected_at` at SEND time (`services/review-click-guard.js`), so the customer is never kept from Google: `/go` always 302s once the click is recorded. A send already past its guard when the click lands may still deliver that one in-flight text), fire-and-forgets the referral invite
+email on the FIRST tracked click only (`sendReferralInviteEmail`, trigger
+`google_review_click`, once per customer; owner ruling 2026-09-29; never
+delays or breaks the redirect; bot fetches, expired, finalized and
+already-reviewed requests send nothing), and 302s to the location's GBP review
 URL — every failure path degrades to the /rate page, and the ONLY redirect
 targets are config/locations.js googleReviewUrl values (never
 request-derived). ONE deliberate non-failure carve-out (owner ruling,

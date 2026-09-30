@@ -466,7 +466,12 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // PR #4623) — the SLOT_TAKEN shape still sits directly after it.
     // 1000: grew again by the travel probe's expected-minutes credit
     // (#4664, offer/commit parity).
-    const probeBlock = src.slice(probeIdx, probeIdx + 1000);
+    // 1400: grew again by the GATE_BOOK_ARRIVAL_GRACE waiver clause between
+    // the probe and its throw (2026-09-29) — the throw is still the same
+    // SLOT_TAKEN shape, now skipped only for a graced offer's waivable
+    // previous-side clashes (booking-arrival-grace.test.js). The tech-aware
+    // scope option (GATE_MULTI_TECH_CONFIRM) also lives in this window.
+    const probeBlock = src.slice(probeIdx, probeIdx + 1600);
     expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
     expect(probeBlock).toMatch(/statusCode: 409/);
     // Shared module import rides the same lazy require as the lock helper.
@@ -930,7 +935,10 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
 
   test('every self-serve caller in this file opts in with selfServeNotice: true', () => {
     const occurrences = src.split('selfServeNotice: true,').length - 1;
-    // GET /availability, POST /find-slots, and the capture-intent revalidation.
-    expect(occurrences).toBe(3);
+    // buildFunnelAvailability — the one builder GET /availability, POST
+    // /find-slots, the capture-intent revalidation and the texting AI's OPEN
+    // TIMES all offer through (booking-capacity-placement-wiring pins each
+    // caller to it).
+    expect(occurrences).toBe(1);
   });
 });

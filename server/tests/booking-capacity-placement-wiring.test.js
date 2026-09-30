@@ -82,23 +82,42 @@ describe('booking.js — bookInsertionOffersLive() is bookCapacityCommitLive() A
   });
 });
 
-describe('booking.js — self-serve callers pass capacityPlacement: bookInsertionOffersLive()', () => {
+describe('booking.js — self-serve callers build through buildFunnelAvailability (capacityPlacement: bookInsertionOffersLive())', () => {
   const src = read('../routes/booking.js');
 
-  test('GET /availability — commits through /confirm -> createSelfBooking', () => {
-    const call = callAfter(src, "router.get('/availability'");
+  test('buildFunnelAvailability itself passes selfServeNotice: true and capacityPlacement: bookInsertionOffersLive()', () => {
+    const call = callAfter(src, 'function buildFunnelAvailability');
     expect(call).toContain('capacityPlacement: bookInsertionOffersLive()');
+    expect(call).toContain('selfServeNotice: true');
   });
 
-  test('POST /find-slots — same /confirm -> createSelfBooking commit as /availability', () => {
-    const call = callAfter(src, "router.post('/find-slots'");
-    expect(call).toContain('capacityPlacement: bookInsertionOffersLive()');
+  // Each of these commits (or revalidates a slot that commits) through
+  // /confirm -> createSelfBooking, so they share the ONE builder above instead
+  // of each restating the two flags — and the texting AI's OPEN TIMES
+  // (availabilityForExistingCustomer) offers through the same one.
+  test.each([
+    ['GET /availability', "router.get('/availability'"],
+    ['POST /find-slots', "router.post('/find-slots'"],
+    ['POST /capture-intent revalidation (must match /availability and /find-slots — offer/commit parity)', "router.post('/capture-intent'"],
+    ['availabilityForExistingCustomer (the texting AI\'s OPEN TIMES)', 'async function availabilityForExistingCustomer'],
+  ])('%s builds through buildFunnelAvailability', (_label, anchor) => {
+    const at = src.indexOf(anchor);
+    expect(at).toBeGreaterThan(-1);
+    const callStart = src.indexOf('buildFunnelAvailability({', at);
+    expect(callStart).toBeGreaterThan(-1);
+    // no raw builder call between the route's start and its funnel call
+    expect(src.slice(at, callStart)).not.toContain('buildBookingAvailability(');
+    // and each opts into the same online-booking arrival grace, so the texting
+    // AI never offers a narrower set than the /book screens show
+    expect(src.slice(callStart, src.indexOf('});', callStart))).toContain('bookArrivalGrace: true');
   });
+});
 
-  test('POST /capture-intent revalidation — must match /availability and /find-slots (offer/commit parity)', () => {
-    const call = callAfter(src, "router.post('/capture-intent'");
-    expect(call).toContain('capacityPlacement: bookInsertionOffersLive()');
-  });
+test('the texting AI\'s /book lookup expands open days like the /book page\'s own request (expand=open)', () => {
+  const src = read('../routes/booking.js');
+  const at = src.indexOf('async function availabilityForExistingCustomer');
+  const callStart = src.indexOf('buildFunnelAvailability({', at);
+  expect(src.slice(callStart, src.indexOf('});', callStart))).toContain('expandOpenDays: true');
 });
 
 describe('reservice-public.js — commits through createSelfBooking (callbackVisit)', () => {

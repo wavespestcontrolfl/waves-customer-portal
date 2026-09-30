@@ -113,9 +113,10 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
+const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
 // branches are mirror images and each must clear the other's keys: a pass that
@@ -134,15 +135,23 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
+
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT is only EFFECTIVE together with its
+// prerequisite GATE_CALL_FAIL_OPEN_BOOKING (the Assessment fallback and the
+// fail-open filter both need it). ONE predicate for the canAutoRoute option in
+// both processor lanes, so the gate alone never half-applies (codex #5371 r2).
+function unclearServiceAssessmentActive(enabled = isEnabled) {
+  return enabled('callUnclearServiceAssessment') === true && enabled('callFailOpenBooking') === true;
+}
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
-const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
+const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1724,6 +1733,7 @@ function callerIdNameForPrompt(call) {
  */
 function buildFailOpenRoutingContext({
   call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
+  unclearServiceAssessmentEnabled = false,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
   // A new lead's trust comes from the verdict production persisted for this
@@ -1748,6 +1758,10 @@ function buildFailOpenRoutingContext({
       failOpen: !!failOpenEnabled,
       callerAni: contactPhone,
       knownCustomer: failOpenKnownCustomer(knownCaller),
+      // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT, effective only with fail-open on
+      // (the live pass's own two-gate predicate). Absent when off, so the
+      // options shape the audits compare is unchanged gate-off.
+      ...(failOpenEnabled && unclearServiceAssessmentEnabled ? { unclearServiceAssessment: true } : {}),
     },
   };
 }
@@ -1830,7 +1844,33 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
     reason: 'v1_only_new_address',
     flags: routingResult.flags,
     appointmentBlockingFlags: ['address_unverified'],
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: the held call still owes staff the
+    // advisory service card for the flag(s) the gate waived — the blocked
+    // branch files failedOpenFlags as advisory cards. Only the gate's own
+    // waivers ride along (the on-file address flags stay dropped, as before),
+    // so gate off the replacement verdict is unchanged.
+    ...(routingResult.unclearServiceDemotedFlags?.length ? {
+      failedOpenFlags: [...routingResult.unclearServiceDemotedFlags],
+      unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags],
+    } : {}),
   };
+}
+
+// The downstream half of the GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT contract for
+// the OFFLINE production-parity audits (readiness, replay, shadow verify): a
+// call the gate admitted is still vetoed when the resolver — reading the FULL
+// transcript, exactly as the live pass does for every gate admission — finds an
+// unsupported / administrative-only call. The live path skips the appointment
+// there; an audit that stops at canAutoRoute would count it auto-routable.
+// Returns the routing verdict unchanged unless that veto applies. One helper,
+// shared by all three scripts.
+function applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription) {
+  if (!routingResult?.allowed || routingResult.unclearServiceGateAdmitted !== true) return routingResult;
+  const resolution = resolveSchedulableCallService(extracted || {}, { transcription, fullTranscriptVeto: true });
+  // ok:true books; noMatch:true books the Assessment fallback. Only a hard
+  // veto (ok:false without noMatch) holds the call.
+  if (resolution.ok || resolution.noMatch === true) return routingResult;
+  return { ...routingResult, allowed: false, reason: resolution.reason || 'unsupported_service' };
 }
 
 // Fail-open on-file address PROOF is customer-scoped (codex P1, 2026-09-09):
@@ -4976,7 +5016,15 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
   }
 }
 
-async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }) {
+// `dbh`: a caller already inside a transaction that holds the address lock (and
+// possibly hold rows) passes it so the confirmation send runs on THAT
+// connection (a savepoint here) instead of opening a second one that would
+// block on the address lock the caller holds (B13).
+async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }, { dbh = null } = {}) {
+  // The caller's transaction when it has one, else the pool: the WHOLE path
+  // (lookup, subscribe, verify, send, stamp bookkeeping) runs on one connection,
+  // so a caller holding a connection + locks never waits on a second pooled one.
+  const conn = dbh && dbh.isTransaction ? dbh : db;
   const emailLc = String(email || '').trim().toLowerCase();
   if (!customerId || !emailLc) return null;
 
@@ -4985,10 +5033,10 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     return { skipped: true, reason: 'invalid_email' };
   }
 
-  const existing = await db('newsletter_subscribers').where({ email: emailLc }).first();
+  const existing = await conn('newsletter_subscribers').where({ email: emailLc }).first();
   if (existing?.status === 'unsubscribed') {
     if (!existing.customer_id) {
-      await db('newsletter_subscribers')
+      await conn('newsletter_subscribers')
         .where({ id: existing.id })
         .update({ customer_id: customerId, updated_at: new Date() });
     } else if (existing.customer_id !== customerId) {
@@ -5005,9 +5053,11 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     source: 'call_recording',
     strict: true,
     requireConfirmation: true,
+    dbh: conn === db ? null : conn,
   });
 
   let confirmationEmailSent = null;
+  let deliveryAmbiguous = false;
   if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
     // The subscriber row is re-verified and LOCKED through the provider
     // call (Codex #3084 r51 — the same pending/token lock-through-send
@@ -5024,7 +5074,12 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     // durable.
     let sendRefused = false;
     try {
-      await db.transaction(async (trx) => {
+      await conn.transaction(async (trx) => {
+        // Address key BEFORE the row lock (suppression / ownership writers
+        // take the key first, then rows); sendConfirmationEmail re-enters it
+        // and runs its vetoes on THIS connection (B13).
+        await require('../utils/customer-comms-lock')
+          .lockCustomerEmail(trx, String(result.subscriber.email || emailLc).trim().toLowerCase());
         const liveSubscriber = await trx('newsletter_subscribers')
           .where({
             id: result.subscriber.id,
@@ -5038,7 +5093,7 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
           sendRefused = true;
           return;
         }
-        await sendConfirmationEmail(result.subscriber);
+        await sendConfirmationEmail(result.subscriber, { dbh: trx });
         confirmationEmailSent = true;
       });
       if (sendRefused) {
@@ -5051,6 +5106,16 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
         // transaction commit failed — the DOI is out and the pre-stamp is
         // durable; do NOT clear it or the retry double-mails.
         logger.warn(`[call-proc] newsletter send transaction commit errored after the send for customer ${customerId}: ${e.code || e.name || 'db_error'} — pre-stamp stands`);
+        e = null;
+      }
+      if (e && e.deliveryAmbiguous) {
+        // A provider timeout / 5xx / network failure AFTER dispatch: the DOI
+        // may have been accepted. Keep the pre-stamp (the dedupe evidence) and
+        // report neutral "maybe sent" state — never clear it and never arm the
+        // forced resend (sendgrid-mail's isDefiniteRejection convention).
+        logger.warn(`[call-proc] Newsletter confirmation delivery is ambiguous for customer ${customerId}: ${e.code || e.name || 'provider_error'} — pre-stamp stands`);
+        confirmationEmailSent = false;
+        deliveryAmbiguous = true;
         e = null;
       }
       if (e) {
@@ -5067,7 +5132,7 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
         // the rotation's own callback owns its stamp.
         if (result.subscriber?.id) {
           try {
-            await db('newsletter_subscribers')
+            await conn('newsletter_subscribers')
               .where({
                 id: result.subscriber.id,
                 confirmation_token: result.subscriber.confirmation_token,
@@ -5093,6 +5158,9 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     // newer token whose DOI may already be delivered.
     confirmationToken: result.subscriber?.confirmation_token || null,
     confirmationEmailSent,
+    // Set only for an ambiguous provider failure: the resume lane re-pends with
+    // the neutral marker (dedupe evidence kept), not the forced-resend one.
+    ...(deliveryAmbiguous ? { deliveryAmbiguous: true, retryReason: 'doi_delivery_ambiguous' } : {}),
   };
 }
 
@@ -5744,6 +5812,105 @@ async function loadCustomerServiceContext(customerId, conn = db) {
   return { estimates, serviceRecords, scheduledServices };
 }
 
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: what an ambiguous-service demotion
+// books, decided in ONE place (codex #5371 r1 + r2).
+//
+// THE RULE: the flag says the PEST/service is unclear, so a service that only
+// the model's own guess named (specific_service_name / matched_service /
+// requested_service, or a transcript keyword) is replaced by the Waves
+// Assessment. A service DETERMINISTIC logic settled is kept, because the
+// ambiguity was about the pest, not the program: a covered re-service row (the
+// live lane override) and a recurring pest program the caller voiced or
+// accepted (applyRecurringIntentDefault's own evidence, recurringIntentEvidence)
+// — on INBOUND calls only, the same condition that runs applyRecurringIntentDefault
+// at all: outbound speaker labels are untrusted, so on an outbound call a
+// model-picked recurring row is forced to the Assessment too.
+//
+// A forced Assessment carries NO treatment signals: the returned
+// `extractedPatch` clears the quoted treatment price (so pricing falls back to
+// the Assessment's own catalog handling) and the follow-up-visit signals (so no
+// "Follow-up treatment" visit 2 is created for a service nobody identified)
+// and the call summary (it may name a treatment or price; it would land in the
+// customer-visible scheduled_services.notes).
+// The caller books from `{ ...extracted, ...extractedPatch }`.
+//
+// Applies only where the resolver did not hard-veto the call (ok:false WITHOUT
+// noMatch stays un-bookable). Returns { applied:false, row } when it does not
+// apply (`kept` names why a deterministic service survived), { applied:true,
+// row, extractedPatch } with the Assessment row, or { applied:true,
+// unbookable:true } when that row is unavailable (hold; never the concrete
+// service the model flagged as unclear).
+function forcedAssessmentBooking({ serviceResolution, services, current, extracted, transcription, inbound = false }) {
+  if (!(serviceResolution?.ok || serviceResolution?.noMatch === true)) return { applied: false, row: current };
+  if (current && isReServiceCatalogRow(current)) return { applied: false, row: current, kept: 're_service' };
+  if (inbound && current && extracted?.is_lead === true
+      && RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(current.name))
+      && recurringIntentEvidence(transcription)) {
+    return { applied: false, row: current, kept: 'recurring_program' };
+  }
+  const row = (services || []).find((s) => /^waves assessment$/i.test(String(s.name || '')));
+  if (!row) return { applied: true, unbookable: true, row: current };
+  return {
+    applied: true,
+    row,
+    extractedPatch: { quoted_price: null, follow_up_visit_mentioned: false, follow_up_date_time: null, call_summary: null },
+  };
+}
+
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a card an earlier (held) pass left
+// open as `blocking` for a flag this pass let through must not stay red on a
+// call that is now booked. The advisory insert is ON CONFLICT DO NOTHING, so
+// demote in place — open / in-progress blocking rows only; nothing is resolved.
+// Fenced to the OWNING pass exactly like the processor's other triage writes:
+// under the per-call triage lock, and only while this pass still holds the
+// call's processing_token (a superseded worker must not demote the current
+// pass's genuinely blocking card). Returns rows updated (0 = nothing to demote)
+// or null when the claim is lost — the caller must NOT proceed to book then.
+//
+// The same fenced transaction also PROVES the advisory card exists (codex #5371
+// r9 P1): on a call's first gate-enabled pass there is no blocking card to
+// demote, and the caller's own advisory insert is best-effort (its catch only
+// logs). `advisoryItems` (built triage rows, one per flag) are inserted here if
+// missing, and every flag must then have an OPEN advisory-or-demoted row, or this
+// THROWS — which the enclosing routing catch turns into a held appointment, so a
+// Waves Assessment is never booked without the card telling staff to identify
+// the real service. Flags with no built row are still verified.
+async function demoteOpenTriageCards(conn, callLogId, flags, procToken, advisoryItems = []) {
+  if (!Array.isArray(flags) || !flags.length) return 0;
+  return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    const owned = await trx('call_log')
+      .where({ id: callLogId })
+      .where('processing_token', procToken)
+      .forUpdate()
+      .first('id');
+    if (!owned) return null;
+    const demoted = await trx('triage_items')
+      .where({ call_log_id: callLogId, severity: 'blocking' })
+      .whereIn('reason_code', flags)
+      .whereIn('status', ['open', 'in_progress'])
+      .update({ severity: 'advisory', updated_at: trx.fn.now() });
+    for (const item of advisoryItems || []) {
+      if (!item || !flags.includes(item.reason_code)) continue;
+      await trx('triage_items')
+        .insert(item)
+        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+        .ignore();
+    }
+    const present = await trx('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('reason_code', flags)
+      .whereIn('status', ['open', 'in_progress'])
+      .select('reason_code');
+    const have = new Set((present || []).map((r) => r.reason_code));
+    const missing = flags.filter((f) => !have.has(f));
+    if (missing.length) {
+      throw new Error(`unclear-service advisory card missing for: ${missing.join(', ')}`);
+    }
+    return demoted;
+  });
+}
+
 function resolveSchedulableCallService(extracted = {}, opts = {}) {
   const requestedText = compactText(extracted.requested_service);
   const extractedDetailText = compactText(
@@ -5770,6 +5937,15 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
     && !requestedHistoryReference;
 
   if (hasUnsupportedCallContext(extractedDetailText)) {
+    return { ok: false, reason: 'unsupported_service', service: null };
+  }
+  // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT (opts.fullTranscriptVeto): a call let
+  // through past ambiguous_pest_or_service has no settled service, so the
+  // unsupported-topic veto reads the WHOLE transcript up front — otherwise a
+  // solicitor whose extracted fields still say "pest control" resolves a
+  // service first and the transcript-only veto below (no service) never runs.
+  // Off = byte-identical: the check below stays as it was.
+  if (opts.fullTranscriptVeto === true && hasUnsupportedCallContext(fullContextText)) {
     return { ok: false, reason: 'unsupported_service', service: null };
   }
   if (hasAdministrativeOnlyContext(adminContextText, extracted)) {
@@ -5804,6 +5980,69 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   // admin-only call), which a catalog match must never override.
   if (!service) return { ok: false, reason: 'unsupported_service', service: null, noMatch: true };
   return { ok: true, reason: null, service };
+}
+
+// The service fields the V2-approved booking will actually book from: the same
+// overrides the approved-extraction merge applies to `extracted` further down
+// (matched_service under its adoption rule, requested_service, and
+// specific_service_name INCLUDING a null clear). The waiver is judged on this
+// view as well as on the fields as they stand at the gate, so a V1 pick that
+// V2 replaces at booking cannot carry a waiver onto a different service.
+function v2BookingServiceView(extracted = {}, v2Extraction = null) {
+  if (!v2Extraction || !isV2Extraction(v2Extraction)) return null;
+  const v2Flat = flatView(v2Extraction);
+  const view = { ...extracted };
+  const v2Category = v2Flat.primary_service_category
+    || v2Extraction?.service_request?.primary_service_category || null;
+  const preciseV2Category = v2Category === 'bed_bug' || v2Category === 'wdo';
+  if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)) {
+    view.matched_service = v2Flat.specific_service_name || v2Flat.matched_service;
+  }
+  if (v2Flat.requested_service) view.requested_service = v2Flat.requested_service;
+  view.specific_service_name = v2Flat.specific_service_name || null;
+  return view;
+}
+
+// Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
+// caller checks the gate). Resolves the call's service the way the booking
+// resolves it and hands the verdict to the pure waiver in call-triage-flags.js.
+// The service must resolve to a bookable CATALOG row on the allowlist — a
+// coarse label alone never waives, since that booking would carry no service_id.
+// Every view of the call's service must qualify: the V1 extraction as it stood
+// BEFORE V2-primary adoption (`preAdoptionExtracted`), the merged fields at the
+// gate, and the V2-overridden view the approved booking will book. Returns the
+// SAME verdict object unless the waiver applies.
+function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], property = null, v2Extraction = null, unclearServiceAssessment = false } = {}) {
+  // Both gates on and the call carries the unclear-service signal: routing may
+  // force the Waves Assessment row, which is not a whole-structure service.
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return addressValidation;
+  const prop = property || v2Extraction?.property || {};
+  const views = [];
+  if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+  views.push(extracted);
+  const finalView = v2BookingServiceView(extracted, v2Extraction);
+  if (finalView) views.push(finalView);
+  const results = views.map((view) => {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view,
+      transcription,
+      services,
+      coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    const waived = applyWholeStructureUnitWaiver(addressValidation, {
+      enabled: true,
+      serviceKey: row?.service_key || null,
+      propertyType: prop.property_type,
+      commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
+      text: [transcription, view.call_summary, view.requested_service].filter(Boolean).join(' '),
+    });
+    return { waived, service: row?.service_key || null };
+  });
+  if (results.some((r) => r.waived === addressValidation)) return addressValidation;
+  const out = results[results.length - 1].waived;
+  out.wholeStructureUnitWaived.service = results[results.length - 1].service;
+  return out;
 }
 
 async function resolveDefaultCallBookingTechnician(conn = db) {
@@ -6980,20 +7219,13 @@ function resolveProgramName(cadenceKey, fallback, catalogNames) {
   return hit || fallback;
 }
 
-function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = []) {
-  if (!extracted || extracted.is_lead !== true) return extracted;
-  // specific_service_name outranks matched_service in catalog booking
-  // resolution (call-booking-catalog.js), so a singular value THERE would
-  // book the one-time service no matter what matched_service says — both
-  // fields get the rule.
-  const matchedKey = normalizeServiceKey(extracted.matched_service);
-  const specificKey = normalizeServiceKey(extracted.specific_service_name);
-  const matchedIsSingular = RECURRING_OVERRIDE_SOURCES.has(matchedKey);
-  const specificIsSingular = RECURRING_OVERRIDE_SOURCES.has(specificKey);
-  const matchedIsRecurring = RECURRING_PEST_PROGRAMS.has(matchedKey);
-  const specificIsRecurring = RECURRING_PEST_PROGRAMS.has(specificKey);
-  if (!matchedIsSingular && !specificIsSingular && !matchedIsRecurring && !specificIsRecurring) return extracted;
-
+// The caller-intent evidence behind the recurring-program default: the caller's
+// own text plus the agent plan offer they accepted, or null when the caller
+// voiced / accepted no recurring intent (or declined it). ONE place, read by
+// applyRecurringIntentDefault (to rewrite the service) and by
+// forcedAssessmentBooking (to know a recurring program is the caller's, not the
+// model's guess).
+function recurringIntentEvidence(transcription) {
   const normalized = normalizeApostrophes(transcription);
   const turns = speakerTurns(normalized);
   const callerText = callerOnlyText(normalized);
@@ -7014,12 +7246,32 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
     // want a package either") is not fresh intent.
     if (!nonNegatedMatch(RECURRING_INTENT_STRONG_RE, afterDecline)
       && !serviceCadenceMatch(RECURRING_CADENCE_RE, afterDecline)
-      && !postDeclineOffer) return extracted;
+      && !postDeclineOffer) return null;
   }
   const callerVoiced = nonNegatedMatch(RECURRING_INTENT_STRONG_RE, callerText)
     || serviceCadenceMatch(RECURRING_CADENCE_RE, callerText);
   const acceptedOffer = postDeclineOffer || (callerVoiced ? null : acceptedPlanOffer(turns, -1));
-  if (!callerVoiced && !acceptedOffer) return extracted;
+  if (!callerVoiced && !acceptedOffer) return null;
+  return { callerText, acceptedOffer };
+}
+
+function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = []) {
+  if (!extracted || extracted.is_lead !== true) return extracted;
+  // specific_service_name outranks matched_service in catalog booking
+  // resolution (call-booking-catalog.js), so a singular value THERE would
+  // book the one-time service no matter what matched_service says — both
+  // fields get the rule.
+  const matchedKey = normalizeServiceKey(extracted.matched_service);
+  const specificKey = normalizeServiceKey(extracted.specific_service_name);
+  const matchedIsSingular = RECURRING_OVERRIDE_SOURCES.has(matchedKey);
+  const specificIsSingular = RECURRING_OVERRIDE_SOURCES.has(specificKey);
+  const matchedIsRecurring = RECURRING_PEST_PROGRAMS.has(matchedKey);
+  const specificIsRecurring = RECURRING_PEST_PROGRAMS.has(specificKey);
+  if (!matchedIsSingular && !specificIsSingular && !matchedIsRecurring && !specificIsRecurring) return extracted;
+
+  const evidence = recurringIntentEvidence(transcription);
+  if (!evidence) return extracted;
+  const { callerText, acceptedOffer } = evidence;
   // Cadence: honor the ONE cadence the caller actually chose (from their own
   // words, or from the agent offer they accepted); when they float several
   // ("quarterly or every six months? I don't know") or name none, pest
@@ -8999,6 +9251,34 @@ const CallRecordingProcessor = {
     // Every card this pass files is created after this instant — the
     // canonical re-stamp after Step 3 below is scoped to them.
     const cardsFiledSince = new Date();
+    // GATE_CALL_ADDRESS_ONFILE_ASSIST: the on-file address may only vouch for
+    // the customer this call FINALLY resolves to. knownCaller is the
+    // phone-only pre-lookup; Step 3 (below, after both assist sites) can
+    // retain or reassign the call to someone else on a shared number. So the
+    // assist gets knownCaller only when Step 3's own inputs agree with it: no
+    // link to a different customer, and the name-aware phone resolution
+    // Step 3 runs (same function, same extraction) lands on this customer
+    // without ambiguity. Anything else (or the gate off) gets null, which
+    // makes both assist paths no-ops. Gate off costs no lookup.
+    // Judged against BOTH identities Step 3 may end up with: the V1 record and
+    // the V2 extraction's caller (V2-primary adoption, later in this pass, can
+    // replace the V1 name) — the assist runs before that adoption, so every
+    // candidate identity must resolve to the same customer.
+    const onFileAssistCaller = async (...extractionsNow) => {
+      let bound = knownCaller;
+      for (const extractedNow of extractionsNow) {
+        bound = await bindAssistCaller({
+          knownCaller: bound,
+          callCustomerId: call.customer_id,
+          hasLinkOverride: !!customerLinkOverride,
+          resolveCustomer: (multiMatchOut) => findCustomerForCallContact(
+            resolveCallContactPhone(call, extractedNow?.phone), extractedNow || {}, { multiMatchOut },
+          ),
+        });
+        if (!bound) return null;
+      }
+      return bound;
+    };
     // Cross-call threading context: the latest other call from this number in
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
@@ -9106,11 +9386,14 @@ const CallRecordingProcessor = {
         // gate below without a second API call.
         if (v2Result?.status === 'valid' && v2Result.extraction) {
           try {
-            v2AddressValidation = await validateAddress({
-              addressLines: buildAddressLines(v2Result.extraction.property?.service_address),
-              // The validator preserves an explicit state over this hint.
-              // Contrary model geography also disables the fallback hint.
-              administrativeArea: v2Result.extraction.triage_flags?.includes('out_of_service_area') ? null : SERVICE_STATE,
+            // Gate off (GATE_CALL_ADDRESS_ONFILE_ASSIST): the wrapper makes the
+            // same validateAddress call this site always made. Gate on, a
+            // street-only request may borrow the on-file city + ZIP.
+            v2AddressValidation = await validateWithOnFileAssist({
+              serviceAddress: v2Result.extraction.property?.service_address,
+              knownCaller: await onFileAssistCaller(extracted, flatView(v2Result.extraction)),
+              outOfServiceFlagged: !!v2Result.extraction.triage_flags?.includes('out_of_service_area'),
+              validate: validateAddress,
             });
           } catch (avErr) {
             logger.warn(`[call-proc-v2] address validation error for ${callSid}: ${avErr.message}`);
@@ -9216,6 +9499,10 @@ const CallRecordingProcessor = {
     // requires the enforce gate's approval and SMS still requires consent.
     // The merged object stays legacy-flat, so canonical ai_extraction keeps
     // the reader-compatible shape.
+    // The V1 extraction as it stood BEFORE V2-primary adoption: the whole-
+    // structure unit waiver must agree with it too (a V1 pick V2 overwrites
+    // is a service disagreement, not a WDO).
+    const preAdoptionExtracted = { ...extracted };
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
         etWallClock: v2IsoToEtWallClock,
@@ -9690,6 +9977,14 @@ const CallRecordingProcessor = {
     let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
     let v2UsesOnFileAddress = false;
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: set when routing let the call
+    // through past ambiguous_pest_or_service — the booking must then be the
+    // Waves Assessment row (never a resolver/model-picked service) and the
+    // resolver's unsupported-call veto reads the full transcript.
+    let v2ForceAssessmentService = false;
+    // Every call this gate newly admitted (either flag waived): the resolver's
+    // unsupported-call veto reads the full transcript for all of them.
+    let v2UnclearServiceGateAdmitted = false;
     // The customer the on-file PROOF above was computed against, plus the
     // address snapshot compared — Step 3 below may retain or reconcile the
     // call to a DIFFERENT canonical customer than knownCaller (codex P1:
@@ -9871,6 +10166,57 @@ const CallRecordingProcessor = {
       logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
     }
 
+    // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
+    // 2026-09-30): a WDO inspection or termite pre-treat/perimeter job is not
+    // held for a missing unit number. The verdict is rewritten HERE, once,
+    // after the shadow row persisted the ORIGINAL — so the enforce gate, the
+    // shadow bridge and the audit path all read the same waived verdict. The
+    // service is resolved the way the booking below resolves it (catalog row
+    // first, coarse label only when no catalog row matched). Gate off, or any
+    // non-qualifying call, returns the verdict object untouched.
+    if (v2AddressValidation && isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)) {
+      try {
+        // A reprocess of a call an earlier pass parked on the unit ask: the
+        // open missing_unit_number card (and its clarify draft and merged
+        // needs_confirmation reason) is a human-verdict-only artifact that
+        // nothing auto-resolves (AGENTS.md; triage-auto-resolve.js), so the
+        // hold stands until the office settles it. A dismissed/resolved card is
+        // that verdict and does not block.
+        const openUnitCard = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'missing_unit_number' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id');
+        if (openUnitCard) {
+          logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
+        } else {
+          const wsAv = wholeStructureUnitWaiverForCall({
+            addressValidation: v2AddressValidation,
+            extracted,
+            preAdoptionExtracted,
+            transcription,
+            services: bookableCallServices,
+            property: v2Result?.extraction?.property,
+            v2Extraction: v2Result?.extraction,
+            unclearServiceAssessment: unclearServiceAssessmentActive(),
+          });
+          if (wsAv !== v2AddressValidation) {
+            // Stamp the pass's waiver on the PERSISTED verdict (status stays
+            // the original) so the offline audits can rebuild the verdict the
+            // gate saw. Fenced like the write above; pass-scoped, since the
+            // next pass rewrites ai_address_validation without the marker.
+            await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+              ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived }),
+              updated_at: new Date(),
+            });
+            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
+            v2AddressValidation = wsAv;
+          }
+        }
+      } catch (wsErr) {
+        logger.warn(`[call-proc] whole-structure unit waiver failed open (hold stands) for ${maskSid(callSid)}: ${wsErr.message}`);
+      }
+    }
+
     // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
     // Runs before the routing gate: in enforce mode a recovered street must
     // reach canAutoRoute as the validated verdict it is, or the very garble
@@ -9884,7 +10230,15 @@ const CallRecordingProcessor = {
         // Street re-hearings the contact-dictation decoder already produced
         // from BOTH transcripts — tried before recovery spends its own
         // phonetic model call.
-        extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        // Plus (gate on, house number matching, call bound to that customer)
+        // the caller's on-file street, appended AFTER the decoder's so it never
+        // displaces one (recovery evaluates the first five) — still only
+        // adopted when Google confirms exactly one premise.
+        extraStreetCandidates: withOnFileStreetCandidate({
+          spokenStreet: extracted.address_line1,
+          knownCaller: await onFileAssistCaller(extracted, flatView(v2Result?.extraction)),
+          decoderCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        }),
         // "Building resolved, unit missing" is not a garbled street — the
         // recovery module refuses it outright (codex r10 P1), so the
         // ambiguous hold stands and missing_unit_number names the ask
@@ -10080,6 +10434,11 @@ const CallRecordingProcessor = {
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: call.created_at,
+            // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a settled time + trusted
+            // address is not held on an unclear service — the Waves
+            // Assessment fallback below books it (both directions, same as
+            // the fallback itself). Off = today.
+            unclearServiceAssessment: unclearServiceAssessmentActive(),
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -10094,6 +10453,14 @@ const CallRecordingProcessor = {
               routingResult = demoted;
             }
           }
+          // …and the downstream full-transcript service veto the live pass
+          // applies to every call GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT admitted
+          // (the resolver skips the appointment there). Applied BEFORE the
+          // decision is built (codex #5371 r9 P1) — the SAME shared helper the
+          // shadow and offline-audit paths use — so the enforce decision records
+          // the call as held (needs_review, blocked reason), never as an allowed
+          // auto-route that is silently skipped later.
+          routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);
           if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
             logger.info(`[call-proc] Fail-open booking for ${maskSid(callSid)}: proceeding despite recoverable flags ${routingResult.failedOpenFlags.join(', ')} (office to confirm)`);
           }
@@ -10181,11 +10548,12 @@ const CallRecordingProcessor = {
             mode: 'enforce',
             recordingSid: call.recording_sid,
           });
-          // Targetless DO NOTHING: tolerant of BOTH the legacy three-column
-          // constraint (kept until the contract migration) and the
-          // recording-keyed index, so no release depends on a constraint by
-          // name during a rolling deploy (Codex #3736 r9 P1).
-          await db('route_decisions').insert(routeDecision).onConflict().ignore();
+          // Insert-or-REFRESH on the recording-keyed key (see
+          // upsertRouteDecision): a reprocess that decides differently — a
+          // dark gate flipped either way — replaces the recommendation and
+          // created_at instead of leaving the first pass's verdict as the
+          // newest decision. Fenced to the pass that owns the processing token.
+          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken });
 
           // Advisory flags (missing surname / rental / second address) reach the
           // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
@@ -10375,6 +10743,26 @@ const CallRecordingProcessor = {
                 extracted.zip = null;
               }
             }
+            // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: the advisory insert above is
+            // ON CONFLICT DO NOTHING, so a card an earlier (held) pass left
+            // open as `blocking` would stay red on a call that is now booked
+            // — and read as an unbooked visit. Demote it in place (open /
+            // in-progress rows only, blocking ones only; nothing is resolved).
+            // FAIL CLOSED: if the demotion cannot be made (a transaction error
+            // propagates to this block's catch, which holds the appointment for
+            // triage exactly as before the gate) or this pass no longer owns the
+            // call (null = claim lost: abandon), the call is NOT booked — a
+            // blocking card left standing on a booked visit is what invites a
+            // duplicate booking.
+            const demoted = await demoteOpenTriageCards(
+              db, call.id, routingResult.unclearServiceDemotedFlags, procToken,
+              (routingResult.unclearServiceDemotedFlags || []).map((f) => buildTriageItem({
+                callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress,
+              })),
+            );
+            if (demoted === null) return abandonToPeer('the unclear-service card demotion');
+            v2ForceAssessmentService = routingResult.forceAssessmentService === true;
+            v2UnclearServiceGateAdmitted = routingResult.unclearServiceGateAdmitted === true;
             v2ApprovedExtraction = v2Extraction;
             v2UsesOnFileAddress = routingResult.usesOnFileAddress === true;
             if (v2UsesOnFileAddress) {
@@ -14698,6 +15086,12 @@ const CallRecordingProcessor = {
               smsOutcome = { sent: false, skipped: 'no_usable_ani' };
             } else if (genuineNewProspect && callbackNumberNeededHoldActive) {
               smsOutcome = { sent: false, skipped: 'callback_number_needed' };
+            } else if (genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true) {
+              // The caller said no to texts on THIS call (owner 2026-09-30).
+              // Read from the live extraction: the row may not carry it yet.
+              // genuineNewProspect already requires a valid V2 result; the
+              // sender checks every earlier call with this number itself.
+              smsOutcome = { sent: false, skipped: 'said_no_texts' };
             } else if (genuineNewProspect) {
               // Inner catch: the review card below MUST still open when the
               // send path throws — a failed text plus no card is exactly the
@@ -15364,7 +15758,7 @@ const CallRecordingProcessor = {
     const timeStr = (extracted.preferred_date_time || '').toLowerCase();
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
     const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
-    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext });
+    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext, fullTranscriptVeto: v2UnclearServiceGateAdmitted });
     // Catalog anchor: the specific bookable service this call maps to, when
     // one resolves. Drives service_type/service_id/price/duration/follow-up on
     // the booking. Also rescues catalog services whose names don't hit the
@@ -15440,6 +15834,40 @@ const CallRecordingProcessor = {
         // can't book.)
         genericBookingUnbookable = true;
         logger.warn(`[call-proc] "Waves Assessment" fallback row unavailable for ${maskSid(callSid)} — holding generic booking for review`);
+      }
+    }
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: routing let this call through past
+    // ambiguous_pest_or_service, so the service is NOT settled — book the
+    // Waves Assessment row even when the resolver or a model-selected catalog
+    // field named a concrete service (the office card sets the real one). A
+    // resolver hard veto (ok:false, no noMatch) is left alone: it still makes
+    // the call un-bookable. No Assessment row available = hold, never the
+    // concrete service the model flagged as unclear.
+    // The extraction the booking reads. Identical to `extracted` unless the
+    // ambiguous-service force below strips treatment signals (see
+    // forcedAssessmentBooking) — `extracted` itself stays whole for the record.
+    let bookingExtracted = extracted;
+    if (v2ForceAssessmentService && isEnabled('callFailOpenBooking')) {
+      const forced = forcedAssessmentBooking({
+        serviceResolution, services: bookableCallServices, current: callBookingCatalogRow, extracted, transcription,
+        // The processor's own recurring-intent backstop skips outbound calls
+        // (diarization can label the Waves agent as Caller) — so does this.
+        inbound: !isOutboundCall(call),
+      });
+      if (forced.applied) {
+        if (forced.unbookable) {
+          genericBookingUnbookable = true;
+          logger.warn(`[call-proc] "Waves Assessment" row unavailable for ${maskSid(callSid)} — holding ambiguous-service booking for review`);
+        } else {
+          if (forced.row !== callBookingCatalogRow) {
+            logger.info(`[call-proc] Service flagged ambiguous for ${maskSid(callSid)} — booking as "Waves Assessment" (forced; assess on-site)`);
+          }
+          callBookingCatalogRow = forced.row;
+          genericBookingUnbookable = false;
+          bookingExtracted = { ...extracted, ...forced.extractedPatch };
+        }
+      } else if (forced.kept) {
+        logger.info(`[call-proc] Service flagged ambiguous for ${maskSid(callSid)} — keeping the ${forced.kept} service (deterministic)`);
       }
     }
     // Use the module-level isOutboundCall(call) helper — a local `const
@@ -15746,7 +16174,7 @@ const CallRecordingProcessor = {
             // Price: transcript-quoted (what the agent and caller agreed)
             // first, catalog list price fallback (one_time services only).
             const priceInfo = resolveCallBookingPrice({
-              quotedPrice: extracted.quoted_price,
+              quotedPrice: bookingExtracted.quoted_price,
               catalogRow: callBookingCatalogRow,
             });
             const smsPhone = customerValidation.details.phone;
@@ -16068,7 +16496,7 @@ const CallRecordingProcessor = {
               const callFollowUpPlan = isReServiceCatalogRow(callBookingCatalogRow)
                 ? null
                 : resolveCallFollowUpPlan({
-                  extracted,
+                  extracted: bookingExtracted,
                   catalogRow: callBookingCatalogRow,
                   parentDate: scheduledDate,
                   parentWindowStart: windowStart || '09:00',
@@ -16219,7 +16647,7 @@ const CallRecordingProcessor = {
                   const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
                   if (primaryActualDate && primaryActualDate !== scheduledDate) {
                     fuPlan = resolveCallFollowUpPlan({
-                      extracted,
+                      extracted: bookingExtracted,
                       catalogRow: callBookingCatalogRow,
                       parentDate: primaryActualDate,
                       parentWindowStart: String(primaryRow.window_start || '').slice(0, 5) || windowStart || '09:00',
@@ -17061,7 +17489,10 @@ const CallRecordingProcessor = {
                     priceInfo.price != null
                       ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
                       : null,
-                    extracted.call_summary || null,
+                    // bookingExtracted: a forced Assessment drops the model's summary
+                    // (it may name a treatment or price nobody agreed to) from this
+                    // customer-visible note.
+                    bookingExtracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
                   // Dispatcher-only price provenance: scheduled_services.notes
                   // is customer-visible (GET /api/schedule returns it verbatim),
@@ -17081,9 +17512,9 @@ const CallRecordingProcessor = {
                     (priceInfo.price == null
                       && callBookingCatalogRow
                       && callBookingCatalogRow.billing_type !== 'one_time'
-                      && typeof extracted.quoted_price === 'number'
-                      && extracted.quoted_price > 0)
-                      ? `Rate quoted on call: $${extracted.quoted_price.toFixed(2)} (recurring service — set up plan billing at this rate; intentionally not stamped on this visit).`
+                      && typeof bookingExtracted.quoted_price === 'number'
+                      && bookingExtracted.quoted_price > 0)
+                      ? `Rate quoted on call: $${bookingExtracted.quoted_price.toFixed(2)} (recurring service — set up plan billing at this rate; intentionally not stamped on this visit).`
                       : null,
                   ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
@@ -18872,15 +19303,18 @@ const CallRecordingProcessor = {
         }
       }
       try {
-        await db('route_decisions')
+        // Row-locked like every write to an existing decision (codex #5371 r9 P1):
+        // a verdict landing concurrently serializes on the route_decisions row.
+        await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
           // Same-run outcome update: targets the row THIS process wrote
           // moments ago, so the CURRENT version only (a reprocess writes —
-          // and updates — its own fresh v2-1.1.0 row).
-          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' })
-          .update({
+          // and updates — its own fresh v2-1.1.0 row). A row a human has
+          // reviewed keeps the outcome that review judged.
+          { call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' },
+          {
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
-          });
+          }));
       } catch (rdErr) {
         logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
       }
@@ -19566,6 +20000,8 @@ const CallRecordingProcessor = {
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
           callStartedAt: call.created_at,
+          // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
+          unclearServiceAssessment: unclearServiceAssessmentActive(),
         });
         // Same on-file satisfaction the live merge point applies to its card set.
         if (routingResult?.onFileAddressSatisfiedFlags?.length) {
@@ -19575,6 +20011,11 @@ const CallRecordingProcessor = {
         // shadow decision must hold exactly where enforce would hold, or
         // rollout metrics overstate safe fail-open bookings.
         routingResult = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
+        // …and the downstream full-transcript service veto the live pass applies
+        // to every call GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT admitted (the
+        // resolver skips the appointment there), or the stored shadow evidence
+        // overstates safe auto-routes.
+        routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);
         // …and the house-number hold this pass actually applied (codex r38
         // P1): a call whose legacy booking was HELD must not be persisted as
         // a shadow auto-route candidate, or the promotion cohort counts an
@@ -19594,10 +20035,7 @@ const CallRecordingProcessor = {
             mode: 'shadow',
             recordingSid: call.recording_sid,
           });
-          await db('route_decisions')
-            .insert(shadowDecision)
-            .onConflict()
-            .ignore()
+          await upsertRouteDecision(db, shadowDecision, { callLogId: call.id, processingToken: procToken })
             .catch((err) => logger.warn(`[call-proc-v2] Shadow route decision skipped for ${maskSid(callSid)}: ${err.message}`));
         }
       }
@@ -21006,6 +21444,11 @@ CallRecordingProcessor._test = {
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
+  wholeStructureUnitWaiverForCall,
+  forcedAssessmentBooking,
+  demoteOpenTriageCards,
+  applyUnclearServiceTranscriptVeto,
+  unclearServiceAssessmentActive,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
   slotOnlyLinkAllowed,
@@ -21103,6 +21546,7 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 // changing the gate. Deliberately on the module surface, not `_test`.
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
+CallRecordingProcessor.applyUnclearServiceTranscriptVeto = applyUnclearServiceTranscriptVeto;
 // Codex #4933 r3 P2: the customer the audits pass INTO buildFailOpenRoutingContext
 // must be selected the same way production's Step 2 pre-lookup selects it
 // (operator override outranks the phone lookup; an explicit unlink is no

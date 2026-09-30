@@ -530,6 +530,37 @@ async function getLiveRelatedPaths(paths = [], { database = db, hosts = [] } = {
   return new Set([...wanted].filter((p) => sites.every((site) => liveKeys.has(`${site}|${p}`))));
 }
 
+// Merge-time freshness: getLiveRelatedPaths reads registry rows that the
+// daily sync / live-status sweep refreshes, so a post unpublished since
+// that sweep still reads live. Each publish host's DEPLOYED sitemap is the
+// fresher truth (it changes with the next Pages build). Of the given paths,
+// the ones in every host's sitemap right now; null when any host's sitemap
+// cannot be read (the caller withholds and retries). Same sitemap order as
+// the read-depth route: /sitemap-index.xml on every fleet site, the hub's
+// /sitemap.xml redirect as the fallback.
+const SITEMAP_PATHS = ['/sitemap-index.xml', '/sitemap.xml'];
+async function getSitemapLiveRelatedPaths(paths = [], { hosts = [], fetchImpl } = {}) {
+  const wanted = [...new Set((Array.isArray(paths) ? paths : []).map(normalizePathForCompare).filter(Boolean))];
+  if (!wanted.length) return new Set();
+  const { fetchSitemapPaths } = require('./content-registry-live-status');
+  const { normalizeContentUrl } = require('./content-registry');
+  const { spokeSiteOrigin } = require('../content-astro/spoke-sites');
+  const sites = Array.isArray(hosts) && hosts.length ? hosts : HUB_SITE_KEYS;
+  let live = wanted;
+  for (const site of sites) {
+    const origin = spokeSiteOrigin(site);
+    if (!origin) return null;
+    let sitemap = null;
+    for (const sitemapPath of SITEMAP_PATHS) {
+      sitemap = await fetchSitemapPaths({ sitemapUrl: `${origin}${sitemapPath}`, ...(fetchImpl ? { fetchImpl } : {}) }).catch(() => null);
+      if (sitemap) break;
+    }
+    if (!sitemap) return null;
+    live = live.filter((p) => sitemap.has(normalizeContentUrl(`${origin}${p}`)));
+  }
+  return new Set(live);
+}
+
 module.exports = {
   RELATED_POSTS_DEFAULT_LIMIT,
   RELATED_POSTS_TARGET_MIN,
@@ -541,5 +572,6 @@ module.exports = {
   registryRowLiveKeys,
   getRelatedPostsForBrief,
   getLiveRelatedPaths,
+  getSitemapLiveRelatedPaths,
   _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };
