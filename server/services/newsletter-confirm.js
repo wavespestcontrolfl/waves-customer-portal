@@ -59,7 +59,11 @@ function isDeliveryAmbiguous(err) {
   if (Number.isFinite(Number(err.status))) {
     return typeof sendgrid.isDefiniteRejection === 'function' ? !sendgrid.isDefiniteRejection(err) : true;
   }
-  return err.name === 'TypeError'; // fetch network failure
+  // fetch's network failure only: undici throws TypeError('fetch failed') with a
+  // network-level cause. Any other TypeError is a code bug inside sendOne BEFORE
+  // the request was dispatched (payload build, link rewrite) — definite, so the
+  // retry still sends.
+  return err.name === 'TypeError' && (err.message === 'fetch failed' || !!(err.cause && err.cause.code));
 }
 
 class ConfirmationVetoedError extends Error {

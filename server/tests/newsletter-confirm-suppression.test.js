@@ -316,6 +316,8 @@ describe('delivery-ambiguous provider failures', () => {
     ['5xx', Object.assign(new Error('x'), { status: 503 }), true],
     ['timeout-style 408', Object.assign(new Error('x'), { status: 408 }), true],
     ['network failure', new TypeError('fetch failed'), true],
+    ['network failure with a socket cause', Object.assign(new TypeError('terminated'), { cause: { code: 'ECONNRESET' } }), true],
+    ['a plain TypeError before dispatch (code bug)', new TypeError("Cannot read properties of undefined (reading 'x')"), false],
     ['definite 422 rejection', Object.assign(new Error('x'), { status: 422 }), false],
     ['definite 400 rejection', Object.assign(new Error('x'), { status: 400 }), false],
     ['not configured (no request made)', Object.assign(new Error('x'), { code: 'SENDGRID_NOT_CONFIGURED' }), false],
