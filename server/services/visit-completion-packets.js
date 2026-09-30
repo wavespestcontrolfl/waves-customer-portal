@@ -1249,6 +1249,20 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
 // row the homeowner already holds keeps its status) and the withdrawal's
 // own hold and office-review state are lifted. A failed packet keeps its
 // hold and state: only the marker is cleared. Returns whether it was released.
+// The closeout recorded that the summary text carries this invoice's pay link, and that text is
+// still ahead of its outcome: not yet claimed or retrying, in flight, ambiguous, or queued (quiet
+// hours) with its link still in the queued body. Sent plain, suppressed, or a queued body whose
+// link was already swapped out mean it will not carry the link.
+async function summaryStillToCarryLink(trx, packet, invoiceId) {
+  const recorded = packetPayload(packet)?.summaryBillingLink;
+  if (recorded?.kind !== 'pay_link' || recorded.invoiceId !== invoiceId) return false;
+  const effect = await trx('visit_effects').where({ visit_id: packet.visit_id, effect_type: 'completion_sms' }).first('status');
+  if (['sent', 'suppressed'].includes(effect?.status)) return false;
+  if (effect?.status !== 'pending') return true;
+  return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })
+    .whereRaw("metadata->>'visit_id' = ?", [String(packet.visit_id)]).whereRaw("metadata->'billing_link' IS NOT NULL").first('id'));
+}
+
 async function releaseWithdrawnPacketInvoice(trx, invoice) {
   // `payer_billed:<payerId>[:park][:hold]` — the flags are order-independent
   // so a later one can be appended without re-parsing the rest.
@@ -1272,14 +1286,18 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
     }
     return false;
   }
-  const packet = await trx('visit_completion_packets').where({ id: invoice.visit_completion_packet_id }).first('id', 'visit_id', 'status', 'error');
+  const packet = await trx('visit_completion_packets').where({ id: invoice.visit_completion_packet_id }).first('id', 'visit_id', 'status', 'error', 'payload');
   const requeue = invoice.status === 'draft' && packet?.status !== 'failed';
+  // A pay link the visit summary text carries (already accepted, or still to go) is not texted
+  // a second time by the invoice: it goes back email-only. If the summary went plain or was
+  // refused, the link never reached the customer by text and the invoice texts as today.
+  const carried = requeue && (invoice.sms_sent_at || await summaryStillToCarryLink(trx, packet, invoice.id));
   const moved = await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
     .update(requeue
       // A pay link the visit summary text already carried (its acceptance stamped the invoice's
       // Text leg) goes back to the queue email-only, not to text it a second time.
       ? { status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0,
-        scheduled_send_error: invoice.sms_sent_at ? SUMMARY_TEXT_CARRIED_ERROR : null, updated_at: trx.fn.now() }
+        scheduled_send_error: carried ? SUMMARY_TEXT_CARRIED_ERROR : null, updated_at: trx.fn.now() }
       // A parked ambiguous send returns to the park it came from — its
       // evidence restored, its send time still empty — never to the queue.
       : { scheduled_send_error: parked ? STALE_SEND_PARK_ERROR : null, updated_at: trx.fn.now() });

@@ -5369,6 +5369,59 @@ postgres('visit summary recipient recovery', () => {
       });
     });
 
+    // A payer assigned after the fold was decided, then removed: the release honors the packet's
+    // recorded decision. If the summary text is still to carry the link the invoice goes back
+    // email-only; if it went plain or was refused, the invoice texts as today.
+    describe('a withdrawal released while the summary text is still pending', () => {
+      const releaseWithdrawn = async (invoiceId) => {
+        const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+        try {
+          await mockPg('invoices').where({ id: invoiceId }).update({ status: 'draft', scheduled_send_at: null, scheduled_send_error: `payer_billed:${payer.id}`, sms_sent_at: null });
+          await mockPg.transaction(async (trx) => {
+            expect(await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId })).toBe(1);
+          });
+          return await invoiceRow(invoiceId);
+        } finally { await mockPg('payers').where({ id: payer.id }).del(); }
+      };
+      const deferLink = () => {
+        const nextAllowedAt = new Date(Date.now() + 8 * 3600000).toISOString();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt }));
+      };
+
+      test('the summary is queued with the link: the invoice goes back email-only', async () => {
+        const invoiceId = await stop();
+        deferLink();
+        await coordinate();
+        expect(await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first()).toMatchObject({ status: 'scheduled' });
+        expect(await releaseWithdrawn(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: MARKER });
+      });
+
+      test('the summary is retrying: the invoice goes back email-only', async () => {
+        const invoiceId = await stop();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, code: 'PROVIDER_UNAVAILABLE' }));
+        await coordinate();
+        expect(await summaryEffect()).toMatchObject({ status: 'failed' });
+        expect(await releaseWithdrawn(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: MARKER });
+      });
+
+      test('the queued summary already dropped its link (a billing hold swapped in the plain body): the invoice texts as today', async () => {
+        const invoiceId = await stop();
+        deferLink();
+        await coordinate();
+        await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' })
+          .update({ message_body: plainBody(), metadata: mockPg.raw("metadata - 'billing_link' - 'plain_body'") });
+        expect(await releaseWithdrawn(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+      });
+
+      test('the summary was refused: the invoice texts as today', async () => {
+        const invoiceId = await stop();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' }));
+        await coordinate();
+        expect(await summaryEffect()).toMatchObject({ status: 'suppressed' });
+        expect(await releaseWithdrawn(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+      });
+    });
+
     describe('the invoice\'s own text going first', () => {
       test('a deferred summary whose invoice text went meanwhile (an operator send-now) goes out plain', async () => {
         const invoiceId = await stop();
