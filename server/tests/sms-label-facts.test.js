@@ -2127,28 +2127,44 @@ describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
     labelSentencesCopiedIn: (t) => labelFactsLib.labelSentencesCopiedIn(t, SECTION),
     nonEnglishTimingWords: (t) => labelFactsLib.nonEnglishTimingWords(t),
   };
-  const timeMs = (fn, text) => {
+  // Machine-independent: a generous absolute ceiling per call (CI runners are several times slower than a laptop and noisy under parallel workers;
+  // a real ReDoS is seconds or worse) AND a scaling check on the same pattern: a 4x longer input may take at most ~12x as long (linear is 4x,
+  // quadratic 16x, exponential unbounded), each the best of three runs after a warm-up, with a floor on the short-input time so sub-millisecond
+  // jitter cannot fail it. PRINT_TIMINGS=1 prints each classifier's slowest case.
+  const CEILING_MS = 500;
+  const SCALE_FACTOR = 12;
+  const SHORT_FLOOR_MS = 0.5;
+  const SHORT_N = 500;
+  const bestOf3 = (fn, text) => {
     fn(text); // warm-up (regex compilation, lazy lexicons)
-    const runs = [0, 1].map(() => { const t0 = process.hrtime.bigint(); fn(text); return Number(process.hrtime.bigint() - t0) / 1e6; });
-    return Math.min(...runs);
+    return Math.min(...[0, 1, 2].map(() => { const t0 = process.hrtime.bigint(); fn(text); return Number(process.hrtime.bigint() - t0) / 1e6; }));
   };
-  test('every exported classifier finishes an adversarial 2,000-character input in under 50 ms (a long run of "twenty-one-" used to backtrack exponentially)', () => {
+  test('every exported classifier finishes an adversarial 2,000-character input under a generous ceiling and scales sub-quadratically (a long run of "twenty-one-" used to backtrack exponentially)', () => {
     const slow = [];
+    const worst = {};
     for (const [name, fn] of Object.entries(CLASSIFIERS)) {
       for (const [label, text] of Object.entries(ADVERSARIAL)) {
         expect(text.length).toBe(N);
-        const ms = timeMs(fn, text);
-        if (ms >= 50) slow.push(`${name} on "${label}": ${ms.toFixed(1)} ms`);
+        const long = bestOf3(fn, text);
+        const short = bestOf3(fn, text.slice(0, SHORT_N));
+        if (!worst[name] || long > worst[name][1]) worst[name] = [label, long];
+        if (long >= CEILING_MS) slow.push(`${name} on "${label}": ${long.toFixed(1)} ms (ceiling ${CEILING_MS})`);
+        else if (long > SCALE_FACTOR * Math.max(short, SHORT_FLOOR_MS)) slow.push(`${name} on "${label}": ${short.toFixed(2)} ms at ${SHORT_N} chars -> ${long.toFixed(2)} ms at ${N} (more than ${SCALE_FACTOR}x)`);
       }
     }
+    if (process.env.PRINT_TIMINGS) console.log(Object.entries(worst).map(([n, [l, ms]]) => `${n}: ${ms.toFixed(2)} ms on "${l}"`).join('\n'));  
     expect(slow).toEqual([]);
   });
   test('send time and the async path are bounded too', async () => {
     const boom = () => { throw new Error('must not read'); };
     for (const [label, text] of Object.entries(ADVERSARIAL)) {
-      const t0 = process.hrtime.bigint();
-      await labelFactsLib.labelFactsSendBlockReason({ snapshot: { sentences: [], asked: ['reentry'] }, body: text, inbound: text, conn: boom });
-      expect([label, Number(process.hrtime.bigint() - t0) / 1e6 < 50]).toEqual([label, true]);
+      let best = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const t0 = process.hrtime.bigint();
+        await labelFactsLib.labelFactsSendBlockReason({ snapshot: { sentences: [], asked: ['reentry'] }, body: text, inbound: text, conn: boom });
+        best = Math.min(best, Number(process.hrtime.bigint() - t0) / 1e6);
+      }
+      expect([label, best < CEILING_MS]).toEqual([label, true]);
     }
   });
   test('past the cap nothing is truncated and passed: a reply over 2,000 chars is held, an inbound over 1,000 is unverified / another visit / none on file', async () => {
