@@ -33,6 +33,9 @@ const ROUTE_PREFIX = '/api/public/map-image';
 const KEY_INFO = 'waves:signed-map-image:v1';
 const DEFAULT_TTL_SECONDS = 2 * 60 * 60;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
+// Pods' clocks differ by a second or two: a token minted at exactly the 24 h cap
+// on one pod must still verify on a pod that is slightly behind.
+const CLOCK_SKEW_SECONDS = 60;
 const MAX_TOKEN_LENGTH = 200;
 const MAP_TYPES = new Set(['satellite', 'hybrid']);
 
@@ -97,7 +100,7 @@ function verifyMapImageToken(token, { nowSeconds = Math.floor(Date.now() / 1000)
   const match = PAYLOAD_RE.exec(Buffer.from(parts[1], 'base64url').toString('utf8'));
   if (!match) return null;
   const exp = Number(match[8]);
-  if (!Number.isFinite(exp) || exp <= nowSeconds || exp > nowSeconds + MAX_TTL_SECONDS) return null;
+  if (!Number.isFinite(exp) || exp <= nowSeconds || exp > nowSeconds + MAX_TTL_SECONDS + CLOCK_SKEW_SECONDS) return null;
   return normalizeParams({
     lat: match[1], lng: match[2], zoom: match[3], width: match[4], height: match[5], scale: match[6], maptype: match[7],
   });

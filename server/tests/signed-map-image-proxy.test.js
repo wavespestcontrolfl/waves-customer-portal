@@ -19,7 +19,7 @@ jest.mock('../services/logger', () => ({
 
 const express = require('express');
 const signed = require('../services/signed-map-image');
-const { scrubMapsKeysFromString } = require('../services/estimate-map-image');
+const { scrubMapsKeysFromString, scrubMapsKeysDeep } = require('../services/estimate-map-image');
 const mapImageRouter = require('../routes/public-map-image');
 const { _test: lookupTest } = require('../routes/public-property-lookup');
 
@@ -79,6 +79,20 @@ describe('signed token', () => {
     const fresh = signed.signMapImageToken(PARAMS, { nowSeconds: 1000, ttlSeconds: 60 });
     expect(signed.verifyMapImageToken(fresh, { nowSeconds: 1030 })).not.toBeNull();
     expect(signed.verifyMapImageToken(fresh, { nowSeconds: 1061 })).toBeNull();
+  });
+
+  test('a token minted at exactly the 24 h cap still verifies on a pod whose clock is a little behind', () => {
+    const DAY = 24 * 60 * 60;
+    const token = signed.signMapImageToken(PARAMS, { nowSeconds: 10000, ttlSeconds: DAY * 5 });
+    // A requested lifetime above the cap is clamped to it; verify with the clock 1 s, 30 s and 60 s behind.
+    for (const behind of [0, 1, 30, 60]) {
+      expect([behind, signed.verifyMapImageToken(token, { nowSeconds: 10000 - behind }) !== null]).toEqual([behind, true]);
+    }
+    // ...but skew is bounded: a token can never be honoured for materially longer than the cap.
+    expect(signed.verifyMapImageToken(token, { nowSeconds: 10000 - 61 })).toBeNull();
+    expect(signed.verifyMapImageToken(token, { nowSeconds: 10000 - 3600 })).toBeNull();
+    // and it is still refused once expired
+    expect(signed.verifyMapImageToken(token, { nowSeconds: 10000 + DAY })).toBeNull();
   });
 
   test('a token signed under a different secret does not verify', () => {
@@ -307,6 +321,22 @@ describe('router-level coverage: nothing under the mount falls through', () => {
     });
   });
 
+  test('malformed percent-encodings under the mount get the same stamped generic 404, never a 500', async () => {
+    await withServer(async (baseUrl) => {
+      for (const p of ['/%E0%A4%A', '/%', '/%zz', '/%E0%A4%A/x', '/v1.%E0%A4%A.sig', '/%C0%AE%C0%AE', '/%E0%A4%A?x=1']) {
+        for (const method of ['GET', 'HEAD', 'POST']) {
+          const res = await fetch(`${baseUrl}/api/public/map-image${p}`, { method });
+          const label = `${method} ${p}`;
+          expect([label, res.status]).toEqual([label, 404]);
+          expect([label, res.headers.get('cache-control')]).toEqual([label, 'no-store']);
+          expect([label, res.headers.get('cross-origin-resource-policy')]).toEqual([label, 'cross-origin']);
+          expect([label, res.headers.get('referrer-policy')]).toEqual([label, 'no-referrer']);
+          if (method !== 'HEAD') expect([label, await res.text()]).toEqual([label, JSON.stringify({ error: 'Not found' })]);
+        }
+      }
+    });
+  });
+
   test('HEAD, uppercase mount path and a trailing slash on a valid token behave like GET', async () => {
     const path = signed.signedMapImagePath(PARAMS);
     await withServer(async (baseUrl) => {
@@ -369,6 +399,19 @@ describe('public lead-form lookup payload', () => {
     expect(scrubMapsKeysFromString(text)).toBe(text);
   });
 
+  test('a signed link whose signature looks like a bare Google key survives the scrub intact', () => {
+    // Crafted: "AIza" + 39 base64url chars = the 43-char signature shape.
+    const sig = `AIza${'Ab3_-'.repeat(7)}wxyz`;
+    expect(sig).toHaveLength(43);
+    const url = `https://portal.wavespestcontrol.com/api/public/map-image/v1.MjcuMw.${sig}`;
+    const body = { lead_id: 'x', note: 'stray AIzaSyFAKEFAKEFAKEFAKEFAKEFAKE1234567 in text', satellite: { closeUrl: url } };
+    const out = scrubMapsKeysDeep(body);
+    expect(out.satellite.closeUrl).toBe(url);
+    expect(out.note).not.toMatch(/AIza/);
+    expect(scrubMapsKeysFromString(`<img src="${url}">`)).toBe(`<img src="${url}">`);
+    expect(scrubMapsKeysFromString(`${url} and key=AIzaSyFAKEFAKEFAKEFAKEFAKEFAKE1234567`)).toBe(`${url} and `);
+  });
+
   test('no satellite / no urls -> null fields, no throw', () => {
     expect(lookupTest.publicSatellitePayload(null)).toBeNull();
     expect(lookupTest.publicSatellitePayload({ inServiceArea: false })).toEqual({
@@ -378,7 +421,9 @@ describe('public lead-form lookup payload', () => {
 
   test('the route wraps its success body in the key scrub', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/public-property-lookup'), 'utf8');
-    expect(src).toMatch(/res\.json\(scrubMapsKeysDeep\(\{\s*lead_id: lead\.id,/);
+    // Source scrubbed FIRST, signed URLs attached AFTER (a signature can look like a bare key).
+    expect(src).toMatch(/const publicBody = scrubMapsKeysDeep\(\{\s*lead_id: lead\.id,/);
+    expect(src).toMatch(/publicBody\.satellite = publicSatellitePayload\(result\.satellite\);\s*res\.json\(publicBody\);/);
     expect(src).not.toMatch(/closeUrl: result\.satellite/);
   });
 });

@@ -98,4 +98,11 @@ router.get('/:token', async (req, res, next) => {
 // (with the headers stamped above), never the app-level notFound.
 router.use((req, res) => notFound(res));
 
+// Any error raised under this mount (e.g. Express's URIError decoding a
+// malformed percent-encoding such as /%E0%A4%A in :token) gets the SAME generic
+// 404 with the privacy headers — never the global error handler's 500. Error
+// handlers only see errors from the middleware/routes above, so this stays last.
+ 
+router.use((err, req, res, next) => notFound(res));
+
 module.exports = router;

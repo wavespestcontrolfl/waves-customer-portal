@@ -2091,7 +2091,7 @@ key, upstream failure) is ONE generic 404 body — including the empty token,
 catch-all in the router answers with the same 404 (the header stamp and the
 route limiter run router-wide, ahead of the route, so no request under the
 mount falls through to the global limiter or the app notFound; the mount is
-case-insensitive and ignores a trailing slash); every response including the
+case-insensitive and ignores a trailing slash; a last error handler in the router answers any error raised under the mount, such as a malformed percent-encoding like `/%E0%A4%A`, with the same 404 instead of the global 500); every response including the
 404 and the 429 carries `Cache-Control: no-store` (success: `private,
 max-age=900`), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
 nosniff`, `X-Robots-Tag: noindex` and `Cross-Origin-Resource-Policy:

@@ -671,6 +671,28 @@ describe('scrub covers escaped and differently-keyed URLs', () => {
     expect(mapImage.scrubMapsKeysFromString(`${BASE}&amp;key=${OTHER}&amp;size=640x640`)).toContain('&amp;size=640x640');
   });
 
+  test('our own proxy paths are never mangled, even when a token contains an AIza run; real keys still go', () => {
+    const oddToken = 'AIzaSyABCDEFGHIJKLMNOPQRSTUV'; // AIza + 24 chars: shaped like a bare key
+    const paths = [
+      `/api/estimates/${oddToken}/map/satellite`,
+      `/api/estimates/${oddToken}/map/overlay`,
+      `/api/estimates/${encodeURIComponent(`${oddToken}-1`)}/map/satellite`,
+      `https://portal.wavespestcontrol.com/api/estimates/${oddToken}/map/satellite`,
+    ];
+    for (const p of paths) {
+      expect(mapImage.scrubMapsKeysFromString(p)).toBe(p);
+      expect(mapImage.scrubMapsKeysFromString(`<img src="${p}">`)).toBe(`<img src="${p}">`);
+      expect(mapImage.scrubMapsKeysDeep({ a: [{ url: p }] })).toEqual({ a: [{ url: p }] });
+    }
+    // publicMapProxyPath emits exactly these shapes
+    expect(mapImage.scrubMapsKeysFromString(mapImage.publicMapProxyPath(oddToken, 'satellite'))).toBe(`/api/estimates/${oddToken}/map/satellite`);
+    // a real key next to a protected path is still removed, and the configured key is blanked even inside one
+    expect(mapImage.scrubMapsKeysFromString(`${paths[0]} key=AIzaSyOTHERKEY0123456789abcdefghijklmn`)).toBe(`${paths[0]} `);
+    expect(mapImage.scrubMapsKeysFromString('/api/estimates/test-maps-key/map/satellite')).toBe('/api/estimates//map/satellite');
+    // a lookalike that is NOT one of our proxy paths gets no protection
+    expect(mapImage.scrubMapsKeysFromString(`/api/other/${oddToken}/map/satellite`)).not.toContain(oddToken);
+  });
+
   test('sendEstimatePage: an authored field with a differently-keyed, HTML-escaped URL never reaches the HTML', () => {
     const authored = `https://maps.googleapis.com/maps/api/staticmap?center=27.3,-82.5&zoom=19&key=${OTHER}`;
     const html = [];

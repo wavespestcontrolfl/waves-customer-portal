@@ -709,7 +709,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
 
-    res.json(scrubMapsKeysDeep({
+    // Scrub the SOURCE payload first, THEN attach the signed URLs: a signed
+    // token's signature can (rarely) contain a run that looks like a bare Google
+    // key, and the scrub must never truncate it.
+    const publicBody = scrubMapsKeysDeep({
       lead_id: lead.id,
       enriched,
       propertyRecord,
@@ -719,14 +722,15 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       // anonymous caller only ever gets short-lived signed proxy URLs
       // (absolute: the marketing site renders them cross-origin); the
       // response is also scrubbed of any Maps key as a last line.
-      satellite: publicSatellitePayload(result.satellite),
       aiAnalysis: result.aiAnalysis ? {
         sources: result.aiAnalysis._sources,
         confidence: result.aiAnalysis._claudeConfidence || result.aiAnalysis.confidenceScore,
       } : null,
       errors: publicLookupErrors(result.errors),
       meta: publicLookupMeta(result.meta),
-    }));
+    });
+    publicBody.satellite = publicSatellitePayload(result.satellite);
+    res.json(publicBody);
   } catch (err) {
     logger.error(`[public-property-lookup] failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: 'Property lookup failed. Please call (941) 297-5749 to speak with our team.' });
