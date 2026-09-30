@@ -250,6 +250,7 @@ function followupSlaPhrase(now = new Date()) {
 const followupSla = require('./sms-followup-sla');
 const { stripTrackLinks } = require('./sms-track-links');
 const { sanitizeTechNames } = require('./live-eta-destination');
+const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 // The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
 // line (only the categories whose own gate is still off), one instruction
@@ -850,8 +851,11 @@ function numberWordValue(m, hundredsWord, tens1, digit1, under20a, tens2, digit2
   const under20 = lookupNumberWord(NUMBER_WORD_UNITS, isHundred ? under20a : under20b);
   return (isHundred ? multiplier * 100 : 0) + tens + digit + under20;
 }
+// Every numeric/time parser enters here, so it also reads the text the CUSTOMER gets:
+// the provider path runs normalizeGsmPunctuation (curly apostrophes, en/em dashes,
+// smart quotes become plain ASCII) before delivery (Codex round-38 P2).
 function normalizeNumberWords(text) {
-  return String(text || '').replace(NUMBER_WORD_RE, (m, ...groups) => String(numberWordValue(m, ...groups.slice(0, 7))));
+  return normalizeGsmPunctuation(String(text || '')).replace(NUMBER_WORD_RE, (m, ...groups) => String(numberWordValue(m, ...groups.slice(0, 7))));
 }
 // A number word normalizeNumberWords cannot convert, right next to a time
 // unit ("a thousand minutes", "a dozen minutes", "hundreds of minutes") —
@@ -1153,7 +1157,7 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // bare "we're here" and "we have on-site inspections" stay excluded.
 const WE_ARRIVED_ALT = "we(?:'ve|\\s+have)?\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:arrived|(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address)))"
   + "|we(?:'re|\\s+are)\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:on[\\s-]?site|at\\s+(?:your|the)\\s+(?:door|house|home|place|property|address)|outside\\s+(?:your|the)\\s+(?:door|house|home|place|property)|on\\s+(?:the|your)\\s+property)";
-const COMPLETED_ARRIVAL_BASE_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address)))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+const COMPLETED_ARRIVAL_BASE_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address)))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve))|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve)))|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
 const COMPLETED_ARRIVAL_RE = new RegExp(COMPLETED_ARRIVAL_BASE_RE.source.replace(/\)\\b$/, `|${WE_ARRIVED_ALT})\\b`), 'i');
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
@@ -1234,7 +1238,7 @@ function carrySubjectAcrossConjunctions(str, techNames = []) {
   return last ? out + str.slice(last) : str;
 }
 function bodyClaimsCompletedArrival(text, { techNames = [] } = {}) {
-  const str = carrySubjectAcrossConjunctions(String(text || ''), techNames);
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
   for (const m of str.matchAll(new RegExp(statusRegexFor('completed', techNames).source, 'gi'))) {
     // Same exemptions as the en-route classifiers: negation, question, a governing
     // conditional ("once we've arrived I'll text"), and an explicit future day.
@@ -1382,7 +1386,7 @@ function isFutureDayStatus(str, index, length = 0, now = new Date()) {
   return WEEKDAY_NAMES.some((day) => day !== today && new RegExp(`\\b${day}\\b`, 'i').test(sentence));
 }
 function bodyMentionsArrival(text, { techNames = [] } = {}) {
-  const str = carrySubjectAcrossConjunctions(String(text || ''), techNames);
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
   for (const m of str.matchAll(new RegExp(statusRegexFor('enRoute', techNames).source, 'gi'))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (isConditionalBefore(before)) continue;
@@ -1430,7 +1434,7 @@ function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
 }
 const VISIT_STATUS_RE = buildVisitStatusRe();
 function bodyMentionsVisitStatus(text, { techNames = [] } = {}) {
-  const str = carrySubjectAcrossConjunctions(String(text || ''), techNames);
+  const str = carrySubjectAcrossConjunctions(normalizeGsmPunctuation(String(text || '')), techNames);
   for (const m of str.matchAll(new RegExp(statusRegexFor('visit', techNames).source, 'gi'))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (isConditionalBefore(before)) continue;
@@ -1617,7 +1621,7 @@ function findEtaMinutesClaims(text) {
 // number-word origin (default-deny stays).
 const NUMBER_WORD_MARK = '\u0001';
 function numberWordOriginIndexes(text, str) {
-  const marked = normalizeTimeQuantities(String(text || '').replace(NUMBER_WORD_RE, (m, ...groups) => NUMBER_WORD_MARK + String(numberWordValue(m, ...groups.slice(0, 7)))));
+  const marked = normalizeTimeQuantities(normalizeGsmPunctuation(String(text || '')).replace(NUMBER_WORD_RE, (m, ...groups) => NUMBER_WORD_MARK + String(numberWordValue(m, ...groups.slice(0, 7)))));
   let plain = '';
   const origins = new Set();
   for (const ch of marked) {
@@ -1844,7 +1848,7 @@ function countEnRouteEtaStops(context) {
 function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount = null, techNames = [] }) {
   // Round-19 P2: parse the reply without its tracking links (a token's trailing
   // digits are not an ETA) — the same shared step the send-time check uses.
-  const reply = stripTrackLinks(rawReply);
+  const reply = normalizeGsmPunctuation(stripTrackLinks(rawReply));
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   // Codex round-13 P2: a completed-arrival claim ("has arrived") with an
   // en-route tech and no on-site fact is false — the facts must say the tech

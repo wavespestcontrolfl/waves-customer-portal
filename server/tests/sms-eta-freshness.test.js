@@ -2008,3 +2008,26 @@ describe('first-person arrival claims and elapsed durations at send time', () =>
     expect(await run(body)).toBeNull();
   });
 });
+
+// Codex round-39 P2s (PR #5334): send-time classification sees what the customer receives; "is there".
+describe('smart punctuation and "is there" at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const enRouteSnap = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  const rows = (extra) => [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra }];
+  const done = { status: 'completed', track_state: 'completed' };
+  const run = (body, extra) => etaClaimBlockReason({ liveEtaSnapshot: enRouteSnap, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows(extra)) });
+  test.each(['They’re on the way.', 'Your technician’s running late.', 'The tech isn’t there yet, but is on the way.'])('%p is rechecked like its straight-quote form', async (body) => {
+    expect(await run(body)).toBeNull();
+    expect(await run(body, done)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('"The technician is there." needs the on-property state (not just "still en route")', async () => {
+    expect(await run('The technician is there.')).toBe('eta_claim_no_longer_en_route');
+    expect(await run('The technician is there.', { status: 'on_site', track_state: 'on_property' })).toBeNull();
+  });
+  test('"The technician is there to help." is untouched', async () => {
+    expect(await run('The technician is there to help.', done)).toBeNull();
+  });
+});

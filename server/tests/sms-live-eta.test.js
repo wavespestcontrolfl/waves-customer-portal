@@ -1943,6 +1943,51 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-39 P2s (PR #5334): smart punctuation is classified as the customer receives it;
+// "is there" is a completed arrival.
+describe('round 39 P2s: normalized punctuation; technician "is there"', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    'They’re on the way.', 'The tech‘s en route.', 'Your technician’s running late.', 'The technician isn’t there yet, but is on the way.',
+    'He’s almost there.', 'Sam’s on the way.',
+  ])('%p (curly quotes) is classified like its straight-quote form', (t) => {
+    expect(bodyMentionsArrival(t, { techNames: ['Sam'] })).toBe(true);
+    expect(bodyMentionsVisitStatus(t, { techNames: ['Sam'] })).toBe(true);
+  });
+  test('negation and questions still work through smart punctuation', () => {
+    expect(bodyMentionsArrival('The tech isn’t on the way yet.')).toBe(false);
+    expect(bodyMentionsArrival('Is the tech on the way?')).toBe(false);
+    expect(bodyClaimsCompletedArrival('The technician hasn’t arrived.')).toBe(false);
+    expect(bodyClaimsCompletedArrival('He’s just arrived at your home.'.replace('He’s just arrived', 'He has just arrived'))).toBe(true);
+  });
+  test('smart dashes and quotes do not hide a minutes figure or a range', () => {
+    expect(findEtaMinutesClaims('The tech is 10–12 minutes away.').map((c) => c.minutes)).toEqual([10, 12]);
+    expect(findEtaMinutesClaims('He’s 12 minutes away — “about” that.').map((c) => c.minutes)).toEqual([12]);
+    expect(findGroundedMinutesFigures('The tech is “12” minutes away').map((c) => c.minutes)).toContain(12);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: 'He’s 12 minutes away.', factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply: 'The technician’s arrived.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each(['The technician is there.', 'Your tech is there.', 'The techs are there.', "He's there.", 'The crew is there.', 'The driver is now there.'])('%p is a completed arrival', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    'The technician is there to help.', 'The team is there to answer questions.', 'The technician will be there tomorrow.', 'The technician will be there shortly.',
+    'Is the technician there?', "The technician isn't there yet.", 'Once the tech is there I will text you.',
+  ])('%p is not a completed arrival', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+  });
+  test('"is there" against an en-route fact is rejected by the draft-time validator (like "has arrived")', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: 'The technician is there.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
 // Codex round-38 P2s (PR #5334): first-person arrival claims; retrospective durations.
 describe('round 38 P2s: first-person on-site claims; elapsed-time durations', () => {
   const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');

@@ -84,6 +84,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { stripTrackLinks, sendTimeTrackTokenLive } = require('./sms-track-links');
 const { etDateString } = require('../utils/datetime-et');
 const { sanitizeTechNames } = require('./live-eta-destination');
+const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 // 15 minutes: long enough that an ordinary reviewer accept/edit cycle (a
 // human reading a composer card and clicking Send) never gets blocked by
@@ -244,7 +245,9 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames
   // The link itself is not prose: a token like "a-12-b" must never read as a
   // "12" minutes figure, so claim analysis runs on the body without its
   // /track/ URLs.
-  const outgoingBody = stripTrackLinks(fullBody);
+  // Classify the text the customer RECEIVES: the provider path normalizes smart
+  // punctuation (’ “ ” –) to plain ASCII before delivery (round-38 P2).
+  const outgoingBody = normalizeGsmPunctuation(stripTrackLinks(fullBody));
   const hasTrackLink = trackTokens.length > 0;
   const liveContext = snapshotHasEntries || hasTrackLink;
   const claims = liveContext

@@ -95,13 +95,19 @@ router.put('/vehicles/:technicianId', async (req, res, next) => {
     const { bouncie_imei, bouncie_vin, vehicle_name } = req.body;
     const updates = { updated_at: new Date() };
     if (bouncie_imei !== undefined) {
-      updates.bouncie_imei = bouncie_imei || null;
+      const nextImei = bouncie_imei || null;
+      updates.bouncie_imei = nextImei;
       // Stamp the tracker-remap instant ONLY when the IMEI actually changes (round-35
-      // P2): tech_status stores no device identity, so cached fixes older than this are
-      // not trusted for the new device. technicians.updated_at is restamped by every
-      // ordinary edit and cannot say this. An unchanged re-save must not restart it.
-      const current = await db('technicians').where({ id: req.params.technicianId }).first('bouncie_imei');
-      if (String(current?.bouncie_imei ?? '') !== String(updates.bouncie_imei ?? '')) updates.bouncie_imei_changed_at = new Date();
+      // P2) and do it ATOMICALLY with the IMEI write (round-38 P2): one UPDATE whose
+      // CASE compares the row's CURRENT bouncie_imei (Postgres evaluates SET
+      // expressions against the pre-update row, under the row lock), so concurrent
+      // saves can never restore an old IMEI without a stamp. An unchanged re-save keeps
+      // the existing stamp. technicians.updated_at is restamped by every ordinary edit
+      // and cannot say this.
+      updates.bouncie_imei_changed_at = db.raw(
+        'CASE WHEN technicians.bouncie_imei IS DISTINCT FROM ?::varchar THEN NOW() ELSE technicians.bouncie_imei_changed_at END',
+        [nextImei],
+      );
     }
     if (bouncie_vin !== undefined) updates.bouncie_vin = bouncie_vin || null;
     if (vehicle_name !== undefined) updates.vehicle_name = vehicle_name || null;

@@ -54,6 +54,18 @@ async function lookupBouncieImei(techId) {
   return imei || null;
 }
 
+// Is the technician STILL mapped to the IMEI a fetched location came from? A read
+// failure or a missing row cannot prove it -> false.
+async function mappingStillMatches(techId, imei) {
+  try {
+    const tech = await db('technicians').where({ id: techId }).first('bouncie_imei');
+    return Boolean(tech) && String(tech.bouncie_imei || '').trim() === imei;
+  } catch (err) {
+    logger.warn(`[tracking-vehicle-location] mapping recheck failed: ${err.message}`);
+    return false;
+  }
+}
+
 async function resolveBouncieFallback({
   techId,
   bouncieImei,
@@ -77,6 +89,13 @@ async function resolveBouncieFallback({
     const lng = finiteNumber(loc.lng);
     const lastReportedAt = loc.updatedAt || loc.lastUpdated || loc.timestamp || null;
     if (lat == null || lng == null || !isFreshTimestamp(lastReportedAt)) return null;
+
+    // Revalidate the mapping BEFORE returning the coordinates (Codex round-38 P2): an
+    // IMEI remap that landed while getLocationByImei was in flight makes this the OLD
+    // vehicle's point. The guarded cache write below only protects persistence; the
+    // response must not publish one wrong map point / ETA either. Unverifiable or
+    // changed -> discard (fail closed: no map point, no ETA).
+    if (!(await mappingStillMatches(techId, imei))) return null;
 
     pingTechLocation({
       tech_id: techId,
