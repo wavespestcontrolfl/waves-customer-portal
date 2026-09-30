@@ -13,8 +13,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const base = require('../models/migrations/20260930120000_prep_lawn_guide_revision');
 const r1 = require('../models/migrations/20260930120001_prep_lawn_guide_revision_codex_r1');
 const r2 = require('../models/migrations/20260930120002_prep_lawn_guide_revision_r2');
-// 000003 → 000002 → 000001 → 000000; 000003's TEMPLATES are what customers receive.
-const migration = require('../models/migrations/20260930120003_prep_lawn_guide_revision_r6');
+const r6 = require('../models/migrations/20260930120003_prep_lawn_guide_revision_r6');
+// 000004 → 000003 → 000002 → 000001 → 000000; 000004's TEMPLATES are what customers receive.
+const migration = require('../models/migrations/20260930120004_prep_lawn_guide_revision_r8');
 const { normalizeBlocks } = require('../services/email-template-library');
 
 const { TEMPLATES } = migration;
@@ -93,10 +94,17 @@ describe('prep.lawn revision content', () => {
 });
 
 describe('supersession', () => {
+  test('000004: the new-sod answer names North Port’s April 1 fertilizer start (Codex r8 P1)', () => {
+    expect(migration.SUPERSEDES).toBe('migration:20260930120003');
+    const text = JSON.stringify(TEMPLATES);
+    expect(text).toMatch(/April 1 – September 30 in North Port/);
+    expect(text).not.toMatch(/none at all June 1 – September 30\)/);
+  });
+
   test('000003 supersedes 000002 and patches only the Bermuda answer', () => {
-    expect(migration.SUPERSEDES).toBe('migration:20260930120002');
+    expect(r6.SUPERSEDES).toBe('migration:20260930120002');
     const before = r2.TEMPLATES[0].blocks;
-    const after = TEMPLATES[0].blocks;
+    const after = r6.TEMPLATES[0].blocks;
     const changed = after.filter((b, i) => JSON.stringify(b) !== JSON.stringify(before[i]));
     expect(changed).toHaveLength(1);
     expect(changed[0].variant).toBe('faq');
@@ -127,7 +135,8 @@ describe.each([
   ['000000', base, 'migration:20260930120000'],
   ['000001', r1, 'migration:20260930120001'],
   ['000002', r2, 'migration:20260930120002'],
-  ['000003', migration, 'migration:20260930120003'],
+  ['000003', r6, 'migration:20260930120003'],
+  ['000004', migration, 'migration:20260930120004'],
 ])('publish mechanics (%s)', (_name, migration, marker) => {
   const { TEMPLATES } = migration;
   function makeKnex() {

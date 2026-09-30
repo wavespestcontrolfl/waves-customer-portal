@@ -429,6 +429,8 @@ const SERVICE_DETAILS_COPY = {
   //   requires: 'bermuda_suppression' on a section — kept only when the estimate
   //     carries the Bermuda-suppression add-on AND GATE_BERMUDA_SUPPRESSION is on.
   //   oneTimeHeading: string on a section — its heading in the one-time guide.
+  //   treatmentOnly: true on a section — application prep/aftercare, dropped
+  //     from a mechanical-only one-time guide (no product is applied).
   //   scope: 'recurring' | 'one_time' on a section, a FAQ entry, or a
   //     { scope, text } entry inside paragraphs/steps/bullets — kept only for
   //     that lawn scope (see `oneTime` below); unmarked entries always render.
@@ -466,6 +468,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'Before every visit',
         oneTimeHeading: 'Before your service',
+        treatmentOnly: true,
         bullets: [
           'Mow at least 24 hours before if mowing is due. Don’t mow the day of. Why: we need leaf surface to treat, and fresh cuts bleed product.',
           'Sprinklers off the night before a treatment visit. Why: we treat a dry lawn; wet grass dilutes liquids and granules stick to the blade instead of reaching the soil. Plugging and top dressing are the exceptions: follow their own watering steps below.',
@@ -479,6 +482,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'After every visit',
         oneTimeHeading: 'After your service',
+        treatmentOnly: true,
         paragraphs: [
           { scope: 'recurring', text: 'Your service report tells you which of these applies. They change with the product, so we will not print one rule for every visit.' },
           { scope: 'one_time', text: 'Your service report tells you which of these applies. They change with the product, so we will not print one rule for every job.' },
@@ -558,7 +562,7 @@ const SERVICE_DETAILS_COPY = {
         bullets: [
           'Water: days 1–7, 2–3 short cycles a day; days 8–14, once a day, early morning; weeks 3–4, 2–3 times a week at ¼–½ inch; from week 5, your normal schedule at ½–¾ inch. New sod is usually exempt from district watering days for the first 30 days only.',
           'Mow: first cut at 14–21 days, once a tug on the sod holds. Sharp blade, correct height for the grass, never more than a third of the blade.',
-          'Fertilizer: none for 30–60 days, and none at all June 1–Sept 30 in Sarasota and Manatee. A summer install gets iron and micronutrients until October.',
+          'Fertilizer: none for 30–60 days, and none at all during your area’s restricted season: June 1–Sept 30 in Sarasota, Manatee, and Charlotte counties, and April 1–Sept 30 in North Port. A summer install gets iron and micronutrients until October.',
           'Herbicide: none during establishment. Pull weeds by hand. The Recognition/Fusilade program waits at least 4 weeks after sodding and in practice a full season.',
           'Feet and pets: off for 2 weeks.',
           'Why: roots, not blades, decide whether sod lives. Everything above protects rooting.',
@@ -593,9 +597,9 @@ const SERVICE_DETAILS_COPY = {
         ],
       },
       {
-        heading: 'Summer fertilizer rules (June 1 – September 30)',
+        heading: 'Summer fertilizer rules (June 1 – September 30; North Port from April 1)',
         scope: 'recurring',
-        paragraphs: ['Manatee County, Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn fertilizer in this window. Your address decides which ordinance applies. Summer visits still run the full inspection, insect and disease work, weed control, and iron and micronutrients to hold color. Your lawn is not skipped, and we won’t break the ordinance for you.'],
+        paragraphs: ['Manatee, Sarasota, and Charlotte counties and the City of Bradenton restrict nitrogen and phosphorus lawn fertilizer from June 1 through September 30. The City of North Port starts earlier: April 1 through September 30. Your address decides which ordinance applies. Summer visits still run the full inspection, insect and disease work, weed control, and iron and micronutrients to hold color. Your lawn is not skipped, and we won’t break the ordinance for you.'],
       },
     ],
     included: [
@@ -638,7 +642,7 @@ const SERVICE_DETAILS_COPY = {
       ctaMicro: 'The lawn work on your estimate · Documented in your service report',
       complianceExtras: [
         'Florida law requires a conspicuous treatment notice when pesticides are applied to lawns or exterior foliage — we post it whenever a qualifying application is made, and your service report carries the full details behind the sign.',
-        'Local fertilizer ordinances: Manatee County, the City of Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn and landscape fertilizers from June 1 through September 30. The property address determines which ordinance applies, and any fertilizer we apply follows it.',
+        'Local fertilizer ordinances: Manatee, Sarasota, and Charlotte counties and the City of Bradenton restrict nitrogen and phosphorus lawn and landscape fertilizers from June 1 through September 30, and the City of North Port from April 1 through September 30. The property address determines which ordinance applies, and any fertilizer we apply follows it.',
       ],
       documentation: {
         heading: 'Documented — no mystery treatments, no missing paperwork',
@@ -730,7 +734,7 @@ const SERVICE_DETAILS_COPY = {
     },
     complianceExtras: [
       'Florida law requires a conspicuous treatment notice when pesticides are applied to lawns or exterior foliage — we post it at every qualifying visit, and your digital report carries the full details behind the sign.',
-      'Local fertilizer ordinances are built into the program: Manatee County, the City of Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn and landscape fertilizers from June 1 through September 30. The property address — never a generic company calendar — determines which ordinance applies, and restricted-season visits are adjusted to lawful materials and work.',
+      'Local fertilizer ordinances are built into the program: Manatee, Sarasota, and Charlotte counties and the City of Bradenton restrict nitrogen and phosphorus lawn and landscape fertilizers from June 1 through September 30, and the City of North Port from April 1 through September 30. The property address — never a generic company calendar — determines which ordinance applies, and restricted-season visits are adjusted to lawful materials and work.',
     ],
     documentationOverride: {
       heading: 'Documented every visit — your lawn’s case file, not a mystery treatment',
@@ -1003,7 +1007,7 @@ function estimateHasBermudaSuppression(estimate = {}) {
 
 // Resolve the `requires` / `scope` markers on the generic sections (schema on
 // the lawn_care entry). Markers never reach renderers.
-function resolveSections(sections, { lawnScope, bermuda }) {
+function resolveSections(sections, { lawnScope, bermuda, mechanicalOnly = false }) {
   const scopeOk = (scope) => scope == null || scope === lawnScope;
   const list = (entries) => (Array.isArray(entries)
     ? entries.reduce((acc, entry) => {
@@ -1016,7 +1020,8 @@ function resolveSections(sections, { lawnScope, bermuda }) {
   return (sections || []).reduce((acc, section) => {
     if (!section || !scopeOk(section.scope)) return acc;
     if (section.requires === 'bermuda_suppression' && !bermuda) return acc;
-    const { requires: _requires, scope: _scope, oneTimeHeading, ...rest } = section;
+    if (section.treatmentOnly && mechanicalOnly) return acc;
+    const { requires: _requires, scope: _scope, oneTimeHeading, treatmentOnly: _treatmentOnly, ...rest } = section;
     if (lawnScope === 'one_time' && oneTimeHeading) rest.heading = oneTimeHeading;
     for (const field of ['paragraphs', 'steps', 'bullets']) {
       if (rest[field]) rest[field] = list(rest[field]);
@@ -1074,6 +1079,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
     // documented on the lawn_care entry), markers resolved.
     sections: resolveSections(copy.sections, {
       lawnScope,
+      mechanicalOnly: !showProducts,
       // The Bermuda program rides a recurring lawn plan only — an add-on
       // flag left behind after a lawn removal never reaches a one-time guide.
       bermuda: lawnScope === 'recurring'
@@ -1091,8 +1097,10 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
       .map(({ ownership: _ownership, scope: _scope, ...entry }) => entry),
     documentation,
     illustrations: copy.illustrations || [],
-    safety: copy.safetyOverride || SAFETY_SECTION,
-    compliance: copy.complianceOverride || {
+    // Mechanical-only one-time work applies no pesticide: no pesticide safety
+    // section, and compliance keeps only the license line.
+    safety: showProducts ? (copy.safetyOverride || SAFETY_SECTION) : null,
+    compliance: !showProducts ? { heading: COMPLIANCE_SECTION.heading, bullets: [COMPLIANCE_SECTION.bullets[0]] } : copy.complianceOverride || {
       heading: COMPLIANCE_SECTION.heading,
       bullets: [...COMPLIANCE_SECTION.bullets, ...(copy.complianceExtras || [])],
     },

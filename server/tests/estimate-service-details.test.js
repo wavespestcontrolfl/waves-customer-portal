@@ -264,6 +264,15 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     // The flag only applies to the one-time guide.
     const recurring = await buildServiceDetailsContent('lawn_care', {}, { mechanicalOnly: true });
     expect(recurring.showProducts).toBe(true);
+    // No application prep/aftercare, pesticide safety, or pesticide compliance (Codex r8 P2).
+    const mechHeadings = mechanical.sections.map((sec) => sec.heading);
+    expect(mechHeadings).not.toContain('Before your service');
+    expect(mechHeadings).not.toContain('After your service');
+    expect(mechanical.safety).toBeNull();
+    expect(mechanical.compliance.bullets).toHaveLength(1);
+    expect(mechanical.compliance.bullets[0]).toMatch(/license JB351547/);
+    expect(treatment.sections.map((sec) => sec.heading)).toContain('After your service');
+    expect(treatment.safety).not.toBeNull();
     // The PDF omits the product section entirely.
     const pdf = await renderServiceDetailsPdf(mechanical);
     expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
@@ -324,6 +333,12 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     expect(slotOnly.subarray(0, 5).toString()).toBe('%PDF-');
     expect(Math.abs(slotOnly.length - without.length)).toBeLessThan(without.length * 0.05);
   }, 30000);
+
+  test('every fertilizer-window mention carries North Port’s April 1 start (Codex r8 P1)', () => {
+    const strings = lawnStrings(SERVICE_DETAILS_COPY.lawn_care).filter((t) => /June 1/.test(t));
+    expect(strings.length).toBeGreaterThan(0);
+    for (const text of strings) expect(text).toMatch(/North Port/);
+  });
 
   test('all lawn copy obeys the product & safety standard', () => {
     const strings = lawnStrings(SERVICE_DETAILS_COPY.lawn_care);
