@@ -1069,7 +1069,7 @@ async function fileCoverageException(term, reason, body, {
       .where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
     if (dedupeDays != null) {
-      existingQuery = existingQuery.where('created_at', '>=', db.raw(`now() - interval '${Number(dedupeDays) || 7} days'`));
+      existingQuery = existingQuery.where('created_at', '>=', db.raw("now() - (? * interval '1 day')", [Number(dedupeDays) || 7]));
     }
     const existing = await existingQuery
       .first('id')
@@ -1093,6 +1093,43 @@ async function fileCoverageException(term, reason, body, {
   } catch (err) {
     logger.warn(`[annual-prepay] coverage exception notification failed for term ${term?.id}: ${err.message}`);
   }
+}
+
+// The pre-tax per-visit price ensureCoverageRowsForTerm gives a visit IT
+// seeds: the prepay invoice subtotal minus one-time setup lines, divided by
+// the sold visit count. Shared with the stamp-time price check so the two can
+// never disagree on what a seeded visit's own price is. Throws on a failed
+// read — the seeder swallows that (it only loses a fallback price), the
+// price check lets it propagate (fail closed). null = no derivable price.
+async function seededVisitPriceForTerm(term, conn, coverageVisitCount) {
+  if (!term?.prepay_invoice_id || !coverageVisitCount) return null;
+  const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total', 'line_items');
+  let base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+  // One-time setup lines (rodent bait-station setup, owner 2026-08-29)
+  // ride the prepay invoice but are NOT per-visit coverage money —
+  // subtract them before dividing, or the voided-prepay fallback price
+  // rebills every visit with a slice of the setup fee. The IMMUTABLE
+  // setup_fee_claims record decides first (codex #3591 r71 P1) — a
+  // staff-renamed line would otherwise inflate every seeded fallback
+  // price by the setup's slice while a later reversal also restores the
+  // setup itself; the text scan stays only for pre-ledger invoices.
+  let setupTotal = 0;
+  try {
+    const claimRow = await conn('setup_fee_claims').where({ invoice_id: term.prepay_invoice_id }).first('amount');
+    setupTotal = Math.round((Number(claimRow?.amount) || 0) * 100) / 100;
+  } catch { /* unreadable ledger — fall back to the line scan */ }
+  if (!(setupTotal > 0)) {
+    try {
+      const lines = typeof inv?.line_items === 'string' ? JSON.parse(inv.line_items) : inv?.line_items;
+      if (Array.isArray(lines)) {
+        setupTotal = lines
+          .filter((li) => /\bsetup\b/i.test(String(li?.description || '')))
+          .reduce((s, li) => s + (Number(li?.unit_price) || 0) * (Number(li?.quantity) || 1), 0);
+      }
+    } catch { /* unparseable line_items — keep the subtotal basis */ }
+  }
+  if (setupTotal > 0 && setupTotal < base) base = Math.round((base - setupTotal) * 100) / 100;
+  return base > 0 ? Math.round((base / coverageVisitCount) * 100) / 100 : null;
 }
 
 // seedNotBefore (opt-in, ADMIN-BUG-R18): a gap-fill never seeds a visit
@@ -1291,33 +1328,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   let seededVisitPrice = null;
   if (cols.estimated_price && term?.prepay_invoice_id) {
     try {
-      const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total', 'line_items');
-      let base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
-      // One-time setup lines (rodent bait-station setup, owner 2026-08-29)
-      // ride the prepay invoice but are NOT per-visit coverage money —
-      // subtract them before dividing, or the voided-prepay fallback price
-      // rebills every visit with a slice of the setup fee. The IMMUTABLE
-      // setup_fee_claims record decides first (codex #3591 r71 P1) — a
-      // staff-renamed line would otherwise inflate every seeded fallback
-      // price by the setup's slice while a later reversal also restores the
-      // setup itself; the text scan stays only for pre-ledger invoices.
-      let setupTotal = 0;
-      try {
-        const claimRow = await conn('setup_fee_claims').where({ invoice_id: term.prepay_invoice_id }).first('amount');
-        setupTotal = Math.round((Number(claimRow?.amount) || 0) * 100) / 100;
-      } catch { /* unreadable ledger — fall back to the line scan */ }
-      if (!(setupTotal > 0)) {
-        try {
-          const lines = typeof inv?.line_items === 'string' ? JSON.parse(inv.line_items) : inv?.line_items;
-          if (Array.isArray(lines)) {
-            setupTotal = lines
-              .filter((li) => /\bsetup\b/i.test(String(li?.description || '')))
-              .reduce((s, li) => s + (Number(li?.unit_price) || 0) * (Number(li?.quantity) || 1), 0);
-          }
-        } catch { /* unparseable line_items — keep the subtotal basis */ }
-      }
-      if (setupTotal > 0 && setupTotal < base) base = Math.round((base - setupTotal) * 100) / 100;
-      if (base > 0) seededVisitPrice = Math.round((base / coverageVisitCount) * 100) / 100;
+      seededVisitPrice = await seededVisitPriceForTerm(term, conn, coverageVisitCount);
     } catch (err) {
       logger.warn(`[annual-prepay] seeded visit price lookup skipped: ${err.message}`);
     }
@@ -2468,24 +2479,23 @@ function priceCents(value) {
 
 async function securePlanSoldPerVisitCents(term, conn) {
   if (!term?.id || !term.customer_id) return null;
-  try {
-    const row = await conn('activity_log')
-      .where({ customer_id: term.customer_id, action: 'annual_prepay_invoice_created' })
-      .whereRaw("metadata->>'annual_prepay_term_id' = ?", [String(term.id)])
-      .whereRaw("metadata->>'source' = ?", [SECURE_PLAN_MINT_SOURCE])
-      .orderBy('created_at', 'desc')
-      .first('metadata');
-    if (!row) return null;
-    let meta = row.metadata;
-    if (typeof meta === 'string') {
-      try { meta = JSON.parse(meta); } catch { return null; }
-    }
-    const sold = priceCents(meta?.per_visit_amount);
-    return sold != null && sold > 0 ? sold : null;
-  } catch (err) {
-    logger.warn(`[annual-prepay] sold per-visit price lookup skipped for term ${term.id}: ${err.message}`);
-    return null;
+  // A failed read PROPAGATES (fail closed): swallowing it would stamp a
+  // repriced visit at the old price on a transient error. The stamp runs in
+  // the caller's transaction, which a failed select poisons anyway, and the
+  // activation / refresh / sweep callers retry on their next run.
+  const row = await conn('activity_log')
+    .where({ customer_id: term.customer_id, action: 'annual_prepay_invoice_created' })
+    .whereRaw("metadata->>'annual_prepay_term_id' = ?", [String(term.id)])
+    .whereRaw("metadata->>'source' = ?", [SECURE_PLAN_MINT_SOURCE])
+    .orderBy('created_at', 'desc')
+    .first('metadata');
+  if (!row) return null;
+  let meta = row.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return null; }
   }
+  const sold = priceCents(meta?.per_visit_amount);
+  return sold != null && sold > 0 ? sold : null;
 }
 
 // Splits `rows` (coverage rows in canonical slot order) into the visits the
@@ -2507,14 +2517,27 @@ async function holdPriceDriftedRows(term, rows, conn, { skipRow = null } = {}) {
   if (!candidates.length) return { held, heldIds: new Set() };
   const soldCents = await securePlanSoldPerVisitCents(term, conn);
   if (soldCents == null) return { held, heldIds: new Set() };
-  // The term's own generated visits are priced at the per-visit slice of the
-  // discounted invoice (ensureCoverageRowsForTerm's seededVisitPrice) — that
-  // is the term's price for them, not a drift.
-  const allowed = new Set([soldCents]);
-  const visitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
-  for (const slice of splitCoverageAmount(Number(term.prepay_amount), visitCount)) allowed.add(priceCents(slice));
+  // ONLY the term's own SEEDED visits may carry the discounted per-visit
+  // price (ensureCoverageRowsForTerm's seededVisitPrice); every other row must
+  // still be at the sold price. Seeded = linked to this term AND carrying the
+  // seeder's own notes text (staff never type it; an edited note simply reads
+  // as a real visit and is held — fail closed).
+  const seedNote = `Annual prepaid ${normalizeCoverageServiceType(term.coverage_service_type)} coverage`;
+  const isSeededByTerm = (row) => row.annual_prepay_term_id != null
+    && String(row.annual_prepay_term_id) === String(term.id)
+    && String(row.notes || '') === seedNote;
+  let seededCents;
+  const seededPriceCents = async () => {
+    if (seededCents === undefined) {
+      seededCents = priceCents(await seededVisitPriceForTerm(term, conn, normalizeCoverageVisitCount(term.coverage_visit_count)));
+    }
+    return seededCents;
+  };
   for (const row of candidates) {
-    if (!allowed.has(priceCents(row.estimated_price))) held.push({ row, soldCents });
+    const current = priceCents(row.estimated_price);
+    if (current === soldCents) continue;
+    if (isSeededByTerm(row) && current === await seededPriceCents()) continue;
+    held.push({ row, soldCents });
   }
   return { held, heldIds: new Set(held.map(({ row }) => String(row.id))) };
 }
