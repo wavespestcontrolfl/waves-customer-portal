@@ -62,6 +62,19 @@ const cand = (id, intent, createdAt) => ({
   inbound_at: createdAt,
 });
 
+// COMPANY FACTS is matched by the EXACT rendered section before the first
+// BILLING: line (Codex #5392 r3 P2), not a header LIKE, so its clause binds
+// the delimiter + exact suffixes; SLA and FREE RE-SERVICE stay LIKE markers.
+const {
+  BILLING_DELIMITER: D_, exactSectionSuffixes: exactSuffixes_,
+} = require('../services/sms-company-facts');
+const [EXACT_PLAIN, EXACT_BOOKING] = exactSuffixes_();
+const CONTRACT_BINDINGS = [
+  '%FOLLOW-UP SLA RIGHT NOW:%',
+  D_, D_, EXACT_PLAIN.length, EXACT_PLAIN, D_, EXACT_BOOKING.length, EXACT_BOOKING,
+  '%FREE RE-SERVICE:%',
+];
+
 describe('sealEvalItems — selection contract', () => {
   test('pool already at target → no candidate query side effects, sealed: 0', async () => {
     const dbi = makeFakeDb({ activeCount: 100 });
@@ -234,7 +247,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']);
+      expect(args[1]).toEqual(CONTRACT_BINDINGS);
       expect(String(args[0])).not.toMatch(/NOT LIKE/); // _cf+c: every fact the version carries is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
@@ -251,7 +264,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
     for (const [, args] of contract) {
       expect(String(args[0])).not.toMatch(/(?<!NOT )LIKE \?/); // nothing required, both lines forbidden
-      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']);
+      expect(args[1]).toEqual(CONTRACT_BINDINGS);
     }
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^md\.facts_block NOT LIKE/.test(String(args[0])))).toBe(true);
     // the v12 items beyond the target are retired (the fake reports 3)
@@ -278,7 +291,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
       expect(likeRaws.length).toBeGreaterThanOrEqual(2); // the compat count + the restore filter
       for (const [, args] of likeRaws) {
-        expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']);
+        expect(args[1]).toEqual(CONTRACT_BINDINGS);
       }
       // restore targets INACTIVE rows, newest sealed_at first, limited to the whole shortfall (100)
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
@@ -321,7 +334,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       // the restore selects RETIRED rows under the v11 contract: both v12 lines forbidden
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
       expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^COALESCE\(facts_block, ''\) NOT LIKE \?/.test(String(args[0]))
-        && JSON.stringify(args[1]) === JSON.stringify(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']))).toBe(true);
+        && JSON.stringify(args[1]) === JSON.stringify(CONTRACT_BINDINGS))).toBe(true);
       expect(dbi.updates.filter((u) => u.patch.active === false)).toHaveLength(1); // the v12 items are retired
     });
   });
@@ -347,8 +360,8 @@ test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND for
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     // the pre-_cf identity also forbids COMPANY FACTS (Codex #5392 r1)
-    expect(compat[1][0]).toBe("COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') NOT LIKE ? AND COALESCE(facts_block, '') NOT LIKE ?");
-    expect(compat[1][1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']);
+    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND COALESCE\(facts_block, ''\) NOT LIKE \?$/);
+    expect(compat[1][1]).toEqual(CONTRACT_BINDINGS);
   } finally {
     spy.mockRestore();
   }

@@ -35,69 +35,46 @@ function renderCompanyFactsSection() {
   return `${COMPANY_FACTS_HEADER}\n${COMPANY_FACTS.map((f) => `- ${f}`).join('\n')}\n`;
 }
 
-// ---- Per-draft lines (rendered right after the static section) ----------
+// ---- Per-draft line (rendered right after the static section) ----------
 //
-// REFERRAL PROGRAM comes from the LIVE referral_program_settings row
-// (referral-engine.getLiveSettings) — never hardcoded. program_active must be
-// exactly true; otherwise no line is rendered and NO amount is authorized.
-// The fixed term is "referral credit": the drafter's amount guard authorizes
-// the live referrer/referee amounts ONLY in a clause that contains that literal
-// term (see referralCreditCents + replyQuotesUngroundedAmount). Each amount
-// sits in a clause that carries the term, so a plain restatement passes.
-const REFERRAL_FACT_LABEL = 'REFERRAL PROGRAM:';
+// Only when the FREE RE-SERVICE fact is positive AND the customer can open
+// the self-serve booking page (the caller checks: complaints gate, eligible
+// lanes, GATE_RESERVICE_SELF_SERVE, a reservice_token on file); otherwise
+// nothing about app booking.
 const RESERVICE_BOOKING_LABEL = 'RE-SERVICE BOOKING:';
-const REFERRAL_TERM_RE = /\breferral\s+credit\b/i;
-
-function dollars(cents) {
-  const n = Number(cents) / 100;
-  return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
-}
-function referralProgramLive(settings) {
-  return Boolean(settings) && settings.program_active === true;
-}
-// The cents a reply may quote as a referral credit, or [] (fail closed).
-function referralCreditCents(settings) {
-  if (!referralProgramLive(settings)) return [];
-  return [settings.referrer_reward_cents, settings.referee_discount_cents]
-    .map((c) => Math.round(Number(c)))
-    .filter((c) => Number.isFinite(c) && c > 0);
-}
-function referralFactLine(settings) {
-  if (!referralProgramLive(settings)) return '';
-  const referrer = Math.round(Number(settings.referrer_reward_cents));
-  const referee = Math.round(Number(settings.referee_discount_cents));
-  const hasReferrer = Number.isFinite(referrer) && referrer > 0;
-  const hasReferee = Number.isFinite(referee) && referee > 0;
-  if (!hasReferrer && !hasReferee) return '';
-  const timing = settings.require_service_completion === true
-    ? " It applies after the new customer's first service is completed."
-    : '';
-  let body;
-  if (hasReferrer && hasReferee && referrer === referee) {
-    body = `${dollars(referrer)} referral credit for each person, the customer who refers and the new customer.`;
-  } else {
-    body = [
-      hasReferrer ? `${dollars(referrer)} referral credit for the customer who refers.` : null,
-      hasReferee ? `${dollars(referee)} referral credit for the new customer.` : null,
-    ].filter(Boolean).join(' ');
-  }
-  return `${REFERRAL_FACT_LABEL} ${body}${timing} Quote it only as a "referral credit".`;
-}
-
-// Only when the FREE RE-SERVICE fact is positive AND self-serve booking is on
-// (the caller checks both); otherwise nothing about booking in the app.
 function reserviceBookingLine() {
   return `${RESERVICE_BOOKING_LABEL} when the customer sees pests again after a visit and FREE RE-SERVICE above says they are eligible, offer the free re-service and mention they can book it in the Waves app. Do not explain why pests are still showing.`;
 }
 
+// ---- Trusted presence check (sealed-eval compatibility) -----------------
+//
+// A header substring is NOT proof a block carried the section: a customer's
+// multi-line SMS in the thread can contain the header text. The real section
+// sits directly before the FIRST "BILLING:" line (buildFactsBlock's spot),
+// optionally followed by the one RE-SERVICE BOOKING line. So a block "has"
+// COMPANY FACTS only when the text before that first BILLING: line ends with
+// the exact static render (+ the booking line). Any edit to COMPANY_FACTS text
+// therefore needs a new version suffix (old items no longer match).
+const BILLING_DELIMITER = '\nBILLING:\n';
+function exactSectionSuffixes() {
+  const section = renderCompanyFactsSection();
+  return [`\n${section.replace(/\n$/, '')}`, `\n${section}${reserviceBookingLine()}`];
+}
+function hasExactCompanyFacts(factsBlock) {
+  const facts = String(factsBlock || '');
+  const at = facts.indexOf(BILLING_DELIMITER);
+  if (at < 0) return false;
+  const before = facts.slice(0, at);
+  return exactSectionSuffixes().some((suffix) => before.endsWith(suffix));
+}
+
 module.exports = {
+  BILLING_DELIMITER,
+  exactSectionSuffixes,
+  hasExactCompanyFacts,
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
-  REFERRAL_FACT_LABEL,
   RESERVICE_BOOKING_LABEL,
-  REFERRAL_TERM_RE,
   renderCompanyFactsSection,
-  referralFactLine,
-  referralCreditCents,
   reserviceBookingLine,
 };

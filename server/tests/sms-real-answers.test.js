@@ -1722,6 +1722,15 @@ describe('free re-service is an entitlement resolved through the existing mechan
     await expect(loadWith({ throws: true }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
   });
 
+  test('fetchReserviceState: hasToken follows the customer row reservice_token (Codex #5392 r3 P2); fails closed', async () => {
+    const withToken = loadWith({ row: { id: 'cust-1', active: true, reservice_token: 'tok' } }).drafter;
+    await expect(withToken.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest'], hasToken: true });
+    const noToken = loadWith({ row: { id: 'cust-1', active: true, reservice_token: null } }).drafter;
+    await expect(noToken.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest'], hasToken: false });
+    await expect(loadWith({ throws: true }).drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], hasToken: false });
+    await expect(loadWith({ selfServe: false }).drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], hasToken: false });
+  });
+
   test('fetchReserviceLanes: either gate off → null (no fact rendered, mechanism never consulted)', async () => {
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
     const { drafter, reserviceLanesForCustomer } = loadWith({});

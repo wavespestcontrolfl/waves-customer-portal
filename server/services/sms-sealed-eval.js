@@ -40,7 +40,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { COMPANY_FACTS_HEADER } = require('./sms-company-facts');
+const {
+  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactSectionSuffixes, hasExactCompanyFacts,
+} = require('./sms-company-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -175,19 +177,40 @@ function contractLabel(promptVersion) {
   const forbidden = forbiddenFactMarkers(promptVersion);
   return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
 }
+// Does a frozen facts block carry this marker? The COMPANY FACTS marker is
+// TRUSTED only by an exact render before the first BILLING: line (a header
+// typed into a multi-line SMS proves nothing — Codex #5392 r3 P2); every other
+// marker is a server-rendered line and stays a substring check.
+function factPresent(facts, marker) {
+  return marker === COMPANY_FACTS_HEADER ? hasExactCompanyFacts(facts) : facts.includes(marker);
+}
 function itemCompatibleWith(factsBlock, promptVersion) {
   const facts = String(factsBlock || '');
-  return requiredFactMarkers(promptVersion).every((m) => facts.includes(m))
-    && forbiddenFactMarkers(promptVersion).every((m) => !facts.includes(m));
+  return requiredFactMarkers(promptVersion).every((m) => factPresent(facts, m))
+    && forbiddenFactMarkers(promptVersion).every((m) => !factPresent(facts, m));
 }
 // SQL for "this row matches the exact contract" (wrap in NOT (...) for the
 // complement), parameterized: required markers present, forbidden absent.
+// Mirrors factPresent: LIKE for ordinary markers, the exact-suffix test for
+// COMPANY FACTS (text before the first BILLING: line ends with the exact
+// render). Bindings follow clause order.
 function compatibleWhereRaw(markers, forbidden = []) {
-  const clauses = [
-    ...markers.map(() => "COALESCE(facts_block, '') LIKE ?"),
-    ...forbidden.map(() => "COALESCE(facts_block, '') NOT LIKE ?"),
-  ];
-  return { sql: clauses.join(' AND ') || 'TRUE', bindings: [...markers, ...forbidden].map((m) => `%${m}%`) };
+  const col = "COALESCE(facts_block, '')";
+  const clauses = [];
+  const bindings = [];
+  const add = (marker, negate) => {
+    if (marker === COMPANY_FACTS_HEADER) {
+      const [plain, withBooking] = exactSectionSuffixes();
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND (right(split_part(${col}, ?::text, 1), ?::int) = ?::text OR right(split_part(${col}, ?::text, 1), ?::int) = ?::text))`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, plain.length, plain, BILLING_DELIMITER, withBooking.length, withBooking);
+    } else {
+      clauses.push(`${col} ${negate ? 'NOT ' : ''}LIKE ?`);
+      bindings.push(`%${marker}%`);
+    }
+  };
+  markers.forEach((m) => add(m, false));
+  forbidden.forEach((m) => add(m, true));
+  return { sql: clauses.join(' AND ') || 'TRUE', bindings };
 }
 
 /* ── Freezer ──────────────────────────────────────────────────────────── */
@@ -1417,5 +1440,6 @@ module.exports = {
     SEALED_EVAL_MIN_AGE_DAYS,
     MAX_CONSECUTIVE_FAILURES,
     SIGNIFICANCE_ALPHA,
+    compatibleWhereRaw,
   },
 };

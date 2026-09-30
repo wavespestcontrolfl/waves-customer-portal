@@ -28,9 +28,7 @@ const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-confi
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
-const {
-  renderCompanyFactsSection, referralFactLine, referralCreditCents, reserviceBookingLine, REFERRAL_TERM_RE,
-} = require('./sms-company-facts');
+const { renderCompanyFactsSection, reserviceBookingLine } = require('./sms-company-facts');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -107,8 +105,13 @@ const PROMPT_VERSION = 'house_voice_v11';
 // from every earlier bare-v12 draft. Still starts with 'house_voice_v12'
 // (sms-amount-recheck, sms-sealed-eval, agent-decision-send-checks and
 // sms-followup-sla all recognize the real-answers cohort by that prefix, and
-// sms-auto-send's LIKE match keys off this constant). 31 chars; with all four
+// sms-auto-send's discovery matches REAL_ANSWERS_VERSION_FAMILY). 31 chars; with all four
 // category tags ('+bclm') 36, under PROMPT_VERSION_COLUMN_MAX.
+// The identity FAMILY every real-answers cohort shares (bare, '_cf', any later
+// suffix, any '+category' tags): readers that must recognize ALL of them —
+// sms-auto-send's gratitude discovery — match this prefix, never the current
+// constant, so a suffix bump cannot orphan rows stamped under earlier versions.
+const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers_cf';
 const SHADOW_STATUS = 'shadow';
 
@@ -362,25 +365,33 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
 // customer, a lookup error or a timeout all resolve to [] (not eligible).
 // Returns null when the gates are off (no fact is rendered at all).
 async function fetchReserviceLanes({ customerId } = {}) {
+  const state = await fetchReserviceState({ customerId });
+  return state ? state.lanes : null;
+}
+
+// fetchReserviceLanes plus whether the customer has a reservice_token on
+// file (the app-booking page cannot open without one). Same gates, same
+// fail-closed behavior; null when the gates are off.
+async function fetchReserviceState({ customerId } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return null;
-  if (!customerId) return [];
+  if (!customerId) return { lanes: [], hasToken: false };
   let timer = null;
   try {
     const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('./reservice-scheduler');
-    if (!reserviceSelfServeEnabled()) return [];
+    if (!reserviceSelfServeEnabled()) return { lanes: [], hasToken: false };
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
     const lookup = (async () => {
-      const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate');
-      if (!row || row.active === false) return [];
-      return reserviceLanesForCustomer(row);
+      const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
+      if (!row || row.active === false) return { lanes: [], hasToken: false };
+      return { lanes: await reserviceLanesForCustomer(row), hasToken: Boolean(row.reservice_token) };
     })();
-    const lanes = await Promise.race([lookup, timeout]);
-    return Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [];
+    const { lanes, hasToken } = await Promise.race([lookup, timeout]);
+    return { lanes: Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [], hasToken };
   } catch (err) {
     logger.warn(`[sms-shadow] free re-service eligibility lookup failed (${err.message}); treating as not eligible`);
-    return [];
+    return { lanes: [], hasToken: false };
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -394,56 +405,6 @@ function reserviceFactLine(lanes) {
   return list.length
     ? `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
     : `${RESERVICE_FACT_LABEL} not eligible`;
-}
-
-// LIVE referral-program settings for the COMPANY FACTS referral line, through
-// referral-engine.getLiveSettings (the strict reader: the live row or null,
-// never the advertise-an-active-$25 defaults). Gate-on only, best-effort with
-// the same timeout as the other per-draft reads. Returns the four fields the
-// fact and the amount guard use, or null (failure, timeout, no row, gate off)
-// — null renders no referral line and authorizes no amount.
-async function fetchReferralSettings() {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
-  let timer = null;
-  try {
-    const { getLiveSettings } = require('./referral-engine');
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('referral settings timeout')), OPEN_TIMES_TIMEOUT_MS);
-    });
-    const row = await Promise.race([getLiveSettings(), timeout]);
-    if (!row) return null;
-    return {
-      program_active: row.program_active === true,
-      referrer_reward_cents: row.referrer_reward_cents,
-      referee_discount_cents: row.referee_discount_cents,
-      require_service_completion: row.require_service_completion === true,
-    };
-  } catch (err) {
-    logger.warn(`[sms-shadow] referral settings lookup failed (${err.message}); omitting the referral fact`);
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-// The referral-credit cents a reply may quote RIGHT NOW (fresh read, like
-// billing at send time): used by the draft-time amount guard and by
-// sms-amount-recheck. [] on any failure or an inactive program, so nothing is
-// authorized. Not gate-checked here — callers pass byMeaning explicitly.
-async function fetchReferralCreditCents() {
-  let timer = null;
-  try {
-    const { getLiveSettings } = require('./referral-engine');
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('referral settings timeout')), OPEN_TIMES_TIMEOUT_MS);
-    });
-    return referralCreditCents(await Promise.race([getLiveSettings(), timeout]));
-  } catch (err) {
-    logger.warn(`[sms-shadow] referral credit lookup failed (${err.message}); authorizing no referral amount`);
-    return [];
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 // The shared compliance predicate (AGENTS.md "Compliance language on any
@@ -1059,7 +1020,6 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   const text = String(reply || '');
   // Gate on: only payments that actually went through back an acknowledgement.
   const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const referralCents = Array.isArray(opts.referralCents) ? opts.referralCents : [];
   const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
   const amountsIn = (t) => (t.match(AMOUNT_MASK_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
   // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
@@ -1102,15 +1062,6 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     if (!amounts.length) continue;
     const owed = AMOUNT_OWED_RE.test(masked);
     const ack = PAYMENT_ACK_RE.test(masked);
-    // COMPANY FACTS referral credit: the LIVE referral-program amounts
-    // (opts.referralCents, from referral_program_settings; empty when the
-    // program is inactive or the read failed, so nothing is authorized) are
-    // allowed ONLY in a clause that carries the literal term "referral
-    // credit" — never on a bare "credit" or on the word "referral" alone.
-    // Never as an owed/paid figure either: a clause that also reads as owed
-    // or an acknowledgement falls through to the ordinary binding below.
-    if (!owed && !ack && REFERRAL_TERM_RE.test(masked)
-        && referralCents.length && amounts.every((a) => referralCents.includes(a))) continue;
     if (owed === ack) return true;
     const allowed = owed ? owedCents : paidCents;
     if (amounts.some((a) => !allowed.has(a))) return true;
@@ -1436,15 +1387,17 @@ function buildFactsBlock(context, extras = {}) {
   // COMPANY FACTS (owner rulings 2026-09-29/30): owner-approved company
   // knowledge, gate-on only, ordinary per-draft facts the verifier grounds
   // against like any other section. '' gate-off (byte-identical).
-  // The per-draft lines follow the static section: the LIVE referral program
-  // (extras.referralSettings — fetchReferralSettings; absent/inactive renders
-  // nothing) and the re-service app-booking line, only while the FREE
-  // RE-SERVICE fact above is positive AND self-serve booking is on.
+  // The re-service app-booking line follows the static section, only while
+  // the FREE RE-SERVICE fact above is positive AND the customer can actually
+  // open the booking page: self-serve on and a reservice_token on file (the
+  // portal schedule payload, routes/schedule.js, withholds the URL without
+  // one). extras.reserviceAppBookable is resolved upstream with the lanes.
   const reserviceBookable = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
     && Array.isArray(extras.reserviceLanes) && extras.reserviceLanes.length > 0
+    && extras.reserviceAppBookable === true
     && require('../config/feature-gates').isEnabled('reserviceSelfServe');
   const companyFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? `${renderCompanyFactsSection()}${[referralFactLine(extras.referralSettings), reserviceBookable ? reserviceBookingLine() : ''].filter(Boolean).map((l) => `${l}\n`).join('')}`
+    ? `${renderCompanyFactsSection()}${reserviceBookable ? `${reserviceBookingLine()}\n` : ''}`
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
@@ -1997,8 +1950,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     });
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
-  const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
-  const referralSettings = presetFactsBlock ? null : await fetchReferralSettings();
+  const reserviceState = presetFactsBlock ? null : await fetchReserviceState({ customerId: context?.customer?.id || null });
+  const reserviceLanes = reserviceState ? reserviceState.lanes : null;
+  const reserviceAppBookable = reserviceState ? reserviceState.hasToken === true : false;
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -2011,7 +1965,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, referralSettings, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceAppBookable, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -2431,10 +2385,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // The whitelist itself (authoritative values only, never the thread text
     // the facts block also carries; dues included) is replyQuotesUngroundedAmount
     // above — shared with the estimate-review lane since Codex r3.
-    // Live referral-credit amounts (fresh read, same as the send-time recheck).
-    const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context, {
-      referralCents: gateEnvValue('GATE_SMS_REAL_ANSWERS') ? await fetchReferralCreditCents() : [],
-    });
+    const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context);
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }
@@ -2615,6 +2566,7 @@ module.exports = {
   DRAFTER,
   PROMPT_VERSION,
   REAL_ANSWERS_PROMPT_VERSION,
+  REAL_ANSWERS_VERSION_FAMILY,
   currentPromptVersion,
   VERIFY_ENABLED,
   MAX_REVISIONS,
@@ -2644,8 +2596,7 @@ module.exports = {
   liveServiceType,
   serviceIdentityFor,
   fetchReserviceLanes,
-  fetchReferralSettings,
-  fetchReferralCreditCents,
+  fetchReserviceState,
   reserviceFactLine,
   validateReserviceOffer,
   validateComplianceCopy,
