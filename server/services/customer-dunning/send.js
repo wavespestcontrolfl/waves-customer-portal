@@ -190,8 +190,10 @@ async function stampNeverContacted(ledger, on, database = db) {
         .whereRaw("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'never_contacted')")
         .update({ metadata: database.raw("metadata - 'never_contacted'") });
     }
+    return true;
   } catch (err) {
     logger.warn(`[customer-dunning] never_contacted stamp failed for ledger ${ledger.id}: ${err.message}`);
+    return false;
   }
 }
 
@@ -239,7 +241,13 @@ async function deliverEmail(ctx, ledger, { recipient, to }) {
 async function sendEmailLeg(ctx, ledger) {
   // Every attempt starts clean: an earlier refusal's stamp must not outlive a
   // retry that reaches the customer, whatever the channel selection.
-  await stampNeverContacted(ledger, false);
+  const cleared = await stampNeverContacted(ledger, false);
+  // A stale flag that cannot be removed would leave a DELIVERED row excluded from
+  // the collections frequency window for good: do not send. A definite,
+  // retryable non-send, like any other failure before the provider.
+  if (!cleared && ledger.metadata?.never_contacted === true) {
+    return { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'NEVER_CONTACTED_CLEAR_FAILED' };
+  }
   const who = await resolveEmailRecipient(ctx);
   const result = who.refusal || await deliverEmail(ctx, ledger, who);
   // Only the decision to ADD the stamp depends on default channels: a definite

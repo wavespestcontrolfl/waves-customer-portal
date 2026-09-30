@@ -815,6 +815,181 @@ describe('shadow runs the live pre-send guards (R2-1)', () => {
   });
 });
 
+describe('shadow evaluates the collections policy before logging a send (R3-1)', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  const openSchedule = [{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }];
+  const shadow = async () => {
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    const database = shadowDb(openSchedule);
+    await Runner.shadowRun(NOW, { database });
+    return database;
+  };
+  const untouched = (database) => {
+    expect(database.writes).toEqual([]);
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    expect(ContactLedger.claimAttempt).not.toHaveBeenCalled();
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
+  };
+
+  test('a recent contact denies every channel: would HOLD on COLLECTIONS_POLICY, naming the channels; nothing is reserved or written', async () => {
+    mockPolicy.mockResolvedValue({ allowed: false, durable: false });
+    untouched(await shadow());
+    expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=COLLECTIONS_POLICY denied=email\+sms/);
+    expect(lines()).not.toMatch(/would send/);
+    // asked exactly as the live attempt asks: the quoted invoices, this step's own rows excluded
+    expect(mockPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: CUSTOMER_ID, purpose: 'late_payment', invoiceIds: ['inv-a', 'inv-b', 'inv-c'], detail: true, source: 'invoice_followups_customer',
+    }));
+  });
+
+  test('a partial denial is a would-send for the allowed channels, naming the denied one', async () => {
+    mockPolicy.mockImplementation(async ({ channel }) => (channel === 'email' ? { allowed: true } : { allowed: false }));
+    untouched(await shadow());
+    expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder kind=multi members=3 total_cents=\d+ denied=sms/);
+  });
+
+  test('incomplete debt evidence holds the whole step, like the live attempt', async () => {
+    mockPolicy.mockResolvedValue({ allowed: true, balanceIncomplete: 'payer read failed' });
+    untouched(await shadow());
+    expect(lines()).toMatch(/would hold .* reason=COLLECTIONS_POLICY/);
+  });
+
+  test('a durable denial on the only owed leg, with a sibling already delivered, settles on the waiver (as live), and this step\'s own rows are excluded from the policy read', async () => {
+    mockLedger.push({
+      id: 'pre-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-e',
+      metadata: { notificationEventKey: 'customer-dunning:s-open:1:d60_reminder', delivered: true, selectedChannels: ['email', 'sms'] },
+    });
+    mockPolicy.mockResolvedValue({ allowed: false, durable: true });
+    untouched(await shadow());
+    expect(lines()).toMatch(/SHADOW would settle .* reason=policy_waived/);
+    expect(mockPolicy).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms', excludeLedgerIds: ['pre-email'] }));
+  });
+
+  test('policy allows everything (gate off, or nothing recent): the send verdict is unchanged, with no denied field', async () => {
+    mockPolicy.mockResolvedValue({ allowed: true });
+    untouched(await shadow());
+    expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder kind=multi members=3 total_cents=\d+$/m);
+    expect(lines()).not.toMatch(/denied=/);
+  });
+});
+
+describe('never_contacted must be cleared before a retry sends (R3-2)', () => {
+  test('a clear that fails leaves the stale flag: NO provider call, a retryable not-sent, the reservation reopened; the next run clears it and sends', async () => {
+    customer.phone = null;
+    prefs = undefined; // default channels: the refusal is stamped never_contacted
+    mockLoadContext.mockResolvedValueOnce({ error: mockBlocked('BILLING_EMAIL_RECHECK_FAILED', 'x', { retryable: true }) });
+    await run();
+    expect(rowFor('email').metadata.never_contacted).toBe(true);
+
+    const db = require('../models/db');
+    const impl = db.getMockImplementation();
+    // reads: recover-first progress (1), sendReminderChannels' progress (2); the clear (3) fails
+    db.mockImplementationOnce(impl); db.mockImplementationOnce(impl); db.mockImplementationOnce(() => { throw new Error('ledger update down'); });
+    mockSendTemplate.mockClear();
+    const out = await run();
+    expect(out.outcome).toBe('held');
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockEmailMessages).toHaveLength(0);
+    expect(rowFor('email').metadata.send_failed).toBe(true);
+    expect(rowFor('email').metadata.never_contacted).toBe(true); // still there, the row is not delivered
+
+    expect((await run()).outcome).toBe('advanced'); // the clear works: flag gone, then sent
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(rowFor('email').metadata.never_contacted).toBeUndefined();
+    expect(rowFor('email').metadata.delivered).toBe(true);
+  });
+
+  test('a failed clear with NO stale flag on the row does not block the send', async () => {
+    customer.phone = null;
+    const db = require('../models/db');
+    const impl = db.getMockImplementation();
+    db.mockImplementationOnce(impl); db.mockImplementationOnce(impl); db.mockImplementationOnce(() => { throw new Error('ledger update down'); });
+    expect((await run()).outcome).toBe('advanced');
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a changed set is planned again before the second attempt (R3-3)', () => {
+  const full = () => makeSet(['inv-a', 'inv-b', 'inv-c']);
+  // the runner's own resolves carry `now`; the boundary's do not. `runnerSets[n]` is what the runner sees on its nth resolve;
+  // the boundary always sees `boundarySet`, so the first attempt (rendered from the initial set) is refused.
+  const scriptSets = (runnerSets, boundarySet) => {
+    let n = 0;
+    mockResolve.mockImplementation(async (_id, opts) => {
+      if (!opts?.now) return boundarySet;
+      const set = runnerSets[Math.min(n, runnerSets.length - 1)];
+      n += 1;
+      return set;
+    });
+  };
+
+  // "sent" = accepted by the provider; a vetoed first attempt still CALLS the mocks
+  const smsAccepted = async () => (await Promise.all(mockSendMessage.mock.results.map((r) => r.value))).filter((r) => r?.sent === true);
+  const acceptedBodies = async () => Promise.all(mockSendMessage.mock.results.map((r) => r.value)).then((all) => all.map((r, i) => (r?.sent === true ? mockSendMessage.mock.calls[i][0].body : null)).filter(Boolean));
+
+  test('an OLDER invoice that becomes eligible catches the stage up: the second attempt sends the caught-up step, and the schedule advances from it', async () => {
+    setup({ stepIndex: 3, sentDaysAgo: 30 });
+    memberSeqRows = [
+      ...rowsFor(['inv-a'], 65, 3),
+      { ...rowsFor(['inv-b'], 30, 3)[0] }, { ...rowsFor(['inv-c'], 29, 3)[0] },
+    ];
+    const initial = makeSet(['inv-b', 'inv-c']);
+    scriptSets([initial, full()], full());
+    const out = await run();
+    expect(out.outcome).toBe('advanced');
+    expect(Schedule.writeStage).toHaveBeenCalledTimes(1);
+    expect(Schedule.writeStage).toHaveBeenCalledWith(expect.objectContaining({ id: SCHEDULE_ID }), 4, expect.anything());
+    // the first attempt (old stage, two invoices) was vetoed at the boundary; only the re-planned one was accepted
+    expect(mockEmailMessages).toHaveLength(1);
+    expect(mockEmailMessages[0].template_key).toBe('invoice.followup_combined_60_day');
+    expect(JSON.parse(mockEmailMessages[0].payload_snapshot).invoice_count).toBe('3');
+    expect(await acceptedBodies()).toEqual([expect.stringContaining('SMS[invoice_followup_combined_60day] 3 ')]);
+    expect(Schedule.advance.mock.calls[0][0]).toMatchObject({ step_index: 4 });
+    expect(mockLedger.every((r) => r.metadata.notificationEventKey.endsWith(':d60_reminder') || r.metadata.notificationEventKey.endsWith(':d30_final'))).toBe(true);
+  });
+
+  test('multi -> single: the second attempt uses the SINGLE variant\'s template availability, not the multi variant\'s', async () => {
+    mockLoadTemplate.mockImplementation(async (key) => (String(key).startsWith('invoice.followup_combined')
+      ? { template: { status: 'active' }, activeVersion: { id: 'v' } } : null)); // only the combined email exists
+    const single = makeSet(['inv-a']);
+    scriptSets([full(), single], single);
+    const out = await run(); // default channels: email + text
+    expect(out.outcome).toBe('advanced');
+    expect(mockEmailMessages).toHaveLength(0); // the single-invoice email template is not available: never sent
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1); // the vetoed first attempt only
+    expect(await acceptedBodies()).toEqual([expect.stringContaining('SMS[invoice_followup_60day]')]); // the single text
+  });
+
+  test('a re-plan that stops (no channel left for the new variant) sends NOTHING more and applies the stop', async () => {
+    prefs = { invoice_channels: ['email'] };
+    mockLoadTemplate.mockImplementation(async (key) => (String(key).startsWith('invoice.followup_combined')
+      ? { template: { status: 'active' }, activeVersion: { id: 'v' } } : null));
+    const single = makeSet(['inv-a']);
+    scriptSets([full(), single], single);
+    const out = await run();
+    expect(out).toMatchObject({ outcome: 'paused', reason: 'no_reachable_channel' });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1); // the vetoed first attempt; the re-plan sent nothing more
+    expect(mockEmailMessages).toHaveLength(0);
+    expect(mockLedger.some((r) => r.metadata.delivered === true)).toBe(false);
+    expect(Schedule.advance).not.toHaveBeenCalled();
+  });
+
+  test('a re-plan that finds a hold or an empty set applies it and sends nothing', async () => {
+    scriptSets([full(), makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'member_paused' })], makeSet(['inv-a', 'inv-b'], { totalCents: 1, digest: 'other' }));
+    expect(await run()).toMatchObject({ outcome: 'held', reason: 'member_paused' });
+    expect(await smsAccepted()).toEqual([]);
+    expect(mockEmailMessages).toHaveLength(0);
+    expect(mockSendMessage).toHaveBeenCalledTimes(1); // no second attempt
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('a delivery older than the progress window is still a delivery, and completes what it NAMED (R2-2 / A2)', () => {
   const crypto = require('crypto');
   const finalKey = `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`;

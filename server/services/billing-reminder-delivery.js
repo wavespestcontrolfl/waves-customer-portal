@@ -125,6 +125,25 @@ async function restoredDelivery(entry, channel) {
   }
 }
 
+// The legs an episode still owes, and the collections-policy verdict for each. Both
+// are READS (collectionsChannelPermitted consults the contact policy and writes
+// nothing), shared with the customer-dunning shadow run so it judges a send by
+// exactly what the live attempt will.
+function pendingReminderChannels(channels, delivered, resolved) {
+  return ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
+    && !delivered.has(channel) && !resolved.has(channel));
+}
+
+function reminderPolicyVerdicts({
+  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries,
+}, pending) {
+  return Promise.all(pending.map((channel) => collectionsChannelPermitted({
+    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), source, logTag: 'billing-reminder',
+    invoiceIds: policyInvoiceIds ?? invoiceIds,
+    detail: true,
+  })));
+}
+
 // `send` receives the leg's reservation so a producer can hand its ledger id
 // to a deferred replay that must re-check the collections rail.
 async function sendLeg(send, channel, entry) {
@@ -190,13 +209,10 @@ async function sendReminderChannels({
   const deliveredNow = [];
   const restored = []; // legs found already delivered by the keyed reservation, with what it recorded
   const results = {};
-  const pending = ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
-    && !delivered.has(channel) && !resolved.has(channel));
-  const permitted = await Promise.all(pending.map((channel) => collectionsChannelPermitted({
-    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), source, logTag: 'billing-reminder',
-    invoiceIds: policyInvoiceIds ?? invoiceIds,
-    detail: true,
-  })));
+  const pending = pendingReminderChannels(channels, delivered, resolved);
+  const permitted = await reminderPolicyVerdicts({
+    customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries,
+  }, pending);
   // Partial debt evidence cannot authorize a leg or settle a restored waiver.
   // Keep the entire pending episode retryable before any delivery mutation.
   if (permitted.some((verdict) => verdict?.balanceIncomplete)) {
@@ -267,4 +283,5 @@ async function settleEpisode(channels, { delivered, resolved, waived }, rowIds) 
 
 module.exports = {
   reminderProgress, sendReminderChannels, isTerminalEmailRefusal, verdictAllows, verdictDurablyDenied,
+  pendingReminderChannels, reminderPolicyVerdicts,
 };

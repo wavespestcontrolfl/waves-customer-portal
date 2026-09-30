@@ -25,7 +25,9 @@ const logger = require('../logger');
 const Followups = require('../invoice-followups');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 const { customerOnAutopay } = require('../autopay-eligibility');
-const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
+const {
+  reminderProgress, sendReminderChannels, verdictAllows, verdictDurablyDenied, pendingReminderChannels, reminderPolicyVerdicts,
+} = require('../billing-reminder-delivery');
 const { dunningCustomerScheduleAllowlist } = require('../../config/feature-gates');
 const { OPEN_STATUSES, SOURCE, eventKey } = require('./constants');
 const { resolveDunnableSet } = require('./balance-set');
@@ -206,6 +208,7 @@ async function decideRecovery(run) {
   if (!run.step) return decision('close', 'no_step', { closeReason: 'released_prereq_off' });
   run.eventKey = eventKey(run.schedule, run.step.id);
   const event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey);
+  run.progressEvent = event || null; // the shadow policy check needs this step's rows
   if (!event || event.delivered.size === 0) return event?.complete ? decision('pause', 'all_channels_terminal') : null;
   run.priorEvent = event; // a partial delivery from an earlier tick, kept in case the post-send read fails
   // Delivered before: settle from the ledger. No render, no set read.
@@ -348,15 +351,21 @@ function attemptSend(run, set) {
 /**
  * Send; when the boundary saw the set change and nothing was delivered,
  * re-resolve and send ONCE more in this tick (the failed leg was
- * markSendFailed, so claimAttempt re-quotes under the same key). A second
- * mismatch is left to the disposition (held).
+ * markSendFailed, so claimAttempt re-quotes under the same key). The fresh set
+ * is PLANNED again first — the stage it goes out at (an older invoice that
+ * became eligible catches the schedule up), its variant's templates and its
+ * channels — through the same decideSet/applyStage the first attempt used; a
+ * stop there (hold, pause, close, a stale stage write) ends the tick with
+ * nothing more sent. A second mismatch is left to the disposition (held).
+ * Returns { result, set } or { stop } (a decision or an outcome).
  */
 async function sendWithRerender(run, set) {
   const first = await attemptSend(run, set);
   if (!setChanged(first) || first.deliveredNow.length) return { result: first, set };
   const fresh = await resolveDunnableSet(run.schedule.customer_id, { database: run.database, now: run.now });
   run.rows = null; // the rows narrowed to the first set no longer describe the send
-  if (!sendable(fresh)) return { result: first, set: fresh, ended: true };
+  const stop = await decideSet(run, fresh) || await applyStage(run);
+  if (stop) return { stop };
   return { result: await attemptSend(run, fresh), set: fresh };
 }
 
@@ -408,12 +417,12 @@ async function dispose(run, facts) {
 
 async function sendPhase(run) {
   const set = await resolveDunnableSet(run.schedule.customer_id, { database: run.database, now: run.now });
-  const stop = await decideSet(run, set);
-  if (stop) return applyDecision(run, stop);
+  const blocked = await decideSet(run, set);
+  if (blocked) return applyDecision(run, blocked);
   const staged = await applyStage(run);
   if (staged) return staged;
-  const { result, set: finalSet, ended } = await sendWithRerender(run, set);
-  if (ended) return applyDecision(run, decideEndOfSet(finalSet));
+  const { result, stop } = await sendWithRerender(run, set);
+  if (stop) return stop.kind ? applyDecision(run, stop) : stop;
   return dispose(run, await deliveryFacts(run, result));
 }
 
@@ -484,6 +493,35 @@ function allowlisted(rows) {
 }
 
 /**
+ * The collections-policy half of a send (what sendReminderChannels asks per owed
+ * channel before it reserves anything), as a pure read: which channels the live
+ * attempt would send and which it would deny. No reservation, claim or waiver is
+ * written (persistPolicyWaivers is never reached). Every channel denied is a
+ * hold on COLLECTIONS_POLICY (or, when the denials are durable and a sibling
+ * already delivered, the step settles on the waiver, as it does live).
+ */
+async function decideShadowPolicy(run, set) {
+  const event = run.progressEvent;
+  const delivered = event?.delivered || new Set();
+  const pending = pendingReminderChannels(run.sendChannels, delivered, event?.resolved || new Set());
+  run.policyDenied = [];
+  if (!pending.length) return null;
+  const memberIds = set.members.map((m) => m.invoice_id);
+  const verdicts = await reminderPolicyVerdicts({
+    customerId: run.schedule.customer_id, invoiceId: null, invoiceIds: memberIds, policyInvoiceIds: memberIds,
+    source: SOURCE, purpose: 'late_payment', entries: event?.entries || [],
+  }, pending);
+  if (verdicts.some((v) => v?.balanceIncomplete)) return decision('hold', 'COLLECTIONS_POLICY', { denied: pending });
+  const denied = pending.filter((_c, i) => !verdictAllows(verdicts[i]));
+  if (denied.length === pending.length) {
+    const waivable = delivered.size > 0 && denied.every((channel) => verdictDurablyDenied(verdicts[pending.indexOf(channel)]));
+    return waivable ? decision('settle', 'policy_waived', { denied }) : decision('hold', 'COLLECTIONS_POLICY', { denied });
+  }
+  run.policyDenied = denied; // a partial send: the allowed channels go, these do not
+  return null;
+}
+
+/**
  * What the live run would do with a schedule: the SAME read-only guards
  * runClaimed runs (customer, preferences, recover-first, autopay, then the set,
  * stage and template checks), and only their decide halves — nothing is applied.
@@ -493,13 +531,17 @@ function allowlisted(rows) {
 async function judgeShadowSchedule(schedule, set, { now, database, due = null }) {
   const run = { schedule, now, database, operatorInitiated: false, claimStamp: null, readOnly: true };
   const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
-  const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAutopay(run) || await decideSet(run, set);
+  const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAutopay(run)
+    || await decideSet(run, set) || await decideShadowPolicy(run, set);
   if (!stop) {
-    line('send', { ...fields, step: run.step?.id, kind: set.kind, members: set.members.length, total_cents: set.totalCents, ...(due ? { due: iso(due) } : {}) });
+    line('send', {
+      ...fields, step: run.step?.id, kind: set.kind, members: set.members.length, total_cents: set.totalCents,
+      ...(run.policyDenied?.length ? { denied: run.policyDenied.join('+') } : {}), ...(due ? { due: iso(due) } : {}),
+    });
     return 'send';
   }
   const verb = { hold: 'hold', autopay_hold: 'hold', pause: 'pause', close: 'close', settle: 'settle' }[stop.kind];
-  line(verb, { ...fields, reason: stop.reason });
+  line(verb, { ...fields, reason: stop.reason, ...(stop.denied?.length ? { denied: stop.denied.join('+') } : {}) });
   return verb;
 }
 
