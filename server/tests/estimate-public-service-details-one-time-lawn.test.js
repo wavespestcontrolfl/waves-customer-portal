@@ -169,6 +169,14 @@ describe('estimateServiceDetailsScope', () => {
     expect(nothing.lawnScope).toBeNull();
   });
 
+  test('mechanicalOnly is true only when every one-time lawn row applies no product (Codex r7 P1)', async () => {
+    const scope = async (rows) => (await estimateServiceDetailsScope(estimateRow(oneTime(rows)))).mechanicalOnly;
+    expect(await scope([LAWN_ROW('plugging', 'Plugging'), LAWN_ROW('top_dressing', 'Top dressing')])).toBe(true);
+    expect(await scope([LAWN_ROW('dethatching', 'Dethatching')])).toBe(true);
+    expect(await scope([LAWN_ROW('plugging', 'Plugging'), LAWN_ROW('one_time_lawn', 'One-Time Lawn Treatment')])).toBe(false);
+    expect(await scope([LAWN_ROW('one_time_lawn', 'One-Time Lawn Treatment')])).toBe(false);
+  });
+
   test('a $0 or unpriced one-time lawn row does not count (not on the customer page)', async () => {
     const { keys } = await estimateServiceDetailsScope(estimateRow(oneTime([{ service: 'plugging', label: 'Lawn plugging', price: 0 }])));
     expect(keys.size).toBe(0);
@@ -182,7 +190,7 @@ describe('GET /:token/service-details/:serviceKey/pdf', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/pdf');
     const { buildServiceDetailsContent } = require('../services/estimate-service-details');
-    expect(buildServiceDetailsContent).toHaveBeenCalledWith('lawn_care', expect.objectContaining({ token: TOKEN }), { lawnScope: 'one_time' });
+    expect(buildServiceDetailsContent).toHaveBeenCalledWith('lawn_care', expect.objectContaining({ token: TOKEN }), { lawnScope: 'one_time', mechanicalOnly: true });
   });
 
   test('still 404s every guide the estimate does not carry', async () => {
@@ -211,7 +219,7 @@ describe('POST /:token/service-details/send', () => {
     expect(sendTemplate).toHaveBeenCalledTimes(1);
     expect(sendTemplate.mock.calls[0][0].triggerEventId).toMatch(/:lawn_care$/);
     const { buildServiceDetailsContent } = require('../services/estimate-service-details');
-    expect(buildServiceDetailsContent).toHaveBeenCalledWith('lawn_care', expect.objectContaining({ token: TOKEN }), { lawnScope: 'one_time' });
+    expect(buildServiceDetailsContent).toHaveBeenCalledWith('lawn_care', expect.objectContaining({ token: TOKEN }), { lawnScope: 'one_time', mechanicalOnly: false });
   });
 
   test('the one-time hint only keys the lawn guide: another guide keeps one idempotency key (Codex r3 P2)', async () => {

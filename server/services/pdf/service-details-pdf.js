@@ -620,19 +620,23 @@ function renderServiceDetailsPdf(content) {
       bullets(doc, content.compliance.bullets);
     }
 
-    if (content.productImages) productImageRow(doc, content.productImages);
+    // A guide for work that applies no product (mechanical one-time lawn
+    // jobs: plugging, dethatching, top dressing) carries showProducts:false.
+    if (content.showProducts !== false) {
+      if (content.productImages) productImageRow(doc, content.productImages);
 
-    sectionHeading(doc, 'Products we may use');
-    if (Array.isArray(content.products) && content.products.length) {
-      doc.font('Helvetica').fontSize(9.5).fillColor(MUTED)
-        .text('Product selection varies by pest, property, season, and treatment area — not every listed product is applied at every property. Your service report identifies the exact products used during your visit. Every pesticide product below is EPA-registered and applied per its label.', L, doc.y, { width: W, lineGap: 1 });
-      doc.moveDown(0.6);
-      for (const product of content.products) productBlock(doc, product);
-    } else {
-      doc.font('Helvetica').fontSize(10).fillColor(BODY).text(
-        `Product selection is matched to your property at service time. For the current product list — including labels and safety data sheets — visit ${WAVES_WEBSITE_HOST}/products-and-safety/ or ask us any time.`,
-        L, doc.y, { width: W, lineGap: 1.5 },
-      );
+      sectionHeading(doc, 'Products we may use');
+      if (Array.isArray(content.products) && content.products.length) {
+        doc.font('Helvetica').fontSize(9.5).fillColor(MUTED)
+          .text('Product selection varies by pest, property, season, and treatment area — not every listed product is applied at every property. Your service report identifies the exact products used during your visit. Every pesticide product below is EPA-registered and applied per its label.', L, doc.y, { width: W, lineGap: 1 });
+        doc.moveDown(0.6);
+        for (const product of content.products) productBlock(doc, product);
+      } else {
+        doc.font('Helvetica').fontSize(10).fillColor(BODY).text(
+          `Product selection is matched to your property at service time. For the current product list — including labels and safety data sheets — visit ${WAVES_WEBSITE_HOST}/products-and-safety/ or ask us any time.`,
+          L, doc.y, { width: W, lineGap: 1.5 },
+        );
+      }
     }
 
     // Closing CTA — after the full picture (coverage, safety, products).

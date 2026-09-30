@@ -251,6 +251,26 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     expect(hits).toEqual([]);
   });
 
+  test('a mechanical-only one-time guide carries no product sections; a one-time treatment keeps them (Codex r7 P1)', async () => {
+    db.__rows.products = [PRODUCT];
+    db.__rows.usage = [{ product_id: 'p1', service_pattern: 'lawn' }];
+    const mechanical = await buildServiceDetailsContent('lawn_care', {}, { lawnScope: 'one_time', mechanicalOnly: true });
+    expect(mechanical.showProducts).toBe(false);
+    expect(mechanical.products).toEqual([]);
+    expect(mechanical.productImages).toBeNull();
+    const treatment = await buildServiceDetailsContent('lawn_care', {}, { lawnScope: 'one_time', mechanicalOnly: false });
+    expect(treatment.showProducts).toBe(true);
+    expect(treatment.productImages).not.toBeNull();
+    // The flag only applies to the one-time guide.
+    const recurring = await buildServiceDetailsContent('lawn_care', {}, { mechanicalOnly: true });
+    expect(recurring.showProducts).toBe(true);
+    // The PDF omits the product section entirely.
+    const pdf = await renderServiceDetailsPdf(mechanical);
+    expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
+    const withProducts = await renderServiceDetailsPdf({ ...mechanical, showProducts: true });
+    expect(pdf.length).toBeLessThan(withProducts.length);
+  }, 30000);
+
   test('the one-time variant drops every recurring-program promise (Codex r1 P1)', async () => {
     const lawn = await withBermudaGate('true', () => buildServiceDetailsContent('lawn_care', {}, { lawnScope: 'one_time' }));
     expect(lawn.systemBox.heading).toBe('Your lawn service at a glance');

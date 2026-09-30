@@ -1028,6 +1028,9 @@ function resolveSections(sections, { lawnScope, bermuda }) {
 
 // options.lawnScope: 'one_time' when the estimate's only lawn work is a
 // one-time lawn row (the route decides); anything else is the recurring guide.
+// options.mechanicalOnly (one-time only): every one-time lawn row is plugging,
+// dethatching, or top dressing — work that applies no product — so the guide
+// carries no product images and no "Products we may use" section.
 async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {}) {
   const baseCopy = SERVICE_DETAILS_COPY[serviceKey];
   if (!baseCopy) return null;
@@ -1044,7 +1047,8 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
   // marker never reaches renderers.
   const stationOwnership = estimateStationOwnership(estimate);
   const ownershipMatches = (marker) => marker == null || marker === stationOwnership;
-  const products = await fetchRegistryProducts(serviceKey);
+  const showProducts = !(lawnScope === 'one_time' && options.mechanicalOnly === true);
+  const products = showProducts ? await fetchRegistryProducts(serviceKey) : [];
   const documentation = copy.documentation || copy.documentationOverride || {
     heading: DOCUMENTATION_SECTION.heading,
     bullets: serviceKey === 'lawn_care'
@@ -1099,8 +1103,9 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
     // hasn't approved for the public registry can't leak through a caption.
     // Generic imagery (no `product` key: the surfactant, fertilizer bags)
     // always renders.
+    showProducts,
     productImages: (() => {
-      if (!copy.productImages) return null;
+      if (!showProducts || !copy.productImages) return null;
       const registryNames = products
         .map((p) => `${p.name || ''} ${p.common_name || ''}`.toLowerCase());
       const images = (copy.productImages.images || []).filter((img) => !img.product

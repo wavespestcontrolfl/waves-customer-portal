@@ -26559,6 +26559,8 @@ const serviceDetailsSendLimiter = rateLimit({
 // one-time variant (no visit count, re-service, or program promises). Keep in
 // step with the client's ONE_TIME_LAWN_GUIDE_SERVICES (EstimateViewPage.jsx).
 const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
+// Mechanical/material lawn work that applies no product (prep-guide-sender.js).
+const MECHANICAL_LAWN_GUIDE_SERVICES = new Set(['plugging', 'dethatching', 'top_dressing']);
 
 // The packet only exists for services actually ON this estimate: the
 // recurring lines, plus 'lawn_care' when the estimate carries a one-time lawn
@@ -26572,7 +26574,9 @@ const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'deth
 // toggle estimate, one-time mode) serves the one-time variant. The hint only
 // picks the variant when a one-time lawn row is actually present — it never
 // widens `keys`, and recurring stays the default.
-// Returns { keys, lawnScope } — lawnScope is 'recurring', 'one_time', or null.
+// Returns { keys, lawnScope, mechanicalOnly } — lawnScope is 'recurring',
+// 'one_time', or null; mechanicalOnly = every one-time lawn row applies no
+// product (the guide then omits the product sections).
 async function estimateServiceDetailsScope(estimate, { preferOneTime = false } = {}) {
   const estData = parseEstimateDataSafe(estimate);
   const estResult = estData?.result || estData?.engineResult || estData || {};
@@ -26580,8 +26584,8 @@ async function estimateServiceDetailsScope(estimate, { preferOneTime = false } =
     recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
   );
   const recurringLawn = keys.has('lawn_care');
-  if (recurringLawn && !preferOneTime) return { keys, lawnScope: 'recurring' };
-  let oneTimeLawn = false;
+  if (recurringLawn && !preferOneTime) return { keys, lawnScope: 'recurring', mechanicalOnly: false };
+  let lawnRows = [];
   try {
     let breakdown = null;
     try {
@@ -26589,13 +26593,13 @@ async function estimateServiceDetailsScope(estimate, { preferOneTime = false } =
     } catch { /* replay failed: fall back to the stored breakdown */ }
     if (!breakdown) breakdown = normalizeOneTimeBreakdown(estData);
     const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
-    oneTimeLawn = items.some((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service));
+    lawnRows = items.filter((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service));
   } catch { /* malformed one-time data: no widening (fail closed) */ }
-  if (oneTimeLawn) {
+  if (lawnRows.length) {
     keys.add('lawn_care');
-    return { keys, lawnScope: 'one_time' };
+    return { keys, lawnScope: 'one_time', mechanicalOnly: lawnRows.every((item) => MECHANICAL_LAWN_GUIDE_SERVICES.has(item.service)) };
   }
-  return { keys, lawnScope: recurringLawn ? 'recurring' : null };
+  return { keys, lawnScope: recurringLawn ? 'recurring' : null, mechanicalOnly: false };
 }
 
 router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
@@ -26626,7 +26630,7 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope });
+    const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
     const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
     const buffer = await renderServiceDetailsPdf(content);
     res.set('Content-Type', 'application/pdf');
@@ -26763,7 +26767,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
 
     if (channel === 'email') {
       if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
-      const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope });
+      const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
       if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
