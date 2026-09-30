@@ -10,7 +10,7 @@ jest.mock('../models/db', () => {
   const state = { visits: [], scheduled: [], clicked: null };
   const fn = jest.fn((table) => {
     const q = {};
-    for (const m of ['where', 'whereNotNull', 'leftJoin', 'select', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+    for (const m of ['where', 'whereNotNull', 'whereNull', 'leftJoin', 'select', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
     q.first = jest.fn(async () => {
       if (table === 'review_requests') return state.clicked;
       // visitAnchor (review-click-guard) reads the visit's service_date.
@@ -124,6 +124,21 @@ describe('GET /review-card — tracked links only, never a send', () => {
     // ...and a tracked click since that visit ends it (same anchor as the guard).
     db.state.clicked = { id: 'rr-9' };
     expect((await card()).card).toBeNull();
+  });
+
+  test('an older service record does not mask a NEWER record-less visit: both sources are compared and the newest wins', async () => {
+    db.state.visits = [{ id: 'rec-mon', service_type: 'Pest Control', service_date: '2026-09-22', technician_name: 'Alex' }];
+    db.state.scheduled = [{ scheduled_service_id: 'ss-thu', service_type: 'Lawn Care', technician_name: null, scheduled_date: '2026-09-25' }];
+    const res = await card();
+    expect(res.card).toMatchObject({ serviceRecordId: null, scheduledServiceId: 'ss-thu', serviceType: 'Lawn Care' });
+  });
+
+  test('same-day visits from both sources: the later completion instant wins', async () => {
+    db.state.visits = [{ id: 'rec-am', service_type: 'Pest Control', service_date: '2026-09-25', ended_at: '2026-09-25T14:00:00Z', technician_name: 'Alex' }];
+    db.state.scheduled = [{ scheduled_service_id: 'ss-pm', service_type: 'Lawn Care', technician_name: null, scheduled_date: '2026-09-25', check_out_time: '2026-09-25T20:00:00Z' }];
+    expect((await card()).card).toMatchObject({ scheduledServiceId: 'ss-pm' });
+    db.state.visits = [{ id: 'rec-pm', service_type: 'Pest Control', service_date: '2026-09-25', ended_at: '2026-09-25T21:00:00Z', technician_name: 'Alex' }];
+    expect((await card()).card).toMatchObject({ serviceRecordId: 'rec-pm' });
   });
 
   test('no completed visit in the window: no card', async () => {

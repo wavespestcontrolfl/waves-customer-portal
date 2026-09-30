@@ -56,39 +56,56 @@ router.get('/review-card', async (req, res, next) => {
     const propertyScope = resolvedScopePayload(scope);
     if (scope.enabled && scope.scoped && (scope.closed || !scope.property)) return res.json({ card: null, propertyScope });
 
-    let visitQuery = db('service_records')
+    // The newest completed visit in the last 7 days, from BOTH sources: a
+    // completed appointment can exist with no service record, and an older
+    // record must not mask a newer record-less visit. Same-day ties go to the
+    // later completion instant (the click guard's anchor), unknown last.
+    const windowStart = sevenDaysAgo.toISOString().split('T')[0];
+    let recordQuery = db('service_records')
       .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' })
-      .where('service_records.service_date', '>=', sevenDaysAgo.toISOString().split('T')[0])
+      .where('service_records.service_date', '>=', windowStart)
       .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select(
         'service_records.id',
         'service_records.service_type',
         'service_records.service_date',
+        'service_records.ended_at',
         'technicians.name as technician_name'
       )
       .orderBy('service_records.service_date', 'desc')
-      .limit(1); // one card at a time
-    visitQuery = applyPropertyPredicate(visitQuery, scope, 'scheduled_services');
-    let [visit] = await visitQuery;
-    // A completed appointment can exist with no service record: fall back to
-    // the newest completed scheduled visit in the same window and property
-    // scope (same status / date predicates as the click guard's anchor).
-    if (!visit) {
-      let scheduledQuery = db('scheduled_services')
-        .where({ 'scheduled_services.customer_id': req.customerId, 'scheduled_services.status': 'completed' })
-        .where('scheduled_services.scheduled_date', '>=', sevenDaysAgo.toISOString().split('T')[0])
-        .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
-        .select(
-          'scheduled_services.id as scheduled_service_id',
-          'scheduled_services.service_type',
-          'technicians.name as technician_name'
-        )
-        .orderBy('scheduled_services.scheduled_date', 'desc')
-        .limit(1);
-      scheduledQuery = applyPropertyPredicate(scheduledQuery, scope, 'scheduled_services');
-      [visit] = await scheduledQuery;
-    }
+      .limit(5);
+    recordQuery = applyPropertyPredicate(recordQuery, scope, 'scheduled_services');
+    let scheduledQuery = db('scheduled_services')
+      .where({ 'scheduled_services.customer_id': req.customerId, 'scheduled_services.status': 'completed' })
+      .where('scheduled_services.scheduled_date', '>=', windowStart)
+      .leftJoin('service_records', 'service_records.scheduled_service_id', 'scheduled_services.id')
+      .whereNull('service_records.id') // a visit WITH a record is covered above
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .select(
+        'scheduled_services.id as scheduled_service_id',
+        'scheduled_services.service_type',
+        'scheduled_services.scheduled_date',
+        'scheduled_services.actual_end_time',
+        'scheduled_services.check_out_time',
+        'scheduled_services.completed_at',
+        'technicians.name as technician_name'
+      )
+      .orderBy('scheduled_services.scheduled_date', 'desc')
+      .limit(5);
+    scheduledQuery = applyPropertyPredicate(scheduledQuery, scope, 'scheduled_services');
+    const [records, scheduled] = await Promise.all([recordQuery, scheduledQuery]);
+    const ymd = (v) => (v instanceof Date ? v.toISOString() : String(v || '')).slice(0, 10);
+    const instant = (v) => {
+      const t = v ? new Date(v).getTime() : NaN;
+      return Number.isNaN(t) ? -Infinity : t;
+    };
+    const candidates = [
+      ...(records || []).map((r) => ({ ...r, visitDate: r.service_date, completedMs: instant(r.ended_at) })),
+      ...(scheduled || []).map((r) => ({ ...r, visitDate: r.scheduled_date, completedMs: instant(r.actual_end_time || r.check_out_time || r.completed_at) })),
+    ];
+    candidates.sort((a, b) => (ymd(b.visitDate).localeCompare(ymd(a.visitDate))) || (b.completedMs - a.completedMs));
+    const visit = candidates[0] || null;
     if (!visit) return res.json({ card: null, propertyScope });
 
     // Already clicked through a tracked review link since this visit: the same
