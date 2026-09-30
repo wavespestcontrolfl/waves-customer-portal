@@ -323,6 +323,25 @@ async function terminalDeferredSummarySms(meta) {
   if (!result.ok) throw new Error('Visit summary terminal state could not be saved');
 }
 
+// The queue state a pay link may ride on: scheduled, and either unstamped or
+// under the coordinator's wait. Any other stamp (a send window hold, an error,
+// the accepted-Text marker) is somebody else's send state.
+function summaryPayLinkQueued(invoice) {
+  const { SUMMARY_TEXT_HOLD_ERROR } = require('./invoice-helpers');
+  const error = String(invoice.scheduled_send_error || '');
+  return invoice.status === 'scheduled' && (!error || error.startsWith(SUMMARY_TEXT_HOLD_ERROR.split(' ')[0]));
+}
+
+// A summary text whose provider outcome cannot be told: it may have been
+// delivered. The one rule deliverVisitCompletionSummary reads too: an explicit
+// unknown, or a mark whose pre-provider marker is gone (its process died after
+// the request may have started) past the lease.
+function summaryOutcomeAmbiguous(effect) {
+  if (effect?.status !== 'unknown_delivery') return false;
+  const stale = new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS;
+  return effect.last_error === 'provider_outcome_unknown' || (stale && !VisitGroups.isHandoffPending(effect.last_error));
+}
+
 // The one decision whether the summary text also carries the visit invoice's
 // pay link (unpaid) or receipt link (paid), so a combined stop texts the
 // customer once. Everything that could make the invoice text go to someone
@@ -348,7 +367,7 @@ async function summaryBillingLinkPlan(context, packetId, { preSchedule = false }
   if (!invoice?.token || invoice.customer_id !== visit.customer_id || invoice.payer_id || invoice.payer_statement_id) return null;
   const holder = await database('customers').where({ id: invoice.customer_id }).whereNull('deleted_at').first('phone');
   if (!holder?.phone || !sameSmsDestination(holder.phone, recipient.phone)) return null;
-  const { invoiceAmountDue, SUMMARY_TEXT_HOLD_ERROR } = require('./invoice-helpers');
+  const { invoiceAmountDue } = require('./invoice-helpers');
   if (!(invoiceAmountDue(invoice) > 0)) return null;
   const channels = require('./billing-delivery-channels').billingChannelsPayload(prefs || {});
   const textOnly = (list) => list.includes('sms') && !list.includes('push');
@@ -357,28 +376,33 @@ async function summaryBillingLinkPlan(context, packetId, { preSchedule = false }
       || !textOnly(channels.paymentConfirmationChannels)) return null;
     return { kind: 'receipt', invoiceId: invoice.id };
   }
-  const error = String(invoice.scheduled_send_error || '');
-  const queued = invoice.status === 'scheduled' && (!error || error.startsWith(SUMMARY_TEXT_HOLD_ERROR.split(' ')[0]));
-  if (!(preSchedule ? invoice.status === 'draft' : queued) || !textOnly(channels.invoiceChannels)) return null;
+  if (!(preSchedule ? invoice.status === 'draft' : summaryPayLinkQueued(invoice)) || !textOnly(channels.invoiceChannels)) return null;
   return { kind: 'pay_link', invoiceId: invoice.id };
 }
 
 // Read at the handoff under the held customer row (payer writers commit under
-// it), so a payer or billing hold that lands after the plan cannot slip a pay
-// link to the homeowner. False sends the plain summary instead. At the
-// dispatch handoff `lock` also takes the invoice row FOR UPDATE, held to the
-// end of the handoff transaction: the send queue's claim (customer row shared,
-// then the invoice row) waits behind it, so it cannot claim, or find an expired
-// wait, between this check and the stamp written at provider start. Customer
-// then invoice matches the queue's own order.
+// it), so a payer or billing hold that lands after the plan cannot slip a link
+// to the homeowner. Anything the plan would not have chosen is stale, and the
+// plain summary goes instead. At the dispatch handoff `lock` also takes the
+// rows the invoice's other senders claim FOR UPDATE, held to the end of the
+// handoff transaction: the send queue's claim (customer row shared, then the
+// invoice row) waits behind it, so it cannot claim, or find an expired wait,
+// between this check and the cover stamped at provider start; a receipt job is
+// skipped while its row is held (the drain takes rows SKIP LOCKED) and one
+// already running is stale here. Job row before invoice row, as the receipt
+// worker takes them.
 async function summaryBillingLinkLive(trx, link, visitId, { lock = false } = {}) {
+  if (lock && link.kind === 'receipt') {
+    const job = await trx('receipt_delivery_jobs').where({ invoice_id: link.invoiceId }).forUpdate().first('status');
+    if (job?.status === 'running') return false;
+  }
   const query = trx('invoices').where({ id: link.invoiceId });
-  if (lock && link.kind === 'pay_link') query.forUpdate();
+  if (lock) query.forUpdate();
   const invoice = await query.first('status', 'payer_id', 'payer_statement_id', 'receipt_sent_at', 'scheduled_send_error');
   const visit = await trx('service_visits').where({ id: visitId }).first('billing_hold');
   if (!invoice || !visit || visit.billing_hold || invoice.payer_id || invoice.payer_statement_id) return false;
   if (link.kind === 'receipt') return invoice.status === 'paid' && !invoice.receipt_sent_at;
-  return invoice.status === 'scheduled' && !/^payer_billed:/.test(String(invoice.scheduled_send_error || ''));
+  return summaryPayLinkQueued(invoice);
 }
 
 async function summaryBillingLinkText(link) {
@@ -404,6 +428,7 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
     const plainBody = `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${summaryUrl}`;
     let link = billingLink;
     let linkStale = false;
+    let receiptStampAt = null;
     const send = async () => {
       // A link that cannot be minted, or that changed by the handoff, falls
       // back to the plain summary below (the invoice's own sender covers it).
@@ -456,6 +481,14 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
             if (link?.kind === 'pay_link' && !(await InvoiceService.settleSummaryTextHold(link.invoiceId, packetId, { textCovered: true, database: trx }))) {
               throw new Error('Visit summary pay-link invoice is no longer queued');
             }
+            if (link?.kind === 'receipt') {
+              // The receipt job's Text leg stands down the same way: stamped
+              // in this transaction, under the invoice and job locks.
+              receiptStampAt = new Date();
+              if (!(await InvoiceService.markReceiptCoveredBySummaryText(link.invoiceId, { database: trx, at: receiptStampAt }))) {
+                throw new Error('Visit summary receipt was already texted');
+              }
+            }
             await onProviderStart();
             dispatched = true;
           }) }),
@@ -465,6 +498,7 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
     if (linkStale && !result.sent) {
       link = null;
       dispatched = false;
+      receiptStampAt = null;
       result = await send();
     }
     if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
@@ -487,6 +521,8 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
     }
     const retryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
     const outcome = result.sent ? 'sent' : retryable ? 'retry' : 'suppressed';
+    // A receipt cover written for a text the provider definitively refused.
+    if (receiptStampAt && outcome !== 'sent') await InvoiceService.takeBackReceiptSummaryCover(link.invoiceId, receiptStampAt);
     // The folded link rides the same commit as the sent state: a replay reads
     // it to finish the invoice side (settleSummaryBillingLink). An ambiguous
     // outcome keeps the link recorded at the claim.
@@ -509,9 +545,9 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
 async function settleSummaryBillingLink(packetId, visitId, database) {
   const InvoiceService = require('./invoice');
   const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_sms' })
-    .first('status', 'provider_id', 'sent_at', 'last_error');
+    .first('status', 'provider_id', 'sent_at', 'last_error', 'claimed_at');
   // A queued (quiet-hours) summary is the plain text: the invoice's sender covers the link.
-  const ambiguous = effect?.status === 'unknown_delivery' && effect.last_error === 'provider_outcome_unknown';
+  const ambiguous = summaryOutcomeAmbiguous(effect);
   if (!effect || !(['sent', 'suppressed', 'pending'].includes(effect.status) || ambiguous)) return;
   const folded = effect.status === 'sent' || ambiguous ? /^(pay_link|receipt):([0-9a-f-]{36})$/.exec(effect.provider_id || '') : null;
   if (folded?.[1] === 'receipt') return InvoiceService.markReceiptCoveredBySummaryText(folded[2]);
@@ -1154,8 +1190,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   // A stale mark that still carries its pre-provider marker is provably
   // unsent (the next replay reclaims it), so it stays pending, not review.
   const stale = (effect) => new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS;
-  const unknown = effects.some((effect) => effect.status === 'unknown_delivery'
-    && (effect.last_error === 'provider_outcome_unknown' || (stale(effect) && !VisitGroups.isHandoffPending(effect.last_error))));
+  const unknown = effects.some(summaryOutcomeAmbiguous);
   const pending = effects.length !== 2 || effects.some((effect) => !['sent', 'suppressed', 'unknown_delivery'].includes(effect.status)
     || (effect.status === 'unknown_delivery' && effect.last_error !== 'provider_outcome_unknown'
       && (!stale(effect) || VisitGroups.isHandoffPending(effect.last_error))));

@@ -7202,7 +7202,9 @@ const InvoiceService = {
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
         // allowClaimed). Resend-safe via the priorStatus gate.
         if (ownedDeliveryFinalized) {
-          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at
+            // The visit summary text's cover is this delivery's Text leg, not a prior delivery.
+            || (claim.invoice.sms_sent_at && claim.invoice.scheduled_send_error !== SUMMARY_TEXT_COVERED_ERROR)) });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -7971,9 +7973,16 @@ const InvoiceService = {
   // The combined-visit summary text carried this invoice's receipt link, so
   // the receipt queue's Text leg stands down (its Email is unaffected): the
   // same claim the completion text's combined receipt stamps.
-  async markReceiptCoveredBySummaryText(invoiceId) {
-    return db("invoices").where({ id: invoiceId }).whereNull("receipt_sent_at")
-      .update({ receipt_sent_at: db.fn.now(), updated_at: new Date() });
+  async markReceiptCoveredBySummaryText(invoiceId, { database = db, at = null } = {}) {
+    return database("invoices").where({ id: invoiceId }).whereNull("receipt_sent_at")
+      .update({ receipt_sent_at: at || database.fn.now(), updated_at: new Date() });
+  },
+
+  // A receipt cover written for a text the provider definitively refused: only
+  // the exact stamp this attempt wrote is taken back.
+  async takeBackReceiptSummaryCover(invoiceId, at) {
+    return db("invoices").where({ id: invoiceId, receipt_sent_at: at })
+      .update({ receipt_sent_at: null, updated_at: new Date() });
   },
 
   /**

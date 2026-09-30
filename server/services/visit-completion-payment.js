@@ -328,6 +328,11 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
         await require('./stripe').chargeInvoiceWithSavedCard(invoice.id, method.id, {
           requireAutopayForCustomerId: customer.id, requireVisitCompletionPacketId: packet.id,
           refuseWhenDunningStopped: true,
+          // The combined-visit summary text may carry this receipt's link
+          // (visit-completion-summary.js): the receipt job waits, as it does
+          // for the completion text's own combined receipt, instead of
+          // texting the classic receipt beside it. Its email still sends.
+          deferReceiptDelivery: true,
         });
         outcome = 'sent';
         reason = null;

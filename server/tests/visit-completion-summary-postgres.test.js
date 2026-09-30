@@ -4692,6 +4692,8 @@ postgres('visit summary recipient recovery', () => {
     const summaryEffect = () => mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first();
 
     afterEach(async () => {
+      await mockPg('activity_log').where({ customer_id: fixture.customerId }).del();
+      await mockPg('receipt_delivery_jobs').whereIn('invoice_id', mockPg('invoices').where({ customer_id: fixture.customerId }).select('id')).del();
       await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
       await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).del();
     });
@@ -4891,6 +4893,74 @@ postgres('visit summary recipient recovery', () => {
       const restored = await invoiceRow(invoiceId);
       expect(restored).toMatchObject({ status: 'scheduled', scheduled_send_error: null, sms_sent_at: null });
       expect(new Date(restored.scheduled_send_at).getTime()).toBeLessThanOrEqual(Date.now());
+    });
+
+    test('the receipt worker cannot text the classic receipt beside the folded one, and the receipt email still sends', async () => {
+      const invoiceId = await stop({ status: 'paid', invoice: { paid_at: new Date(), stripe_payment_intent_id: 'pi_fixture_race' } });
+      const Queue = require('../services/receipt-delivery-queue');
+      await Queue.enqueueReceiptDelivery({ invoiceId, source: 'card_on_file', stripePaymentIntentId: 'pi_fixture_race' });
+      const receiptEmail = jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail').mockResolvedValue({ ok: true });
+      const receiptTexts = [];
+      const summarySender = handoffSender(async () => {
+        // The provider request is under way: the receipt worker's drain runs now.
+        await Queue.processDueReceiptDeliveryJobs();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return { sent: true };
+      });
+      sendCustomerMessage.mockImplementation(async (input) => {
+        if (input.purpose === 'payment_receipt') { receiptTexts.push(input.body); return { sent: true }; }
+        return summarySender(input);
+      });
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      expect(receiptTexts).toHaveLength(0);
+      expect((await invoiceRow(invoiceId)).receipt_sent_at).not.toBeNull();
+      // The worker's next drain: no second text, and the receipt email goes.
+      await Queue.processDueReceiptDeliveryJobs();
+      expect(receiptTexts).toHaveLength(0);
+      expect(receiptEmail).toHaveBeenCalledTimes(1);
+      expect(await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first()).toMatchObject({ status: 'completed' });
+    });
+
+    test('a receipt cover for a text the provider definitively rejected is taken back', async () => {
+      const invoiceId = await stop({ status: 'paid', invoice: { paid_at: new Date(), stripe_payment_intent_id: 'pi_fixture_rej' } });
+      sendCustomerMessage.mockImplementation(handoffSender(async () => ({ sent: false, terminal: true })));
+      await deliver();
+      expect(await summaryEffect()).toMatchObject({ status: 'suppressed', provider_id: null });
+      expect((await invoiceRow(invoiceId)).receipt_sent_at).toBeNull();
+    });
+
+    test('a process that died mid-request (no error recorded, lease expired) still counts the folded text as covering the invoice', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      await priorClaim('completion_sms', { status: 'unknown_delivery', last_error: null, provider_id: `pay_link:${invoiceId}` });
+      await deliver();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      const covered = await invoiceRow(invoiceId);
+      expect(covered).toMatchObject({ status: 'scheduled', scheduled_send_error: MARKER });
+      expect(covered.sms_sent_at).not.toBeNull();
+    });
+
+    test('an invoice whose queue state changed before the handoff falls back to the plain summary in the same run', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      let calls = 0;
+      sendCustomerMessage.mockImplementation(async (input) => {
+        calls += 1;
+        if (calls === 1) await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: 'QUIET_HOURS_HOLD — outside 8AM-8PM ET send window' });
+        return handoffSender()(input);
+      });
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      expect(sendCustomerMessage.mock.calls[1][0].body).toBe(plainBody());
+      expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: null });
+    });
+
+    test('the queue still converts the lead once when the summary text covered the Text leg', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      await deliver();
+      expect((await invoiceRow(invoiceId)).sms_sent_at).not.toBeNull();
+      const convert = jest.spyOn(require('../services/lead-estimate-link'), 'convertLeadFromEvent').mockResolvedValue(null);
+      jest.spyOn(require('../services/invoice-email'), 'sendInvoiceEmail').mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+      await require('../services/invoice').processScheduledSends();
+      expect(convert).toHaveBeenCalledWith({ source: 'invoice_sent', customerId: fixture.customerId });
     });
   });
 });

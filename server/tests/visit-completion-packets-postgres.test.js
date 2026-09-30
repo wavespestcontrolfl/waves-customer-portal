@@ -1974,6 +1974,24 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(summaryBody()).toHaveLength(1);
   });
 
+  test('the queue waits under SUMMARY_TEXT_HOLD while the summary text is undelivered, and an expired wait sends the invoice as before', async () => {
+    sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, code: 'PROVIDER_UNAVAILABLE' }));
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 202, body: { state: 'effects_pending' } });
+    const invoiceId = saved.body.billing.invoiceId;
+    const waiting = await mockPg('invoices').where({ id: invoiceId }).first();
+    expect(waiting.status).toBe('scheduled');
+    expect(waiting.scheduled_send_error).toMatch(/^SUMMARY_TEXT_HOLD/);
+    expect(new Date(waiting.scheduled_send_at).getTime()).toBeGreaterThan(Date.now() + 15 * 60_000);
+    const send = jest.spyOn(InvoiceService, 'sendViaSMSAndEmail').mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true }, creditApplied: 0 });
+    await InvoiceService.processScheduledSends();
+    expect(send).not.toHaveBeenCalled();
+    // The wait expires (an interrupted closeout): the invoice sends as it always did.
+    await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+    await InvoiceService.processScheduledSends();
+    expect(send).toHaveBeenCalledWith(invoiceId, expect.objectContaining({ allowClaimed: true }));
+  });
+
   test('an autopay-paid grouped closeout carries the receipt link in the summary text and sends no receipt text', async () => {
     const methodId = randomUUID();
     await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
@@ -1992,6 +2010,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'paid' } } });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/Review each service and its report: \S+ Your receipt: \S+$/);
+    // The receipt job waits so it cannot text the classic receipt beside the folded one.
+    expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ deferReceiptDelivery: true });
     expect((await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first()).receipt_sent_at).not.toBeNull();
     // The receipt queue's text leg stands down; its email leg is separate.
     expect(await InvoiceService.sendReceipt(saved.body.billing.invoiceId)).toEqual({ sent: false, reason: 'already-sent' });
