@@ -230,7 +230,7 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.promptHint).toContain('rodent');
   });
 
-  test('customer words: quoted history stripped, short replies left out, bare codes masked in snippets and subjects', async () => {
+  test('customer words: quoted history stripped, short replies left out, bare codes masked in snippets', async () => {
     const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
     const ctx = await buildCustomerWordsContext({
       customerId: 'c1',
@@ -270,7 +270,7 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toContain('BLUE');
     expect(ctx.text).not.toContain('sesame');
     expect(ctx.text).not.toMatch(/^Customer text/m);
-    expect(ctx.text).toMatch(/^Customer email .* "Re: Gate": \[no body preview\]$/m);
+    expect(ctx.text).not.toMatch(/Re: Gate|no body preview/);
     expect(ctx.text).not.toContain('7719');
     expect(ctx.text).toContain('Thanks for coming out.');
   });
@@ -390,6 +390,9 @@ describe('buildCompletionCommsContext', () => {
       ],
       emails: [
         { received_at: mk(5), subject: 'Attic photos', snippet: 'Photos of the soffit gap attached', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+        // A reply keeps the subject Waves wrote; a bare subject can be a code.
+        { received_at: mk(5.5), subject: 'Re: Activity found in the garage', body_text: 'Thanks, we will keep the garage door shut.', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+        { received_at: mk(5.7), subject: 'open sesame', body_text: '', from_address: 'pat@example.com', label_ids: ['INBOX'] },
         { received_at: mk(6), subject: 'Your visit', snippet: 'See you Tuesday', from_address: 'Waves Pest Control <contact@wavespestcontrol.com>', label_ids: ['SENT'] },
         // Gmail's snippet stops before the anchor; the full body has it.
         { received_at: mk(10), subject: 'Access', snippet: `5173 ${'the back door sticks '.repeat(8)}`, body_text: `5173 ${'the back door sticks '.repeat(14)}is the gate code`, from_address: 'pat@example.com', label_ids: ['INBOX'] },
@@ -423,16 +426,19 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).toMatch(/^Customer text .*: The dog stays inside\.$/m);
     expect(whereArgs['emails:raw'].map(([sql]) => sql).join(' ')).toMatch(/SENT.*wavespestcontrol\.com/s);
     const lines = ctx.text.split('\n')
-      .filter((line) => !/dog stays inside|"Access"|Side gate/.test(line));
+      .filter((line) => !/dog stays inside|The number is|garage door shut/.test(line));
     expect(lines).toEqual([
       expect.stringMatching(/^Call .* \(the customer called; AI summary of the whole conversation, not verified\): Heard noises again in the attic$/),
       expect.stringMatching(/^Customer text .*: Scratching is worse after midnight$/),
       expect.stringMatching(/^Call .* \(Waves called the customer; AI summary of the whole conversation, not verified\): Confirmed the visit window$/),
-      expect.stringMatching(/^Customer email .* "Attic photos": Photos of the soffit gap attached$/),
+      expect.stringMatching(/^Customer email \d{4}-\d{2}-\d{2}: Photos of the soffit gap attached$/),
       expect.stringMatching(/^Call .* \(caller unknown; AI summary of the whole conversation, not verified\): Discussed the attic hatch$/),
     ]);
     expect(ctx.text).not.toContain('Confirming your exclusion visit window');
     expect(ctx.text).not.toContain('See you Tuesday');
+    // Subjects never reach the writer: only the customer's own body text.
+    expect(ctx.text).not.toMatch(/Activity found in the garage|Attic photos|sesame/);
+    expect(ctx.text).toMatch(/^Customer email .*: Thanks, we will keep the garage door shut\.$/m);
     expect(ctx.promptHint).toContain('never a finding');
     expect(ctx.promptHint).toContain('rodent');
   });

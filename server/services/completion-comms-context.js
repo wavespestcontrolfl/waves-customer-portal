@@ -402,15 +402,16 @@ const CUSTOMER_WORDS_CHANNELS = Object.freeze([
       .where('received_at', '>=', floor)
       .whereRaw("NOT (COALESCE(label_ids, '[]'::jsonb) @> '[\"SENT\"]'::jsonb)")
       .whereRaw("COALESCE(from_address, '') NOT ILIKE '%@wavespestcontrol.com%'")
-      .select('received_at', 'subject', 'snippet', 'body_text', 'from_address', 'label_ids')
+      .select('received_at', 'snippet', 'body_text', 'from_address', 'label_ids')
       .orderBy('received_at', 'desc')
       .limit(6),
     keep: (row) => !wavesSentEmail(row),
     max: 6,
+    // The body only: a reply's subject keeps what Waves wrote ("Re:
+    // Activity found in the garage"), and a subject can be a bare code.
     line: (row) => {
       const summary = customerEmailText(row);
-      const subject = compactText(scrub(row.subject), 120);
-      return (summary || subject) && `Customer email ${etDay(row.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`;
+      return summary && `Customer email ${etDay(row.received_at)}: ${summary}`;
     },
     ts: (row) => row.received_at,
   },

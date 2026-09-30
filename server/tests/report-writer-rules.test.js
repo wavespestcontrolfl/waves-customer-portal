@@ -205,6 +205,12 @@ describe('writerRulesRejection', () => {
     ['We mapped the treated perimeter.', 'owner_phrase'],
     ['The technician followed the traced route.', 'owner_phrase'],
     ['We completed the treated outline.', 'owner_phrase'],
+    ['The recheck is 95 dollars.', 'price'],
+    ['That visit costs ninety-five dollars.', 'price'],
+    ['There is a small fee for the extra station.', 'price'],
+    ['We will not charge for the follow-up.', 'price'],
+    ['Your next visit is scheduled for 10/7.', 'date'],
+    ['We will be back on 2026-10-07.', 'date'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -222,6 +228,9 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('The gutters were free of standing water.')).toBeNull();
     expect(writerRulesRejection('You texted us on Monday about the ants.')).toBeNull();
     expect(writerRulesRejection('We checked 4/5 stations.')).toBeNull();
+    expect(writerRulesRejection('We will recheck 4/5 stations at the next visit.')).toBeNull();
+    expect(writerRulesRejection('On 9/15 you mentioned ants by the sink.')).toBeNull();
+    expect(writerRulesRejection('The technician in charge of your route checked the lanai.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();

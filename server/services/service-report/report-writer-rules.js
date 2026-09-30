@@ -246,12 +246,15 @@ const TIMEFRAME_RE = new RegExp(
 // forms ("the next check is free", "the follow-up is included") but not a
 // physical state ("covered by mulch", "free of standing water").
 const ENTITLEMENT_RE = /\b(?:is|are|was|were|be|comes?)\s+(?:(?:completely|totally|also|fully)\s+)?(?:free|included|covered)\b(?!\s+(?:by|with|in|under|of|from|on)\b)/i;
-const PRICE_RE = /\$\s?\d|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
+const PRICE_RE = /\$\s?\d|\b(?:dollars?|bucks|cents|usd|costs?|costing|price[ds]?|pricing|fees?|invoice[ds]?|billing|payments?)\b|(?<!\bin\s)\bcharg(?:e|es|ed|ing)\b|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
 // Next-visit dates, days and times (rule 11): the report prints the
 // appointment itself. "October 7", "next Tuesday", "10 AM".
 // "May" only capitalized, so "activity may 2…" is not a date. A date is
 // refused only with a forward cue: "On September 15, we noted…" is history
 // the grounding supplies; "your next visit is October 7" is the appointment.
+// Numeric dates ("10/7", "10/07/2026", "2026-10-07"); a fraction of a set
+// ("4/5 stations", "3/4 of the yard") is not a date.
+const NUMERIC_DATE_RE = /\b(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?(?!\s+(?:of\b|[a-z]{2,}s\b)))\b/g;
 const MONTH_DAY_RE = /\b(?:[Jj]an(?:uary)?|[Ff]eb(?:ruary)?|[Mm]ar(?:ch)?|[Aa]pr(?:il)?|May|[Jj]une?|[Jj]uly?|[Aa]ug(?:ust)?|[Ss]ept?(?:ember)?|[Oo]ct(?:ober)?|[Nn]ov(?:ember)?|[Dd]ec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/g;
 const FUTURE_CUE_BEFORE_RE = /\b(?:next|upcoming|scheduled|appointment|return(?:ing)?|back|see\s+you|will|until|by|coming)\b/i;
 const FUTURE_CUE_AFTER_RE = /^[^.!?]{0,30}\b(?:next|upcoming)\s+(?:visit|appointment|service|check)\b/i;
@@ -326,6 +329,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [PRICE_RE, 'price'],
   [ENTITLEMENT_RE, 'price'],
   [(copy) => forwardMention(copy, MONTH_DAY_RE), 'date'],
+  [(copy) => forwardMention(copy, NUMERIC_DATE_RE), 'date'],
   [WEEKDAY_RE, 'date'],
   [(copy) => forwardMention(copy, CLOCK_RE, ARRIVAL_CUE_RE), 'time'],
 ]);
