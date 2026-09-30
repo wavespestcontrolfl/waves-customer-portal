@@ -18,11 +18,13 @@
  * access-only (ib-access.js ibFullAccess, enforced in
  * routes/admin-intelligence-bar.js — not here). Unconfirmed, each looks the
  * issue up live and returns a preview naming its TITLE, not just the short
- * id. THIS PR IS PREVIEW ONLY: called with confirmed:true, every one of them
- * refuses — the commit path (an actual Sentry PUT) ships in a follow-up PR.
- * SENTRY_API_TOKEN is read-scoped today; a write needs it reissued with
- * event:write + project:write (see the IB scope doc's token checklist) —
- * until then the commit refusal is moot because these never reach it anyway.
+ * id. Confirmed, the executor acts ONLY on the pinned identifiers
+ * /confirm-action verified against that live preview's fingerprint
+ * (`_verified_sentry_issue_id` / `_verified_sentry_assignee_id`, threaded in
+ * by admin-intelligence-bar.js) — it never re-resolves issue_short_id or
+ * assignee from the confirmed call's own input. SENTRY_API_TOKEN needs
+ * event:write + project:write for the PUT to succeed; a 401/403 surfaces as
+ * a plain "the token is read-only" error rather than a bare HTTP failure.
  */
 
 const logger = require('../logger');
@@ -79,7 +81,7 @@ Use for: "show me that WAVES-PORTAL-1A error", "what's the stack trace on the to
   },
   {
     name: 'resolve_sentry_issue',
-    description: `Resolve a Sentry issue by its short id (e.g. "WAVES-PORTAL-1A") — marks it fixed. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Sentry.
+    description: `Resolve a Sentry issue by its short id (e.g. "WAVES-PORTAL-1A") — marks it fixed. Owner login only, through a confirmation card.
 Use for: "resolve WAVES-PORTAL-1A", "mark that error as fixed"`,
     input_schema: {
       type: 'object',
@@ -91,7 +93,7 @@ Use for: "resolve WAVES-PORTAL-1A", "mark that error as fixed"`,
   },
   {
     name: 'ignore_sentry_issue',
-    description: `Ignore (mute) a Sentry issue by its short id so it stops alerting. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Sentry.
+    description: `Ignore (mute) a Sentry issue by its short id so it stops alerting. Owner login only, through a confirmation card.
 Use for: "ignore WAVES-PORTAL-1A", "mute that error, it's expected"`,
     input_schema: {
       type: 'object',
@@ -103,7 +105,7 @@ Use for: "ignore WAVES-PORTAL-1A", "mute that error, it's expected"`,
   },
   {
     name: 'assign_sentry_issue',
-    description: `Assign a Sentry issue by its short id to a Sentry org member — matched EXACTLY (case-insensitive) against their real Sentry username, account email, or display name; no match or more than one match refuses rather than guess. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Sentry.
+    description: `Assign a Sentry issue by its short id to a Sentry org member — matched EXACTLY (case-insensitive) against their real Sentry username, account email, or display name; no match or more than one match refuses rather than guess. Owner login only, through a confirmation card.
 Use for: "assign WAVES-PORTAL-1A to Adam", "who should look at that error?"`,
     input_schema: {
       type: 'object',
@@ -121,7 +123,7 @@ const SENTRY_WRITE_ACTIONS = {
   ignore_sentry_issue: { verb: 'Ignore', past: 'ignored' },
   assign_sentry_issue: { verb: 'Assign', past: 'assigned' },
 };
-const NOT_YET_IMPLEMENTED_MESSAGE = 'Sentry write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
+const READ_ONLY_TOKEN_MESSAGE = 'The Sentry token is read-only — it needs write scope (event:write, project:write) before this action can commit.';
 
 const NOT_CONFIGURED_MESSAGE = 'Sentry access is not configured. Add the SENTRY_API_TOKEN service variable (a Sentry org auth token) in the Railway dashboard.';
 
@@ -157,6 +159,47 @@ async function sentryGet(path, params = {}) {
     }
     if (!res.ok) throw new Error(`Sentry API returned HTTP ${res.status}`);
     return await res.json();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Sentry API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The one PUT this module makes — resolve/ignore/assign, always on a
+// pinned issue id from a fingerprint-verified preview (see writeSentryIssue).
+// A 401/403 here means the token can read but not write, which is the
+// expected state until SENTRY_API_TOKEN is reissued with event:write +
+// project:write (the IB scope doc's token checklist) — surfaced as a plain,
+// actionable message rather than a bare HTTP failure.
+async function sentryPut(path, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${SENTRY_API_BASE}${path}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${process.env.SENTRY_API_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (res.status === 401 || res.status === 403) {
+      const err = new Error(READ_ONLY_TOKEN_MESSAGE);
+      err.status = res.status;
+      err.writeAccessRequired = true;
+      throw err;
+    }
+    if (!res.ok) {
+      let detail = '';
+      try { const j = await res.json(); detail = j?.detail ? `: ${j.detail}` : ''; } catch { /* body wasn't JSON */ }
+      const err = new Error(`Sentry API returned HTTP ${res.status}${detail}`);
+      err.status = res.status;
+      throw err;
+    }
+    return await res.json().catch(() => ({}));
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`Sentry API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
     throw err;
@@ -385,8 +428,32 @@ async function writeSentryIssue(toolName, input) {
     }
     return preview;
   }
-  // Confirmed: the commit path (a Sentry PUT) is not built in this PR.
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned identity /confirm-action verified
+  // against the live preview above (_verified_sentry_issue_id /
+  // _verified_sentry_assignee_id, threaded in by admin-intelligence-bar.js's
+  // WRITE_TWO_STEP_TOOL_NAMES pinning) — never re-resolve issue_short_id or
+  // assignee from this call's own input, which is untrusted at this point.
+  const pinnedIssueId = input._verified_sentry_issue_id;
+  if (!pinnedIssueId) {
+    return {
+      error: 'Missing the verified issue identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  const org = process.env.SENTRY_ORG || DEFAULT_ORG;
+  if (toolName === 'assign_sentry_issue') {
+    const pinnedAssigneeId = input._verified_sentry_assignee_id;
+    if (!pinnedAssigneeId) {
+      return {
+        error: 'Missing the verified assignee identity for this confirmed action — ask again for a fresh confirmation card.',
+        code: 'missing_verified_pin',
+      };
+    }
+    await sentryPut(`/organizations/${org}/issues/${pinnedIssueId}/`, { assignedTo: `user:${pinnedAssigneeId}` });
+    return { success: true, tool: toolName, issue_id: String(pinnedIssueId), assignee_id: String(pinnedAssigneeId) };
+  }
+  await sentryPut(`/organizations/${org}/issues/${pinnedIssueId}/`, { status: action.past });
+  return { success: true, tool: toolName, issue_id: String(pinnedIssueId), status: action.past };
 }
 
 async function executeSentryOpsTool(toolName, input = {}) {
@@ -417,7 +484,7 @@ async function executeSentryOpsTool(toolName, input = {}) {
     } else {
       logger.error(`[intelligence-bar:sentry-ops] Tool ${toolName} failed:`, err);
     }
-    return { error: err.message };
+    return { error: err.message, ...(err.writeAccessRequired ? { code: 'write_access_required' } : {}) };
   }
 }
 

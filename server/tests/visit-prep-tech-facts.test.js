@@ -831,6 +831,131 @@ describe('customerFlaggedFacts — plant read integration (GATE_VISIT_PREP_PLANT
   });
 });
 
+describe('customerFlaggedFacts — combined Lawn & Pest read (owner ruling 2026-09-30)', () => {
+  beforeEach(() => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PEST_READ = 'true';
+    process.env.GATE_VISIT_PREP_PLANT_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+  });
+  afterEach(() => {
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+    delete process.env.GATE_VISIT_PREP_PEST_READ;
+    delete process.env.GATE_VISIT_PREP_PLANT_READ;
+    delete process.env.GATE_VISIT_FACTS;
+  });
+
+  const PLANT_V2 = {
+    answer: { level: 'entry', wording: 'likely', headline: 'Likely: Brown Patch' },
+    subject: { plant: { common_name: 'St. Augustinegrass' } },
+    possibilities: [{ common_name: 'Brown Patch', fits: ['Roughly circular brown patch'], not_yet: [] }],
+    next_step_hint: { kind: 'inspection', text: 'A technician checks this on your next visit.' },
+    referral: null,
+  };
+  const PEST_CONTRACT = {
+    safety: { stinging: false },
+    v2: { answer: { wording: 'likely' }, entry: { common_name: 'German cockroach' }, evidence: { matches: ['Two stripes'], still_need: [] }, referral: null },
+  };
+  const combo = (overrides = {}, extra = {}) => ({
+    id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_ref: 'pi-1',
+    read_result: JSON.stringify({
+      engine: 'combo', subject_type: 'lawn', pest: { status: 'done' }, plant: { status: 'done', v2: PLANT_V2 }, ...overrides,
+    }),
+    ...extra,
+  });
+  const stopWith = (types, submission) => fakeConn({
+    scheduled_services: types.map((service_type, i) => ({ id: `svc-${i + 1}`, visit_id: types.length > 1 ? 'visit-9' : null, scheduled_date: '2026-10-02', service_type, status: 'confirmed' })),
+    visit_prep_submissions: [submission],
+    visit_prep_photos: [],
+    pest_identifications: [{ id: 'pi-1', report_contract: JSON.stringify(PEST_CONTRACT) }],
+  });
+  const svcFor = (types) => ({ id: 'svc-1', visit_id: types.length > 1 ? 'visit-9' : null });
+
+  test.each([
+    ['(a) one combined service_type', ['Quarterly Pest Control Service + Lawn Care Service']],
+    ['(b) separate pest-only and lawn-only members', ['Quarterly Pest Control Service', 'Weekly Lawn Care']],
+  ])('%s: a DONE combo read serves BOTH notes (pest and lawn)', async (_name, types) => {
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo()));
+    const { read } = facts[0];
+    expect(read.status).toBe('done');
+    expect(read.kind).toBe('combo');
+    expect(read.pest).toMatchObject({ status: 'done', commonName: 'German cockroach', matches: ['Two stripes'] });
+    expect(read.plant).toMatchObject({ status: 'done', kind: 'plant', subjectType: 'lawn', conditionName: 'Brown Patch', plantCommonName: 'St. Augustinegrass' });
+  });
+
+  test('a partial combo (plant failed) serves the pest note and a null plant note', async () => {
+    const types = ['Lawn Care + Pest Control'];
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo({ plant: { status: 'failed' } })));
+    expect(facts[0].read).toMatchObject({ status: 'done', kind: 'combo', plant: null, pest: { commonName: 'German cockroach' } });
+  });
+
+  test('a partial combo (pest failed, no read_ref) serves the plant note and a null pest note', async () => {
+    const types = ['Lawn Care + Pest Control'];
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo({ pest: { status: 'failed' } }, { read_ref: null })));
+    expect(facts[0].read).toMatchObject({ status: 'done', kind: 'combo', pest: null, plant: { conditionName: 'Brown Patch' } });
+  });
+
+  test('a combo read where both parts failed is served as failed (quiet)', async () => {
+    const types = ['Lawn Care + Pest Control'];
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo({ pest: { status: 'failed' }, plant: { status: 'failed' } }, { read_status: 'failed', read_ref: null })));
+    expect(facts[0].read).toEqual({ status: 'failed' });
+  });
+
+  test('a PENDING combo read shows pending (the panel keeps waiting)', async () => {
+    const types = ['Lawn Care + Pest Control'];
+    const pending = combo({}, { read_status: 'pending', created_at: new Date(), read_result: JSON.stringify({ engine: 'combo', subject_type: 'lawn' }), read_ref: null });
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, pending));
+    expect(facts[0].read).toEqual({ status: 'pending' });
+  });
+
+  test('a combo read on a stop that lost its lawn part still serves the pest note only', async () => {
+    const types = ['Quarterly Pest Control Service'];
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo()));
+    expect(facts[0].read).toMatchObject({ status: 'done', kind: 'combo', plant: null, pest: { commonName: 'German cockroach' } });
+  });
+
+  test('a combo read whose stop moved to another plant subject hides the plant note', async () => {
+    const types = ['Quarterly Pest Control Service', 'Quarterly Tree & Shrub Care'];
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo()));
+    expect(facts[0].read).toMatchObject({ kind: 'combo', plant: null, pest: { commonName: 'German cockroach' } });
+  });
+
+  test('plant gate dark: only the pest note of a stored combo is served', async () => {
+    delete process.env.GATE_VISIT_PREP_PLANT_READ;
+    const types = ['Lawn Care + Pest Control'];
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo()));
+    expect(facts[0].read).toMatchObject({ kind: 'combo', plant: null, pest: { commonName: 'German cockroach' } });
+  });
+
+  test('pest gate dark: only the plant note of a stored combo is served', async () => {
+    delete process.env.GATE_VISIT_PREP_PEST_READ;
+    const types = ['Lawn Care + Pest Control'];
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo()));
+    expect(facts[0].read).toMatchObject({ kind: 'combo', pest: null, plant: { conditionName: 'Brown Patch' } });
+  });
+
+  test('a stop that is no combo shape at all (mosquito) serves a stored combo as unsupported', async () => {
+    const types = ['Mosquito Control Service'];
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, combo()));
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a stored PEST read on a stop that is now a combo is still shown (until the sweep re-reads it as a combo)', async () => {
+    const types = ['Quarterly Pest Control Service', 'Weekly Lawn Care'];
+    const pestOnly = combo({}, { read_result: null });
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, pestOnly));
+    expect(facts[0].read).toMatchObject({ status: 'done', commonName: 'German cockroach' });
+    expect(facts[0].read.kind).toBeUndefined();
+  });
+
+  test('a stored PLANT read on a stop that is now a combo is still shown', async () => {
+    const types = ['Quarterly Pest Control Service', 'Weekly Lawn Care'];
+    const plantOnly = combo({}, { read_ref: null, read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn', v2: PLANT_V2 }) });
+    const facts = await customerFlaggedFacts(svcFor(types), stopWith(types, plantOnly));
+    expect(facts[0].read).toMatchObject({ status: 'done', kind: 'plant', conditionName: 'Brown Patch' });
+  });
+});
+
 describe('plant read safety lines (Codex #5320 r1)', () => {
   const { plantReadFactsFromResult } = visitPrep._internal;
   test('every catalog safety line (plant, weeds, every possibility) is kept, deduplicated', () => {

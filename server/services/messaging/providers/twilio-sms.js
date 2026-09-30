@@ -426,6 +426,9 @@ module.exports = {
   // may still have reached Twilio.
   classifyProviderFailure,
   SENDER_SIDE_TERMINAL_TWILIO_CODES,
+  // Shared with the booking-link lane, which treats a recipient-side
+  // rejection as an expected refusal rather than a lane failure.
+  RECIPIENT_TERMINAL_TWILIO_CODES,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.

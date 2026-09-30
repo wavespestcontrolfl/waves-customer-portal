@@ -1597,6 +1597,34 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY BOOKING-LINK TEXT CHECK — Monday 8:13am ET (owner 2026-09-29: a
+  // concise admin notification every 7 days while GATE_CALL_BOOKING_LINK_TEXT
+  // is on — sent count, top skips, or what needs a look). Minute 13 is free
+  // in every schedule here, step patterns included; :19/:49 belong to the
+  // DB/LLM-heavy previsit sweep (codex #5358 r2 P1).
+  // =========================================================================
+  cron.schedule('13 8 * * 1', async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('call-booking-link-weekly', async () => {
+        const { runCallBookingLinkWeeklyCheck } = require('./call-booking-link-weekly-check');
+        const result = await runCallBookingLinkWeeklyCheck();
+        logger.info(`[call-booking-link-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, problem: result.problem ?? null })}`);
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`booking-link weekly check did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('call-booking-link-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`booking-link weekly check tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly booking-link check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
   // Each is exception-based (a quiet day sends nothing), carries its own
   // env kill switch, and dedupes via ops_email_send_state. Cron minutes are
@@ -2290,6 +2318,18 @@ function initScheduledJobs() {
       const r = await classifier.run({ limit: 200 });
       logger.info(`[signup-classifier] classified=${r.classified} ${JSON.stringify(r.byPolicy)}`);
     } catch (err) { logger.error(`Signup classifier failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY MON 4:47AM — Directory-listing (citation) audit: read-only GET of each
+  // seo_citations.listing_url, classified against config/locations.js NAP
+  // (services/seo/citation-auditor.js). Kill = GATE_CITATION_AUDIT=false.
+  // :47 is unused in the 4am hour (4:20 already runs three daily jobs).
+  cron.schedule('47 4 * * 1', async () => {
+    if (!isEnabled('citationAudit')) return;
+    logger.info('Running: citation audit');
+    try {
+      await runExclusive('citation-audit', () => require('./seo/citation-auditor').audit());
+    } catch (err) { logger.error(`Citation audit failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // DAILY 3:30AM — Citation submission runner: auto-submit allowlisted submit_free
@@ -4310,6 +4350,7 @@ function initScheduledJobs() {
                       customerId: openTimesSnapshot.lookup?.customerId || null,
                       estimateId: openTimesSnapshot.lookup?.estimateId || null,
                       ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
+                      ...(openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: openTimesSnapshot.lookup.scheduledServiceId } : {}),
                       quotedWindows: plan.quotedWindows,
                     });
                     if (!recheck.ok) {
@@ -7692,8 +7733,8 @@ function initScheduledJobs() {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();
-      if (!result.skipped && (result.misses > 0 || result.alerted > 0)) {
-        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted}`);
+      if (!result.skipped && (result.misses > 0 || result.alerted > 0 || result.repeated > 0)) {
+        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted} repeated=${result.repeated || 0}`);
       }
     } catch (err) {
       logger.error(`Call booking-miss watchdog tick failed: ${err.message}`);
