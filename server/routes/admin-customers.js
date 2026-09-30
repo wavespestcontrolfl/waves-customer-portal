@@ -2621,11 +2621,6 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
-// Lazily backfills a primary property for customers created after the migration.
-// requireAdmin: returns every active property address on the account — a
-// per-customer assignment must not reveal sibling addresses, and no tech
-// surface calls this (the property writes below were already admin-only).
 // GET /api/admin/customers/:id/collection-holds — active collections holds
 // (B10). A dispute hold ("stops_charges") halts every off-session charge and
 // the customer was told billing follow-up is on hold; this is how staff see it.
@@ -2664,6 +2659,11 @@ router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
+// Lazily backfills a primary property for customers created after the migration.
+// requireAdmin: returns every active property address on the account — a
+// per-customer assignment must not reveal sibling addresses, and no tech
+// surface calls this (the property writes below were already admin-only).
 // Canonical WaveGuard-qualifying service families on an account (the same
 // loader estimate conversion feeds into priorQualifyingServices). The admin
 // estimator's CLIENT_FALLBACK engine reads this to decide the rodent

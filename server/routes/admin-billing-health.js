@@ -12,6 +12,15 @@ const { MONTHLY_LANE_SQL, resolveBillingLane } = require('../services/billing-la
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
 const { hasUnresolvedSiblingStripeOutcome, deriveMonthlyChargeIdempotencyKey } = require('../services/retry-collectibility');
 
+// Charge Now is an operatorOverride: it goes past an active collections dispute
+// hold. Never blocked, but it leaves a trail naming the admin (best-effort).
+async function recordChargeNowHoldOverride(req, customerId) {
+  return require('../services/collections/collection-hold').recordHoldOverride({
+    customerId, actorId: req.technicianId || null, ip: req.ip,
+    userAgent: req.get('user-agent') || null, route: 'admin_charge_now',
+  });
+}
+
 router.use(adminAuthenticate);
 router.use(requireAdmin);
 
@@ -276,6 +285,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
         // description/metadata, which Stripe would reject as a mismatch.
         const idempotencyKey = await deriveMonthlyChargeIdempotencyKey(customerId, monthKey, db);
 
+        await recordChargeNowHoldOverride(req, customerId);
         try {
           // Machine provenance (Codex #3598 r5 P1): an admin clicking Charge
           // Now is not the customer's own action — the PI's ACH lifecycle
@@ -305,6 +315,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       if (lockOutcome.response) return res.status(lockOutcome.response.status).json(lockOutcome.response.body);
       payment = lockOutcome.payment;
     } else {
+      await recordChargeNowHoldOverride(req, customerId);
       try {
         payment = await service.chargeOneTime(customerId, chargeAmount, desc, null, { initiated_by: 'machine' }, { operatorOverride: true });
       } catch (err) {

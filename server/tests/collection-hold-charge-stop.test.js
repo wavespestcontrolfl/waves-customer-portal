@@ -491,3 +491,49 @@ describe('recurring-card-on-file prepay recovery sweep (source pin)', () => {
     expect(src.slice(holdAt, fallbackAt)).not.toMatch(/sendViaSMSAndEmail|alertUncollected/);
   });
 });
+
+describe('operator override leaves a trail (never blocks)', () => {
+  function load({ holdRows = [], holdThrows = false } = {}) {
+    jest.resetModules();
+    const audit = jest.fn(async () => {});
+    const autopay = jest.fn(async () => {});
+    jest.doMock('../models/db', () => makeFakeDb({ collections_flags: holdRows }, holdThrows ? { failTable: 'collections_flags' } : {}));
+    jest.doMock('../services/audit-log', () => ({ recordAuditEvent: audit }));
+    jest.doMock('../services/autopay-log', () => ({ logAutopay: autopay }));
+    return { m: require('../services/collections/collection-hold'), audit, autopay };
+  }
+  const who = { customerId: 'cust-1', actorId: 'admin-7', ip: '1.2.3.4', route: 'admin_charge_now' };
+
+  test('an active dispute hold: audit row + collection_hold_overridden autopay event naming the admin', async () => {
+    const { m, audit, autopay } = load({ holdRows: [{ ...HOLD }] });
+    expect(await m.recordHoldOverride(who)).toBe(true);
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'customer.collection_hold_overridden', actor_id: 'admin-7', resource_id: 'cust-1' }));
+    expect(autopay).toHaveBeenCalledWith('cust-1', 'collection_hold_overridden', { details: expect.objectContaining({ admin_id: 'admin-7', route: 'admin_charge_now' }) });
+  });
+
+  test('no dispute hold (none / fallback / released): nothing recorded', async () => {
+    for (const holdRows of [[], [FALLBACK_WRONG_NUMBER], [{ ...HOLD, released_at: new Date() }]]) {
+      const { m, audit, autopay } = load({ holdRows });
+      expect(await m.recordHoldOverride(who)).toBe(false);
+      expect(audit).not.toHaveBeenCalled();
+      expect(autopay).not.toHaveBeenCalled();
+    }
+  });
+
+  test('a failing lookup or audit write never throws (the charge is not blocked)', async () => {
+    const a = load({ holdThrows: true });
+    await expect(a.m.recordHoldOverride(who)).resolves.toBe(false);
+    const b = load({ holdRows: [{ ...HOLD }] });
+    b.audit.mockRejectedValueOnce(new Error('audit down'));
+    await expect(b.m.recordHoldOverride(who)).resolves.toBe(false);
+  });
+
+  test('both operatorOverride routes call it before charging', () => {
+    const fs = require('fs'); const path = require('path');
+    const bh = fs.readFileSync(path.join(__dirname, '../routes/admin-billing-health.js'), 'utf8');
+    expect((bh.match(/await recordChargeNowHoldOverride\(req, customerId\)/g) || []).length).toBe(2);
+    const inv = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
+    expect(inv.indexOf("route: 'admin_invoice_charge_card'")).toBeGreaterThan(0);
+    expect(inv.indexOf("route: 'admin_invoice_charge_card'")).toBeLessThan(inv.indexOf('operatorOverride: true'));
+  });
+});

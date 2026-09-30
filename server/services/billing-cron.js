@@ -1281,10 +1281,19 @@ const BillingCron = {
         // re-checks and collects once the office releases the hold.
         if (isCollectionHoldRefusal(err)) {
           logger.warn(`[billing-cron] Retry for payment ${payment.id} skipped for customer ${payment.customer_id} — collections hold (${err.code}); left armed`);
-          await logAutopay(payment.customer_id, 'skipped_collection_hold', {
-            paymentId: payment.id,
-            details: { source: 'autopay_retry', code: err.code },
-          });
+          // Log once per payment, not once per sweep tick.
+          let alreadyLogged = false;
+          try {
+            alreadyLogged = !!(await db('autopay_log')
+              .where({ customer_id: payment.customer_id, event_type: 'skipped_collection_hold', payment_id: payment.id })
+              .first('id'));
+          } catch (dedupeErr) { /* log-only: worst case one extra row */ }
+          if (!alreadyLogged) {
+            await logAutopay(payment.customer_id, 'skipped_collection_hold', {
+              paymentId: payment.id,
+              details: { source: 'autopay_retry', code: err.code },
+            });
+          }
           continue;
         }
         // STRIPE_CHARGED_DB_FAILED — Stripe accepted the retry charge but

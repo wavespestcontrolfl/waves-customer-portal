@@ -31,3 +31,14 @@ test('the routes are admin-only and audited', () => {
   expect(src).toMatch(/router\.post\('\/:id\/collection-holds\/release', requireAdmin/);
   expect(src).toMatch(/customer\.collection_hold_released/);
 });
+
+test('the hold routes sit above the property-address comment block, not between it and its handler', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-customers.js'), 'utf8');
+  const holds = src.indexOf("router.get('/:id/collection-holds'");
+  const release = src.indexOf("router.post('/:id/collection-holds/release'");
+  const propsComment = src.indexOf('// GET /api/admin/customers/:id/properties');
+  expect(holds).toBeGreaterThan(0);
+  expect(release).toBeLessThan(propsComment);
+  // the properties comment is followed by its own code, not by the hold routes
+  expect(src.slice(propsComment, propsComment + 2500)).not.toMatch(/collection-holds/);
+});

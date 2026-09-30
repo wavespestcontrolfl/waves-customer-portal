@@ -56,6 +56,17 @@ function activeDisputeHolds(query) {
     .whereRaw('reason ILIKE ?', [`${DISPUTE_REASON_PREFIX}%`]);
 }
 
+// The same discriminator as a correlated EXISTS body for queries that join
+// through their own alias (termite grace-lapse scans): `this` is the
+// whereExists/whereNotExists builder and `outerCustomerColumn` e.g. 'tt.customer_id'.
+function disputeHoldExistsSql(builder, outerCustomerColumn) {
+  return builder.select(1).from('collections_flags as f')
+    .whereRaw('f.customer_id = ??', [outerCustomerColumn])
+    .where('f.flag', HOLD_FLAG)
+    .whereNull('f.released_at')
+    .whereRaw('f.reason ILIKE ?', [`${DISPUTE_REASON_PREFIX}%`]);
+}
+
 async function customerHasActiveCollectionHold(customerId, database = db) {
   if (!customerId) return false;
   const row = await activeDisputeHolds(database('collections_flags').where({ customer_id: customerId })).first('id');
@@ -99,7 +110,38 @@ async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
   return new Set(invoices.filter((r) => r.customer_id && held.has(String(r.customer_id))).map((r) => String(r.id)));
 }
 
+// An operator-ordered charge (operatorOverride) goes past an active dispute
+// hold. It is never blocked, but it must leave a trail: an audit row naming the
+// admin and a distinct autopay event. Best-effort - a failed lookup or write
+// only logs, it never blocks or fails the charge.
+async function recordHoldOverride({ customerId, actorId = null, ip = null, userAgent = null, route, invoiceId = null }) {
+  try {
+    if (!(await customerHasActiveCollectionHold(customerId))) return false;
+    const { recordAuditEvent } = require('../audit-log');
+    const { logAutopay } = require('../autopay-log');
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: actorId,
+      action: 'customer.collection_hold_overridden',
+      resource_type: 'customer',
+      resource_id: customerId,
+      metadata: { route, invoice_id: invoiceId },
+      ip_address: ip,
+      user_agent: userAgent,
+      critical: false,
+    });
+    await logAutopay(customerId, 'collection_hold_overridden', { details: { route, invoice_id: invoiceId, admin_id: actorId } });
+    return true;
+  } catch (err) {
+    require('../logger').warn(`[collection-hold] override trail failed for customer ${customerId}: ${err.message}`);
+    return false;
+  }
+}
+
 module.exports = {
+  recordHoldOverride,
+  activeDisputeHolds,
+  disputeHoldExistsSql,
   HOLD_FLAG,
   DISPUTE_REASON_PREFIX,
   HOLD_ACTIVE_CODE,

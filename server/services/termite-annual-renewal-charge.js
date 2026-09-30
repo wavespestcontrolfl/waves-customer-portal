@@ -3181,11 +3181,7 @@ async function bellHeldOverdueRenewals({ conn, counts }) {
       .whereNull('tt.dispute_suspended_at')
       .whereNull('tt.renewal_lapse_started_at')
       .whereExists(function collectionsDisputeHold() {
-        this.select(1).from('collections_flags as f')
-          .whereRaw('f.customer_id = tt.customer_id')
-          .where('f.flag', 'collection_hold')
-          .whereNull('f.released_at')
-          .whereRaw("f.reason ILIKE 'dispute%'");
+        require('./collections/collection-hold').disputeHoldExistsSql(this, 'tt.customer_id');
       })
       .whereRaw(`${deadlineSql} < ?`, [etDateString()])
       .select('tt.*')
@@ -3232,11 +3228,7 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
       // held rows never occupy the bounded page; bellHeldOverdueRenewals
       // tells staff once.
       .whereNotExists(function collectionsDisputeHold() {
-        this.select(1).from('collections_flags as f')
-          .whereRaw('f.customer_id = t.customer_id')
-          .where('f.flag', 'collection_hold')
-          .whereNull('f.released_at')
-          .whereRaw("f.reason ILIKE 'dispute%'");
+        require('./collections/collection-hold').disputeHoldExistsSql(this, 't.customer_id');
       })
       .whereRaw(`${deadlineSql} < ?`, [etDateString()])
       .where(function presented() {

@@ -429,6 +429,19 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
+  test('B10: a hold-lookup FAILURE never rejects the exemption pass - the warning stays (not exempt)', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }],
+      throwOn: 'collections_flags',
+    });
+    await expect(getCardExpiryExemptCustomerIds(HORIZON)).resolves.toBeDefined();
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // handled AT the hold check (per visit), not by the pass-wide catch
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('collection-hold lookup failed'));
+  });
+
   test("a dying or missing Auto Pay method never proves its own warning unnecessary — the visit stays chargeable", async () => {
     // eligibility is the enrollment flag + pause, NOT the candidate card's
     // chargeability: an expired card reading as "no chargeable method"

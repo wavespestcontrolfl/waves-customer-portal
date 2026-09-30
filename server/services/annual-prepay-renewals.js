@@ -200,6 +200,17 @@ function whereCallbackRow(cols) {
 }
 const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
 const { customerHasActiveCollectionHold } = require('./collections/collection-hold');
+
+// Card-expiry WARNING path (not money): a hold-lookup failure must not reject
+// the whole exemption pass. Treat it as "not exempt" so the warning stays.
+async function collectionHoldStopsExtendedLane(customerId, conn) {
+  try {
+    return await customerHasActiveCollectionHold(customerId, conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] collection-hold lookup failed for customer ${customerId} - card-expiry warning stays (not exempt): ${err.message}`);
+    return false;
+  }
+}
 const COVERAGE_EXCLUDED_STATUSES = new Set(['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']);
 const PREPAID_UPDATE_EXCLUDED_STATUSES = new Set([...COVERAGE_EXCLUDED_STATUSES, 'completed']);
 
@@ -6061,7 +6072,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
           if (seq && String(seq.status || '').toLowerCase() === 'stopped') autopayLaneCharges = false;
           // Active collections collection_hold (dispute on a collections
           // call, B10) — same refusal the charge boundary asserts.
-          else if (await customerHasActiveCollectionHold(reused.customer_id || v.customer_id, conn)) autopayLaneCharges = false;
+          else if (await collectionHoldStopsExtendedLane(reused.customer_id || v.customer_id, conn)) autopayLaneCharges = false;
           else if (await conn('payment_plans').where({ invoice_id: reused.id, status: 'active' }).first('id')) autopayLaneCharges = false;
         }
       }

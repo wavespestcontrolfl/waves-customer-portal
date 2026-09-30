@@ -1906,6 +1906,17 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
     // stale/invalid paymentMethodId would otherwise consume credit before the
     // card check throws, leaving the invoice reduced/edit-locked with no charge.
     const StripeService = require('../services/stripe');
+    // An override past an active collections dispute hold is allowed but
+    // leaves a trail (audit + autopay event naming the admin); never blocks.
+    try {
+      const inv = await db('invoices').where({ id: req.params.id }).first('customer_id');
+      if (inv?.customer_id) {
+        await require('../services/collections/collection-hold').recordHoldOverride({
+          customerId: inv.customer_id, actorId: req.technicianId || null, ip: req.ip,
+          userAgent: req.get('user-agent') || null, route: 'admin_invoice_charge_card', invoiceId: req.params.id,
+        });
+      }
+    } catch (trailErr) { logger.warn(`[admin-invoices] hold-override trail failed: ${trailErr.message}`); }
     const result = await StripeService.chargeInvoiceWithSavedCard(
       req.params.id,
       paymentMethodId,
