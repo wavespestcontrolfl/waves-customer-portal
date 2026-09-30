@@ -24,7 +24,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 // waive_race_lost (codex C3 r2 P1): an office-initiated waive that lost the
 // row to a concurrent fee worker is NOT a clean waive — a charge may still
 // land while the cancellation reports the fee waived.
-const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'charge_review_write_failed', 'waive_race_lost']);
+const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'collection_hold', 'charge_review', 'charge_review_write_failed', 'waive_race_lost']);
 
 /**
  * Process an accepted customer cancellation request, in an order chosen so the

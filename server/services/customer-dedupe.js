@@ -24,6 +24,7 @@
 const db = require('../models/db');
 const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
+const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldReason, priorHoldReasonOf } = require('./collections/collection-hold');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 
@@ -939,11 +940,24 @@ async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loser
 // copy comes across RELEASED so the history (who flagged, when) survives
 // (codex r6: absent this, a shared do_not_text/collection_hold aborted the
 // whole merge).
+//
+// The one flag whose REASON matters is collection_hold: only a DISPUTE-reason
+// hold stops automatic card charges (collections/collection-hold.js). When the
+// winner already carries a fallback (wrong-number / wrong-party) hold and the
+// loser's colliding row is a dispute hold, releasing the loser's copy would
+// silently drop the dispute stop — so the winner's surviving row is promoted
+// to the dispute reason first (its who/when history stays; the prior reason is
+// kept in the trailer). The reverse (winner dispute, loser fallback) carries the
+// loser's fallback into the surviving dispute's trailer the same way: the loser's
+// row is released, so without it releasing that dispute would drop the outreach
+// block the fallback carried. A winner dispute that already has a trailer keeps its own.
 async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id');
+  const rows = await trx(table).where(column, loserId).select('id', 'flag', 'reason', 'released_at');
   let moved = 0;
   let released = 0;
-  for (const { id } of rows) {
+  let promoted = 0;
+  let carried = 0;
+  for (const { id, flag, reason, released_at: releasedAt } of rows) {
     try {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id }).update({ [column]: winnerId });
@@ -951,11 +965,54 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
+      if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null) {
+        // Locked: the flag-only release route does not take the merge's customer
+        // locks, so without FOR UPDATE a release landing after this read would
+        // leave the trailer on a released row and drop both holds.
+        const winnerRow = await trx(table).where({ [column]: winnerId, flag: HOLD_FLAG }).whereNull('released_at').forUpdate().first('id', 'reason');
+        if (!winnerRow) {
+          // The winner's hold was released after the collision: nothing collides
+          // now, so the loser's active hold moves across as-is.
+          try {
+            await trx.transaction(async (sp) => {
+              await sp(table).where({ id }).update({ [column]: winnerId });
+            });
+            moved += 1;
+            continue;
+          } catch (e2) {
+            if (!(e2 && e2.code === '23505')) throw e2;
+          }
+        }
+        if (winnerRow) {
+          // Same trailer placeDisputeHold writes: releasing the dispute restores the
+          // fallback hold (collection-hold-admin) instead of dropping its outreach block.
+          // The loser's row is released below, so whatever fallback it carried must end up
+          // on the surviving row. ONE update site: at most one new reason per collision.
+          const loserIsDispute = isDisputeHoldReason(reason);
+          const winnerIsDispute = isDisputeHoldReason(winnerRow.reason);
+          let mergedReason = null;
+          if (loserIsDispute && !winnerIsDispute) {
+            // Loser dispute over the winner's fallback: the winner's row is promoted to the
+            // dispute (a loser dispute that itself carries a trailer keeps only the winner's).
+            mergedReason = embedPriorHoldReason(withoutPriorHoldReason(String(reason).trim()), winnerRow.reason);
+            promoted += 1;
+          } else if (winnerIsDispute && !priorHoldReasonOf(winnerRow.reason)) {
+            // Winner's plain dispute: carry the loser's fallback into its trailer, whether the
+            // loser is itself a fallback hold or a dispute that had a fallback under it.
+            const fallback = loserIsDispute ? priorHoldReasonOf(reason) : { prior: reason };
+            if (fallback) {
+              mergedReason = embedPriorHoldReason(winnerRow.reason, fallback.prior);
+              carried += 1;
+            }
+          }
+          if (mergedReason !== null) await trx(table).where({ id: winnerRow.id }).update({ reason: mergedReason });
+        }
+      }
       await trx(table).where({ id }).update({ [column]: winnerId, released_at: trx.fn.now() });
       released += 1;
     }
   }
-  return `moved ${moved}, released ${released} (winner already carried the active flag)`;
+  return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}${carried ? `, carried ${carried} fallback hold(s) into the surviving dispute` : ''}`;
 }
 
 const UNIQUE_COLLISION_HANDLERS = {
