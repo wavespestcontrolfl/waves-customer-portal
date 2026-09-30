@@ -102,7 +102,7 @@ ${liveIndex}`,
     // Step 2: Load articles
     const articles = await db('knowledge_base')
       .whereIn('path', paths)
-      .where('active', true) // the index the paths were chosen from is active-only
+      .whereRaw('active IS NOT FALSE') // an admin's active=false hides the row (NULL counts as on), as in every other reader
       .select('path', 'title', 'content');
 
     // Step 3: Answer with full context (FLAGSHIP first, Sol on a miss; a
