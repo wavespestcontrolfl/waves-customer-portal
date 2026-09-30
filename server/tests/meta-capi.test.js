@@ -218,3 +218,37 @@ describe('uploadConversions', () => {
     expect(r.skipped).toEqual([{ event_id: 'waves_qualified_lead:L1', reason: 'already_sent' }]);
   });
 });
+
+
+describe('extra match keys (name / location / external_id)', () => {
+  const base = { email: 'a@x.com', phone: null, firstName: 'Jo-Ann', lastName: "O'Neil", city: 'Palm Harbor', state: 'Florida', zip: '34221-1234', externalId: 'CUST-1' };
+
+  test('adds fn/ln/ct/st/zp/country/external_id, normalized per Meta then hashed, as arrays', () => {
+    expect(buildUserData(base, 1)).toEqual({
+      em: ['h:a@x.com'],
+      fn: ['h:joann'], ln: ['h:oneil'], ct: ['h:palmharbor'], st: ['h:fl'], zp: ['h:34221'], country: ['h:us'],
+      external_id: ['h:cust-1'],
+    });
+  });
+  test('unusable values are omitted (non-US ZIP, unknown state, placeholder name)', () => {
+    const ud = buildUserData({ email: 'a@x.com', firstName: 'Unknown', state: 'Ontario', zip: 'K1A 0B1' }, 1);
+    expect(ud).toEqual({ em: ['h:a@x.com'] });
+  });
+  test('extras never make an event sendable on their own (no email/phone/fbc/fbp)', () => {
+    const c = { conversionType: 'qualified_lead', eventTimestamp: recentTs(), transactionId: 't1', ...base, email: null };
+    expect(buildEvent(c)).toBeNull();
+    expect(skipReason(c)).toBe('missing_match_keys');
+  });
+  test('a click-id-only event with extras present still carries them (they enrich, the click id is the key)', () => {
+    const ev = buildEvent({ conversionType: 'qualified_lead', eventTimestamp: recentTs(), transactionId: 't1', ...base, email: null, fbp: 'fb.1.1.2' });
+    expect(ev.user_data).toMatchObject({ fbp: 'fb.1.1.2', fn: ['h:joann'], external_id: ['h:cust-1'] });
+  });
+  test('a consent-stripped candidate (extras nulled by data-manager) emits no personal keys', () => {
+    const stripped = { ...base, email: null, firstName: null, lastName: null, city: null, state: null, zip: null, externalId: null, consentSuppressed: true, fbp: 'fb.1.1.2' };
+    expect(buildUserData(stripped, 1)).toEqual({ fbp: 'fb.1.1.2' });
+    expect(skipReason({ ...stripped, fbp: null, conversionType: 'qualified_lead', eventTimestamp: recentTs() })).toBe('consent_suppressed');
+  });
+  test('match-key summary records presence only', () => {
+    expect(MetaCapi._private.matchKeySummary(base)).toMatchObject({ email: true, name: true, zip: true, city: true, state: true, externalId: true });
+  });
+});
