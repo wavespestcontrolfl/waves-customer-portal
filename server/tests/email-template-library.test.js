@@ -952,6 +952,47 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('settles a boundary check that could not RUN (infrastructure) as definitely unsent and retryable, never left started', async () => {
+    const queued = { id: 'msg-boundary-unavailable', status: 'queued', subject_snapshot: 'S' };
+    const rejected = { ...queued, status: 'failed', error_message: 'provider_boundary_check_failed' };
+    const boundaryUpdate = chain({ returning: [rejected] });
+    const database = jest.fn();
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queued] }), boundaryUpdate],
+    });
+    const providerBoundaryCheck = jest.fn(async () => {
+      throw Object.assign(new Error('eligibility read unavailable'), { providerBoundaryCheckFailed: true });
+    });
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      await args.providerBoundaryCheck({ database: args.database });
+      throw new Error('the provider request must never be reached');
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      withProviderHandoff: async (dispatch) => {
+        await dispatch(database, providerBoundaryCheck);
+        return { ok: true };
+      },
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      sent: false, aborted: true, boundaryCheckFailed: true,
+      reason: 'provider_boundary_check_failed', providerAttempted: false,
+    }));
+    expect(result.boundaryBlocked).toBeUndefined();
+    expect(boundaryUpdate.where).toHaveBeenCalledWith(expect.objectContaining({
+      id: queued.id, status: 'queued', provider_handoff_phase: 'started',
+    }));
+    expect(boundaryUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', error_message: 'provider_boundary_check_failed', provider_handoff_phase: 'rejected',
+    }));
+  });
+
   test('propagates a failed boundary-refusal settlement through normal provider recovery', async () => {
     const queued = { id: 'msg-boundary-settlement-failed', status: 'queued', subject_snapshot: 'S' };
     const current = { ...queued, provider_handoff_phase: 'started' };

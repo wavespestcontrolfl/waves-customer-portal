@@ -158,7 +158,7 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
     : (opts.callDirection === 'inbound'
       ? '\nCALL DIRECTION: INBOUND — the caller dialed our office; the person who answered is Waves staff.\n'
       : '');
-  return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, Charlotte, and DeSoto counties).
+  return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties, plus the south-Hillsborough towns Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton, and Riverview).
 
 Analyze this phone call transcript and extract structured data matching the JSON OUTPUT CONTRACT appended at the end of this prompt. Every field must conform to the contract's type and enum constraints.
 
@@ -247,7 +247,7 @@ ADDRESS:
 - Parse into street_line_1, city, state, postal_code when clearly stated.
 - If the transcribed street name is not a plausible street name (real words or a proper name — "C Phone Trail" is not), it is likely a phonetic mis-transcription: still parse it as heard (the server re-validates and recovers), but lower service_address confidence to 0.6 or below.
 - state must be "FL" or null. Do not set for non-Florida addresses.
-- county: Set if clearly identifiable from city/address. Manatee, Sarasota, Charlotte, or DeSoto only.
+- county: Set if clearly identifiable from city/address. Manatee, Sarasota, Charlotte, or DeSoto only (DeSoto is recorded but NOT in the service area).
 - normalization_status: Always set to "not_attempted" (server handles normalization).
 
 PROPERTY:
@@ -349,7 +349,7 @@ exact mistakes lost real leads; apply them literally):
 
 SENTIMENT & LEAD:
 - sentiment: Match caller's emotional state.
-- lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte/DeSoto counties.
+- lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte counties and not one of the served south-Hillsborough towns (DeSoto/Arcadia is out).
 
 EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fields:
 - property.service_address (any component)
@@ -383,7 +383,7 @@ CONFIDENCE SCORES — Per-section scores in [0, 1]. Score FIDELITY, not complete
 - overall = the MINIMUM of the routing-critical section scores (service_address, scheduling_window, caller_identity), each scored on the rule above — the gate must reflect the weakest link, not an average that hides it.
 
 TRIAGE FLAGS — Set flags for situations requiring human review:
-- out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte/DeSoto counties.
+- out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte counties and not a served south-Hillsborough town (Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton, Riverview). DeSoto County (Arcadia) is out.
 - hoa_common_area_requires_approval: hoa_common_area_service is true.
 - commercial_requires_quote: Commercial property needing custom quote.
 - caller_not_authorized: Caller is EXPLICITLY a third party (tenant, property_manager, real_estate_agent, lender, home_buyer, employee, hoa_board_member, other) AND on_site_authorization is false. Never for owner, spouse_partner, or unknown.

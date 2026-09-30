@@ -5,8 +5,9 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LawnTrends, ScoreRing as LawnScoreRing, WaterIntakeBar } from './LawnReportV2';
+import LawnReportV2Section from './LawnReportV2Section';
 import { ScoreRing as TreeShrubScoreRing } from '../treeShrubV2/TreeShrubReportV2';
 import { MeterSvg, TrendChip } from '../GaugePrimitives';
 
@@ -345,5 +346,128 @@ describe('Stacked lawn trends', () => {
     const grid = [...container.querySelectorAll('div')].find((node) => node.style.display === 'grid' && node.style.gridTemplateColumns === 'minmax(0, 1fr)');
     expect(grid).toBeTruthy();
     expect(grid.children).toHaveLength(4);
+  });
+});
+
+
+// ── Watering banner + hold plan overlay (GATE_LAWN_WATERING_RULE) ─────────────
+const FUTURE = '2999-01-01T00:00:00.000Z';
+const PAST = '2020-01-01T00:00:00.000Z';
+const BANNERS = {
+  hold: { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.', 'Then follow this week’s plan below.'], expiresAt: FUTURE },
+  water_in: { state: 'water_in', lines: ['Water in today’s treatment by Thu 2 PM.', 'Run each zone about 40 minutes.', 'Run it even if it is not your usual day.'], expiresAt: FUTURE },
+  hold_then_water_in: { state: 'hold_then_water_in', lines: ['Skip your turf watering until Thu 3 PM, then water in.', 'After that, run each zone about 40 minutes within 24 hours.', 'Run it even if it is not your usual day.'], expiresAt: FUTURE },
+};
+const SNAPSHOT = { overallScore: 80, statusHeadline: 'Looking good' };
+
+describe('LawnReportV2Section watering banner', () => {
+  it.each(Object.keys(BANNERS))('%s: first child, eyebrow, line 1 as the heading, the rest as body text', (state) => {
+    const { container } = render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: BANNERS[state] }} />);
+    const banner = screen.getByTestId('lawn-watering-banner');
+    expect(banner).toHaveAttribute('data-state', state);
+    // First child of the embed, ahead of the hero.
+    const embed = container.querySelector('.report-v2-embed');
+    expect(embed.firstElementChild).toContainElement(banner);
+    expect(embed.firstElementChild).toHaveAttribute('data-glass', 'card');
+    expect(banner).toHaveTextContent('Watering after today’s visit');
+    const heading = screen.getByTestId('lawn-watering-banner-heading');
+    expect(heading.tagName).toBe('H2');
+    expect(heading).toHaveTextContent(BANNERS[state].lines[0]);
+    expect(banner).toHaveTextContent(BANNERS[state].lines[1]);
+    expect(banner).toHaveTextContent(BANNERS[state].lines[2]);
+    expect(Number.parseFloat(heading.style.fontSize)).toBeGreaterThanOrEqual(20);
+    expect(Number.parseFloat(heading.style.fontSize)).toBeLessThanOrEqual(22);
+    expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
+  });
+
+  it('hold states carry the warm tint; water-in does not', () => {
+    const tinted = (state) => {
+      const { container, unmount } = render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: BANNERS[state] }} />);
+      const style = container.querySelector('.report-v2-embed').firstElementChild.style.background;
+      unmount();
+      return style;
+    };
+    expect(tinted('hold')).toBe(tinted('hold_then_water_in'));
+    expect(tinted('hold')).not.toBe(tinted('water_in'));
+  });
+
+  it('past expiresAt (live view): the ended fine-print replaces the lines', () => {
+    render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: { ...BANNERS.hold, expiresAt: PAST } }} />);
+    expect(screen.getByTestId('lawn-watering-banner-ended')).toHaveTextContent('This watering note was for the day of your visit.');
+    expect(screen.queryByTestId('lawn-watering-banner-heading')).toBeNull();
+    expect(screen.queryByText(/Skip your turf watering/)).toBeNull();
+  });
+
+  it('an open tab switches to the ended note when expiresAt passes, with no other re-render', () => {
+    vi.useFakeTimers();
+    try {
+      const expiresAt = new Date(Date.now() + 60 * 1000).toISOString();
+      render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: { ...BANNERS.hold, expiresAt } }} />);
+      expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
+      act(() => { vi.advanceTimersByTime(62 * 1000); });
+      expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('print / PDF keeps the lines even past expiry, in the same block', () => {
+    render(<LawnReportV2Section print data={{ snapshot: SNAPSHOT, banner: { ...BANNERS.hold, expiresAt: PAST } }} />);
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.hold.lines[0]);
+    expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
+  });
+
+  it('a banner with no expiry (none state, until-dry before completion) never ends', () => {
+    render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: { state: 'none', lines: ['No watering change from today’s treatment.'], expiresAt: null } }} />);
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('No watering change');
+  });
+
+  it('null or empty banner renders nothing extra', () => {
+    for (const banner of [null, undefined, { state: 'hold', lines: [] }]) {
+      const { unmount } = render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner }} />);
+      expect(screen.queryByTestId('lawn-watering-banner')).toBeNull();
+      unmount();
+    }
+  });
+});
+
+describe('WeekPlanCallout hold overlay', () => {
+  const water = {
+    rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 0.75, status: 'balanced',
+    weekPlan: {
+      title: 'This week: run once', detail: 'About 20 minutes.', visitInPlanWeek: true, prescribesRun: true,
+      afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' },
+      afterHold: { title: 'This week: run once', detail: 'About 20 minutes. Not before Thu 3 PM: if your permitted watering day comes first, use your next permitted day after it; if there isn’t one this week, skip that run.' },
+    },
+  };
+  const hold = { watering: 'Skip your turf watering until Thu 3 PM. That gives today’s treatment time to work.', wateringHold: true, evidenceSource: 'product_instruction', needsReview: false, holdTask: 'Skip your turf watering until Thu 3 PM.' };
+
+  it('a hold verdict shows afterHold (and its own ordering replaces the generic condition)', () => {
+    render(<WaterIntakeBar water={water} aftercare={hold} />);
+    expect(screen.getByTestId('lawn-week-plan-detail')).toHaveTextContent('Not before Thu 3 PM');
+    expect(screen.queryByTestId('lawn-week-plan-condition')).toBeNull();
+    expect(screen.getByTestId('lawn-week-plan-detail')).not.toHaveTextContent('No further turf runs');
+  });
+
+  it('a hold with no afterHold keeps the raw plan under the condition (older payloads)', () => {
+    const { afterHold, ...plan } = water.weekPlan;
+    render(<WaterIntakeBar water={{ ...water, weekPlan: plan }} aftercare={hold} />);
+    expect(screen.getByTestId('lawn-week-plan-detail')).toHaveTextContent('About 20 minutes.');
+    expect(screen.getByTestId('lawn-week-plan-condition')).toBeInTheDocument();
+  });
+
+  it('a credited water-in still shows afterTreatment; anything else the raw plan', () => {
+    const credit = { watering: 'Water in today’s treatment by Thu 2 PM.', creditableWaterIn: true, evidenceSource: 'product_instruction', wateringHold: false, needsReview: false };
+    const { unmount } = render(<WaterIntakeBar water={water} aftercare={credit} />);
+    expect(screen.getByTestId('lawn-week-plan-detail')).toHaveTextContent('No further turf runs this week.');
+    unmount();
+    render(<WaterIntakeBar water={water} aftercare={{ watering: 'Keep your normal schedule.', waterInRequired: false }} />);
+    expect(screen.getByTestId('lawn-week-plan-detail')).toHaveTextContent('About 20 minutes.');
+    expect(screen.getByTestId('lawn-week-plan-detail')).not.toHaveTextContent('Not before');
+  });
+
+  it('a historical visit (outside the plan week) never shows the overlay', () => {
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek: false } }} aftercare={hold} />);
+    expect(screen.getByTestId('lawn-week-plan-detail')).not.toHaveTextContent('Not before');
   });
 });

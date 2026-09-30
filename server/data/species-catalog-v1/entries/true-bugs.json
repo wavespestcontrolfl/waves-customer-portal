@@ -1092,5 +1092,160 @@
     "action": "monitor",
     "season_basis": "observed",
     "verification": []
+  },
+  {
+    "slug": "ground-pearls",
+    "kind": "organism",
+    "common_name": "Ground Pearls",
+    "aka": [],
+    "aliases": [
+      "ground pearls",
+      "ground pearl",
+      "margarodes"
+    ],
+    "scientific_name": "Margarodes spp.",
+    "rank": "genus",
+    "group": "true-bugs",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "stages": [
+      "cyst",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Irregular yellow patches that keep declining even with regular watering",
+      "Turf in the patch pulls up easily and the roots look short and thin",
+      "Digging into the root zone can turn up tiny, round, pearl-like cysts on the roots",
+      "Damage is worst in stressed turf, often through the summer months"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chinch-bug",
+        "difference": "Chinch bugs are visible insects at the patch edge; ground pearls live in the soil as tiny pearl-like cysts on the roots.",
+        "next_photo": "A photo of a small plug pulled from the patch edge, soil shaken off, showing the roots.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "white-grub",
+        "difference": "White grubs are fat, C-shaped grubs under lifting turf; ground pearls are tiny round cysts on thin, short roots.",
+        "next_photo": "A photo of a plug pulled from the patch edge, turned over to show the roots and any soil life.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      7,
+      8
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Irregular yellow patches that keep declining despite watering can suggest ground pearls, but drought, chinch bugs, nematodes and root diseases look similar. A photo cannot confirm it; a technician digs into the root zone and checks the roots.",
+      "fact": "Ground pearls live in the soil as small pearl-like cysts on grass roots, and UF/IFAS does not recommend an insecticide for them; easing turf stress is the main approach."
+    },
+    "tech_notes": "Dig into the root zone at the margin of a declining patch and look for pearl-like cysts on the roots; rule out drought, chinch bug, nematodes and root disease. UF/IFAS recommends no chemical control; monitor and reduce turf stress with sound irrigation and mowing; any fertilizer timing follows the property's local ordinance.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/in554"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Placed in true-bugs (ground pearls are Hemiptera, like chinch bug and spittlebug): plant-pests-small is all Tree & Shrub Care and a lawn-line entry there breaks the inherited service label of the group in the v1 map. Hosts stated in copy are kept generic; UF/IFAS IN554 lists centipedegrass, St. Augustinegrass, bermudagrass, bahiagrass, carpetgrass and zoysiagrass as hosts."
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Peak months [7, 8]",
+        "note": "From the owner brief. IN554 gives only late-spring/early-summer emergence of adult females and overwintering as cysts; no monthly damage calendar."
+      },
+      {
+        "claim": "Dig depth for sampling",
+        "note": "Owner brief said 4-6 in. IN554 says ground pearls can be found up to 12 in. deep within the root zone, so tech_notes say \"root zone\" without a depth."
+      }
+    ],
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Irregular yellow patches that keep declining even with regular watering",
+        "Turf in the patch pulls up easily and the roots look short and thin"
+      ],
+      "required_signature": {
+        "text": "No photo confirms ground pearls. A technician digs into the root zone and finds the pearl-like cysts on the roots.",
+        "elements": [
+          "Irregular yellow patches that keep declining even with regular watering"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bugs are visible insects at the patch edge; ground pearls live in the soil as tiny pearl-like cysts on the roots.",
+          "next_observation": "A technician pulls a plug at the patch edge and checks the roots and soil.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "white-grub",
+          "difference": "White grubs are fat, C-shaped grubs under lifting turf; ground pearls are tiny round cysts on thin, short roots.",
+          "next_observation": "A technician pulls a plug at the patch edge and checks the roots and soil.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "manageable",
+      "recovery_note": "There is no reliable chemical control; turf recovers slowly as watering and mowing reduce stress."
+    }
   }
 ]
