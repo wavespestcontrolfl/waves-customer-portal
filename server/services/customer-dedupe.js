@@ -966,7 +966,23 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
       if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null) {
-        const winnerRow = await trx(table).where({ [column]: winnerId, flag: HOLD_FLAG }).whereNull('released_at').first('id', 'reason');
+        // Locked: the flag-only release route does not take the merge's customer
+        // locks, so without FOR UPDATE a release landing after this read would
+        // leave the trailer on a released row and drop both holds.
+        const winnerRow = await trx(table).where({ [column]: winnerId, flag: HOLD_FLAG }).whereNull('released_at').forUpdate().first('id', 'reason');
+        if (!winnerRow) {
+          // The winner's hold was released after the collision: nothing collides
+          // now, so the loser's active hold moves across as-is.
+          try {
+            await trx.transaction(async (sp) => {
+              await sp(table).where({ id }).update({ [column]: winnerId });
+            });
+            moved += 1;
+            continue;
+          } catch (e2) {
+            if (!(e2 && e2.code === '23505')) throw e2;
+          }
+        }
         if (winnerRow) {
           // Same trailer placeDisputeHold writes: releasing the dispute restores the
           // fallback hold (collection-hold-admin) instead of dropping its outreach block.
