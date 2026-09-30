@@ -677,13 +677,27 @@ async function liveReserviceLaneState(customerId) {
   let timer = null;
   try {
     const { reserviceSelfServeEnabled, loadReserviceLaneAvailability } = require('./reservice-scheduler');
-    if (!reserviceSelfServeEnabled()) return none;
+    // Codex round-32 P1: the ENTITLEMENT lookup is independent of the public-surface gate (GATE_RESERVICE_SELF_SERVE and its
+    // kill switch). With the surface off a covered customer is still covered — only the booking LINK is unavailable, a
+    // distinct fact state (`linkAvailable: false`) instead of "eligibility unavailable" (which sent the reply to paid OPEN TIMES).
+    const linkAvailable = reserviceSelfServeEnabled() !== false;
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
     const state = await Promise.race([loadReserviceLaneAvailability(customerId), timeout]);
     const only = (lanes) => (Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : []);
-    return { eligible: only(state?.eligible), open: state?.open || {}, bookable: only(state?.bookable), verified: state?.verified === true };
+    const eligible = only(state?.eligible);
+    const open = state?.open || {};
+    return {
+      eligible,
+      open,
+      // no bookable lane while the link is unavailable — a free re-service cannot be booked (promise checks fail closed)
+      bookable: linkAvailable ? only(state?.bookable) : [],
+      linkAvailable,
+      // covered lanes with no open callback whose booking link is down: entitled, but nothing to offer or book right now
+      linkDownLanes: linkAvailable ? [] : eligible.filter((lane) => !open[lane]),
+      verified: state?.verified === true,
+    };
   } catch (err) {
     logger.warn(`[sms-shadow] re-service eligibility lookup failed (${err.message}); treating as not eligible`);
     return none;
@@ -698,6 +712,9 @@ function reserviceLanesBlockedReason(lanes, state, anyOf = false) {
   if (!blocked.length || (anyOf && blocked.length < lanes.length)) return null;
   // anyOf: one bookable lane among `lanes` is enough, and the reason names no lane.
   const names = anyOf ? '' : ` ${blocked.join(' and ')}`;
+  if (state.linkAvailable === false && blocked.every((lane) => state.eligible.includes(lane) && !state.open?.[lane])) {
+    return `the free${names} re-service booking link is unavailable right now — the customer is covered but nothing can be promised or booked; hand it to the office`;
+  }
   return blocked.every((lane) => state.eligible.includes(lane))
     ? `a free${names} re-service is already booked (an open re-service visit exists) — the link would land on the already-booked page`
     : `no longer eligible for a free${names} re-service`;
@@ -706,7 +723,7 @@ function reserviceLanesBlockedReason(lanes, state, anyOf = false) {
 // The rendered fact line, and its reader. One line, fixed wording, so the
 // deterministic check below and a frozen replay read the same thing.
 const RESERVICE_FACT_LABEL = 'FREE RE-SERVICE:';
-function reserviceFactLine(lanes, booked = {}, planState = 'unknown') {
+function reserviceFactLine(lanes, booked = {}, planState = 'unknown', linkDownLanes = []) {
   const list = Array.isArray(lanes) ? lanes : [];
   // Codex round-13 P2 (PR #5336): a covered lane that already holds an open
   // re-service callback is NOT "not eligible" — that wording steered the model
@@ -728,6 +745,13 @@ function reserviceFactLine(lanes, booked = {}, planState = 'unknown') {
     return `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
       + (bookedText ? `; ${bookedText}` : '');
   }
+  // Codex round-32 P1: COVERED but the booking link is unavailable (the surface gate is off / killed) — a distinct state.
+  // The reply acknowledges and hands it to the office; it never offers the link, a free visit or paid OPEN TIMES.
+  const down = (Array.isArray(linkDownLanes) ? linkDownLanes : []).filter((lane) => lane === 'pest' || lane === 'lawn');
+  if (down.length) {
+    return `${RESERVICE_FACT_LABEL} covered for ${down.join(' and ')}, but the free re-service booking link is unavailable right now — do NOT offer the link, a free visit or paid OPEN TIMES for it; acknowledge and hand it to the office`
+      + (bookedText ? `; ${bookedText}` : '');
+  }
   return bookedText
     ? `${RESERVICE_FACT_LABEL} ${bookedText} — their free re-service for that line is already on the schedule`
     // Codex round-27 P1: two DISTINCT not-eligible states. Only a lookup that COMPLETED and found no recurring plan
@@ -744,11 +768,12 @@ function reserviceFactLine(lanes, booked = {}, planState = 'unknown') {
 async function fetchReserviceFactState({ customerId } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
   const state = await liveReserviceLaneState(customerId);
+  // booked = every lane holding an open callback (loaded independently of current eligibility — round-32 P2)
   const booked = {};
-  for (const lane of state.eligible) {
-    if (!state.bookable.includes(lane)) booked[lane] = state.open?.[lane] || {};
+  for (const lane of ['pest', 'lawn']) {
+    if (state.open?.[lane]) booked[lane] = state.open[lane];
   }
-  return { lanes: state.bookable, booked, planState: state.verified && !state.eligible.length ? 'none' : 'unknown' };
+  return { lanes: state.bookable, booked, linkDownLanes: state.linkDownLanes || [], planState: state.verified && !state.eligible.length ? 'none' : 'unknown' };
 }
 
 // The shared compliance predicate (AGENTS.md "Compliance language on any
@@ -842,7 +867,11 @@ const RESERVICE_NOT_SCHEDULED_LOOKBEHIND = "(?<!\\b(?:scheduled|regular|routine|
 // (Return semantics — another/return/extra/follow-up/come back — never go through this alternative.)
 const RESERVICE_NOT_EXISTING_VISIT_BEHIND = "(?<!\\b(?:your|my|our|his|her|their|its)\\s)(?<!\\b(?:tomorrow|today|tonight|(?:mon|tues|wednes|thurs|fri|satur|sun)day)['’]s\\s)";
 const RESERVICE_NOT_DATED_VISIT_AHEAD = "(?!(?:e?s)?\\s+(?:tomorrow|today|tonight|(?:on|at|scheduled)\\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day\\b))";
-const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|(?:another|extra|second|return|follow-?up|repeat)\\s+(?:visits?|trips?|treatments?|services?|applications?|sprays?|calls?)|${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}${RESERVICE_NOT_EXISTING_VISIT_BEHIND}(?:visit|trip)${RESERVICE_NOT_DATED_VISIT_AHEAD}|callback|redo|re-do|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))|inspections?|inspect|assessments?|look\\s+(?:at|over)|check-?up|tech(?:nician)?\\s+(?:out|back)|(?:send|sending)\\s+(?:a\\s+|another\\s+)?(?:tech(?:nician)?|someone|somebody)`;
+// Codex round-32 P2: OUTBOUND-visit constructions ("We can come out at no charge", "have a technician come out for free", "We will
+// stop by at no charge", "swing by") are free-visit offers too. A recurring-plan explanation ("we come out every quarter at no
+// charge") is billing copy, not an offer — the recurrence words after it exclude it.
+const RESERVICE_OUTBOUND_VISIT_SOURCE = "(?:come|coming|comes|stop|stopping|stops|swing|swinging|drop|dropping|pop|popping)\\s+(?:by|out|over)\\b(?!\\s+(?:every|each|quarterly|monthly|bi-?monthly|annually|regularly|on\\s+(?:a\\s+)?(?:regular|routine)))";
+const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|(?:another|extra|second|return|follow-?up|repeat)\\s+(?:visits?|trips?|treatments?|services?|applications?|sprays?|calls?)|${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}${RESERVICE_NOT_EXISTING_VISIT_BEHIND}(?:visit|trip)${RESERVICE_NOT_DATED_VISIT_AHEAD}|callback|redo|re-do|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))|inspections?|inspect|assessments?|look\\s+(?:at|over)|check-?up|tech(?:nician)?\\s+(?:out|back)|(?:send|sending)\\s+(?:a\\s+|another\\s+)?(?:tech(?:nician)?|someone|somebody)|${RESERVICE_OUTBOUND_VISIT_SOURCE}`;
 // "free" as a price word, not an idiom: excluded when "free" is followed by
 // "to <verb>" / "from ..." / "of ..." (except "free of charge"), so "feel
 // free to call", "you are / you're free to return", "free of pests" never
@@ -1408,7 +1437,13 @@ function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) 
   if (!reserviceState || !gateEnvValue('GATE_SMS_REAL_ANSWERS') || !pestReportSignal(inboundMessage, context)) return false;
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const lane = reportedReserviceLane(inboundMessage) || pronounOnlyReportLane(inboundMessage, context);
-  return Boolean(lane) && (reserviceState.lanes.includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
+  return Boolean(lane) && (reserviceState.lanes.includes(lane) || (reserviceState.linkDownLanes || []).includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
+}
+// Lanes the facts mark COVERED-BUT-LINK-UNAVAILABLE ("covered for pest, but the free re-service booking link is unavailable …").
+function linkDownReserviceLanes(factsBlock) {
+  const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(`${RESERVICE_FACT_LABEL} covered for `)) || '';
+  const named = line.slice(`${RESERVICE_FACT_LABEL} covered for `.length).split(',')[0];
+  return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane}\\b`).test(named));
 }
 function bookedReserviceLanes(factsBlock) {
   const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL)) || '';
@@ -1427,6 +1462,9 @@ function reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTi
   if (!lane) return null;
   if (bookedReserviceLanes(factsBlock).includes(lane)) {
     return `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`;
+  }
+  if (linkDownReserviceLanes(factsBlock).includes(lane)) {
+    return `the customer reported a ${lane} issue and is COVERED, but the free re-service booking link is unavailable right now — never offer paid OPEN TIMES, declare offered_times or add book_appointment; acknowledge, add {"type":"escalate","note":"<what they need>"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW`;
   }
   if (eligibleReserviceLanes(factsBlock).includes(lane)) {
     return `the customer reported a ${lane} issue and FREE RE-SERVICE in the facts says they are eligible — the re-service link shows its own availability, so never declare offered_times or add book_appointment; hand any OTHER request to the office with {"type":"escalate","note":"<the other request>"} and the FOLLOW-UP SLA wording`;
@@ -2803,7 +2841,7 @@ function buildFactsBlock(context, extras = {}) {
   // lanes renders "not eligible" (fail closed). Resolved upstream
   // (fetchReserviceFactState).
   const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? `${reserviceFactLine(extras.reserviceLanes, extras.reserviceBooked, extras.reservicePlanState)}\n`
+    ? `${reserviceFactLine(extras.reserviceLanes, extras.reserviceBooked, extras.reservicePlanState, extras.reserviceLinkDownLanes)}\n`
     : '';
   // COMPANY FACTS (owner rulings 2026-09-29/30): owner-approved company
   // knowledge, gate-on only, ordinary per-draft facts the verifier grounds
@@ -3290,7 +3328,15 @@ function customerHasPestRelationship(context) {
   return history.some((s) => {
     const label = String(s?.type || '').toLowerCase();
     if (!label) return false;
-    if (/rodent|termite|mosquito|tree|shrub/.test(label)) return false;
+    if (/termite|mosquito|tree|shrub/.test(label)) return false;
+    // Codex round-32 P2: exclude RODENT-LED services only. A retained "Pest & Rodent Control Service" (catalog pest_control —
+    // migration 20260712600000_retire_pest_rodent_combined.js) is pest-led and stays; "Rodent Pest Control" / "Rodent
+    // Trapping" lead with rodent and go.
+    const rodentAt = label.search(/rodent/);
+    if (rodentAt >= 0) {
+      const pestAt = label.search(/\bpest\b/);
+      if (pestAt < 0 || rodentAt < pestAt) return false;
+    }
     return /\bpest\b|waveguard/.test(label);
   });
 }
@@ -3504,7 +3550,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.

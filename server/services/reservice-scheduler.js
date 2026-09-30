@@ -273,7 +273,10 @@ async function loadReserviceEligibility(customerId, dbh = db) {
  */
 async function reserviceLaneAvailability(customer, dbh = db, { strict = false } = {}) {
   const eligible = !customer || customer.active === false ? [] : await reserviceLanesForCustomer(customer, dbh, { strict });
-  const open = eligible.length ? await openReserviceCallbacks(customer.id, dbh) : {};
+  // Codex round-32 P2: open callbacks are loaded INDEPENDENTLY of current eligibility — a callback booked while the plan
+  // covered the lane is still an appointment on the schedule after coverage changes. Eligibility is intersected only for
+  // "newly bookable".
+  const open = customer?.id ? await openReserviceCallbacks(customer.id, dbh) : {};
   return { eligible, open, bookable: eligible.filter((lane) => !open[lane]) };
 }
 
@@ -476,6 +479,8 @@ const RESERVICE_ACTIVITY_BOUND_RES = [
   new RegExp(`\\b(?:have|having|got|getting)\\s+(?:more|new|another|so\\s+many|a\\s+lot\\s+of|lots\\s+of|tons\\s+of|a\\s+bunch\\s+of)\\s+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
 ];
 
+// index of the plain-possession pattern ("I have / had / we've got ants") — the only one a past-time marker demotes
+const RESERVICE_POSSESSION_RE_INDEX = RESERVICE_ACTIVITY_BOUND_RES.findIndex((re) => re.source.includes('now\\s+have'));
 function reserviceClauseDropped(clause) {
   return RESERVICE_CLAUSE_NEGATED_RE.test(clause.replace(RESERVICE_AFFIRMING_EPISTEMIC_RE, (m) => ' '.repeat(m.length))) || reserviceClauseResolved(clause);
 }
@@ -506,9 +511,17 @@ function reserviceClauseIsQuestion(clause, delimiter) {
 // conjunction — "not bed bugs, the ants are back" is two clauses, not a list. Masked length-preservingly in the copy the
 // delimiters are read from.
 const RESERVICE_NOUN_LIST_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b(?:\\s*,\\s*(?:the\\s+|some\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b)*\\s*,?\\s+(?:and|plus)\\s+(?:the\\s+|some\\s+|those\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b`, 'gi');
+// ...but only when the list is a SUBJECT sharing the predicate. A list that is the OBJECT of a preceding verb ("I do not have
+// termites and ants are back" — "have termites" is complete, "ants are back" is a new clause) is not masked (round-32 P2).
+const RESERVICE_OBJECT_POSITION_BEFORE_RE = /\b(?:have|has|had|having|got|get|getting|see|saw|seen|seeing|find|found|finding|spot\w*|notic\w*|with|without|no|not|any|about|for|of|like|than)\s+(?:(?:the|some|any|these|those|many|more|all|a|an|of)\s+)*$/i;
 function maskCoordinatedNouns(text) {
-  return String(text).replace(RESERVICE_NOUN_LIST_RE, (m) => m.replace(/,/g, '&').replace(/\b(?:and|plus)\b/gi, (w) => '&'.repeat(w.length)));
+  const s = String(text);
+  return s.replace(RESERVICE_NOUN_LIST_RE, (m, offset) => {
+    if (RESERVICE_OBJECT_POSITION_BEFORE_RE.test(s.slice(Math.max(0, offset - 40), offset))) return m;
+    return m.replace(/,/g, '&').replace(/\b(?:and|plus)\b/gi, (w) => '&'.repeat(w.length));
+  });
 }
+const RESERVICE_SUBJECTLESS_PREDICATE_RE = /^\W*(?:(?:and|but|yet|then|now|so)\W+)*(?:came|come|comes|returned|returns|returning|reappeared|reappears|showed|shows|started|starts|keep|kept|are|is|were|was|have|has)\b/i;
 const RESERVICE_PRONOUN_SUBJECT_RE = /^\W*(?:(?:but|and|yet|now|then|so|because)\W+)*(?:they|it|them|those|these|all\s+of\s+(?:them|it))\b/i;
 // { kept: clauses that still count, survivingText: the original text with dropped clauses blanked }
 function reservicePestReportFacts(text) {
@@ -524,10 +537,20 @@ function reservicePestReportFacts(text) {
     cursor = m.index + m[0].length;
   }
   flush(s.length, '');
-  segs.forEach((seg) => {
+  // A SUBJECTLESS predicate clause ("The ants went away and came back": "came back") keeps the pest subject of the clause before
+  // it (Codex round-32 P2): its effective text is "<noun> came back".
+  segs.forEach((seg, i) => {
     seg.blank = !seg.clause.trim();
-    seg.dropped = seg.blank || reserviceClauseDropped(seg.clause);
-    seg.question = !seg.blank && reserviceClauseIsQuestion(seg.clause, seg.delimiter);
+    seg.eff = seg.clause;
+    if (!seg.blank && RESERVICE_SUBJECTLESS_PREDICATE_RE.test(seg.clause) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) {
+      const prevSeg = segs.slice(0, i).reverse().find((x) => !x.blank);
+      const noun = prevSeg && RESERVICE_PEST_NOUN_UNBOUND_RE.exec(prevSeg.clause);
+      if (noun) seg.eff = `${noun[0]} ${seg.clause.trim()}`;
+    }
+  });
+  segs.forEach((seg) => {
+    seg.dropped = seg.blank || reserviceClauseDropped(seg.eff);
+    seg.question = !seg.blank && reserviceClauseIsQuestion(seg.eff, seg.delimiter);
   });
   segs.forEach((seg, i) => {
     const prev = segs.slice(0, i).reverse().find((x) => !x.blank);
@@ -540,7 +563,7 @@ function reservicePestReportFacts(text) {
   let surviving = '';
   for (const seg of segs) {
     if (!seg.blank) clauses.push(seg.clause);
-    if (!seg.dropped) { kept.push(seg.clause); if (!seg.question) asserted.push(seg.clause); surviving += seg.clause; } else surviving += ' '.repeat(seg.clause.length);
+    if (!seg.dropped) { kept.push(seg.eff); if (!seg.question) asserted.push(seg.eff); surviving += seg.clause; } else surviving += ' '.repeat(seg.clause.length);
     surviving += seg.delimiter;
   }
   return { kept, asserted, clauses, survivingText: surviving };
@@ -549,8 +572,12 @@ function reservicePestReportFacts(text) {
 // (not a service name) anywhere in another surviving clause: "the roach poison is not working, they are back".
 const RESERVICE_PRONOUN_RETURN_RE = /\b(?:they|it)(?:'re|'s|\s+(?:are|is|were|was|keep|keeps))?\s+(?:(?:coming|showing)\s+(?:back|up)|back|everywhere|returned|returning)\b/i;
 const RESERVICE_PEST_NOUN_UNBOUND_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i');
+// Codex round-32 P2: plain possession with an explicit PAST-TIME marker is history, not an active report ("Last year I had
+// ants. What did you use?"). The persistence / sighting constructions are unaffected.
+const RESERVICE_PAST_MARKER_RE = /\b(?:last\s+(?:year|month|summer|winter|spring|fall|season|week)|(?:a\s+)?(?:year|month|week|decade)s?\s+ago|years\s+ago|used\s+to|previously|formerly|before\s+(?:we|i)\b|back\s+in\s+(?:\d{4}|the\s+day)|in\s+(?:19|20)\d{2}|when\s+(?:we|i)\s+(?:first\s+)?(?:moved|bought|lived))\b/i;
 function activePestClauses(kept) {
-  return kept.filter((clause) => RESERVICE_ACTIVITY_BOUND_RES.some((re) => re.test(clause)));
+  return kept.filter((clause) => RESERVICE_ACTIVITY_BOUND_RES.some((re, i) => re.test(clause)
+    && !(i === RESERVICE_POSSESSION_RE_INDEX && RESERVICE_PAST_MARKER_RE.test(clause))));
 }
 // Does the message name ANOTHER service than `lane` (the other self-bookable lane, or an excluded specialty)?
 // Location phrases ("on the lawn") are not a service. Used to keep the re-service the sole need (round-29 P1).

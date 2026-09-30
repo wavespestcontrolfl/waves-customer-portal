@@ -424,6 +424,18 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['stink bugs are back', true, 'pest', false],
     ['boxelder bugs are back', true, 'pest', false],
     ['bed bugs are back', true, null, true],
+    // round-32 P2: object-position noun pairs, subjectless coordinated predicates, historical possession
+    ['I do not have termites and ants are back', true, 'pest', false],
+    ['we saw no termites and ants are back', true, 'pest', false],
+    ['termites and ants are back', true, null, true],
+    ['The ants went away and came back', true, 'pest', false],
+    ['The ants are gone and are coming back', true, 'pest', false],
+    ['The ants went away', false, null, false],
+    ['Last year I had ants. What did you use?', false, 'pest', false],
+    ['we used to have ants', false, 'pest', false],
+    ['I had ants last year', false, 'pest', false],
+    ['I had ants yesterday', true, 'pest', false],
+    ['I have ants', true, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],
@@ -527,5 +539,49 @@ describe('covered-pest noun source', () => {
       expect(reportedReserviceLane(`the ${noun} are back`)).toBeNull();
       expect(reportedReserviceExcludedSpecialty(`the ${noun} are back`)).toBe(true);
     }
+  });
+});
+
+
+// Codex round-32 P2: open callbacks are loaded independently of current eligibility.
+describe('reserviceLaneAvailability — open callbacks survive a coverage change', () => {
+  const { reserviceLaneAvailability } = require('../services/reservice-scheduler');
+  const fakeDb = (callbackRows) => {
+    let mode = 'coverage';
+    const chain = {};
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotIn', 'modify', 'select', 'limit', 'forUpdate', 'orWhere', 'orWhereIn']) chain[m] = () => chain;
+    chain.orderBy = () => { mode = 'callbacks'; return chain; };
+    chain.then = (resolve) => Promise.resolve(mode === 'callbacks' ? callbackRows : []).then(resolve);
+    return () => chain;
+  };
+  const rows = [{ id: 'r1', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '11:00', service_type: 'Pest Control Re-Service', reschedule_token: 't1', service_key: 'pest_re_service' }];
+
+  test('a customer with NO current coverage still reports the open pest callback (bookable stays empty)', async () => {
+    const out = await reserviceLaneAvailability({ id: 'cust-1', active: true, waveguard_tier: null, monthly_rate: 0 }, fakeDb(rows));
+    expect(out.eligible).toEqual([]);
+    expect(Object.keys(out.open)).toEqual(['pest']);
+    expect(out.open.pest.date).toBe('2099-01-05');
+    expect(out.bookable).toEqual([]);
+  });
+
+  test('an inactive customer keeps the open callback too; nothing is newly bookable', async () => {
+    const out = await reserviceLaneAvailability({ id: 'cust-1', active: false }, fakeDb(rows));
+    expect(out.eligible).toEqual([]);
+    expect(Object.keys(out.open)).toEqual(['pest']);
+    expect(out.bookable).toEqual([]);
+  });
+
+  test('the SMS fact state renders the lane as ALREADY BOOKED even though it is no longer eligible', async () => {
+    jest.resetModules();
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    const actual = jest.requireActual('../services/reservice-scheduler');
+    jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: [], open: { pest: { date: '2026-10-08', windowStart: '09:00' } }, bookable: [], verified: true }) }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const state = await drafter.fetchReserviceFactState({ customerId: 'cust-1' });
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    jest.dontMock('../services/reservice-scheduler');
+    jest.resetModules();
+    expect(state.booked).toEqual({ pest: { date: '2026-10-08', windowStart: '09:00' } });
+    expect(state.lanes).toEqual([]);
   });
 });
