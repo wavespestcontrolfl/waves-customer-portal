@@ -655,19 +655,6 @@ describe('renderWeekPlanNotBefore', () => {
     expect(renderWeekPlanNotBefore(null)).toBeNull();
   });
 
-  test('credit variant: nothing left to shift orders the watering-in after the hold; leftover runs get the sentence', () => {
-    const one = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'peak', restriction: ONE_DAY, ...SPRAY });
-    const covered = renderWeekPlanNotBefore(one, { restriction: ONE_DAY, credit: true });
-    expect(covered.title).toBe('This week: covered by today\'s treatment watering-in');
-    expect(covered.detail).toBe('After the hold ends, water in today\'s application as the note above says — that is this week\'s run. No further turf runs this week.');
-    expect(covered.detail).not.toContain(HOLD_UNTIL_TOKEN);
-    const two = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
-    const more = renderWeekPlanNotBefore(two, { restriction: { ...ONE_DAY, maxDaysPerWeek: 2 }, credit: true });
-    expect(more.title).toBe('This week: 1 more run after today\'s watering-in');
-    expect(more.detail.endsWith(SENTENCE)).toBe(true);
-    expect(renderWeekPlanNotBefore(buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'peak', restriction: ONE_DAY, ...SPRAY }), { credit: true })).toBeNull();
-  });
-
   test('follows the file wording rules and never touches the stored plan or its decision hash', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     const inputs = { runMinutes: 20 };

@@ -451,26 +451,11 @@ const NOT_BEFORE_SENTENCE = `Not before ${HOLD_UNTIL_TOKEN}: if your permitted w
  * like the credit path: the stored Monday snapshot and its decisionHash are
  * never touched. Null for hold / unavailable plans (no run to shift).
  *
- * credit: the plan as reduced by a credited watering-in. With no runs left
- * there is nothing to shift, so the card just orders the watering-in after
- * the hold.
- *
  * The detail carries a literal {holdUntil} token — the caller replaces it
  * with the hold's end time.
  */
-function renderWeekPlanNotBefore(plan, { restriction = null, credit = false, runMinutes = null } = {}) {
+function renderWeekPlanNotBefore(plan, { restriction = null, runMinutes = null } = {}) {
   if (!plan || plan.action !== 'run') return null;
-  if (credit) {
-    const reduced = renderWeekPlanAfterTreatment(plan, { restriction });
-    if (!reduced) return null;
-    if (Math.max(0, Number(plan.events || 0) - 1) === 0) {
-      return {
-        title: reduced.title,
-        detail: 'After the hold ends, water in today\'s application as the note above says — that is this week\'s run. No further turf runs this week.',
-      };
-    }
-    return { title: reduced.title, detail: `${reduced.detail} ${NOT_BEFORE_SENTENCE}` };
-  }
   const card = renderWeekPlanReport(plan, { runMinutes, restriction });
   if (!card) return null;
   return { title: card.title, detail: `${card.detail} ${NOT_BEFORE_SENTENCE}` };

@@ -467,12 +467,21 @@ function buildAftercare(applications, opts = {}) {
   if (instruction && ['hold', 'water_in', 'hold_then_water_in'].includes(instruction.state)
     && Array.isArray(instruction.lines) && instruction.lines.length >= 2) {
     const holds = instruction.state !== 'water_in';
+    // A water-in credits a full weekly run only when it is at least as deep as
+    // the plan's per-run depth. Shallower, it counts toward the week but the
+    // plan stays whole (no creditableWaterIn). No plan run to reduce: as before.
+    const plan = opts.weekPlan;
+    const runDepth = Number(plan?.depthInches);
+    const creditsRun = !plan?.title || plan.prescribesRun !== true
+      || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001);
     return normalizeLawnAftercare({
       watering: `${instruction.lines[0]} ${instruction.lines[1]}`,
       reentry,
       waterInRequired: instruction.state !== 'hold',
       wateringHold: holds,
-      creditableWaterIn: instruction.state === 'water_in',
+      creditableWaterIn: instruction.state === 'water_in' && creditsRun,
+      // The task line when the water-in is real but earns no plan credit.
+      ...(instruction.state === 'water_in' && !creditsRun ? { waterInTask: instruction.lines[0] } : {}),
       needsReview: false,
       neutral: false,
       evidenceSource: 'product_instruction',
@@ -623,7 +632,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
-  const aftercare = buildAftercare(applications, { instruction: wateringInstruction });
+  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null });
   const aftercareWaterAction = wateringRestrictionAction(aftercare, water ? water.weekPlan : null);
   if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
   const insights = buildLawnInsightCards({
@@ -686,7 +695,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // earned it: outside this week's plan (visitInPlanWeek === false) it stays
   // in the Aftercare section only, never promoted into the hero action,
   // noActionNeeded, or the SMS summary derived from it below (codex P2 r10).
-  const aftercareTask = aftercareCustomerTask(aftercare, water ? water.weekPlan : null);
+  // A required water-in that earns no plan credit resolves to verdict none, which
+  // states no task: keep its own line as the task so the hero never reads "no
+  // action needed" beside it (only for this visit's plan week).
+  const aftercareTask = aftercareCustomerTask(aftercare, water ? water.weekPlan : null)
+    || (aftercare.waterInTask && water?.weekPlan?.visitInPlanWeek !== false ? aftercare.waterInTask : null);
   // A credited water-in the water/damp cards phrase generically ("as
   // directed") already carries this same task in different words — the
   // literal-instruction `includes` check below misses that semantic

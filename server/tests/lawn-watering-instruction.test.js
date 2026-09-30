@@ -445,3 +445,25 @@ describe('a hold far enough out names its date', () => {
     expect(r.lines[0]).toBe('Skip your turf watering until Tue, Jan 5 at 2 PM.');
   });
 });
+
+describe('water-in depth against the plan run', () => {
+  const plan = (planRunInches) => build([WATER_IN()], { hasWeekPlan: true, planRunInches, runtime: { headTypes: ['rotor'] } });
+  test('shallower than the plan run: line 3 keeps the any-day sentence and adds "counts toward"', () => {
+    const r = plan(0.5);
+    expect(r.waterInInches).toBe(0.25);
+    expect(r.lines).toHaveLength(3);
+    expect(r.lines[2]).toBe('Run it even if it is not your usual day. That counts toward this week’s watering.');
+    expectCleanCopy(r);
+  });
+  test('as deep, no plan, or a plan with no run depth: the plain any-day line', () => {
+    expect(plan(0.25).lines[2]).toBe('Run it even if it is not your usual day.');
+    expect(plan(0.1).lines[2]).toBe('Run it even if it is not your usual day.');
+    expect(plan(null).lines[2]).toBe('Run it even if it is not your usual day.');
+    expect(build([WATER_IN()], { planRunInches: 0.5 }).lines[2]).toBe('Run it even if it is not your usual day.'); // hasWeekPlan false
+  });
+  test('the depth rides the instruction for every water-in state, and a deeper rule wins', () => {
+    expect(build([WATER_IN({ water_in_inches: 0.5 })]).waterInInches).toBe(0.5);
+    expect(build([HOLD(24), WATER_IN()]).waterInInches).toBe(0.25);
+    expect(build([HOLD(24)]).waterInInches).toBeNull();
+  });
+});

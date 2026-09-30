@@ -4,7 +4,7 @@
 
 jest.mock('../services/service-report/pdf-queue', () => ({
   loadServiceRecordForPdf: jest.fn(async (id) => ({ id, service_line: 'lawn', structured_notes: '{}' })),
-  ensureReportToken: jest.fn(async () => 'token-1'),
+  ensureReportToken: jest.fn(async () => 'c'.repeat(32)),
 }));
 jest.mock('../services/service-report/report-data', () => ({ buildReportV1Data: jest.fn() }));
 jest.mock('../services/service-report/report-consistency', () => ({ reconcileLawnReport: jest.fn(() => ({ warnings: [] })) }));
@@ -62,6 +62,8 @@ test('the freeze is its own guarded statement; lawnReportV2 keeps its pinned wri
   expect(freeze.guard).toBe("(structured_notes::jsonb -> 'lawnWateringFreeze') IS NULL");
   expect(state.notes.lawnWateringFreeze).toMatchObject({ wateringInstruction: INSTRUCTION(40), banner: { state: 'water_in' } });
   expect(result.wateringFreeze).toEqual(state.notes.lawnWateringFreeze);
+  // The gate's own token mint is handed back so the handler can recover from a failed earlier mint.
+  expect(result.reportToken).toBe('c'.repeat(32));
 });
 
 test('two writers with different instructions: the first persists whichever order they run in', async () => {

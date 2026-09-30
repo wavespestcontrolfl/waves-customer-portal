@@ -37,8 +37,10 @@
 // allowed on a non-permitted county day and says so.
 
 const { resolveApplicationRate, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
+// ET wall-clock extraction lives in the one shared module; only the deadline
+// rounding below is specific to this writer.
+const { etParts, etDateString } = require('../../utils/datetime-et');
 
-const DEFAULT_TZ = 'America/New_York';
 const HOUR_MS = 3600000;
 
 // Owner table: minutes per zone for a quarter inch. Scaled linearly (rounded
@@ -49,6 +51,8 @@ const BASE_INCHES = 0.25;
 const HOLD_SECOND_LINE = 'That gives today’s treatment time to work.';
 const PLAN_LINE = 'Then follow this week’s plan below.';
 const ANY_DAY_LINE = 'Run it even if it is not your usual day.';
+// A water-in shallower than the plan's per-run depth is partial credit only.
+const PARTIAL_CREDIT_LINE = `${ANY_DAY_LINE} That counts toward this week’s watering.`;
 const NONE_LINE_1 = 'No watering change from today’s treatment.';
 const NONE_LINE_2 = 'Follow this week’s plan below.';
 // An "until dry" hold has no printed duration (fixed drying figures are
@@ -60,29 +64,12 @@ const DRY_PLAN_LABEL = 'the spray has dried';
 const FULL_CYCLE = 'one full cycle on each turf zone';
 
 // ── Time helpers ─────────────────────────────────────────────────────────
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function toDate(value) {
   if (value == null || value === '') return null;
   const d = value instanceof Date ? value : new Date(value);
   return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function wallParts(date, tz) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short',
-  }).formatToParts(date);
-  const get = (t) => parts.find((p) => p.type === t)?.value;
-  let hour = parseInt(get('hour'), 10);
-  if (hour === 24) hour = 0; // Intl quirk: midnight reports as 24
-  return {
-    day: `${get('year')}-${get('month')}-${get('day')}`,
-    month: parseInt(get('month'), 10),
-    dayOfMonth: parseInt(get('day'), 10),
-    weekday: get('weekday'),
-    hour,
-    minute: parseInt(get('minute'), 10),
-  };
 }
 
 // Whole-hour rounding on the absolute clock. Every US zone offset is a whole
@@ -112,10 +99,10 @@ function deadlineAfter(base, hours) {
 
 // The end of the visit's ET day (23:59:59). Walks hour boundaries, so a 23- or
 // 25-hour DST day is handled.
-function endOfDay(anchor, tz) {
-  const day = wallParts(anchor, tz).day;
+function endOfDay(anchor) {
+  const day = etDateString(anchor);
   let t = ceilToHour(anchor);
-  for (let i = 0; i < 26 && wallParts(t, tz).day === day; i += 1) t = new Date(t.getTime() + HOUR_MS);
+  for (let i = 0; i < 26 && etDateString(t) === day; i += 1) t = new Date(t.getTime() + HOUR_MS);
   return new Date(t.getTime() - 1000);
 }
 
@@ -129,15 +116,16 @@ function withinPhrase(hours) {
 // "8 PM tonight" / "10 AM today" on the visit's own day, else "Wed 4 PM".
 // Anchored to the (frozen) visit day, never to "now", so a permanent report
 // link reads the same forever.
-function formatWhen(date, anchor, tz) {
-  const at = wallParts(date, tz);
+function formatWhen(date, anchor) {
+  const at = etParts(date);
   const clock = clockLabel(at.hour, at.minute);
-  const from = wallParts(anchor, tz);
-  if (from.day === at.day) return `${clock} ${at.hour >= 17 ? 'tonight' : 'today'}`;
+  const atDay = etDateString(date);
+  const fromDay = etDateString(anchor);
+  if (fromDay === atDay) return `${clock} ${at.hour >= 17 ? 'tonight' : 'today'}`;
   // A weekday alone is ambiguous once the target is six or more days out.
-  const days = Math.round((Date.parse(`${at.day}T00:00:00Z`) - Date.parse(`${from.day}T00:00:00Z`)) / 86400000);
-  if (days >= 6) return `${at.weekday}, ${MONTHS[at.month - 1]} ${at.dayOfMonth} at ${clock}`;
-  return `${at.weekday} ${clock}`;
+  const days = Math.round((Date.parse(`${atDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000);
+  if (days >= 6) return `${WEEKDAYS[at.dayOfWeek]}, ${MONTHS[at.month - 1]} ${at.day} at ${clock}`;
+  return `${WEEKDAYS[at.dayOfWeek]} ${clock}`;
 }
 
 // ── Rule aggregation ─────────────────────────────────────────────────────
@@ -222,6 +210,7 @@ function emptyInstruction() {
     expiresAt: null,
     waterInBy: null,
     waterInByLabel: null,
+    waterInInches: null,
     minutes: { spray: null, rotor: null, unknown: false, measured: null },
     lines: [],
     ruleSource: null,
@@ -234,14 +223,15 @@ function emptyInstruction() {
  * @param {Array}  input.rules        per applied product: a rule object, null,
  *                                    or { name, rule }
  * @param {Date|string|null} input.completedAt
- * @param {string} [input.tz]         defaults to America/New_York
+ * (Times are always America/New_York; see utils/datetime-et.js.)
  * @param {object|null} [input.runtime] { runMinutes, wateringDays, headTypes,
  *                                    explicitInchesPerWeek, unconfirmed }
  * @param {null} [input.forecast]     reserved (forecast-aware water-in is a later PR)
  * @param {boolean} [input.hasWeekPlan] a weekly plan callout renders below the banner
+ * @param {number|null} [input.planRunInches] the plan's per-run depth when it prescribes a run this week
  * @returns {object}
  */
-function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime = null, forecast = null, hasWeekPlan = false } = {}) {  
+function buildWateringInstruction({ rules, completedAt, runtime = null, forecast = null, hasWeekPlan = false, planRunInches = null } = {}) {  
   const out = emptyInstruction();
   const list = Array.isArray(rules) ? rules : [];
   const resolved = list.map(ruleOf);
@@ -279,6 +269,7 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
     const byHours = Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24)));
     waterInDetail = { inches, byHours, ...minutesFor(runtime, inches) };
     out.minutes = waterInDetail.minutes;
+    out.waterInInches = inches;
   }
 
   if (holds.length) {
@@ -290,7 +281,7 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
       const holdHours = Math.max(...timedHolds.map((r) => finitePositive(r.hold_hours, 24)));
       holdEnd = ceilToHour(new Date(at.getTime() + holdHours * HOUR_MS));
       out.holdUntil = holdEnd.toISOString();
-      out.holdUntilLabel = formatWhen(holdEnd, at, tz);
+      out.holdUntilLabel = formatWhen(holdEnd, at);
       out.holdUntilPlanLabel = out.holdUntilLabel;
     } else {
       out.holdUntilLabel = DRY_LABEL;
@@ -303,7 +294,7 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
       const base = holdEnd || new Date(at.getTime() + DRY_HOLD_FLOOR_HOURS * HOUR_MS);
       const thenBy = deadlineAfter(base, waterInDetail.byHours);
       out.waterInBy = thenBy.toISOString();
-      out.waterInByLabel = formatWhen(thenBy, at, tz);
+      out.waterInByLabel = formatWhen(thenBy, at);
       out.expiresAt = out.waterInBy;
       out.lines = [
         `Skip your turf watering until ${holdLabel}, then water in.`,
@@ -312,7 +303,7 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
       ];
     } else {
       out.state = 'hold';
-      out.expiresAt = (holdEnd || endOfDay(at, tz)).toISOString();
+      out.expiresAt = (holdEnd || endOfDay(at)).toISOString();
       out.lines = [`Skip your turf watering until ${holdLabel}.`, HOLD_SECOND_LINE];
       if (hasWeekPlan) out.lines.push(PLAN_LINE);
     }
@@ -323,11 +314,12 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
   out.state = 'water_in';
   out.waterInBy = by.toISOString();
   out.expiresAt = out.waterInBy;
-  out.waterInByLabel = formatWhen(by, at, tz);
+  out.waterInByLabel = formatWhen(by, at);
   out.lines = [
-    `Water in today’s treatment by ${formatWhen(by, at, tz)}.`,
+    `Water in today’s treatment by ${formatWhen(by, at)}.`,
     `Run ${waterInDetail.clause}.`,
-    ANY_DAY_LINE,
+    // Shallower than the plan's run: it counts toward the week, it does not replace a run.
+    hasWeekPlan && Number.isFinite(planRunInches) && waterInDetail.inches < planRunInches - 0.001 ? PARTIAL_CREDIT_LINE : ANY_DAY_LINE,
   ];
   return out;
 }

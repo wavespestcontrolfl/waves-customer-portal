@@ -774,18 +774,29 @@ export default function ServiceReportDocument({ data, token }) {
   // inspection-only lawn visit claims a treatment that didn't happen (5th
   // variant of this class: defaults read as evidence).
   if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
+  // A visit with a server watering instruction (banner: hold / water-in) prints
+  // it ONCE, through aftercare.watering above. The hero task, follow-up and
+  // insight actions restate the banner's first line verbatim, so that sentence
+  // is stripped from them (any other advice in the same action stays).
+  const bannerLine = hasActualTreatment
+    && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
+    ? data.reportV2.banner.lines?.[0] : null;
+  const pushAction = (text) => {
+    if (!bannerLine) { pushRec(text); return; }
+    pushRec(String(text || '').split(bannerLine).join(' ').replace(/\s+/g, ' '));
+  };
   pushRec(v2NextMove);
   pushRec(termiteNextMove);
   // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
   // snapshot.customerAction and per-insight customerAction; omitting it drops
   // required actions (e.g. correcting irrigation) from the artifact.
-  pushRec(v2?.snapshot?.customerAction);
-  pushRec(v2?.followUp?.customerAction);
+  pushAction(v2?.snapshot?.customerAction);
+  pushAction(v2?.followUp?.customerAction);
   // wavesNext is what WAVES will do next (future tense, never the past-tense
   // wavesAction) — a commitment, so it belongs in the permanent record.
   pushRec(v2?.snapshot?.wavesNext
     || (Array.isArray(v2?.insights) ? v2.insights : []).map((i) => i?.nextVisitPlan).find(Boolean));
-  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushRec(insight?.customerAction));
+  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushAction(insight?.customerAction));
   pushRec(v2?.mowing?.recommendation);
 
   // "(3 of 5 — baseline recorded today)" / "(3 of 5)" / " — baseline

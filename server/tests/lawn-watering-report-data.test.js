@@ -71,10 +71,10 @@ function makeKnex(fixtures) {
       whereNotNull(col) { rows = rows.filter((r) => r[col] != null); return q; },
       whereNull(col) { rows = rows.filter((r) => r[col] == null); return q; },
       orderBy(col, dir = 'asc') { sortKeys.push({ col, dir }); applySort(); return q; },
-      first() { return Promise.resolve(rows[0] || null); },
+      first() { return failing ? Promise.reject(new Error('read failed')) : Promise.resolve(rows[0] || null); },
       columnInfo: () => Promise.resolve({}),
       catch: (fn) => (failing ? Promise.resolve(fn(new Error('read failed'))) : Promise.resolve(rows)),
-      then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+      then: (resolve, reject) => (failing ? Promise.reject(new Error('read failed')) : Promise.resolve(rows)).then(resolve, reject),
     });
     return q;
   };
@@ -231,6 +231,39 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       const legacy = { ...serviceWith(WATER_IN), structured_notes: JSON.stringify({ lawnReportV2: { wateringInstruction: JSON.parse(JSON.stringify(out.instruction)) } }) };
       const replay = await buildReportV1Data(legacy, 'token-w1', makeKnex(fixtures(PREFS(['spray']))));
       expect(replay.reportV2.banner).toEqual(first.reportV2.banner);
+    });
+
+    test('a failed property_preferences read builds no instruction and freezes nothing; the next render gets the right minutes', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const out = {};
+      const failed = await buildReportV1Data(serviceWith(WATER_IN), 'token-w1', makeKnex({ ...fixtures(), property_preferences: FAIL }), { wateringInstructionOut: out });
+      expect(failed.reportV2.banner).toBeUndefined();
+      expect(failed.reportV2.aftercare.evidenceSource).toBeUndefined(); // legacy path
+      expect(out.instruction).toBeNull(); // the write gate freezes only a truthy claim
+      const next = await buildReportV1Data(serviceWith(WATER_IN), 'token-w1', makeKnex(fixtures(PREFS(['rotor']))));
+      expect(next.reportV2.banner.lines[1]).toBe('Run each zone about 40 minutes.');
+    });
+
+    test('a live rule lookup that fails for a legacy product leaves a partial rule set: no instruction, nothing to freeze', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const LEGACY_ID = PRODUCT_ID.replace('5555', '7777');
+      const { wateringRule, ...legacyFacts } = facts(null);
+      const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: facts(HOLD), [LEGACY_ID]: { ...legacyFacts, name: 'Legacy Product' } } });
+      const service = { ...serviceWith(HOLD), service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }) };
+      const rows = [
+        { id: 'sp-1', service_record_id: 'svc-lawn-w1', product_id: PRODUCT_ID, product_name: 'Celsius WG', created_at: '2026-09-30T18:00:00Z' },
+        { id: 'sp-2', service_record_id: 'svc-lawn-w1', product_id: LEGACY_ID, product_name: 'Legacy Product', created_at: '2026-09-30T18:01:00Z' },
+      ];
+      const out = {};
+      const broken = await buildReportV1Data(service, 'token-w1', makeKnex({ ...fixtures(), service_products: rows, products_catalog: FAIL }), { wateringInstructionOut: out });
+      expect(out.productsLoadFailed).toBe(true);
+      expect(out.instruction).toBeNull();
+      expect(broken.reportV2.banner).toBeUndefined();
+      // Catalog back: the live lookup resolves the legacy product and the render completes.
+      const okOut = {};
+      const ok = await buildReportV1Data(service, 'token-w1', makeKnex({ ...fixtures(), service_products: rows, products_catalog: [{ id: LEGACY_ID, name: 'Legacy Product', category: 'fertilizer' }] }), { wateringInstructionOut: okOut });
+      expect(okOut.productsLoadFailed).toBe(false);
+      expect(ok.reportV2.banner.state).toBe('hold');
     });
 
     test('a pre-toggle preferences row (irrigation_system false) still gets the head-type minutes, never "no system"', async () => {

@@ -111,7 +111,7 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
         .then((row) => parseJsonObject(row && row.structured_notes).lawnWateringFreeze || null);
     }
 
-    return { smsSummary: frozen.smsSummary, frozen, wateringFreeze, warnings, persisted: true };
+    return { smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true };
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);
     return empty;

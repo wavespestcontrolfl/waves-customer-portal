@@ -282,7 +282,12 @@ async function attachLiveWateringRules(knex, products) {
         'post_application_watering',
       );
   } catch {
-    return products;
+    // The rules of these products are UNKNOWN, not absent: flag the list so the
+    // watering instruction is neither built nor frozen from a partial rule set.
+    const unread = products.slice();
+    if (products.catalogEnrichmentFailed) unread.catalogEnrichmentFailed = true;
+    unread.wateringRuleLookupFailed = true;
+    return unread;
   }
   const byId = new Map(rows.map((row) => [String(row.id), row]));
   const out = products.map((product) => {
@@ -3473,7 +3478,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       const afterHold = featureGates.lawnWateringRuleLive()
         ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
         : null;
-      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}) } : null;
+      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
     }
   }
 
@@ -3565,10 +3570,12 @@ async function buildReportWateringInstruction({ products, service, completionTim
   const waterContext = lawnAssessment?.waterContext || {};
   let runtime = null;
   if (!waterContext.scheduleUnconfirmed) {
+    // A FAILED read is not a missing row: it throws out of here so no
+    // instruction is built (and none is frozen) from generic minutes; the
+    // caller renders the legacy path and a later render retries.
     const prefs = await knex('property_preferences')
       .where({ customer_id: service.customer_id })
-      .first()
-      .catch(() => null);
+      .first();
     if (prefs) {
       runtime = {
         runMinutes: prefs.irrigation_run_minutes,
@@ -3587,6 +3594,7 @@ async function buildReportWateringInstruction({ products, service, completionTim
     completedAt: completionTime,
     runtime,
     hasWeekPlan: !!weekPlan?.title && weekPlan.visitInPlanWeek !== false,
+    planRunInches: weekPlan?.prescribesRun === true && weekPlan.visitInPlanWeek !== false ? numberOrNull(weekPlan.depthInches) : null,
   });
 }
 
@@ -5173,15 +5181,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       let wateringInstruction = null;
       if (featureGates.lawnWateringRuleLive()) {
         try {
-          // Replay the frozen instruction; regenerate only when none exists.
+          // Replay the frozen instruction; regenerate only when none exists (and
+          // only from a complete rule set: a failed live rule lookup builds none).
           wateringInstruction = readFrozenWateringInstruction(structured)
-            || await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex });
+            || (products.wateringRuleLookupFailed ? null
+              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }));
         } catch { wateringInstruction = null; }
         // Out-param for the write gate, which freezes the complete instruction.
         if (opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') {
           opts.wateringInstructionOut.instruction = wateringInstruction;
           // A failed product read means the rules were unknown, not absent.
-          opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed;
+          opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed || !!products.wateringRuleLookupFailed;
         }
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).

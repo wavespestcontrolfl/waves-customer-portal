@@ -354,6 +354,36 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain(rawBlurb);
   });
 
+  it('prints exactly one watering line for a hold visit (the banner sentence is not restated by the hero task or insights)', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'hold', lines: [line1, 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} That gives today’s treatment time to work.`, holdTask: line1, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: line1 },
+        followUp: { customerAction: line1 },
+        insights: [
+          { category: 'water', headline: 'Water', customerAction: line1 },
+          { category: 'mowing', headline: 'Mowing', customerAction: `Raise the mower one setting. ${line1}` },
+        ],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.match(/Skip your turf watering until Thu 3 PM\./g)).toHaveLength(1);
+    expect(text).toContain('Raise the mower one setting.'); // other advice in the same action survives
+    expect(text).toContain('That gives today’s treatment time to work.');
+  });
+
+  it('without a banner the recommendations list is unchanged', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { aftercare: { watering: line1 }, snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: 'Water the front strip by hand.' } } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain('Water the front strip by hand.');
+  });
+
   it('keeps approved visual moments and the turf-height gauge photo', () => {
     const data = {
       ...BASE_DATA,

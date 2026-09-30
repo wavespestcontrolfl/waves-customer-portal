@@ -768,6 +768,7 @@ describe('watering instruction drives the aftercare through the existing verdict
     action: 'run',
     visitInPlanWeek: true,
     prescribesRun: true,
+    depthInches: 0.5,
     afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' },
     afterHold: { title: 'This week: one full cycle per turf zone', detail: 'On your permitted watering day, about ½" of water per run. Not before Thu 3 PM: if your permitted watering day comes first, use your next permitted day after it; if there isn’t one this week, skip that run.' },
   };
@@ -781,8 +782,8 @@ describe('watering instruction drives the aftercare through the existing verdict
     recommendations: {},
     waterContext: { ...baseAssessment().waterContext, weekPlan },
   });
-  const build = (rules, { runtime = null, assessment = clean(), applications = CELSIUS } = {}) => {
-    const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED, runtime, hasWeekPlan: true });
+  const build = (rules, { runtime = null, assessment = clean(), applications = CELSIUS, planRunInches = 0.5 } = {}) => {
+    const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED, runtime, hasWeekPlan: true, planRunInches });
     return { instruction, report: buildLawnReportV2({ lawnAssessment: assessment, applications, wateringInstruction: instruction }) };
   };
   // The PDF prints these, in this order, through a de-duplicating pushRec
@@ -841,11 +842,46 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterHold);
   });
 
-  test('water-in resolves to credit, reduces the plan, and sets creditableWaterIn', () => {
-    const { report } = build([WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
+  test('a water-in as deep as the plan run credits it and reduces the plan', () => {
+    const { report } = build([{ ...WATER_IN_RULE, water_in_inches: 0.5 }], { runtime: { headTypes: ['rotor'] } });
     expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: false, creditableWaterIn: true, waterInRequired: true, needsReview: false });
+    expect(report.aftercare).not.toHaveProperty('waterInTask');
     expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan)).toMatchObject({ verdict: 'credit', credited: true, restricts: false });
     expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterTreatment);
+  });
+
+  test('a quarter-inch water-in against a half-inch run is NOT credited: the plan stays whole and the banner says it counts toward the week', () => {
+    const { instruction, report } = build([WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
+    expect(instruction.waterInInches).toBe(0.25);
+    expect(instruction.lines[2]).toBe('Run it even if it is not your usual day. That counts toward this week’s watering.');
+    expect(instruction.lines[2]).not.toMatch(/one of this week/);
+    expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: false, creditableWaterIn: false, waterInRequired: true, needsReview: false });
+    expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan)).toMatchObject({ credited: false, restricts: false });
+    const shown = renderedWeekPlan(report.aftercare, report.water.weekPlan);
+    expect(shown).toBe(report.water.weekPlan);
+    expect(`${shown.title} ${shown.detail}`).not.toMatch(/No further turf runs|covered by today/);
+    // The water-in is still the customer's task: the hero carries it, never "no action needed".
+    expect(report.snapshot.customerAction).toBe(instruction.lines[0]);
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(banned(instruction.lines[2])).toEqual([]);
+  });
+
+  test('a water-in with no plan to reduce is unchanged: creditable, and no "counts toward" line', () => {
+    const noPlan = clean(null);
+    const instruction = buildWateringInstruction({ rules: [WATER_IN_RULE], completedAt: COMPLETED, runtime: { headTypes: ['rotor'] } });
+    expect(instruction.lines[2]).toBe('Run it even if it is not your usual day.');
+    const report = buildLawnReportV2({ lawnAssessment: noPlan, applications: CELSIUS, wateringInstruction: instruction });
+    expect(report.aftercare.creditableWaterIn).toBe(true);
+    expect(report.aftercare).not.toHaveProperty('waterInTask');
+    // A plan that prescribes no run this week has nothing to reduce either.
+    const hold = { ...RUN_PLAN, action: 'hold', prescribesRun: false, depthInches: null };
+    expect(build([WATER_IN_RULE], { assessment: clean(hold) }).report.aftercare.creditableWaterIn).toBe(true);
+  });
+
+  test('a run plan with no recorded depth cannot be credited (fail closed)', () => {
+    const { depthInches, ...noDepth } = RUN_PLAN;
+    const { report } = build([{ ...WATER_IN_RULE, water_in_inches: 0.5 }], { assessment: clean(noDepth), planRunInches: null });
+    expect(report.aftercare.creditableWaterIn).toBe(false);
   });
 
   test('without an afterHold overlay a hold keeps today\'s plan object', () => {
