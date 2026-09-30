@@ -1965,7 +1965,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(summaryBody()).toHaveLength(1);
     expect(summaryBody()[0]).toMatch(/Review each service and its report: \S+ Pay your invoice: \S+$/);
     const queued = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
-    expect(queued).toMatchObject({ status: 'scheduled', scheduled_send_error: 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED' });
+    expect(queued).toMatchObject({ status: 'scheduled', scheduled_send_error: 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED:visit_summary' });
     expect(queued.sms_sent_at).not.toBeNull();
     const sendViaSms = jest.spyOn(InvoiceService, 'sendViaSMS');
     jest.spyOn(require('../services/invoice-email'), 'sendInvoiceEmail').mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });

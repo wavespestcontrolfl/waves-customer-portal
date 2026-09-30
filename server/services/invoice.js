@@ -3884,6 +3884,8 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
 }
 
 const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
+// The same marker, written for a Text leg the combined-visit summary text covers.
+const SUMMARY_TEXT_COVERED_ERROR = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}:visit_summary`;
 
 async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSmsAt) {
   if (!claimToken) return false;
@@ -7921,38 +7923,47 @@ const InvoiceService = {
     });
   },
 
-  // The combined-visit summary text finished its part in this invoice's Text
-  // leg (visit-completion-summary.js). With `textCovered` the summary text
-  // carried the pay link: the queued send's Text leg is done and only its
-  // Email remains, which is exactly the state an accepted Text with a pending
-  // Email already uses (BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED: the
-  // sender treats the leg as accepted and sends the Email at once, in or out
-  // of the send window). Without it the wait the coordinator scheduled under
-  // SUMMARY_TEXT_HOLD_ERROR ends and the invoice sends as it always did.
-  // Only a still-queued self-pay row of this packet moves; a row the queue
-  // already claimed is left alone, and a replay is a no-op.
-  async settleSummaryTextHold(invoiceId, packetId, { textCovered = false, acceptedAt = new Date() } = {}) {
+  // The combined-visit summary text and this invoice's Text leg
+  // (visit-completion-summary.js). With `textCovered` the summary text carries
+  // the pay link: the queued send's Text leg is done and only its Email
+  // remains, which is exactly the state an accepted Text with a pending Email
+  // already uses (BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED: the sender
+  // treats the leg as accepted and sends the Email at once, in or out of the
+  // send window). The stamp carries a suffix so it can be told from an
+  // accepted invoice text (SUMMARY_TEXT_COVERED_ERROR; every reader matches
+  // the marker by prefix). Without `textCovered` the wait the coordinator
+  // scheduled under SUMMARY_TEXT_HOLD_ERROR ends, and a stamp this summary
+  // wrote for a text that never went out is taken back, so the invoice sends
+  // as it always did. Only a queued self-pay row of this packet moves; a row
+  // the queue already claimed is left alone, and a replay is a no-op.
+  // `database` is the handoff transaction when the stamp is written before the
+  // provider request, under the invoice row lock the caller holds.
+  async settleSummaryTextHold(invoiceId, packetId, { textCovered = false, acceptedAt = new Date(), database = db } = {}) {
     const { SUMMARY_TEXT_HOLD_ERROR } = require("./invoice-helpers");
     const holdLike = `${SUMMARY_TEXT_HOLD_ERROR.split(" ")[0]}%`;
-    const queued = db("invoices")
+    const markerLike = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}%`;
+    const queued = () => database("invoices")
       .where({ id: invoiceId, status: "scheduled", visit_completion_packet_id: packetId })
       .whereNull("payer_id")
       .whereNull("payer_statement_id");
     if (!textCovered) {
-      return queued
+      const released = await queued()
         .where("scheduled_send_error", "like", holdLike)
-        .update({ scheduled_send_error: null, scheduled_send_at: db.fn.now(), updated_at: new Date() });
+        .update({ scheduled_send_error: null, scheduled_send_at: database.fn.now(), updated_at: new Date() });
+      const reverted = await queued()
+        .where("scheduled_send_error", SUMMARY_TEXT_COVERED_ERROR)
+        .update({ scheduled_send_error: null, sms_sent_at: null, scheduled_send_attempts: 0, scheduled_send_at: database.fn.now(), updated_at: new Date() });
+      return released + reverted;
     }
-    const markerLike = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}%`;
-    return queued
+    return queued()
       .where((q) => q.whereNull("scheduled_send_error")
         .orWhere("scheduled_send_error", "like", holdLike)
         .orWhere("scheduled_send_error", "like", markerLike))
       .update({
-        sms_sent_at: db.raw("COALESCE(sms_sent_at, ?::timestamptz)", [acceptedAt]),
-        scheduled_send_at: db.raw("CASE WHEN scheduled_send_error LIKE ? THEN NOW() ELSE scheduled_send_at END", [holdLike]),
-        scheduled_send_attempts: db.raw("CASE WHEN scheduled_send_error LIKE ? THEN scheduled_send_attempts ELSE 0 END", [markerLike]),
-        scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+        sms_sent_at: database.raw("COALESCE(sms_sent_at, ?::timestamptz)", [acceptedAt]),
+        scheduled_send_at: database.raw("CASE WHEN scheduled_send_error LIKE ? THEN NOW() ELSE scheduled_send_at END", [holdLike]),
+        scheduled_send_attempts: database.raw("CASE WHEN scheduled_send_error LIKE ? THEN scheduled_send_attempts ELSE 0 END", [markerLike]),
+        scheduled_send_error: database.raw("CASE WHEN scheduled_send_error LIKE ? THEN scheduled_send_error ELSE ? END", [markerLike, SUMMARY_TEXT_COVERED_ERROR]),
         updated_at: new Date(),
       });
   },

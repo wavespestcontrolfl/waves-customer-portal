@@ -4673,7 +4673,7 @@ postgres('visit summary recipient recovery', () => {
   // link (unpaid) or receipt link (paid) when it goes to the same person the
   // invoice text would, and the invoice's own text stands down.
   describe('the summary text carries the invoice link', () => {
-    const MARKER = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
+    const MARKER = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED:visit_summary';
     const { SUMMARY_TEXT_HOLD_ERROR } = require('../services/invoice-helpers');
 
     async function stop({ status = 'draft', sameRecipient = true, scheduled = false, invoice = {} } = {}) {
@@ -4829,6 +4829,68 @@ postgres('visit summary recipient recovery', () => {
       expect(sendCustomerMessage.mock.calls[1][0].body).toBe(plainBody());
       expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: null });
       expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+    });
+
+    test('the send queue cannot claim the invoice while the summary handoff is in flight, even past an expired wait', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: new Date(Date.now() - 60000) });
+      const Invoice = require('../services/invoice');
+      const sendSms = jest.spyOn(Invoice, 'sendViaSMS');
+      const email = jest.spyOn(require('../services/invoice-email'), 'sendInvoiceEmail').mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+      let queue;
+      let sentDuringHandoff;
+      sendCustomerMessage.mockImplementation(handoffSender(async () => {
+        // The provider request is under way: the queue's tick starts now.
+        queue = Invoice.processScheduledSends();
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        sentDuringHandoff = sendSms.mock.calls.length;
+        return { sent: true };
+      }));
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      await queue;
+      expect(sentDuringHandoff).toBe(0);
+      expect(sendSms).not.toHaveBeenCalled();
+      expect(email).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'sent' });
+    });
+
+    test('a provider-accepted text whose finalization failed keeps the invoice Text leg covered', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      const finalize = VisitGroups.finalizeVisitNotification;
+      jest.spyOn(VisitGroups, 'finalizeVisitNotification').mockImplementation(async (...args) => {
+        if (args[1] === 'completion_sms' && args[2] === 'sent') throw new Error('Synthetic finalize failure');
+        return finalize(...args);
+      });
+      await deliver();
+      expect(await summaryEffect()).toMatchObject({ status: 'unknown_delivery', last_error: 'provider_outcome_unknown', provider_id: `pay_link:${invoiceId}` });
+      const covered = await invoiceRow(invoiceId);
+      expect(covered).toMatchObject({ status: 'scheduled', scheduled_send_error: MARKER });
+      expect(covered.sms_sent_at).not.toBeNull();
+      const sendSms = jest.spyOn(require('../services/invoice'), 'sendViaSMS');
+      jest.spyOn(require('../services/invoice-email'), 'sendInvoiceEmail').mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+      await require('../services/invoice').processScheduledSends();
+      expect(sendSms).not.toHaveBeenCalled();
+    });
+
+    test('an ambiguous provider failure with a link attached still counts the text as covering the invoice', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      sendCustomerMessage.mockImplementation(handoffSender(async () => { throw providerFailure(503); }));
+      await deliver();
+      // The handoff rolled its cover back with the failed request; the durable link decides.
+      expect(await summaryEffect()).toMatchObject({ status: 'unknown_delivery', provider_id: `pay_link:${invoiceId}` });
+      expect(await invoiceRow(invoiceId)).toMatchObject({ scheduled_send_error: MARKER });
+      expect((await invoiceRow(invoiceId)).sms_sent_at).not.toBeNull();
+    });
+
+    test('a provider request definitively rejected takes the cover back so the invoice texts as before', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      sendCustomerMessage.mockImplementation(handoffSender(async () => ({ sent: false, terminal: true })));
+      await deliver();
+      expect(await summaryEffect()).toMatchObject({ status: 'suppressed', provider_id: null });
+      const restored = await invoiceRow(invoiceId);
+      expect(restored).toMatchObject({ status: 'scheduled', scheduled_send_error: null, sms_sent_at: null });
+      expect(new Date(restored.scheduled_send_at).getTime()).toBeLessThanOrEqual(Date.now());
     });
   });
 });
