@@ -222,6 +222,20 @@ describe('gate on — an upcoming visit is offered through the reschedule link p
     expect(oldFinder).not.toHaveBeenCalled();
   });
 
+  test('two upcoming visits that read identically (same type, same date): no id is used, nothing offered, zone finder not used either (Codex #5379 r3)', async () => {
+    const drafter = freshDrafter();
+    mockIdentity.answer = { about: 'visit', visit: 'V2', service: null };
+    const context = baseContext([
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-v1'),
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-v2'),
+    ]);
+    const client = makeClient(plainReply());
+    const r = await drafter.generateGroundedDraft(argsFor(client, context));
+    expect(picker.loadById).not.toHaveBeenCalled();
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+
   test('ambiguous upcoming visits: identity uncertain → nothing offered, neither path called', async () => {
     const drafter = freshDrafter();
     const context = baseContext([

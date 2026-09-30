@@ -670,9 +670,17 @@ function serviceIdentitySchema(visits, openEstimate, services) {
 // the last completed visit, else the engine's own default service for a
 // brand-new customer.
 // The visit's scheduled_services id on the identity, only when it has one —
-// keeps the identity shape unchanged for every context without ids.
-function visitIdField(visit) {
-  return visit?.scheduledServiceId ? { scheduledServiceId: visit.scheduledServiceId } : {};
+// keeps the identity shape unchanged for every context without ids. Withheld
+// when another upcoming visit reads identically in the identity prompt (same
+// type, same date): the model's pick between them is arbitrary, and the id
+// would size OPEN TIMES for one particular visit (and property). The service
+// type stays certain either way, so the zone-finder path is unchanged; the
+// scheduler path withholds OPEN TIMES without an id.
+function visitIdField(visit, visits = []) {
+  if (!visit?.scheduledServiceId) return {};
+  const twin = visits.some((v) => v !== visit && v.upcoming && v.type === visit.type
+    && formatEtDate(v.date) === formatEtDate(visit.date));
+  return twin ? {} : { scheduledServiceId: visit.scheduledServiceId };
 }
 
 function unnamedServiceIdentity(visits, openEstimate) {
@@ -690,7 +698,7 @@ function unnamedServiceIdentity(visits, openEstimate) {
 function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
   const visit = visits.find((v) => v.id === answer?.visit);
   const service = services.find((s) => s.service_key === answer?.service);
-  if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit) : {}) };
+  if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
   if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking' };
   if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
