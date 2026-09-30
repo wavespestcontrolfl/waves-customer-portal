@@ -343,8 +343,35 @@ function moveTechNotices(moved, movedTechIds) {
     .filter((n) => n.technicianId);
 }
 
+/**
+ * A retry of the SAME accept (same case) whose earlier attempt wrote this
+ * family's hold and then stopped: that hold is picked up where it stands —
+ * its prepaid moves are done and its skip plan is recorded — rather than
+ * re-decided (its visits are no longer inside the pause, so a fresh
+ * decision would read "nothing to pause" and leave it to be undone).
+ */
+async function resumeSameCaseHold({ customerId, caseId, familyKey }) {
+  if (!caseId) return null;
+  const existing = await db('plan_holds')
+    .where({ customer_id: customerId, family_key: familyKey, cancellation_case_id: caseId, status: 'active' })
+    .first('id', 'starts_on', 'resume_on', 'moved_visits');
+  if (!existing) return null;
+  const record = readRecord(existing.moved_visits);
+  if (record.compensating) throw codedError('hold_setup_failed', 'We could not set the hold up — nothing changed. Call our office and we will do it by hand');
+  const done = new Set((record.skipped || []).map(String));
+  const resume = dateOnlyString(existing.resume_on);
+  return {
+    holdId: existing.id, familyKey, startsOn: dateOnlyString(existing.starts_on), resumeOn: resume, resumeDisplay: displayDate(resume),
+    moved: (record.moved || []).length,
+    pendingSkips: (record.toSkip || []).filter((v) => !done.has(String(v.id))),
+    techNotices: [],
+  };
+}
+
 async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 180 }) {
   const { today, resume } = validateHoldDates(familyKey, resumeOn, maxDays);
+  const picked = await resumeSameCaseHold({ customerId, caseId, familyKey });
+  if (picked) return picked;
   // The visits the pause covers (rule 1): dated from today up to the day
   // before the return date, rebook placeholders aside.
   const visits = await familyUpcomingVisits(customerId, familyKey);
@@ -607,6 +634,14 @@ const SKIP_RECOVERY_AFTER_MS = 15 * 60 * 1000;
  * only after the provider accepted the send (codex r1 P1).
  * Returns 'sent' | 'unsent' | 'not_due' (incl. a visit that changed under the lock) | 'already_sent' | 'no_visit' | 'cancelled'.
  */
+// The text goes 7 days out or closer, and never once the visit is underway
+// or done ("move it or cancel" no longer applies).
+function restartTextWindowOpen(next, nextOn, today) {
+  const underway = ['completed', 'en_route', 'on_site'].includes(next.status)
+    || next.track_state === 'complete' || LIVE_TRACK_STATES.includes(next.track_state);
+  return !underway && nextOn >= today && nextOn <= addDays(today, 7);
+}
+
 async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone', 'active', 'pipeline_stage');
   if (!customer || customer.active === false || customer.pipeline_stage === 'churned') {
@@ -637,9 +672,7 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   const nextOn = dateOnlyString(next.scheduled_date);
   // Once the visit is underway (or done) the text's "move it or cancel"
   // no longer applies.
-  const underway = ['completed', 'en_route', 'on_site'].includes(next.status)
-    || next.track_state === 'complete' || LIVE_TRACK_STATES.includes(next.track_state);
-  if (underway || nextOn < today || nextOn > addDays(today, 7)) return 'not_due';
+  if (!restartTextWindowOpen(next, nextOn, today)) return 'not_due';
   if (!customer.phone) return unsentRestartText(hold, next, nextOn, today);
   // Claim in a SHORT transaction, send outside it: the renderer and the
   // sender query the pool themselves, and a transaction held across the

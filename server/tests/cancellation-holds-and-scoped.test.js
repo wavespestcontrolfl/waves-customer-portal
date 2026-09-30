@@ -212,6 +212,20 @@ describe('startHold (ruling C-4)', () => {
     expect(mockState.tables.plan_holds).toHaveLength(0);
   });
 
+  test('a retry of the same accept picks up the hold its stopped attempt wrote, instead of reading "nothing to pause"', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay' }],
+      holds: [{ id: 'h9', customer_id: 'c1', family_key: 'lawn_care', cancellation_case_id: 'k', status: 'active', starts_on: TODAY, resume_on: daysOut(30),
+        moved_visits: JSON.stringify({ moved: [{ id: 'p1' }], toSkip: [{ id: 's1', status: 'confirmed', from: daysOut(9) }, { id: 's2', status: 'confirmed', from: daysOut(12) }], skipped: ['s2'], skipsFinal: false, acceptCommitted: false }) }],
+      visits: [lawnVisit('p1', daysOut(30)), lawnVisit('s1', daysOut(9)), lawnVisit('back', daysOut(45))],
+    });
+    const out = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) });
+    expect(out).toMatchObject({ holdId: 'h9', moved: 1, pendingSkips: [{ id: 's1' }] });
+    expect(out.notNeeded).toBeUndefined();
+    expect(mockState.tables.plan_holds).toHaveLength(1);
+    expect(mockReschedule).not.toHaveBeenCalled();
+  });
+
   test('"nothing to pause" is answered before the once-a-year limit and the billing checks: no new hold, no free month either way', async () => {
     seed({
       customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }], components: [],
