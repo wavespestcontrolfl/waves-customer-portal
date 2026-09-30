@@ -24866,7 +24866,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         // pre-redacted (codex r34).
         observations: rulesItems([...promptObs, ...typedFallbackObservations]),
         recommendations: writerRulesOn ? [] : [...promptRecs, ...typedFallbackNextSteps],
-        ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
+        // A zero rating ("Recorded pest activity was none.") names no place
+        // checked, a property-wide absence the writer rules refuse (rule 4):
+        // under the rules it is left out, so the recorded work still ships.
+        ratingLabel: ratingNum !== null && !(writerRulesOn && ratingNum === 0) ? PEST_ACTIVITY_LABELS[ratingNum] : null,
         customerConcern: rulesItems([promptConcern])[0] || '',
         // The writer rules drop the recorded footage ("with 120 linear ft
         // recorded") from the last-resort copy too.

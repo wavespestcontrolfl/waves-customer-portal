@@ -183,6 +183,22 @@ test('gate on: the last-resort copy leaves out recorded items the rules forbid',
   expect(report).not.toMatch(/linear ft/);
 });
 
+test('gate on: a zero activity rating leaves the last-resort copy standing', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockProvider.mockImplementation(async () => ({ ok: false, reason: 'openai_503' }));
+  const res = mkRes();
+  await handler(mkReq({
+    serviceNotes: 'Perimeter band (zero rating case).',
+    actionsCompleted: ['Exterior perimeter treatment'],
+    pestActivityRating: 0,
+  }), res);
+  expect(res.statusCode).toBe(200);
+  const { report, deterministic } = res.json.mock.calls[0][0];
+  expect(deterministic).toBe(true);
+  expect(report).toContain('Exterior perimeter treatment');
+  expect(report).not.toMatch(/Recorded pest activity was/);
+});
+
 test('gate on: a failed catalog read fails retryable instead of screening weaker', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogFails = true;
