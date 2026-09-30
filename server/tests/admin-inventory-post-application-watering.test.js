@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 'audit-1') }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.technician = { id: 'admin-1', name: 'Owner' }; req.technicianId = 'admin-1'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -24,6 +25,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const inventoryRouter = require('../routes/admin-inventory');
+const { recordAuditEvent } = require('../services/audit-log');
 
 const PRODUCT = '11111111-1111-4111-8111-111111111111';
 
@@ -133,5 +135,38 @@ describe.each([
       expect(res.status).toBe(200);
     });
     expect(Object.keys(updates[0])).not.toContain('post_application_watering');
+  });
+});
+
+describe('audit trail (local audit P1 on #5393)', () => {
+  beforeEach(() => recordAuditEvent.mockClear());
+
+  test.each([
+    ['PATCH', `/lawn-outline-facts/${PRODUCT}`],
+    ['PUT', `/${PRODUCT}`],
+  ])('%s records an audit_log entry with before/after when the rule changes', async (method, path) => {
+    wire();
+    await withServer(async (base) => {
+      const res = await send(base, method, path, { postApplicationWatering: { mode: 'hold', hold_hours: 12 } });
+      expect(res.status).toBe(200);
+    });
+    expect(recordAuditEvent).toHaveBeenCalledTimes(1);
+    const call = recordAuditEvent.mock.calls[0][0];
+    expect(call).toMatchObject({
+      actor_type: 'technician', actor_id: 'admin-1',
+      action: 'products_catalog.post_application_watering.updated',
+      resource_type: 'products_catalog', resource_id: PRODUCT,
+    });
+    expect(call.metadata.before).toBeNull();
+    expect(call.metadata.after).toMatchObject({ mode: 'hold', hold_hours: 12, source: 'owner', verified_by: 'Owner' });
+  });
+
+  test('a save that does not mention the field records nothing', async () => {
+    wire();
+    await withServer(async (base) => {
+      const res = await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { irrigationNotes: 'x' });
+      expect(res.status).toBe(200);
+    });
+    expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 });

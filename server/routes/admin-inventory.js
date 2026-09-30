@@ -1106,6 +1106,7 @@ router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
       .where({ id: product.id })
       .update(update)
       .returning('*');
+    await auditWateringRuleChange(req, product, wateringPatch);
     res.json({
       product: mapProduct(updated),
       readiness: lawnFactReadiness(updated),
@@ -3327,6 +3328,36 @@ async function recalcBestPriceLocked(productId, dbc) {
 // is stamped as an owner edit by the acting admin. Returns { skip } when the
 // body does not mention the field, { error } for a 400, else { value } (the
 // JSON text to store, or null).
+
+// Audit an admin edit of the product's watering rule (a compliance field that
+// completion snapshots freeze). No-op when the field was not in the request or
+// did not change. Never throws: the row is already saved.
+async function auditWateringRuleChange(req, product, wateringPatch, trx = null) {
+  if (!wateringPatch || wateringPatch.skip) return;
+  const before = product?.post_application_watering ?? null;
+  const beforeText = before == null ? null : (typeof before === 'string' ? before : JSON.stringify(before));
+  if (beforeText === (wateringPatch.value ?? null)) return;
+  try {
+    const { recordAuditEvent } = require('../services/audit-log');
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: req.technicianId || null,
+      action: 'products_catalog.post_application_watering.updated',
+      resource_type: 'products_catalog',
+      resource_id: String(product.id),
+      metadata: {
+        product: product.name || null,
+        before: beforeText ? JSON.parse(beforeText) : null,
+        after: wateringPatch.value ? JSON.parse(wateringPatch.value) : null,
+        actor_name: req.technician?.name || null,
+      },
+      trx,
+    });
+  } catch (err) {
+    logger?.warn?.(`[admin-inventory] watering-rule audit failed: ${err.message}`);
+  }
+}
+
 function postApplicationWateringPatch(body, actor) {
   const raw = body?.postApplicationWatering;
   if (raw === undefined) return { skip: true };
@@ -3567,6 +3598,7 @@ router.put('/:id', async (req, res, next) => {
       const lockedSizeChanged = (upd.container_size !== undefined && (upd.container_size || null) !== (locked.container_size || null))
         || (upd.unit_size_oz !== undefined && numberOrNull(upd.unit_size_oz) !== numberOrNull(locked.unit_size_oz));
       await trx('products_catalog').where({ id: req.params.id }).update(upd);
+      await auditWateringRuleChange(req, locked, wateringPatch, trx);
       if (stockChanged) {
         const before = stockBefore || 0;
         const after = nextStock || 0;
