@@ -2,9 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
-const TwilioService = require('../services/twilio');
-const logger = require('../services/logger');
-const ReviewService = require('../services/review-request');
+const { reviewCardLinkFor } = require('../services/portal-review-card');
 const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 
 router.use(authenticate);
@@ -17,280 +15,142 @@ router.use(authenticate);
 // page in the same week. The GBP URLs now come from WAVES_LOCATIONS, so a
 // profile-link change lands everywhere at once.
 const { resolveReviewLocation } = require('../config/locations');
-
-// Admin alert recipient — must be a real cell, never one of our own Twilio
-// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
-const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const { visitAnchor, reviewLinkClickedSince } = require('../services/review-click-guard');
 
 // =========================================================================
-// GET /api/satisfaction/pending — unrated services from last 7 days
+// GET /api/satisfaction/review-card — the portal's one-tap Google review card
 // =========================================================================
-router.get('/pending', async (req, res, next) => {
+// Owner ruling 2026-09-29: the 1-10 rating is retired everywhere. The portal
+// offers ONE tap to Google's review form (it cannot be embedded), the same for
+// every customer. Nothing is sent from here — the normal post-visit review
+// texts are the only asks.
+//
+// Shown for the customer's newest completed visit of the last 7 days (scoped to
+// the selected saved property), unless:
+//   - the customer has already left a Google review (has_left_google_review);
+//   - they already clicked through a tracked review link since that visit
+//     (review_requests.redirected_at) — that is how the card stops showing;
+//   - the customer opted out of review requests (notification_prefs);
+//   - the customer has no live delivered review link: the card offers ONLY the
+//     tracked /api/rate/<token>/go link (services/portal-review-card.js), never
+//     a bare office Google URL, so every portal tap stamps the click and the
+//     send-time guard suppresses any ask enrolled afterwards.
+router.get('/review-card', async (req, res, next) => {
   try {
-    if (req.customer?.has_left_google_review) {
-      return res.json({ pending: [] });
+    const customer = req.customer;
+    if (customer?.has_left_google_review) {
+      return res.json({ card: null });
     }
 
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the prompt renders on
-    // Home, which follows the selected house — a rating for another saved
-    // property's visit must not be asked (or submitted) from this house's
-    // dashboard (GitHub codex r5 P1). Every property retired: nothing to ask.
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the card renders on Home,
+    // which follows the selected house — a visit at another saved property must
+    // not be offered from this house's dashboard (GitHub codex r5 P1). Every
+    // property retired: nothing to offer.
     const scope = await resolveSessionScope(req);
     // The RESOLVED scope is echoed like the schedule and last-visit reads so
-    // Home can drop a prompt served under another house than it shows (the
-    // selected house retired, or the gate flipped, after the list loaded)
-    // instead of asking the customer to rate the wrong visit (GitHub codex
-    // r11 P2).
+    // Home can drop a card served under another house than it shows (GitHub
+    // codex r11 P2).
     const propertyScope = resolvedScopePayload(scope);
-    if (scope.enabled && scope.scoped && (scope.closed || !scope.property)) return res.json({ pending: [], propertyScope });
+    if (scope.enabled && scope.scoped && (scope.closed || !scope.property)) return res.json({ card: null, propertyScope });
 
-    let pendingQuery = db('service_records')
+    // The newest completed visit in the last 7 days, from BOTH sources: a
+    // completed appointment can exist with no service record, and an older
+    // record must not mask a newer record-less visit. Same-day ties go to the
+    // later completion instant (the click guard's anchor), unknown last.
+    // Seven ET calendar days back (the UTC calendar hides the card a day early
+    // between 8 p.m. and midnight ET).
+    const windowStart = etDateString(addETDays(new Date(), -7));
+    let recordQuery = db('service_records')
       .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' })
-      .where('service_records.service_date', '>=', sevenDaysAgo.toISOString().split('T')[0])
+      .where('service_records.service_date', '>=', windowStart)
       .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
-      .leftJoin('satisfaction_responses', function () {
-        this.on('service_records.id', 'satisfaction_responses.service_record_id')
-          .andOn('service_records.customer_id', 'satisfaction_responses.customer_id');
-      })
-      .whereNull('satisfaction_responses.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select(
         'service_records.id',
+        // The visit's stable id: siblings of one visit share it, so the
+        // client keys its dismissal by it rather than by whichever sibling wins.
+        'service_records.scheduled_service_id',
         'service_records.service_type',
         'service_records.service_date',
+        'service_records.ended_at',
+        // A record written without ended_at (e.g. by pest-recap) completes at
+        // its linked visit's instant: the same fallback order visitAnchor uses.
+        'scheduled_services.actual_end_time as linked_actual_end_time',
+        'scheduled_services.check_out_time as linked_check_out_time',
+        'scheduled_services.completed_at as linked_completed_at',
         'technicians.name as technician_name'
       )
+      // The same order as the sort below, before the limit, so same-day
+      // siblings cannot crowd the latest visit out of the five.
       .orderBy('service_records.service_date', 'desc')
-      .limit(1); // show one at a time
-    pendingQuery = applyPropertyPredicate(pendingQuery, scope, 'scheduled_services');
-    const pending = await pendingQuery;
+      .orderByRaw('COALESCE(service_records.ended_at, scheduled_services.actual_end_time, scheduled_services.check_out_time, scheduled_services.completed_at) DESC NULLS LAST')
+      .orderBy('service_records.id', 'asc')
+      .limit(5);
+    recordQuery = applyPropertyPredicate(recordQuery, scope, 'scheduled_services');
+    let scheduledQuery = db('scheduled_services')
+      .where({ 'scheduled_services.customer_id': req.customerId, 'scheduled_services.status': 'completed' })
+      .where('scheduled_services.scheduled_date', '>=', windowStart)
+      .leftJoin('service_records', 'service_records.scheduled_service_id', 'scheduled_services.id')
+      .whereNull('service_records.id') // a visit WITH a record is covered above
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .select(
+        'scheduled_services.id as scheduled_service_id',
+        'scheduled_services.service_type',
+        'scheduled_services.scheduled_date',
+        'scheduled_services.actual_end_time',
+        'scheduled_services.check_out_time',
+        'scheduled_services.completed_at',
+        'technicians.name as technician_name'
+      )
+      .orderBy('scheduled_services.scheduled_date', 'desc')
+      .orderByRaw('COALESCE(scheduled_services.actual_end_time, scheduled_services.check_out_time, scheduled_services.completed_at) DESC NULLS LAST')
+      .orderBy('scheduled_services.id', 'asc')
+      .limit(5);
+    scheduledQuery = applyPropertyPredicate(scheduledQuery, scope, 'scheduled_services');
+    const [records, scheduled] = await Promise.all([recordQuery, scheduledQuery]);
+    const ymd = (v) => (v instanceof Date ? v.toISOString() : String(v || '')).slice(0, 10);
+    const instant = (v) => {
+      const t = v ? new Date(v).getTime() : NaN;
+      return Number.isNaN(t) ? -Infinity : t;
+    };
+    const candidates = [
+      ...(records || []).map((r) => ({ ...r, visitDate: r.service_date, completedMs: instant(r.ended_at || r.linked_actual_end_time || r.linked_check_out_time || r.linked_completed_at) })),
+      ...(scheduled || []).map((r) => ({ ...r, visitDate: r.scheduled_date, completedMs: instant(r.actual_end_time || r.check_out_time || r.completed_at) })),
+    ];
+    // Last tie-break on the id, so the same sibling wins on every load.
+    const idOf = (r) => String(r.id || r.scheduled_service_id || '');
+    candidates.sort((a, b) => (ymd(b.visitDate).localeCompare(ymd(a.visitDate))) || (b.completedMs - a.completedMs)
+      || idOf(a).localeCompare(idOf(b)));
+    const visit = candidates[0] || null;
+    if (!visit) return res.json({ card: null, propertyScope });
 
-    res.json({ pending, propertyScope });
-  } catch (err) {
-    next(err);
-  }
-});
+    // Already clicked through a tracked review link since this visit: the same
+    // completion-instant anchor and first-or-latest click check the send-time
+    // guard uses.
+    const anchor = await visitAnchor({ serviceRecordId: visit.id || null, scheduledServiceId: visit.scheduled_service_id || null });
+    if (await reviewLinkClickedSince(req.customerId, anchor)) return res.json({ card: null, propertyScope });
 
-// =========================================================================
-// POST /api/satisfaction — submit a rating
-// =========================================================================
-router.post('/', async (req, res, next) => {
-  try {
-    const { serviceRecordId, rating, feedbackText } = req.body;
-
-    if (!serviceRecordId || !rating || rating < 1 || rating > 10) {
-      return res.status(400).json({ error: 'Valid serviceRecordId and rating (1-10) required' });
-    }
-
-    // Verify the service belongs to this customer — and, under the saved-
-    // property scope, to the SELECTED house: the same predicate GET /pending
-    // applies, so a stale prompt (the visit moved to another house after it
-    // loaded) or a replayed record id cannot rate house A's visit from house
-    // B's session (GitHub codex r12 P2). Every property retired: nothing to
-    // rate. Mismatch = 404, like the scoped schedule actions.
-    const scope = await resolveSessionScope(req);
-    if (scope.enabled && scope.scoped && (scope.closed || !scope.property)) {
-      return res.status(404).json({ error: 'Service record not found' });
-    }
-    let serviceQuery = db('service_records')
-      .where({ 'service_records.id': serviceRecordId, 'service_records.customer_id': req.customerId })
-      .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
-      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'technicians.name as technician_name');
-    serviceQuery = applyPropertyPredicate(serviceQuery, scope, 'scheduled_services');
-    const service = await serviceQuery.first();
-
-    if (!service) {
-      return res.status(404).json({ error: 'Service record not found' });
-    }
-
-    // Check for duplicate
-    const existing = await db('satisfaction_responses')
-      .where({ customer_id: req.customerId, service_record_id: serviceRecordId })
-      .first();
-
-    if (existing) {
-      // The rating step already inserted this row; the follow-up feedback
-      // step legitimately adds the written note to it. Accept that update
-      // (filling an empty note only) instead of stranding the customer's
-      // concern behind the duplicate 409 — and forward the note to the
-      // office, which only saw the bare rating at alert time.
-      if (feedbackText && !existing.feedback_text) {
-        await db('satisfaction_responses')
-          .where({ id: existing.id })
-          .update({ feedback_text: feedbackText });
-        if (existing.flagged_for_followup) {
-          try {
-            await TwilioService.sendSMS(
-              ADMIN_ALERT_PHONE,
-              `Follow-up note added\n\n` +
-              `${req.customer.first_name} ${req.customer.last_name} added a note to their ` +
-              `${service.service_type} (${service.service_date}) rating of ${existing.rating}/10:\n` +
-              `"${feedbackText}"\n` +
-              `Phone: ${req.customer.phone}`,
-            );
-          } catch (smsErr) {
-            logger.error(`Failed to send feedback follow-up alert: ${smsErr.message}`);
-          }
-        }
-        return res.json({ success: true, action: 'feedback_saved' });
-      }
-      return res.status(409).json({ error: 'Already rated this service' });
-    }
-
-    const customer = req.customer;
     // Same last-resort stored id the ask path uses (ReviewService
     // resolveLocation) so the office shown here can never disagree with the
-    // office the gated ask resolves.
+    // office the review texts resolve.
     const office = resolveReviewLocation(customer, {
       storedLocationId: customer.nearest_location_id || null,
     });
-    const isPromoter = rating >= 8;
-    const isDetractor = rating <= 3;
 
-    // Insert the response. office_location now stores the canonical location id
-    // ('bradenton') rather than this file's private 'lakewood_ranch' key —
-    // review-request.js already wrote canonical ids into the same column, and
-    // nothing reads it.
-    await db('satisfaction_responses').insert({
-      customer_id: req.customerId,
-      service_record_id: serviceRecordId,
-      rating,
-      feedback_text: feedbackText || null,
-      directed_to_review: isPromoter,
-      flagged_for_followup: !isPromoter,
-      office_location: office.id,
-    });
+    const reviewLink = await reviewCardLinkFor(customer.id);
+    if (!reviewLink) return res.json({ card: null, propertyScope });
 
-    // Handle routing based on score
-    if (isPromoter) {
-      // 8-10: ask for the Google review through the SAME gated path as every
-      // other unscheduled ask. This used to text a BARE g.page link with no
-      // review_requests row, so the ask was invisible to the 3-ask cap, the
-      // 30-day cooldown, the already-reviewed flag, and the outreach funnel —
-      // and the click could never be attributed. sendGatedAsk mints the token,
-      // applies the gates, and records the row.
-      // 'error' (NOT 'send_failed'): a THROW here means nothing was
-      // persisted — sendGatedAsk's own send_failed outcome implies a row was
-      // queued for cron retry, but a fail-closed gate error leaves no row, so
-      // classifying it as queued would tell the customer to wait for a text
-      // that never comes (codex #3285 r5). 'error' falls through to the
-      // in-app fallback chain instead.
-      let asked = { outcome: 'error' };
-      try {
-        // #3288's {reservice_line} contract holds through the fold: the
-        // gated path renders via ReviewService.sendSMS, whose render site
-        // supplies reservice_line (review-request.js) — this route no longer
-        // renders the template itself.
-        asked = await ReviewService.sendGatedAsk({
-          customerId: customer.id,
-          customer,
-          channel: 'sms',
-          // CANONICAL template mode: renders the 'review_request'
-          // sms_template — the same body (incl. the {reservice_line} clause
-          // #3288 wired) the pre-fold path sent. 'friendly_ask' silently
-          // dropped that clause, and a bare null templateId defaults back to
-          // friendly_ask (codex #3285 r5b).
-          templateId: null,
-          canonicalTemplate: true,
-          serviceRecordId,
-          triggeredBy: 'portal_satisfaction',
-          manageRetryVia: 'cron',
-          // This path had no Day-3 follow-up before the fold, and adding one
-          // would be a new customer touch nobody asked for. Drop this flag to
-          // opt the portal ask into the same follow-up admin one-offs get.
-          skipLegacyFollowup: true,
-        });
-      } catch (smsErr) {
-        // Never fail the rating write because the ask could not go out.
-        logger.error(`[satisfaction] Gated review ask threw (customerId=${customer.id} errType=${smsErr?.name || 'Error'})`);
-      }
-      if (asked.outcome !== 'sent') {
-        logger.info(`[satisfaction] Review ask not sent (customerId=${customer.id} outcome=${asked.outcome})`);
-      }
-
-      // The in-app button points at the SAME tokenized link the text carries,
-      // so a customer who taps here instead of in their messages is still
-      // attributed. When the ask was gated (at cap, in cooldown, already in a
-      // cadence) there is no fresh token — reuse the customer's most recent
-      // live DELIVERED one, and only fall back to the bare profile URL if
-      // there is none. Exception: while an ask is QUEUED (deferred /
-      // already_queued / transient-retry / concurrent in-flight) there is a
-      // pending row processScheduled will send later — a bare link now could
-      // not consume it, so the customer would review AND still get the SMS
-      // (codex #3285 r3). No actionable fallback in that window; the queued
-      // text carries the link.
-      const askQueued = ['deferred', 'already_queued', 'send_failed'].includes(asked.outcome);
-      // A review-history/spacing refusal also withholds both link fallbacks.
-      const askHeld = asked.outcome === 'blocked'
-        && (String(asked.code || '').startsWith('REVIEW_') || asked.code === 'SMS_DELIVERY_UNCERTAIN');
-      let reviewLink = asked.reviewUrl || null;
-      if (!reviewLink && !askQueued && !askHeld && asked.outcome !== 'already_reviewed') {
-        // BOTH fallbacks skip the queued window (codex #3285 r4): an older
-        // delivered token is just as actionable as the bare URL — the click
-        // couldn't consume the pending row and processScheduled would still
-        // send the queued ask afterward. already_reviewed gets NO link at all
-        // (finality). in_cadence may reuse a live DELIVERED token — that is
-        // the cadence's own link, and clicking it stamps + STOPS the cadence
-        // via /go — but never the bare URL, which stops nothing and would let
-        // the cadence chase a customer who already reviewed (pre-push audit
-        // r4).
-        reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
-        if (!reviewLink) {
-          let bareOk = asked.outcome !== 'in_cadence';
-          if (asked.outcome === 'concurrent') {
-            // Lock contention proves neither direction (codex #3285 r9 ×2):
-            // the competing holder may be a no-link check-in or fail without
-            // a retry (suppressing would promise a text that never comes),
-            // OR it may deliver an ask moments after we respond (a bare URL
-            // now = untracked review + another ask later). Settle the race:
-            // wait briefly for the in-flight send to land, then prefer its
-            // tokenized URL; a durably queued ask suppresses; only a window
-            // with NEITHER falls back to the bare link.
-            for (let attempt = 0; attempt < 3 && bareOk && !reviewLink; attempt++) {
-              await new Promise((r) => setTimeout(r, 700));
-              reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
-              if (reviewLink) break;
-              const gate = await ReviewService.checkUnscheduledAskGates(customer.id).catch(() => null);
-              if (gate && gate.outcome === 'already_queued') bareOk = false;
-            }
-          }
-          if (bareOk && !reviewLink) reviewLink = office.googleReviewUrl;
-        }
-      }
-
-      return res.json({
-        success: true,
-        action: 'review',
+    res.json({
+      card: {
+        serviceRecordId: visit.id || null,
+        scheduledServiceId: visit.scheduled_service_id || null,
+        serviceType: visit.service_type,
+        technicianName: visit.technician_name || null,
         reviewLink,
         officeName: office.name,
-      });
-    }
-
-    // Below 8: Flag for follow-up, alert the office
-    const urgency = isDetractor ? '🚨 URGENT' : '⚠️';
-    try {
-      await TwilioService.sendSMS(
-        ADMIN_ALERT_PHONE,
-        `${urgency} Satisfaction Alert\n\n` +
-        `${customer.first_name} ${customer.last_name} rated their ` +
-        `${service.service_type} (${service.service_date}) a ${rating}/10.\n` +
-        `Tech: ${service.technician_name || 'Unknown'}\n` +
-        (feedbackText ? `Feedback: "${feedbackText}"\n` : '') +
-        `Phone: ${customer.phone}\n\n` +
-        (isDetractor ? 'Follow up ASAP — detractor score.' : 'Follow up within 24 hours.'),
-        { messageType: 'internal_alert', link: '/admin/reviews' }
-      );
-    } catch (smsErr) {
-      logger.error(`Failed to send office alert SMS: ${smsErr.message}`);
-    }
-
-    return res.json({
-      success: true,
-      action: 'followup',
+      },
+      propertyScope,
     });
   } catch (err) {
     next(err);

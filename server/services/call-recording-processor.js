@@ -111,7 +111,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
@@ -6152,6 +6152,69 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   return { ok: true, reason: null, service };
 }
 
+// The service fields the V2-approved booking will actually book from: the same
+// overrides the approved-extraction merge applies to `extracted` further down
+// (matched_service under its adoption rule, requested_service, and
+// specific_service_name INCLUDING a null clear). The waiver is judged on this
+// view as well as on the fields as they stand at the gate, so a V1 pick that
+// V2 replaces at booking cannot carry a waiver onto a different service.
+function v2BookingServiceView(extracted = {}, v2Extraction = null) {
+  if (!v2Extraction || !isV2Extraction(v2Extraction)) return null;
+  const v2Flat = flatView(v2Extraction);
+  const view = { ...extracted };
+  const v2Category = v2Flat.primary_service_category
+    || v2Extraction?.service_request?.primary_service_category || null;
+  const preciseV2Category = v2Category === 'bed_bug' || v2Category === 'wdo';
+  if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)) {
+    view.matched_service = v2Flat.specific_service_name || v2Flat.matched_service;
+  }
+  if (v2Flat.requested_service) view.requested_service = v2Flat.requested_service;
+  view.specific_service_name = v2Flat.specific_service_name || null;
+  return view;
+}
+
+// Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
+// caller checks the gate). Resolves the call's service the way the booking
+// resolves it and hands the verdict to the pure waiver in call-triage-flags.js.
+// The service must resolve to a bookable CATALOG row on the allowlist — a
+// coarse label alone never waives, since that booking would carry no service_id.
+// Every view of the call's service must qualify: the V1 extraction as it stood
+// BEFORE V2-primary adoption (`preAdoptionExtracted`), the merged fields at the
+// gate, and the V2-overridden view the approved booking will book. Returns the
+// SAME verdict object unless the waiver applies.
+function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], property = null, v2Extraction = null, unclearServiceAssessment = false } = {}) {
+  // Both gates on and the call carries the unclear-service signal: routing may
+  // force the Waves Assessment row, which is not a whole-structure service.
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return addressValidation;
+  const prop = property || v2Extraction?.property || {};
+  const views = [];
+  if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+  views.push(extracted);
+  const finalView = v2BookingServiceView(extracted, v2Extraction);
+  if (finalView) views.push(finalView);
+  const results = views.map((view) => {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view,
+      transcription,
+      services,
+      coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    const waived = applyWholeStructureUnitWaiver(addressValidation, {
+      enabled: true,
+      serviceKey: row?.service_key || null,
+      propertyType: prop.property_type,
+      commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
+      text: [transcription, view.call_summary, view.requested_service].filter(Boolean).join(' '),
+    });
+    return { waived, service: row?.service_key || null };
+  });
+  if (results.some((r) => r.waived === addressValidation)) return addressValidation;
+  const out = results[results.length - 1].waived;
+  out.wholeStructureUnitWaived.service = results[results.length - 1].service;
+  return out;
+}
+
 async function resolveDefaultCallBookingTechnician(conn = db) {
   const configuredId = String(process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID || '').trim();
   if (configuredId) {
@@ -9631,6 +9694,10 @@ const CallRecordingProcessor = {
     // requires the enforce gate's approval and SMS still requires consent.
     // The merged object stays legacy-flat, so canonical ai_extraction keeps
     // the reader-compatible shape.
+    // The V1 extraction as it stood BEFORE V2-primary adoption: the whole-
+    // structure unit waiver must agree with it too (a V1 pick V2 overwrites
+    // is a service disagreement, not a WDO).
+    const preAdoptionExtracted = { ...extracted };
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
         etWallClock: v2IsoToEtWallClock,
@@ -10295,6 +10362,57 @@ const CallRecordingProcessor = {
       extracted = held.extracted;
       dictationEmailPayload = held.dictationEmailPayload;
       logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+    }
+
+    // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
+    // 2026-09-30): a WDO inspection or termite pre-treat/perimeter job is not
+    // held for a missing unit number. The verdict is rewritten HERE, once,
+    // after the shadow row persisted the ORIGINAL — so the enforce gate, the
+    // shadow bridge and the audit path all read the same waived verdict. The
+    // service is resolved the way the booking below resolves it (catalog row
+    // first, coarse label only when no catalog row matched). Gate off, or any
+    // non-qualifying call, returns the verdict object untouched.
+    if (v2AddressValidation && isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)) {
+      try {
+        // A reprocess of a call an earlier pass parked on the unit ask: the
+        // open missing_unit_number card (and its clarify draft and merged
+        // needs_confirmation reason) is a human-verdict-only artifact that
+        // nothing auto-resolves (AGENTS.md; triage-auto-resolve.js), so the
+        // hold stands until the office settles it. A dismissed/resolved card is
+        // that verdict and does not block.
+        const openUnitCard = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'missing_unit_number' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id');
+        if (openUnitCard) {
+          logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
+        } else {
+          const wsAv = wholeStructureUnitWaiverForCall({
+            addressValidation: v2AddressValidation,
+            extracted,
+            preAdoptionExtracted,
+            transcription,
+            services: bookableCallServices,
+            property: v2Result?.extraction?.property,
+            v2Extraction: v2Result?.extraction,
+            unclearServiceAssessment: unclearServiceAssessmentActive(),
+          });
+          if (wsAv !== v2AddressValidation) {
+            // Stamp the pass's waiver on the PERSISTED verdict (status stays
+            // the original) so the offline audits can rebuild the verdict the
+            // gate saw. Fenced like the write above; pass-scoped, since the
+            // next pass rewrites ai_address_validation without the marker.
+            await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+              ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived }),
+              updated_at: new Date(),
+            });
+            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
+            v2AddressValidation = wsAv;
+          }
+        }
+      } catch (wsErr) {
+        logger.warn(`[call-proc] whole-structure unit waiver failed open (hold stands) for ${maskSid(callSid)}: ${wsErr.message}`);
+      }
     }
 
     // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
@@ -21571,6 +21689,7 @@ CallRecordingProcessor._test = {
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
+  wholeStructureUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,
   applyUnclearServiceTranscriptVeto,
