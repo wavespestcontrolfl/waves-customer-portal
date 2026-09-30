@@ -1955,6 +1955,38 @@ describe('r27 (round 26 review): seeded re-entry wordings parse; compound relati
   });
 });
 
+describe('r28 (round 27 review): rinse / wash / wipe / mop of a treated surface; counted weekdays', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  test('rinsing / washing / hosing / wiping / mopping / cleaning a treated surface in a timing or permission context asks both kinds (like watering)', () => {
+    for (const t of ['Can I rinse the lawn now?', 'Can I wash the patio now?', 'ok to pressure wash the driveway?', 'can I hose off the deck', 'can I wipe down the baseboards', 'can I mop the floors today?', 'is it ok to clean the patio furniture?', 'when can I power wash the lanai?']) {
+      const kinds = asked(t);
+      expect([t, kinds.includes('rain'), kinds.includes('reentry')]).toEqual([t, true, true]);
+    }
+  });
+  test('no treated surface, or no timing / permission context, asks no kind', () => {
+    for (const t of ['can I wash my car tomorrow?', 'can I clean the grill now?', 'do you wash windows?', 'I wash the dishes every night']) expect([t, asked(t)]).toEqual([t, []]);
+  });
+  test('outgoing: "you can rinse / wash / mop ... now / anytime" is a permission claim (held)', () => {
+    const claims = (reply) => labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences(reply, ''));
+    for (const reply of ['You can rinse the lawn now.', 'You can wash the patio anytime.', 'Feel free to mop the floors whenever.', 'They can hose off the deck right away.']) expect([reply, claims(reply)]).toEqual([reply, true]);
+  });
+
+  const differs = (t, today = '2026-09-30', visit = '2026-09-29') => labelFactsLib.inboundRefersToOtherVisit(t, visit, today);
+  test('a counted weekday is never one resolvable day: another visit', () => {
+    for (const t of ['two Tuesdays ago', '2 Tuesdays ago', 'a few Tuesdays ago', 'a couple Tuesdays back', 'a couple of Tuesdays ago', 'the Tuesday before that', 'every other Tuesday', 'several Fridays ago', 'three Mondays back']) {
+      expect([t, differs(t), differs(t, null)]).toEqual([t, true, true]);
+    }
+    expect(differs('you came Tuesday')).toBe(false); // the bare weekday is still the visit's own (Sep 29 is a Tuesday, 1 day back)
+  });
+  test('counted weekdays in a historical row are another visit whatever the row date', () => {
+    const FACTS = { serviceDate: '2026-09-29', products: [], unverifiedCount: 0 };
+    for (const date of ['2026-09-30T15:00:00Z', '2026-10-01T15:00:00Z', null]) {
+      expect(labelFactsLib.labelFactsForInbound(FACTS, ['Can the dogs go out now?'], '2026-09-30', [{ text: 'You sprayed two Tuesdays ago', date }])).toBeNull();
+    }
+    expect(labelFactsLib.labelFactsForInbound(FACTS, ['is it ok now?', 'a couple Tuesdays back?'], '2026-09-30', [], [null, '2026-09-30T15:00:00Z'])).toBeNull();
+  });
+});
+
 describe('r26: the follow-up deadline the real-answers prompt requires may trail a hand-off (the exact SLA_PHRASES of sms-followup-sla)', () => {
   const { SLA_PHRASES } = require('../services/sms-followup-sla');
   const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');

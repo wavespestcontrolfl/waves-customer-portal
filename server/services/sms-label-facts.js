@@ -1106,8 +1106,16 @@ const WATERING_RE = /\b(?:water(?:ing)?(?=\s+(?:the|my|our|it|them|in|down|early
 const WATERING_CONTEXT_RE = /\b(?:now|yet|ok|okay|safe|fine|when|can\s+(?:i|we)|may\s+(?:i|we)|allowed|how\s+long|after|before|until|till|today|tonight|tomorrow|already|still|treatment|treated|spray|sprayed|spraying|application|applied|fertilizer|fertilized|granules?|product|wait|hold\s+off|again|back\s+on)\b/;
 const WATERING_WEATHER_RE = /\b(?:dew|dewy|fog|foggy|mist|misty|moisture|condensation|rain\w*|showers?|storms?|stormy|forecast\w*|drizzl\w*|downpour\w*|weather|humid\w*|wet|soaked)\b|\bwash(?:es|ed)?\s+(?:it\s+)?(?:off|away)\b/;
 const OTHER_REENTRY_TOPIC_RE = new RegExp(BEING_RE.source + '|\\b(?:walk|walking|play|playing|mow|mowing|swim|swimming|sit|sitting|enter|inside|indoors)\\b');
+// Rinsing / washing / hosing / wiping / mopping / cleaning a TREATED SURFACE ("can I rinse the lawn now?", "ok to pressure wash the driveway?", "can I wipe
+// down the baseboards?") is the same question as watering: the rain-fast time and the keep-off time both bear on it. A timing / permission context is
+// required (same as watering); with no treated surface ("can I wash my car tomorrow?") it asks no kind.
+const CLEANING_SURFACE_SRC = 'lawn|grass|yard|patio|deck|driveway|porch|lanai|walkway|sidewalk|pavers?|siding|fence|furniture|baseboards?|floors?|carpets?|cabinets?|counters?|countertops?|windows?|sills?|walls?|screens?|cage|pool\\s+deck|treated\\s+(?:areas?|surfaces?)|surfaces?|house|home';
+const CLEANING_RE = new RegExp(`\\b(?:rins(?:e|es|ed|ing)|wash(?:es|ed|ing)?|(?:pressure|power)[-\\s]?wash\\w*|hos(?:e|es|ed|ing)\\s+(?:off|down)|spray(?:s|ed|ing)?\\s+down|wip(?:e|es|ed|ing)\\s+(?:down|off)|mop(?:s|ped|ping)?|clean(?:s|ed|ing)?)\\b(?:\\s+[\\w'-]+){0,4}?\\s+(?:${CLEANING_SURFACE_SRC})\\b`);
+function cleaningKinds(text) {
+  return CLEANING_RE.test(text) && (WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text)) ? ['reentry', 'rain'] : null;
+}
 function wateringKinds(text) {
-  if (!WATERING_RE.test(text)) return null;
+  if (!WATERING_RE.test(text)) return cleaningKinds(text);
   const context = WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text);
   if (context) return ['reentry', 'rain'];
   return OTHER_REENTRY_TOPIC_RE.test(text) ? null : [];
@@ -1402,6 +1410,9 @@ async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, t
 // section instead. Conservative: anything ambiguous reads as a different visit.
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const WEEKDAY_SRC = '(?:sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?';
+// A COUNTED weekday ("two Tuesdays ago", "2 Tuesdays ago", "a few Tuesdays ago", "a couple Tuesdays back", "the Tuesday before that", "every other Tuesday") is
+// never one resolvable day: another visit, read before the bare-weekday rule.
+const COUNTED_WEEKDAY_RE = new RegExp(`\\b(?:(?:\\d{1,2}|one|two|three|four|five|six|seven|eight|a\\s+few|a\\s+couple(?:\\s+of)?|several|some|many|a\\s+number\\s+of)\\s+${WEEKDAY_SRC}s\\s+(?:ago|back|before|earlier|prior)|the\\s+${WEEKDAY_SRC}\\s+before(?:\\s+(?:that|last|then))?|(?:every\\s+)?other\\s+${WEEKDAY_SRC}s?|${WEEKDAY_SRC}s\\s+(?:ago|back))\\b`, 'g');
 const QUALIFIED_WEEKDAY_RE = new RegExp(`\\b(?:(?:next|this|coming|following|upcoming|every|each|last|past|previous)\\s+${WEEKDAY_SRC}|${WEEKDAY_SRC}\\s+(?:after\\s+next|before\\s+last))\\b`, 'g');
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
@@ -1463,7 +1474,7 @@ const otherYmd = (v, month, day, year) => month !== v.month || day !== v.day || 
 const tailYear = (a, b) => a || b;
 
 // The patterns whose meaning depends on the day the message was sent.
-const RELATIVE_REFERENCES = [YESTERDAY_RE, DAY_BEFORE_YESTERDAY_RE, NIGHT_BEFORE_LAST_RE, SAME_DAY_RE, DAYS_AGO_RE, QUALIFIED_WEEKDAY_RE, WEEKDAY_ABBR_RE];
+const RELATIVE_REFERENCES = [COUNTED_WEEKDAY_RE, YESTERDAY_RE, DAY_BEFORE_YESTERDAY_RE, NIGHT_BEFORE_LAST_RE, SAME_DAY_RE, DAYS_AGO_RE, QUALIFIED_WEEKDAY_RE, WEEKDAY_ABBR_RE];
 
 // Every way a message can point at a visit: a pattern, and a resolver that says
 // whether ONE match names a visit other than the facts' own. The message refers
@@ -1481,6 +1492,7 @@ const VISIT_REFERENCES = [
   // a QUALIFIED weekday ("next Friday", "this Friday", "this coming Friday", "the following Friday", "Friday after next",
   // "every Friday", "last Tuesday's", "past / previous Tuesday", "Tuesday before last") is future or ambiguous: another
   // visit. Only a bare weekday reaches the 6-day rule below.
+  { re: COUNTED_WEEKDAY_RE, differs: () => true },
   { re: QUALIFIED_WEEKDAY_RE, differs: () => true },
   // a weekday name: only the visit's own weekday, and only when the visit was within the last 6 days
   {
