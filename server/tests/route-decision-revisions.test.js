@@ -58,72 +58,103 @@ describe('revision versions', () => {
   });
 });
 
-describe('a reviewed base row: a different verdict gets a NEW row under a distinct key', () => {
-  // Base row reviewed: the row lock finds it, the guarded UPDATE touches nothing.
-  const respond = (existing) => (q) => {
-    if (/^insert/i.test(q.sql)) return [];
-    if (/for update/i.test(q.sql)) return [{ id: 'row' }];
-    if (/^update "route_decisions"/i.test(q.sql)) return 0;
-    if (/^select \* from "route_decisions"/i.test(q.sql)) {
-      const v = versionOf(q);
-      return existing[v] ? [existing[v]] : [];
-    }
-    return [];
-  };
-
-  test('booked pass over a reviewed HOLD: writes v2-1.50.0+r1 (targetless insert), never touches the reviewed row', async () => {
-    const { c, sqls } = conn(respond({ [V2_DECISION_VERSION]: rowOf(held) }));
-    expect(await upsertRouteDecision(c, booked)).toBe(1);
-    const ins = inserts(sqls);
-    expect(ins).toHaveLength(2);
-    expect(ins[0].bindings).toContain(V2_DECISION_VERSION); // the ordinary insert (no-op on conflict)
-    expect(ins[1].sql).toMatch(/on conflict do nothing/i);
-    expect(ins[1].sql).not.toMatch(/on conflict \(/i);
-    expect(ins[1].bindings).toContain('v2-1.50.0+r1');
-    expect(ins[1].bindings).toContain('auto_create_appointment');
-    expect(ins[1].bindings).toContain('RE1');
-  });
-
-  test('the same verdict that was already judged writes nothing more', async () => {
-    const { c, sqls } = conn(respond({ [V2_DECISION_VERSION]: rowOf(booked) }));
-    expect(await upsertRouteDecision(c, booked)).toBe(0);
-    expect(inserts(sqls)).toHaveLength(1); // only the ordinary (conflicting) insert
-  });
-
-  test('a revision row that is still unreviewed is refreshed in place (no r2)', async () => {
-    const r1 = rowOf(held, { decision_version: 'v2-1.50.0+r1', final_action_taken: 'auto_route' });
-    let updates = 0;
-    const { c, sqls } = conn((q) => {
-      if (/^update "route_decisions"/i.test(q.sql)) { updates += 1; return updates === 1 ? 0 : 1; } // base reviewed, r1 not
-      return respond({ [V2_DECISION_VERSION]: rowOf(held), 'v2-1.50.0+r1': r1 })(q);
+describe('the family rule (codex #5377 r4 + r7 P1): read base + +r1 FOR UPDATE, find the reviewed member, then write', () => {
+  const REV = `${V2_DECISION_VERSION}+r1`;
+  const row = (d, version, extra = {}) => rowOf(d, { id: `id-${version}`, decision_version: version, created_at: '2026-01-01T00:00:00Z', ...extra });
+  // members: { [version]: row }, reviewed: version whose row has the (one) verdict
+  function family({ members, reviewed = null }) {
+    return conn((q) => {
+      if (/^insert/i.test(q.sql)) return [];
+      if (/^select \* from "route_decisions"/i.test(q.sql)) return Object.values(members);
+      if (/^select "route_decision_id" from "route_feedback"/i.test(q.sql)) {
+        return reviewed ? [{ route_decision_id: members[reviewed].id }] : [];
+      }
+      return 1; // updates
     });
-    expect(await upsertRouteDecision(c, booked)).toBe(1);
-    expect(inserts(sqls)).toHaveLength(1);
-    expect(sqls.filter((q) => /^update "route_decisions"/i.test(q.sql))).toHaveLength(2);
+  }
+  const updates = (sqls) => sqls.filter((q) => /^update "route_decisions"/i.test(q.sql));
+  const run = async (fam, d, out = {}) => ({ n: await upsertRouteDecision(fam.c, d, null, out), out, upd: updates(fam.sqls), ins: inserts(fam.sqls) });
+
+  test('none reviewed: the base row is refreshed by id (first pass: the plain insert alone)', async () => {
+    const r = await run(family({ members: { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION) } }), booked);
+    expect(r).toMatchObject({ n: 1, out: { decisionVersion: V2_DECISION_VERSION } });
+    expect(r.ins).toHaveLength(1);
+    expect(r.upd).toHaveLength(1);
+    expect(r.upd[0].bindings).toContain('id-v2-1.50.0');
   });
 
-  test('a revision that repeats the reviewed verdict writes nothing; the cap stops any further row', async () => {
-    const r1 = rowOf(booked, { decision_version: 'v2-1.50.0+r1' });
-    // both rows reviewed cannot happen today (one verdict per call) — the cap keeps it bounded anyway
-    const { c, sqls } = conn((q) => (/^update "route_decisions"/i.test(q.sql) ? 0 : respond({ [V2_DECISION_VERSION]: rowOf(held), 'v2-1.50.0+r1': r1 })(q)));
-    expect(await upsertRouteDecision(c, held)).toBe(0);
-    expect(inserts(sqls)).toHaveLength(1);
+  test('reviewed BASE, different verdict: a NEW +r1 row (targetless insert), the reviewed row untouched', async () => {
+    const r = await run(family({ members: { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION) }, reviewed: V2_DECISION_VERSION }), booked);
+    expect(r).toMatchObject({ n: 1, out: { decisionVersion: REV } });
+    expect(r.ins).toHaveLength(2);
+    expect(r.ins[1].sql).toMatch(/on conflict do nothing/i);
+    expect(r.ins[1].sql).not.toMatch(/on conflict \(/i);
+    expect(r.ins[1].bindings).toContain(REV);
+    expect(r.ins[1].bindings).toContain('auto_create_appointment');
+    expect(r.upd).toHaveLength(0);
   });
 
-  test('the ordinary case is unchanged: an unreviewed base row is refreshed, no revision statements', async () => {
-    const { c, sqls } = conn((q) => (/^update "route_decisions"/i.test(q.sql) ? 1 : respond({})(q)));
-    expect(await upsertRouteDecision(c, booked)).toBe(1);
-    expect(rd(sqls).map((q) => q.sql.split(' ')[0])).toEqual(['insert', 'select', 'update']);
+  test('reviewed BASE, different verdict, unreviewed +r1 exists: the +r1 is refreshed in place', async () => {
+    const members = { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION), [REV]: row(held, REV) };
+    const r = await run(family({ members, reviewed: V2_DECISION_VERSION }), booked);
+    expect(r).toMatchObject({ n: 1, out: { decisionVersion: REV } });
+    expect(r.ins).toHaveLength(1);
+    expect(r.upd).toHaveLength(1);
+    expect(r.upd[0].bindings).toContain(`id-${REV}`);
   });
 
-  test('a lost claim still writes nothing at all', async () => {
+  test('reviewed BASE, the SAME verdict: nothing is written and the pass reports no row', async () => {
+    const r = await run(family({ members: { [V2_DECISION_VERSION]: row(booked, V2_DECISION_VERSION) }, reviewed: V2_DECISION_VERSION }), booked);
+    expect(r).toMatchObject({ n: 0, out: { decisionVersion: null } });
+    expect(r.ins).toHaveLength(1); // only the plain (conflicting) insert
+    expect(r.upd).toHaveLength(0);
+  });
+
+  test('reviewed +r1 (a re-review repointed the verdict), the SAME verdict: nothing written, the unreviewed base is NOT refreshed (codex r7 P1)', async () => {
+    const members = { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION, { created_at: '2026-01-01T00:00:00Z' }), [REV]: row(booked, REV, { created_at: '2026-01-02T00:00:00Z' }) };
+    const r = await run(family({ members, reviewed: REV }), booked);
+    expect(r).toMatchObject({ n: 0, out: { decisionVersion: null } });
+    expect(r.upd).toHaveLength(0); // reviewed +r1 is already the newest: no write at all
+    expect(r.ins).toHaveLength(1);
+  });
+
+  test('reviewed +r1, the SAME verdict, but the stale base is the NEWER row: only the reviewed row\'s created_at moves up, its verdict columns are untouched', async () => {
+    const members = { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION, { created_at: '2026-01-03T00:00:00Z' }), [REV]: row(booked, REV, { created_at: '2026-01-02T00:00:00Z' }) };
+    const r = await run(family({ members, reviewed: REV }), booked);
+    expect(r.n).toBe(0);
+    expect(r.upd).toHaveLength(1);
+    expect(r.upd[0].sql).toMatch(/^update "route_decisions" set "created_at" = \? where "id" = \?/i);
+    expect(r.upd[0].bindings).toContain(`id-${REV}`);
+    expect(r.upd[0].bindings).not.toContain('id-v2-1.50.0');
+  });
+
+  test('reviewed +r1, a DIFFERENT verdict: the (unreviewed) BASE is refreshed', async () => {
+    const members = { [V2_DECISION_VERSION]: row(booked, V2_DECISION_VERSION), [REV]: row(booked, REV) };
+    const r = await run(family({ members, reviewed: REV }), held);
+    expect(r).toMatchObject({ n: 1, out: { decisionVersion: V2_DECISION_VERSION } });
+    expect(r.upd).toHaveLength(1);
+    expect(r.upd[0].bindings).toContain('id-v2-1.50.0');
+    expect(r.ins).toHaveLength(1);
+  });
+
+  test('the family is locked FOR UPDATE and the verdict is read AFTER the lock, in the same transaction', async () => {
+    const fam = family({ members: { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION) } });
+    await run(fam, booked);
+    const at = (re) => fam.sqls.findIndex((q) => re.test(q.sql));
+    expect(at(/^select \* from "route_decisions".* for update/i)).toBeGreaterThan(at(/^insert/i));
+    expect(at(/^select "route_decision_id" from "route_feedback"/i)).toBeGreaterThan(at(/for update/i));
+  });
+
+  test('a lost claim writes nothing at all and reports no row', async () => {
     const { c, sqls } = conn(() => []);
     c.transaction = async (fn) => fn((t) => {
       const qb = c(t);
       if (t === 'call_log') qb.then = (res, rej) => Promise.resolve(undefined).then(res, rej);
       return qb;
     });
-    expect(await upsertRouteDecision(Object.assign(c, {}), booked, { callLogId: 'c1', processingToken: 'stale' })).toBeNull();
+    const out = {};
+    expect(await upsertRouteDecision(Object.assign(c, {}), booked, { callLogId: 'c1', processingToken: 'stale' }, out)).toBeNull();
+    expect(out.decisionVersion).toBeNull();
     expect(rd(sqls)).toHaveLength(0);
   });
 });
@@ -131,10 +162,11 @@ describe('a reviewed base row: a different verdict gets a NEW row under a distin
 describe('wiring', () => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
 
-  test('the same-run outcome update targets the pass\'s revision family, still through the row lock', () => {
+  test('the same-run outcome update targets the row THIS pass wrote (reported by the upsert), still through the row lock; a pass that wrote none updates none', () => {
     const src = read('../services/call-recording-processor.js');
-    expect(src).toMatch(/decision_version: routeDecisionFamilyVersions\(V2_DECISION_VERSION\), mode: 'enforce'/);
-    expect(src).toMatch(/db\.transaction\(\(trx\) => updateUnreviewedRouteDecisions\(trx,/);
+    expect(src).toMatch(/upsertRouteDecision\(db, routeDecision, \{ callLogId: call\.id, processingToken: procToken \}, routeDecisionWrite\)/);
+    expect(src).toMatch(/const outcomeVersion = routeDecisionWrite\.decisionVersion === undefined\s*\? routeDecisionFamilyVersions\(V2_DECISION_VERSION\)\s*: routeDecisionWrite\.decisionVersion;\s*if \(outcomeVersion\) \{\s*await db\.transaction\(\(trx\) => updateUnreviewedRouteDecisions\(trx,/);
+    expect(src).toMatch(/decision_version: outcomeVersion, mode: 'enforce'/);
   });
 
   test('the outcome update scope accepts an array as an IN list', async () => {

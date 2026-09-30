@@ -554,11 +554,11 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     const sqls = [];
     const conn = (table) => {
       const qb = knex(table);
-      // The row-lock SELECT returns a row so the refresh proceeds to its UPDATE.
+      // The family row-lock SELECT returns the base row so the refresh proceeds to its UPDATE.
       qb.then = (res, rej) => {
         const q = qb.toSQL();
         sqls.push(q);
-        return Promise.resolve(/for update/i.test(q.sql) && /route_decisions/.test(q.sql) ? [{ id: 'rd-1' }] : []).then(res, rej);
+        return Promise.resolve(/for update/i.test(q.sql) && /route_decisions/.test(q.sql) ? [{ id: 'rd-1', decision_version: decision.decision_version }] : []).then(res, rej);
       };
       return qb;
     };
@@ -576,8 +576,8 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(w).toHaveLength(3);
     expect(w[0].sql).toMatch(/insert into "route_decisions"[\s\S]*on conflict do nothing/i);
     expect(w[0].sql).not.toMatch(/on conflict \(/i);
-    // the keyed, LOCKED read of the target row (codex #5371 r9 P1)
-    expect(w[1].sql).toMatch(/^select "id" from "route_decisions" where "call_log_id" = \? and "decision_version" = \? and "mode" = \? and "recording_sid" = \? for update/i);
+    // the LOCKED read of the decision's whole family (base + '+r1'; codex #5371 r9 + #5377 r7 P1)
+    expect(w[1].sql).toMatch(/^select \* from "route_decisions" where "call_log_id" = \? and "mode" = \? and "recording_sid" = \? and "decision_version" in \(\?, \?\) for update/i);
     const upd = w[2].sql;
     expect(upd).toMatch(/^update "route_decisions" set/i);
     for (const col of ROUTE_DECISION_REFRESH_COLUMNS) expect(upd).toContain(`"${col}" = ?`);
@@ -585,7 +585,7 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(upd).not.toContain('created_scheduled_service_id');
     expect(upd).not.toContain('sms_enqueued');
     // the update targets exactly the rows it locked
-    expect(upd).toMatch(/where "id" in \(\?\)/i);
+    expect(upd).toMatch(/where "id" = \?/i);
     expect(w[2].bindings).toContain('rd-1');
     expect(ROUTE_DECISION_REFRESH_COLUMNS).toContain('created_at');
   });
@@ -611,10 +611,16 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(rd(sqls)).toHaveLength(0);
   });
 
-  test('a refresh skips a decision that has route_feedback (codex r6 P1)', async () => {
+  test('a refresh skips a decision that has route_feedback (codex r6 P1): the family rule reads the verdict under the row lock', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
-    expect(rd(sqls)[2].sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
+    const at = (re) => sqls.findIndex((q) => re.test(q.sql));
+    const lock = at(/^select \* from "route_decisions".* for update/i);
+    const fb = at(/^select "route_decision_id" from "route_feedback" where "route_decision_id" in \(\?\)/i);
+    const upd = at(/^update "route_decisions"/i);
+    expect(lock).toBeGreaterThan(-1);
+    expect(fb).toBeGreaterThan(lock);
+    expect(upd).toBeGreaterThan(fb);
   });
 
   test('the processor outcome update skips a reviewed decision too, under the same row lock (codex r7 + r9 P1)', async () => {
@@ -645,7 +651,7 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
 
   test('both processor lanes write through it and nothing writes a route decision with a bare ignore', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    expect(src).toMatch(/upsertRouteDecision\(db, routeDecision, \{ callLogId: call\.id, processingToken: procToken \}\)/);
+    expect(src).toMatch(/upsertRouteDecision\(db, routeDecision, \{ callLogId: call\.id, processingToken: procToken \}, routeDecisionWrite\)/);
     expect(src).toMatch(/upsertRouteDecision\(db, shadowDecision, \{ callLogId: call\.id, processingToken: procToken \}\)/);
     expect(src).not.toMatch(/db\('route_decisions'\)\.insert\(routeDecision\)/);
   });

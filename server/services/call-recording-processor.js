@@ -9853,6 +9853,9 @@ const CallRecordingProcessor = {
     // suppressed. Approved calls capture v2's validated scheduling fields so
     // the appointment is created from the data the gate actually checked.
     let v2RoutingBlocked = false;
+    // The enforce decision write's report (upsertRouteDecision `out`): which row
+    // of the decision's family this pass wrote, or null when it wrote none.
+    const routeDecisionWrite = {};
     let v2SmsBlocked = false;
     let v2SmsConsentExplicit = false;
     // P1-C (callback_number_needed reminder hold): set true the moment the
@@ -10507,7 +10510,7 @@ const CallRecordingProcessor = {
           // dark gate flipped either way — replaces the recommendation and
           // created_at instead of leaving the first pass's verdict as the
           // newest decision. Fenced to the pass that owns the processing token.
-          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken });
+          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken }, routeDecisionWrite);
 
           // Advisory flags (missing surname / rental / second address) reach the
           // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
@@ -19179,19 +19182,24 @@ const CallRecordingProcessor = {
       try {
         // Row-locked like every write to an existing decision (codex #5371 r9 P1):
         // a verdict landing concurrently serializes on the route_decisions row.
-        await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
-          // Same-run outcome update: targets the row THIS process wrote
-          // moments ago, so the CURRENT version only (a reprocess writes —
-          // and updates — its own fresh v2-1.1.0 row) — plus its revisions:
-          // when the base row was reviewed, this pass's verdict lives in a
-          // '+r<n>' revision row (upsertRouteDecision; codex #5377 r4 P1). A
-          // row a human has reviewed keeps the outcome that review judged, so
-          // only the family's one unreviewed row is ever updated.
-          { call_log_id: call.id, decision_version: routeDecisionFamilyVersions(V2_DECISION_VERSION), mode: 'enforce', recording_sid: call.recording_sid || '' },
-          {
-            final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
-            ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
-          }));
+        // Same-run outcome update: targets the row THIS pass wrote moments ago
+        // (upsertRouteDecision reports its version: the base row or its '+r1'
+        // revision, codex #5377 r4 + r7 P1). It wrote NONE when the pass's
+        // verdict equals the reviewed member's — that row keeps the outcome the
+        // review judged, so nothing is updated. A pass that never reached the
+        // write (report absent) keeps the old family-wide scope. A reviewed row
+        // is never updated either way.
+        const outcomeVersion = routeDecisionWrite.decisionVersion === undefined
+          ? routeDecisionFamilyVersions(V2_DECISION_VERSION)
+          : routeDecisionWrite.decisionVersion;
+        if (outcomeVersion) {
+          await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
+            { call_log_id: call.id, decision_version: outcomeVersion, mode: 'enforce', recording_sid: call.recording_sid || '' },
+            {
+              final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
+              ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
+            }));
+        }
       } catch (rdErr) {
         logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
       }

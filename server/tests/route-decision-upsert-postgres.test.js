@@ -237,31 +237,71 @@ jest.setTimeout(30000);
     expect(r[1].final_action_taken).toBe('triage_review');
   });
 
-  test('a further pass refreshes the unreviewed revision in place; an identical pass to the judged verdict adds nothing', async () => {
+  test('reviewed base: a further different pass refreshes the unreviewed revision in place; a pass equal to the judged verdict writes nothing new and keeps the reviewed row newest', async () => {
     await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' });
-    await review((await rows())[0]);
+    const [held] = await rows();
+    await review(held);
     await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
     await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
     expect(await rows()).toHaveLength(2); // refreshed r1, no r2
-    await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' });
+    const out = {};
+    await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' }, out);
+    expect(out.decisionVersion).toBeNull(); // equals the reviewed hold: no row written
     const r = await rows();
-    expect(r).toHaveLength(2); // r1 (unreviewed) now records the hold again
-    expect(r[0]).toMatchObject({ decision_version: `${V2_DECISION_VERSION}+r1`, final_action_taken: 'triage_review' });
+    expect(r).toHaveLength(2);
+    // the reviewed row is the newest again (only created_at moved) and keeps its judged verdict
+    expect(r[0]).toMatchObject({ id: held.id, final_action_taken: 'triage_review' });
+    expect(r[1]).toMatchObject({ decision_version: `${V2_DECISION_VERSION}+r1`, final_action_taken: 'auto_route' });
   });
 
-  test('a re-review repoints the one verdict to the revision: the base row is then the unreviewed one and is refreshed (still no r2)', async () => {
+  // codex #5377 r7 P1: a re-review repoints the one verdict to the +r1 row, so the
+  // base row is the unreviewed member of the family.
+  async function reviewedRevision() {
     await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' });
     await review((await rows())[0]);
     await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
-    const r1 = (await rows())[0];
+    const [r1] = await rows();
     await db('route_feedback').where({ call_log_id: callId }).update({ route_decision_id: r1.id });
+    return r1;
+  }
+
+  test('reviewed +r1 + the SAME verdict: nothing is written, the unreviewed base is NOT refreshed and does not become the newest', async () => {
+    const r1 = await reviewedRevision();
+    const before = await rows();
+    const out = {};
+    await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' }, out);
+    expect(out.decisionVersion).toBeNull();
+    const after = await rows();
+    expect(after).toHaveLength(2);
+    expect(after[0].id).toBe(r1.id); // the reviewed decision is still the newest
+    expect(after.map((x) => [x.id, x.final_action_taken, new Date(x.created_at).getTime()]))
+      .toEqual(before.map((x) => [x.id, x.final_action_taken, new Date(x.created_at).getTime()]));
+    // the auto-routed queue's join keeps the verdict on the newest row
+    const [fb] = await db('route_feedback').where({ call_log_id: callId });
+    expect(fb.route_decision_id).toBe(after[0].id);
+  });
+
+  test('reviewed +r1 + a DIFFERENT verdict: the unreviewed base is refreshed (and reported), the reviewed revision stays as judged', async () => {
+    const r1 = await reviewedRevision();
     await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-stale' });
     expect((await rows())[0].id).toBe(r1.id); // a stale worker wrote nothing
-    await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' });
+    const out = {};
+    await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' }, out);
+    expect(out.decisionVersion).toBe(V2_DECISION_VERSION);
     const r = await rows();
     expect(r).toHaveLength(2);
-    expect(r[0]).toMatchObject({ decision_version: V2_DECISION_VERSION, final_action_taken: 'triage_review' }); // base refreshed: now the newest
-    expect(r[1]).toMatchObject({ id: r1.id, final_action_taken: 'auto_route' }); // the reviewed revision stays as judged
+    expect(r[0]).toMatchObject({ decision_version: V2_DECISION_VERSION, final_action_taken: 'triage_review' });
+    expect(r[1]).toMatchObject({ id: r1.id, final_action_taken: 'auto_route' });
+  });
+
+  test('a stale base that is NEWER than the reviewed +r1 is out-ranked again when the pass equals the reviewed verdict (only created_at moves)', async () => {
+    const r1 = await reviewedRevision();
+    await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' }); // base now newest
+    expect((await rows())[0].decision_version).toBe(V2_DECISION_VERSION);
+    await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
+    const r = await rows();
+    expect(r[0]).toMatchObject({ id: r1.id, final_action_taken: 'auto_route' });
+    expect(r[1]).toMatchObject({ decision_version: V2_DECISION_VERSION, final_action_taken: 'triage_review' });
   });
 
   test('updateUnreviewedRouteDecisions updates nothing when the scope matches no row', async () => {

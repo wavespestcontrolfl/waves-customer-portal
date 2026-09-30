@@ -501,68 +501,82 @@ async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mo
   });
 }
 
-// Insert-or-refresh in two statements, so the INSERT stays TARGETLESS
-// (ON CONFLICT DO NOTHING names no constraint: tolerant of BOTH the legacy
-// three-column constraint and the recording-keyed index during a rolling
-// deploy, Codex #3736 r9 P1 — Postgres cannot do a targetless DO UPDATE):
-//   1. INSERT ... ON CONFLICT DO NOTHING (the first pass for a key lands here);
-//   2. a keyed, ROW-LOCKED UPDATE of the refresh columns (a later pass lands
-//      here) — see updateUnreviewedRouteDecisions.
-// `fence` ({ callLogId, processingToken }) makes BOTH statements conditional on
-// this pass still owning the call's processing_token: the ownership row is
-// locked FOR UPDATE and re-read in the same transaction as the writes (the
-// processor's own fence shape), so a superseded worker can neither insert a
-// first decision nor overwrite a newer pass's (codex #5371 r8 P1). A fence that
-// was ASKED FOR but is incomplete fails closed: nothing is written. Refreshes
-// also skip a decision a human already reviewed. The unfenced path runs in a
+// Insert-or-refresh, so the INSERT stays TARGETLESS (ON CONFLICT DO NOTHING
+// names no constraint: tolerant of BOTH the legacy three-column constraint and
+// the recording-keyed index during a rolling deploy, Codex #3736 r9 P1 —
+// Postgres cannot do a targetless DO UPDATE). Everything after it is ONE
+// FAMILY RULE under the row lock (codex #5377 r4 + r7 P1). The decision's
+// FAMILY is its base version row plus its '+r1' revision. Read the whole family
+// FOR UPDATE (every route_feedback writer takes the same row lock, so a verdict
+// cannot land mid-write), find the REVIEWED member (route_feedback is one
+// verdict per call: at most one), then:
+//   - none reviewed: refresh the base row (insert it, first pass);
+//   - the new verdict EQUALS the reviewed member's: nothing to record — the
+//     reviewed row already says it. Its decision columns are never touched; if
+//     the other member is the newer row (a stale, differing one), only the
+//     reviewed row's created_at moves up so the reviewed member stays the
+//     newest decision and keeps its verdict (a re-review repoints the verdict
+//     to the revision, leaving the base unreviewed, so refreshing the base
+//     here would have shown a judged decision as unreviewed);
+//   - the verdict DIFFERS: refresh-or-insert the OTHER member (base <-> +r1).
+// So the newest member of a family is always the one that represents the
+// latest pass, and a reviewed row's decision columns are never mutated.
+// `fence` ({ callLogId, processingToken }) makes ALL of it conditional on this
+// pass still owning the call's processing_token: the ownership row is locked FOR
+// UPDATE and re-read in the same transaction as the writes (the processor's own
+// fence shape), so a superseded worker can neither insert a first decision nor
+// overwrite a newer pass's (codex #5371 r8 P1). A fence that was ASKED FOR but is
+// incomplete fails closed: nothing is written. The unfenced path runs in a
 // transaction too: the row lock needs one.
-// Returns rows refreshed / 0 / null (null = fence not held: nothing written).
-async function upsertRouteDecision(conn, decision, fence = null) {
+// Returns 1 (written) / 0 (nothing to write) / null (fence not held). `out`,
+// when given, receives `decisionVersion`: the version of the row this pass
+// wrote, or null when it wrote none (the same-run outcome update targets it).
+async function upsertRouteDecision(conn, decision, fence = null, out = null) {
+  const report = (version) => { if (out) out.decisionVersion = version; };
   const write = async (c) => {
     await c('route_decisions').insert(decision).onConflict().ignore();
-    const refresh = {};
-    for (const col of ROUTE_DECISION_REFRESH_COLUMNS) refresh[col] = decision[col];
-    // A REVIEWED decision is never refreshed (codex #5371 r6 P1): route_feedback
-    // points at a decision row by id and calibration joins that row's CURRENT
-    // action / reasons to the human's verdict, so mutating a reviewed row would
-    // re-attach an old verdict to a decision the reviewer never saw.
-    const key = {
-      call_log_id: decision.call_log_id,
-      decision_version: decision.decision_version,
-      mode: decision.mode,
-      recording_sid: decision.recording_sid,
-    };
-    const refreshed = await updateUnreviewedRouteDecisions(c, key, refresh);
-    // Nothing refreshed = the base row is REVIEWED (the insert above guarantees
-    // it exists). A pass that decided differently records a revision row instead
-    // of being silently skipped: refresh the family's unreviewed revision if
-    // there is one, else append the next revision unless the verdict is the one
-    // already judged.
-    if (refreshed !== 0) return refreshed;
-    let previous = await c('route_decisions').where(key).first();
-    for (let n = 1; n <= ROUTE_DECISION_MAX_REVISIONS; n += 1) {
-      const revisionKey = { ...key, decision_version: routeDecisionRevisionVersion(decision.decision_version, n) };
-      const existing = await c('route_decisions').where(revisionKey).first();
-      if (!existing) {
-        if (sameRouteVerdict(previous, decision)) return 0;
-        await c('route_decisions').insert({ ...decision, decision_version: revisionKey.decision_version }).onConflict().ignore();
-        return 1;
+    const base = decision.decision_version;
+    const scope = { call_log_id: decision.call_log_id, mode: decision.mode, recording_sid: decision.recording_sid };
+    const family = await applyRouteDecisionScope(c('route_decisions'), { ...scope, decision_version: routeDecisionFamilyVersions(base) })
+      .forUpdate().select('*');
+    const ids = family.map((r) => r.id);
+    const reviewedIds = new Set(ids.length
+      ? (await c('route_feedback').whereIn('route_decision_id', ids).select('route_decision_id')).map((r) => r.route_decision_id)
+      : []);
+    const reviewed = family.find((r) => reviewedIds.has(r.id)) || null;
+    const revision = routeDecisionRevisionVersion(base, 1);
+    let target = base;
+    if (reviewed) {
+      if (sameRouteVerdict(reviewed, decision)) {
+        const other = family.find((r) => r.id !== reviewed.id);
+        if (other && new Date(other.created_at).getTime() > new Date(reviewed.created_at).getTime()) {
+          await c('route_decisions').where({ id: reviewed.id }).update({ created_at: decision.created_at });
+        }
+        report(null);
+        return 0;
       }
-      const updated = await updateUnreviewedRouteDecisions(c, revisionKey, refresh);
-      if (updated > 0) return updated;
-      previous = existing;
+      target = reviewed.decision_version === base ? revision : base;
     }
-    return 0;
+    const existing = family.find((r) => r.decision_version === target);
+    if (existing) {
+      const refresh = {};
+      for (const col of ROUTE_DECISION_REFRESH_COLUMNS) refresh[col] = decision[col];
+      await c('route_decisions').where({ id: existing.id }).update(refresh);
+    } else {
+      await c('route_decisions').insert({ ...decision, decision_version: target }).onConflict().ignore();
+    }
+    report(target);
+    return 1;
   };
   if (!fence) return conn.transaction(write);
-  if (!fence.callLogId || !fence.processingToken) return null;
+  if (!fence.callLogId || !fence.processingToken) { report(null); return null; }
   return conn.transaction(async (trx) => {
     const owned = await trx('call_log')
       .where({ id: fence.callLogId })
       .where('processing_token', fence.processingToken)
       .forUpdate()
       .first('id');
-    if (!owned) return null;
+    if (!owned) { report(null); return null; }
     return write(trx);
   });
 }
