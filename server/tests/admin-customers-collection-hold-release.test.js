@@ -59,6 +59,20 @@ test('release + critical audit share one transaction and commit together', async
   expect(mockTx.committed).toBe(1);
 });
 
+test('a released dispute that leaves the fallback hold in place says so, and the audit row records it', async () => {
+  releaseCollectionHold.mockResolvedValueOnce({ ok: true, released: 1, fallbackRestored: true });
+  const res = await post();
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual({
+    released: 1,
+    fallbackRestored: true,
+    message: 'Dispute released; the earlier wrong-number/wrong-party hold stays.',
+  });
+  expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+    metadata: expect.objectContaining({ hold_id: HOLD_ID, fallback_restored: true }),
+  }));
+});
+
 test('a failed audit write rolls the release back and the route errors', async () => {
   recordAuditEvent.mockRejectedValueOnce(new Error('audit down'));
   const res = await post();

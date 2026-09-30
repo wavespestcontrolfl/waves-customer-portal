@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
-const { isNeverAttemptedHoldDeferral } = require('../services/collections/collection-hold');
+const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('../services/collections/collection-hold');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
@@ -88,14 +88,16 @@ router.get('/', async (req, res, next) => {
     };
     let total;
     if (payerInvoiceIds.size === 0) {
-      const countRow = await db('payments')
-        .where({ customer_id: req.customerId })
+      // Armed hold-deferral rows are never shown (getPaymentHistory drops them), so
+      // they are not counted either: `total` must match what pagination serves.
+      const countRow = await excludeNeverAttemptedHoldDeferrals(db('payments')
+        .where({ customer_id: req.customerId }), 'payments')
         .count('* as count')
         .first();
       total = Number(countRow?.count || 0);
     } else {
-      const rows = await db('payments')
-        .where({ customer_id: req.customerId })
+      const rows = await excludeNeverAttemptedHoldDeferrals(db('payments')
+        .where({ customer_id: req.customerId }), 'payments')
         // Every field isPayerLinked reads — metadata alone under-counts the
         // exclusion for rows payer-linked only through their PaymentIntent or
         // invoice-number description, leaving `total` above the number of

@@ -2661,7 +2661,7 @@ router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next
         action: 'customer.collection_hold_released',
         resource_type: 'customer',
         resource_id: req.params.id,
-        metadata: { released: released.released, hold_id: holdId },
+        metadata: { released: released.released, hold_id: holdId, ...(released.fallbackRestored ? { fallback_restored: true } : {}) },
         ip_address: req.ip,
         user_agent: req.get('user-agent') || null,
         critical: true,
@@ -2669,7 +2669,12 @@ router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next
       });
       return released;
     });
-    res.json({ released: result.released });
+    res.json({
+      released: result.released,
+      // The dispute was released but an earlier wrong-number / wrong-party hold on the
+      // same row stays active (all-channel outreach block); Customer 360 says so.
+      ...(result.fallbackRestored ? { fallbackRestored: true, message: 'Dispute released; the earlier wrong-number/wrong-party hold stays.' } : {}),
+    });
   } catch (err) { next(err); }
 });
 

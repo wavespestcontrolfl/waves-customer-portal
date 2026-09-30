@@ -154,6 +154,33 @@ describe('Customer 360 collections dispute-hold notice', () => {
     expect(JSON.parse(releaseCalls(fetchMock)[0][1].body)).toEqual({ holdId: 'hold-1' });
   });
 
+  it('releasing a dispute that sat on a wrong-number/wrong-party hold says the earlier hold stays, and re-reads the holds', async () => {
+    let current = [HOLD];
+    const fetchMock = installFetch({
+      holds: () => current,
+      release: () => {
+        // server downgrades the shared row back to the fallback (still active)
+        current = [{ ...HOLD, reason: 'wrong-party answer on billing follow-up call', stops_charges: false }];
+        return response({
+          released: 1,
+          fallbackRestored: true,
+          message: 'Dispute released; the earlier wrong-number/wrong-party hold stays.',
+        });
+      },
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Release hold/i }));
+
+    expect(await screen.findByText(/Dispute released; the earlier wrong-number\/wrong-party hold stays\./i)).toBeInTheDocument();
+    // the dispute notice is gone (charging resumes) but the holds were re-read, not blanked
+    expect(screen.queryByText(/Billing on hold — customer disputed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Billing hold released/i)).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/collection-holds'))).toHaveLength(2);
+    expect(releaseCalls(fetchMock)).toHaveLength(1);
+  });
+
   it('on a 409 (hold changed) shows the conflict inline, re-reads the holds, and releases nothing blind', async () => {
     let current = [HOLD];
     const fetchMock = installFetch({

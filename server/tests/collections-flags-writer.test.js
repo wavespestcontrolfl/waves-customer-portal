@@ -113,8 +113,9 @@ describe('placeDisputeHold (B: only DISPUTE holds stop money)', () => {
     expect(res.ok).toBe(true);
     expect(w.inserts).toHaveLength(1);
     expect(w.updates).toHaveLength(1);
-    expect(w.updates[0].reason.sql).toMatch(/earlier hold/);
-    expect(w.updates[0].reason.bindings[0]).toBe('dispute on call: bill is wrong');
+    // The fallback's reason rides in the structured trailer that releasing the dispute reads back.
+    expect(w.updates[0].reason.bindings).toEqual(['dispute on call: bill is wrong', 300, ' [earlier hold: ', ']']);
+    expect(w.updates[0].reason.sql).toMatch(/btrim\(coalesce\(reason, ''\)\)/);
   });
 
   test('RACE 1: the fallback is released between the duplicate insert and the update - the insert is retried and a dispute row lands', async () => {

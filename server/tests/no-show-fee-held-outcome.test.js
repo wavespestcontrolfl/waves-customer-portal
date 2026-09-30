@@ -33,24 +33,34 @@ describe('runNoShowFeeStep', () => {
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = mockNotifyAdmin.mock.calls[0];
     expect(category).toBe('billing');
-    expect(title).toBe('No-show fee not charged — customer has a collections dispute hold');
-    expect(body).toMatch(/No charge was attempted/);
+    expect(title).toBe('Billing — decide on a no-show fee held by a dispute');
+    expect(body).toMatch(/nothing was charged/);
     expect(`${title} ${body}`).not.toMatch(/declin|parked|needs review|failed/i);
-    expect(opts.metadata).toEqual({ scheduledServiceId: 'svc-1', reason: 'fee_held_collections_dispute' });
+    expect(opts.link).toBe('/admin/customers?customerId=cust-1');
+    // Raised through raiseAdminAlert (docs/admin-notifications.md): structured fields present.
+    expect(opts.metadata).toEqual({
+      scheduledServiceId: 'svc-1',
+      reason: 'fee_held_collections_dispute',
+      area: 'Billing',
+      severity: 'needs-you',
+      subject: { type: 'visit', id: 'svc-1' },
+      doneWhen: 'no_show_fee_decided',
+      who: 'person',
+    });
   });
 
   test('appointment-rail collection_hold (hold rail saw no hold) is held too', async () => {
     mockHoldFee.mockResolvedValue({ charged: false, reason: 'no_hold' });
     mockApptFee.mockResolvedValue({ charged: false, reason: 'collection_hold' });
     await expect(runNoShowFeeStep({ svc })).resolves.toBe('held');
-    expect(mockNotifyAdmin.mock.calls[0][1]).toMatch(/not charged/);
+    expect(mockNotifyAdmin.mock.calls[0][1]).toMatch(/held by a dispute/);
     expect(mockNotifyAdmin.mock.calls[0][3].metadata.reason).toBe('fee_held_collections_dispute');
   });
 
   test.each([['charge_review'], ['charge_failed']])('%s stays review with the decline/parked alert', async (reason) => {
     mockHoldFee.mockResolvedValue({ charged: false, reason });
     await expect(runNoShowFeeStep({ svc })).resolves.toBe('review');
-    expect(mockNotifyAdmin.mock.calls[0][1]).toBe('No-show fee needs review');
+    expect(mockNotifyAdmin.mock.calls[0][1]).toBe('Billing — review a no-show fee that did not settle');
     expect(mockNotifyAdmin.mock.calls[0][3].metadata.reason).toBe('fee_unsettled');
   });
 
@@ -72,6 +82,7 @@ describe('runNoShowFeeStep', () => {
   test('a thrown fee step is review with the step-error alert', async () => {
     mockHoldFee.mockRejectedValue(new Error('boom'));
     await expect(runNoShowFeeStep({ svc })).resolves.toBe('review');
+    expect(mockNotifyAdmin.mock.calls[0][1]).toBe('Billing — review a no-show fee step that errored');
     expect(mockNotifyAdmin.mock.calls[0][3].metadata.reason).toBe('fee_step_error');
   });
 

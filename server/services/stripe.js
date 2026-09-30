@@ -3,7 +3,7 @@ const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
-const { assertNoCollectionHold, recordHoldOverride } = require('./collections/collection-hold');
+const { assertNoCollectionHold, recordHoldOverride, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
@@ -3170,6 +3170,11 @@ const StripeService = {
       )
       .orderBy('payments.payment_date', 'desc')
       .limit(limit);
+    // The armed collections-hold deferral row (B10) is a never-attempted placeholder
+    // for the retry sweep, not a payment: a customer-facing history would show it as
+    // FAILED with "Update Payment Method". The route's total / cursor math applies
+    // the same predicate, so both stay in step.
+    q = excludeNeverAttemptedHoldDeferrals(q, 'payments');
     if (offset > 0) q = q.offset(offset);
     return q;
   },

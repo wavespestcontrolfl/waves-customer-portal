@@ -2754,7 +2754,10 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
     const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
     const promote = updates.find((u) => u.rowId === 'W1');
     expect(promote.patch.reason).toMatch(/^dispute on call: says the charge is wrong/);
-    expect(promote.patch.reason).toMatch(/prior hold: wrong-number report could not be filed/);
+    // Same trailer placeDisputeHold writes, so releasing the dispute restores the winner's fallback.
+    expect(promote.patch.reason).toBe('dispute on call: says the charge is wrong [earlier hold: wrong-number report could not be filed]');
+    expect(require('../services/collections/collection-hold').priorHoldReasonOf(promote.patch.reason))
+      .toEqual({ prior: 'wrong-number report could not be filed' });
     expect(updates.find((u) => u.rowId === 'L1').patch.released_at).toBe('CURRENT_TIMESTAMP');
     expect(result).toMatch(/promoted 1/);
   });

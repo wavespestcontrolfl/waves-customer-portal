@@ -16,7 +16,7 @@
 
 const db = require('../../../models/db');
 const logger = require('../../logger');
-const { HOLD_FLAG, DISPUTE_REASON_PREFIX } = require('../collection-hold');
+const { HOLD_FLAG, DISPUTE_REASON_PREFIX, PRIOR_HOLD_OPEN, PRIOR_HOLD_CLOSE, DISPUTE_TEXT_CAP } = require('../collection-hold');
 
 async function writeFlag({ customerId, flag, reason, createdBy = 'system:collections_voice' }) {
   if (!customerId || !flag) return { ok: false, reason: 'missing_args' };
@@ -93,7 +93,8 @@ async function revokeAutomatedVoiceConsent(customerId, { reason, createdBy } = {
  * fallback artifact, and the one-active-row-per-flag index means a dispute
  * raised while such a fallback row is active would otherwise be swallowed as
  * "already active": the existing row is upgraded to carry the dispute reason
- * (its earlier reason kept after it).
+ * (its earlier reason kept in a trailer after it, so releasing the dispute
+ * restores the fallback instead of dropping the block).
  */
 const DISPUTE_HOLD_ATTEMPTS = 3;
 
@@ -115,7 +116,9 @@ async function placeDisputeHold(customerId, { summary, createdBy } = {}) {
         .whereNull('released_at')
         .whereRaw('(reason IS NULL OR reason NOT ILIKE ?)', [`${DISPUTE_REASON_PREFIX}%`]) // parenthesized: knex does not wrap raw fragments
         .update({
-          reason: db.raw("left(? || '; earlier hold: ' || coalesce(reason, 'no reason recorded'), 500)", [disputeReason]),
+          // Same trailer as embedPriorHoldReason (collection-hold.js): releasing the
+          // dispute restores the fallback from it (collection-hold-admin).
+          reason: db.raw("left(?, ?) || ? || btrim(coalesce(reason, '')) || ?", [disputeReason, DISPUTE_TEXT_CAP, PRIOR_HOLD_OPEN, PRIOR_HOLD_CLOSE]),
         });
       if (Number(upgraded) > 0) { res = { ok: true, created: false, upgraded: true }; break; }
       const activeDispute = await db('collections_flags')

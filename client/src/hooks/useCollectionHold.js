@@ -124,6 +124,23 @@ export function useCollectionHold(customerId, isAdmin) {
         { method: "POST", body: JSON.stringify({ holdId: dispute.id }) },
       );
       if (!stillViewing()) return;
+      if (result?.fallbackRestored) {
+        // The dispute shared its row with an earlier wrong-number / wrong-party hold:
+        // the dispute is released (charging resumes) but that hold stays active, so
+        // re-read what is current instead of showing "no hold".
+        try {
+          const holds = await fetchHolds(forCustomerId);
+          if (!stillViewing()) return;
+          setRead({ customerId: forCustomerId, status: "ready", holds });
+        } catch {
+          if (!stillViewing()) return;
+          setRead({ customerId: forCustomerId, status: "error", holds: [] });
+        }
+        setReleaseNote(
+          `${result.message || "Dispute released; the earlier wrong-number/wrong-party hold stays."} Automatic charges resume on their next attempt.`,
+        );
+        return;
+      }
       setRead({ customerId: forCustomerId, status: "ready", holds: [] });
       setReleaseNote(
         Number(result?.released) > 0

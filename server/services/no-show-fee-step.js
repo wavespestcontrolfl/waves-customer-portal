@@ -15,6 +15,7 @@
 // Never throws — the caller has already committed the status flip.
 
 const logger = require('./logger');
+const { raiseAdminAlert } = require('./admin-alert-compose');
 
 const REVIEW_REASONS = ['charge_review', 'charge_failed'];
 const HELD_REASON = 'collection_hold';
@@ -26,10 +27,39 @@ function outcomeFromFeeResult(result) {
   return null;
 }
 
-async function bell(title, body, svc, reason) {
+// Office alerts follow docs/admin-notifications.md: raised through raiseAdminAlert
+// (composed headline / why / link / subject / done-when), never a raw notifyAdmin.
+const ALERTS = {
+  fee_unsettled: {
+    action: 'review a no-show fee that did not settle',
+    why: 'The fee was declined or parked, and a retry may still charge the card.',
+    doneWhen: 'fee_reconciled',
+  },
+  fee_step_error: {
+    action: 'review a no-show fee step that errored',
+    why: 'The fee step failed before it knew which card rail applies, so a fee may still apply.',
+    doneWhen: 'fee_reconciled',
+  },
+  fee_held_collections_dispute: {
+    action: 'decide on a no-show fee held by a dispute',
+    why: 'The customer has a collections dispute hold, so nothing was charged and nothing was attempted.',
+    doneWhen: 'no_show_fee_decided',
+  },
+};
+
+async function bell(svc, reason) {
   try {
-    await require('./notification-service').notifyAdmin('billing', title, body, {
+    const alert = ALERTS[reason];
+    await raiseAdminAlert('billing', {
+      area: 'Billing',
+      action: alert.action,
+      why: alert.why,
+      severity: 'needs-you',
       link: `/admin/customers?customerId=${svc.customer_id}`,
+      subject: { type: 'visit', id: svc.id },
+      doneWhen: alert.doneWhen,
+      who: 'person',
+    }, {
       metadata: { scheduledServiceId: svc.id, reason },
     });
   } catch (notifyErr) {
@@ -60,22 +90,12 @@ async function runNoShowFeeStep({ svc }) {
       }
     }
     if (outcome === 'review') {
-      await bell(
-        'No-show fee needs review',
-        'The no-show fee did not settle cleanly (declined or parked) — review the customer\'s billing; a retry may still charge.',
-        svc,
-        'fee_unsettled',
-      );
+      await bell(svc, 'fee_unsettled');
     } else if (outcome === 'held') {
       // Informational, not a failure: nothing was attempted, so there is
       // nothing to reconcile. The hold itself is already on the customer's
       // billing surfaces.
-      await bell(
-        'No-show fee not charged — customer has a collections dispute hold',
-        'The no-show fee was not charged because the customer has an active collections dispute hold. No charge was attempted, and the customer got the ordinary no-show notice with no fee wording.',
-        svc,
-        'fee_held_collections_dispute',
-      );
+      await bell(svc, 'fee_held_collections_dispute');
     }
   } catch (e) {
     // A THROWN fee step means lane ownership was never resolved (Codex #3153
@@ -84,12 +104,7 @@ async function runNoShowFeeStep({ svc }) {
     // needs to hear about it.
     outcome = 'review';
     logger.error(`[admin-dispatch] no-show card-hold fee charge failed — outcome parked review: ${e.message}`);
-    await bell(
-      'No-show fee needs review',
-      'The no-show fee step errored before lane ownership was resolved — review the customer\'s billing; a fee may still apply.',
-      svc,
-      'fee_step_error',
-    );
+    await bell(svc, 'fee_step_error');
   }
   return outcome;
 }

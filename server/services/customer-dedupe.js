@@ -24,7 +24,7 @@
 const db = require('../models/db');
 const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
-const { HOLD_FLAG, isDisputeHoldReason } = require('./collections/collection-hold');
+const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldReason } = require('./collections/collection-hold');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 
@@ -965,9 +965,11 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
       if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null && isDisputeHoldReason(reason)) {
         const winnerRow = await trx(table).where({ [column]: winnerId, flag: HOLD_FLAG }).whereNull('released_at').first('id', 'reason');
         if (winnerRow && !isDisputeHoldReason(winnerRow.reason)) {
-          const prior = String(winnerRow.reason || '').trim();
+          // Same trailer placeDisputeHold writes: releasing the dispute restores the
+          // winner's fallback hold (collection-hold-admin) instead of dropping it.
+          // A loser dispute that itself carries a trailer keeps only the winner's.
           await trx(table).where({ id: winnerRow.id }).update({
-            reason: prior ? `${String(reason).trim()} (merged; prior hold: ${prior})` : String(reason).trim(),
+            reason: embedPriorHoldReason(withoutPriorHoldReason(String(reason).trim()), winnerRow.reason),
           });
           promoted += 1;
         }

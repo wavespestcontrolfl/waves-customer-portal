@@ -49,6 +49,40 @@ const HOLD_CHECK_FAILED_CODE = 'COLLECTION_HOLD_CHECK_FAILED';
 // In-memory twin of activeDisputeHolds' reason predicate (case-insensitive
 // prefix; ILIKE in SQL).
 const isDisputeHoldReason = (reason) => String(reason || '').toLowerCase().startsWith(DISPUTE_REASON_PREFIX);
+// A dispute that lands on an ACTIVE fallback hold (wrong number / wrong party) shares its
+// row (one active row per customer+flag), so the row is upgraded to the dispute reason and
+// the fallback's own reason rides at the END, inside a fixed trailer:
+//     <dispute reason> [earlier hold: <fallback reason>]
+// Releasing the dispute must put the fallback BACK (the row stays active), never stamp
+// released_at, or the all-channel outreach block the fallback carried would silently drop.
+// priorHoldReasonOf is the one reader of the trailer; embedPriorHoldReason the one writer
+// (SQL twin: embedPriorHoldReasonSql in outbound-voice/flags.js). No column, no migration.
+const PRIOR_HOLD_OPEN = ' [earlier hold: ';
+const PRIOR_HOLD_CLOSE = ']';
+const DISPUTE_TEXT_CAP = 300; // the dispute part is trimmed so the fallback trailer always fits intact
+
+function embedPriorHoldReason(disputeReason, priorReason) {
+  const prior = String(priorReason == null ? '' : priorReason).trim();
+  return `${String(disputeReason).slice(0, DISPUTE_TEXT_CAP)}${PRIOR_HOLD_OPEN}${prior}${PRIOR_HOLD_CLOSE}`;
+}
+
+// null: this is a plain dispute hold (nothing to restore). Otherwise { prior } where prior
+// is the fallback's original reason text, or null when it had none.
+function priorHoldReasonOf(reason) {
+  const text = String(reason || '');
+  if (!isDisputeHoldReason(text) || !text.endsWith(PRIOR_HOLD_CLOSE)) return null;
+  const at = text.lastIndexOf(PRIOR_HOLD_OPEN);
+  if (at < 0) return null;
+  const prior = text.slice(at + PRIOR_HOLD_OPEN.length, text.length - PRIOR_HOLD_CLOSE.length).trim();
+  return { prior: prior || null };
+}
+
+// The dispute part of a reason, trailer removed (a reason with no trailer is returned as is).
+function withoutPriorHoldReason(reason) {
+  const text = String(reason || '');
+  return priorHoldReasonOf(text) ? text.slice(0, text.lastIndexOf(PRIOR_HOLD_OPEN)) : text;
+}
+
 const isCollectionHoldRefusal = (err) => err?.code === HOLD_ACTIVE_CODE || err?.code === HOLD_CHECK_FAILED_CODE;
 
 // Restrict a collections_flags query to ACTIVE DISPUTE holds.
@@ -193,6 +227,12 @@ module.exports = {
   isNeverAttemptedHoldDeferral,
   excludeNeverAttemptedHoldDeferrals,
   HOLD_DEFERRAL_REASON,
+  PRIOR_HOLD_OPEN,
+  PRIOR_HOLD_CLOSE,
+  DISPUTE_TEXT_CAP,
+  embedPriorHoldReason,
+  priorHoldReasonOf,
+  withoutPriorHoldReason,
   recordHoldOverride,
   activeDisputeHolds,
   disputeHoldExistsSql,

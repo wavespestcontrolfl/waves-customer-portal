@@ -139,9 +139,65 @@ describeOrSkip('collection_hold as a money stop — real Postgres', () => {
     expect(await flags.placeDisputeHold(customerId, { summary: 'bill is wrong' })).toMatchObject({ ok: true });
     const rows = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' });
     expect(rows).toHaveLength(1);
-    expect(rows[0].reason).toMatch(/^dispute on call: bill is wrong; earlier hold: wrong-party answer/);
+    expect(rows[0].reason).toMatch(/^dispute on call: bill is wrong \[earlier hold: wrong-party answer.*\]$/);
     await stopped();
     await flags.releaseFlag({ customerId, flag: 'collection_hold' });
+    await clear();
+  });
+
+  // Codex P1: releasing the DISPUTE on an upgraded fallback row must put the fallback back
+  // (row stays active, all-channel outreach block intact), never stamp released_at.
+  describe.each([
+    ['wrong-number fallback', 'wrongNumberFallback', /^wrong-number report/],
+    ['wrong-party fallback', 'wrongPartyFallback', /^wrong-party answer/],
+  ])('releasing a dispute upgraded over a %s', (_label, which, priorRe) => {
+    const releaseAdmin = () => require('../services/collections/collection-hold-admin');
+    test('restores the fallback (active, not released) and resumes charging', async () => {
+      await ({ wrongNumberFallback, wrongPartyFallback }[which])();
+      const [fallbackRow] = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' });
+      await flags.placeDisputeHold(customerId, { summary: 'says the July bill is wrong' });
+      await stopped();
+      const [upgraded] = await releaseAdmin().listCollectionHolds(customerId);
+      expect(upgraded).toMatchObject({ id: fallbackRow.id, stops_charges: true });
+
+      const out = await releaseAdmin().releaseCollectionHold(customerId, { holdId: upgraded.id });
+      expect(out).toEqual({ ok: true, released: 1, fallbackRestored: true });
+
+      // charging resumes ...
+      await clear();
+      // ... but the fallback's hold row is still ACTIVE with its original reason
+      const rows = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: fallbackRow.id, released_at: null, reason: fallbackRow.reason });
+      expect(rows[0].reason).toMatch(priorRe);
+      const [listed] = await releaseAdmin().listCollectionHolds(customerId);
+      expect(listed).toMatchObject({ id: fallbackRow.id, stops_charges: false });
+
+      // A second release of the same row now releases the fallback for real (staff intent).
+      expect(await releaseAdmin().releaseCollectionHold(customerId, { holdId: fallbackRow.id })).toEqual({ ok: true, released: 1 });
+      expect(await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).whereNull('released_at')).toHaveLength(0);
+    });
+  });
+
+  test('a long dispute summary never truncates the fallback trailer, and a reason-less fallback restores reason-less', async () => {
+    const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+    await db('collections_flags').insert({ customer_id: customerId, flag: 'collection_hold', reason: null, created_by: 'admin:ops' });
+    await flags.placeDisputeHold(customerId, { summary: 'x'.repeat(900) });
+    const [row] = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' });
+    expect(hold.priorHoldReasonOf(row.reason)).toEqual({ prior: null });
+    await stopped();
+    expect(await releaseCollectionHold(customerId, { holdId: row.id })).toMatchObject({ released: 1, fallbackRestored: true });
+    const [after] = await db('collections_flags').where({ id: row.id });
+    expect(after).toMatchObject({ released_at: null, reason: null });
+    await clear();
+  });
+
+  test('a plain dispute (no fallback under it) is released outright', async () => {
+    const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+    await flags.placeDisputeHold(customerId, { summary: 'duplicate bill' });
+    const [row] = await db('collections_flags').where({ customer_id: customerId });
+    expect(await releaseCollectionHold(customerId, { holdId: row.id })).toEqual({ ok: true, released: 1 });
+    expect((await db('collections_flags').where({ id: row.id }).first()).released_at).not.toBeNull();
     await clear();
   });
 
