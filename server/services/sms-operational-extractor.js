@@ -197,7 +197,7 @@ Additional properties (capture enabled: ${captureAdditionalProperties}; when fal
 - For an INBOUND message naming additional service addresses, propose one item per address. This only creates office review; never approve an account relationship, property role, or a primary-residence change.
 - Preserve the customer’s own label (for example "family", "primary", "rental") as label, copied verbatim from the current message only when clearly attached to this address; otherwise null. A label never proves ownership or a shared billing account.
 - quote must be the COMPLETE single line containing that address, verbatim. Every non-null address part must occur verbatim in that line. Leave missing city/state/ZIP null. Never borrow the current customer's address or infer that family members belong to one billing account. The office sees the full message, including every condition and qualifier.
-- A multi-address list is allowed here even when other fact fields require the complete message. If the current message exceeds 600 characters return facts=[] and obligations=[]; still capture address proposals.
+- A multi-address list is allowed here even when other fact fields require the complete message. If the current message exceeds ${BODY_LIMIT[channel] || BODY_LIMIT.sms} characters return facts=[] and obligations=[]; still capture address proposals.
 
 Facts:
 - Capture explicitly reported operational facts and instructions, not diagnoses or technical recommendations. Keep the customer's equipment/irrigation reports distinguished from verified findings.

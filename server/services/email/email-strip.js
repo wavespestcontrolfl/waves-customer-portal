@@ -86,4 +86,16 @@ function stripQuotedAndSignature(bodyText) {
   return text.trim();
 }
 
-module.exports = { stripQuotedAndSignature, decodeEntities };
+// The text of an email row: body_text, or its HTML converted when
+// body_text is empty. Portal sends (admin Email tab, Intelligence Bar) are
+// text/html-only, so Gmail sync stores them in body_html with body_text
+// empty. Same conversion email-reply-context.js uses (quoted blocks
+// dropped). Required lazily: newsletter-proof loads the send stack.
+function emailPlainText(row) {
+  const text = String(row?.body_text || '');
+  if (text.trim()) return text;
+  const html = String(row?.body_html || '');
+  return html.trim() ? require('../newsletter-proof').htmlReplyToText(html) : '';
+}
+
+module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText };

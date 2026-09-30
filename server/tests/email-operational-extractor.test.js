@@ -28,6 +28,12 @@ describe('sms-operational-extractor channel param', () => {
     expect(prompt).not.toContain('Subject:');
   });
 
+  test('the whole-message length cutoff in the prompt follows the channel (600 for SMS, 6000 for email)', () => {
+    const message = baseMessage('Please send the estimate');
+    expect(buildPrompt({ message, properties: [] })).toContain('If the current message exceeds 600 characters return facts=[] and obligations=[]');
+    expect(buildPrompt({ message, properties: [], channel: 'email' })).toContain('If the current message exceeds 6000 characters return facts=[] and obligations=[]');
+  });
+
   test('an explicit channel: "sms" is identical to omitting channel', () => {
     const message = baseMessage('Please send the estimate');
     expect(buildPrompt({ message, properties: [], channel: 'sms' })).toBe(buildPrompt({ message, properties: [] }));

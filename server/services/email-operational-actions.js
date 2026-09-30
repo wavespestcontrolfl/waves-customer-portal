@@ -32,11 +32,12 @@ const { extractSmsOperations, VERSION: EXTRACTOR_VERSION } = require('./sms-oper
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, PAYMENT_WITNESS_KINDS } = require('./sms-commitment-fulfillment');
 const { ringOverdueBell, keptLate, resolveDueDeadline } = require('./sms-operational-actions');
 const { resolveEmailCustomerLink, personSentFilter } = require('./email/email-customer-link');
-const { stripQuotedAndSignature } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
 const NotificationService = require('./notification-service');
 
 const VERSION = `${EXTRACTOR_VERSION}:email`;
 const enabled = () => gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
+const SENT_LINK_GRACE_MS = 15 * 60 * 1000;
 // lead_inquiry included (owner diagnostic, 2026-09-29): the classifier's
 // lead_inquiry label is written for a NEW lead by default, but an EXISTING
 // customer replying on an old estimate/lead thread ("does your lawn care
@@ -69,7 +70,7 @@ function overdueBody(kind, whenAt) {
 }
 
 function eligibleAskEmail(email) {
-  return !!email.customer_id && !!email.body_text && CLASSIFICATIONS.includes(email.classification);
+  return !!email.customer_id && !!emailPlainText(email).trim() && CLASSIFICATIONS.includes(email.classification);
 }
 
 // Stable identity across passes, mirroring sms-operational-actions.js's
@@ -93,7 +94,7 @@ async function loadActiveProperties(conn, customerId) {
 }
 
 async function extractForEmail(email, { direction, properties = [] }) {
-  const strippedBody = stripQuotedAndSignature(email.body_text);
+  const strippedBody = stripQuotedAndSignature(emailPlainText(email));
   if (!strippedBody) return { obligations: [], facts: [], additional_properties: [], dropped: 0 };
   // subject rides on the message object itself (a `subject` key), not as a
   // separate prompt-text param — buildPrompt puts it inside the scrubbed
@@ -124,8 +125,8 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
     // classification; a staff send's re-resolved recipient link).
     if (!enabled()) return { skipped: 'gate_off' };
     const source = await trx('emails').where({ id: email.id }).forUpdate()
-      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'gmail_thread_id', 'to_address');
-    if (!source || source.operational_analysis || source.body_text !== email.body_text) return { skipped: 'source_changed' };
+      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'body_html', 'gmail_thread_id', 'to_address');
+    if (!source || source.operational_analysis || emailPlainText(source) !== emailPlainText(email)) return { skipped: 'source_changed' };
     const stillOwned = direction === 'outbound'
       ? String(await resolveEmailCustomerLink(trx, source)) === String(customer.id)
       : eligibleAskEmail(source) && String(source.customer_id) === String(customer.id);
@@ -165,7 +166,7 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
       operational_analysis: { version: VERSION, processed_at: new Date().toISOString(), dropped: extracted.dropped },
     });
     await recordExtractionAttempt({ trx, source_type: RECEIPT_SOURCE_TYPE, source_id: email.id,
-      extractor_version: VERSION, source_hash: hashExtractionSource(email.body_text || ''),
+      extractor_version: VERSION, source_hash: hashExtractionSource(emailPlainText(email)),
       status: 'ok', proposal_count: obligations.length });
     return { recorded: obligations.length };
   });
@@ -229,20 +230,23 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       })
       .whereNotExists(noTerminalReceipt('emails'))
       .orderBy('received_at').orderBy('id').limit(PAGE_INTAKE)
-      .select('id', 'customer_id', 'body_text', 'subject', 'received_at', 'classification');
+      .select('id', 'customer_id', 'body_text', 'body_html', 'subject', 'received_at', 'classification');
 
     const promiseCandidates = await conn('emails as er')
       .whereRaw(personSentFilter('er')).whereNull('er.operational_analysis')
-      .where('er.received_at', '>=', since).where('er.received_at', '<=', now)
+      // A staff send is read only after a grace period: sync can list a
+      // reply before the inbound it answers, and a missing thread partner
+      // would otherwise mark it no_customer_link for good.
+      .where('er.received_at', '>=', since).where('er.received_at', '<=', new Date(now.getTime() - SENT_LINK_GRACE_MS))
       .whereNotExists(noTerminalReceipt('er'))
       .orderBy('er.received_at').orderBy('er.id').limit(PAGE_INTAKE)
-      .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.body_text', 'er.subject', 'er.received_at');
+      .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
 
     let processed = 0; let failed = 0; let skipped = 0;
     for (const email of askCandidates) {
       if (!enabled()) break;
       const source = { source_type: RECEIPT_SOURCE_TYPE, source_id: email.id, extractor_version: VERSION,
-        source_hash: hashExtractionSource(email.body_text || '') };
+        source_hash: hashExtractionSource(emailPlainText(email)) };
       if (!eligibleAskEmail(email)) {
         await recordExtractionAttempt({ ...source, trx: conn, status: 'no_fields' });
         skipped += 1; continue;
@@ -258,13 +262,14 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       } catch {
         failed += 1;
         logger.warn(`[email-operations] ask extraction failed for email ${email.id}`);
-        await recordFailedAttempt(conn, { source, emailId: email.id, customerId: email.customer_id });
+        await recordFailedAttempt(conn, { source, emailId: email.id, customerId: email.customer_id })
+          .catch((err) => logger.warn(`[email-operations] could not record the failed attempt for email ${email.id}: ${err.message}`));
       }
     }
     for (const email of promiseCandidates) {
       if (!enabled()) break;
       const source = { source_type: RECEIPT_SOURCE_TYPE, source_id: email.id, extractor_version: VERSION,
-        source_hash: hashExtractionSource(email.body_text || '') };
+        source_hash: hashExtractionSource(emailPlainText(email)) };
       let resolvedCustomerId = null;
       try {
         const skip = await shouldSkipExtraction({ ...source, trx: conn });
@@ -280,7 +285,8 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       } catch {
         failed += 1;
         logger.warn(`[email-operations] promise extraction failed for email ${email.id}`);
-        await recordFailedAttempt(conn, { source, emailId: email.id, customerId: resolvedCustomerId });
+        await recordFailedAttempt(conn, { source, emailId: email.id, customerId: resolvedCustomerId })
+          .catch((err) => logger.warn(`[email-operations] could not record the failed attempt for email ${email.id}: ${err.message}`));
       }
     }
     return { processed, failed, skipped };
@@ -335,12 +341,12 @@ async function refreshEmailCommitment(conn, row, now, verify) {
   // reflected the next time this row is read, not just used in-memory here.
   const current = { ...row, sms_context: { ...row.sms_context, customer_id: customerId, ...await soleProperty(conn, row, customerId) } };
   const sourceAt = row.sms_context?.source_at;
-  // sms/call evidence matches on the CUSTOMER'S OWN phone (loadSmsFulfillmentEvidence
-  // derives its "peer" from message.direction/from_phone/to_phone); an
-  // email-sourced ask has no phone of its own, so both fields are the
-  // customer's number, whatever direction is read below.
+  // An email has no thread number, so any_customer_phone lets a staff text
+  // or call to any of the customer's numbers count (loadSmsFulfillmentEvidence
+  // keeps both sources scoped to the customer); the phone fields stay the
+  // customer's own number for everything else that reads them.
   const message = { id: row.email_id, customer_id: customerId, direction: 'inbound',
-    created_at: sourceAt, from_phone: customer.phone || null, to_phone: customer.phone || null };
+    created_at: sourceAt, from_phone: customer.phone || null, to_phone: customer.phone || null, any_customer_phone: true };
   const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
   const incomplete = evidence.failures.some((f) => !f.endsWith('_truncated'));
   const settle = (outcome) => (incomplete ? 'deferred' : outcome);
@@ -355,6 +361,10 @@ async function refreshEmailCommitment(conn, row, now, verify) {
     if (!locked) return;
     // Revalidate against the same property scope the verdict was reached under.
     const { customer_id: scopedCustomer, property_id: scopedProperty, property_adopted: adopted } = current.sms_context;
+    // An adopted sole property is re-read under the customer lock: a second
+    // property committed since the read above means this verdict's scope is
+    // stale, so leave the row for the next tick.
+    if (adopted && (await soleProperty(trx, locked, customerId)).property_id !== scopedProperty) return;
     const live = { ...locked, sms_context: { ...locked.sms_context, customer_id: scopedCustomer,
       ...(scopedProperty ? { property_id: scopedProperty } : {}), ...(adopted ? { property_adopted: true } : {}) } };
     if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, live, message, verdict, now)) return;

@@ -45,7 +45,9 @@ const gmailId = () => `qa-${randomUUID()}`;
 const insertEmail = (overrides = {}) => mockPg('emails').insert({
   id: randomUUID(), gmail_id: gmailId(), gmail_thread_id: overrides.gmail_thread_id || randomUUID(),
   from_address: 'customer@example.invalid', to_address: 'contact@wavespestcontrol.com',
-  subject: 'Estimate', body_text: 'Please send the estimate', received_at: new Date(),
+  // 20 minutes old by default: staff sends are read only after intake's
+  // 15-minute link grace period.
+  subject: 'Estimate', body_text: 'Please send the estimate', received_at: new Date(Date.now() - 20 * 60000),
   label_ids: JSON.stringify(['INBOX']), ...overrides,
 }).returning('*').then(([row]) => row);
 
@@ -296,6 +298,77 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(promiseRow).toMatchObject({ party: 'waves', channel: 'email' });
     expect(promiseRow.sms_context).toMatchObject({ basis: 'promise', customer_id: customerId });
     expect(promiseRow.email_customer_id).toBe(customerId);
+  });
+
+  test('an HTML-only staff send (portal Email tab / Intelligence Bar) is read from body_html, without its quoted thread', async () => {
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request' });
+    const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', body_text: '', customer_id: null, classification: null,
+      body_html: '<div>I&#39;ll send the estimate tomorrow</div><div class="gmail_quote">On Tue wrote:<blockquote>quoted older request</blockquote></div>',
+      label_ids: JSON.stringify(['SENT']) });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [], facts: [], additional_properties: [] } });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+      description: 'send the estimate', quote: "I'll send the estimate tomorrow", basis: 'promise', property_id: null,
+      due_text: 'tomorrow', due_at: null, due_date: null, promise_firm: true, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    const sentPrompt = JSON.stringify(dispatchWithFallback.mock.calls[1]);
+    expect(sentPrompt).toContain("I'll send the estimate tomorrow");
+    expect(sentPrompt).not.toContain('quoted older request');
+    expect(await mockPg('call_commitments').where({ email_id: sent.id }).first()).toMatchObject({ party: 'waves', channel: 'email' });
+  });
+
+  test('a staff send newer than the 15-minute link grace period is not read yet', async () => {
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      received_at: new Date(Date.now() - 30 * 60000) });
+    const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', body_text: "I'll send the estimate tomorrow", customer_id: null,
+      classification: null, label_ids: JSON.stringify(['SENT']), received_at: new Date(Date.now() - 5 * 60000) });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1); // the inbound ask only
+    expect((await mockPg('emails').where({ id: sent.id }).first()).operational_analysis).toBeNull();
+  });
+
+  test('an email-sourced row counts a staff call to any of the customer\'s numbers; a text row still matches its own number', async () => {
+    const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+    const sourceAt = new Date(Date.now() - 60 * 60000);
+    const [call] = await mockPg('call_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
+      from_phone: '+19418889999', to_phone: '+12025557777', status: 'completed', duration_seconds: 120,
+      created_at: new Date(sourceAt.getTime() + 60000) }).returning('*');
+    const message = { id: randomUUID(), customer_id: customerId, direction: 'inbound', created_at: sourceAt,
+      from_phone: '+12025550101', to_phone: '+12025550101' };
+    const commitment = { kind: 'callback', party: 'waves', sms_context: { basis: 'request', customer_id: customerId } };
+    const emailEvidence = await loadSmsFulfillmentEvidence(mockPg, commitment, { ...message, any_customer_phone: true }, new Date());
+    expect(emailEvidence.records.some((r) => r.type === 'call' && r.id === call.id)).toBe(true);
+    const smsEvidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date());
+    expect(smsEvidence.records.some((r) => r.type === 'call')).toBe(false);
+  });
+
+  test('an adopted sole property is re-read under the lock: a second property added mid-check leaves the row for the next tick', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'lead_inquiry',
+      body_text: 'Yes I would like a quote please', subject: 'Re: thanks for reaching out' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+      description: 'would like a quote', quote: 'Yes I would like a quote please', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date(email.received_at.getTime() + 1000) });
+    const commitment = await mockPg('call_commitments').first();
+    const [property] = await mockPg('customer_properties').insert({ customer_id: customerId,
+      address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true }).returning('*');
+    const deliveredAt = new Date(email.received_at.getTime() + 10 * 60000);
+    const [estimate] = await mockPg('estimates').insert({ customer_id: customerId, property_id: property.id,
+      status: 'accepted', service_interest: 'Pest Control', estimate_data: { deliveryState: { lastDeliveredAt: deliveredAt.toISOString() } } }).returning('id');
+    dispatchWithFallback.mockImplementationOnce(async () => {
+      await mockPg('customer_properties').insert({ customer_id: customerId, address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+      return { ok: true, json: { verdict: 'fulfilled', record_ref: `estimate:${estimate.id}`, quote: 'Pest Control' } };
+    });
+    const refresh = await refreshEmailCommitments({ conn: mockPg, now: new Date(commitment.due_at.getTime() + 60000) });
+    expect(refresh).toMatchObject({ scanned: 1, fulfilled: 0 });
+    // The verifier is told a person's matched email reply is an answer too.
+    expect(JSON.stringify(dispatchWithFallback.mock.calls.at(-1))).toContain('or an email_reply record');
+    const after = await mockPg('call_commitments').first();
+    expect(after.status).toBe('open');
+    expect(after.sms_context.fulfillment_check).toBeUndefined();
+    expect(after.sms_context.property_id ?? null).toBeNull();
   });
 
   test('a staff promise follows a customer merge (email_customer_id is repointed; the jsonb snapshot is not)', async () => {
