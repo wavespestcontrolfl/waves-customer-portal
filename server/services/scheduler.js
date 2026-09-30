@@ -25,7 +25,7 @@ const callBookingLinkText = require('./call-booking-link-text');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
-const SCHEDULED_SMS_MAX_ATTEMPTS = 3;
+const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
 const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;

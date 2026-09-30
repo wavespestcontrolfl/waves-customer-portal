@@ -1262,11 +1262,60 @@ describe('deferred-replay registry', () => {
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
     expect(await recheckDeferredReplay('dispatch_completion_deferred', meta)).toEqual({ eligible: true });
 
-    // Lookup failure fails CLOSED: strip (still eligible), do not retry into a pay link.
+    // A first-attempt lookup failure is not a confirmed hold: hold the row for
+    // the rail's bounded retry instead of stripping a link permanently.
     jest.clearAllMocks();
     db.mockReturnValueOnce(throwChain());
     expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: false, reason: 'hold-recheck-failed', retryable: true });
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { ...meta, scheduled_sms_attempts: 2 }))
+      .toEqual({ eligible: false, reason: 'hold-recheck-failed', retryable: true });
+  });
+
+  test('completion recheck (B10 follow-up): a hold lookup that still fails at the attempt cap fails CLOSED to a strip (report-only), never a pay link', async () => {
+    const meta = { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1', scheduled_sms_attempts: 3 };
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
       .toEqual({ eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' });
+    // The retry that recovers is a normal hold answer: released hold, link kept.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(firstChain(undefined));
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { ...meta, scheduled_sms_attempts: 2 }))
+      .toEqual({ eligible: true });
+  });
+
+  test('decline notice (B10 follow-up): an active dispute hold suppresses the whole notice; the terminal hook restores the record', async () => {
+    const inv = { id: 'inv-1', status: 'sent', payer_id: null, customer_id: 'cust-1' };
+    db.mockReturnValueOnce(firstChain(inv));
+    db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));
+    expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1' }))
+      .toEqual({ eligible: false, reason: 'collections-dispute-hold' });
+    expect(db).toHaveBeenLastCalledWith('collections_flags');
+
+    // The scheduler's terminal path for an ineligible, non-retryable recheck runs this hook.
+    expect(requiresDurableFinalize('autopay_completion_decline_deferred')).toBe(true);
+    const { terminalDeferredDeclineNotice } = require('../services/dispatch-completion-deferred');
+    const meta = { invoice_id: 'inv-1', service_record_id: 'rec-1' };
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta);
+    expect(terminalDeferredDeclineNotice).toHaveBeenCalledWith(meta);
+
+    // Released / non-dispute hold: the notice stays eligible. Customer falls back to the invoice's.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(firstChain(inv));
+    db.mockReturnValueOnce(firstChain(undefined));
+    expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1' }))
+      .toEqual({ eligible: true });
+    expect(db).toHaveBeenCalledWith('collections_flags');
+  });
+
+  test('decline notice (B10 follow-up): a hold lookup failure is retryable-ineligible, never an eligible send', async () => {
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, customer_id: 'cust-1' }));
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1' }))
+      .toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
   });
 
   test('completion recheck (round 10 #4634 finding 3): a transient collectibility-read failure stays retryable-ineligible, never promoted to a strip', async () => {

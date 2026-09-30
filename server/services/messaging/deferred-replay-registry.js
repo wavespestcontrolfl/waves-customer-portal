@@ -75,6 +75,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./scheduled-sms-limits');
 
 // Sequence-ending states a customer REPLY produces — 'completed' is the
 // final step's own natural advance (it marks completed right after queueing
@@ -455,7 +456,24 @@ const REGISTRY = {
       // closed - shouldWithholdPayLink answers true when its lookup fails.
       // Checked BEFORE invoice collectibility: a strip needs no invoice read.
       // The scheduler enriches meta.customer_id from sms_log.customer_id.
-      if (await require('../collections/collection-hold').shouldWithholdPayLink(meta.customer_id)) {
+      // A hold-LOOKUP failure is not a confirmed hold: strip is one-way, so a
+      // DB hiccup on the first attempt must not permanently drop a pay link
+      // the customer is entitled to. Hold the row for the rail's bounded
+      // 15-minute retry (fresh read each time) and fail closed to a strip
+      // only on the last attempt - never a pay link sent unverified.
+      const holdReader = require('../collections/collection-hold');
+      try {
+        if (await holdReader.customerHasActiveCollectionHoldChecked(meta.customer_id)) {
+          return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
+        }
+      } catch (err) {
+        if (err?.code !== holdReader.HOLD_CHECK_FAILED_CODE) throw err;
+        const attempts = Number(meta.scheduled_sms_attempts) || 1;
+        if (attempts < SCHEDULED_SMS_MAX_ATTEMPTS) {
+          logger.warn(`[deferred-replay] completion hold recheck failed for customer ${meta.customer_id} (attempt ${attempts}/${SCHEDULED_SMS_MAX_ATTEMPTS}, holding for retry): ${err.message}`);
+          return { eligible: false, reason: 'hold-recheck-failed', retryable: true };
+        }
+        logger.warn(`[deferred-replay] completion hold recheck still failing for customer ${meta.customer_id} at the attempt cap - sending report-only: ${err.message}`);
         return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
       }
       const collectible = await invoiceStillCollectible(meta);
@@ -586,6 +604,16 @@ const REGISTRY = {
         // still reach the homeowner about debt the payer now owes.
         if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
           return { eligible: false, reason: 'payer-billed-withdrawn' };
+        }
+        // A dispute hold that landed after this notice was queued (owner
+        // ruling 2026-09-30): the customer was told all billing follow-up is
+        // on hold, and the notice IS a pay-link billing text - suppress it
+        // whole (terminalDeferredDeclineNotice restores the record's status;
+        // the completion route re-arms nothing while the hold stands). A
+        // lookup failure throws the coded refusal into failClosed below:
+        // retryable, then suppressed at the attempt cap.
+        if (await require('../collections/collection-hold').customerHasActiveCollectionHoldChecked(meta.customer_id || inv.customer_id)) {
+          return { eligible: false, reason: 'collections-dispute-hold' };
         }
         return { eligible: true };
       } catch (err) {

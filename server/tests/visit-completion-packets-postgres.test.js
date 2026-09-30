@@ -4007,6 +4007,41 @@ postgres('visit completion packet records on PostgreSQL', () => {
     } finally { dispatch.mockRestore(); }
   });
 
+  test('an active dispute hold keeps the shared invoice draft (no pay-link send) until the hold is released', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    const [flag] = await mockPg('collections_flags').insert({ customer_id: fixture.customerId, flag: 'collection_hold',
+      reason: 'dispute on call: synthetic billing question', created_by: 'test' }).returning('id');
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+      status: 202, body: { state: 'effects_pending', payment: { state: 'payment_pending', reason: 'collections-dispute-hold' } },
+    });
+    expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_at: null });
+    await mockPg('collections_flags').where({ id: flag.id }).update({ released_at: mockPg.fn.now() });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled' });
+  });
+
+  test('a non-dispute (wrong-number fallback) hold does not stop the scheduled pay-link send', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('collections_flags').insert({ customer_id: fixture.customerId, flag: 'collection_hold',
+      reason: 'wrong-number report on billing follow-up call; wrong_number flag write failed', created_by: 'test' });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first()).toMatchObject({ status: 'scheduled' });
+  });
+
+  test('a failed dispute-hold lookup fails closed without aborting the closeout transaction, then retries clean', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await withReadFailure(({ sql }) => /from "collections_flags"/i.test(sql), async () => {
+      expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+        status: 202, body: { state: 'effects_pending', payment: { state: 'payment_pending' } },
+      });
+    });
+    expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_at: null });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled' });
+  });
+
   test('a caller-owned transaction is rejected before any packet query or upload', async () => {
     const outer = await mockPg.transaction();
     const query = jest.fn();
