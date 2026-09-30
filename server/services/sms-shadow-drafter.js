@@ -511,27 +511,36 @@ function validateComplianceCopy({ reply }) {
 // Shared by both regexes below (built with `new RegExp` so the fragment
 // can't drift between them) rather than duplicated inline.
 const REVISIT_TERM_SOURCE = 'revisit(?!\\s+(?:the|my|our|your|this|that|its?|their)\\s+(?:options?|quotes?|estimates?|schedules?|pricing|prices?|billing|bills?|invoices?|accounts?|portals?|terms|plans?|polic(?:y|ies)|profiles?|details?|history)\\b)';
+// Codex round-6 P1: the noun set below is the ONE place a re-service
+// PROMISE's noun is recognized — deliberately RE-SERVICE-SPECIFIC (re-service,
+// reservice, re-treat(ment), re-spray, revisit — narrowed by
+// REVISIT_TERM_SOURCE above, callback visit, come back out, follow-up
+// treatment) with no bare "free"/"visit"/"return"/"treatment"/"service"/
+// "callback" fallback: those bare words paired with an unrelated "free"/
+// "return" elsewhere in the same sentence ("Feel free to return to your
+// estimate link anytime" — no snapshot, no re-service promise at all) used to
+// false-positive both regexes below into treating routine copy as a re-service
+// promise.
+const RESERVICE_SPECIFIC_NOUN_SOURCE = `re-?service|re-?treat(?:ment)?|re-?spray|${REVISIT_TERM_SOURCE}|callback\\s+visit|come\\s+back\\s+out|follow-?up\\s+treatment`;
 // Deterministic backstop: a reply that offers a free visit while the facts
 // do not say eligible is a violation, fed into the same revise/verify loop
 // (and enforced in single-pass mode, where no verifier would catch it).
 const FREE_RESERVICE_OFFER_RE = new RegExp(
-  `\\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\\b[^.?!\\n]{0,60}\\b(?:re-?service|re-?treat(?:ment)?|re-?spray|${REVISIT_TERM_SOURCE}|visit|treatment|service|callback|come back|return)\\b`
-  + `|\\b(?:re-?service|re-?treat(?:ment)?|re-?spray|${REVISIT_TERM_SOURCE}|visit|treatment|callback|come back|return)\\b[^.?!\\n]{0,60}\\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\\b`,
+  `\\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\\b[^.?!\\n]{0,60}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b`
+  + `|\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b[^.?!\\n]{0,60}\\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\\b`,
   'i',
 );
 // Codex round-2 finding: a promise can cover a re-service WITHOUT ever
 // saying "free" — "Your pest re-service is covered; we'll text the booking
 // link now" skipped the eligibility/lane/action checks above entirely.
-// Deliberately scoped to the RE-SERVICE-SPECIFIC noun set only (re-service,
-// reservice, re-treat, re-spray, revisit, come-back(-out), callback) rather
-// than widening the generic visit/treatment/service words FREE_RESERVICE_
-// OFFER_RE already covers — those stay paired with the narrower free-ish
-// modifiers above so an ordinary "your visit is included in your plan"
-// billing line doesn't spuriously trip this. Any of link/covered/no charge/
-// no cost/free/complimentary/on us/on the house/included, in either order.
+// Deliberately scoped to the SAME re-service-specific noun set above (never
+// the generic visit/treatment/service words) so an ordinary "your visit is
+// included in your plan" billing line doesn't spuriously trip this. Any of
+// link/covered/no charge/no cost/free/complimentary/on us/on the
+// house/included, in either order.
 const RESERVICE_COVERAGE_RE = new RegExp(
-  `\\b(?:re-?service|re-?treat(?:ment)?|re-?spray|${REVISIT_TERM_SOURCE}|come\\s+back(?:\\s+out)?|callback)\\b[^.?!\\n]{0,60}\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b`
-  + `|\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b[^.?!\\n]{0,60}\\b(?:re-?service|re-?treat(?:ment)?|re-?spray|${REVISIT_TERM_SOURCE}|come\\s+back(?:\\s+out)?|callback)\\b`,
+  `\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b[^.?!\\n]{0,60}\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b`
+  + `|\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b[^.?!\\n]{0,60}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b`,
   'i',
 );
 // The single entry point every caller below uses — never test either regex
@@ -548,11 +557,17 @@ function eligibleReserviceLanes(factsBlock) {
 // The lane(s) an SMS body EXPLICITLY names — shared by validateReserviceOffer
 // (the drafted reply) and reservicePromiseStillEligible (the actual outgoing
 // body, which a human may have edited after drafting) so the two never run
-// different named-lane logic on text that is supposed to mean the same thing.
-const RESERVICE_LANE_NAME_PATTERNS = [['pest', /\bpest\b/i], ['lawn', /\b(?:lawn|turf|grass)\b/i]];
+// different named-lane logic on text that is supposed to mean the same
+// thing. Codex round-6 P1: reuses reservice-scheduler's OWN lane-word
+// vocabulary (RESERVICE_LANE_WORD_PATTERNS) — the SAME words
+// reportedReserviceLane classifies a customer's inbound report with —
+// instead of a separate, narrower ad hoc list here (the old list matched
+// only bare "pest" and "lawn|turf|grass", so a reply naming "weed-treatment"
+// or a pest species word named no lane at all).
 function namedReserviceLanesInText(text) {
   const t = String(text || '');
-  return RESERVICE_LANE_NAME_PATTERNS.filter(([, rx]) => rx.test(t)).map(([lane]) => lane);
+  const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
+  return RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(t)).map(([lane]) => lane);
 }
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };

@@ -1788,7 +1788,14 @@ describe('free re-service is an entitlement resolved through the existing mechan
   function loadWith({ lanes = ['pest'], selfServe = true, throws = false } = {}) {
     jest.resetModules();
     const loadEligibleReserviceLanes = jest.fn(async () => { if (throws) throw new Error('boom'); return lanes; });
-    jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => selfServe, loadEligibleReserviceLanes }));
+    // namedReserviceLanesInText (Codex round-6 P1) reads the real module's
+    // RESERVICE_LANE_WORD_PATTERNS — pass the actual export through so this
+    // mock stays byte-identical to the real module on everything this suite
+    // doesn't itself stub out.
+    const { RESERVICE_LANE_WORD_PATTERNS } = jest.requireActual('../services/reservice-scheduler');
+    jest.doMock('../services/reservice-scheduler', () => ({
+      reserviceSelfServeEnabled: () => selfServe, loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS,
+    }));
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
 
@@ -1940,7 +1947,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // alone (Codex round-1 P2 (c)/(d) get their own tests below).
     const inboundMessage = 'still have ants, can you come back?';
     const intendedActions = [{ type: 'escalate', note: 'send_reservice_link' }];
-    for (const reply of ['We can come back for a free re-service.', 'We will re-treat at no charge.', 'A complimentary visit is on us.']) {
+    // Codex round-6 P1: isReserviceOfferPromise now requires a re-service-
+    // specific noun (never a bare "visit") — "callback visit" is one of
+    // those specific nouns, so this fixture still exercises a
+    // free-word-paired-with-a-noun phrasing distinct from the other two.
+    for (const reply of ['We can come back for a free re-service.', 'We will re-treat at no charge.', 'A complimentary callback visit is on us.']) {
       expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage, intendedActions }).ok).toBe(false);
       expect(validateReserviceOffer({ reply, factsBlock: 'no such line', inboundMessage, intendedActions }).ok).toBe(false);
       expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage, intendedActions }).ok).toBe(true);
@@ -2151,6 +2162,49 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(isReserviceOfferPromise('Your pest re-service is covered; we will text the link now.')).toBe(true);
       expect(isReserviceOfferPromise('Your balance is $95, due at the next visit.')).toBe(false);
     });
+  });
+
+  // Codex round-6 P1: isReserviceOfferPromise treated generic "free ... visit
+  // | return" as a re-service promise, so the unconditional send-time check
+  // rejected routine copy that never promised anything re-service-specific.
+  describe('isReserviceOfferPromise — requires a re-service-specific noun, not bare "free"/"visit"/"return" (Codex round-6 P1)', () => {
+    const { isReserviceOfferPromise } = require('../services/sms-shadow-drafter');
+
+    test.each([
+      'Feel free to return to your estimate link anytime.',
+      'Your balance is $95, due at the next visit.',
+      'Feel free to visit our website for more info.',
+      'You are free to return the equipment whenever it suits you.',
+    ])('%s → NOT a re-service promise', (text) => {
+      expect(isReserviceOfferPromise(text)).toBe(false);
+    });
+
+    test('a genuine re-service promise still counts, with each of the specific nouns', () => {
+      expect(isReserviceOfferPromise('We will come back out for free.')).toBe(true);
+      expect(isReserviceOfferPromise('A complimentary callback visit is on us.')).toBe(true);
+      expect(isReserviceOfferPromise('No charge for the follow-up treatment.')).toBe(true);
+      expect(isReserviceOfferPromise('We can re-spray at no cost.')).toBe(true);
+    });
+  });
+
+  // Codex round-6 P1: reservicePromiseStillEligible (and therefore the
+  // unconditional send-time check in agent-decision-send-checks.js) is gated
+  // entirely on isReserviceOfferPromise — once that detector is narrowed, an
+  // ordinary reply naming no re-service promise revalidates to null (nothing
+  // to check), even with no snapshot on the decision.
+  test('reservicePromiseStillEligible: the estimate-link sentence passes; a real promise still checks', async () => {
+    const { reservicePromiseStillEligible } = require('../services/sms-shadow-drafter');
+    await expect(reservicePromiseStillEligible({
+      outgoingBody: 'Feel free to return to your estimate link anytime.',
+      customerId: 'cust-1',
+      promisedLanes: null,
+    })).resolves.toBeNull();
+    // A genuine promise with no eligible lane on record still fails closed.
+    await expect(reservicePromiseStillEligible({
+      outgoingBody: "Good news — we'll send your free re-service link now.",
+      customerId: 'cust-1',
+      promisedLanes: null,
+    })).resolves.toMatch(/no promised re-service lane/);
   });
 
   // Codex round-3 P2: "revisit" as an ORDINARY business-admin verb ("revisit
@@ -2378,6 +2432,25 @@ describe('round-7 deterministic guards (gate on)', () => {
     // resolves to the eligible lane.
     expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free re-service.', factsBlock: pestOnly, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(true);
     expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free lawn re-service.', factsBlock: both, intendedActions: sendLink }).ok).toBe(true);
+  });
+
+  // Codex round-6 P1: namedReserviceLanesInText used to know only bare
+  // "pest" and "lawn|turf|grass" — a reply naming a broader lawn word like
+  // "weed-treatment" named NO lane at all under the old list, even though
+  // reportedReserviceLane (the inbound-report classifier) already recognized
+  // it as lawn. Both now share reservice-scheduler's RESERVICE_LANE_WORD_
+  // PATTERNS, so the reply-side check agrees.
+  test('validateReserviceOffer: a reply naming the broader lawn vocabulary ("weed-treatment") resolves to the lawn lane', () => {
+    const pestOnly = `X\n${drafter.reserviceFactLine(['pest'])}\nBILLING:`;
+    const lawnEligible = `X\n${drafter.reserviceFactLine(['lawn'])}\nBILLING:`;
+    const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+    expect(drafter.validateReserviceOffer({
+      reply: 'Good news — free weed-treatment re-service link is on its way.', factsBlock: lawnEligible, intendedActions: sendLink,
+    }).ok).toBe(true);
+    // Not eligible for lawn: caught, exactly as a bare "lawn" reply would be.
+    expect(drafter.validateReserviceOffer({
+      reply: 'Good news — free weed-treatment re-service link is on its way.', factsBlock: pestOnly, intendedActions: sendLink,
+    }).ok).toBe(false);
   });
 
   test('replyQuotesUngroundedAmount: a FAILED or pending payment does not back "your payment went through"', () => {

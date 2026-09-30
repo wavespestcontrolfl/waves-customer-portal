@@ -200,36 +200,45 @@ async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = fa
 }
 
 /**
- * The ONE "can we mint/promise a re-service link for this customer" check
- * (Codex round-4 P1, structural fix): a live, non-deleted customer row that
- * carries a reservice_token AND has at least one live lane — the exact
- * predicate the admin composer's /reservice-link route already applied per
- * candidate row (deleted_at IS NULL, active !== false, reservice_token
- * present, reserviceLanesForCustomer non-empty). Every other consumer that
- * needs to know "what could staff actually send right now" — the SMS FREE
- * RE-SERVICE fact (fetchReserviceLanes), the draft-time offer check
- * (validateReserviceOffer, via the same fact), and the send-time promise
- * recheck (reservicePromiseStillEligible) — resolves through this loader
- * too, so none of them can drift from what the route (and buildReserviceLink,
- * which mints from the same reservice_token) actually honors. An archived
- * (deleted_at set), tokenless, or inactive customer is never eligible, same
- * as a customer with no qualifying lane. Never throws: any lookup failure
- * returns [] (fail-closed — a lookup error must read as "not eligible",
- * never crash the caller).
+ * The customer-row half of the eligibility predicate: a live, non-deleted
+ * customer row that carries a reservice_token AND has at least one live
+ * lane — the exact predicate the admin composer's /reservice-link route
+ * already applied per candidate row (deleted_at IS NULL, active !== false,
+ * reservice_token present, reserviceLanesForCustomer non-empty). Returns
+ * null for a missing/deleted/inactive/tokenless row, a lookup error, or a
+ * row with no qualifying lane; otherwise { customer, lanes } (lanes always
+ * non-empty). Never throws: any lookup failure resolves null (fail-closed —
+ * a lookup error must read as "not eligible", never crash the caller).
+ *
+ * Codex round-6 P1: this is now the ONE place that predicate is computed —
+ * reservice-link.js's reserviceStreamlineAccess (the admin composer's
+ * /reservice-link route, requests/photo-id/report-data/cancellation
+ * surfaces) delegates to this loader too (adding its own extra
+ * reserviceStreamline gate + token/lanes shaping on top) instead of
+ * re-running its own copy of the same customer query, so all of those
+ * surfaces and this module's own loadEligibleReserviceLanes agree on
+ * exactly the same customer row and lane set.
  */
-async function loadEligibleReserviceLanes(customerId, dbh = db) {
-  if (!customerId) return [];
+async function loadReserviceEligibility(customerId, dbh = db) {
+  if (!customerId) return null;
   try {
-    const row = await dbh('customers')
+    const customer = await dbh('customers')
       .where({ id: customerId })
       .whereNull('deleted_at')
       .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-    if (!row || row.active === false || !row.reservice_token) return [];
-    return reserviceLanesForCustomer(row, dbh);
+    if (!customer || customer.active === false || !customer.reservice_token) return null;
+    const lanes = await reserviceLanesForCustomer(customer, dbh);
+    if (!lanes.length) return null;
+    return { customer, lanes };
   } catch (err) {
     logger.warn(`[reservice-scheduler] eligibility loader failed for customer ${customerId}: ${err.message}`);
-    return [];
+    return null;
   }
+}
+
+async function loadEligibleReserviceLanes(customerId, dbh = db) {
+  const eligibility = await loadReserviceEligibility(customerId, dbh);
+  return eligibility ? eligibility.lanes : [];
 }
 
 // Free-text lane classification for a CUSTOMER-REPORTED issue — used by the
@@ -245,13 +254,47 @@ async function loadEligibleReserviceLanes(customerId, dbh = db) {
 // PEST re-service link (Codex round-4 P2). A report naming an excluded
 // specialty, or mentioning both lawn and pest words, resolves to null
 // (unresolved) rather than guessing.
-const EXCLUDED_RESERVICE_SPECIALTY_RE = /\b(termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?|shrubs?)\b|\btrees?\b/i;
+//
+// termites/rodents/mosquitoes are ALWAYS an excluded specialty — there is no
+// "incidental mention" reading of those words. Tree & shrub is different
+// (Codex round-6 P1): "the ants are back in the shrubs" is an ordinary pest
+// report that happens to name a location, not a tree & shrub complaint, so a
+// bare "shrub"/"tree" word is no longer enough — only genuine SERVICE-ISSUE
+// phrasing about the plants/structures themselves counts as the specialty
+// (a dedicated tree & shrub service/treatment/care call, the trees/shrubs
+// themselves reported sick/dying/diseased, or disease/fungus/scale on them).
+// An incidental location ("in/on/near/around/under the shrubs/trees") never
+// trips this, so when a pest noun is ALSO present the report still resolves
+// to the pest lane below.
+const EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE = /\b(termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?)\b/i;
+const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
+  // A dedicated tree & shrub service/treatment/care/program call.
+  '\\b(?:tree|shrub)s?\\b(?:\\s*(?:and|\\/|&)\\s*(?:tree|shrub)s?\\b)?\\s*(?:service|treatment|care|program)\\b'
+  // The trees/shrubs themselves reported sick, dying, or diseased.
+  + '|\\b(?:my\\s+|our\\s+|the\\s+)?(?:trees?|shrubs?)\\s+(?:are|is|looks?)\\s+(?:sick|dying|diseased)\\b'
+  // Disease/fungus/scale on the trees or shrubs, in either order.
+  + '|\\b(?:trees?|shrubs?)\\b[^.?!\\n]{0,20}\\b(?:disease|fungus|scale)\\b'
+  + '|\\b(?:disease|fungus|scale)\\b[^.?!\\n]{0,20}\\b(?:trees?|shrubs?)\\b',
+  'i',
+);
 const RESERVICE_LAWN_WORDS_RE = /\b(lawn|turf|grass|weeds?|fert|fertilizer|fertilization|mow(?:ing)?|sod|yard)\b/i;
 const RESERVICE_PEST_WORDS_RE = /\b(pests?|bugs?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|fleas?|ticks?|wasps?|bees?|silverfish|scorpions?|exterminator)\b/i;
+// Codex round-6 P1: the ONE lane vocabulary, shared by reportedReserviceLane
+// below (a customer's INBOUND report) and sms-shadow-drafter.js's
+// namedReserviceLanesInText (an outgoing reply's own wording) — the same
+// words must resolve the same lane wherever they appear, or the two
+// classifiers can (and did) drift: a reply naming "weed-treatment" named no
+// lane at all under the reply-side classifier's old, narrower word list.
+// Pest-first ordering matches this module's own ['pest','lawn'] convention
+// elsewhere (loadEligibleReserviceLanes / reserviceLanesForCustomer).
+const RESERVICE_LANE_WORD_PATTERNS = [
+  ['pest', RESERVICE_PEST_WORDS_RE],
+  ['lawn', RESERVICE_LAWN_WORDS_RE],
+];
 
 function reportedReserviceLane(text) {
   const s = String(text || '');
-  if (!s || EXCLUDED_RESERVICE_SPECIALTY_RE.test(s)) return null;
+  if (!s || reportedReserviceExcludedSpecialty(s)) return null;
   const hasLawn = RESERVICE_LAWN_WORDS_RE.test(s);
   const hasPest = RESERVICE_PEST_WORDS_RE.test(s);
   if (hasLawn && hasPest) return null; // ambiguous — let the reply itself name the lane
@@ -261,14 +304,15 @@ function reportedReserviceLane(text) {
 }
 
 // Codex round-5 P1: reportedReserviceLane folds an excluded-specialty report
-// (termites/rodents/mosquitoes/tree/shrub) into the same null it returns for
-// an ambiguous or unmatched report — validateReserviceOffer needs to tell
-// the two apart, since an excluded specialty must reject a re-service
+// (termites/rodents/mosquitoes/tree & shrub) into the same null it returns
+// for an ambiguous or unmatched report — validateReserviceOffer needs to
+// tell the two apart, since an excluded specialty must reject a re-service
 // promise outright even when the reply itself names an eligible pest/lawn
 // lane (a termite report never rides a free PEST re-service link, whatever
-// the reply promises). Same regex reportedReserviceLane already guards with.
+// the reply promises).
 function reportedReserviceExcludedSpecialty(text) {
-  return EXCLUDED_RESERVICE_SPECIALTY_RE.test(String(text || ''));
+  const s = String(text || '');
+  return EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE.test(s) || TREE_SHRUB_SPECIALTY_ISSUE_RE.test(s);
 }
 
 // Statuses that keep a callback "open" for the lane dedupe: booked
@@ -390,7 +434,9 @@ module.exports = {
   laneForCoverageRow,
   laneForCallbackRow,
   reserviceLanesForCustomer,
+  loadReserviceEligibility,
   loadEligibleReserviceLanes,
+  RESERVICE_LANE_WORD_PATTERNS,
   reportedReserviceLane,
   reportedReserviceExcludedSpecialty,
   openReserviceCallbacks,

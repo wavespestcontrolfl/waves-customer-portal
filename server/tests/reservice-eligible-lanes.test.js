@@ -163,3 +163,62 @@ describe('reportedReserviceExcludedSpecialty', () => {
     expect(reportedReserviceExcludedSpecialty(text)).toBe(false);
   });
 });
+
+// Codex round-6 P1: the tree & shrub half of EXCLUDED_RESERVICE_SPECIALTY_RE
+// used to fire on any bare "tree"/"shrub" word, so "the ants are back in the
+// shrubs" — an ordinary pest report naming an incidental location — was
+// wrongly rejected as an excluded specialty. Specialty now requires genuine
+// service-issue phrasing (a tree & shrub service/treatment/care call, the
+// trees/shrubs themselves reported sick/dying/diseased, or disease/fungus/
+// scale on them); an incidental location (in/on/near/around/under the
+// shrubs/trees/bushes) no longer counts, and a pest noun alongside one
+// resolves to the pest lane. termite/rodent/mosquito words are unaffected —
+// they stay an excluded specialty with no locational exception.
+describe('tree & shrub: SERVICE-ISSUE phrasing vs an incidental location (Codex round-6 P1)', () => {
+  test.each([
+    'the ants are back in the shrubs',
+    'bugs near the trees again',
+    'ants under the bushes',
+    'still finding roaches around the trees',
+  ])('%s → resolves to pest (incidental location, not a specialty)', (text) => {
+    expect(reportedReserviceExcludedSpecialty(text)).toBe(false);
+    expect(reportedReserviceLane(text)).toBe('pest');
+  });
+
+  test.each([
+    'we need tree and shrub service this month',
+    'can you quote a shrub care program',
+    'my trees are dying',
+    'the trees are diseased',
+    'shrub disease is spreading',
+    'there is a fungus on the trees',
+  ])('%s → true (genuine tree & shrub service-issue phrasing stays a specialty)', (text) => {
+    expect(reportedReserviceExcludedSpecialty(text)).toBe(true);
+    expect(reportedReserviceLane(text)).toBeNull();
+  });
+
+  // Regression: the existing "the shrubs look sick"/"the trees look sick"
+  // fixtures above must keep resolving as a genuine specialty, not an
+  // incidental location, since this narrowing must not swing the other way.
+  test('a bare tree/shrub health complaint (no pest noun) still resolves as a specialty', () => {
+    expect(reportedReserviceExcludedSpecialty('the shrubs look sick')).toBe(true);
+    expect(reportedReserviceExcludedSpecialty('the trees look sick')).toBe(true);
+  });
+});
+
+// Codex round-6 P1: namedReserviceLanesInText (sms-shadow-drafter.js) and
+// reportedReserviceLane above must classify a lane word IDENTICALLY —
+// RESERVICE_LANE_WORD_PATTERNS is the one exported vocabulary both read.
+describe('RESERVICE_LANE_WORD_PATTERNS — the one shared lane vocabulary (Codex round-6 P1)', () => {
+  const { RESERVICE_LANE_WORD_PATTERNS } = require('../services/reservice-scheduler');
+
+  test('resolves a broader lawn vocabulary (weed-treatment) the same way reportedReserviceLane does', () => {
+    expect(reportedReserviceLane('free weed-treatment re-service link')).toBe('lawn');
+    const named = RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test('free weed-treatment re-service link')).map(([lane]) => lane);
+    expect(named).toEqual(['lawn']);
+  });
+
+  test('pest is checked before lawn, matching this module\'s own [\'pest\', \'lawn\'] ordering convention', () => {
+    expect(RESERVICE_LANE_WORD_PATTERNS.map(([lane]) => lane)).toEqual(['pest', 'lawn']);
+  });
+});
