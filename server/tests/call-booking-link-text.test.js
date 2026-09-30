@@ -3155,3 +3155,28 @@ describe('isExpectedRefusal', () => {
     expect(isExpectedRefusal({ sent: false, retryable: false, providerErrorCode: '20003' })).toBe(false);
   });
 });
+
+// codex #5358 r6 P2: every rewrite of the entry keeps staged_at, so the week
+// a call was checked in never moves after staging.
+describe('recordDecision keeps staged_at', () => {
+  const { recordDecision } = _private;
+  function capture() {
+    const written = [];
+    const conn = jest.fn(() => ({
+      where: () => ({ update: async (patch) => { written.push(JSON.parse(patch.metadata.bindings[0])); } }),
+      insert: () => ({ catch: async () => {} }),
+    }));
+    conn.raw = (sql, bindings) => ({ sql, bindings });
+    return { conn, written };
+  }
+  const call = { id: 'c-1', metadata: { call_booking_link_text: { status: 'claimed', staged_at: '2026-10-05T12:20:00.000Z' } } };
+  test('a send and a pending retry carry staged_at forward', async () => {
+    const { conn, written } = capture();
+    await recordDecision(conn, call, { status: 'sent', lead_id: 'l-1', sent_at: '2026-10-05T14:00:00.000Z' }, { logActivity: false });
+    await recordDecision(conn, call, { status: 'pending', lead_id: 'l-1', send_at: '2026-10-05T15:00:00.000Z' }, { logActivity: false });
+    expect(written[0].call_booking_link_text.staged_at).toBe('2026-10-05T12:20:00.000Z');
+    expect(written[0].call_booking_link_text.decided_at).toEqual(expect.any(String));
+    expect(written[1].call_booking_link_text.staged_at).toBe('2026-10-05T12:20:00.000Z');
+    expect(written[1].call_booking_link_text.decided_at).toBeUndefined();
+  });
+});

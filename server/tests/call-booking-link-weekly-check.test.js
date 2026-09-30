@@ -187,6 +187,14 @@ test('a stage-time skip counts in the week it was stamped', () => {
   expect(composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW).summary).toBe('1 call checked · top skips: existing customer 1');
 });
 
+// codex #5358 r6 P2: a send's sent_at is the sweep's start; decided_at is
+// when the write landed, and that picks the week.
+test('a send written after the tick counts in the week it was written', () => {
+  const prevTick = NOW.getTime() - 7 * 24 * 3600 * 1000;
+  const rows = [{ status: 'sent', created_at: new Date(prevTick - 3 * 3600 * 1000).toISOString(), sent_at: new Date(prevTick - 60 * 1000).toISOString(), decided_at: new Date(prevTick + 60 * 1000).toISOString() }];
+  expect(composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW).headline).toBe('Booking-link texts: 1 sent this week');
+});
+
 // codex #5358 r4 P2: outcomes count by their own time, so a call from two
 // weeks ago that failed this week is this week's error.
 test('an old call that failed inside the week is counted', () => {
@@ -245,6 +253,19 @@ describe('runCallBookingLinkWeeklyCheck', () => {
       loadWeek: async () => ({ rows: [], job: FRESH_JOB }),
     });
     expect(stampSendMarker).not.toHaveBeenCalled();
+  });
+
+  // codex #5358 r6 P2: the email is only the fallback, so an unconfigured
+  // mailer must not cost the in-app bell.
+  test('an unconfigured mailer still posts the in-app bell', async () => {
+    const deliver = jest.fn(async () => ({ ok: true, channel: 'in_app' }));
+    const res = await runCallBookingLinkWeeklyCheck({
+      now: NOW, gateEnabled: true, deliver, sentRecently: async () => false, stampSendMarker: async () => {},
+      sendgrid: { isConfigured: () => false, sendOne: jest.fn() },
+      loadWeek: async () => ({ rows: [], job: FRESH_JOB }),
+    });
+    expect(res.sent).toBe(true);
+    expect(await deliver.mock.calls[0][0].sendEmail()).toEqual({ ok: false, error: 'unconfigured' });
   });
 
   test('a failed query is reported, not posted', async () => {

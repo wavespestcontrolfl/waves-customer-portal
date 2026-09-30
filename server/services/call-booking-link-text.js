@@ -1006,8 +1006,13 @@ async function claimForDispatch(conn, callId) {
 
 async function recordDecision(conn, call, entry, { logActivity = true } = {}) {
   // decided_at: when a call reached its final outcome, so the weekly check
-  // reports it in that week rather than the week of the call.
-  const stamped = entry.status === 'pending' ? entry : { ...entry, decided_at: new Date().toISOString() };
+  // reports it in that week rather than the week of the call. staged_at is
+  // carried through every rewrite (retries, sends, dispatch skips replace the
+  // whole entry), so the week a call was checked in never changes after
+  // staging (codex #5358 r6 P2).
+  const stagedAt = entry.staged_at || parseMetadata(call)[METADATA_KEY]?.staged_at;
+  const kept = stagedAt ? { ...entry, staged_at: stagedAt } : entry;
+  const stamped = entry.status === 'pending' ? kept : { ...kept, decided_at: new Date().toISOString() };
   await conn('call_log').where({ id: call.id }).update({ metadata: metadataPatch(conn, stamped), updated_at: new Date() });
   if (!logActivity) return;
   const sent = entry.status === 'sent';
@@ -2404,7 +2409,7 @@ module.exports = {
   // dispatchClaimedCall alone (its own pre-send deadline check already
   // gates the identical (entry, now) pair) — a direct reach-in test-only
   // export, same convention as the rest of this bag.
-  _private: { isExpectedRefusal,
+  _private: { isExpectedRefusal, recordDecision,
     leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently, recordRetryableDecision, smsDeclinedOnEarlierCall,
   },
 };

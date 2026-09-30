@@ -121,13 +121,15 @@ async function loadWeek(now = new Date()) {
       db.raw('metadata->?->>? AS failed', [METADATA_KEY, 'failed']),
     );
   const job = await db('job_health').where({ job_name: JOB_NAME }).first('last_success_at', 'consecutive_failures');
+  // "Not checked" is a standing state, like a stuck send, not a weekly
+  // count: every valid call since the gate went live that the sweep never
+  // stamped stays in every report until it is stamped, however many week
+  // boundaries it crosses (codex #5358 r6 P2).
   const boundary = await activationBoundary(db);
-  const since = new Date(Math.max(start.getTime(), boundary.getTime()));
   const unstamped = await db('call_log')
     .modify((q) => whereNotSandboxCall(q)) // stage() never sees a sandbox call
     .where('v2_extraction_status', 'valid')
-    .where('created_at', '>=', since)
-    .where('created_at', '<', end)
+    .where('created_at', '>=', boundary)
     .whereNull('processing_token')
     .where('updated_at', '<=', new Date(now.getTime() - UNCHECKED_AFTER_MS))
     .whereRaw('metadata->? IS NULL', [METADATA_KEY])
@@ -157,9 +159,12 @@ const isError = (r) => r.status === 'ambiguous'
 // call is checked, and a stage-time skip counted, in the week it was stamped
 // (codex #5358 r5 P2). created_at only for rows passed without one.
 const checkedAt = (r) => r.staged_at || r.created_at;
-// When the call reached its outcome: sent_at for a text, decided_at for any
-// other final decision, staged_at for a stage-time skip.
-const outcomeAt = (r) => r.sent_at || r.decided_at || checkedAt(r);
+// When the call reached its outcome: decided_at, the moment the final
+// decision was written (a send's sent_at is the sweep's start time, which
+// can fall before a report the write lands after; codex #5358 r6 P2);
+// sent_at for rows written before decided_at existed; staged_at for a
+// stage-time skip.
+const outcomeAt = (r) => r.decided_at || r.sent_at || checkedAt(r);
 
 // `checked` = calls the lane looked at this week; `outcomes` = decisions reached this week,
 // whatever week the call was in; `waiting` = everything still open, so a
@@ -294,15 +299,28 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
 
   const mailer = opts.sendgrid || sendgrid;
   const to = digestEmail();
-  // FAIL CLOSED: owner/internal inboxes only (the email is the bell's fallback).
-  if (!isInternalEmailRecipient(to)) {
-    logger.warn('[call-booking-link-weekly] recipient is not an internal address — skipping; set a valid CALL_BOOKING_LINK_WEEKLY_EMAIL');
-    return { skipped: 'recipient', ...composed };
-  }
-  if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
-    logger.warn('[call-booking-link-weekly] mailer not configured — skipping');
-    return { skipped: 'unconfigured', ...composed };
-  }
+  // The email is only the bell's fallback, so its checks live inside it: an
+  // unconfigured mailer or a bad recipient must not cost the week's in-app
+  // bell (codex #5358 r6 P2). FAIL CLOSED: owner/internal inboxes only.
+  const sendEmail = () => {
+    if (!isInternalEmailRecipient(to)) {
+      logger.warn('[call-booking-link-weekly] recipient is not an internal address — email skipped; set a valid CALL_BOOKING_LINK_WEEKLY_EMAIL');
+      return { ok: false, error: 'recipient' };
+    }
+    if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
+      logger.warn('[call-booking-link-weekly] mailer not configured — email skipped');
+      return { ok: false, error: 'unconfigured' };
+    }
+    return mailer.sendOne({
+      to,
+      fromEmail: fromEmail(),
+      fromName: FROM_NAME,
+      subject: composed.headline,
+      text: `${composed.summary}\n\n${composed.detail}`,
+      categories: ['ops', OPS_KEY],
+      suppressErrorLog: true,
+    });
+  };
 
   let delivered;
   try {
@@ -321,15 +339,7 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
       count: composed.checked,
       itemKeys: [reportWeekKey(now)],
       ringOnFirstIdentity: true,
-      sendEmail: () => mailer.sendOne({
-        to,
-        fromEmail: fromEmail(),
-        fromName: FROM_NAME,
-        subject: composed.headline,
-        text: `${composed.summary}\n\n${composed.detail}`,
-        categories: ['ops', OPS_KEY],
-        suppressErrorLog: true,
-      }),
+      sendEmail,
     });
   } catch (err) {
     logger.error(`[call-booking-link-weekly] delivery failed (${err.code || err.name || 'error'})`);
