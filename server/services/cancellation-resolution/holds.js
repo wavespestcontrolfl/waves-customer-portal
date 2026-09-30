@@ -659,13 +659,15 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
         // The accept died before all its writes stood: undo this hold
         // (rate restored, prepaid moves reverted) rather than skip visits
         // for an accept the customer was never told succeeded.
-        await cancelHold(hold.id, { compensateVisits: true });
         // A paired accept's Away Mode goes back too — only while the
-        // preference still holds the date this accept wrote.
+        // preference still holds the date this accept wrote. Restored
+        // BEFORE the hold is cancelled: a run stopped in between finds the
+        // hold still active and retries (the restore is a no-op then).
         if (record.awayPairing?.until) {
           await db('property_preferences').where({ customer_id: hold.customer_id, away_mode_until: record.awayPairing.until })
             .update({ away_mode_until: record.awayPairing.previousUntil || null, updated_at: new Date() });
         }
+        await cancelHold(hold.id, { compensateVisits: true });
         const { notifyAdmin } = require('../notification-service');
         await notifyAdmin('service', 'Plan hold undone: the accept did not finish', `Hold ${hold.id} (${hold.family_key}) was written by a cancel-flow accept that stopped before it finished — it has been undone. Check with the customer whether they still want the pause.`, {
           bell: true, dedupeKey: `plan_hold_accept_interrupted:${hold.id}`, metadata: { kind: 'plan_hold_accept_interrupted', holdId: hold.id, customerId: hold.customer_id },
