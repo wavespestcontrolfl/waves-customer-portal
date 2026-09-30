@@ -447,6 +447,22 @@ describe('runPlanHoldLifecycle', () => {
     await expect(markHoldsAccepted(['h1'])).rejects.toThrow('no longer active');
   });
 
+  test('a resumed hold with an unfinished skip plan is still retried; an unmarked resumed hold is never undone', async () => {
+    const plan = (over) => JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(-3) }], skipped: [], skipsFinal: false, ...over });
+    holdSeed({ status: 'resumed', created_at: new Date(Date.now() - 60 * 60 * 1000), starts_on: daysOut(-10), resume_on: daysOut(-1), moved_visits: plan({ acceptCommitted: true }) },
+      [lawnVisit('l1', daysOut(-3)), lawnVisit('back', daysOut(30))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).skipsRecovered).toBe(1);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l1', toStatus: 'skipped' }));
+
+    mockTransition.mockClear();
+    holdSeed({ status: 'resumed', created_at: new Date(Date.now() - 60 * 60 * 1000), starts_on: daysOut(-10), resume_on: daysOut(-1), moved_visits: plan({ acceptCommitted: false }) },
+      [lawnVisit('l1', daysOut(-3))]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].status).toBe('resumed');
+    expect(bells('plan_hold_accept_interrupted')).toHaveLength(0);
+  });
+
   test('undoing an unfinished paired accept also puts Away Mode back — unless the preference changed since', async () => {
     const seedPaired = (awayNow) => {
       holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000),

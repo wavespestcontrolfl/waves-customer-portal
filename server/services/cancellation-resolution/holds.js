@@ -720,12 +720,15 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   // the in-flight window whose skip plan never finished are carried out
   // here; applyHoldSkips re-checks every visit under its lock.
   const recoverBefore = new Date(Date.now() - SKIP_RECOVERY_AFTER_MS);
-  const unfinished = await db('plan_holds').where({ status: 'active' }).where('created_at', '<', recoverBefore).select('*');
+  // Resumed holds too: a skip left unresolved on the return-date run keeps
+  // being retried after dues restart. Undoing is for active holds only.
+  const unfinished = await db('plan_holds').whereIn('status', ['active', 'resumed']).where('created_at', '<', recoverBefore).select('*');
   for (const hold of unfinished) {
     try {
       const record = readRecord(hold.moved_visits);
       if (record.skipsFinal !== false || !Array.isArray(record.toSkip)) continue;
       if (record.acceptCommitted !== true) {
+        if (hold.status !== 'active') continue;
         // Claim the undo under the row lock markHoldsAccepted takes: an
         // accept that marked the hold since the bulk read wins, and one
         // marking after this claim is refused (and compensates itself).
@@ -751,6 +754,12 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
             .update({ away_mode_until: record.awayPairing.previousUntil || null, updated_at: new Date() });
         }
         await cancelHold(hold.id, { compensateVisits: true });
+        // Nothing of the accept stands once its last hold is undone: release
+        // its case so the pause card is offered again.
+        if (hold.cancellation_case_id) {
+          await require('./index').releaseUnappliedCase({ caseId: hold.cancellation_case_id, customerId: hold.customer_id, code: 'accept_interrupted' })
+            .catch((err) => logger.warn(`[holds] case ${hold.cancellation_case_id} not released: ${err.message}`));
+        }
         const { notifyAdmin } = require('../notification-service');
         await notifyAdmin('service', 'Plan hold undone: the accept did not finish', `Hold ${hold.id} (${hold.family_key}) was written by a cancel-flow accept that stopped before it finished — it has been undone. Check with the customer whether they still want the pause.`, {
           bell: true, dedupeKey: `plan_hold_accept_interrupted:${hold.id}`, metadata: { kind: 'plan_hold_accept_interrupted', holdId: hold.id, customerId: hold.customer_id },

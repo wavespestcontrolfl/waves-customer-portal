@@ -1229,20 +1229,7 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
       // the same case that did succeed is never undone.
       if (execErr.code === 'hold_not_needed' && caseRow?.id) {
         try {
-          await db.transaction(async (trx) => {
-            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`cancel-accept:${req.customer.id}`]);
-            const fresh = await trx('cancellation_cases').where({ id: caseRow.id }).forUpdate().first('resolution_outcome', 'snapshot');
-            if (!fresh || fresh.resolution_outcome !== 'accepted') return;
-            const snap = typeof fresh.snapshot === 'string' ? JSON.parse(fresh.snapshot) : (fresh.snapshot || {});
-            if (snap.accept_receipt) return;
-            const standing = await trx('plan_holds').where({ cancellation_case_id: caseRow.id }).whereIn('status', ['active', 'resumed']).first('id');
-            if (standing) return;
-            await trx('cancellation_cases').where({ id: caseRow.id }).update({
-              resolution_outcome: 'none',
-              snapshot: JSON.stringify({ ...snap, accept_refused: { code: execErr.code, at: new Date().toISOString() } }),
-              updated_at: new Date(),
-            });
-          });
+          await CancellationResolution.releaseUnappliedCase({ caseId: caseRow.id, customerId: req.customer.id, code: execErr.code });
         } catch (markErr) { logger.warn(`[cancel-resolution] refused case ${caseRow.id} not released: ${markErr.message}`); }
       }
       return res.status(execErr.code ? 409 : 500).json({

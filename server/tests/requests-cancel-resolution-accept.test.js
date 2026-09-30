@@ -64,10 +64,12 @@ jest.mock('../models/db', () => {
 
 const mockPreview = jest.fn();
 const mockOpenCase = jest.fn();
+const mockRelease = jest.fn().mockResolvedValue(true);
 jest.mock('../services/cancellation-resolution', () => ({
   cancelFlowV2Enabled: () => process.env.GATE_CANCEL_FLOW_V2 === 'true',
   previewCancellationResolution: (...a) => mockPreview(...a),
   openCancellationCase: (...a) => mockOpenCase(...a),
+  releaseUnappliedCase: (...a) => mockRelease(...a),
 }));
 const mockExecute = jest.fn();
 jest.mock('../services/cancellation-resolution/actions', () => ({
@@ -161,31 +163,20 @@ test('an executor coded failure returns its code and sends no confirmation', asy
   expect(res.body.code).toBe('hold_date_invalid');
   expect(mockSms).not.toHaveBeenCalled();
   expect(mockEmail).not.toHaveBeenCalled();
-  // Any other refusal keeps the case (a concurrent retry may have hit it).
-  expect(mockState.updates.find((p) => p.resolution_outcome === 'none')).toBeUndefined();
 });
 
-test('a pause with nothing to pause releases its case — unless a receipt or a hold stands for it', async () => {
-  const notNeeded = () => Object.assign(new Error('Your next Lawn Care visit is November 5, 2026, after you are back.'), { code: 'hold_not_needed' });
-  mockState.freshCase = { resolution_outcome: 'accepted', snapshot: JSON.stringify({ accept_key: 'k' }) };
-  mockExecute.mockRejectedValueOnce(notNeeded());
+test('a pause with nothing to pause asks for its case to be released; other refusals keep it', async () => {
+  mockRelease.mockClear();
+  mockExecute.mockRejectedValueOnce(Object.assign(new Error('Your next Lawn Care visit is November 5, 2026, after you are back.'), { code: 'hold_not_needed' }));
   expect((await accept({ reasonCode: 'away', templateId: 'away_hold' })).body.code).toBe('hold_not_needed');
-  const release = mockState.updates.find((p) => p.resolution_outcome === 'none');
-  expect(JSON.parse(release.snapshot)).toMatchObject({ accept_key: 'k', accept_refused: { code: 'hold_not_needed' } });
+  expect(mockRelease).toHaveBeenCalledWith(expect.objectContaining({ customerId: expect.anything(), code: 'hold_not_needed' }));
 
-  mockState.updates.length = 0;
-  mockState.standingHold = { id: 'h1' };
-  mockExecute.mockRejectedValueOnce(notNeeded());
+  mockRelease.mockClear();
+  mockExecute.mockRejectedValueOnce(Object.assign(new Error('already held'), { code: 'hold_cooldown' }));
   await accept({ reasonCode: 'away', templateId: 'away_hold' });
-  expect(mockState.updates.find((p) => p.resolution_outcome === 'none')).toBeUndefined();
-
-  mockState.updates.length = 0;
-  mockState.standingHold = null;
-  mockState.freshCase = { resolution_outcome: 'accepted', snapshot: JSON.stringify({ accept_receipt: { reference: 'X' } }) };
-  mockExecute.mockRejectedValueOnce(notNeeded());
-  await accept({ reasonCode: 'away', templateId: 'away_hold' });
-  expect(mockState.updates.find((p) => p.resolution_outcome === 'none')).toBeUndefined();
+  expect(mockRelease).not.toHaveBeenCalled();
 });
+
 
 test('same accepted template inside 24h returns the original receipt, no re-execution', async () => {
   mockState.priorCase = {
