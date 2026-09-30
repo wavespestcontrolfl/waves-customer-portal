@@ -173,8 +173,13 @@ const VISIT_COLS = [
 // visit / no record linked" (and `unresolved` says a pointer was present).
 // When the invoice and its completion record point at DIFFERENT visits the two
 // disagree about what was billed: `conflict` is set and NOTHING derived from
-// either is returned. Throws when a lookup itself fails: callers decide what a
-// failure means (the Property row is omitted, the service falls back).
+// either is returned. With BOTH pointers on the invoice, equality is REQUIRED:
+// a legacy record whose own scheduled_service_id is NULL (migration
+// 20260427000007 left old rows unlinked) cannot be proven to describe the
+// invoice's visit, so it is a conflict too (fail closed) rather than a record
+// whose service type and date might belong to a different visit. Throws when a
+// lookup itself fails: callers decide what a failure means (the Property row is
+// omitted, the service falls back).
 async function ownedVisitContext(invoice) {
   const customerId = invoice?.customer_id;
   if (!customerId) return { visit: null, record: null, linked: false, unresolved: false, conflict: false };
@@ -183,8 +188,8 @@ async function ownedVisitContext(invoice) {
     ? (await db('service_records').where({ id: invoice.service_record_id, customer_id: customerId })
       .first('service_type', 'service_date', 'scheduled_service_id')) || null
     : null;
-  if (record?.scheduled_service_id && invoice.scheduled_service_id
-    && String(record.scheduled_service_id) !== String(invoice.scheduled_service_id)) {
+  if (record && invoice.scheduled_service_id
+    && String(record.scheduled_service_id ?? '') !== String(invoice.scheduled_service_id)) {
     return { visit: null, record: null, linked, unresolved: true, conflict: true };
   }
   const scheduledId = invoice.scheduled_service_id || record?.scheduled_service_id || null;
@@ -195,24 +200,35 @@ async function ownedVisitContext(invoice) {
   return { visit, record, linked, unresolved: !!unresolved, conflict: false };
 }
 
-// The members of a combined-visit packet that belong to THIS invoice AND this
-// customer. Mirrors invoice-email.js's packet receipt lookup: the packet item's
-// invoice_id, the member visit's customer_id, and p.visit_id = s.visit_id (the
-// visit really belongs to that packet's group), so a mislinked packet_id or
-// invoice_id can never name another customer's visits.
+// The combined-visit packet's members for THIS invoice, verified as a SET.
+// Mirrors invoice-email.js's packet receipt lookup: every packet item naming
+// this invoice and packet is loaded (none filtered out in SQL), then each must
+// (a) point at a visit that exists and belongs to the invoice's customer and
+// (b) have p.visit_id = s.visit_id (the visit really belongs to that packet's
+// group). FAIL CLOSED: if ANY item is rejected the whole packet is unverified
+// (`ok: false`, no members), so callers omit every packet-derived detail (the
+// Property row and the service list) instead of describing the members that
+// happened to pass. An empty packet is `ok: true` with no members. Throws when
+// the lookup fails.
 async function ownedPacketVisits(invoice, columns) {
-  if (!invoice?.id || !invoice.customer_id || !invoice.visit_completion_packet_id) return [];
-  return db('visit_completion_packet_items as i')
-    .join('visit_completion_packets as p', 'p.id', 'i.packet_id')
-    .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
-    .where({
-      'i.invoice_id': invoice.id,
-      'i.packet_id': invoice.visit_completion_packet_id,
-      's.customer_id': invoice.customer_id,
-    })
-    .whereRaw('p.visit_id = s.visit_id')
-    .orderBy('s.id')
-    .select(columns);
+  if (!invoice?.id || !invoice.customer_id || !invoice.visit_completion_packet_id) return { ok: true, members: [] };
+  const rows = await db('visit_completion_packet_items as i')
+    .leftJoin('visit_completion_packets as p', 'p.id', 'i.packet_id')
+    .leftJoin('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+    .where({ 'i.invoice_id': invoice.id, 'i.packet_id': invoice.visit_completion_packet_id })
+    .orderBy('i.scheduled_service_id')
+    .select([
+      ...columns,
+      's.id as member_visit_row_id',
+      's.customer_id as member_customer_id',
+      's.visit_id as member_visit_id',
+      'p.visit_id as packet_visit_id',
+    ]);
+  const verified = rows.every((r) => r.member_visit_row_id
+    && String(r.member_customer_id) === String(invoice.customer_id)
+    && r.packet_visit_id && r.member_visit_id
+    && String(r.packet_visit_id) === String(r.member_visit_id));
+  return verified ? { ok: true, members: rows } : { ok: false, members: [] };
 }
 
 // A street address from an OWNED saved property; '' when it is not this
@@ -259,8 +275,8 @@ async function invoicePropertyAddress(invoice, customer) {
       // is decided BEFORE the direct visit link: an adopted packet invoice
       // keeps the owner visit's scheduled_service_id, and that one visit's
       // address must not speak for the whole packet.
-      const members = await ownedPacketVisits(invoice, VISIT_COLS.map((c) => `s.${c}`));
-      if (!members.length) return '';
+      const { ok, members } = await ownedPacketVisits(invoice, VISIT_COLS.map((c) => `s.${c}`));
+      if (!ok || !members.length) return '';
       const addresses = await Promise.all(members.map((m) => visitPropertyAddress(m, customerId)));
       const first = addresses[0];
       return first && addresses.every((a) => a === first) ? first : '';
@@ -322,10 +338,11 @@ async function invoiceServiceDetails(invoice) {
   let label = fromInvoice;
   let date = invoiceDate;
   try {
-    if (invoice?.visit_completion_packet_id && !label) {
-      // Verified against the customer, the invoice and the packet's own visit
-      // (ownedPacketVisits), never trusting packet_id / invoice_id alone.
-      const members = await ownedPacketVisits(invoice, ['s.service_type']);
+    const isPacket = !!invoice?.visit_completion_packet_id;
+    if (isPacket && !label) {
+      // Verified as a set against the customer, the invoice and the packet's
+      // own visit (ownedPacketVisits): one rejected member drops the whole list.
+      const { members } = await ownedPacketVisits(invoice, ['s.service_type']);
       const names = [...new Set(members.map((m) => clean(m.service_type)).filter(Boolean))];
       if (names.length) label = names.join(', ');
     }
@@ -334,7 +351,9 @@ async function invoiceServiceDetails(invoice) {
       // record is read whenever EITHER half still needs a fallback, so the
       // record's own date beats the visit's scheduled date.
       const { visit, record } = await ownedVisitContext(invoice);
-      if (!label) label = clean(visit?.service_type) || clean(record?.service_type);
+      // A packet invoice's service list is the packet's alone: the owner visit
+      // it kept must not name one service for the whole group.
+      if (!label && !isPacket) label = clean(visit?.service_type) || clean(record?.service_type);
       if (!date) {
         const raw = record?.service_date || visit?.scheduled_date;
         date = raw ? formatDateOnly(raw) : '';

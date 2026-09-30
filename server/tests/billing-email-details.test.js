@@ -20,7 +20,7 @@ function mockTables(tables) {
     const rows = tables[table];
     if (rows instanceof Error) throw rows;
     const q = {};
-    ['where', 'whereIn', 'whereRaw', 'orderBy', 'join', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+    ['where', 'whereIn', 'whereRaw', 'orderBy', 'join', 'leftJoin', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.first = jest.fn(async () => (rows || [])[0]);
     q.then = (resolve, reject) => Promise.resolve(rows || []).then(resolve, reject);
     return q;
@@ -289,13 +289,14 @@ describe('service and service date', () => {
   });
 
   test('or from the completion record when there is no visit', async () => {
-    mockTables({ service_records: [{ service_type: 'Rodent Trapping', service_date: '2026-09-11' }] });
+    mockTables({ service_records: [{ service_type: 'Rodent Trapping', service_date: '2026-09-11', scheduled_service_id: null }] });
     expect(await Details.invoiceServiceDetails({ id: 'i', customer_id: 'c', service_record_id: 'sr-1', service_type: '', service_date: null }))
       .toEqual({ label: 'Rodent Trapping', date: 'September 11, 2026' });
   });
 
   test('a combined visit names every service on the packet once', async () => {
-    mockTables({ 'visit_completion_packet_items as i': [{ service_type: 'Pest Control' }, { service_type: 'Lawn Care' }, { service_type: 'Pest Control' }] });
+    const own = { member_visit_row_id: 's', member_customer_id: 'c', member_visit_id: 'v', packet_visit_id: 'v' };
+    mockTables({ 'visit_completion_packet_items as i': [{ ...own, service_type: 'Pest Control' }, { ...own, service_type: 'Lawn Care' }, { ...own, service_type: 'Pest Control' }] });
     const out = await Details.invoiceServiceDetails({ id: 'i', customer_id: 'c', visit_completion_packet_id: 'p-1', service_type: null, service_date: '2026-09-02' });
     expect(out.label).toBe('Pest Control, Lawn Care');
     expect(out.date).toBe('September 2, 2026');

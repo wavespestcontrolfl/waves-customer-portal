@@ -23,13 +23,7 @@ function mockTables(tables) {
       }
       return q;
     });
-    // whereRaw understands the one predicate that matters here: a packet member
-    // whose packet visit differs from its own visit is filtered out.
-    q.whereRaw = jest.fn((sql) => {
-      if (String(sql).includes('p.visit_id = s.visit_id')) rows = rows.filter((r) => r.p_visit_id === r.s_visit_id);
-      return q;
-    });
-    ['whereIn', 'orderBy', 'join', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+    ['whereIn', 'whereRaw', 'orderBy', 'join', 'leftJoin', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.first = jest.fn(async () => rows[0]);
     q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
     return q;
@@ -119,7 +113,7 @@ describe('invoice service and date: the visit / record must belong to the invoic
 describe('invoice service date precedence: the completion record\'s date beats the scheduled date', () => {
   test('invoice has a service but no date; the visit HAS a service type: the record\'s date still wins', async () => {
     mockTables({
-      service_records: [{ id: 'sr-1', customer_id: 'c', service_type: 'Quarterly Pest Control', service_date: '2026-09-20' }],
+      service_records: [{ id: 'sr-1', customer_id: 'c', service_type: 'Quarterly Pest Control', service_date: '2026-09-20', scheduled_service_id: 'ss-1' }],
       scheduled_services: [stamped('c', '55 Rental Court')],
     });
     expect(await Details.invoiceServiceDetails({
@@ -129,7 +123,7 @@ describe('invoice service date precedence: the completion record\'s date beats t
 
   test('no service and no date: visit label, record date', async () => {
     mockTables({
-      service_records: [{ id: 'sr-1', customer_id: 'c', service_type: 'Other', service_date: '2026-09-20' }],
+      service_records: [{ id: 'sr-1', customer_id: 'c', service_type: 'Other', service_date: '2026-09-20', scheduled_service_id: 'ss-1' }],
       scheduled_services: [stamped('c', '55 Rental Court')],
     });
     expect(await Details.invoiceServiceDetails({
@@ -194,6 +188,30 @@ describe('round 5: invoice with BOTH a completion record and a scheduled visit',
   });
 });
 
+describe('round 9: BOTH invoice pointers require the record to name the same visit', () => {
+  const inv = { id: 'i', customer_id: 'c', scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: null, service_date: null, title: 'Visit — August 2026' };
+  const legacy = { id: 'sr-1', customer_id: 'c', service_type: 'Rodent Trapping', service_date: '2026-09-11', scheduled_service_id: null };
+
+  test('a legacy record with NULL scheduled_service_id is a conflict: no property, service or date', async () => {
+    mockTables({ service_records: [legacy], scheduled_services: [stamped('c', '55 Rental Court')] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+    expect(await Details.invoiceServiceDetails(inv)).toEqual({ label: 'Visit', date: '' });
+    const ctx = await Details._private.ownedVisitContext(inv);
+    expect(ctx).toMatchObject({ conflict: true, visit: null, record: null });
+  });
+
+  test('a record-only invoice (no direct visit pointer) still resolves through the record\'s own visit', async () => {
+    mockTables({ service_records: [{ ...legacy, scheduled_service_id: 'ss-1' }], scheduled_services: [stamped('c', '55 Rental Court')] });
+    const recordOnly = { ...inv, scheduled_service_id: null };
+    expect(await Details.invoicePropertyAddress(recordOnly, HOME)).toBe('55 Rental Court, Sarasota, FL 34236');
+  });
+
+  test('a legacy record with NULL link and NO direct visit pointer stays unresolved (row omitted)', async () => {
+    mockTables({ service_records: [legacy] });
+    expect(await Details.invoicePropertyAddress({ ...inv, scheduled_service_id: null }, HOME)).toBe('');
+  });
+});
+
 describe('round 5: an unstamped visit resolves through property_id, then source_estimate_id (Rule A)', () => {
   const unstamped = (extra) => ({ ...stamped('c', null), service_address_city: null, service_address_zip: null, service_address_state: null, ...extra });
   const inv = { id: 'i', customer_id: 'c', scheduled_service_id: 'ss-1' };
@@ -252,7 +270,8 @@ describe('round 5: an unstamped visit resolves through property_id, then source_
 
 describe('round 5: combined-packet labels are verified against customer, invoice and packet visit', () => {
   const member = (over) => ({
-    'i.invoice_id': 'i', 'i.packet_id': 'pk-1', 's.customer_id': 'c', p_visit_id: 'v-1', s_visit_id: 'v-1', service_type: 'Lawn Care', ...over,
+    'i.invoice_id': 'i', 'i.packet_id': 'pk-1', member_visit_row_id: 'ss-1', member_customer_id: 'c',
+    packet_visit_id: 'v-1', member_visit_id: 'v-1', service_type: 'Lawn Care', ...over,
   });
   const inv = { id: 'i', customer_id: 'c', visit_completion_packet_id: 'pk-1', service_type: null, service_date: '2026-09-02', title: 'Combined visit' };
 
@@ -262,12 +281,12 @@ describe('round 5: combined-packet labels are verified against customer, invoice
   });
 
   test('a member visit owned by ANOTHER customer is never named', async () => {
-    mockTables({ 'visit_completion_packet_items as i': [member({ 's.customer_id': 'someone-else', service_type: 'Foreign Service' })] });
+    mockTables({ 'visit_completion_packet_items as i': [member({ member_customer_id: 'someone-else', service_type: 'Foreign Service' })] });
     expect((await Details.invoiceServiceDetails(inv)).label).toBe('Combined visit');
   });
 
   test('a member whose visit is not the packet\'s own visit is never named', async () => {
-    mockTables({ 'visit_completion_packet_items as i': [member({ s_visit_id: 'v-elsewhere', service_type: 'Foreign Service' })] });
+    mockTables({ 'visit_completion_packet_items as i': [member({ member_visit_id: 'v-elsewhere', service_type: 'Foreign Service' })] });
     expect((await Details.invoiceServiceDetails(inv)).label).toBe('Combined visit');
   });
 
@@ -282,9 +301,54 @@ describe('round 5: combined-packet labels are verified against customer, invoice
     expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('55 Rental Court, Sarasota, FL 34236');
     mockTables({ 'visit_completion_packet_items as i': [m('55 Rental Court'), m('9 Other Street')] });
     expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
-    mockTables({ 'visit_completion_packet_items as i': [m('55 Rental Court', { 's.customer_id': 'someone-else' })] });
+    mockTables({ 'visit_completion_packet_items as i': [m('55 Rental Court', { member_customer_id: 'someone-else' })] });
     expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
   });
+  // Round 9: the packet is verified as a SET. One rejected member (foreign
+  // customer, mismatched packet visit, visit row that does not exist) or a
+  // failed lookup omits EVERY packet-derived detail, never just that member.
+  describe('round 9: one rejected member omits the whole packet', () => {
+    const good = (line1, over) => member({ ...stamped('c', line1), ...over });
+    const bad = {
+      foreign: { member_customer_id: 'someone-else' },
+      'another packet visit': { member_visit_id: 'v-elsewhere' },
+      'missing visit row': { member_visit_row_id: null, member_customer_id: null, member_visit_id: null },
+      'packet without a visit': { packet_visit_id: null, member_visit_id: null },
+    };
+
+    test.each(Object.entries(bad))('a %s member drops the service list and the Property row', async (_name, over) => {
+      const rows = [good('55 Rental Court', { service_type: 'Lawn Care' }), good('55 Rental Court', { service_type: 'Pest Control', ...over })];
+      mockTables({ 'visit_completion_packet_items as i': rows });
+      expect((await Details.invoiceServiceDetails(inv)).label).toBe('Combined visit');
+      expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+    });
+
+    test('the packet query loads every item for the invoice (nothing is filtered out in SQL)', async () => {
+      db.mockClear();
+      mockTables({ 'visit_completion_packet_items as i': [good('55 Rental Court')] });
+      await Details.invoicePropertyAddress(inv, HOME);
+      const q = db.mock.results[0].value;
+      expect(q.where).toHaveBeenCalledWith({ 'i.invoice_id': 'i', 'i.packet_id': 'pk-1' });
+      expect(q.leftJoin).toHaveBeenCalled();
+      expect(q.whereRaw).not.toHaveBeenCalled();
+    });
+
+    test('a failed packet lookup omits the Property row and the service list', async () => {
+      db.mockImplementation(() => { throw new Error('db blip'); });
+      expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+      expect((await Details.invoiceServiceDetails(inv)).label).toBe('Combined visit');
+    });
+
+    test('a rejected member never falls back to the owner visit for the service list', async () => {
+      const adopted = { ...inv, scheduled_service_id: 'ss-1' };
+      mockTables({
+        'visit_completion_packet_items as i': [good('55 Rental Court'), good('55 Rental Court', bad.foreign)],
+        scheduled_services: [stamped('c', '55 Rental Court')],
+      });
+      expect((await Details.invoiceServiceDetails(adopted)).label).toBe('Combined visit');
+    });
+  });
+
   // Round 8: visit-completion-invoice adopts a packet onto an invoice that keeps
   // the owner visit's scheduled_service_id and gains service_record_id. The
   // direct link must not speak for the whole packet.

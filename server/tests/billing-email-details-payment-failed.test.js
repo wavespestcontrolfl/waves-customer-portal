@@ -54,7 +54,7 @@ function mockQueues(queues) {
   });
 }
 
-const CUSTOMER = { id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan', email: 'taylor@example.com', phone: '+19415550101' };
+const CUSTOMER = { id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan', email: 'taylor@example.com', phone: '+19415550101', stripe_customer_id: 'cus_stripe_1' };
 const INVOICE = { id: 'inv-1', customer_id: 'cust-1', invoice_number: 'INV-1001', title: 'Quarterly Pest Control', token: 'pay-token', total: '129.00' };
 const PREFS = { email_enabled: true };
 
@@ -67,8 +67,12 @@ function lifecycle(extra = {}) {
   };
 }
 
+// The failed intent's card is shown only when the intent's Stripe customer AND
+// the emailed customer's stripe_customer_id are known and equal (round 9).
+const STRIPE_ID = 'cus_stripe_1';
 const failedIntent = (card = { brand: 'visa', last4: '4242' }) => ({
   id: 'pi_test',
+  customer: STRIPE_ID,
   last_payment_error: { code: 'card_declined', payment_method: { type: 'card', card } },
 });
 
@@ -238,7 +242,7 @@ describe('round 8: the card label needs payment / invoice / intent ownership to 
     id: 'pay-1', customer_id: 'cust-1', payment_method_id: null, amount: '129.00',
     payment_date: '2026-09-28', next_retry_at: null, stripe_payment_intent_id: 'pi_test', ...over,
   });
-  const intent = (customer) => ({ ...failedIntent(), ...(customer === undefined ? {} : { customer }) });
+  const intent = (customer) => ({ ...failedIntent(), customer });
   const build = ({ invoice = INVOICE, payment, customer = CUSTOMER } = {}) => lifecycle({
     customers: [chain({ first: customer })],
     invoices: [chain({ first: invoice })],
@@ -282,12 +286,54 @@ describe('round 8: the card label needs payment / invoice / intent ownership to 
     expect((await sendFailed({ paymentIntent: intent({ id: 'cus_mine' }), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
   });
 
-  test('a Stripe customer unknown on either side is not a disagreement', async () => {
+  // Round 9 FAIL CLOSED: the intent's card is shown only when BOTH Stripe
+  // customer ids are known and equal. Unknown on either side is "cannot confirm".
+  test('a customer with NO stripe_customer_id never shows the intent\'s card', async () => {
     mockDetailsLive = true;
-    mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: null } }));
-    expect((await sendFailed({ paymentIntent: intent('cus_other'), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
+    for (const stripeId of [null, undefined, '']) {
+      mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: stripeId } }));
+      expect((await sendFailed({ paymentIntent: intent('cus_other'), failedAt: FAILED_AT })).payment_method_label).toBe('');
+    }
+  });
+
+  test('an intent with NO customer never shows its card, even when the customer has a Stripe id', async () => {
+    mockDetailsLive = true;
     mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' } }));
-    expect((await sendFailed({ paymentIntent: intent(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
+    expect((await sendFailed({ paymentIntent: intent(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('');
+    mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' } }));
+    expect((await sendFailed({ paymentIntent: intent(null), failedAt: FAILED_AT })).payment_method_label).toBe('');
+  });
+
+  test('a failed Stripe-customer lookup blanks the intent\'s card', async () => {
+    mockDetailsLive = true;
+    const boom = chain(); boom.first = jest.fn(async () => { throw new Error('db blip'); });
+    mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' } }));
+    // The ownership check reads customers first; only that read blips.
+    db.mockImplementation(((impl) => {
+      let customerReads = 0;
+      return (table) => (table === 'customers' && ++customerReads === 1 ? boom : impl(table));
+    })(db.getMockImplementation()));
+    expect((await sendFailed({ paymentIntent: intent('cus_mine'), failedAt: FAILED_AT })).payment_method_label).toBe('');
+  });
+
+  test('a payments-row snapshot owned by the customer needs no Stripe ids', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({
+      payment: owned({ card_brand: 'Visa', card_last_four: '1111' }),
+      customer: { ...CUSTOMER, stripe_customer_id: null },
+    }));
+    expect((await sendFailed({ paymentIntent: intent(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 1111');
+  });
+
+  test('a saved method owned by the customer needs no Stripe ids', async () => {
+    mockDetailsLive = true;
+    mockQueues(lifecycle({
+      customers: [chain({ first: { ...CUSTOMER, stripe_customer_id: null } })],
+      invoices: [chain({ first: INVOICE })],
+      payments: [chain({ first: owned({ payment_method_id: 'pm-1' }) })],
+      payment_methods: [chain({ first: { id: 'pm-1', method_type: 'card', card_brand: 'Mastercard', last_four: '4444' } })],
+    }));
+    expect((await sendFailed({ paymentIntent: intent(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Mastercard ending in 4444');
   });
 
   test('gate off: the payload is untouched by the ownership check', async () => {
