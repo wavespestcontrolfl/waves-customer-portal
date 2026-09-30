@@ -688,6 +688,7 @@ function ConversationViewV2({
           return (
             <div
               key={m.id}
+              id={`sms-message-${m.id}`}
               className={cn("flex", isOut ? "justify-end" : "justify-start")}
             >
               {" "}
@@ -2822,31 +2823,59 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   }, [threads, activeThread?.contactPhone, statusFilter, smsHasMore]);
 
   // Deep-link from a notification: /admin/communications?thread=<customerId>
-  // opens that customer's SMS conversation. The sms_reply notification carries
-  // the customer id as its thread id (see notification-triggers.js); threads are
-  // keyed by phone but each carries its customerId, so we match on that and snap
-  // into the conversation view once the message log has loaded. Runs once.
+  // (a known sender; the sms_reply bell carries the customer id as its thread
+  // id, see notification-triggers.js) or ?message=<Twilio MessageSid> (an
+  // unknown sender, named by the message because a link must not carry their
+  // number). The conversation opens even when it is not in the loaded page of
+  // the log: its messages are fetched directly (by customer, or by the sid's
+  // own contact) and merged in. Runs once, after the first load.
   const threadDeepLinkDone = useRef(false);
+  const [deepLinkThreadKey, setDeepLinkThreadKey] = useState(null);
   useEffect(() => {
-    if (!active) return;
-    if (threadDeepLinkDone.current) return;
-    const threadCustomerId = new URLSearchParams(window.location.search).get("thread");
-    if (!threadCustomerId) {
-      threadDeepLinkDone.current = true;
-      return;
-    }
-    if (!threads.length) return; // wait for the log to load
+    if (!active || customer || loading || threadDeepLinkDone.current) return;
     threadDeepLinkDone.current = true;
-    const match = threads.find(
+    const params = new URLSearchParams(window.location.search);
+    const threadCustomerId = params.get("thread");
+    const messageSid = params.get("message");
+    if (!threadCustomerId && !messageSid) return;
+    const loaded = threadCustomerId && threads.find(
       (t) => t.customerId && String(t.customerId) === String(threadCustomerId),
     );
-    if (!match) return; // no thread yet for this customer — stay on the list
+    if (loaded) {
+      setDeepLinkThreadKey(smsThreadKey(loaded.contactPhone));
+      return;
+    }
+    const scope = threadCustomerId
+      ? `customerId=${encodeURIComponent(threadCustomerId)}`
+      : `twilioSid=${encodeURIComponent(messageSid)}`;
+    adminFetch(`/admin/communications/log?limit=${SMS_LOG_PAGE_SIZE}&${scope}`)
+      .then((data) => {
+        if (!Array.isArray(data?.messages) || data.error || !data.messages.length) return; // stay on the list
+        setMessages((prev) => mergeSmsMessages(prev, data.messages));
+        setDeepLinkThreadKey(smsMessageThreadKey(data.messages[0]));
+      })
+      .catch(() => {}); // the list is still there
+  }, [active, customer, loading, threads]);
+  // Open the thread once it is among the loaded ones, and bring its newest
+  // message (the one the alert was about) into view.
+  const scrollToNewestRef = useRef(false);
+  useEffect(() => {
+    if (!deepLinkThreadKey) return;
+    const match = threads.find((t) => smsThreadKey(t.contactPhone) === deepLinkThreadKey);
+    if (!match) return;
+    setDeepLinkThreadKey(null);
     const openedThread = { ...match };
+    scrollToNewestRef.current = true;
     setActiveThread(openedThread);
     setSmsView("conversation");
     selectSmsRecipient(match.contactPhone, match.ourNumber, match.customerId);
     markMessagesRead(openedThread);
-  }, [active, threads, markMessagesRead]);
+  }, [deepLinkThreadKey, threads, markMessagesRead]);
+  useEffect(() => {
+    if (!scrollToNewestRef.current || smsView !== "conversation" || !activeThread) return;
+    scrollToNewestRef.current = false;
+    document.getElementById(`sms-message-${activeThread.messages[0]?.id}`)?.scrollIntoView?.({ block: "end" });
+  }, [smsView, activeThread]);
 
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
@@ -3976,7 +4005,7 @@ export default function CommunicationsPageV2() {
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
   const smsParams = new URLSearchParams(location.search);
-  const smsTarget = ["thread", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
+  const smsTarget = ["thread", "message", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
   const smsTargetKey = smsTarget.some(Boolean) ? JSON.stringify(smsTarget) : "";
   const [openedSmsTarget, setOpenedSmsTarget] = useState(smsTargetKey);
   // Preserve the composer on channel switches, but initialize a new explicit

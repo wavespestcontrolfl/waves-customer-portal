@@ -1555,7 +1555,11 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
     const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
     expect(shifted).toBe(0);
-    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('2026-07-16 → 2026-07-19'), expect.objectContaining({ metadata: expect.objectContaining({ parentServiceId: 'svc-parent' }) }));
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('2026-07-16 → 2026-07-19'), expect.objectContaining({
+      // Opens the follow-up that kept its date, on that day.
+      link: '/admin/dispatch?tab=schedule&date=2026-07-16&appointment=kid-1',
+      metadata: expect.objectContaining({ parentServiceId: 'svc-parent' }),
+    }));
   });
 
   test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {

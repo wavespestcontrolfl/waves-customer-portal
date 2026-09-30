@@ -28,6 +28,13 @@ function nextMillisecondBoundary(date) {
   return new Date(date.getTime() + 1);
 }
 
+// An unknown sender's bell carries no customer id: its link is the bare inbox
+// or, since the bell opens the conversation, ?message=<MessageSid>
+// (notification-triggers.js sms_reply). Both mean "unlinked".
+const UNLINKED_BELL_LINK = '/admin/communications';
+const isUnlinkedBellLink = (qb, column = 'link') => qb.where((b) => b
+  .where(column, UNLINKED_BELL_LINK).orWhere(column, 'like', `${UNLINKED_BELL_LINK}?message=%`));
+
 async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
   if (!phone) return 0;
   try {
@@ -49,8 +56,8 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
         .first('m.twilio_sid');
       // Match the bell's current target and preserve customer-linked bells.
       const bellCutoff = nextMillisecondBoundary(cutoff);
-      const liveBell = () => NotificationService.scopeAdminFeedToRole(trx('notifications'), role)
-        .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
+      const liveBell = () => isUnlinkedBellLink(NotificationService.scopeAdminFeedToRole(trx('notifications'), role)
+        .where({ recipient_type: 'admin', category: 'inbound_sms' }))
         .whereNull('read_at')
         .where('created_at', '<', bellCutoff)
         .whereRaw(
@@ -100,8 +107,8 @@ async function phonesWithLiveUnlinkedBell(candidateRows) {
     })
     .whereRaw('COALESCE(l.from_phone, c.contact_phone) = ANY(?)', [candidatePhones])
     .whereExists(function liveBell() {
-      this.select(1).from('notifications as n')
-        .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms', 'n.link': '/admin/communications' })
+      isUnlinkedBellLink(this.select(1).from('notifications as n')
+        .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms' }), 'n.link')
         .whereNull('n.read_at')
         .whereRaw("n.metadata->'payload'->>'twilioSid' = m.twilio_sid");
     })

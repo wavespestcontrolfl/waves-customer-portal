@@ -188,7 +188,8 @@ test('a new miss posts the rolling list fresh, unread, at the top of the feed', 
   const [, title, body, opts] = rollingCall();
   expect(title).toBe('1 missed follow-up in the last 24 hours');
   expect(body).toContain('callback promised to Test Caller');
-  expect(opts).toMatchObject({ dedupeKey: `${ROLLING_KEY}:${NOW.toISOString()}`, bell: true, metadata: { missed_commitment_ids: ['a'] } });
+  // One miss opens its call; several open the Owed list.
+  expect(opts).toMatchObject({ dedupeKey: `${ROLLING_KEY}:${NOW.toISOString()}`, bell: true, link: '/admin/communications#tab=calls&call=call-a', metadata: { missed_commitment_ids: ['a'] } });
   // Posted inside the same transaction that retires the older posts.
   expect(opts.trx).toBe(db);
 });
@@ -225,6 +226,7 @@ test('a new miss joining the list re-posts it and retires the older post', async
   listOpenCommitments.mockResolvedValue([row('a'), row('b', { call_log_id: 'call-b' })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).alerted).toBe(1);
   expect(rollingCall()[1]).toBe('2 missed follow-ups in the last 24 hours');
+  expect(rollingCall()[3].link).toBe('/admin/communications#tab=owed');
   expect(updates).toEqual([{ table: 'notifications', patch: { read_at: NOW } }]);
 });
 
@@ -235,6 +237,8 @@ test('items only dropping off rewrite the latest post in place, read state kept 
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   expect(updates).toHaveLength(1);
   expect(updates[0].patch.title).toBe('1 missed follow-up in the last 24 hours');
+  // Down to one miss, the standing post now opens that call.
+  expect(updates[0].patch.link).toBe('/admin/communications#tab=calls&call=call-a');
   expect(updates[0].patch.read_at).toBeUndefined();
   expect(JSON.parse(updates[0].patch.metadata).missed_commitment_ids).toEqual(['a']);
 });

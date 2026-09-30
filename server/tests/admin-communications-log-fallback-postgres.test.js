@@ -280,6 +280,22 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     expect(result.body.messages).toEqual([]);
   });
 
+  // The unknown-sender bell links ?message=<MessageSid> (no phone in a link);
+  // the inbox resolves that sid to the sender's whole conversation.
+  test('twilioSid resolves one message to its contact thread only; an unknown sid returns nothing', async () => {
+    await insertThread({ contactPhone: '+19415550142', body: 'Synthetic first', twilioSid: 'SMsyntheticsid0001' });
+    await insertThread({ contactPhone: '+19415550142', ourEndpoint: '+19415550198', body: 'Synthetic same sender, other line' });
+    await insertThread({ contactPhone: '+19415550143', body: 'Synthetic other sender' });
+
+    const hit = await getLog('?twilioSid=SMsyntheticsid0001');
+    expect(hit.status).toBe(200);
+    expect(hit.body.messages.map((m) => m.body).sort()).toEqual(['Synthetic first', 'Synthetic same sender, other line']);
+
+    const miss = await getLog('?twilioSid=SMdoesnotexist');
+    expect(miss.status).toBe(200);
+    expect(miss.body.messages).toEqual([]);
+  });
+
   test('an unlinked +44 sender sharing a US customer\'s last 10 digits resolves to NO customer', async () => {
     await mockPg('customers').insert({
       id: randomUUID(), phone: '+12079460958', first_name: 'Dana', last_name: 'Ordway',

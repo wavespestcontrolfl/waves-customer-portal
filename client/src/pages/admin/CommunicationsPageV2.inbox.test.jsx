@@ -928,3 +928,51 @@ it("Analyze photos offers Tree & shrub and posts a tree_shrub assessment, then d
   expect(JSON.parse(postInit.body).message_photos).toEqual([{ message_id: "photo-hedge", key: "sms-media/inbound/hedge" }]);
   expect(mockNavigate).toHaveBeenCalledWith("/admin/lawn-assessments?open=tree_shrub:assessment-ts1");
 });
+
+// Alert deep links: the sms_reply bell opens ?thread=<customerId> for a known
+// sender and ?message=<MessageSid> for an unknown one (no phone in a link).
+// Either must open the conversation even when it is not in the loaded page.
+const inboundFrom = (id, body, phone, extra = {}) => ({ ...inbound(id, body, phone), ...extra });
+const logFor = (byQuery) => (url) => response({ messages: byQuery(url.searchParams), hasMore: false, page: 1 });
+const openedConversation = () => screen.queryByRole("button", { name: "Text back" });
+
+it("opens a thread deep link for a customer beyond the loaded page by fetching that customer's messages", async () => {
+  const loaded = inboundFrom("l", "Newer text from someone else", "+19415550111", { customerId: "cust-other", customerName: "Other Person" });
+  const older = inboundFrom("t", "Gate is stuck again", "+19415550122", { customerId: "cust-target", customerName: "Target Person" });
+  loadLog = logFor((q) => (q.get("customerId") === "cust-target" ? [older] : [loaded]));
+  window.history.replaceState({}, "", "/?thread=cust-target");
+  setup(); await tick();
+  expect(logRequests().some(([url]) => String(url).includes("customerId=cust-target"))).toBe(true);
+  expect(openedConversation()).toBeInTheDocument();
+  expect(screen.getAllByText("Gate is stuck again").length).toBeGreaterThan(0);
+  expect(screen.queryByText("Newer text from someone else")).not.toBeInTheDocument();
+});
+
+it("opens a thread deep link for a customer already in the loaded page without another fetch", async () => {
+  const mine = inboundFrom("m", "Already loaded text", "+19415550133", { customerId: "cust-here", customerName: "Here Person" });
+  loadLog = logFor(() => [mine]);
+  window.history.replaceState({}, "", "/?thread=cust-here");
+  setup(); await tick();
+  expect(openedConversation()).toBeInTheDocument();
+  expect(logRequests().some(([url]) => String(url).includes("customerId="))).toBe(false);
+});
+
+it("opens an unknown sender's message deep link by the message id, with no phone number in the request", async () => {
+  const loaded = inboundFrom("l", "Newer text from someone else", "+19415550111", { customerId: "cust-other", customerName: "Other Person" });
+  const stranger = inboundFrom("s", "Is this the pest company?", "+19415550144");
+  loadLog = logFor((q) => (q.get("twilioSid") === "SMsynthetic1" ? [stranger] : [loaded]));
+  window.history.replaceState({}, "", "/?message=SMsynthetic1");
+  setup(); await tick();
+  const lookup = logRequests().find(([url]) => String(url).includes("twilioSid=SMsynthetic1"));
+  expect(lookup).toBeDefined();
+  expect(String(lookup[0])).not.toContain("19415550144");
+  expect(openedConversation()).toBeInTheDocument();
+  expect(screen.getAllByText("Is this the pest company?").length).toBeGreaterThan(0);
+});
+
+it("stays on the list when a deep link names a conversation that is not there", async () => {
+  loadLog = logFor(() => []);
+  window.history.replaceState({}, "", "/?message=SMgone");
+  setup(); await tick();
+  expect(openedConversation()).not.toBeInTheDocument();
+});

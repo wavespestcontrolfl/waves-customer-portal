@@ -2000,8 +2000,20 @@ router.get('/log', async (req, res, next) => {
 
     // Exact contact match for a lead that has no customer record yet. Never
     // use broad body/name search to choose the conversation or mark it read.
-    if (req.query.phone !== undefined) {
-      const phones = phoneMatchDigits(req.query.phone);
+    // `twilioSid` names one message (an unknown-sender alert's deep link, which
+    // must not carry a phone number) and resolves to that message's contact,
+    // under the same visibility scoping as every other read here.
+    let contactFilter = req.query.phone;
+    if (req.query.twilioSid !== undefined) {
+      const sid = typeof req.query.twilioSid === 'string' ? req.query.twilioSid.trim() : '';
+      const anchor = sid && await query.clone().clearSelect().clearOrder()
+        .where('messages.twilio_sid', sid)
+        .first(db.raw(`${addressProjection.contactPhoneSql} as contact`));
+      if (!anchor?.contact) return res.json({ messages: [], page: 1, limit: DEFAULT_SMS_LOG_LIMIT, hasMore: false, nextPage: null });
+      contactFilter = anchor.contact;
+    }
+    if (contactFilter !== undefined) {
+      const phones = phoneMatchDigits(contactFilter);
       if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
       query = query.whereRaw(`regexp_replace(${addressProjection.contactPhoneSql}, '[^0-9]', '', 'g') = ANY (?::text[])`, [phones]);
     }

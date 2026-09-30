@@ -583,10 +583,14 @@ async function runInner({ now = new Date() } = {}) {
     const { stripEmoji } = require('../utils/strip-emoji');
     const title = stripEmoji(`${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`);
     const body = stripEmoji(`Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${onList.map((r) => `• ${describe(r)}`).join('\n')}`);
+    // One miss opens its call; several open the Owed list.
+    const link = onList.length === 1 && onList[0].call_log_id
+      ? `/admin/communications#tab=calls&call=${encodeURIComponent(onList[0].call_log_id)}`
+      : '/admin/communications#tab=owed';
     if (fresh.length) {
       const key = `${ROLLING_KEY}:${now.toISOString()}`;
       const notif = await NotificationService.notifyAdmin('alert', title, body, {
-        link: '/admin/communications#tab=owed', dedupeKey: key, bell: true, trx,
+        link, dedupeKey: key, bell: true, trx,
         metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
       });
       if (!notif?.id || notif.suppressed) return;
@@ -601,7 +605,7 @@ async function runInner({ now = new Date() } = {}) {
     // items or changed details → rewritten in place, read state kept.
     if (!shown.length) return;
     const patch = ids.length
-      ? { title, body, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
+      ? { title, body, link, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
       : { read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) };
     // Same items, same words: nothing to write (an emptied patch carries no
     // title, so it never matches).
