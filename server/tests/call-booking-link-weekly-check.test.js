@@ -180,6 +180,13 @@ describe('reportWindow', () => {
   });
 });
 
+// codex #5358 r5 P2: a call stamped after the report its own time falls in
+// is checked, and its skip counted, in the week it was stamped.
+test('a stage-time skip counts in the week it was stamped', () => {
+  const rows = [{ status: 'skipped', reason: 'existing_customer', created_at: new Date(NOW.getTime() - 7 * 24 * 3600 * 1000 - 5 * 60 * 1000).toISOString(), staged_at: new Date(NOW.getTime() - 7 * 24 * 3600 * 1000 + 30 * 60 * 1000).toISOString() }];
+  expect(composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW).summary).toBe('1 call checked · top skips: existing customer 1');
+});
+
 // codex #5358 r4 P2: outcomes count by their own time, so a call from two
 // weeks ago that failed this week is this week's error.
 test('an old call that failed inside the week is counted', () => {

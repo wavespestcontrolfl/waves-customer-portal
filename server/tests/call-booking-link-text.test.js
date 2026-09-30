@@ -3146,4 +3146,12 @@ describe('isExpectedRefusal', () => {
     }
     expect(isExpectedRefusal({ sent: false, code: 'SMS_OPTED_OUT' })).toBe(false);
   });
+  // codex #5358 r5 P2: Twilio's recipient-side rejections are about the
+  // number, not the lane.
+  test('Twilio recipient rejections are expected; other provider codes are not', () => {
+    for (const code of ['21610', '21614', 21211]) {
+      expect(isExpectedRefusal({ sent: false, retryable: false, providerErrorCode: code })).toBe(true);
+    }
+    expect(isExpectedRefusal({ sent: false, retryable: false, providerErrorCode: '20003' })).toBe(false);
+  });
 });

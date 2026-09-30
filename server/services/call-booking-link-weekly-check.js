@@ -108,6 +108,7 @@ async function loadWeek(now = new Date()) {
       .where((w) => w.where('created_at', '>=', start).where('created_at', '<', end))
       .orWhereRaw(OUTCOME_IN_WINDOW, [METADATA_KEY, 'sent_at', start, METADATA_KEY, 'sent_at', end])
       .orWhereRaw(OUTCOME_IN_WINDOW, [METADATA_KEY, 'decided_at', start, METADATA_KEY, 'decided_at', end])
+      .orWhereRaw(OUTCOME_IN_WINDOW, [METADATA_KEY, 'staged_at', start, METADATA_KEY, 'staged_at', end])
       .orWhereRaw('metadata->?->>? IN (?, ?)', [METADATA_KEY, 'status', 'pending', 'claimed']))
     .select(
       'created_at',
@@ -116,6 +117,7 @@ async function loadWeek(now = new Date()) {
       db.raw('metadata->?->>? AS send_at', [METADATA_KEY, 'send_at']),
       db.raw('metadata->?->>? AS sent_at', [METADATA_KEY, 'sent_at']),
       db.raw('metadata->?->>? AS decided_at', [METADATA_KEY, 'decided_at']),
+      db.raw('metadata->?->>? AS staged_at', [METADATA_KEY, 'staged_at']),
       db.raw('metadata->?->>? AS failed', [METADATA_KEY, 'failed']),
     );
   const job = await db('job_health').where({ job_name: JOB_NAME }).first('last_success_at', 'consecutive_failures');
@@ -150,12 +152,16 @@ const isWaiting = (r) => r.status === 'pending' || r.status === 'claimed';
 const isFailed = (r) => r.failed === true || r.failed === 'true';
 const isError = (r) => r.status === 'ambiguous'
   || (r.status === 'skipped' && (isFailed(r) || ERROR_REASONS.has(r.reason)));
+// When the lane looked at the call: staged_at, which can land after the
+// report that the call's own time falls in (extraction + grace period), so a
+// call is checked, and a stage-time skip counted, in the week it was stamped
+// (codex #5358 r5 P2). created_at only for rows passed without one.
+const checkedAt = (r) => r.staged_at || r.created_at;
 // When the call reached its outcome: sent_at for a text, decided_at for any
-// other final decision, the call itself for a stage-time skip (and for rows
-// written before decided_at existed).
-const outcomeAt = (r) => r.sent_at || r.decided_at || r.created_at;
+// other final decision, staged_at for a stage-time skip.
+const outcomeAt = (r) => r.sent_at || r.decided_at || checkedAt(r);
 
-// `checked` = calls made this week; `outcomes` = decisions reached this week,
+// `checked` = calls the lane looked at this week; `outcomes` = decisions reached this week,
 // whatever week the call was in; `waiting` = everything still open, so a
 // stuck row is reported until it resolves.
 function tally({ outcomes, waiting }, now) {
@@ -208,7 +214,7 @@ function composeWeeklyCheck({ rows = [], job = null, unchecked = 0 }, now = new 
   const inWindow = (at) => !at || (new Date(at).getTime() >= start.getTime() && new Date(at).getTime() < end.getTime());
   // A call that predates the gate going live is not this week's news.
   const notPre = rows.filter((r) => r.reason !== 'pre_activation');
-  const live = notPre.filter((r) => inWindow(r.created_at));
+  const live = notPre.filter((r) => inWindow(checkedAt(r)));
   const waiting = notPre.filter(isWaiting);
   // An outcome counts in the week it happened, so a text sent, or a send
   // that failed, after the previous check for an earlier call is never missed.
@@ -242,17 +248,19 @@ function dedupeKeyFor(now = new Date()) {
   return `${OPS_KEY}:${reportWeekKey(now)}`;
 }
 
-// Durable weekly-send guard, same as agent-gap-digest: runExclusive only
+// Durable weekly-send guard, like agent-gap-digest's: runExclusive only
 // serializes CONCURRENT ticks, and the email fallback skips the bell's
 // dedupeKey, so a deploy-overlap instance entering after the first released
 // the lock would email again. Stamped only after a delivery succeeded; a
 // read failure sends anyway (a rare double beats a silently skipped week).
-const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
-
-async function sentRecently() {
+// Compared against the report week, not a rolling age: a report can only be
+// sent at or after its week's end tick, so a stamp at or after that tick
+// means THIS week's report went out, and a late retry of last week's report
+// never holds back the next one (codex #5358 r5 P2).
+async function sentRecently(now = new Date()) {
   try {
     const row = await db('ops_email_send_state').where({ email_key: OPS_KEY }).first('last_sent_at');
-    return Boolean(row?.last_sent_at && (Date.now() - new Date(row.last_sent_at).getTime()) < SIX_DAYS_MS);
+    return Boolean(row?.last_sent_at && new Date(row.last_sent_at).getTime() >= reportWindow(now).end.getTime());
   } catch (err) {
     logger.warn(`[call-booking-link-weekly] send-marker read failed (${err.code || err.name || 'error'}) — proceeding without the guard`);
     return false;
@@ -274,7 +282,7 @@ async function stampSendMarker() {
 async function runCallBookingLinkWeeklyCheck(opts = {}) {
   const now = opts.now || new Date();
   if (!(opts.gateEnabled ?? isEnabled(GATE))) return { skipped: 'disabled' };
-  if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
+  if (await (opts.sentRecently || sentRecently)(now)) return { skipped: 'recent_send' };
   let data;
   try {
     data = await (opts.loadWeek || loadWeek)(now);
@@ -338,5 +346,5 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
 
 module.exports = {
   runCallBookingLinkWeeklyCheck,
-  _private: { composeWeeklyCheck, reportWindow, dedupeKeyFor, reasonLabel, clampSummary, loadWeek, OPS_KEY, SUMMARY_MAX },
+  _private: { composeWeeklyCheck, reportWindow, sentRecently, dedupeKeyFor, reasonLabel, clampSummary, loadWeek, OPS_KEY, SUMMARY_MAX },
 };

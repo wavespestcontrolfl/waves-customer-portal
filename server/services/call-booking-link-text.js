@@ -2088,8 +2088,17 @@ const EXPECTED_REFUSAL_CODES = new Set([
   'CALLBACK_NUMBER_HOLD', 'QUIET_HOURS_HOLD',
 ]);
 
+// Twilio's own recipient-side rejections (unsubscribed 21610, non-mobile
+// 21614, invalid or unroutable number) come back as a provider failure with
+// providerErrorCode and no `blocked`; they are about the number, not the
+// lane (codex #5358 r5 P2).
+function isRecipientProviderRefusal(result) {
+  const { RECIPIENT_TERMINAL_TWILIO_CODES } = require('./messaging/providers/twilio-sms');
+  return result.providerErrorCode != null && (RECIPIENT_TERMINAL_TWILIO_CODES || []).includes(String(result.providerErrorCode));
+}
+
 function isExpectedRefusal(result) {
-  return result.blocked === true && EXPECTED_REFUSAL_CODES.has(result.code);
+  return (result.blocked === true && EXPECTED_REFUSAL_CODES.has(result.code)) || isRecipientProviderRefusal(result);
 }
 
 function blockedOutcomeReason(result) {

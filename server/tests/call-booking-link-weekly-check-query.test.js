@@ -5,6 +5,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockCalls = [];
+const mockMarker = { row: null };
 function mockBuilder(table) {
   const b = {};
   const record = (name) => (...args) => {
@@ -14,7 +15,11 @@ function mockBuilder(table) {
   };
   for (const name of ['where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNull', 'select', 'count']) b[name] = record(name);
   b.modify = (fn) => { fn(b); return b; };
-  b.first = async () => (table === 'job_health' ? { last_success_at: new Date(), consecutive_failures: 0 } : { n: '0' });
+  b.first = async () => {
+    if (table === 'job_health') return { last_success_at: new Date(), consecutive_failures: 0 };
+    if (table === 'ops_email_send_state') return mockMarker.row;
+    return { n: '0' };
+  };
   b.then = (resolve) => resolve([]);
   return b;
 }
@@ -29,7 +34,7 @@ jest.mock('../services/call-booking-link-text', () => ({
   activationBoundary: async () => new Date('2026-09-30T00:41:59.000Z'),
 }));
 
-const { _private: { loadWeek } } = require('../services/call-booking-link-weekly-check');
+const { _private: { loadWeek, sentRecently } } = require('../services/call-booking-link-weekly-check');
 
 test('the weekly read keeps pending and claimed rows of any age', async () => {
   await loadWeek(new Date('2026-10-05T12:19:00.000Z'));
@@ -46,8 +51,26 @@ test('the weekly read loads sends and decisions by their own time', async () => 
   mockCalls.length = 0;
   await loadWeek(new Date('2026-10-05T12:13:00.000Z'));
   const byTime = mockCalls.filter((c) => c.table === 'call_log' && c.name === 'orWhereRaw' && /timestamptz/.test(c.args[0]));
-  expect(byTime.map((c) => c.args[1][1])).toEqual(['sent_at', 'decided_at']);
+  expect(byTime.map((c) => c.args[1][1])).toEqual(['sent_at', 'decided_at', 'staged_at']);
   const [, , start, , , end] = byTime[0].args[1];
   expect(start.toISOString()).toBe('2026-09-28T12:13:00.000Z');
   expect(end.toISOString()).toBe('2026-10-05T12:13:00.000Z');
+});
+
+// codex #5358 r5 P2: the send marker is compared against the report week, so
+// a late retry of last week's report never holds back this week's.
+describe('sentRecently', () => {
+  const MONDAY = new Date('2026-10-05T12:13:00.000Z'); // Mon 8:13 EDT
+  test('a stamp from a Friday retry of last week does not block Monday', async () => {
+    mockMarker.row = { last_sent_at: new Date('2026-10-02T15:00:00.000Z') };
+    await expect(sentRecently(MONDAY)).resolves.toBe(false);
+  });
+  test('a stamp from this week\'s own run blocks a second send', async () => {
+    mockMarker.row = { last_sent_at: new Date('2026-10-05T12:14:00.000Z') };
+    await expect(sentRecently(new Date('2026-10-05T12:30:00.000Z'))).resolves.toBe(true);
+  });
+  test('no stamp sends', async () => {
+    mockMarker.row = null;
+    await expect(sentRecently(MONDAY)).resolves.toBe(false);
+  });
 });
