@@ -83,7 +83,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 
-const { startHold, applyHoldSkips, runPlanHoldLifecycle } = require('../services/cancellation-resolution/holds');
+const { startHold, applyHoldSkips, sendDueRestartTexts, runPlanHoldLifecycle } = require('../services/cancellation-resolution/holds');
 const { planScopedWindDown, applyScopedWindDown, scopedPricingFingerprint } = require('../services/cancellation-processor');
 const lockCalls = () => require('../models/db').raw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql)).map(([, b]) => b);
 const { etDateString } = require('../utils/datetime-et');
@@ -340,6 +340,24 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockState.tables.customers[0].tier_protected_until).toBe(null);
     expect(mockState.tables.plan_holds[0].status).toBe('resumed');
     expect(mockReschedule).not.toHaveBeenCalled(); // nothing is ever shifted to make room for the notice
+  });
+
+  test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {
+    holdSeed({}, [lawnVisit('placeholder', daysOut(22), { status: 'rescheduled' }), lawnVisit('back', daysOut(25))]);
+    expect((await runPlanHoldLifecycle({ today: daysOut(20) })).reminded).toBe(1);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ visit_date: displayOf(daysOut(25)) }), expect.anything());
+    expect(mockSms.mock.calls[0][0].metadata).toMatchObject({ visit_id: 'back' });
+  });
+
+  test('accept-time send: a hold whose first visit back is inside the week is texted at once under its own lock, and never twice', async () => {
+    const db = require('../models/db');
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    await sendDueRestartTexts(['h1']);
+    expect(mockSms).toHaveBeenCalledTimes(1);
+    expect(db.raw.mock.calls.some(([sql, b]) => /pg_advisory_xact_lock/.test(sql) && String(b).includes('plan-hold-reminder:h1'))).toBe(true);
+    await sendDueRestartTexts(['h1']);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(0);
+    expect(mockSms).toHaveBeenCalledTimes(1);
   });
 
   test('a short pause texts at once (first visit back under 7 days out); a RESUMED hold whose first visit back comes later still gets its text', async () => {

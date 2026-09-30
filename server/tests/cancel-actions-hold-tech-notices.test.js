@@ -10,6 +10,7 @@ const mockCancelHold = jest.fn().mockResolvedValue(true);
 const mockStartAwayMode = jest.fn();
 const mockEmit = jest.fn();
 const mockSkips = jest.fn().mockResolvedValue(undefined);
+const mockRestartTexts = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -19,6 +20,7 @@ jest.mock('../services/cancellation-resolution/holds', () => ({
   startAwayMode: (...a) => mockStartAwayMode(...a),
   emitHoldTechNotices: (...a) => mockEmit(...a),
   applyHoldSkips: (...a) => mockSkips(...a),
+  sendDueRestartTexts: (...a) => mockRestartTexts(...a),
 }));
 
 const { executeAcceptedAction } = require('../services/cancellation-resolution/actions');
@@ -32,6 +34,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockCancelHold.mockResolvedValue(true);
   mockSkips.mockResolvedValue(undefined);
+  mockRestartTexts.mockResolvedValue(undefined);
 });
 
 test('multi-family hold: every family\'s notices go out together, after the last hold committed', async () => {
@@ -123,4 +126,21 @@ test('away pairing: the hold notices wait for Away Mode; a failed Away Mode comp
   expect(mockCancelHold).toHaveBeenCalledWith('h-lawn_care', { compensateVisits: true });
   expect(mockEmit).not.toHaveBeenCalled();
   expect(mockSkips).not.toHaveBeenCalled();
+});
+
+test('a short pause gets its restart text at accept, after the skips, for exactly the holds made (the daily run may already be past)', async () => {
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', [])).mockResolvedValueOnce(hold('mosquito', []));
+  await executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'hold' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care', 'mosquito'],
+  });
+  expect(mockRestartTexts).toHaveBeenCalledWith(['h-lawn_care', 'h-mosquito']);
+  expect(mockRestartTexts.mock.invocationCallOrder[0]).toBeGreaterThan(mockSkips.mock.invocationCallOrder[0]);
+
+  jest.clearAllMocks();
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', []));
+  mockStartAwayMode.mockRejectedValueOnce(new Error('away write failed'));
+  await expect(executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: {}, families: ['lawn_care'],
+  })).rejects.toThrow('away write failed');
+  expect(mockRestartTexts).not.toHaveBeenCalled();
 });

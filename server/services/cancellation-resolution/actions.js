@@ -196,7 +196,7 @@ async function executeAwayMode({ customerId, caseRow, params }) {
 }
 
 async function executeHold({ customerId, caseRow, action, params, families, deferTechNotices = false, allowNoHold = false }) {
-  const { startHold, cancelHold, applyHoldSkips, emitHoldTechNotices } = require('./holds');
+  const { startHold, cancelHold, applyHoldSkips, sendDueRestartTexts, emitHoldTechNotices } = require('./holds');
   const holdable = families.filter((f) => ['lawn_care', 'mosquito', 'tree_shrub'].includes(f));
   if (!holdable.length) throw codedError('hold_family_required', 'Nothing on this plan can be held');
   // Multi-family holds commit ALL or NOTHING (codex P0): a later family's
@@ -235,6 +235,7 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
   if (!deferTechNotices) {
     emitHoldTechNotices(techNotices);
     await applyHoldSkips(results);
+    await sendDueRestartTexts(results.map((r) => r.holdId));
   }
   const first = results[0];
   const heldLabels = results.map((r) => labelOf(r.familyKey));
@@ -271,6 +272,7 @@ async function executeAwayPairing(ctx) {
   const holds = require('./holds');
   holds.emitHoldTechNotices(techNotices);
   await holds.applyHoldSkips(holdResults);
+  await holds.sendDueRestartTexts(hold.holds);
   return { ...away, ...hold, effects: [...away.effects, ...hold.effects] };
 }
 

@@ -463,7 +463,8 @@ async function firstVisitBack(hold, dbh = db) {
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', hold.customer_id)
     .where('s.scheduled_date', '>=', dateOnlyString(hold.resume_on))
-    .whereNotIn('s.status', ['cancelled', 'skipped', 'no_show'])
+    // A 'rescheduled' placeholder is rebooking intent, not an appointment.
+    .whereNotIn('s.status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
     .orderBy('s.scheduled_date', 'asc')
     .select('s.*', 'sv.service_key', 'sv.name as service_name');
   return rows.find((row) => familyOfServiceRow(row) === hold.family_key) || null;
@@ -472,6 +473,89 @@ async function firstVisitBack(hold, dbh = db) {
 // A hold whose first visit back has not come round within this many days of
 // the return date is no longer texted about.
 const REMINDER_LOOKBACK_DAYS = 90;
+
+/**
+ * The restart text for one hold (rule 3): sent when the first visit back is
+ * 7 days out or closer, naming its date. Called by the daily lifecycle and
+ * right after a hold is accepted (a short pause accepted after the day's
+ * run must not reach its first visit unannounced). A per-hold advisory lock
+ * serializes the two callers; the stamp is re-read under it and written
+ * only after the provider accepted the send (codex r1 P1).
+ * Returns 'sent' | 'unsent' | 'not_due' | 'already_sent' | 'no_visit' | 'cancelled'.
+ */
+async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
+  const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone', 'active', 'pipeline_stage');
+  if (!customer || customer.active === false || customer.pipeline_stage === 'churned') {
+    if (hold.status === 'active') await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
+    return 'cancelled';
+  }
+  const next = await firstVisitBack(hold);
+  if (!next) {
+    // Nothing booked after the pause: there is no date to name, so no
+    // text — the office books the restart.
+    if (dateOnlyString(hold.resume_on) <= today) {
+      const { notifyAdmin } = require('../notification-service');
+      await notifyAdmin('service', 'Plan hold: no visit booked after the pause', `Hold ${hold.id} (${hold.family_key}) reached its return date ${dateOnlyString(hold.resume_on)} with no visit booked after it — book the restart and let the customer know.`, {
+        bell: true, dedupeKey: `plan_hold_no_visit_back:${hold.id}`, metadata: { kind: 'plan_hold_no_visit_back', holdId: hold.id, customerId: hold.customer_id },
+      }).catch(() => {});
+    }
+    return 'no_visit';
+  }
+  const nextOn = dateOnlyString(next.scheduled_date);
+  if (next.status === 'completed' || nextOn < today || nextOn > addDays(today, 7)) return 'not_due';
+  const sent = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`plan-hold-reminder:${hold.id}`]);
+    const live = await trx('plan_holds').where({ id: hold.id }).first('reminder_sent_at');
+    if (!live || live.reminder_sent_at) return null;
+    if (!customer.phone) return false;
+    const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
+    const { sendCustomerMessage } = require('../messaging/send-customer-message');
+    const { gsmSafeName } = require('../messaging/gsm-normalize');
+    const { familyLabel } = require('./templates');
+    const visitDate = displayDate(nextOn);
+    const body = await renderRequiredSmsTemplate('plan_hold_resume_reminder', {
+      first_name: gsmSafeName(customer.first_name),
+      service: familyLabel(hold.family_key) || hold.family_key,
+      visit_date: visitDate,
+      // The pre-20260930 body names {resume_date}; the date it now
+      // promises is the first visit back either way.
+      resume_date: visitDate,
+    }, { workflow: 'plan_hold_resume_reminder', entity_type: 'plan_hold', entity_id: hold.id });
+    const smsResult = await sendCustomerMessage({
+      to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'support_resolution',
+      customerId: hold.customer_id, identityTrustLevel: 'system', entryPoint: 'plan_hold_reminder',
+      metadata: { original_message_type: 'plan_hold_resume_reminder', plan_hold_id: hold.id, visit_id: next.id },
+    });
+    if (!smsResult.sent) return false;
+    await trx('plan_holds').where({ id: hold.id }).whereNull('reminder_sent_at').update({ reminder_sent_at: new Date(), updated_at: new Date() });
+    return true;
+  });
+  if (sent === null) return 'already_sent';
+  if (sent) return 'sent';
+  logger.error(`[holds] restart text not delivered for hold ${hold.id} — will retry tomorrow`);
+  // The visit is about to run with no notice: the office calls.
+  if (nextOn <= addDays(today, 1)) {
+    const { notifyAdmin } = require('../notification-service');
+    await notifyAdmin('service', 'Plan hold: restart text not delivered', `Hold ${hold.id} (${hold.family_key}): the first visit back is ${nextOn} and the restart text could not be delivered — call the customer before the visit.`, {
+      bell: true, dedupeKey: `plan_hold_restart_text_undelivered:${hold.id}`, metadata: { kind: 'plan_hold_restart_text_undelivered', holdId: hold.id, customerId: hold.customer_id, visitId: next.id },
+    }).catch(() => {});
+  }
+  return 'unsent';
+}
+
+/**
+ * After an accept: send the restart text now for any hold whose first
+ * visit back is already inside the 7-day window. Best-effort — the daily
+ * lifecycle retries anything that did not go out.
+ */
+async function sendDueRestartTexts(holdIds) {
+  for (const holdId of holdIds || []) {
+    try {
+      const hold = await db('plan_holds').where({ id: holdId }).first('*');
+      if (hold && hold.status === 'active') await sendRestartTextIfDue(hold);
+    } catch (err) { logger.warn(`[holds] accept-time restart text failed for hold ${holdId}: ${err.message}`); }
+  }
+}
 
 /**
  * Daily lifecycle (scheduler). The restart text goes out 7 days before the
@@ -483,72 +567,15 @@ const REMINDER_LOOKBACK_DAYS = 90;
 async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   const out = { reminded: 0, resumed: 0, errors: [] };
 
-  const remindBy = addDays(today, 7);
   // A resumed hold still owes its text when the first visit back comes
   // after the return date.
   const toRemind = await db('plan_holds').whereIn('status', ['active', 'resumed']).whereNull('reminder_sent_at')
     .where('resume_on', '>=', addDays(today, -REMINDER_LOOKBACK_DAYS)).select('*');
   for (const hold of toRemind) {
     try {
-      const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone', 'active', 'pipeline_stage');
-      if (!customer || customer.active === false || customer.pipeline_stage === 'churned') {
-        if (hold.status === 'active') await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
-        continue;
-      }
-      const next = await firstVisitBack(hold);
-      if (!next) {
-        // Nothing booked after the pause: there is no date to name, so no
-        // text — the office books the restart.
-        if (dateOnlyString(hold.resume_on) <= today) {
-          const { notifyAdmin } = require('../notification-service');
-          await notifyAdmin('service', 'Plan hold: no visit booked after the pause', `Hold ${hold.id} (${hold.family_key}) reached its return date ${dateOnlyString(hold.resume_on)} with no visit booked after it — book the restart and let the customer know.`, {
-            bell: true, dedupeKey: `plan_hold_no_visit_back:${hold.id}`, metadata: { kind: 'plan_hold_no_visit_back', holdId: hold.id, customerId: hold.customer_id },
-          }).catch(() => {});
-        }
-        continue;
-      }
-      const nextOn = dateOnlyString(next.scheduled_date);
-      if (next.status === 'completed' || nextOn < today) continue;
-      if (nextOn > remindBy) continue;
-      // Send FIRST, stamp only after the provider accepted (codex r1 P1).
-      // runExclusive serializes the cron, so the post-send stamp cannot
-      // double-send.
-      let sent = false;
-      if (customer.phone) {
-        const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
-        const { sendCustomerMessage } = require('../messaging/send-customer-message');
-        const { gsmSafeName } = require('../messaging/gsm-normalize');
-        const { familyLabel } = require('./templates');
-        const visitDate = displayDate(nextOn);
-        const body = await renderRequiredSmsTemplate('plan_hold_resume_reminder', {
-          first_name: gsmSafeName(customer.first_name),
-          service: familyLabel(hold.family_key) || hold.family_key,
-          visit_date: visitDate,
-          // The pre-20260930 body names {resume_date}; the date it now
-          // promises is the first visit back either way.
-          resume_date: visitDate,
-        }, { workflow: 'plan_hold_resume_reminder', entity_type: 'plan_hold', entity_id: hold.id });
-        const smsResult = await sendCustomerMessage({
-          to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'support_resolution',
-          customerId: hold.customer_id, identityTrustLevel: 'system', entryPoint: 'plan_hold_reminder',
-          metadata: { original_message_type: 'plan_hold_resume_reminder', plan_hold_id: hold.id, visit_id: next.id },
-        });
-        sent = !!smsResult.sent;
-      }
-      if (sent) {
-        await db('plan_holds').where({ id: hold.id }).whereNull('reminder_sent_at').update({ reminder_sent_at: new Date(), updated_at: new Date() });
-        out.reminded += 1;
-      } else {
-        out.errors.push(`remind_unsent:${hold.id}`);
-        logger.error(`[holds] restart text not delivered for hold ${hold.id} — will retry tomorrow`);
-        // The visit is about to run with no notice: the office calls.
-        if (nextOn <= addDays(today, 1)) {
-          const { notifyAdmin } = require('../notification-service');
-          await notifyAdmin('service', 'Plan hold: restart text not delivered', `Hold ${hold.id} (${hold.family_key}): the first visit back is ${nextOn} and the restart text could not be delivered — call the customer before the visit.`, {
-            bell: true, dedupeKey: `plan_hold_restart_text_undelivered:${hold.id}`, metadata: { kind: 'plan_hold_restart_text_undelivered', holdId: hold.id, customerId: hold.customer_id, visitId: next.id },
-          }).catch(() => {});
-        }
-      }
+      const result = await sendRestartTextIfDue(hold, { today });
+      if (result === 'sent') out.reminded += 1;
+      if (result === 'unsent') out.errors.push(`remind_unsent:${hold.id}`);
     } catch (err) {
       out.errors.push(`remind:${hold.id}`);
       logger.error(`[holds] restart text failed for hold ${hold.id}: ${err.message}`);
@@ -617,4 +644,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, startHold, applyHoldSkips, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, startHold, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
