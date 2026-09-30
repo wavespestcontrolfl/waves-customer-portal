@@ -32,7 +32,13 @@ describe('loadPaymentHistory', () => {
     expect(raw[0]).not.toMatch(/NOT IN|COALESCE|i\.id::text/);
     expect(raw[1]).toEqual(['c1']);
     expect(dbh.calls.find(([m]) => m === 'limit')[1]).toEqual([PAYMENT_HISTORY_CAP + 1]);
-    expect(dbh.calls.some(([m, a]) => m === 'whereNot' && a[1] === 'upcoming')).toBe(true);
+    // only an EXPLICIT 'upcoming' row is excluded — NULL-status rows stay (Codex round-15 P1)
+    expect(dbh.calls.some(([m, a]) => m === 'whereNot' && a[1] === 'upcoming')).toBe(false);
+    const grouped = dbh.calls.find(([m, a]) => m === 'where' && typeof a[0] === 'function')[1][0];
+    const inner = [];
+    const rec = { whereNull: (c) => { inner.push(['whereNull', c]); return rec; }, orWhereNot: (c, v) => { inner.push(['orWhereNot', c, v]); return rec; } };
+    grouped.call(rec);
+    expect(inner).toEqual([['whereNull', 'payments.status'], ['orWhereNot', 'payments.status', 'upcoming']]);
   });
 
   test('complete is exact: <= cap rows complete; cap+1 rows is truncated to cap and incomplete', async () => {
@@ -64,6 +70,14 @@ describe('ensureAbsenceHistory (lazy)', () => {
     const notTruncated = ctx({ recentPayments: [], recentPaymentsTruncated: false });
     await ensureAbsenceHistory(notTruncated, "Your payment isn't showing yet.", dbh);
     expect(dbh).not.toHaveBeenCalled();
+  });
+
+  test('an amount-free NEGATED ack ("No payment received.") also loads the authoritative history (Codex round-15 P1)', async () => {
+    const dbh = fakeDb([{ id: 1, status: 'paid' }]);
+    const denial = ctx({ recentPayments: [], recentPaymentsTruncated: true });
+    await ensureAbsenceHistory(denial, 'No payment received.', dbh);
+    expect(dbh).toHaveBeenCalledTimes(1);
+    expect(denial.billing.paymentHistory.rows).toHaveLength(1);
   });
 
   test('absence claim + truncated window: loads once, attaches, idempotent', async () => {

@@ -305,6 +305,9 @@ async function amountFreeStatusClaimStale({
   if (!mayAssertPaymentStatus(text)) return { stale: false };
   const hasStatusClaim = text.split(CLAUSE_SPLIT_RE)
     .some((clause) => drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null
+      // Codex round-15 P1: an amount-free NEGATED ack ("Your payment wasn't processed") is a denial
+      // of receipt — a paid row since the draft makes it false, so it is rechecked too.
+      || (typeof drafter.paymentAckPolarity === 'function' && drafter.paymentAckPolarity(clause) === 'negated')
       || paymentStatusPhraseClaim(clause, inboundNamesPayment(inboundMessage)) != null);
   if (!hasStatusClaim) return { stale: false };
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };

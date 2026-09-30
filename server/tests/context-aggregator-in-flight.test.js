@@ -22,7 +22,9 @@ jest.mock('../models/db', () => {
     q.then = (res, rej) => Promise.resolve(rowsFor(table)).then(res, rej);
     return q;
   };
-  const db = jest.fn((table) => mk(String(table).split(' ')[0]));
+  const queries = [];
+  const db = jest.fn((table) => { const q = mk(String(table).split(' ')[0]); queries.push([String(table).split(' ')[0], q]); return q; });
+  db.__queries = queries;
   db.raw = jest.fn(async () => ({ rows: [] }));
   db.fn = { now: jest.fn() };
   return db;
@@ -54,4 +56,20 @@ describe('hasProcessingPayment comes from the existence query, not the display w
     hasInFlightMoney.mockResolvedValue(null);
     expect((await build()).hasProcessingPayment).toBe(true);
   });
+});
+
+// Codex round-15 P1: the capped Recent payments read excludes only an EXPLICIT 'upcoming' row —
+// `status <> 'upcoming'` would also drop NULL-status rows (found-but-unknown evidence).
+test('the Recent payments query keeps NULL-status rows: (status IS NULL OR status <> upcoming)', async () => {
+  const db = require('../models/db');
+  db.__queries.length = 0;
+  hasInFlightMoney.mockResolvedValue(false);
+  await build();
+  const q = db.__queries.find(([t]) => t === 'payments')[1];
+  expect(q.whereNot.mock.calls.some(([, v]) => v === 'upcoming')).toBe(false);
+  const grouped = q.where.mock.calls.map(([a]) => a).find((a) => typeof a === 'function');
+  const inner = [];
+  const rec = { whereNull: (c) => { inner.push(['whereNull', c]); return rec; }, orWhereNot: (c, v) => { inner.push(['orWhereNot', c, v]); return rec; } };
+  grouped.call(rec);
+  expect(inner).toEqual([['whereNull', 'payments.status'], ['orWhereNot', 'payments.status', 'upcoming']]);
 });

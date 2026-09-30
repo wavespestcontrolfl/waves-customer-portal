@@ -35,7 +35,10 @@ async function loadPaymentHistory(customerId, dbh = db) {
       // Payer-owned money (payments.payer_id — the AP party that paid) never belongs to the
       // homeowner's history, even with no metadata.invoice_id (Codex round-12 P0).
       .whereNull('payments.payer_id')
-      .whereNot('payments.status', 'upcoming')
+      // Codex round-15 P1: exclude only an EXPLICIT 'upcoming' row — `status <> 'upcoming'` also
+      // drops NULL-status rows (legacy / imported / partially reconciled), which are
+      // found-but-unknown evidence that a payment record exists.
+      .where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); })
       // payments.metadata is JSONB (initial_schema `t.jsonb('metadata')`, never altered), so
       // ->> is total (NULL metadata / missing key => NULL => the row is kept).
       .whereRaw(
@@ -54,10 +57,19 @@ async function loadPaymentHistory(customerId, dbh = db) {
 // Attach billing.paymentHistory to `context` iff `replyText` makes an absence
 // claim and the display window may be hiding history. Mutates and returns the
 // context; idempotent (an existing value, including null, is kept).
+// Codex round-15 P1: an amount-free negated ack ("Your payment wasn't processed") is a denial of
+// receipt too — it needs the authoritative history just like an "isn't showing" claim. Lazy
+// require (the drafter requires this module's siblings); a stub without the export = no trigger.
+function claimsNegatedAck(text) {
+  try {
+    const drafter = require('./sms-shadow-drafter');
+    return typeof drafter.paymentAckPolarity === 'function' && drafter.paymentAckPolarity(String(text || '')) === 'negated';
+  } catch { return false; }
+}
 async function ensureAbsenceHistory(context, replyText, dbh = db) {
   const billing = context?.billing;
   if (!billing || typeof billing !== 'object' || billing.paymentHistory !== undefined) return context;
-  if (!billing.recentPaymentsTruncated || !containsAbsencePhrase(replyText)) return context;
+  if (!billing.recentPaymentsTruncated || !(containsAbsencePhrase(replyText) || claimsNegatedAck(replyText))) return context;
   billing.paymentHistory = await loadPaymentHistory(context.customer?.id, dbh);
   return context;
 }

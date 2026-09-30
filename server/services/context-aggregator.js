@@ -557,8 +557,9 @@ class ContextAggregator {
       db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.id', 'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
-      // five future autopay rows empty the history.
-      db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').whereNot('status', 'upcoming').orderBy('payment_date', 'desc').limit(5),
+      // five future autopay rows empty the history. Only an EXPLICIT 'upcoming' is excluded:
+      // a NULL-status row is found-but-unknown evidence (Codex round-15 P1).
+      db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }).orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),

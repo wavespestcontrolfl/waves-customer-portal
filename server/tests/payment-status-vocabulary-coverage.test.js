@@ -214,3 +214,85 @@ describe('round-14: a clause asserting several status families is validated agai
     expect(r).toBeTruthy();
   });
 });
+
+// Codex round-15 P1: amount-free NEGATED acks are denials of receipt, judged by the absence binder.
+describe('round-15: amount-free negated acks ("wasn\'t processed") are checked against payment history', () => {
+  const ctx = (rows, extra = {}) => ({ billing: { outstandingBalance: 0, recentPayments: rows, ...extra } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const paidRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  // verb-first denials (now in the not_received table) and ones only the generic negated-ack route catches
+  const DENIALS = ["We didn't get your payment.", "We haven't seen your payment.", 'No payment received.', 'Payment has not posted.', "We don't have your payment.", 'We do not have a payment on file.'];
+
+  test('a paid row makes the denial false (ungrounded); no matching paid row keeps it truthful', () => {
+    for (const d of DENIALS) {
+      expect({ d, paid: rq(d, ctx([paidRow])) }).toEqual({ d, paid: true });
+      expect({ d, refunded: rq(d, ctx([{ ...paidRow, status: 'refunded' }])) }).toEqual({ d, refunded: true });
+      expect({ d, none: rq(d, ctx([])) }).toEqual({ d, none: false });
+      // "we don't have your payment" is a NOT-FOUND claim (a row of ANY status contradicts it); receipt denials are only contradicted by a received row
+      const notFound = /don't have|do not have/.test(d);
+      expect({ d, failedOnly: rq(d, ctx([{ ...paidRow, status: 'failed' }])) }).toEqual({ d, failedOnly: notFound });
+    }
+  });
+
+  test('unavailable billing and unknown/incomplete history block it', () => {
+    const d = 'No payment received.';
+    expect(rq(d, { billing: { unavailable: true } })).toBe(true);
+    expect(rq(d, ctx([], { recentPaymentsTruncated: true }))).toBe(true); // window may hide a paid row; history not loaded
+    expect(rq(d, ctx([], { recentPaymentsTruncated: true, paymentHistory: null }))).toBe(true);
+    // an OLDER paid row outside the window is found through the authoritative history
+    expect(rq(d, ctx([], { recentPaymentsTruncated: true, paymentHistory: { rows: [paidRow], complete: true } }))).toBe(true);
+    expect(rq(d, ctx([], { recentPaymentsTruncated: true, paymentHistory: { rows: [], complete: true } }))).toBe(false);
+  });
+
+  test('amount-bearing negated acks are still rejected outright', () => {
+    expect(rq("Your $120 payment wasn't processed.", ctx([]))).toBe(true);
+    expect(rq('No $120 payment received.', ctx([]))).toBe(true);
+  });
+
+  test('a null-status row (found-but-unknown) contradicts the denial but never grounds a paid claim', () => {
+    const unknown = { amount: 120, status: null, payment_date: '2026-09-12', payment_method_type: 'card' };
+    expect(rq('No payment received.', ctx([unknown]))).toBe(true);
+    expect(rq("Your payment isn't showing yet.", ctx([unknown]))).toBe(true);
+    expect(rq('We received your $120 payment from Sep 12.', ctx([unknown]))).toBe(true);
+    expect(rq('This invoice is unpaid.', ctx([unknown], { outstandingBalance: 120 }))).toBe(true);
+  });
+});
+
+// Codex round-15 P1: a reply's tender / date / amount must AGREE with the payment the customer named.
+describe('round-15: a reply identity that conflicts with the inbound is ungrounded', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const card = { amount: 120, status: 'paid', payment_date: '2026-09-10', payment_method_type: 'card' };
+  const zelle = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-9 — zelle' };
+  const ASK = 'Did you get my $120 Zelle payment from Sep 12?';
+
+  test('TENDER: the customer asked about Zelle; a reply that restates the card row does not bind', () => {
+    expect(rq('We received your $120 card payment from Sep 10.', ctx([card]), ASK)).toBe(true);
+    expect(rq('We received your $120 card payment from Sep 12.', ctx([{ ...card, payment_date: '2026-09-12' }]), ASK)).toBe(true);
+    expect(rq('We received your $120 Zelle payment from Sep 12.', ctx([zelle]), ASK)).toBe(false); // agrees
+  });
+
+  test('DATE: a reply date that differs from the date the customer named is rejected, even on a real row', () => {
+    const zelleSep10 = { ...zelle, payment_date: '2026-09-10' };
+    expect(rq('We received your $120 Zelle payment from Sep 10.', ctx([zelleSep10]), ASK)).toBe(true);
+    expect(rq('We received your $120 Zelle payment from Sep 12.', ctx([zelle]), ASK)).toBe(false);
+    // year: the same month/day in a different year conflicts too
+    expect(rq('We received your $120 Zelle payment from Sep 12, 2025.', ctx([{ ...zelle, payment_date: '2025-09-12' }]), 'Did you get my $120 Zelle payment from Sep 12, 2026?')).toBe(true);
+  });
+
+  test('AMOUNT: a reply amount the customer did not name is rejected', () => {
+    const zelle95 = { ...zelle, amount: 95 };
+    expect(rq('We received your $95 Zelle payment from Sep 12.', ctx([zelle95]), ASK)).toBe(true);
+    expect(rq('We received your $120 Zelle payment from Sep 12.', ctx([zelle]), ASK)).toBe(false);
+    // status + absence claims are held to the same identity
+    expect(rq('Your $95 Zelle payment is still processing.', ctx([{ ...zelle95, status: 'processing' }]), ASK)).toBe(true);
+    expect(rq("We don't see a $95 Zelle payment from Sep 12.", ctx([]), ASK)).toBe(true);
+    expect(rq("We don't see a $120 Zelle payment from Sep 12.", ctx([card]), ASK)).toBe(false); // the prompt's required "not showing" answer
+  });
+
+  test('a reply that is silent on a field inherits the inbound (unchanged), and no inbound means no conflict', () => {
+    expect(rq('We received your payment.', ctx([zelle]), ASK)).toBe(true); // amount-free receipt still never names a payment
+    expect(rq('We received your $120 Zelle payment from Sep 12.', ctx([zelle]))).toBe(false);
+    expect(rq('We received your $120 card payment from Sep 10.', ctx([card]))).toBe(false);
+  });
+});

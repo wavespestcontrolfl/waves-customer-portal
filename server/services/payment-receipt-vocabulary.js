@@ -130,6 +130,9 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
     phrases: Object.freeze([
       "isn't showing", 'is not showing', "aren't showing", 'not showing', "don't see", 'do not see', 'no record',
       "isn't reflected", 'not on file',
+      // Codex round-15 P1: "we don't have your payment" / "...a payment on file" deny the payment's existence.
+      "don't have your payment", 'do not have your payment', "don't have the payment", 'do not have the payment',
+      "don't have any payment", 'do not have any payment', "don't have a payment on file", 'do not have a payment on file',
     ]),
   }),
   // "Unpaid" forms: contradicted by a PAID row (Codex round-13 P1). Predicate forms
@@ -152,6 +155,10 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
       "haven't received", 'have not received', "hasn't been received", 'has not been received',
       "wasn't received", 'was not received', 'not received',
       "hasn't come through", 'has not come through', 'no payment has come through', "hasn't posted", "hasn't cleared",
+      // Codex round-15 P1: the verb-first denials ("we didn't get your payment") — they deny RECEIPT,
+      // so a paid row contradicts them exactly like "haven't received".
+      "didn't get", 'did not get', "didn't receive", 'did not receive', "haven't gotten", 'have not gotten',
+      "haven't got", 'have not got', "haven't seen", 'have not seen', 'never received', 'never got',
     ]),
   }),
 });

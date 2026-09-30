@@ -1250,7 +1250,7 @@ const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // the SAME clause as the match (never the whole reply) so a mixed "we got
 // your March payment but not April's" still binds each half on its own —
 // the negation half never voids the affirmative one.
-const PAYMENT_NEGATION_RE = /\b(?:haven't|have not|hasn't|has not|didn't|did not|isn't|is not|don't see|do not see|doesn't|does not|no\b|not\b|yet to)\b/i;
+const PAYMENT_NEGATION_RE = /\b(?:haven't|have not|hasn't|has not|didn't|did not|isn't|is not|wasn't|was not|weren't|were not|never|don't see|do not see|doesn't|does not|no\b|not\b|yet to)\b/i;
 // Splits on the same boundaries as the per-clause loop below (sentence
 // ends, commas, "and"/"but", dashes) so the whole-reply ack guard judges
 // one clause at a time instead of the whole reply.
@@ -1456,11 +1456,15 @@ const CHECK_TENDER_CONTEXT_RE = new RegExp([
   // mailed/sent/wrote/... a check
   "\\b(?:mailed|sent|wrote|written|dropped\\s+off|deposited|cut)\\s+(?:(?:you|y'?all|them)\\s+)?(?:(?:a|my|the|paper)\\s+)?check\\b",
 ].join('|'), 'i');
-function replyClaimedTender(text) {
+function tenderLabelsIn(text) {
   const str = String(text || '');
   const labels = new Set();
   for (const m of str.matchAll(NON_CHECK_TENDER_RE)) labels.add(tenderLabelForWord(tenderWordFor(m[1])));
   if (CHECK_TENDER_CONTEXT_RE.test(str)) labels.add('Check');
+  return labels;
+}
+function replyClaimedTender(text) {
+  const labels = tenderLabelsIn(text);
   if (labels.size > 1) return TENDER_AMBIGUOUS;
   return labels.size ? [...labels][0] : null;
 }
@@ -1570,11 +1574,17 @@ function paymentDateMatchesClaim(p, claimed) {
 const rowAmountMatches = (p, amountCents) => amountCents == null
   || (Number.isFinite(Number(p.amount)) && Math.round(Number(p.amount) * 100) === amountCents);
 // Rows of the family's status(es) that agree on amount (and date when claimed).
+// Codex round-15 P1: a row with NO status (legacy / imported / partially reconciled) is
+// found-but-UNKNOWN evidence. It contradicts an ABSENCE claim ("isn't showing", "not
+// received", "unpaid") — it might be the payment — and never grounds a positive one.
+const ABSENCE_FAMILIES = new Set(['not_found', 'not_received', 'unpaid']);
 function paymentRowCandidates({ family, amountCents, claimedDate, rows }) {
   const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
   const anyStatus = wanted.has(ANY_STATUS);
+  const unknownCounts = ABSENCE_FAMILIES.has(family);
   return rows.filter((p) => (
-    p && (anyStatus || wanted.has(String(p.status || '').toLowerCase())) && rowAmountMatches(p, amountCents)
+    p && (anyStatus || wanted.has(String(p.status || '').toLowerCase()) || (unknownCounts && !String(p.status || '').trim()))
+      && rowAmountMatches(p, amountCents)
       && (!claimedDate || paymentDateMatchesClaim(p, claimedDate))
   ));
 }
@@ -1603,11 +1613,36 @@ const bindPaidPaymentRow = (args) => bindPaymentRow({ ...args, family: 'paid' })
 // inbound message is the fallback ONLY when the clause is silent on that point.
 // null = an AMBIGUOUS tender (several distinct tenders in one text): unknown,
 // never a guess — the caller fails closed.
+function claimedDatesAgree(a, b) {
+  return a.month === b.month && a.day === b.day && (a.year == null || b.year == null || a.year === b.year);
+}
+// The binding a validator uses: paymentClaimBinding plus the AMOUNT identity — when the
+// customer named amounts, every amount the reply's claim states must be one of them
+// (Codex round-15 P1). An 'unpaid' claim states what is OWED, not the payment asked about.
+function claimBinding(c, env) {
+  const binding = paymentClaimBinding(c.text, env.inboundText);
+  if (!binding) return null;
+  if (c.family !== 'unpaid') {
+    const asked = amountCentsIn(env.inboundText);
+    if (asked.length && (c.amounts || []).some((a) => !asked.includes(a))) return null;
+  }
+  return binding;
+}
 function paymentClaimBinding(clauseText, inboundText) {
   let claimedTender = replyClaimedTender(clauseText);
+  // Codex round-15 P1: the reply's identity must AGREE with the payment the customer
+  // asked about — it never overrides it. A reply tender the inbound does not name, or a
+  // reply date that differs from the inbound's, is a different payment: reject.
+  if (claimedTender && claimedTender !== TENDER_AMBIGUOUS && inboundText) {
+    const asked = tenderLabelsIn(inboundText);
+    if (asked.size && !asked.has(claimedTender)) return null;
+  }
+  const replyDate = parseClaimedPaymentDate(clauseText);
+  const inboundDate = inboundText ? parseClaimedPaymentDate(inboundText) : null;
+  if (replyDate && inboundDate && !claimedDatesAgree(replyDate, inboundDate)) return null;
   if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
   if (claimedTender === TENDER_AMBIGUOUS) return null;
-  const claimedDate = parseClaimedPaymentDate(clauseText) || (inboundText && parseClaimedPaymentDate(inboundText)) || null;
+  const claimedDate = replyDate || inboundDate || null;
   const inboundNamedPayment = !!inboundText && /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?)\b/i.test(inboundText);
   return { claimedTender, claimedDate, inboundNamedPayment };
 }
@@ -1704,7 +1739,7 @@ function claimTargets(amounts, env) {
 function validateAck(c, env) {
   if (!c.amounts.length) return true;
   if (c.amounts.some((a) => !env.paidCents.has(a))) return true;
-  const binding = paymentClaimBinding(c.text, env.inboundText);
+  const binding = claimBinding(c, env);
   if (!binding) return true;
   return c.amounts.some((a) => !bindPaymentRow({ family: 'paid', amountCents: a, context: env.context, ...binding }));
 }
@@ -1712,7 +1747,7 @@ function validateAck(c, env) {
 // row of the family's status matching the same identity rules as a receipt.
 function validateStatusClaim(c, env) {
   if (env.billingUnavailable) return true;
-  const binding = paymentClaimBinding(c.text, env.inboundText);
+  const binding = claimBinding(c, env);
   if (!binding) return true;
   return claimTargets(c.amounts, env)
     .some((a) => !bindPaymentRow({ family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false }));
@@ -1732,7 +1767,7 @@ function absenceHistoryUnknown(env, vague) {
 }
 function validateAbsenceClaim(c, env) {
   if (env.billingUnavailable) return true;
-  const binding = paymentClaimBinding(c.text, env.inboundText);
+  const binding = claimBinding(c, env);
   if (!binding) return true;
   const targets = claimTargets(c.amounts, env);
   const vague = targets.every((a) => a == null) && !binding.claimedTender && !binding.claimedDate;
@@ -1787,7 +1822,10 @@ const KIND_VALIDATORS = {
   ack: validateAck,
   // a negated ack ("wasn't processed") with a figure is never a binding claim;
   // amount-free it is a truthful denial and untouched (round-10 P1 polarity).
-  negated_ack: (c) => c.amounts.length > 0,
+  // Codex round-15 P1: amount-free, it is a denial of RECEIPT ("wasn't processed") and is judged
+  // by the not_received/absence binder like any other — a matching paid row makes it false,
+  // and unavailable history blocks. (Amount-bearing negated acks stay rejected outright.)
+  negated_ack: (c, env) => c.amounts.length > 0 || validateAbsenceClaim({ ...c, family: 'not_received' }, env),
   settlement: (c, env) => env.hasOutstandingObligation || env.billingUnavailable,
   owed: (c, env) => c.amounts.some((a) => !env.owedCents.has(a)),
   trusted_owed: () => false,

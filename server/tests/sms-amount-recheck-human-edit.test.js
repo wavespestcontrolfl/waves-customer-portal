@@ -61,3 +61,23 @@ describe('a queued "still unpaid" reply is rechecked against the invoice that is
       .resolves.toEqual({ stale: false });
   });
 });
+
+// Codex round-15 P1: a queued amount-free DENIAL ("No payment received.") is false once a paid row lands.
+describe('a queued denial of receipt is rechecked at send time (paid-after-draft)', () => {
+  const { amountFreeStatusClaimStale } = require('../services/sms-amount-recheck');
+  const check = (body, rows, extra = {}) => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(rows, extra));
+    return amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh });
+  };
+  test.each(['No payment received.', "We didn't get your payment.", "We don't have your payment.", "Payment has not posted."])('%s', async (body) => {
+    await expect(check(body, [])).resolves.toEqual({ stale: false }); // true at draft time
+    await expect(check(body, [paid])).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' }); // paid since
+    await expect(check(body, [{ ...paid, status: 'refunded' }])).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    await expect(check(body, [{ ...paid, status: null }])).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' }); // unknown-status row
+  });
+  test('unavailable billing blocks it', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { unavailable: true } });
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'No payment received.', strict: true, dbh }))
+      .resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+});
