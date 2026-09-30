@@ -5008,12 +5008,12 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // services/assessment-booking predicate), never supplied by callers, so every
 // entry point — the four in-file booking paths and the outbound-review
 // confirm hook — agrees on what an assessment is.
-async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, booking = null }) {
+async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, booking = null, deferConversion = false }) {
   if (!leadId) return false;
-  // A pending office-review booking is not a closed deal: the lead converts
-  // when the office confirms the visit (runOutboundReviewConfirmHook), like
-  // every pending office-review booking.
-  if (booking && isPendingOutboundReviewBooking(booking)) return false;
+  // A street-level address hold is not a closed deal: the lead converts when
+  // the office confirms the visit (runOutboundReviewConfirmHook), like every
+  // pending office-review booking. Any other booking converts as before.
+  if (deferConversion) return false;
   try {
     return await trx.transaction(async (inner) => {
       const keepOpenForAssessment = !!booking
@@ -16687,6 +16687,8 @@ const CallRecordingProcessor = {
                       callSid,
                       keepOpenForQuote: callQuotePromised,
                       booking: primaryRow,
+                      // A reused street-level hold converts on office confirm, not here.
+                      deferConversion: await isStreetLevelHoldRow(trx, primaryRow),
                     });
                   }
                   if (isAttachedManualBooking) {
@@ -17426,6 +17428,7 @@ const CallRecordingProcessor = {
                       callSid,
                       keepOpenForQuote: callQuotePromised,
                       booking: created,
+                      deferConversion: streetLevelPending,
                     });
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
@@ -17471,6 +17474,7 @@ const CallRecordingProcessor = {
                       callSid,
                       keepOpenForQuote: callQuotePromised,
                       booking: existingByKey,
+                      deferConversion: await isStreetLevelHoldRow(trx, existingByKey),
                     });
                   }
                   // This is exactly the retry whose first attempt may have
@@ -17561,7 +17565,9 @@ const CallRecordingProcessor = {
               // filed; the owner also asked for ONE admin bell per visit (no
               // existing bell fires for a pending call booking), deduped on the
               // visit id so a reprocess never rings twice. Best effort.
-              if (isPendingOutboundReviewBooking(svc)) {
+              // Street-level holds only: every other reused row (legacy outbound-review,
+              // voice agent) keeps its exact prior behavior.
+              if (isPendingOutboundReviewBooking(svc) && await isStreetLevelHoldRow(db, svc)) {
                 pendingOfficeReview = true;
                 if (v2StreetLevelHold) {
                   try {

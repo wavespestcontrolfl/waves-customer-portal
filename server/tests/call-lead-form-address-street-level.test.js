@@ -453,7 +453,11 @@ describe('office-review pending path (owner ruling 2026-09-30)', () => {
 
   test('a pending office-review row is not a closed deal: no lead conversion, no inspection-credit evidence, no reminders, no card funnel', () => {
     const s = src();
-    expect(s).toMatch(/if \(booking && isPendingOutboundReviewBooking\(booking\)\) return false;/);
+    expect(s).toContain('if (deferConversion) return false;');
+    // Deferred only for a street-level hold: the fresh insert, and reused rows by the durable card signal.
+    expect(s).toContain('deferConversion: streetLevelPending,');
+    expect(s).toContain('deferConversion: await isStreetLevelHoldRow(trx, primaryRow),');
+    expect(s).toContain('deferConversion: await isStreetLevelHoldRow(trx, existingByKey),');
     expect(s).toMatch(/if \(!streetLevelPending\) \{\s*await require\('\.\/inspection-credit'\)\.markBookingForInspectionCredit/);
     expect(s).toContain('PENDING — activated on office confirm');
     expect(s.indexOf('if (pendingOfficeReview) {')).toBeLessThan(s.indexOf('} else if (!scheduleWasReused) {\n                logger.info(`[call-proc] Scheduled service created'));
@@ -613,5 +617,13 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     const block = triage.slice(0, triage.indexOf('if (Object.keys(updates).length > 0)'));
     expect(block).toContain("'stage', COALESCE(extracted_data, '{}'::jsonb)->'stage'");
     expect(block).toContain("'address', COALESCE(extracted_data, '{}'::jsonb)->'address'");
+  });
+
+  test('gate off / any other pending row: the pending branches are scoped to street-level holds, so a reused legacy or voice-agent row keeps its exact prior behavior', () => {
+    const s = src();
+    expect(s).toContain('if (isPendingOutboundReviewBooking(svc) && await isStreetLevelHoldRow(db, svc)) {\n                pendingOfficeReview = true;');
+    expect(s).not.toMatch(/if \(isPendingOutboundReviewBooking\(svc\)\) \{\s*pendingOfficeReview = true;/);
+    // The confirm hook's own conversion is untouched (no deferConversion passed there).
+    expect(read('../services/outbound-review-confirm.js')).not.toContain('deferConversion');
   });
 });
