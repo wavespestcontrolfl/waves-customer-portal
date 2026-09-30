@@ -51,7 +51,7 @@ describe('deriveDefaultRule: form classification', () => {
     expect(deriveDefaultRule(herbicide(formulation))).toMatchObject({ mode: 'hold' });
   });
 
-  test.each(['G', '2G', 'granular', 'granule', 'granular bait'])('%s is granular (water in, spray-only hold rule skipped)', (formulation) => {
+  test.each(['G', '2G', 'granular', 'granule'])('%s is granular (water in, spray-only hold rule skipped)', (formulation) => {
     // irrigation_required null so the granular branch, not the flag, decides.
     expect(deriveDefaultRule({ name: 'Test Granular', category: 'fertilizer', formulation, irrigation_required: null }))
       .toMatchObject({ mode: 'water_in' });
@@ -210,5 +210,21 @@ describe('resolveWateringRule', () => {
     expect(resolveWateringRule({ name: 'Artavia 2 SC', category: 'fungicide', formulation: 'SC' })).toBeNull();
     expect(resolveWateringRule(null)).toBeNull();
     expect(resolveWateringRule(undefined)).toBeNull();
+  });
+});
+
+describe('codex #5389 r2', () => {
+  const { validateRule, deriveDefaultRule } = require('../services/service-report/lawn-watering-rule');
+  test('a dry granular bait never derives water_in from its form alone', () => {
+    expect(deriveDefaultRule({ name: 'Advion WDG Granular Bait', category: 'bait', formulation: 'granular', irrigation_required: null })).toBeNull();
+    expect(deriveDefaultRule({ name: 'Advion WDG Granular Bait', category: 'bait', formulation: 'granular', irrigation_required: true }))
+      .toMatchObject({ mode: 'water_in' });
+  });
+  test("hold_until 'dry' is a valid hold with no hours", () => {
+    const v = validateRule({ mode: 'hold', hold_until: 'dry', source: 'label' });
+    expect(v.valid).toBe(true);
+    expect(v.rule).toMatchObject({ mode: 'hold', hold_until: 'dry', hold_hours: null });
+    expect(validateRule({ mode: 'hold', hold_until: 'wet', source: 'label' }).valid).toBe(false);
+    expect(validateRule({ mode: 'hold', hold_until: 'dry', hold_hours: 4, source: 'label' }).rule).toMatchObject({ hold_until: 'dry', hold_hours: 4 });
   });
 });

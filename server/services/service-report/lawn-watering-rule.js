@@ -18,7 +18,7 @@
 const MODES = ['hold', 'water_in', 'none'];
 const SOURCES = ['label', 'owner', 'default'];
 const RULE_KEYS = [
-  'mode', 'hold_hours', 'water_in_inches', 'water_in_by_hours',
+  'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours',
   'source', 'label_note', 'verified_at', 'verified_by',
 ];
 
@@ -69,9 +69,26 @@ function validateRule(json) {
 
   const rule = { mode: value.mode };
   if (value.mode === 'hold') {
-    const hours = value.hold_hours == null ? DEFAULT_HOLD_HOURS : positiveNumber(value.hold_hours, MAX_HOURS);
-    if (hours == null) errors.push(`hold_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
-    rule.hold_hours = hours;
+    // A label that says "do not irrigate until the spray has dried" is a
+    // CONDITION, not a duration; it is stored as hold_until 'dry' with no
+    // hours, so no surface can turn it into a fixed drying time (codex P2
+    // #5389 r2). hold_hours may still accompany it as an optional floor.
+    if (value.hold_until != null && value.hold_until !== 'dry') errors.push("hold_until must be 'dry' when present");
+    const untilDry = value.hold_until === 'dry';
+    if (untilDry) {
+      rule.hold_until = 'dry';
+      if (value.hold_hours == null) {
+        rule.hold_hours = null;
+      } else {
+        const hours = positiveNumber(value.hold_hours, MAX_HOURS);
+        if (hours == null) errors.push(`hold_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
+        rule.hold_hours = hours;
+      }
+    } else {
+      const hours = value.hold_hours == null ? DEFAULT_HOLD_HOURS : positiveNumber(value.hold_hours, MAX_HOURS);
+      if (hours == null) errors.push(`hold_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
+      rule.hold_hours = hours;
+    }
   } else if (value.mode === 'water_in') {
     const inches = value.water_in_inches == null ? DEFAULT_WATER_IN_INCHES : positiveNumber(value.water_in_inches, MAX_INCHES);
     const byHours = value.water_in_by_hours == null ? DEFAULT_WATER_IN_BY_HOURS : positiveNumber(value.water_in_by_hours, MAX_HOURS);
@@ -160,7 +177,12 @@ function deriveDefaultRule(row) {
     return defaultRule({ mode: 'hold', hold_hours: Math.max(DEFAULT_HOLD_HOURS, rainfastHours) });
   }
 
-  if (!flagFalse && (preEmergent || form === 'granular' || row.irrigation_required === true)) {
+  // A dry granular BAIT (e.g. Advion WDG Granular) is placed, not watered in:
+  // its granular form must not imply water_in unless the catalog flag says so
+  // (codex P2 #5389 r2).
+  const bait = /\bbait\b/i.test([row.category, row.formulation, row.name, row.subcategory].filter(Boolean).join(' '));
+  const granularWaterIn = form === 'granular' && !bait;
+  if (!flagFalse && (preEmergent || granularWaterIn || row.irrigation_required === true)) {
     return defaultRule({ mode: 'water_in' });
   }
 

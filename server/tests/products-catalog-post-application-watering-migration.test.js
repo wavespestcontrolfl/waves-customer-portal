@@ -5,6 +5,7 @@ const describeDb = SKIP ? describe.skip : describe;
 const { randomUUID } = require('crypto');
 const knexFactory = require('knex');
 const migration = require('../models/migrations/20260930000001_products_catalog_post_application_watering');
+const correction = require('../models/migrations/20260930000003_watering_rule_celsius_until_dry_audit');
 
 describeDb('products_catalog.post_application_watering migration', () => {
   let knex;
@@ -90,5 +91,45 @@ describeDb('products_catalog.post_application_watering migration', () => {
     await migration.down(knex);
     expect(await knex.schema.hasColumn('products_catalog', 'post_application_watering')).toBe(false);
     await migration.down(knex); // idempotent
+  });
+});
+
+describeDb('20260930000003 Celsius until-dry correction + audit', () => {
+  let knex;
+  let schema;
+  beforeEach(async () => {
+    schema = `watering_fix_${randomUUID().replace(/-/g, '')}`;
+    knex = knexFactory({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 4 } });
+    await knex.raw('CREATE SCHEMA ??', [schema]);
+    await knex.raw('CREATE TABLE ??.products_catalog (LIKE public.products_catalog INCLUDING ALL)', [schema]);
+    await knex.raw('ALTER TABLE products_catalog DROP CONSTRAINT IF EXISTS products_catalog_post_application_watering_mode_check');
+    await knex.raw('ALTER TABLE products_catalog DROP COLUMN IF EXISTS post_application_watering');
+    await migration.up(knex);
+  });
+  afterEach(async () => {
+    await knex.raw('DROP SCHEMA ?? CASCADE', [schema]);
+    await knex.destroy();
+  });
+  const insert = async (row) => {
+    const [created] = await knex('products_catalog').insert({ id: randomUUID(), ...row }).returning('id');
+    return created.id;
+  };
+  const rule = async (id) => (await knex('products_catalog').where({ id }).first()).post_application_watering;
+
+  test('rewrites only the seeded 6-hour Celsius rule to an until-dry condition, idempotently', async () => {
+    const celsius = await insert({ name: 'Celsius WG', epa_reg_number: '432-1507' });
+    const owned = await insert({ name: 'Celsius WG (owner)', epa_reg_number: '432-1507' });
+    const talak = await insert({ name: 'Atticus Talak 7.9 F' });
+    await knex('products_catalog').where({ id: celsius }).update({ post_application_watering: null });
+    await knex('products_catalog').where({ id: owned }).update({ post_application_watering: JSON.stringify({ mode: 'hold', hold_hours: 8, source: 'owner', verified_by: 'label-check-2026-09-29' }) });
+    await migration.up(knex); // re-seed the cleared Celsius row (fill-only-empty)
+    expect(await rule(celsius)).toMatchObject({ mode: 'hold', hold_hours: 6, source: 'label' });
+    await correction.up(knex);
+    expect(await rule(celsius)).toMatchObject({ mode: 'hold', hold_until: 'dry', hold_hours: null, source: 'label', label_note: 'Do not irrigate until the spray has dried.' });
+    expect(await rule(owned)).toMatchObject({ mode: 'hold', hold_hours: 8, source: 'owner' }); // owner edit untouched
+    expect(await rule(talak)).toMatchObject({ mode: 'hold', hold_hours: 24, source: 'label' }); // other seeds untouched
+    const once = await rule(celsius);
+    await correction.up(knex);
+    expect(await rule(celsius)).toEqual(once);
   });
 });
