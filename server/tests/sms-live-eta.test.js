@@ -1681,6 +1681,53 @@ describe('round 18 P2s: decimals, driving, on-site groups, technician identity',
   });
 });
 
+// Codex round-19 P2s (PR #5334).
+describe('round 19 P2s: window minutes, zero, tracking-link digits, on-site sibling grouping', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+
+  test.each([
+    'Your 120-minute arrival window starts at 9.', 'Your arrival window is 120 minutes.', 'Your 90 minute window starts at 9.',
+    'Your arrival window is 90 seconds.', 'Your arrival window: 20-30 minutes.',
+  ])('%p (a window, any unit) is never an ETA claim', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts(9) })).toEqual({ ok: true, violations: [] });
+  });
+  test('a real minutes ETA beside a window is still checked', () => {
+    expect(validateLiveEtaMinutes({ reply: 'Your 120-minute arrival window starts at 9. The tech is 20 minutes away.', factsBlock: facts(9) }).ok).toBe(false);
+  });
+
+  test('"zero" is a number: "zero minutes away" is a 0-minute claim, checked against the live figure', () => {
+    expect(normalizeNumberWords('zero minutes away')).toBe('0 minutes away');
+    expect(findEtaMinutesClaims('The tech is zero minutes away.').map((c) => c.minutes)).toEqual([0]);
+    expect(validateLiveEtaMinutes({ reply: 'The tech is zero minutes away.', factsBlock: facts(9) }).ok).toBe(false);
+  });
+  test.each(['The tech is several minutes away.', 'The tech is a handful of minutes away.'])('%p — an unconvertible number word next to a time unit fails closed', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts(9) }).ok).toBe(false);
+  });
+
+  test('the digits ending a /track/ token are not an ETA (link stripped before draft-time parsing)', () => {
+    const reply = 'Track your tech: portal.wavespestcontrol.com/track/abcdef9';
+    expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE STATUS: tech marked en route to this visit' })).toEqual({ ok: true, violations: [] });
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away: portal.wavespestcontrol.com/track/abcdef7', factsBlock: facts(9) }).ok).toBe(true);
+    expect(require('../services/sms-track-links').stripTrackLinks('a b/track/x9 c')).toBe('a   c');
+  });
+
+  test('on-site grouped siblings sharing a technician + destination form ONE on_property group', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const mk = (id, extra = {}) => ({ id, scheduled_date: today, status: 'on_site', track_state: 'on_property', track_view_token: `tok-${id}`, technician_id: 'tech-1', service_lat: 27.4, service_lng: -82.5, ...extra });
+    const customer = baseCustomer();
+    const rows = [mk('a'), mk('b'), mk('c', { technician_id: 'tech-2' })];
+    const groups = buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: [null, null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer });
+    expect(groups.map((g) => g.scheduledServiceIds)).toEqual([['a', 'b'], ['c']]);
+    expect(groups.every((g) => g.state === 'on_property' && g.minutes === null)).toBe(true);
+    expect(groups[0].trackTokens).toEqual(['tok-a', 'tok-b']);
+  });
+});
+
 // Codex round-17 P2 (PR #5334): destination coordinates are a PAIR.
 describe('liveEtaDestination — lat/lng are used only as a complete pair (round 17 P2)', () => {
   test('a visit latitude alone never mixes with the customer longitude', () => {

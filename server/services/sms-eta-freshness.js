@@ -81,6 +81,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { stripTrackLinks } = require('./sms-track-links');
 
 // 15 minutes: long enough that an ordinary reviewer accept/edit cycle (a
 // human reading a composer card and clicking Send) never gets blocked by
@@ -122,6 +123,14 @@ const LINK_LEADING_RE = /^[(<"'[]+/;
 const LINK_TRAILING_RE = /[.,;:!?)\]"'>\u2014\u2013]+$/;
 const SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
+function canonicalProtocol() {
+  try {
+    return new URL(publicPortalUrl()).protocol;
+  } catch {
+    return 'https:';
+  }
+}
+
 function canonicalPortalHost() {
   try {
     return new URL(publicPortalUrl()).host.toLowerCase();
@@ -148,7 +157,10 @@ function parseTrackLink(rawToken, canonicalHost) {
   }
   const match = TRACK_PATH_RE.exec(url.pathname);
   const clean = !url.search && !url.hash && !url.username && !url.password;
-  return match && clean && url.host.toLowerCase() === canonicalHost ? match[1] : null;
+  // An EXPLICIT scheme must equal the canonical portal's (Codex round-19 P2:
+  // http:// or ftp:// portal links are refused); schemeless stays allowed.
+  const schemeOk = !SCHEME_RE.test(token) || url.protocol === canonicalProtocol();
+  return match && clean && schemeOk && url.host.toLowerCase() === canonicalHost ? match[1] : null;
 }
 
 function trackLinkTokens(text) {
@@ -165,10 +177,6 @@ function scanTrackLinks(text) {
     else violation = true;
   }
   return { tokens: [...tokens], violation };
-}
-
-function stripTrackLinks(text) {
-  return String(text || '').split(/(\s+)/).map((t) => (t.toLowerCase().includes('/track/') ? ' ' : t)).join('');
 }
 
 function extractTrackTokens(text) {

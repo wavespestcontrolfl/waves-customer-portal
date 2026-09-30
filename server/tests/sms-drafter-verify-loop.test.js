@@ -458,6 +458,38 @@ describe('generateGroundedDraft — single-pass mode (SHADOW_DRAFT_VERIFY=false)
   });
 });
 
+// Codex round-19 P2 (PR #5334): the single-pass branch also runs the
+// deterministic live-ETA guard. The branch is reached only when real answers
+// were NOT applied at prompt-build time, so the test flips the gate on after
+// the prompt is built (inside the model call) to exercise the wiring.
+describe('generateGroundedDraft — single-pass mode runs validateLiveEtaMinutes', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+  beforeEach(() => { delete process.env.GATE_SMS_REAL_ANSWERS; process.env.SHADOW_DRAFT_VERIFY = 'false'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY; else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+    jest.resetModules();
+  });
+  const run = async (reply) => {
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    const inner = makeClient([{ reply, intended_actions: [], missing_info: null }]);
+    const client = { calls: inner.calls, messages: { create: (a) => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; return inner.messages.create(a); } } };
+    return drafter.generateGroundedDraft({
+      client, context: CTX, inboundMessage: 'Where is the tech?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+    });
+  };
+  test('a fabricated ETA with no live-ETA fact is NOT converged', async () => {
+    const r = await run('The tech is about 20 minutes away.');
+    expect(r.converged).toBe(false);
+  });
+  test('a reply with no ETA claim still converges', async () => {
+    const r = await run('Thanks so much, we appreciate you!');
+    expect(r.converged).toBe(true);
+  });
+});
+
 // Codex r3: with the LLM verifier OFF nothing can judge whether a quoted
 // window is a confirmation of a booked visit or an undeclared offer, so the
 // single-pass check runs WITHOUT the grounded-elsewhere allowance.

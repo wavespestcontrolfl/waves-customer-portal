@@ -912,14 +912,26 @@ function liveEtaOnSite(row, todayStr = etDateString()) {
   const { customerTrackState } = require('./track-transitions');
   return Boolean(row) && calendarDay(row.scheduled_date) === todayStr && customerTrackState(row) === 'on_property';
 }
-function buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta }) {
+function buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer = null }) {
   if (!includeLiveEta) return [];
   const keyed = uniqueLiveEtaKeys.map((key) => liveEtaGroupFor(upcomingServices.filter((s, i) => liveEtaKeys[i] === key), liveEtaResultByKey.get(key)));
   // Live rows with no dedupe key (no technician / destination): singleton groups.
   const keyless = upcomingServices.filter((s, i) => liveEtaKeys[i] == null && liveEtaEligible(s)).map((s) => liveEtaGroupFor([s], null));
   // On-site (on_property) visits today: status-only groups, so a completed
   // arrival claim is rechecked against the visit's state at send time.
-  const onSite = upcomingServices.filter((s) => liveEtaOnSite(s)).map((s) => liveEtaGroupFor([s], null, 'on_property'));
+  // Round-19 P2: on-site grouped siblings sharing one physical stop (same
+  // technician + destination key) form ONE group, so "The technician has
+  // arrived" isn't ambiguous across the siblings; keyless rows stay singletons.
+  const onSiteRows = upcomingServices.filter((s) => liveEtaOnSite(s));
+  const onSiteByKey = new Map();
+  const onSite = [];
+  for (const row of onSiteRows) {
+    const key = customer ? liveEtaDedupeKey(row, customer) : null;
+    if (key == null) { onSite.push(liveEtaGroupFor([row], null, 'on_property')); continue; }
+    if (!onSiteByKey.has(key)) onSiteByKey.set(key, []);
+    onSiteByKey.get(key).push(row);
+  }
+  for (const members of onSiteByKey.values()) onSite.push(liveEtaGroupFor(members, null, 'on_property'));
   return [...keyed, ...keyless, ...onSite];
 }
 
@@ -1229,7 +1241,7 @@ class ContextAggregator {
     // DIFFERENT stop's still-en_route status — grouping preserves which
     // ids each distinct minutes figure actually came from. Threaded through
     // generateGroundedDraft's context param, never persisted here.
-    const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta });
+    const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
 
     return {
       known: true,

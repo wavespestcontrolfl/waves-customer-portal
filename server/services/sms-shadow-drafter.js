@@ -232,6 +232,7 @@ function followupSlaPhrase(now = new Date()) {
 // SLA_PHRASES / replyPromisesFollowup / slaPhraseStatus live in
 // ./sms-followup-sla (Codex r3) and are re-exported below.
 const followupSla = require('./sms-followup-sla');
+const { stripTrackLinks } = require('./sms-track-links');
 
 // The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
 // line (only the categories whose own gate is still off), one instruction
@@ -804,10 +805,10 @@ function sentenceSpans(str) {
 // plain under-100 number, converted as a single figure. Anything it cannot
 // fully convert ("a thousand", "a dozen", "hundreds") is left as a word and
 // rejected next to a time unit by bodyHasUnconvertedNumberWord below.
-const NUMBER_WORD_UNITS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const NUMBER_WORD_UNITS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
 const NUMBER_WORD_TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
 const NW_TENS = Object.keys(NUMBER_WORD_TENS).join('|');
-const NW_DIGITS = Object.keys(NUMBER_WORD_UNITS).slice(0, 9).join('|');
+const NW_DIGITS = 'one|two|three|four|five|six|seven|eight|nine';
 const NW_UNDER_TWENTY = Object.keys(NUMBER_WORD_UNITS).join('|');
 const NUMBER_WORD_RE = new RegExp(
   `\\b(?:(?:(?:(${NW_DIGITS}|an?)[\\s-]+)?hundred(?:(?:[\\s-]+and)?[\\s-]+(?:(${NW_TENS})(?:[\\s-]+(${NW_DIGITS}))?|(${NW_UNDER_TWENTY})))?)`
@@ -829,7 +830,7 @@ function normalizeNumberWords(text) {
 // A number word normalizeNumberWords cannot convert, right next to a time
 // unit ("a thousand minutes", "a dozen minutes", "hundreds of minutes") —
 // fail closed instead of letting the figure go unread.
-const UNCONVERTED_NUMBER_WORD_RE = /\b(?:hundreds|thousands?|millions?|dozens?|score)\b[\s\w-]{0,20}?\b(?:min(?:ute)?s?|hours?|hrs?)\b/gi;
+const UNCONVERTED_NUMBER_WORD_RE = /\b(?:hundreds|thousands?|millions?|dozens?|score|several|many|numerous|bunch|handful)\b[\s\w-]{0,20}?\b(?:min(?:ute)?s?|hours?|hrs?)\b/gi;
 // Structural time-quantity normalization (Codex round-9 P2, PR #5334): every
 // earlier round of this PR found ANOTHER way a customer-visible ETA could
 // slip past the exact-minutes comparison, and round 9 found the newest —
@@ -1226,6 +1227,9 @@ function findEtaMinutesClaims(text) {
       // Office follow-up timing (round 13): never a tech ETA. 'always' tokens
       // ("be there in 20") carry their own arrival subject and are exempt.
       if (token.judge !== 'always' && isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+      // ONE window predicate for EVERY token kind (Codex round-19 P2): "Your
+      // 120-minute arrival window" is a scheduling span whatever its unit.
+      if (isWindowQuantity(str, m.index, m[0].length)) continue;
       if (!ETA_CLAIM_JUDGES[token.judge](str, m, sentenceAt(str, spans, m.index))) continue;
       for (const g of token.groups) claims.push({ minutes: Number(m[g]), index: m.index });
       consumed.push(...figureSpans);
@@ -1269,6 +1273,8 @@ function findGroundedMinutesFigures(text) {
     return str.slice(span[0], span[1]);
   };
   const maybeGroundedClaim = (minutes, matchIndex, matchLength, sentence) => {
+    // Round-19 P2: a window figure (any unit) is never an ETA claim.
+    if (isWindowQuantity(str, matchIndex, matchLength)) return false;
     if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) {
       claims.push({ minutes, index: matchIndex });
       return true;
@@ -1318,7 +1324,7 @@ function findGroundedMinutesFigures(text) {
     if (claims.some((c) => c.index === bm2.index)) continue;
     const minutes = Number(bm2[1]);
     if (minutes < 1 || minutes > 180) continue;
-    if (classifyBareEtaNumber(str, bm2.index, bm2[0].length) === 'claim') {
+    if (!isWindowQuantity(str, bm2.index, bm2[0].length) && classifyBareEtaNumber(str, bm2.index, bm2[0].length) === 'claim') {
       claims.push({ minutes, index: bm2.index });
     }
   }
@@ -1333,7 +1339,7 @@ function findGroundedMinutesFigures(text) {
   while ((ishm = ishRe.exec(str))) {
     if (claims.some((c) => c.index === ishm.index)) continue;
     const minutes = Number(ishm[1]);
-    if (minutes >= 1 && minutes <= 180) claims.push({ minutes, index: ishm.index });
+    if (minutes >= 1 && minutes <= 180 && !isWindowQuantity(str, ishm.index, ishm[0].length)) claims.push({ minutes, index: ishm.index });
   }
 
   // Office follow-up timing (round 13) is never an ETA — see isOfficeFollowupDuration.
@@ -1435,7 +1441,10 @@ function buildLiveEtaSnapshot(context) {
 function countEnRouteEtaStops(context) {
   return Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.filter((g) => g && g.state !== 'on_property').length : null;
 }
-function validateLiveEtaMinutes({ reply, factsBlock, liveEtaStopCount = null }) {
+function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount = null }) {
+  // Round-19 P2: parse the reply without its tracking links (a token's trailing
+  // digits are not an ETA) — the same shared step the send-time check uses.
+  const reply = stripTrackLinks(rawReply);
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   // Codex round-13 P2: a completed-arrival claim ("has arrived") with an
   // en-route tech and no on-site fact is false — the facts must say the tech
@@ -3171,6 +3180,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     if (!singlePassReservice.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassReservice.violations);
+    }
+    // Round-19 P2: the deterministic live-ETA guard runs in single-pass mode too
+    // (no verifier here would catch a wrong minutes figure).
+    const singlePassLiveEta = validateLiveEtaMinutes({ reply: parsed?.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context) });
+    if (!singlePassLiveEta.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassLiveEta.violations);
     }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);

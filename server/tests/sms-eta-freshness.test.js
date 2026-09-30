@@ -1457,3 +1457,38 @@ describe('numeric binding ignores on-site entries; status claims still see them'
     expect(await run('The technician has arrived: portal.wavespestcontrol.com/track/tok-b', [enRoute, onSite])).toBeNull();
   });
 });
+
+// Codex round-19 P2 (PR #5334): an explicit link scheme must be the canonical one.
+describe('round 19 P2: explicit link scheme', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+      drafter[name].mockReset().mockImplementation(real[name]);
+    }
+  });
+  const snap = { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'] }] };
+  const rows = [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE }];
+  const check = (body) => etaClaimBlockReason({ liveEtaSnapshot: snap, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows) });
+
+  test.each(['http://portal.wavespestcontrol.com/track/tok-1', 'ftp://portal.wavespestcontrol.com/track/tok-1', 'javascript://portal.wavespestcontrol.com/track/tok-1'])('%p is untrusted', async (link) => {
+    expect(await check(`Track: ${link}`)).toBe('eta_claim_link_untrusted');
+  });
+  test('https:// and schemeless canonical links pass; a configured http origin accepts http', async () => {
+    expect(await check('Track: https://portal.wavespestcontrol.com/track/tok-1')).toBeNull();
+    expect(await check('Track: portal.wavespestcontrol.com/track/tok-1')).toBeNull();
+    const prior = process.env.PUBLIC_PORTAL_URL;
+    process.env.PUBLIC_PORTAL_URL = 'http://localhost:5173';
+    try {
+      expect(await check('Track: http://localhost:5173/track/tok-1')).toBeNull();
+      expect(await check('Track: https://localhost:5173/track/tok-1')).toBe('eta_claim_link_untrusted');
+    } finally {
+      if (prior === undefined) delete process.env.PUBLIC_PORTAL_URL; else process.env.PUBLIC_PORTAL_URL = prior;
+    }
+  });
+  test('a link ending in a digit is not read as a minutes figure at send time', async () => {
+    const digitSnap = { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'], trackTokens: ['abcdef9'] }] };
+    const r = [{ ...rows[0], track_view_token: 'abcdef9' }];
+    expect(await etaClaimBlockReason({ liveEtaSnapshot: digitSnap, factsGeneratedAt: FRESH, outgoingBody: 'Track your tech: portal.wavespestcontrol.com/track/abcdef9', now: NOW, dbh: fakeDb(r) })).toBeNull();
+  });
+});
