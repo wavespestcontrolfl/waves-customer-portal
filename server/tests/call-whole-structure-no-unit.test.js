@@ -227,11 +227,13 @@ describe('call-level waiver (service resolved the way the booking resolves it)',
     const ambiguous = v2({ triage_flags: ['ambiguous_pest_or_service'] });
     const lowAddrOnly = v2({ confidence: { overall: 0.4, service_address: 0.3, urgency: 0.9 } });
     expect(serviceMayForceAssessment(ambiguous)).toBe(true);
-    expect(serviceMayForceAssessment(lowAddrOnly)).toBe(true);
+    // The sub-score half was dropped from the Assessment gate on main (#5371
+    // final): only the model's ambiguous_pest_or_service flag demotes.
+    expect(serviceMayForceAssessment(lowAddrOnly)).toBe(false);
     expect(serviceMayForceAssessment(v2({}))).toBe(false);
     // Assessment gate on + service unclear: the hold stands.
     expect(run(ambiguous, true)).toBe(AV_UNIT_MISSING);
-    expect(run(lowAddrOnly, true)).toBe(AV_UNIT_MISSING);
+    expect(run(lowAddrOnly, true).status).toBe('validated_accept');
     // Assessment gate off: unchanged (waived). Clear service, gate on: waived.
     expect(run(ambiguous, false).status).toBe('validated_accept');
     expect(run(v2({}), true).status).toBe('validated_accept');

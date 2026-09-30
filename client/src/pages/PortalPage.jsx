@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
+import usePortalActivity from '../hooks/usePortalActivity';
 import api from '../utils/api';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
@@ -10945,8 +10946,23 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
 // Station-map dropdown inside a plan row (owner 2026-07-15: the map sits
 // behind a click, never always-on). Chevron flips and the map fades/slides
 // in so the reveal reads as motion, not a static swap.
-function PlanStationMap({ map }) {
+// The station-map image is a signed proxy link that expires (2 h). The map is
+// fetched when My Plan mounts but the card only mounts on dropdown open, so a
+// tab left open can hold a dead link: re-request the map when the dropdown
+// opens if the payload is older than this, and once more on an image error.
+const STATION_MAP_STALE_MS = 90 * 60 * 1000;
+
+function PlanStationMap({ map, onOpen = null, onImageError = null }) {
   const [open, setOpen] = useState(false);
+  const retried = useRef(false);
+  const handleImageError = useCallback(() => {
+    // ONE refetch per mounted map, not per URL: a refetch returns a brand-new
+    // link, so keying on the URL would loop whenever the image keeps failing
+    // for a reason a fresh link cannot fix (e.g. the upstream provider is down).
+    if (!onImageError || retried.current) return;
+    retried.current = true;
+    onImageError();
+  }, [onImageError]);
   const [entered, setEntered] = useState(false);
   useEffect(() => {
     if (!open) { setEntered(false); return undefined; }
@@ -10959,7 +10975,7 @@ function PlanStationMap({ map }) {
     <div style={{ marginTop: 14 }}>
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={() => { if (!open && onOpen) onOpen(); setOpen(!open); }}
         aria-expanded={open}
         aria-controls={panelId}
         data-glass="soft"
@@ -11001,7 +11017,7 @@ function PlanStationMap({ map }) {
             opacity: entered ? 1 : 0,
             transform: entered ? 'translateY(0)' : 'translateY(-8px)',
           }}>
-            <StationMapCard variant="plan" hideTitle stationMap={map} sectionId={panelId} />
+            <StationMapCard variant="plan" hideTitle stationMap={map} sectionId={panelId} onImageError={handleImageError} />
           </div>
         </div>
       )}
@@ -11081,6 +11097,16 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
       .catch(() => setTermiteAnnualPlanStatus('error'));
   }, []);
 
+  const stationMapsLoadedAt = useRef(0);
+  const loadStationMaps = useCallback(() => (
+    api.getStationMap().then(d => {
+      stationMapsLoadedAt.current = Date.now();
+      setStationMaps(d?.available ? d : null);
+    }).catch(() => {})
+  ), []);
+  const refreshStationMapsIfStale = useCallback(() => {
+    if (Date.now() - stationMapsLoadedAt.current > STATION_MAP_STALE_MS) loadStationMaps();
+  }, [loadStationMaps]);
   const loadPlan = useCallback(() => {
     setPlanStatus('loading');
     Promise.all([
@@ -11118,9 +11144,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
       setBillingMode(d?.billing_mode || null);
       setResolvedNonMonthly(d?.non_monthly_billing === true);
     }).catch(() => {});
-    api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
+    loadStationMaps();
     loadTermiteAnnualPlan();
-  }, [loadPlan, cancelledAccount, loadTermiteAnnualPlan]);
+  }, [loadPlan, cancelledAccount, loadTermiteAnnualPlan, loadStationMaps]);
 
   const serviceMatches = (svcId, service = {}) => {
     // Server-resolved family wins when present (codex #3591 r58 P1):
@@ -11748,7 +11774,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                             program (trap map stays a report artifact). */}
                         {(svc.id === 'termite' || svc.id === 'rodent_bait') && (() => {
                           const map = stationMaps?.programs?.[svc.id === 'termite' ? 'termite' : 'rodent'];
-                          return map ? <PlanStationMap map={map} /> : null;
+                          return map ? <PlanStationMap map={map} onOpen={refreshStationMapsIfStale} onImageError={loadStationMaps} /> : null;
                         })()}
                       </div>
                     )}
@@ -16591,6 +16617,8 @@ export default function PortalPage() {
   const [activeTab, setActiveTab] = useState(
     cancelledAccount && !CANCELLED_TABS.includes(initialTab) ? 'plan' : initialTab,
   );
+  // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
+  usePortalActivity(activeTab, `${customer?.id ?? ''}:${sessionEpoch}`);
   const resetTabScroll = useRef(false);
   const moreButtonRef = useRef(null);
   useEffect(() => {

@@ -134,7 +134,7 @@ function buildSummaryPrompt({ customerName, serviceLines = [], input = '', conte
     blocks.push(`Additional technician input:\n${clean(input, MAX_INPUT)}`);
   }
 
-  return `Write a short customer-facing invoice summary for Waves Pest Control & Lawn Care.
+  return `Write a short customer-facing invoice summary for Waves Pest Control.
 
 Requirements:
 - Plain text only.
@@ -221,7 +221,7 @@ function buildThankYouPrompt({ customerName, serviceType, input } = {}) {
   if (svc) ctx.push(`Service: ${svc}`);
   if (hint) ctx.push(`What to emphasize: ${hint}`);
 
-  return `Write a short, warm thank-you message from Waves Pest Control & Lawn Care to include in a customer's invoice email.
+  return `Write a short, warm thank-you message from Waves Pest Control to include in a customer's invoice email.
 
 Requirements:
 - Plain text only.

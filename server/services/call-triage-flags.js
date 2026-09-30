@@ -1942,34 +1942,15 @@ function onFileAddressSatisfaction(flags, extraction, opts = {}) {
   return { flags: list.filter((f) => !FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f)), satisfied };
 }
 
-// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the sub-score half. True only when
-// the overall score is low AND service_address is a low number AND every other
-// numeric sub-score is at or above the threshold (absent sub-scores are not
-// low). A low caller_identity / primary_service_category / urgency / etc. means
-// the call is unclear for a reason the Assessment fallback does not cover, so
-// it keeps the hold. One predicate, read by both the flag filter and the
-// score-level exit in canAutoRouteDecision.
-function lowConfidenceServiceAddressOnly(confidence, threshold) {
-  const c = confidence || {};
-  if (typeof c.overall !== 'number' || c.overall >= threshold) return false;
-  if (typeof c.service_address !== 'number' || c.service_address >= threshold) return false;
-  return Object.entries(c).every(([key, value]) => (
-    key === 'overall' || key === 'service_address'
-    || typeof value !== 'number' || value >= threshold
-  ));
-}
-
 // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT x GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: true
 // when the extraction carries the service-unclear signal the Assessment gate
-// demotes (the model's ambiguous_pest_or_service flag, or a low overall score
-// whose only low sub-score is service_address). With the Assessment gate on,
-// such a call books the Waves Assessment row — a service OFF the whole-
+// demotes (the model's ambiguous_pest_or_service flag). With the Assessment gate
+// on, such a call books the Waves Assessment row — a service OFF the whole-
 // structure allowlist — so the unit waiver must not be what makes its address
 // "trusted". Conservative on purpose: read from the raw extraction.
-function serviceMayForceAssessment(extraction, threshold = DEFAULT_CONFIDENCE_THRESHOLD) {
+function serviceMayForceAssessment(extraction) {
   if (!extraction) return false;
-  if (Array.isArray(extraction.triage_flags) && extraction.triage_flags.includes('ambiguous_pest_or_service')) return true;
-  return lowConfidenceServiceAddressOnly(extraction.confidence, threshold);
+  return Array.isArray(extraction.triage_flags) && extraction.triage_flags.includes('ambiguous_pest_or_service');
 }
 
 // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the booking-shape half. Gate on (and
@@ -2058,7 +2039,6 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     && opts.addressValidation.inServiceArea === true;
   const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
   let unclearServiceOk = false;
-  let lowConfidenceIsServiceAddressOnly = false;
   // Flags THIS gate (and only this gate) took out of the blocking set — the
   // processor forces the Waves Assessment row for an ambiguous demotion and
   // demotes an already-open blocking card for each (reprocess).
@@ -2089,9 +2069,6 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // A spoken community/subdivision ("the Lakewood Ranch property") is
     // location evidence too — without street/city/ZIP it can't be verified,
     // so it must hold for review, not fall back to the on-file primary.
-    // Evaluated once so the blocking filter below and the low-confidence exit
-    // further down agree (see lowConfidenceServiceAddressOnly).
-    lowConfidenceIsServiceAddressOnly = lowConfidenceServiceAddressOnly(extraction.confidence, opts.confidenceThreshold || DEFAULT_CONFIDENCE_THRESHOLD);
     unclearServiceOk = unclearServiceAssessmentApplies(extraction, opts, avPositivelyValidated);
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
@@ -2108,7 +2085,6 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
       // (unsupported / administrative-only) still run downstream and are not
       // touched here.
       if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); return false; }
-      if (unclearServiceOk && f === 'low_extraction_confidence' && lowConfidenceIsServiceAddressOnly) { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); return false; }
       return true;
     });
   }
@@ -2202,15 +2178,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // this either (codex #4685 r1 P1).
   const failOpenLowConfidence = opts.failOpen && !!opts.knownCustomer && !opts.knownCustomer.addressOnly
     && extraction.scheduling?.status === 'confirmed' && !!extraction.scheduling?.confirmed_start_at;
-  // The unclear-service fail-open above demoted low_extraction_confidence only
-  // when service_address was the sole low sub-score; this exit reads the SAME
-  // decision (unclearServiceOk && lowConfidenceIsServiceAddressOnly) so the
-  // flag-level and score-level checks can never disagree. A missing overall
-  // still blocks (the flag never fires without a number).
-  const unclearServiceLowConfidenceOk = unclearServiceOk && lowConfidenceIsServiceAddressOnly
-    && typeof confidence.overall === 'number';
-  if (!failOpenLowConfidence && !unclearServiceLowConfidenceOk
-      && (typeof confidence.overall !== 'number' || confidence.overall < threshold)) {
+  if (!failOpenLowConfidence && (typeof confidence.overall !== 'number' || confidence.overall < threshold)) {
     return { allowed: false, reason: 'low_confidence', overall: confidence.overall, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
   }
 
@@ -2311,6 +2279,10 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // field happened to pick (the flag said the service is unclear), and the
     // resolver's unsupported-call veto must read the full transcript.
     ...(unclearServiceDemotedFlags.length ? {
+      // Set whenever this gate admitted the call by waiving EITHER flag: the
+      // processor's full-transcript unsupported-call veto rides this signal, not
+      // the (narrower) forceAssessmentService.
+      unclearServiceGateAdmitted: true,
       unclearServiceDemotedFlags,
       forceAssessmentService: unclearServiceDemotedFlags.includes('ambiguous_pest_or_service'),
     } : {}),

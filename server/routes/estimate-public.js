@@ -69,6 +69,8 @@ const {
   reconcilePricedTrenchingWarrantyEvidence,
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+const { lockSmsPhone, withSmsConsentLock } = require('../utils/customer-comms-lock');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const { pricedTreeShrubPalmCount } = require('../services/pricing-engine/tree-shrub-palm-priced');
@@ -144,6 +146,7 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
+const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
 function lawnCalendarBlock(services) {
@@ -13186,13 +13189,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // SKIPPED conversion (converter found nothing to convert) may still
     // return a membershipEmail payload — no membership started, so send
     // nothing for it.
-    if (!annualPrepaySelected
-      && standardConversion?.membershipEmail
-      && standardConversion?.recurringConversionSkipped !== true) {
-      const AccountMembershipEmail = require('../services/account-membership-email');
-      void AccountMembershipEmail.sendMembershipStarted(standardConversion.membershipEmail)
-        .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
-    }
+    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): for a standard recurring
+    // signup the combined onboarding email below carries the property and the
+    // plan, so membership.started waits for that send and goes out inline right
+    // after it ONLY when the send did not cover it (decided at send time; owner
+    // ruling 2026-09-30). Gate off: exactly the block below, sent now.
+    const membershipDue = !annualPrepaySelected
+      && !!standardConversion?.membershipEmail
+      && standardConversion?.recurringConversionSkipped !== true;
+    const foldMembership = SignupSingleEmail.signupLaneEligible({ annualPrepaySelected, customerId, standardConversion });
+    const sendMembershipStarted = () => require('../services/account-membership-email')
+      .sendMembershipStarted(standardConversion.membershipEmail)
+      .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
+    if (membershipDue && !foldMembership) void sendMembershipStarted();
     // "You're booked — here's what happens next" onboarding email
     // (estimate.accepted_onboarding). Post-commit, fire-and-forget, and
     // idempotent per estimate so an accept retry can't double-send. The
@@ -13223,7 +13232,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
           : ad.localeCompare(bd);
       })[0] || null;
-      void sendEstimateAcceptedOnboarding({
+      const onboardingArgs = {
         customerId,
         estimateId: estimate.id,
         acceptanceId: acceptanceRecordId,
@@ -13232,7 +13241,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
           || 'service',
         appointment: firstAcceptedAppointment,
-      });
+      };
+      if (foldMembership) {
+        // The combined signup email, then membership.started unless that send
+        // covered it (anything but a covering send, including a throw, sends it).
+        void sendEstimateAcceptedOnboarding({ ...onboardingArgs, signup: { membershipEmail: standardConversion.membershipEmail } })
+          .catch((e) => logger.error(`[estimate-accept] onboarding email failed for customer ${customerId}: ${e.message}`))
+          .then((result) => (result?.coversMembership ? null : sendMembershipStarted()));
+      } else {
+        void sendEstimateAcceptedOnboarding(onboardingArgs);
+      }
     }
     if (customerId) {
       try {
@@ -26549,6 +26567,14 @@ const SERVICE_DETAILS_SMS_DEDUP_MS = 10 * 60 * 1000;
 // makes the offer eligible again — found the claim still held and could
 // never send.
 const WITHHELD_SMS_CLAIM_RECLAIM_SECONDS = 6;
+const POLICY_BLOCKED_CLAIM_OUTCOME = 'policy_blocked';
+// Recipient-level refusal from the policy chain on the packet text. The page
+// shows body.error as-is, so this doubles as the customer-facing copy: it
+// points at the PDF button and does not say why the text was refused.
+const SERVICE_DETAILS_SMS_UNAVAILABLE = Object.freeze({
+  ok: false,
+  error: 'Text is unavailable for this number — use the PDF button to view the details instead.',
+});
 
 router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
   try {
@@ -26708,7 +26734,6 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     }
 
     if (!contact.customerPhone) return res.status(400).json({ error: 'No phone on this estimate' });
-    const TwilioService = require('../services/twilio');
     // Retry/retap dedup, scoped to THIS estimate+service+recipient: the email
     // branch is idempotency-keyed per day, but TwilioService has no
     // idempotency support, so a double-tap or client retry would stack
@@ -26733,6 +26758,18 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: 'withheld' });
       } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
     };
+    // Same durable stamp for a policy-chain refusal (suppression / consent /
+    // DNC): a cross-process loser polling the claim row reads it and answers
+    // the SAME generic 409 the winner does, instead of timing out into a 502.
+    // Bounded exactly like 'withheld': the claim-acquire takeover below lets a
+    // retap reclaim the row after WITHHELD_SMS_CLAIM_RECLAIM_SECONDS, so a
+    // stale marker can never keep answering 409 once the number is cleared.
+    // outcome is a free-form varchar(32) — no migration.
+    const markClaimPolicyBlocked = async () => {
+      try {
+        await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: POLICY_BLOCKED_CLAIM_OUTCOME });
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
+    };
     const priorClaim = serviceDetailsSmsClaims.get(dedupKey);
     if (priorClaim?.promise) {
       // A send for this exact packet is in flight — share ITS outcome rather
@@ -26750,6 +26787,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // every other one on this route.
       if (shared?.success) return await withheldOr(() => res.json({ ok: true, channel: 'sms', deduped: true }));
       if (shared?.withheld || shared?.code === 'ANNUAL_OFFER_WITHHELD') return res.status(404).json({ error: 'Estimate not found' });
+      if (shared?.policyBlocked) return res.status(409).json(SERVICE_DETAILS_SMS_UNAVAILABLE);
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     if (priorClaim?.sentAt && Date.now() - priorClaim.sentAt < SERVICE_DETAILS_SMS_DEDUP_MS) {
@@ -26761,6 +26799,11 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Cross-process gate: a SLIDING unique claim (atomic stale-takeover
     // upsert — no bucket edges) covers rolling-deploy overlap and any future
     // multi-replica config, where the Map only covers one process.
+    // sendCustomerMessage strips the leading https:// from every SMS link
+    // (owner directive; sms-link-policy), so the logged body carries the bare
+    // form. The bare URL is a substring of the scheme-ful one, so matching on
+    // it also still finds rows logged before this send moved onto the chokepoint.
+    const pdfUrlBare = stripSmsUrlScheme(pdfUrl);
     const recentPacketSend = async () => db('sms_log')
       .where({ direction: 'outbound', message_type: 'estimate_service_details' })
       .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
@@ -26768,7 +26811,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
       // so a row matches on the raw URL OR on a code minted for that exact URL.
       .where(function packetLinkInBody() {
-        this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrl])
+        this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
           .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
       })
       .whereRaw("created_at >= NOW() - interval '10 minutes'")
@@ -26792,7 +26835,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           `INSERT INTO sms_send_claims (claim_key) VALUES (?)
            ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW(), outcome = NULL
            WHERE sms_send_claims.created_at < NOW() - interval '10 minutes'
-              OR (sms_send_claims.outcome = 'withheld'
+              OR (sms_send_claims.outcome IN ('withheld', '${POLICY_BLOCKED_CLAIM_OUTCOME}')
                   AND sms_send_claims.created_at < NOW() - interval '${WITHHELD_SMS_CLAIM_RECLAIM_SECONDS} seconds')
            RETURNING id`,
           [claimKey],
@@ -26836,6 +26879,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           try {
             const claimRow = await db('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
             if (claimRow?.outcome === 'withheld') return { success: false, withheld: true };
+            if (claimRow?.outcome === POLICY_BLOCKED_CLAIM_OUTCOME) return { success: false, policyBlocked: true };
           } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome poll skipped: ${e.message}`); }
         }
         return { success: false, claimHeldElsewhere: true };
@@ -26860,87 +26904,85 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         await markClaimWithheld();
         return { success: false, withheld: true };
       }
-      // GATE_SMS_LINK_WRAP: this send bypasses sendCustomerMessage on purpose
-      // (its own claim/dedupe, window + annual-offer preSendCheck and
-      // ANNUAL_OFFER_WITHHELD result contract all hang off TwilioService.sendSMS
-      // directly), so it applies the SAME shared wrapper at this call site
-      // rather than routing through the choke point. Gate off / any mint
-      // failure = the body below is byte-identical to today. The dedupe above
-      // matches the wrapped body by the code's target_url (the pre-wrap pdfUrl).
-      const packetBody = `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`;
-      const smsLinkWrap = require('../services/messaging/sms-link-wrap');
-      let wrappedPacket = { body: packetBody, codes: [] };
-      try {
-        wrappedPacket = await smsLinkWrap.wrapPortalLinks({
-          body: packetBody,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'estimate_service_details',
-          customerId: estimate.customer_id || null,
-        });
-      } catch (e) { logger.warn(`[estimate-public] service-details SMS link wrap skipped: ${String((e && (e.code || e.name)) || 'error').slice(0, 40)}`); }
-      const smsSendResult = await TwilioService.sendSMS(
-        contact.customerPhone,
-        wrappedPacket.body,
-        {
-          customerId: estimate.customer_id || null,
-          messageType: 'estimate_service_details',
-          // Send-window classification at the provider handoff: this text
-          // is the customer's OWN live request — they tapped "text me the
-          // packet" on the estimate page seconds ago — the same
-          // self-service class as an inbound reply, so it carries
-          // conversationalContext and sends at night by design. Routed
-          // through the canonical validator anyway (this legacy path
-          // bypasses sendCustomerMessage) so any future change to that
-          // classification automatically applies here too.
-          //
-          // Codex round 1 on #4608 (P1): this path bypasses sendCustomerMessage
-          // entirely, so the chokepoint guard never gets a chance to run —
-          // composed in here instead, window check first (unchanged shape/
-          // priority), then the annual-offer guard on THIS estimate. A
-          // blocked verdict returns the same not-ok shape checkSendWindow
-          // does, so TwilioService.sendSMS withholds the send exactly like a
-          // window hold — no Twilio call — and the existing claim-release
-          // path above (a rejected sendPromise) runs unchanged. A guard
-          // infra error is caught by TwilioService's own preSendCheck
-          // wrapper and fails closed the same way (see services/twilio.js
-          // runPreSendCheck).
-          preSendCheck: async () => {
-            const { checkSendWindow } = require('../services/messaging/validators/send-window');
-            const windowVerdict = checkSendWindow({
-              channel: 'sms',
-              audience: 'customer',
-              purpose: 'conversational',
-              conversationalContext: true,
-              to: contact.customerPhone,
-            }, null, null);
-            if (!windowVerdict.ok) return windowVerdict;
-            const { annualHandoffGuard } = require('../services/estimate-annual-guard');
-            const verdict = await annualHandoffGuard({ db, estimateIds: [estimate.id] })();
-            if (verdict.blocked) {
-              return { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false };
-            }
-            return { ok: true };
-          },
+      // Routed through sendCustomerMessage (the policy chain) like every other
+      // customer/lead SMS: suppression (STOP / wrong_number / manual_dnc /
+      // non_mobile), sms_enabled consent, the send window, the annual-offer
+      // guard, the SMS link wrap and the audit row all run there. This used
+      // to call TwilioService.sendSMS directly with only a hand-composed
+      // window + annual preSendCheck, which never read messaging_suppression
+      // or notification_prefs. The claim/dedupe machinery above and below is
+      // unchanged; only the provider handoff moved. sms_log.message_type is
+      // still 'estimate_service_details' (metadata.original_message_type),
+      // which recentPacketSend() above keys on.
+      //
+      // The send window is exempt through the estimate_service_details_send
+      // customer-action entry point (validators/send-window): the customer
+      // tapped "text me the packet" seconds ago, the same self-service class
+      // as the estimate-accept texts.
+      const cmResult = await sendCustomerMessage({
+        to: contact.customerPhone,
+        body: `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
+        channel: 'sms',
+        audience: estimate.customer_id ? 'customer' : 'lead',
+        purpose: 'estimate_followup',
+        customerId: estimate.customer_id || undefined,
+        estimateId: estimate.id,
+        identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'estimate_token_verified',
+        consentBasis: estimate.customer_id ? undefined : {
+          status: 'transactional_allowed',
+          source: 'estimate_token_service_details',
+          capturedAt: new Date().toISOString(),
         },
-      );
-      // Fire-and-forget stamp of the codes this text carried. A throw above
-      // skips it (uncertain send: codes stay unstamped); a code the provider
-      // boundary stripped stays unstamped too. Log the code only.
-      if (wrappedPacket.codes.length && smsSendResult) {
-        void smsLinkWrap.settleWrappedLinks(wrappedPacket.codes, {
-          sent: smsSendResult.success === true,
-          deliveryOutcome: smsSendResult.deliveryOutcome,
-          deduped: smsSendResult.deduped,
-          provider: 'twilio',
-          providerMessageId: smsSendResult.sid,
-          withheldLinksRewritten: smsSendResult.withheldLinksRewritten,
-        }).catch((e) => logger.warn(`[estimate-public] service-details wrapped-link stamp failed: ${String((e && (e.code || e.name)) || 'error').slice(0, 40)}`));
-      }
-      // Codex round 3 on #4608 (P0): the SAME durable stamp for the OTHER
-      // withheld path — the composed preSendCheck's annual-offer block,
-      // resolved above as a coded refusal rather than a throw.
-      if (smsSendResult?.code === 'ANNUAL_OFFER_WITHHELD') await markClaimWithheld();
+        entryPoint: 'estimate_service_details_send',
+        // Suppression writers (STOP / wrong-number / DNC) serialize through
+        // lockSmsPhone. Taking the same lock here makes sendCustomerMessage
+        // re-read consent + suppression on the locked connection immediately
+        // before the Twilio call, and it FAILS CLOSED there (retryable
+        // SUPPRESSION_LOOKUP_FAILED / CONSENT_LOOKUP_FAILED) when suppression
+        // state cannot be positively loaded — so an opt-out committed after
+        // the initial read, or a read error the initial chain fails open on,
+        // can never send. Same shape as admin-leads / lead-auto-reply.
+        //
+        // A customer-backed estimate also takes the customer-comms lock BEFORE
+        // the phone lock (withSmsConsentLock's order): the global sms_enabled
+        // opt-out writer (routes/notifications.js) serializes on customer-comms,
+        // not the phone, so the notification_prefs re-read under this handoff
+        // sees it committed or the writer waits until Twilio has the request.
+        // Leads have no customer row, so they stay phone-lock only.
+        withSmsHandoff: estimate.customer_id
+          ? (dispatch) => withSmsConsentLock(db, { phone: contact.customerPhone, customerId: estimate.customer_id }, (trx) => dispatch(trx))
+          : (dispatch) => db.transaction(async (trx) => {
+            await lockSmsPhone(trx, contact.customerPhone);
+            return dispatch(trx);
+          }),
+        metadata: {
+          original_message_type: 'estimate_service_details',
+          estimate_id: estimate.id,
+          service: serviceKey,
+        },
+      });
+      // Map the chokepoint result onto the { success, deduped, code, withheld }
+      // contract the claim/response code below already speaks. `policyBlocked`
+      // = a definitive, non-retryable refusal by the policy chain (suppression,
+      // consent, DNC, identity ...): answered with one generic 409 that names
+      // no reason, and never retried.
+      const withheldByOffer = cmResult?.code === 'ANNUAL_OFFER_WITHHELD';
+      // A lookup/infra failure inside the chain (CONSENT_LOOKUP_FAILED carries
+      // no retryable flag) is transient, never a verdict on the number: it
+      // keeps the retryable 502, not the permanent 409.
+      const transientRefusal = /_(LOOKUP_)?FAILED$|_UNAVAILABLE$/.test(String(cmResult?.code || ''));
+      const smsSendResult = {
+        success: cmResult?.sent === true,
+        deduped: cmResult?.deduped === true ? true : undefined,
+        code: cmResult?.code,
+        withheld: withheldByOffer || undefined,
+        policyBlocked: cmResult?.sent !== true && cmResult?.blocked === true
+          && !withheldByOffer && !transientRefusal && cmResult?.retryable !== true,
+      };
+      // Codex round 3 on #4608 (P0): the durable stamp for the annual-offer
+      // withhold, resolved as a coded refusal rather than a throw.
+      if (withheldByOffer) await markClaimWithheld();
+      if (smsSendResult.policyBlocked) await markClaimPolicyBlocked();
       return smsSendResult;
     })();
     serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });
@@ -26966,7 +27008,12 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // claim would reopen the duplicate window it is guarding.
       if (smsResult?.claimHeldElsewhere) {
         serviceDetailsSmsClaims.delete(dedupKey);
-      } else if (withheld) {
+      } else if (withheld || smsResult?.policyBlocked) {
+        // A policy-chain refusal keeps its DB claim row for the same reason
+        // (its outcome is stamped 'policy_blocked' inside sendPromise): a
+        // cross-process loser mid-poll must still be able to read it. Only
+        // the in-process Map entry clears; the row is reclaimable after
+        // WITHHELD_SMS_CLAIM_RECLAIM_SECONDS, so a retap re-evaluates.
         // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): keep the DB
         // claim row (its outcome is already stamped 'withheld' inside
         // sendPromise, above) so a concurrent loser's poll can still read
@@ -26982,6 +27029,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         releaseClaims();
       }
       if (withheld) return res.status(404).json({ error: 'Estimate not found' });
+      // Policy-chain refusal (suppression / consent / DNC ...): one generic
+      // 409 whatever the reason, mirroring the email branch's address-level
+      // block — never says WHICH rule fired.
+      if (smsResult?.policyBlocked) return res.status(409).json(SERVICE_DETAILS_SMS_UNAVAILABLE);
       return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
     }
     // Structural fix (round 6): the LAST response site on this route —

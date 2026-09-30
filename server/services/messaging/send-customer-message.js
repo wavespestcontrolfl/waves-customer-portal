@@ -467,7 +467,17 @@ async function sendCustomerMessageCore(input) {
     // only and manual semantics are unconditional either way.
     || (['lead', 'customer'].includes(input.audience)
       && ['conversational', 'card_request'].includes(input.purpose)
-      && input.entryPoint === 'admin_communications_manual_sms');
+      && input.entryPoint === 'admin_communications_manual_sms')
+    // The estimate page's "text me the packet" send (estimate-public.js
+    // POST /:token/service-details/send, B01): a bearer-token page whose
+    // recipient can be a stranger's wrong number, so the phone lock (the STOP /
+    // wrong-number writers' own lockSmsPhone) is held through the provider
+    // request, and for a customer-backed estimate the customer-comms lock too
+    // (the sms_enabled writer's lock, taken first). Suppression and consent
+    // reload under them and fail closed. A lead has no customer row: phone only.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
+      && input.entryPoint === 'estimate_service_details_send'
+      && input.metadata?.original_message_type === 'estimate_service_details');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }

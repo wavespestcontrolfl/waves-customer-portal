@@ -1,7 +1,10 @@
 /**
  * Source guards for the self-serve arrival grace lane (owner ruling
  * 2026-09-28, "I'd rather be more lenient than strict"), scoped to the
- * ESTIMATE PICKER ONLY after Codex r1 P1 (#5314): /book (createSelfBooking)
+ * ESTIMATE PICKER ONLY after Codex r1 P1 (#5314) — and, since 2026-09-29
+ * (GATE_BOOK_ARRIVAL_GRACE, owner-approved), ALSO the /book surfaces through
+ * a SEPARATE opt-in (`bookArrivalGrace`, guarded at the bottom of this file)
+ * whose offer and commit apply the same waiver: /book (createSelfBooking)
  * and public reschedule (the rebooker's single-visit move) both run a
  * STRICT pre-verify travel probe ahead of their capacity commit check, so a
  * grace-kept slot there would 409 SLOT_TAKEN before ever reaching
@@ -116,9 +119,11 @@ test('every verifyArrivalCapacity call site passes arrivalGraceMinutes or carrie
   // a refactor that renamed the function or moved a marker too far from its
   // call would otherwise make this test vacuously pass.
   expect(totalCalls).toBeGreaterThanOrEqual(4);
-  // booking.js createSelfBooking, rebooker.js single-visit move, and
-  // slot-reservation.js commitReservation (the P0 fix, Codex r2 #5314).
-  expect(exemptCalls).toBe(3);
+  // rebooker.js single-visit move and slot-reservation.js commitReservation
+  // (the P0 fix, Codex r2 #5314). booking.js createSelfBooking left the
+  // exempt list 2026-09-29: it now passes `arrivalGraceMinutes` (the offer's
+  // own grace, GATE_BOOK_ARRIVAL_GRACE — undefined while the gate is off).
+  expect(exemptCalls).toBe(2);
   expect(offenders).toEqual([]);
 });
 
@@ -156,4 +161,43 @@ test('arrivalGrace: true is only ever passed by the estimate picker', () => {
   // packEnds:true with the estimate picker (the whole point of this guard).
   const bookingSrc = fs.readFileSync(path.join(SERVER_ROOT, 'routes/booking.js'), 'utf8');
   expect(bookingSrc).not.toMatch(/arrivalGrace:\s*true/);
+});
+
+// The /book opt-in (GATE_BOOK_ARRIVAL_GRACE, owner-approved 2026-09-29) is a
+// DIFFERENT flag from arrivalGrace above, so the estimate-picker guard keeps
+// meaning what it says. It is passed ONLY by the redeemable /book surfaces
+// whose commit is createSelfBooking (which applies the matching waiver and
+// grace bound): the booking routes themselves, re-service and inspection
+// booking — never the voice agent (phone stays end-of-day only) or public
+// reschedule (its rebooker commit still runs the strict travel probe).
+test('bookArrivalGrace is only ever passed by the /book surfaces whose commit is createSelfBooking', () => {
+  const ALLOWED = new Set([
+    'routes/booking.js', 'routes/reservice-public.js', 'routes/inspection-public.js',
+  ]);
+  const hits = [];
+  for (const file of scanFiles()) {
+    const rel = path.relative(SERVER_ROOT, file).replace(/\\/g, '/');
+    if (rel === 'services/scheduling/find-time.js') continue; // the option's own consumer
+    const source = fs.readFileSync(file, 'utf8');
+    if (/bookArrivalGrace:/.test(source)) hits.push(rel);
+  }
+  expect(hits.sort()).toEqual([...ALLOWED].sort());
+  for (const forbidden of [
+    'routes/reschedule-public.js', 'services/rebooker.js',
+    'services/voice-agent/relay-booking.js', 'services/voice-agent/relay-tools.js',
+    'services/estimate-slot-availability.js',
+  ]) {
+    const source = fs.readFileSync(path.join(SERVER_ROOT, forbidden), 'utf8');
+    expect(source).not.toMatch(/bookArrivalGrace/);
+  }
+});
+
+// createSelfBooking's ONE verifyArrivalCapacity call passes the offer's grace
+// (a real key, not a bare mention) so the bound the offer screened for is the
+// bound the commit enforces.
+test('createSelfBooking passes the offer grace to verifyArrivalCapacity', () => {
+  const source = fs.readFileSync(path.join(SERVER_ROOT, 'routes/booking.js'), 'utf8');
+  const sites = callSites(source);
+  expect(sites).toHaveLength(1);
+  expect(sites[0].span).toMatch(/arrivalGraceMinutes:\s*offerGrace > 0 \? offerGrace : undefined/);
 });

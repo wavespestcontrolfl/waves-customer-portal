@@ -54,7 +54,8 @@
  *     later retry deferral, which only ever advances send_at itself — the
  *     fixed anchor a retry's own 24h give-up measures against)
  *   { status: 'sent', lead_id, send_at, sent_at, ... }        — texted
- *   { status: 'skipped', reason, send_at, dispatched_at }     — was pending, blocked at send time
+ *   { status: 'skipped', reason, send_at, decided_at, failed? } — was pending, blocked at send time
+ *     (failed: true when delivery itself failed, not a policy block)
  * A cron tick (scheduler.js, every 5 min, mirroring reschedule-link-promises)
  * calls sweep(): stage() evaluates newly-extracted calls once, dispatch()
  * claims and sends whatever is due. Every terminal send-time decision (sent
@@ -1004,7 +1005,15 @@ async function claimForDispatch(conn, callId) {
 }
 
 async function recordDecision(conn, call, entry, { logActivity = true } = {}) {
-  await conn('call_log').where({ id: call.id }).update({ metadata: metadataPatch(conn, entry), updated_at: new Date() });
+  // decided_at: when a call reached its final outcome, so the weekly check
+  // reports it in that week rather than the week of the call. staged_at is
+  // carried through every rewrite (retries, sends, dispatch skips replace the
+  // whole entry), so the week a call was checked in never changes after
+  // staging (codex #5358 r6 P2).
+  const stagedAt = entry.staged_at || parseMetadata(call)[METADATA_KEY]?.staged_at;
+  const kept = stagedAt ? { ...entry, staged_at: stagedAt } : entry;
+  const stamped = entry.status === 'pending' ? kept : { ...kept, decided_at: new Date().toISOString() };
+  await conn('call_log').where({ id: call.id }).update({ metadata: metadataPatch(conn, stamped), updated_at: new Date() });
   if (!logActivity) return;
   const sent = entry.status === 'sent';
   await conn('activity_log').insert({
@@ -1641,8 +1650,8 @@ async function deleteConsultationLinkAttempt(attemptId) {
 async function dispatchClaimedCall(conn, call, now) {
   const entry = parseMetadata(call)[METADATA_KEY] || {};
   const leadId = entry.lead_id;
-  const skip = async (reason) => {
-    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
+  const skip = async (reason, extra = {}) => {
+    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at, ...extra });
     return { sent: false, skipped: reason };
   };
   // The processor's own ownership fence, re-checked at send time (codex
@@ -1696,7 +1705,7 @@ async function dispatchClaimedCall(conn, call, now) {
   // dispatch time. Judging the deadline only after a send attempt means a
   // provider that happens to succeed on that overdue attempt would still
   // text a stale follow-up and record it as a normal send.
-  if (pastRetryDeadline(entry, now)) return skip('send_retry_timeout');
+  if (pastRetryDeadline(entry, now)) return skip('send_retry_timeout', { failed: true });
   const lead = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first();
   const reason = await dispatchIneligibleReason({ conn, call, lead, leadId, now });
   if (reason) return skip(reason);
@@ -2055,7 +2064,7 @@ async function recordRetryableDecision(conn, call, entry, leadId, now, result, s
   // terminal skip, not a reason to leave the marker rows as if it sent.
   if (pastRetryDeadline(entry, now)) {
     await clearDispatchMarkers(call);
-    return skip(result.code || result.reason || 'send_retry_timeout');
+    return skip(result.code || result.reason || 'send_retry_timeout', { failed: true });
   }
   await clearDispatchMarkers(call);
   const rawNextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
@@ -2068,14 +2077,43 @@ async function recordRetryableDecision(conn, call, entry, leadId, now, result, s
   return { sent: false, skipped: result.code || result.reason || 'send_retryable', deferred: true };
 }
 
+// The refusals a working lane is EXPECTED to hit: the person opted out, is
+// suppressed or on do-not-call, has no consent, the number cannot take a
+// text, or a customer hold applies. Any other outcome that reaches the
+// blocked branch — a provider rejection, or a blocked result from the
+// pipeline itself (CONTRACT_VIOLATION, UNKNOWN_POLICY, a failed lookup) —
+// is a lane failure the weekly check must surface (codex #5358 r3 P1).
+// Listing the healthy codes, not the broken ones, means a new pipeline code
+// fails loud instead of reading as a normal skip.
+const EXPECTED_REFUSAL_CODES = new Set([
+  'SMS_OPTED_OUT', 'PURPOSE_OPTED_OUT', 'SUPPRESSED_OPT_OUT', 'SUPPRESSED_WRONG_NUMBER',
+  'SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_NON_MOBILE', 'SUPPRESSED_OTHER', 'DNC_SUPPRESSED',
+  'DELIVERY_SUPPRESSED', 'NON_MOBILE_SMS_RECIPIENT', 'NO_CONSENT_RECORD', 'NO_MARKETING_CONSENT',
+  'REASSIGNED_NUMBER_RISK', 'IDENTITY_TRUST_TOO_LOW', 'CHANNEL_EMAIL_ONLY', 'MOVE_HOLD',
+  'CALLBACK_NUMBER_HOLD', 'QUIET_HOURS_HOLD',
+]);
+
+// Twilio's own recipient-side rejections (unsubscribed 21610, non-mobile
+// 21614, invalid or unroutable number) come back as a provider failure with
+// providerErrorCode and no `blocked`; they are about the number, not the
+// lane (codex #5358 r5 P2).
+function isRecipientProviderRefusal(result) {
+  const { RECIPIENT_TERMINAL_TWILIO_CODES } = require('./messaging/providers/twilio-sms');
+  return result.providerErrorCode != null && (RECIPIENT_TERMINAL_TWILIO_CODES || []).includes(String(result.providerErrorCode));
+}
+
+function isExpectedRefusal(result) {
+  return (result.blocked === true && EXPECTED_REFUSAL_CODES.has(result.code)) || isRecipientProviderRefusal(result);
+}
+
 function blockedOutcomeReason(result) {
   if (result.blocked) return result.code || result.reason || 'policy_block';
   return result.code || result.reason || 'provider_failed';
 }
 
 async function recordSendOutcome(conn, call, entry, leadId, now, result) {
-  const skip = async (reason) => {
-    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
+  const skip = async (reason, extra = {}) => {
+    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at, ...extra });
     return { sent: false, skipped: reason };
   };
   const kind = classifySendOutcomeKind(result);
@@ -2088,7 +2126,10 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
   // Twilio terminal rejection, not merely a pre-dispatch policy refusal) —
   // see clearDispatchMarkers' own doc comment for why this is unconditional.
   await clearDispatchMarkers(call);
-  return skip(blockedOutcomeReason(result));
+  // An expected refusal (opt-out, suppression, no consent) is a correct
+  // skip; anything else is a failure. `failed` lets the weekly check tell
+  // the two apart without knowing every code.
+  return skip(blockedOutcomeReason(result), isExpectedRefusal(result) ? {} : { failed: true });
 }
 
 // A 'claimed' row a whole sweep tick failed to bring to a terminal status
@@ -2368,7 +2409,7 @@ module.exports = {
   // dispatchClaimedCall alone (its own pre-send deadline check already
   // gates the identical (entry, now) pair) — a direct reach-in test-only
   // export, same convention as the rest of this bag.
-  _private: {
+  _private: { isExpectedRefusal, recordDecision,
     leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently, recordRetryableDecision, smsDeclinedOnEarlierCall,
   },
 };

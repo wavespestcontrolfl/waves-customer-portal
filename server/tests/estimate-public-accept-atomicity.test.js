@@ -851,6 +851,63 @@ describe('AUDIT P1 — membership-started email suppressed for skipped conversio
   });
 });
 
+describe('ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL) — membership.started is decided at send time', () => {
+  const MEMBERSHIP = { customerId: 'cust-1', tier: 'Bronze' };
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+  const AccountMembershipEmail = require('../services/account-membership-email');
+
+  async function acceptWith(token, onboardingImpl) {
+    resetStore(recurringPestEstimate({ id: `est-${token}`, token }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: MEMBERSHIP,
+      deferredFollowUpReminderRows: [],
+    });
+    sendEstimateAcceptedOnboarding.mockReset();
+    sendEstimateAcceptedOnboarding.mockImplementation(onboardingImpl);
+    AccountMembershipEmail.sendMembershipStarted.mockClear();
+    const res = await putAccept(token);
+    await flush();
+    await flush();
+    return res;
+  }
+
+  beforeEach(() => { process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true'; });
+  afterEach(() => { delete process.env.GATE_SIGNUP_SINGLE_EMAIL; });
+
+  test('the combined send covered the plan: membership.started is NOT sent, and the sender was handed the plan args', async () => {
+    const res = await acceptWith('tok-fold-cover-x0123456789', async () => ({ sent: true, coversMembership: true }));
+    expect(res.status).toBe(200);
+    expect(sendEstimateAcceptedOnboarding).toHaveBeenCalledWith(expect.objectContaining({ signup: { membershipEmail: MEMBERSHIP } }));
+    expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['the send was accepted but did not carry the whole plan', async () => ({ sent: true })],
+    ['a suppression / preference block', async () => ({ sent: false, blocked: true })],
+    ['no address', async () => ({ sent: false, outcome: 'no_address' })],
+    ['a failed send', async () => ({ sent: false, outcome: 'failed' })],
+    ['the sender throwing', async () => { throw new Error('boom'); }],
+    ['no result at all', async () => undefined],
+  ])('%s: membership.started is sent inline, exactly once, with the same args as today', async (_label, impl) => {
+    const res = await acceptWith('tok-fold-miss-x0123456789', impl);
+    expect(res.status).toBe(200);
+    expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledTimes(1);
+    expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledWith(MEMBERSHIP);
+  });
+
+  test('gate off: membership.started is sent right away and the sender is not asked to fold anything in', async () => {
+    delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
+    await acceptWith('tok-fold-off-x0123456789', async () => ({ sent: true, coversMembership: true }));
+    expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledWith(MEMBERSHIP);
+    expect(sendEstimateAcceptedOnboarding.mock.calls[0][0]).not.toHaveProperty('signup');
+  });
+});
+
 describe('AUDIT P1 — voided annual-prepay invoice is not surfaced on retry', () => {
   test('retry skips the voided prepay-term invoice and falls back to the live accept-mint invoice', async () => {
     const accepted = recurringPestEstimate({

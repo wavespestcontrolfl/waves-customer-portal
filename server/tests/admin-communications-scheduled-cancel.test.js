@@ -19,25 +19,31 @@ jest.mock('../models/db', () => {
     if (!row) return {};
     return typeof row.metadata === 'string' ? (JSON.parse(row.metadata || '{}') || {}) : (row.metadata || {});
   };
-  // Recognizes the one raw SQL fragment the route actually sends —
-  // `COALESCE(metadata->>'review_ask_reservation', '') <> 'true'` — the
-  // same substring-matching convention this codebase's other hand-rolled db
+  // Recognizes the raw SQL fragments the writer actually sends — the same
+  // substring-matching convention this codebase's other hand-rolled db
   // mocks already use (e.g. scheduled-sms-review-dispatch.test.js).
+  // `entry_point` mirrors production's real predicate (workflowOwnerOf,
+  // the same function the writer's SQL exclusion encodes) rather than a
+  // hand-copied condition, so this mock can never drift from it. Required
+  // lazily (inside the predicate, not at factory-eval time) — this factory
+  // itself IS the '../models/db' module scheduled-sms-cancel.js requires,
+  // so requiring it up front here would be circular.
   const whereRawPredicates = {
     review_ask_reservation: (row) => metadataOf(row).review_ask_reservation !== true,
+    replay_purpose: (row) => !require('../services/scheduled-sms-cancel').workflowOwnerOf(metadataOf(row)),
   };
   function builder(table) {
     let filter = {};
-    let rawPredicate = null;
+    let rawPredicates = [];
     const qb = {
       where(cond) { filter = { ...filter, ...cond }; return qb; },
       whereRaw(sql) {
         const hit = Object.entries(whereRawPredicates).find(([needle]) => sql.includes(needle));
-        if (hit) rawPredicate = hit[1];
+        if (hit) rawPredicates.push(hit[1]);
         return qb;
       },
       async first(...cols) {
-        const row = Object.values(store[table] || {}).find((r) => matches(r, filter) && (!rawPredicate || rawPredicate(r)));
+        const row = Object.values(store[table] || {}).find((r) => matches(r, filter) && rawPredicates.every((p) => p(r)));
         if (!row) return undefined;
         return cols.length ? pick(row, cols) : { ...row };
       },
@@ -48,13 +54,13 @@ jest.mock('../models/db', () => {
         // against a snapshot read earlier. Tests hook this to simulate that
         // race landing right before THIS statement executes.
         if (db.__beforeMutate) db.__beforeMutate(table, 'update', filter);
-        const rows = Object.values(store[table] || {}).filter((r) => matches(r, filter) && (!rawPredicate || rawPredicate(r)));
+        const rows = Object.values(store[table] || {}).filter((r) => matches(r, filter) && rawPredicates.every((p) => p(r)));
         rows.forEach((r) => Object.assign(r, patch));
         return returning ? rows.map((r) => pick(r, returning)) : rows.length;
       },
       async del(returning) {
         if (db.__beforeMutate) db.__beforeMutate(table, 'del', filter);
-        const rows = Object.values(store[table] || {}).filter((r) => matches(r, filter) && (!rawPredicate || rawPredicate(r)));
+        const rows = Object.values(store[table] || {}).filter((r) => matches(r, filter) && rawPredicates.every((p) => p(r)));
         rows.forEach((r) => { delete store[table][r.id]; });
         return returning ? rows.map((r) => pick(r, returning)) : rows.length;
       },
@@ -316,5 +322,151 @@ describe('DELETE /admin/communications/scheduled/:id', () => {
     const { status, body } = await withServer((baseUrl) => cancel(baseUrl, 'does-not-exist'));
     expect(status).toBe(200);
     expect(body).toEqual({ success: true });
+  });
+
+  // Found during #5224's pre-push audit: this writer reconciles recruiting
+  // texts, review-ask reservations and parked Agent Review decisions, but
+  // never the deferred-replay registry's own terminal/finalize handling
+  // (onTerminal/finalize) — that only runs inside the scheduled-sms
+  // executor. Deleting a workflow-owned row here would strand its
+  // obligation exactly like a bare status flip used to (Codex round 1's
+  // original bug). invoice_send_deferred registers no onTerminal hook at
+  // all (it just holds its invoice's send claim) — proof the refusal must
+  // key off registry OWNERSHIP (isDeferredReplayEntryPoint), not "has an
+  // onTerminal hook".
+  test('a workflow-owned scheduled row (deferred-replay entry point, no onTerminal hook) is refused with 409, completely untouched', async () => {
+    seedScheduledRow('sms-wf', {
+      message_type: 'invoice',
+      metadata: { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1' },
+    });
+
+    const { status, body } = await withServer((baseUrl) => cancel(baseUrl, 'sms-wf'));
+
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/automated workflow \(invoice send deferred\)/i);
+    const row = db.__store.sms_log['sms-wf'];
+    expect(row).toBeDefined();
+    expect(row.status).toBe('scheduled');
+    expect(row.metadata).toMatchObject({ entry_point: 'invoice_send_deferred' });
+  });
+
+  // Ownership is NOT limited to the deferred-replay registry: several
+  // producers park scheduled rows under entry points the registry does not
+  // list (estimate_deposit_receipt_requeue, referral_nudge_deferred, ...),
+  // and review asks ride replay_purpose / bundled_review_request_id.
+  test.each([
+    ['a non-registry entry_point (deposit receipt requeue)', { entry_point: 'estimate_deposit_receipt_requeue', estimate_id: 'e-1' }, /deposit receipt requeue/i],
+    ['a replay_purpose with no entry_point', { replay_purpose: 'review_request' }, /review request/i],
+    ['a bundled review request', { bundled_review_request_id: 'rr-1' }, /review request/i],
+  ])('refuses %s with 409 and leaves the row untouched', async (_label, metadata, re) => {
+    seedScheduledRow('sms-own', { metadata });
+
+    const { status, body } = await withServer((baseUrl) => cancel(baseUrl, 'sms-own'));
+
+    expect(status).toBe(409);
+    expect(body.error).toMatch(re);
+    expect(db.__store.sms_log['sms-own']).toMatchObject({ status: 'scheduled' });
+  });
+
+  test('a plain staff-scheduled row (human_authored only) still deletes', async () => {
+    seedScheduledRow('sms-plain', { metadata: { human_authored: true } });
+
+    const { status, body } = await withServer((baseUrl) => cancel(baseUrl, 'sms-plain'));
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ success: true });
+    expect(db.__store.sms_log['sms-plain']).toBeUndefined();
+  });
+
+  // recruiting_comms_deferred is registry-owned too, but this writer
+  // already reconciles it inline (reconcileCancelledRecruitingText, tested
+  // above) to the same outcome its own onTerminal hook would produce — the
+  // one entry point exempt from the workflow-owned refusal.
+  test('a recruiting_comms_deferred row is still cancelled (its own inline reconciliation), never refused as workflow-owned', async () => {
+    seedScheduledRow('sms-r2', {
+      message_type: 'job_application_received',
+      metadata: { entry_point: 'recruiting_comms_deferred', job_application_id: 'app-2', ledger_entry_id: 'entry-2' },
+    });
+
+    const { status, body } = await withServer((baseUrl) => cancel(baseUrl, 'sms-r2'));
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ success: true });
+    expect(db.__store.sms_log['sms-r2']).toBeUndefined();
+  });
+
+  // Agent-Review-linked and staff rows carry none of the workflow-ownership
+  // markers, so the refusal predicate must never match them (the writer's
+  // own re-park/reopen handling keeps covering decision-linked rows; that
+  // path needs a richer db mock than this file's and is covered by
+  // sms-suggest-mode.test.js).
+  test('workflowOwnerOf: decision-linked, parked and plain staff metadata are not workflow-owned; the recruiting entry point is exempt', () => {
+    const { workflowOwnerOf } = require('../services/scheduled-sms-cancel');
+    expect(workflowOwnerOf({ agent_decision_id: 'dec-1' })).toBeNull();
+    expect(workflowOwnerOf({ parked_decision_ids: ['dec-1'] })).toBeNull();
+    expect(workflowOwnerOf({ human_authored: true })).toBeNull();
+    expect(workflowOwnerOf({ review_ask_reservation: true })).toBeNull();
+    expect(workflowOwnerOf({})).toBeNull();
+    expect(workflowOwnerOf(null)).toBeNull();
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', replay_purpose: 'x' })).toBeNull();
+    expect(workflowOwnerOf({ entry_point: 'referral_nudge_deferred' })).toBe('referral_nudge_deferred');
+  });
+
+  // Fable review on #5364, P2: the inline recruiting reconcile only maps
+  // 'deferred' → 'blocked', so an already-attempted recruiting row (ledger at
+  // 'handoff') must be refused, not exempted.
+  test('workflowOwnerOf: an attempted recruiting row (finalize_only or provider retry) is workflow-owned', () => {
+    const { workflowOwnerOf } = require('../services/scheduled-sms-cancel');
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', finalize_only: true })).toBe('recruiting_comms_deferred');
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', provider_retry_at: '2026-09-30T00:00:00Z' })).toBe('recruiting_comms_deferred');
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', scheduled_sms_recovered_at: '2026-09-30T00:00:00Z' })).toBe('recruiting_comms_deferred');
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', finalize_only: false })).toBeNull();
+  });
+
+  // Fable review on #5364, P2: the AI auto-reply provider retry holds no state
+  // outside its row, and the IB tool refuses it — the inbox stays its cancel path.
+  test('workflowOwnerOf: the stateless AI auto-reply retry stays deletable', () => {
+    const { workflowOwnerOf } = require('../services/scheduled-sms-cancel');
+    expect(workflowOwnerOf({ entry_point: 'twilio_inbound_ai_assistant_retry', provider_retry: true })).toBeNull();
+  });
+
+  test('workflowOwnerOf: a non-empty falsy bundled_review_request_id is owned, matching the SQL twin', () => {
+    const { workflowOwnerOf } = require('../services/scheduled-sms-cancel');
+    expect(workflowOwnerOf({ bundled_review_request_id: 0 })).toBe('review request');
+    expect(workflowOwnerOf({ bundled_review_request_id: '' })).toBeNull();
+  });
+
+  test('an attempted recruiting row is refused from the inbox and left in place', async () => {
+    seedScheduledRow('sms-rec-attempted', {
+      metadata: { entry_point: 'recruiting_comms_deferred', finalize_only: true, job_application_id: 'app-3', ledger_entry_id: 'entry-3' },
+    });
+    const { status } = await withServer((baseUrl) => cancel(baseUrl, 'sms-rec-attempted'));
+    expect(status).toBe(409);
+    expect(mockReconcileLedger).not.toHaveBeenCalled();
+    expect(db.__store.sms_log['sms-rec-attempted']).toBeDefined();
+  });
+
+  // Same race shape as the review-ask-reservation race test above, for the
+  // new CAS: an entry_point stamped by a concurrent writer between this
+  // request's pre-check and its own conditional DELETE must still refuse —
+  // never delete a row that became workflow-owned mid-flight.
+  test('an entry_point stamped concurrently, right as the route mutates, refuses instead of deleting', async () => {
+    seedScheduledRow('sms-wf-race', { metadata: {} });
+    let fired = false;
+    db.__beforeMutate = (table, op, filter) => {
+      if (!fired && table === 'sms_log' && op === 'del' && filter.id === 'sms-wf-race') {
+        fired = true;
+        db.__store.sms_log['sms-wf-race'].metadata = { entry_point: 'invoice_send_deferred' };
+      }
+    };
+
+    const { status, body } = await withServer((baseUrl) => cancel(baseUrl, 'sms-wf-race'));
+
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/automated workflow \(invoice send deferred\)/i);
+    expect(fired).toBe(true);
+    const row = db.__store.sms_log['sms-wf-race'];
+    expect(row).toBeDefined();
+    expect(row.status).toBe('scheduled'); // never deleted, never cancelled in place
   });
 });
