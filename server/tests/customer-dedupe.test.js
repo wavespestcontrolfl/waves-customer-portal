@@ -2779,6 +2779,31 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
     expect(result).not.toMatch(/promoted/);
   });
 
+  it('winner PLAIN dispute + loser dispute that had a fallback under it: the loser\'s fallback is carried too', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { priorHoldReasonOf } = require('../services/collections/collection-hold');
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'dispute on call: x [earlier hold: wrong-number report]', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call' },
+    });
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    const carry = updates.filter((u) => u.rowId === 'W1');
+    expect(carry).toHaveLength(1); // one update site, one new reason
+    expect(priorHoldReasonOf(carry[0].patch.reason)).toEqual({ prior: 'wrong-number report' });
+    expect(carry[0].patch.reason).toMatch(/^dispute raised on call \[earlier hold:/);
+    expect(result).toMatch(/carried 1/);
+  });
+
+  it('winner plain dispute + loser plain dispute: nothing to carry, winner untouched', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'dispute on call: y', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call' },
+    });
+    await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(updates.find((u) => u.rowId === 'W1')).toBeUndefined();
+  });
+
   it('winner dispute that already has its own fallback trailer + loser fallback: winner untouched', async () => {
     const { repointFlagsReleaseCollisions } = dedupe._test;
     const { trx, updates } = collisionTrx({

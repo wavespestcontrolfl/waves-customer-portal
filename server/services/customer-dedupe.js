@@ -970,22 +970,26 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
         if (winnerRow) {
           // Same trailer placeDisputeHold writes: releasing the dispute restores the
           // fallback hold (collection-hold-admin) instead of dropping its outreach block.
-          if (isDisputeHoldReason(reason) && !isDisputeHoldReason(winnerRow.reason)) {
+          // The loser's row is released below, so whatever fallback it carried must end up
+          // on the surviving row. ONE update site: at most one new reason per collision.
+          const loserIsDispute = isDisputeHoldReason(reason);
+          const winnerIsDispute = isDisputeHoldReason(winnerRow.reason);
+          let mergedReason = null;
+          if (loserIsDispute && !winnerIsDispute) {
             // Loser dispute over the winner's fallback: the winner's row is promoted to the
             // dispute (a loser dispute that itself carries a trailer keeps only the winner's).
-            await trx(table).where({ id: winnerRow.id }).update({
-              reason: embedPriorHoldReason(withoutPriorHoldReason(String(reason).trim()), winnerRow.reason),
-            });
+            mergedReason = embedPriorHoldReason(withoutPriorHoldReason(String(reason).trim()), winnerRow.reason);
             promoted += 1;
-          } else if (!isDisputeHoldReason(reason) && isDisputeHoldReason(winnerRow.reason) && !priorHoldReasonOf(winnerRow.reason)) {
-            // Winner's plain dispute + loser's fallback: the loser's row is released below, so
-            // its fallback rides in the surviving dispute's trailer or releasing that dispute
-            // would drop the outreach block the fallback carried.
-            await trx(table).where({ id: winnerRow.id }).update({
-              reason: embedPriorHoldReason(winnerRow.reason, reason),
-            });
-            carried += 1;
+          } else if (winnerIsDispute && !priorHoldReasonOf(winnerRow.reason)) {
+            // Winner's plain dispute: carry the loser's fallback into its trailer, whether the
+            // loser is itself a fallback hold or a dispute that had a fallback under it.
+            const fallback = loserIsDispute ? priorHoldReasonOf(reason) : { prior: reason };
+            if (fallback) {
+              mergedReason = embedPriorHoldReason(winnerRow.reason, fallback.prior);
+              carried += 1;
+            }
           }
+          if (mergedReason !== null) await trx(table).where({ id: winnerRow.id }).update({ reason: mergedReason });
         }
       }
       await trx(table).where({ id }).update({ [column]: winnerId, released_at: trx.fn.now() });
