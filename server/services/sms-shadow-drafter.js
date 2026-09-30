@@ -1763,6 +1763,14 @@ function identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows 
   }
   return families;
 }
+// The rows tied for the MOST RECENT payment date (rows with no readable date rank oldest; if none has a
+// date they all tie).
+function mostRecentPaymentRows(rows) {
+  const dated = rows.filter(Boolean).map((p) => ({ p, d: paymentRowDateParts(p) }));
+  const key = (d) => (d ? d.year * 10000 + d.month * 100 + d.day : -1);
+  const newest = Math.max(-1, ...dated.map((x) => key(x.d)));
+  return dated.filter((x) => key(x.d) === newest).map((x) => x.p);
+}
 function bindPaymentRow({
   family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
   inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null, partialWording = false, allowPartialPaid = false, refundSubject = false,
@@ -1774,8 +1782,18 @@ function bindPaymentRow({
   // on the same day) cannot be told apart by a status claim — it needs disambiguation, so it binds to
   // NEITHER row (filtering to the asserted family first would let "your payment failed" pick the failed one).
   if (amountCents != null && PRESENCE_STATUS_FAMILIES.has(family) && identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows: allRows }).size > 1) return onAmbiguous;
+  // Codex round-21 P1: a status claim with NO identity at all (no amount, date or tender — clause or inbound)
+  // is about "my payment" = the customer's MOST RECENT payment. It must be true of THAT payment: rows tied
+  // for the newest date decide (conflicting status families among them => ungrounded), and an older row of
+  // another status can never back it ("Your payment is processing" with a newer paid row and an older
+  // processing row is false).
+  let scopedRows = allRows;
+  if (amountCents == null && !claimedDate && !claimedTender && PRESENCE_STATUS_FAMILIES.has(family)) {
+    scopedRows = mostRecentPaymentRows(allRows);
+    if (new Set(scopedRows.map(statusFamilyOfRow)).size > 1) return onAmbiguous;
+  }
   const candidates = paymentRowCandidates({
-    family, amountCents, claimedDate, rows: allRows, partialWording, allowPartialPaid, refundSubject,
+    family, amountCents, claimedDate, rows: scopedRows, partialWording, allowPartialPaid, refundSubject,
   });
   // Codex round-6 pre-push audit P1 (reverse direction): the customer's message
   // is about a payment but NO tender could be extracted from it or the reply,

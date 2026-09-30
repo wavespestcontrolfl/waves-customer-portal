@@ -843,3 +843,40 @@ describe('round-20: "Your invoice is still processing / failed / pending", "your
     expect(replyQuotesUngroundedAmount('Your $120 payment for the invoice is still processing.', paymentsCtx([]), { byMeaning: true })).toBe(true);
   });
 });
+
+// Codex round-21 P1: an identity-free status claim ("my payment") is about the MOST RECENT payment.
+describe('round-21: amount-free, date-free, tender-free status claims are judged against the most recent payment', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const row = (status, date, over = {}) => ({ amount: 100 + Number(date.slice(-2)), status, payment_date: date, payment_method_type: 'card', ...over });
+  const ASK = 'Did my payment go through?';
+  const newerPaidOlderProcessing = [row('paid', '2026-09-20'), row('processing', '2026-09-10')];
+
+  test('the auditor case: a newer paid row + an older processing row => "is processing" is FALSE (was: bound the older row)', () => {
+    expect(rq('Your payment is processing.', ctx(newerPaidOlderProcessing), ASK)).toBe(true);
+    expect(rq('Your payment is still processing.', ctx(newerPaidOlderProcessing))).toBe(true);
+    expect(rq('Your payment failed.', ctx(newerPaidOlderProcessing), ASK)).toBe(true);
+    // ...and the mirror: the NEWEST is the processing one
+    expect(rq('Your payment is processing.', ctx([row('processing', '2026-09-20'), row('paid', '2026-09-10')]), ASK)).toBe(false);
+  });
+  test('row order does not matter — recency comes from the payment date', () => {
+    expect(rq('Your payment is processing.', ctx([...newerPaidOlderProcessing].reverse()), ASK)).toBe(true);
+    expect(rq('Your payment is processing.', ctx([row('paid', '2026-09-10'), row('processing', '2026-09-20')]), ASK)).toBe(false);
+  });
+  test('rows tied for the newest date with conflicting statuses are ambiguous => ungrounded', () => {
+    const tied = [row('paid', '2026-09-20', { amount: 50 }), row('processing', '2026-09-20', { amount: 60 })];
+    expect(rq('Your payment is processing.', ctx(tied), ASK)).toBe(true);
+    expect(rq('Your payment failed.', ctx([row('failed', '2026-09-20', { amount: 50 }), row('paid', '2026-09-20', { amount: 60 })]), ASK)).toBe(true);
+    expect(rq('Your payment is processing.', ctx([row('processing', '2026-09-20', { amount: 50 }), row('processing', '2026-09-20', { amount: 60 })]), ASK)).toBe(false); // same family
+  });
+  test('a single payment, or an explicit identity, is unchanged', () => {
+    expect(rq('Your payment is processing.', ctx([row('processing', '2026-09-10')]), ASK)).toBe(false);
+    expect(rq('Your payment failed.', ctx([row('failed', '2026-09-10')]), ASK)).toBe(false);
+    // an explicit date/amount/tender in the reply or the inbound switches to the identity rule (older row is fine)
+    expect(rq('Your $110 payment from Sep 10 is processing.', ctx(newerPaidOlderProcessing), ASK)).toBe(false);
+    expect(rq('Your payment is processing.', ctx(newerPaidOlderProcessing), 'Is my Sep 10 payment still processing?')).toBe(false);
+  });
+  test('absence claims are not scoped to the newest payment', () => {
+    expect(rq("We haven't received your payment yet.", ctx([row('processing', '2026-09-20'), row('processing', '2026-09-10')]), ASK)).toBe(false);
+  });
+});

@@ -906,6 +906,22 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
   });
 
+  // Codex round-21 P2: an UNVERIFIABLE Zelle state is not a confirmed "ineligible" — the denial can't be confirmed.
+  test.each([['payer_unverifiable', true], ['credit_unverifiable', true], ['eligibility_unverifiable', true], ['payer_owned', false], ['not_eligible', false], ['credit_pending', false]])(
+    'visibility reason %s: denial stale=%s', async (reason, stale) => {
+      process.env.ZELLE_RECIPIENT = 'pay@example.com';
+      ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: { id: 'inv-1' } } });
+      payPageZelleVisibility.mockResolvedValue({ visible: false, reason });
+      const out = await zelleDenialStale({ customerId: 'c1', dbh });
+      if (stale) {
+        expect(out.stale).toBe(true);
+        expect(out.reason).toMatch(/^(?:payer_unverifiable|credit_unverifiable|zelle_recheck_failed)$/);
+      } else {
+        expect(out).toEqual({ stale: false });
+      }
+    },
+  );
+
   test('an unverifiable check fails CLOSED (blocks the send)', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('db down'));

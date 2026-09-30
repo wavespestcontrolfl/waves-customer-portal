@@ -216,3 +216,32 @@ describe('refund-completion and invoice-status replies are rechecked at send tim
     await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your invoice is still processing.', strict: true, dbh })).resolves.toEqual(STALE);
   });
 });
+
+// Codex round-21 P1: paid-family wording about a Zelle payment is a HISTORICAL receipt, not a Zelle offer.
+describe('a Zelle receipt written as "is paid" is not treated as an offer', () => {
+  const { classifyZelleClause, hasAffirmativeZelleMention, outgoingAmountsStale } = require('../services/sms-amount-recheck');
+  const zellePaid = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-9 — zelle' };
+  const RECEIPTS = [
+    'Your $120 Zelle payment from Sep 12 is paid.',
+    'Your $120 Zelle payment from Sep 12 shows as paid.',
+    'Your Zelle payment from Sep 12 is marked paid.',
+    'Your $120 Zelle payment from Sep 12 was refunded.',
+    'Your $120 Zelle payment from Sep 12 is still processing.',
+  ];
+  test.each(RECEIPTS)('%s => receipt, no affirmative Zelle mention', (body) => {
+    expect(classifyZelleClause(body)).toBe('receipt');
+    expect(hasAffirmativeZelleMention(body)).toBe(false);
+  });
+  test('genuine offers and instruction wording are still offers', () => {
+    for (const body of ['You can pay with Zelle.', 'Please Zelle $120 to the office.', 'Your $120 Zelle payment from Sep 12 is paid — you can Zelle the rest.', 'For your Zelle payment, use old@example.com']) {
+      expect({ body, aff: hasAffirmativeZelleMention(body) }).toEqual({ body, aff: true });
+    }
+  });
+  test('send time with NO zelleInvoiceId: the receipt is judged by the payment binder (not blocked as an unresolved offer)', async () => {
+    const body = 'Your $120 Zelle payment from Sep 12 is paid.';
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([zellePaid]));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', zelleInvoiceId: null, dbh })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([]));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', zelleInvoiceId: null, dbh })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+});

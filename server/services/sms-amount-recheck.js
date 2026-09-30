@@ -151,8 +151,13 @@ function classifyZelleClause(clause) {
   // the status grounding in replyQuotesUngroundedAmount (bindPaymentRow), never
   // the recipient/invoice-eligibility recheck. A contact was handled above
   // (always an offer); an instruction marker keeps it an offer.
+  // Codex round-21 P1: ANY payment claim the drafter's shared enumerator recognizes (receipt, paid-family
+  // wording like "is paid" / "shows as paid", every status family) is historical — one definition with the
+  // draft validator. (A caller that mocks the drafter to a stub keeps the phrase check alone.)
+  const recognizedClaim = typeof drafter.enumeratePaymentClaims === 'function'
+    && drafter.enumeratePaymentClaims(text, {}).claims.length > 0;
   if (namesPastPayment && !ZELLE_INSTRUCTION_MARKER_RE.test(text)
-      && paymentStatusPhraseClaim(text, bodyAmountCents(text).length > 0)) return 'receipt';
+      && (recognizedClaim || paymentStatusPhraseClaim(text, bodyAmountCents(text).length > 0))) return 'receipt';
   // A clause naming a specific contact (email/phone) is ALWAYS live payment
   // instructions, whatever verb it does or doesn't carry (finding 2):
   // "For your Zelle payment, use old@example.com" names no offer VERB, but
@@ -381,6 +386,7 @@ function bodyNeedsPaymentRecheck(body) {
  * recipient configured, no open invoice, or the invoice fails the pay page's Zelle visibility); stale
  * ('zelle_now_available') when it would be offered now. An unverifiable check fails CLOSED.
  */
+const ZELLE_DENIAL_UNVERIFIABLE = new Set(['zelle_recheck_failed', 'payer_unverifiable', 'credit_unverifiable']);
 async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null } = {}) {
   const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
   if (!manualPayOptionsFromEnv()?.zelle?.recipient) return { stale: false };
@@ -395,7 +401,9 @@ async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null } 
     if (!invoiceId) return { stale: false }; // nothing to pay by Zelle => "not available" is true
     const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
     if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
-    return eligibility.reason === 'zelle_recheck_failed' ? { stale: true, reason: 'zelle_recheck_failed' } : { stale: false };
+    // an UNVERIFIABLE state (lookup failed, payer or credit state unknown) is not a confirmed "ineligible" —
+    // the denial can't be confirmed, so block (Codex round-21 P2); only confirmed reasons let it stand
+    return ZELLE_DENIAL_UNVERIFIABLE.has(eligibility.reason) ? { stale: true, reason: eligibility.reason } : { stale: false };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] Zelle denial recheck failed for customer ${customerId}: ${err.message}; blocking send`);
     return { stale: true, reason: 'zelle_recheck_failed' };
