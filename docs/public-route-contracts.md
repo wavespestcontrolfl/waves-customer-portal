@@ -3694,7 +3694,7 @@ the /rate page per its every-failure-lands-somewhere contract); the page
 GET carries a 30/min limiter. `/:token/go` is the
 tracked redirect (ALWAYS live, not gate-dependent; GATE_REVIEW_DIRECT_LINK now only decides whether ask texts and emails link here or to the /rate thank-you page): the same 32–64 URL-safe token format gate, 30
 req/min per-IP limit, stamps open/click on the review_requests row, stops
-EVERY later review-ask path for the customer in one click (`ReviewService.stopFutureAsks`: the clicked request's cadence and any active/deferred cadence, a cadence parked for visit-summary recovery, queued one-off asks, due Day-3 follow-ups; a failure keeps the customer on the /rate page), fire-and-forgets the referral invite
+EVERY later review-ask path for the customer in one click (`ReviewService.stopFutureAsks`: the clicked request's cadence and any active/deferred cadence, a cadence parked for visit-summary recovery, queued one-off asks, due Day-3 follow-ups; run under the same per-customer `review-send:<customerId>` lock every dispatcher takes, with a bounded ~2 s wait; a lock timeout, a still-reserved send or any failure keeps the customer on the /rate page, and the next tap succeeds once the send has landed), fire-and-forgets the referral invite
 email on the FIRST tracked click only (`sendReferralInviteEmail`, trigger
 `google_review_click`, once per customer; owner ruling 2026-09-29; never
 delays or breaks the redirect; bot fetches, expired, finalized and

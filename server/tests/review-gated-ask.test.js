@@ -99,6 +99,15 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
     return (r) => branches.some((b) => b(r));
   }
 
+  const reservedRow = (r) => (state.rows.sms_log || []).some((l) => l.status === 'sending'
+    && l.metadata?.review_ask_reservation === true && String(l.metadata?.review_request_id) === String(r.id));
+  const existsFrom = (fn) => {
+    let from = null;
+    const rec = { select() { return rec; }, from(t) { from = t; return rec; }, whereRaw() { return rec; }, where() { return rec; }, whereNotNull() { return rec; } };
+    fn.call(rec);
+    return from;
+  };
+
   function filtered(q) {
     let rows = [...(state.rows[q.table] || [])];
     rows = rows.filter((r) => q.equals.every(([k, v]) => val(r, k) === v));
@@ -140,7 +149,10 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; },
       forUpdate() { return this; },
-      whereNotExists() { return this; },
+      // Only the send-reservation subquery (sms_log 'sending' review_ask_reservation
+      // for this request) is modeled; other EXISTS fragments stay no-ops.
+      whereExists(fn) { if (existsFrom(fn) === 'sms_log') this.orGroups.push(reservedRow); return this; },
+      whereNotExists(fn) { if (existsFrom(fn) === 'sms_log') this.orGroups.push((r) => !reservedRow(r)); return this; },
       modify(fn) { fn(this); return this; },
       async pluck(c) { return filtered(this).map((r) => val(r, c)); },
       async del() {
@@ -643,6 +655,53 @@ describe('portal review card — futureAskState / stopFutureAsks (real overlappi
     test('a healthy summary (not uncertain) adds nothing', async () => {
       installMock({ customers: [CUSTOMER], ...summaryRows(), visit_effects: [], review_requests: [live('a', 2)] });
       expect((await ReviewService.futureAskState('cust-1')).possible).toBe(false);
+    });
+  });
+
+  describe('an ask RESERVED for send (sms_log review_ask_reservation still sending)', () => {
+    const reservedWorld = () => ({
+      customers: [CUSTOMER],
+      review_requests: [live('a', 5), { ...queuedOneOff(), scheduled_for: new Date(Date.now() - 60000) }],
+      sms_log: [{ id: 'sms-1', status: 'sending', metadata: { review_ask_reservation: true, review_request_id: 'rr-queued' } }],
+    });
+
+    test('a reserved pending ask is a NON-stoppable reserved_send reason: the card is hidden even with a live token', async () => {
+      installMock(reservedWorld());
+      const state = await ReviewService.futureAskState('cust-1');
+      expect(state.reasons).toContainEqual({ key: 'reserved_send', stoppable: false });
+      expect(state).toMatchObject({ possible: true, stoppable: false, stoppableToken: null });
+      expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
+    });
+
+    test('a click that finds the reservation still active stops everything else but reports NOT stopped', async () => {
+      const state = installMock(reservedWorld());
+      const out = await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(out).toEqual({ stopped: false, outstanding: ['reserved_send'] });
+      expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('pending'); // not superseded
+    });
+
+    test('a click DURING the send waits for the dispatcher lock, then (after the send commits) stops the follow-up and reports stopped', async () => {
+      const state = installMock(reservedWorld());
+      lockState.held = true; // the dispatcher holds review-send:<customer> around the provider call
+      setTimeout(() => {
+        // The send lands: the ask is delivered, the reservation resolves, the lock frees.
+        Object.assign(state.rows.review_requests.find((r) => r.id === 'rr-queued'), { status: 'sent', sms_sent_at: new Date(), followup_sent: false });
+        state.rows.sms_log[0].status = 'sent';
+        lockState.held = false;
+      }, 350);
+      const started = Date.now();
+      const out = await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked', lockWaitMs: 3000 });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+      expect(out).toEqual({ stopped: true, outstanding: [] });
+      expect(state.rows.review_requests.find((r) => r.id === 'rr-queued')).toMatchObject({ status: 'sent', followup_sent: true });
+    });
+
+    test('a lock that never frees fails closed with lock_timeout and changes nothing', async () => {
+      const state = installMock({ ...reservedWorld(), review_sequences: [seq()] });
+      lockState.held = true;
+      const out = await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked', lockWaitMs: 300 });
+      expect(out).toEqual({ stopped: false, outstanding: ['lock_timeout'] });
+      expect(seqRow(state).status).toBe('active');
     });
   });
 

@@ -10,7 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ gates: {}, isEnabled: jest.fn() }));
 jest.mock('../services/review-request', () => ({
   REVIEW_TOKEN_RE: /^[A-Za-z0-9_-]{32,64}$/,
-  stopFutureAsks: jest.fn(async () => {}),
+  stopFutureAsks: jest.fn(async () => ({ stopped: true, outstanding: [] })),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => {}) }));
 jest.mock('../services/referral-invite-email', () => ({ sendReferralInviteEmail: jest.fn(async () => null) }));
@@ -120,6 +120,28 @@ describe.each([true, false])('GATE_REVIEW_DIRECT_LINK=%s (review sequences ON) â
     expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
     await flush();
     expect(sendReferralInviteEmail).not.toHaveBeenCalled();
+  });
+
+  test('outstanding asks that could not be stopped (lock timeout / reserved send): stays on /rate, no invite; the next tap after the send lands succeeds', async () => {
+    stopFutureAsks.mockResolvedValueOnce({ stopped: false, outstanding: ['lock_timeout'] });
+    let res = await go();
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
+    await flush();
+    expect(sendReferralInviteEmail).not.toHaveBeenCalled();
+    expect(db.state.request.redirected_at).toBeNull(); // the first-click claim was NOT consumed
+
+    stopFutureAsks.mockResolvedValueOnce({ stopped: false, outstanding: ['reserved_send'] });
+    res = await go();
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
+
+    // The send has landed; the follow-ups are stopped: the same link now goes to Google, invite once.
+    res = await go();
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(loc.googleReviewUrl);
+    await flush();
+    expect(stopFutureAsks).toHaveBeenCalledTimes(3);
+    expect(sendReferralInviteEmail).toHaveBeenCalledTimes(1);
   });
 
   test('a link-scanner / bot fetch records nothing and sends no invite', async () => {

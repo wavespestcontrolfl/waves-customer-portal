@@ -194,10 +194,14 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // instead of Google, so nothing keeps chasing a customer who already
     // reached the review form (Codex P2, r1).
     try {
-      await require('../services/review-request').stopFutureAsks(request.customer_id, {
+      const stop = await require('../services/review-request').stopFutureAsks(request.customer_id, {
         sequenceId: request.sequence_id || null,
         reason: 'clicked',
       });
+      // Something outstanding could not be stopped (the send lock never freed,
+      // or an ask is still reserved / mid-send): fail closed. The customer's
+      // next tap on the rate page's button retries once the send has landed.
+      if (!stop || stop.stopped !== true) throw new Error(`outstanding: ${(stop?.outstanding || ['unknown']).join(',')}`);
     } catch (err) {
       logger.warn(`[review-gate] stopping later asks on click failed — rate-page fallback: ${err.message}`);
       return res.redirect(302, ratePageFallback);

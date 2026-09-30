@@ -842,6 +842,19 @@ async function reserveSendableReviewSms({ request, to, body }) {
   });
 }
 
+// A pending ask with an ACTIVE send reservation: its sms_log evidence row is
+// still 'sending', so a dispatcher holds (or crashed holding) the provider
+// handoff — it is sendable or retryable and must never be superseded or
+// treated as stoppable. Used as the callback of whereExists / whereNotExists
+// (`this` is the subquery builder); shared by supersedeQueuedAsks,
+// _reservedPendingAsk and so futureAskState / stopFutureAsks.
+function activeSendReservation() {
+  this.select(1).from("sms_log")
+    .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
+    .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
+    .where("sms_log.status", "sending");
+}
+
 // Queued asks an enrollment replaces. Exported for the PostgreSQL test: the
 // in-flight carve-out is a correlated NOT EXISTS on JSON metadata, which the
 // unit suite's query mock cannot evaluate.
@@ -864,12 +877,7 @@ function supersedeQueuedAsks(customerId) {
       .whereIn("id", candidates.map((row) => row.id))
       .where({ status: "pending" })
       .whereNull("sms_sent_at")
-      .whereNotExists(function () {
-        this.select(1).from("sms_log")
-          .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
-          .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
-          .where("sms_log.status", "sending");
-      })
+      .whereNotExists(activeSendReservation)
       .update({ status: "suppressed" });
   });
 }
@@ -5493,6 +5501,9 @@ const ReviewService = {
    *                         REMOVED (no sequence for the record): the recovery
    *                         enrolls a fresh ask (enrollVisitCompletionReview)
    *   queued_one_off        pending scheduled ASK            -> processScheduled
+   *   reserved_send         pending ask with an active sms_log send reservation:
+   *                         a dispatcher holds (or crashed holding) the provider
+   *                         handoff, so it is sendable/retryable and NOT stoppable
    *   unsent_sending        'sending' with no sms_sent_at    -> reconcileStrandedSends
    *                         may release it back to the scheduler
    *   followup_due          delivered ask with followup_sent=false -> processFollowups
@@ -5535,6 +5546,7 @@ const ReviewService = {
     }
 
     if (await this._queuedOneOffAsk(customerId)) add("queued_one_off", true);
+    if (await this._reservedPendingAsk(customerId)) add("reserved_send", false);
     if (await this._unsentSendingAsk(customerId)) add("unsent_sending", false);
     if (await this._followupPendingBase(db("review_requests").where({ customer_id: customerId })).first("id")) add("followup_due", true);
 
@@ -5550,10 +5562,36 @@ const ReviewService = {
    * and every active / deferred cadence of the customer, relabels a cadence
    * parked for summary recovery so the recovery can no longer resume it (the
    * one-cadence-per-record rule then refuses a fresh enrollment too),
-   * supersedes queued asks, and marks due Day-3 follow-ups handled. Throws on
-   * any failure so the caller can keep the customer on the rate page.
+   * supersedes queued asks, and marks due Day-3 follow-ups handled. Returns
+   * { stopped, outstanding }; a thrown failure or stopped:false means the caller
+   * keeps the customer on the rate page.
    */
-  async stopFutureAsks(customerId, { sequenceId = null, reason = "clicked" } = {}) {
+  async stopFutureAsks(customerId, { sequenceId = null, reason = "clicked", lockWaitMs = 2000 } = {}) {
+    // The stop runs under the SAME per-customer lock every dispatcher takes
+    // around a provider handoff (processScheduled, the sequence step runner,
+    // dispatchReviewAsk, sendGatedAsk, create): a click can never interleave
+    // with an in-flight send. Bounded wait; a lock that never frees means we
+    // cannot prove nothing is mid-send, so nothing is claimed stopped.
+    const deadline = Date.now() + lockWaitMs;
+    for (;;) {
+      const result = await runExclusive(`review-send:${customerId}`, () => this._stopFutureAsksLocked(customerId, { sequenceId, reason }), { recordHealth: false, waitForSlot: false });
+      if (!wasLockSkipped(result)) return result;
+      if (Date.now() >= deadline) return { stopped: false, outstanding: ["lock_timeout"] };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  },
+
+  /**
+   * The stop itself (caller holds review-send:<customer>). Returns
+   * { stopped, outstanding }: `outstanding` names what could NOT be stopped —
+   * a pending ask whose send reservation is still active (supersedeQueuedAsks
+   * skips it). After the lock is won nothing is mid-send, so what remains is a
+   * stranded reservation the reconciliation owns; the caller fails closed until
+   * it settles. (A claimed-but-unsent 'sending' row hides the portal card via
+   * futureAskState but does not block a click: one permanently stranded row
+   * must not lock a customer out of Google.)
+   */
+  async _stopFutureAsksLocked(customerId, { sequenceId, reason }) {
     if (sequenceId) await this.stopReviewSequence(sequenceId, reason);
     const live = await db("review_sequences").where({ customer_id: customerId }).whereIn("status", ["active", "deferred"]).select("id");
     for (const seq of live) await this.stopReviewSequence(seq.id, reason);
@@ -5564,6 +5602,18 @@ const ReviewService = {
     await supersedeQueuedAsks(customerId);
     await this._followupPendingBase(db("review_requests").where({ customer_id: customerId }))
       .update({ followup_sent: true, followup_sent_at: new Date() });
+    const outstanding = [];
+    if (await this._reservedPendingAsk(customerId)) outstanding.push("reserved_send");
+    return { stopped: outstanding.length === 0, outstanding };
+  },
+
+  /** A pending ask with an active send reservation (see activeSendReservation). */
+  async _reservedPendingAsk(customerId) {
+    return db("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereExists(activeSendReservation)
+      .first("id");
   },
 
   /**
