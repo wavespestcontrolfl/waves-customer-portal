@@ -14,7 +14,7 @@ jest.mock('../models/db', () => {
 
 const {
   runCallBookingLinkWeeklyCheck,
-  _private: { composeWeeklyCheck, windowStart, dedupeKeyFor, reasonLabel, SUMMARY_MAX },
+  _private: { composeWeeklyCheck, reportWindow, dedupeKeyFor, reasonLabel, SUMMARY_MAX },
 } = require('../services/call-booking-link-weekly-check');
 
 const NOW = new Date('2026-10-05T12:13:00.000Z'); // Monday 8:13 AM ET
@@ -158,17 +158,33 @@ describe('reasonLabel', () => {
 
 // codex #5358 r3 P1: the window starts at the same ET wall clock seven
 // calendar days back, so runs either side of a DST change meet exactly.
-describe('windowStart', () => {
-  test('the Monday after the fall change reaches back to the previous run', () => {
+describe('reportWindow', () => {
+  test('the Monday after the fall change reaches back to the previous tick', () => {
     const before = new Date('2026-10-26T12:13:00.000Z'); // Mon Oct 26 8:13 EDT
     const after = new Date('2026-11-02T13:13:00.000Z'); // Mon Nov 2 8:13 EST
-    expect(windowStart(after).toISOString()).toBe(before.toISOString());
+    expect(reportWindow(after)).toEqual({ start: before, end: after });
   });
-  test('the Monday after the spring change reaches back to the previous run', () => {
+  test('the Monday after the spring change reaches back to the previous tick', () => {
     const before = new Date('2027-03-08T13:13:00.000Z'); // Mon Mar 8 8:13 EST
     const after = new Date('2027-03-15T12:13:00.000Z'); // Mon Mar 15 8:13 EDT
-    expect(windowStart(after).toISOString()).toBe(before.toISOString());
+    expect(reportWindow(after)).toEqual({ start: before, end: after });
   });
+  // codex #5358 r4 P2: a run that waited for its lock covers the same week.
+  test('a run that waited for the lock reports the same fixed week', () => {
+    expect(reportWindow(new Date(NOW.getTime() + 10 * 60 * 1000))).toEqual(reportWindow(NOW));
+    expect(reportWindow(NOW).end).toEqual(NOW);
+  });
+  test('a run before Monday 8:13 reports the week that ended last Monday', () => {
+    const early = new Date('2026-10-05T11:00:00.000Z'); // Mon 7:00 EDT
+    expect(reportWindow(early).end).toEqual(new Date('2026-09-28T12:13:00.000Z'));
+  });
+});
+
+// codex #5358 r4 P2: outcomes count by their own time, so a call from two
+// weeks ago that failed this week is this week's error.
+test('an old call that failed inside the week is counted', () => {
+  const rows = [{ status: 'skipped', reason: 'worker_error', created_at: new Date(NOW.getTime() - 12 * 24 * 3600 * 1000).toISOString(), decided_at: new Date(NOW.getTime() - 2 * 24 * 3600 * 1000).toISOString() }];
+  expect(composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW).summary).toBe('1 error');
 });
 
 describe('dedupeKeyFor', () => {

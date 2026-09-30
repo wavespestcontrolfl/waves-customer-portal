@@ -20,7 +20,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const { deliverOpsDigest } = require('./ops-digest');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
-const { etWeekStart, addETDaysAtWallClock } = require('../utils/datetime-et');
+const { etWeekStart, addETDaysAtWallClock, parseETDateTime } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
 const { GATE, METADATA_KEY, activationBoundary } = require('./call-booking-link-text');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
@@ -79,27 +79,35 @@ function reasonLabel(reason) {
   return r.replace(/_/g, ' ');
 }
 
-// A send or a failure can land a day or more after its call (2h delay,
-// next-morning window, 24h of retries), so the query reaches back further
-// than the week and compose sorts the rows: calls checked by call time,
-// outcomes by the time they happened.
-const LOOKBACK_EXTRA_MS = 3 * 24 * 60 * 60 * 1000;
+// The report covers one FIXED week: from the scheduled Monday 8:13 ET tick
+// seven calendar days back up to the most recent one at or before `now`.
+// Every time test (call, send, final decision) uses these same two bounds,
+// so consecutive reports meet exactly however long a run waited for its
+// lock or whenever a DST change falls (codex #5358 r3 + r4).
+const TICK_HOUR = 8;
+const TICK_MINUTE = 13;
 
-// Same Eastern wall-clock time seven calendar days back, so consecutive
-// Monday runs cover back-to-back windows across a DST change (a flat 168h
-// would drop or double-count an hour; codex #5358 r3 P1).
-function windowStart(now) {
-  return addETDaysAtWallClock(now, -WINDOW_DAYS);
+function reportWindow(now) {
+  let end = parseETDateTime(`${etWeekStart(now)}T0${TICK_HOUR}:${TICK_MINUTE}:00`);
+  if (end.getTime() > now.getTime()) end = addETDaysAtWallClock(end, -WINDOW_DAYS);
+  return { start: addETDaysAtWallClock(end, -WINDOW_DAYS), end };
 }
 
+// Rows the week needs, each by its own time: calls made in the window, sends
+// and final decisions reached in it whatever the call's age (codex #5358 r4
+// P2), and every unresolved send whatever its age, so a stuck row keeps
+// being reported until it resolves (pre-push P1).
+const OUTCOME_IN_WINDOW = "(metadata->?->>?)::timestamptz >= ? AND (metadata->?->>?)::timestamptz < ?";
+
 async function loadWeek(now = new Date()) {
+  const { start, end } = reportWindow(now);
   const rows = await db('call_log')
     .modify((q) => whereNotSandboxCall(q)) // the sweep never texts a sandbox call either
     .whereRaw('metadata->? IS NOT NULL', [METADATA_KEY])
-    // An unresolved send is loaded whatever its age, so a stuck row keeps
-    // being reported until it resolves (pre-push P1).
     .where((q) => q
-      .where('created_at', '>=', new Date(windowStart(now).getTime() - LOOKBACK_EXTRA_MS))
+      .where((w) => w.where('created_at', '>=', start).where('created_at', '<', end))
+      .orWhereRaw(OUTCOME_IN_WINDOW, [METADATA_KEY, 'sent_at', start, METADATA_KEY, 'sent_at', end])
+      .orWhereRaw(OUTCOME_IN_WINDOW, [METADATA_KEY, 'decided_at', start, METADATA_KEY, 'decided_at', end])
       .orWhereRaw('metadata->?->>? IN (?, ?)', [METADATA_KEY, 'status', 'pending', 'claimed']))
     .select(
       'created_at',
@@ -112,11 +120,12 @@ async function loadWeek(now = new Date()) {
     );
   const job = await db('job_health').where({ job_name: JOB_NAME }).first('last_success_at', 'consecutive_failures');
   const boundary = await activationBoundary(db);
-  const since = new Date(Math.max(windowStart(now).getTime(), boundary.getTime()));
+  const since = new Date(Math.max(start.getTime(), boundary.getTime()));
   const unstamped = await db('call_log')
     .modify((q) => whereNotSandboxCall(q)) // stage() never sees a sandbox call
     .where('v2_extraction_status', 'valid')
     .where('created_at', '>=', since)
+    .where('created_at', '<', end)
     .whereNull('processing_token')
     .where('updated_at', '<=', new Date(now.getTime() - UNCHECKED_AFTER_MS))
     .whereRaw('metadata->? IS NULL', [METADATA_KEY])
@@ -194,9 +203,9 @@ function healthySummary(checkedCount, topSkips) {
 
 // Pure: the week's numbers → bell headline/summary + detail text.
 function composeWeeklyCheck({ rows = [], job = null, unchecked = 0 }, now = new Date()) {
-  const since = windowStart(now);
+  const { start, end } = reportWindow(now);
   // Rows without a time (callers passing their own rows) count as this week.
-  const inWindow = (at) => !at || (new Date(at).getTime() >= since.getTime() && new Date(at).getTime() <= now.getTime());
+  const inWindow = (at) => !at || (new Date(at).getTime() >= start.getTime() && new Date(at).getTime() < end.getTime());
   // A call that predates the gate going live is not this week's news.
   const notPre = rows.filter((r) => r.reason !== 'pre_activation');
   const live = notPre.filter((r) => inWindow(r.created_at));
@@ -224,8 +233,13 @@ function composeWeeklyCheck({ rows = [], job = null, unchecked = 0 }, now = new 
   return { headline, summary, detail, problem: problems.length > 0, sentCount: t.sent, checked: live.length };
 }
 
+// Keyed by the week the report covers (its end tick), not the run time.
+function reportWeekKey(now = new Date()) {
+  return etWeekStart(reportWindow(now).end);
+}
+
 function dedupeKeyFor(now = new Date()) {
-  return `${OPS_KEY}:${etWeekStart(now)}`;
+  return `${OPS_KEY}:${reportWeekKey(now)}`;
 }
 
 // Durable weekly-send guard, same as agent-gap-digest: runExclusive only
@@ -297,7 +311,7 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
       audience: 'owner',
       dedupeKey: dedupeKeyFor(now),
       count: composed.checked,
-      itemKeys: [etWeekStart(now)],
+      itemKeys: [reportWeekKey(now)],
       ringOnFirstIdentity: true,
       sendEmail: () => mailer.sendOne({
         to,
@@ -324,5 +338,5 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
 
 module.exports = {
   runCallBookingLinkWeeklyCheck,
-  _private: { composeWeeklyCheck, windowStart, dedupeKeyFor, reasonLabel, clampSummary, loadWeek, OPS_KEY, SUMMARY_MAX },
+  _private: { composeWeeklyCheck, reportWindow, dedupeKeyFor, reasonLabel, clampSummary, loadWeek, OPS_KEY, SUMMARY_MAX },
 };

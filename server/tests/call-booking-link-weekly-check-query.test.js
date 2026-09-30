@@ -33,9 +33,21 @@ const { _private: { loadWeek } } = require('../services/call-booking-link-weekly
 
 test('the weekly read keeps pending and claimed rows of any age', async () => {
   await loadWeek(new Date('2026-10-05T12:19:00.000Z'));
-  const statusOr = mockCalls.find((c) => c.table === 'call_log' && c.name === 'orWhereRaw');
+  const statusOr = mockCalls.find((c) => c.table === 'call_log' && c.name === 'orWhereRaw' && /IN \(/.test(c.args[0]));
   expect(statusOr).toBeDefined();
   expect(statusOr.args[1]).toEqual(['call_booking_link_text', 'status', 'pending', 'claimed']);
   const created = mockCalls.find((c) => c.table === 'call_log' && c.name === 'where' && c.args[0] === 'created_at');
   expect(created).toBeDefined();
+});
+
+// codex #5358 r4 P2: a send or a final decision in the week is loaded by its
+// own time, whatever the call's age.
+test('the weekly read loads sends and decisions by their own time', async () => {
+  mockCalls.length = 0;
+  await loadWeek(new Date('2026-10-05T12:13:00.000Z'));
+  const byTime = mockCalls.filter((c) => c.table === 'call_log' && c.name === 'orWhereRaw' && /timestamptz/.test(c.args[0]));
+  expect(byTime.map((c) => c.args[1][1])).toEqual(['sent_at', 'decided_at']);
+  const [, , start, , , end] = byTime[0].args[1];
+  expect(start.toISOString()).toBe('2026-09-28T12:13:00.000Z');
+  expect(end.toISOString()).toBe('2026-10-05T12:13:00.000Z');
 });
