@@ -7493,6 +7493,17 @@ const InvoiceService = {
           .whereNull("scheduled_send_attempts")
           .orWhere("scheduled_send_attempts", "<", 5),
       )
+      // Invoices held by a customer's active DISPUTE hold never take a page
+      // slot (owner ruling 2026-09-30): a pile of held invoices, re-due every
+      // tick and oldest first, must not starve the unheld ones behind them.
+      // A payer-billed invoice goes to the payer's AP inbox and is never held.
+      // The delivery-boundary check below stays: it is the authoritative
+      // answer for a hold that lands between this read and the send.
+      .where((q) =>
+        q.whereNotNull("payer_id").orWhereNotExists(function noActiveDisputeHold() {
+          require("./collections/collection-hold").disputeHoldExistsSql(this, "invoices.customer_id");
+        }),
+      )
       .orderBy("scheduled_send_at", "asc")
       .limit(limit)
       .select(

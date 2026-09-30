@@ -78,6 +78,8 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
   // The ops script path (ops/agents/collections-flag.js): releaseFlag directly, no admin route.
   const releaseViaOpsScript = (customerId) => require('../services/collections/outbound-voice/flags').releaseFlag({ customerId, flag: 'collection_hold' });
   const makeDueNow = (id) => db('invoices').where({ id }).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+  // Queue, then make it unambiguously due (the DB's now() can sit a sub-millisecond ahead of the sender's JS clock).
+  const queueDue = async (id) => { await Hold.queueHeldInvoiceForSender(id); await makeDueNow(id); };
   // The sender walks the whole due queue; this suite only asserts on its own invoices.
   const sentIds = () => sendSpy.mock.calls.map((c) => c[0]);
 
@@ -148,14 +150,20 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
   });
 
   describe('the sender under a hold', () => {
-    test('defers a due invoice: still scheduled, pushed a tick out, NO attempt spent, claim released, nothing sent', async () => {
+    test('a hold that lands between the due read and the send is caught at the delivery boundary: still scheduled, pushed a tick out, NO attempt spent, claim released, nothing sent', async () => {
       const c = await newCustomer();
-      await placeHold(c);
       const inv = await newInvoice(c);
-      await Hold.queueHeldInvoiceForSender(inv);
+      await queueDue(inv); // clear at the due read
+      const real = Hold.dueInvoiceHeldByDisputeHold;
+      const race = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockImplementationOnce(async (...args) => {
+        await placeHold(c); // the dispute lands after the query selected this invoice, before the send
+        return real(...args);
+      });
       const before = Date.now();
-      const out = await Invoices.processScheduledSends();
-      expect(out.deferred).toBeGreaterThanOrEqual(1);
+      try {
+        const out = await Invoices.processScheduledSends();
+        expect(out.deferred).toBeGreaterThanOrEqual(1);
+      } finally { race.mockRestore(); }
       expect(sentIds()).not.toContain(inv);
       const row = await invoice(inv);
       expect(row).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
@@ -163,11 +171,24 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(row.scheduled_send_at.getTime()).toBeLessThan(before + 5 * 60 * 1000);
     });
 
+    test('an already-held due invoice is skipped by the due query itself: untouched, nothing claimed, nothing sent', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c);
+      await queueDue(inv);
+      const before = await invoice(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).not.toContain(inv);
+      const after = await invoice(inv);
+      expect(after).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
+      expect(after.scheduled_send_at.getTime()).toBe(before.scheduled_send_at.getTime());
+    });
+
     test('a deferred invoice keeps deferring, every tick, with attempts still at 0', async () => {
       const c = await newCustomer();
       await placeHold(c);
       const inv = await newInvoice(c);
-      await Hold.queueHeldInvoiceForSender(inv);
+      await queueDue(inv);
       for (let i = 0; i < 3; i += 1) {
         await Invoices.processScheduledSends();
         await makeDueNow(inv);
@@ -180,7 +201,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
     test('a hold placed AFTER the invoice was queued still blocks the send', async () => {
       const c = await newCustomer();
       const inv = await newInvoice(c);
-      await Hold.queueHeldInvoiceForSender(inv); // queued while the customer was clear
+      await queueDue(inv); // queued while the customer was clear
       await placeHold(c); // the dispute lands before the tick
       await Invoices.processScheduledSends();
       expect(sentIds()).not.toContain(inv);
@@ -191,7 +212,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const c = await newCustomer();
       await placeHold(c);
       const inv = await newInvoice(c);
-      await Hold.queueHeldInvoiceForSender(inv);
+      await queueDue(inv);
       await Invoices.processScheduledSends(); // deferred under the hold
       expect(sentIds()).not.toContain(inv);
       expect(await releaseViaOpsScript(c)).toMatchObject({ ok: true, released: 1 });
@@ -205,6 +226,25 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(sentIds().filter((id) => id === inv)).toHaveLength(1);
     });
 
+    test('held invoices never take a page slot: 26 held (older) invoices plus 1 unheld due invoice - the unheld one still sends in the same tick', async () => {
+      const held = await newCustomer();
+      const clear = await newCustomer();
+      await placeHold(held);
+      const heldIds = [];
+      for (let i = 0; i < 26; i += 1) {
+        const id = await newInvoice(held, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 2 * 3600 * 1000 - i * 1000) });
+        heldIds.push(id);
+      }
+      const unheld = await newInvoice(clear, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 3600 * 1000) });
+      const out = await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).toContain(unheld);
+      for (const id of heldIds) expect(sentIds()).not.toContain(id);
+      expect(out.sent).toBeGreaterThanOrEqual(1);
+      // the held ones are untouched by the tick: the due query skipped them (nothing claimed, no attempt spent)
+      const rows = await db('invoices').whereIn('id', heldIds);
+      expect(rows.every((r) => r.status === 'scheduled' && r.scheduled_send_attempts === 0 && r.send_claim_token === null)).toBe(true);
+    });
+
     test('the deferral is shorter than one cron tick, so a release is sent by the very next tick', () => {
       expect(Hold.HOLD_DEFER_MS).toBeLessThan(5 * 60 * 1000);
     });
@@ -212,7 +252,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
     test('a hold-lookup failure defers (fail closed, retried next tick) - never sends, never spends an attempt, never parks', async () => {
       const c = await newCustomer();
       const inv = await newInvoice(c);
-      await Hold.queueHeldInvoiceForSender(inv);
+      await queueDue(inv);
       db.__failTables.add('collections_flags');
       await Invoices.processScheduledSends();
       expect(sentIds()).not.toContain(inv);
@@ -232,7 +272,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const c = await newCustomer();
       await placeHold(c, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
       const inv = await newInvoice(c);
-      await Hold.queueHeldInvoiceForSender(inv);
+      await queueDue(inv);
       await Invoices.processScheduledSends();
       expect(sentIds()).toContain(inv);
     });
@@ -242,7 +282,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const clear = await newCustomer();
       await placeHold(held);
       const inv = await newInvoice(clear);
-      await Hold.queueHeldInvoiceForSender(inv);
+      await queueDue(inv);
       await Invoices.processScheduledSends();
       expect(sentIds()).toContain(inv);
     });
@@ -380,6 +420,40 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       // the retry, fault gone, queues it
       expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: inv, customer_id: c })).toMatchObject({ reason: 'collections-dispute-hold' });
       expect((await invoice(inv)).status).toBe('scheduled');
+    });
+  });
+
+  describe('a deferred completion replay that dies at the attempt cap with its invoice never queued', () => {
+    const { onTerminalDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+    const meta = (inv, c) => ({ entry_point: 'dispatch_completion_deferred', invoice_id: inv, customer_id: c, pay_url: 'https://pay.example.test/i/x' });
+    const alertsFor = (inv) => db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' }).whereRaw("payload->>'invoiceId' = ?", [String(inv)]);
+
+    test('the terminal hook raises the queue-failure office alert once (a re-run adds none)', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c); // still a draft: the replay never got to queue it
+      expect(await onTerminalDeferredReplay('dispatch_completion_deferred', meta(inv, c))).toMatchObject({ ok: true });
+      const alerts = await alertsFor(inv);
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0].payload.customerId).toBe(String(c));
+      await onTerminalDeferredReplay('dispatch_completion_deferred', meta(inv, c));
+      expect(await alertsFor(inv)).toHaveLength(1);
+    });
+
+    test('no alert when the invoice was queued, when there is no hold, or when the row carries no pay link', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const queued = await newInvoice(c);
+      await Hold.queueHeldInvoiceForSender(queued);
+      await onTerminalDeferredReplay('dispatch_completion_deferred', meta(queued, c));
+      expect(await alertsFor(queued)).toHaveLength(0);
+      const clear = await newCustomer();
+      const draft = await newInvoice(clear);
+      await onTerminalDeferredReplay('dispatch_completion_deferred', meta(draft, clear));
+      expect(await alertsFor(draft)).toHaveLength(0);
+      const noLink = await newInvoice(c);
+      await onTerminalDeferredReplay('dispatch_completion_deferred', { ...meta(noLink, c), pay_url: undefined });
+      expect(await alertsFor(noLink)).toHaveLength(0);
     });
   });
 });

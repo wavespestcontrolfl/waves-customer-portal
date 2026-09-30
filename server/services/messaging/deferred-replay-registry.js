@@ -214,6 +214,33 @@ async function raiseHeldInvoiceQueueAlert({ invoiceId, customerId, error }) {
   }
 }
 
+// A completion replay that died terminally (attempt cap, terminal block) while
+// the customer's dispute hold stands and its invoice is still an unqueued
+// draft: the replay's own strip-and-queue never landed (a persistent queue
+// write failure walks the row to the cap), so nothing will ever send that
+// invoice after the hold is released. Raise the same durable office alert the
+// other queue-failure exits raise, once per invoice (the terminal hook can
+// re-run from the sweep). Never throws - the hook's own restore must not fail
+// because an alert could not be written.
+async function alertHeldInvoiceNeverQueued(meta) {
+  try {
+    if (!meta.invoice_id || !meta.pay_url) return;
+    const inv = await db('invoices').where({ id: meta.invoice_id }).first('id', 'status', 'customer_id', 'payer_id');
+    if (!inv || inv.status !== 'draft' || inv.payer_id) return;
+    const customerId = meta.customer_id || inv.customer_id;
+    if (!await require('../collections/collection-hold').shouldWithholdPayLink(customerId)) return;
+    const open = await db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' })
+      .whereNull('resolved_at').whereRaw("payload->>'invoiceId' = ?", [String(inv.id)]).first('id');
+    if (open) return;
+    await raiseHeldInvoiceQueueAlert({
+      invoiceId: inv.id, customerId,
+      error: new Error('the deferred completion text ran out of attempts before its invoice could be queued behind the dispute hold'),
+    });
+  } catch (err) {
+    logger.error(`[deferred-replay] could not check/alert the never-queued held invoice ${meta.invoice_id || 'unknown'}: ${err.message}`);
+  }
+}
+
 const REGISTRY = {
   billing_retry_email_deferred: {
     // Email-only replay: the row is queued without a phone on purpose, so
@@ -580,6 +607,7 @@ const REGISTRY = {
         restoreErr = err;
         logger.warn(`[deferred-replay] completion terminal status restore failed for record ${meta.service_record_id || 'unknown'} — will retry via terminal sweep: ${err.message}`);
       }
+      await alertHeldInvoiceNeverQueued(meta);
       // The completion text (and the bundled review link inside it) will
       // never deliver — arm the standalone review sender. Armed ONLY here,
       // never on a timer, so it can't race a still-retryable replay.
