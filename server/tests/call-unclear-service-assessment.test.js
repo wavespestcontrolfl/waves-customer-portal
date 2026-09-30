@@ -590,6 +590,15 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(sqls[1].sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
   });
 
+  test('the processor outcome update skips a reviewed decision too (codex r7 P1)', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const { excludeReviewedDecisions } = require('../services/call-routing-gates');
+    const q = excludeReviewedDecisions(knex('route_decisions').where({ call_log_id: 'c1' }), knex).update({ final_action_taken: 'auto_route' });
+    expect(q.toSQL().sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toMatch(/await excludeReviewedDecisions\(outcomeUpdate, db\)\s*\.update\(\{\s*final_action_taken/);
+  });
+
   test('an incomplete fence (no processing token) fails closed: no refresh runs', async () => {
     const { conn, sqls } = recordingConn();
     expect(await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: undefined })).toBe(0);

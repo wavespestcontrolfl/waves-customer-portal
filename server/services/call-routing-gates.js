@@ -405,6 +405,16 @@ const ROUTE_DECISION_REFRESH_COLUMNS = [
   'created_at',
 ];
 
+// Every write to an existing route_decisions row (the refresh above and the
+// processor's same-run outcome update) skips a row a human has reviewed:
+// route_feedback points at the row by id and calibration joins the row's
+// CURRENT action, reasons and outcome to the verdict (codex #5371 r6 + r7 P1).
+function excludeReviewedDecisions(query, conn) {
+  return query.whereNotExists(function reviewed() {
+    this.select(conn.raw('1')).from('route_feedback').whereRaw('route_feedback.route_decision_id = route_decisions.id');
+  });
+}
+
 // Insert-or-refresh in two statements, so the INSERT stays TARGETLESS
 // (ON CONFLICT DO NOTHING names no constraint: tolerant of BOTH the legacy
 // three-column constraint and the recording-keyed index during a rolling
@@ -433,9 +443,7 @@ async function upsertRouteDecision(conn, decision, fence = null) {
   // re-attach an old verdict to a decision the reviewer never saw. The row a
   // human judged stays exactly as judged; a later pass's different decision
   // is simply not recorded over it.
-  update.whereNotExists(function reviewed() {
-    this.select(conn.raw('1')).from('route_feedback').whereRaw('route_feedback.route_decision_id = route_decisions.id');
-  });
+  excludeReviewedDecisions(update, conn);
   if (fence) {
     // A fence that was ASKED FOR but is incomplete (a missing processing
     // token) fails closed: the refresh is skipped, never run unfenced.
@@ -904,6 +912,7 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 ]);
 
 module.exports = {
+  excludeReviewedDecisions,
   SUPERSEDE_KEPT_REASON_CODES,
   onFileAddressSnapshot,
   computeAppointmentIdempotencyKey,
