@@ -305,6 +305,12 @@ function openTimesDayLabel(d) {
 // new-visit offers move to the /book finder in the next slice.
 const SCHEDULER_OFFER_SOURCE = 'scheduler';
 const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'named_scheduled_visit']);
+// The picker chain (visit load, page eligibility, booking config, the
+// service's availability build with a possible geocode and the find-time
+// travel probe) is much heavier than the zone finder OPEN_TIMES_TIMEOUT_MS
+// (3s) was sized for, and the reschedule GET route runs it with no deadline.
+// Only the scheduler path uses this; the old finder keeps its 3000.
+const SCHEDULER_OPEN_TIMES_TIMEOUT_MS = 10000;
 
 // The same label the zone finder renders (availability.js fullDate):
 // "Tuesday, September 29", from the picker's YYYY-MM-DD day.
@@ -317,10 +323,28 @@ function schedulerDayLabel(day) {
   return openTimesDayLabel(day);
 }
 
-// The picker's days for ONE visit, or null when the visit is not one the
-// reschedule link would offer times for (not found, someone else's, refused
-// by the page's eligibility, or no location to route from). Errors throw —
-// callers fail closed.
+// The visit's own current (day label, arrival window), rendered through the
+// same day-label and arrivalWindowRange/formatSmsTimeRange path the offers
+// use. buildAvailabilityForService passes excludeServiceIds: [svc.id], so the
+// visit's own slot reads as open in the picker; callers use this to keep it
+// out of the offers and to refuse a quote the visit has since moved onto.
+// null when the row carries no date or start time.
+function visitCurrentWindow(svc) {
+  const { apptDateStr, hhmm } = require('./reschedule-eligibility');
+  const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+  const date = apptDateStr(svc?.scheduled_date);
+  const start = hhmm(svc?.window_start);
+  if (!date || !start) return null;
+  const range = arrivalWindowRange(start);
+  const window = range ? formatSmsTimeRange(range) : null;
+  if (!window) return null;
+  return { date: schedulerDayLabel({ date }), window };
+}
+
+// The picker's days for ONE visit (plus the visit's own current window), or
+// null when the visit is not one the reschedule link would offer times for
+// (not found, someone else's, refused by the page's eligibility, or no
+// location to route from). Errors throw — callers fail closed.
 async function loadSchedulerVisitDays({ customerId, scheduledServiceId }) {
   const reschedule = require('../routes/reschedule-public')._internals;
   const booking = require('../routes/booking');
@@ -333,7 +357,7 @@ async function loadSchedulerVisitDays({ customerId, scheduledServiceId }) {
   const config = await booking._internals.loadBookingConfig();
   const range = reschedule.bookingRange(config);
   const availability = await reschedule.buildAvailabilityForService(svc, { ...range, config });
-  return availability ? (availability.days || []) : null;
+  return availability ? { days: availability.days || [], currentWindow: visitCurrentWindow(svc) } : null;
 }
 
 // Up to OPEN_TIMES_MAX_SLOTS_PER_DAY starts per day whose 2-hour arrival
@@ -360,27 +384,42 @@ function pickSchedulerOfferWindows(slots) {
   return windows;
 }
 
+// The picker's slots minus the ones whose rendered arrival window is `window`.
+function excludeWindowSlots(slots, window) {
+  const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+  return (slots || []).filter((s) => {
+    const start = String(s?.startTime24 || s?.start_time || '').slice(0, 5);
+    const range = /^\d{2}:\d{2}$/.test(start) ? arrivalWindowRange(start) : null;
+    return !(range && formatSmsTimeRange(range) === window);
+  });
+}
+
 async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
   if (!scheduledServiceId) {
     logger.info('[sms-shadow] OPEN TIMES withheld — upcoming visit has no id to offer times for');
     return { block: null, days: [] };
   }
   let timer = null;
+  const startedAt = Date.now();
   try {
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('open-times timeout')), OPEN_TIMES_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new Error('open-times timeout')), SCHEDULER_OPEN_TIMES_TIMEOUT_MS);
     });
-    const pickerDays = await Promise.race([loadSchedulerVisitDays({ customerId, scheduledServiceId }), timeout]);
-    if (!pickerDays) {
+    const loaded = await Promise.race([loadSchedulerVisitDays({ customerId, scheduledServiceId }), timeout]);
+    if (!loaded) {
       logger.info('[sms-shadow] OPEN TIMES withheld — visit is not reschedulable through the scheduler');
       return { block: null, days: [] };
     }
     const lines = [];
     const days = [];
-    for (const d of pickerDays) {
-      const windows = pickSchedulerOfferWindows(d.slots);
-      if (!windows.length) continue;
+    for (const d of loaded.days) {
       const date = schedulerDayLabel(d);
+      // The visit's own current slot reads as open (the picker excludes the
+      // visit itself); never offer a customer the time they already have.
+      const cur = loaded.currentWindow;
+      const slots = cur && cur.date === date ? excludeWindowSlots(d.slots, cur.window) : d.slots;
+      const windows = pickSchedulerOfferWindows(slots);
+      if (!windows.length) continue;
       lines.push(`- ${date}: ${windows.join(', ')}`);
       days.push({ date, windows });
       if (lines.length >= OPEN_TIMES_MAX_DAYS) break;
@@ -391,6 +430,7 @@ async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
     return { block: null, days: [] };
   } finally {
     if (timer) clearTimeout(timer);
+    logger.info(`[sms-shadow] scheduler open-times draft fetch took ${Date.now() - startedAt}ms`);
   }
 }
 
@@ -1198,8 +1238,8 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
 // visit is no longer one the picker offers times for.
 async function currentOfferedDays({ city, customerId, estimateId, serviceType, scheduledServiceId }) {
   if (scheduledServiceId) {
-    const days = await loadSchedulerVisitDays({ customerId, scheduledServiceId });
-    return days ? { days, labelOf: schedulerDayLabel } : null;
+    const loaded = await loadSchedulerVisitDays({ customerId, scheduledServiceId });
+    return loaded ? { days: loaded.days, labelOf: schedulerDayLabel, currentWindow: loaded.currentWindow } : null;
   }
   const Availability = require('./availability');
   const result = await Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) });
@@ -1218,10 +1258,14 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
   if (!Array.isArray(quotedWindows) || !quotedWindows.length) return { ok: true };
   if (!city) return { ok: false, reason: 'open_times_recheck_no_city' };
   let timer = null;
+  const startedAt = Date.now();
   try {
     const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('open-times recheck timeout')), OPEN_TIMES_TIMEOUT_MS);
+      timer = setTimeout(
+        () => reject(new Error('open-times recheck timeout')),
+        scheduledServiceId ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS,
+      );
     });
     // A snapshot minted by the scheduler path (scheduledServiceId on its
     // lookup) is rechecked through the same picker for the same visit; a
@@ -1232,6 +1276,13 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
       timeout,
     ]);
     if (!current) return { ok: false, reason: 'open_times_no_longer_offered', goneWindows: quotedWindows };
+    // The picker excludes the visit itself, so a visit moved ONTO a quoted
+    // slot since the draft reads as open there: refuse it — the customer
+    // would be "offered" the time they already have.
+    const cur = current.currentWindow;
+    if (cur && quotedWindows.some((w) => w.date === cur.date && w.window === cur.window)) {
+      return { ok: false, reason: 'open_times_visit_already_there' };
+    }
     const currentWindows = new Set();
     for (const d of current.days) {
       const date = current.labelOf(d);
@@ -1250,6 +1301,7 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
   } finally {
     // Same leaked-handle fix as fetchOpenTimesBlock's own timer.
     if (timer) clearTimeout(timer);
+    if (scheduledServiceId) logger.info(`[sms-shadow] scheduler open-times recheck took ${Date.now() - startedAt}ms`);
   }
 }
 

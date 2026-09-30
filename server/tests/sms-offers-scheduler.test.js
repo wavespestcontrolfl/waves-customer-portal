@@ -385,7 +385,7 @@ describe('openTimesStillOffered — send-time recheck', () => {
       picker.buildAvailabilityForService.mockImplementation(() => new Promise(() => {}));
       const drafter = freshDrafter();
       const promise = drafter.openTimesStillOffered({ city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID, quotedWindows: quoted });
-      await jest.advanceTimersByTimeAsync(3100);
+      await jest.advanceTimersByTimeAsync(10100);
       await expect(promise).resolves.toEqual({ ok: false, reason: 'open_times_recheck_failed' });
       expect(jest.getTimerCount()).toBe(0);
     } finally {
@@ -397,6 +397,8 @@ describe('openTimesStillOffered — send-time recheck', () => {
     jest.useFakeTimers();
     try {
       const drafter = freshDrafter();
+      // the (winston) info line the fetch now logs schedules its own stream work under fake timers
+      jest.spyOn(require('../services/logger'), 'info').mockImplementation(() => {});
       const before = jest.getTimerCount();
       const result = await drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true, offersFromScheduler: true, scheduledServiceId: VISIT_ID });
       expect(result.block).toContain('Tuesday, September 29');
@@ -404,5 +406,192 @@ describe('openTimesStillOffered — send-time recheck', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('recheck ownership', () => {
+  test('recheck path: loadById returns ANOTHER customer\'s row → refused, picker eligibility never asked', async () => {
+    mockPicker({ loaded: { ...SVC, customer_id: 'someone-else' } });
+    const drafter = freshDrafter();
+    const result = await drafter.openTimesStillOffered({
+      city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID,
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
+    expect(result).toEqual({
+      ok: false, reason: 'open_times_no_longer_offered', goneWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
+    expect(picker.pageEligibility).not.toHaveBeenCalled();
+    expect(picker.buildAvailabilityForService).not.toHaveBeenCalled();
+  });
+});
+
+describe('gate on + LINKED estimate → old finder, scheduler picker untouched', () => {
+  test('estimateId passed to generateGroundedDraft (linked estimate, no open-estimate identity) keeps the zone finder', async () => {
+    process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
+    const drafter = freshDrafter();
+    const context = baseContext([upcomingEntry('Quarterly Pest', '2026-10-02', VISIT_ID)]);
+    const client = makeClient(replyWith('10:00 AM - 12:00 PM', 'Friday, October 9'));
+    const r = await drafter.generateGroundedDraft(argsFor(client, context, { estimateId: 'est-linked-1' }));
+    expect(oldFinder).toHaveBeenCalledWith('Venice', 'est-linked-1', expect.objectContaining({ customerId: 'cust-9' }));
+    expect(picker.loadById).not.toHaveBeenCalled();
+    expect(picker.buildAvailabilityForService).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot.lookup).not.toHaveProperty('scheduledServiceId');
+    expect(r.openTimesSnapshot.lookup.estimateId).toBe('est-linked-1');
+  });
+});
+
+describe('scheduler path has its own, longer deadline', () => {
+  const quoted = [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }];
+  const logs = () => require('../services/logger');
+
+  test('draft fetch: a 4s picker still answers (old 3s finder deadline does not apply)', async () => {
+    jest.useFakeTimers();
+    try {
+      mockPicker();
+      picker.buildAvailabilityForService.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ days: PICKER_DAYS }), 4000)));
+      const drafter = freshDrafter();
+      const promise = drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true, offersFromScheduler: true, scheduledServiceId: VISIT_ID });
+      await jest.advanceTimersByTimeAsync(4100);
+      const out = await promise;
+      expect(out.block).toContain('Tuesday, September 29');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('draft fetch: a picker that never answers is cut off at 10s, not before', async () => {
+    jest.useFakeTimers();
+    try {
+      mockPicker();
+      picker.buildAvailabilityForService.mockImplementation(() => new Promise(() => {}));
+      const drafter = freshDrafter();
+      let settled = false;
+      const promise = drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true, offersFromScheduler: true, scheduledServiceId: VISIT_ID })
+        .then((v) => { settled = true; return v; });
+      await jest.advanceTimersByTimeAsync(9900);
+      expect(settled).toBe(false);
+      await jest.advanceTimersByTimeAsync(200);
+      await expect(promise).resolves.toEqual({ block: null, days: [] });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('recheck: a 3.2s picker answer is honored (not retired at the old 3s)', async () => {
+    jest.useFakeTimers();
+    try {
+      mockPicker();
+      picker.buildAvailabilityForService.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ days: PICKER_DAYS }), 3200)));
+      const drafter = freshDrafter();
+      const promise = drafter.openTimesStillOffered({ city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID, quotedWindows: quoted });
+      await jest.advanceTimersByTimeAsync(3300);
+      await expect(promise).resolves.toEqual({ ok: true });
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the OLD finder keeps its 3s deadline (recheck and draft)', async () => {
+    jest.useFakeTimers();
+    try {
+      oldFinder.mockImplementation(() => new Promise(() => {}));
+      const drafter = freshDrafter();
+      const recheck = drafter.openTimesStillOffered({ city: 'Venice', customerId: 'cust-9', quotedWindows: [{ date: 'Friday, October 9', window: '10:00 AM - 12:00 PM' }] });
+      const fetched = drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true });
+      await jest.advanceTimersByTimeAsync(3100);
+      await expect(recheck).resolves.toEqual({ ok: false, reason: 'open_times_recheck_failed' });
+      await expect(fetched).resolves.toEqual({ block: null, days: [] });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('elapsed ms is logged at info on the draft fetch and on the recheck (scheduler path only)', async () => {
+    const drafter = freshDrafter();
+    const logger = logs();
+    const info = jest.spyOn(logger, 'info').mockImplementation(() => {});
+    await drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true, offersFromScheduler: true, scheduledServiceId: VISIT_ID });
+    await drafter.openTimesStillOffered({ city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID, quotedWindows: quoted });
+    const lines = info.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => /scheduler open-times draft fetch took \d+ms/.test(l))).toBe(true);
+    expect(lines.some((l) => /scheduler open-times recheck took \d+ms/.test(l))).toBe(true);
+    info.mockClear();
+    await drafter.openTimesStillOffered({ city: 'Venice', customerId: 'cust-9', quotedWindows: [{ date: 'Friday, October 9', window: '10:00 AM - 12:00 PM' }] });
+    expect(info.mock.calls.map((c) => String(c[0])).some((l) => /took \d+ms/.test(l))).toBe(false);
+    info.mockRestore();
+  });
+});
+
+describe("the visit's own current slot (picker excludes the visit itself, so it reads as open)", () => {
+  // visit currently 9:00-11:00 on Tue Sep 29 (window_start 09:00:00)
+  const HERE = { ...SVC, scheduled_date: '2026-09-29', window_start: '09:00:00' };
+
+  test('draft: the visit\'s current window is not offered; the next feasible start takes its place', async () => {
+    process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
+    mockPicker({ loaded: HERE });
+    const drafter = freshDrafter();
+    const { days } = await drafter.fetchOpenTimesData({
+      city: 'Venice', customerId: 'cust-9', schedulingIntent: true, offersFromScheduler: true, scheduledServiceId: VISIT_ID,
+    });
+    // 9:00 dropped BEFORE the overlap/cap pass: 9:15 (own window 9:15-11:15) is now the first pick
+    expect(days[0].date).toBe('Tuesday, September 29');
+    expect(days[0].windows).not.toContain('9:00 AM - 11:00 AM');
+    expect(days[0].windows[0]).toBe('9:15 AM - 11:15 AM');
+    // other days untouched
+    expect(days[1]).toEqual({ date: 'Wednesday, September 30', windows: ['2:00 PM - 4:00 PM'] });
+  });
+
+  test('draft: a day whose only slot is the visit\'s own window drops out; the same window on ANOTHER day stays', async () => {
+    mockPicker({
+      loaded: HERE,
+      days: [
+        { date: '2026-09-29', slots: [{ startTime24: '09:00' }] },
+        { date: '2026-09-30', slots: [{ startTime24: '09:00' }] },
+      ],
+    });
+    const drafter = freshDrafter();
+    const { days } = await drafter.fetchOpenTimesData({
+      city: 'Venice', customerId: 'cust-9', schedulingIntent: true, offersFromScheduler: true, scheduledServiceId: VISIT_ID,
+    });
+    expect(days).toEqual([{ date: 'Wednesday, September 30', windows: ['9:00 AM - 11:00 AM'] }]);
+  });
+
+  test('recheck: a visit moved ONTO a quoted slot since the draft fails closed (open_times_visit_already_there)', async () => {
+    mockPicker({ loaded: HERE });
+    const drafter = freshDrafter();
+    const result = await drafter.openTimesStillOffered({
+      city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID,
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }, { date: 'Wednesday, September 30', window: '2:00 PM - 4:00 PM' }],
+    });
+    expect(result).toEqual({ ok: false, reason: 'open_times_visit_already_there' });
+  });
+
+  test('recheck: the same window on a different day, or a different window the same day, still passes', async () => {
+    mockPicker({ loaded: HERE });
+    const drafter = freshDrafter();
+    await expect(drafter.openTimesStillOffered({
+      city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID,
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '11:00 AM - 1:00 PM' }, { date: 'Wednesday, September 30', window: '2:00 PM - 4:00 PM' }],
+    })).resolves.toEqual({ ok: true });
+  });
+
+  test('recheck: a visit row with no date/start (nothing to compare) keeps the normal verdict', async () => {
+    mockPicker({ loaded: SVC });
+    const drafter = freshDrafter();
+    await expect(drafter.openTimesStillOffered({
+      city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID,
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    })).resolves.toEqual({ ok: true });
+  });
+
+  test('scheduled_date as a Date object (pg date) renders the same label', async () => {
+    mockPicker({ loaded: { ...HERE, scheduled_date: new Date('2026-09-29T00:00:00.000Z') } });
+    const drafter = freshDrafter();
+    const result = await drafter.openTimesStillOffered({
+      city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID,
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
+    expect(result).toEqual({ ok: false, reason: 'open_times_visit_already_there' });
   });
 });

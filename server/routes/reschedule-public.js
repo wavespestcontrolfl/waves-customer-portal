@@ -540,9 +540,7 @@ router.get('/:token', async (req, res, next) => {
     // Customer-page-view log (bots/staff skipped, deduped, never blocks).
     void recordPageView({ req, page: 'reschedule', customerId: svc.customer_id, subjectType: 'scheduled_service', subjectId: svc.id });
 
-    const elig = withSelfServeNotice(accountInactive(svc)
-      ? { ok: false, reason: 'account_inactive' }
-      : await eligibilityAsync(svc), svc);
+    const elig = await pageEligibility(svc);
     const base = {
       state: elig.ok ? 'reschedulable' : 'not_reschedulable',
       reason: elig.ok ? null : elig.reason,
@@ -630,9 +628,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = withSelfServeNotice(accountInactive(svc)
-      ? { ok: false, reason: 'account_inactive' }
-      : await eligibilityAsync(svc), svc);
+    const elig = await pageEligibility(svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
