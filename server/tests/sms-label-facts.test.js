@@ -200,11 +200,20 @@ describe('gate on — section rendering (one exact sentence per kind)', () => {
     const long = `Keep people and pets off treated areas until dry. ${'x'.repeat(200)} Children must stay off for 12 hours.`;
     expect(re(0, long)).not.toContain('keep people');
     // the plain shapes still work
-    for (const summary of ['Keep people and pets off treated areas until dry.', 'Do not re-enter until the spray has dried.', 'Safe for pets once dry.', 'Stay off until completely dry']) {
+    for (const summary of ['Keep people and pets off treated areas until dry.', 'Do not re-enter until the spray has dried.', 'Safe for people and pets once dry.', 'Stay off until completely dry', 'Keep off treated areas until dry.']) {
       expect(re(0, summary)).toContain('areas until dry.');
       expect(re(null, summary)).toContain('areas until dry.');
     }
-    expect(re(4, 'Keep everyone off the lawn for 4 hours.')).toContain('areas for 4 hours.');
+    expect(re(4, 'Keep off the lawn for 4 hours.')).toContain('areas for 4 hours.');
+    // r14: the sentence says people AND pets, so a text scoped to only people, only pets or "everyone" is unknown
+    for (const summary of ['Keep people off treated areas until dry.', 'Keep pets off treated areas until dry.', 'Keep everyone off the lawn until dry.', 'Safe for pets once dry.', 'Safe for people once dry.', 'Keep persons off until dry.']) {
+      expect([summary, re(0, summary).includes('keep people')]).toEqual([summary, false]);
+      expect([summary, re(null, summary).includes('keep people')]).toEqual([summary, false]);
+    }
+    for (const summary of ['Keep people off treated areas for 4 hours.', 'Keep pets off treated areas for 4 hours.', 'Keep everyone off the lawn for 4 hours.']) expect([summary, re(4, summary).includes('keep people')]).toEqual([summary, false]);
+    for (const summary of ['Keep people and pets off treated areas for 4 hours.', 'Keep pets and people off treated areas for 4 hours.', 'Keep people, pets off treated areas for 4 hours.', 'Keep humans and animals off the lawn for 4 hours.', 'Keep everyone including pets off the lawn for 4 hours.', 'Keep off treated areas for 4 hours.']) {
+      expect([summary, re(4, summary)]).toEqual([summary, expect.stringContaining('areas for 4 hours.')]);
+    }
     // the frozen-zero reader is the same allowlist
     expect(labelFactsLib.renderLabelFactsSection({ serviceDate: '2026-06-05', products: [product({ reiHours: 0, reentrySummary: 'Keep off until dry and watered in.' })], unverifiedCount: 0 }, { formatDate: (d) => d })).not.toContain('keep people');
   });
@@ -216,7 +225,7 @@ describe('gate on — section rendering (one exact sentence per kind)', () => {
   });
 
   test('a summary that would itself be banned copy is never rendered; only the derived wording is', () => {
-    const { text } = section([product({ reentrySummary: 'Safe for pets once dry.' })]);
+    const { text } = section([product({ reentrySummary: 'Safe for people and pets once dry.' })]);
     expect(text).toContain('to keep people and pets off treated areas until dry.');
     expect(text).not.toMatch(/safe/i);
   });
@@ -370,6 +379,21 @@ describe('label row selection (mock knex)', () => {
     expect(await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ name: 'Other' }) })], rows: [row({ product_id: null })] }) })).toBeNull();
     const upper = await read({ conn: fakeConn({ visits: [snapVisit('r2', { abcd: frozen() })], rows: [row({ product_id: 'ABCD' })] }) });
     expect(upper.products).toHaveLength(1);
+  });
+
+  test('r14: the name fallback needs EXACTLY ONE frozen entry with that name; two same-named entries with different timings leave the product unverified', async () => {
+    const two2 = { p1: frozen({ name: 'Some Product', rainfastMinutes: 90 }), p2: frozen({ name: 'some  product ', rainfastMinutes: 240, reentryHours: 4, reentrySummary: 'Keep people and pets off treated areas for 4 hours.' }) };
+    const ambiguous = await read({ conn: fakeConn({ visits: [snapVisit('r2', two2)], rows: [row({ product_id: null })] }) });
+    expect(ambiguous).toBeNull(); // the only product is unverified: nothing to say
+    // a second product that resolves by id keeps its own figures, but the visit as a whole is now none-on-file (unverified count)
+    const mixed = await read({ conn: fakeConn({ visits: [snapVisit('r2', { ...two2, p3: frozen({ name: 'Third' }) })], rows: [row({ product_id: null }), row({ id: 2, product_id: 'p3', product_name: 'Third' })] }) });
+    expect(mixed.unverifiedCount).toBe(1);
+    // the same name on ANOTHER record of the visit also makes it ambiguous
+    const acrossRecords = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen() }), snapVisit('r3', { p9: frozen({ rainfastMinutes: 30 }) })], rows: [row({ product_id: null })] }) });
+    expect(acrossRecords).toBeNull();
+    // exactly one (case / whitespace normalized) still resolves
+    const one = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ name: 'SOME   Product', rainfastMinutes: 90 }) })], rows: [row({ product_id: null })] }) });
+    expect(one.products[0].rainfastMinutes).toBe(90);
   });
 
   test('a frozen re-entry of 0 (a catalog NULL is frozen as 0) is "until dry" only when the frozen summary says so', async () => {
@@ -890,7 +914,7 @@ describe('r10: an elliptical answer to a re-entry or rain question needs the aut
     expect(asked('Will the sprinklers wash it off?')).toEqual(expect.arrayContaining(['rain']));
     expect(asked('Can the dogs go out and will rain wash it off?').sort()).toEqual(['rain', 'reentry']);
     expect(asked('What time are you coming Thursday?')).toEqual([]);
-    expect(asked('Thanks, the dogs loved it')).toEqual([]);
+    expect(asked('Thanks, the dogs loved it')).toEqual(['reentry']); // any label-topic word counts: a mere mention over-holds on purpose
     expect(asked('Should I keep the dogs inside when you arrive?')).toEqual([]);
     expect(asked('')).toEqual([]);
   });
@@ -1122,6 +1146,34 @@ describe('r13: an allowlist for the sentences of a reply to a label question; th
     expect(forInbound(['Can the dogs go out now?', 'What about the May treatment?'])).toBe(facts); // self-contained: resolves on its own
     expect(forInbound(['Is it okay now?', 'Can you come Tuesday?'])).toBe(facts);
     expect(forInbound('Is it okay now?')).toBe(facts);
+  });
+});
+
+describe('r14: a label topic counts as asked whatever the form of the message', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, section, asked(inbound));
+  test('statements, requests and run-on messages ask their kind (no question mark or question word needed)', () => {
+    expect(asked('Tell me when my dogs can go outside')).toEqual(['reentry']);
+    expect(asked('Please let me know if rain will wash it off')).toEqual(['rain']);
+    expect(asked('hi wondering when the kids can play on the lawn')).toEqual(['reentry']);
+    expect(asked('need to know about the sprinklers and my cat')).toEqual(expect.arrayContaining(['reentry', 'rain']));
+    expect(asked('I have two dogs')).toEqual(['reentry']); // a bare mention over-holds on purpose
+    for (const inbound of ['Tell me when my dogs can go outside', 'Please let me know if rain will wash it off', 'hi wondering when the kids can play on the lawn']) {
+      expect([inbound, guard('Yes, they can.', inbound)]).toEqual([inbound, true]);
+      expect([inbound, guard("It's okay.", inbound)]).toEqual([inbound, true]);
+    }
+  });
+  test('explicit pre-visit access wording and non-label messages ask nothing', () => {
+    expect(asked('Should I keep the dogs inside when you arrive?')).toEqual([]);
+    expect(asked('keep the dogs in before you come')).toEqual([]);
+    for (const inbound of ['What time are you coming Thursday?', 'Please send my invoice', 'Thanks so much', 'Can I pay online?']) expect([inbound, asked(inbound)]).toEqual([inbound, []]);
+    expect(guard('Yes, Tuesday works.', 'Please send my invoice')).toBe(false);
+  });
+  test('a topic-less statement with no question shape is not an elliptical follow-up', () => {
+    expect(asked(['now that is great', 'Can the dogs go out?'])).toEqual([]);
+    expect(asked(['is it okay now?', 'Can the dogs go out?'])).toEqual(['reentry']);
   });
 });
 

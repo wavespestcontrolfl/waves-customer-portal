@@ -99,7 +99,8 @@ async function hasVisitToday(conn, customerId, today) {
 // past visit's label said. null = no verified snapshot for this product (no
 // snapshot on the record, product absent from it, or not approved at
 // completion): fail closed.
-function frozenFactsFor(row, snapshot) {
+const normalizedName = (name) => String(name || '').replace(/\s+/g, ' ').trim().toLowerCase();
+function frozenFactsFor(row, snapshot, allSnapshots = [snapshot]) {
   const map = snapshot && snapshot.productFacts && typeof snapshot.productFacts === 'object' ? snapshot.productFacts : null;
   if (!map) return null;
   const id = canonicalProductId(row.product_id);
@@ -107,10 +108,14 @@ function frozenFactsFor(row, snapshot) {
   if (id) {
     facts = Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
   } else {
-    // service_products.product_id is ON DELETE SET NULL: fall back to the
-    // frozen name, as the report does.
-    const name = String(row.product_name || '').trim().toLowerCase();
-    facts = name ? (Object.values(map).find((f) => f && String(f.name || '').trim().toLowerCase() === name) || null) : null;
+    // service_products.product_id is ON DELETE SET NULL: fall back to the frozen name, as the report does -
+    // but names are not unique, so only when EXACTLY ONE frozen entry across the visit's snapshots carries
+    // this name (and it is on this record); none or several leaves the product unverified.
+    const name = normalizedName(row.product_name);
+    const named = (m) => Object.values(m || {}).filter((f) => f && normalizedName(f.name) === name);
+    const total = name ? allSnapshots.reduce((n, snap) => n + named(snap && snap.productFacts).length, 0) : 0;
+    const own = name && total === 1 ? named(map) : [];
+    facts = own.length === 1 ? own[0] : null;
   }
   return facts && typeof facts === 'object' ? facts : null;
 }
@@ -209,7 +214,7 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   const products = [];
   let unverified = 0;
   for (const row of rows) {
-    const p = productFromRow(row, frozenFactsFor(row, snapshotByRecord.get(String(row.service_record_id)) || null));
+    const p = productFromRow(row, frozenFactsFor(row, snapshotByRecord.get(String(row.service_record_id)) || null, [...snapshotByRecord.values()]));
     if (p === 'unverified') unverified += 1;
     else if (p) products.push(p);
   }
@@ -255,7 +260,9 @@ function rainfastDuration(minutes) {
 // else - a second clause, "or", "for pets", "watered in", "unless", a range, a
 // spelled or vague figure, children, at least ... - is not understood, so the
 // re-entry is unknown. The whole text is read (no truncation).
-const REENTRY_SUBJECT_SRC = 'people\\s+and\\s+pets|pets\\s+and\\s+people|people|persons|pets|everyone';
+// Only a subject that covers BOTH people and pets is accepted; a text naming only people or only pets (or "everyone")
+// is not the whole-visit statement the sentence makes, so it is unknown. An unscoped lead ("keep off treated areas") is accepted.
+const REENTRY_SUBJECT_SRC = 'people\\s+and\\s+pets|pets\\s+and\\s+people|people,\\s*pets|humans\\s+and\\s+(?:animals|pets)|people\\s+and\\s+animals|everyone\\s+including\\s+pets';
 const REENTRY_AREA_SRC = '(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawn|grass|yard|surfaces?)';
 const REENTRY_LEAD_SRC = `(?:(?:keep|stay)\\s+(?:(?:${REENTRY_SUBJECT_SRC})\\s+)?(?:off|out\\s+of)(?:\\s+${REENTRY_AREA_SRC})?|(?:do\\s+not|don't)\\s+(?:re-?enter|enter)(?:\\s+${REENTRY_AREA_SRC})?|(?:safe|ok|okay)\\s+for\\s+(?:${REENTRY_SUBJECT_SRC})|re-?entry(?:\\s+(?:is\\s+)?(?:allowed|permitted))?|wait)`;
 const REENTRY_UNTIL_DRY_SRC = "(?:until|once|when)\\s+(?:(?:it(?:\\s+is|'s|\\s+has)?|the\\s+(?:spray|treatment|application|product|areas?|surfaces?)\\s+(?:is|are|has|have))\\s+)?(?:(?:completely|fully|thoroughly)\\s+)?(?:dry|dried)";
@@ -800,11 +807,14 @@ function isEllipticalInbound(text) {
   return text.split(/\s+/).length <= 8 && ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text);
 }
 
+// No question shape is required for a topic: "tell me when my dogs can go outside" asks re-entry as much as a
+// "?" does, so any label-topic vocabulary counts (over-holding a mere mention of the dogs is accepted: fail closed).
+// Only explicit pre-visit access wording is exempt. A follow-up with no topic word needs a question shape to count.
 function askedKindsOf(inboundText) {
   const text = canonText(inboundText).toLowerCase();
-  if (!text || !ASKED_QUESTION_RE.test(text)) return { kinds: [], elliptical: false };
+  if (!text) return { kinds: [], elliptical: false };
   if (ASKED_ACCESS_RE.test(text) && !POST_TREATMENT_SIGNAL_RE.test(text)) return { kinds: [], elliptical: false };
-  return { kinds: [ASKED_REENTRY_RE.test(text) && 'reentry', ASKED_RAIN_RE.test(text) && 'rain'].filter(Boolean), elliptical: isEllipticalInbound(text) };
+  return { kinds: [ASKED_REENTRY_RE.test(text) && 'reentry', ASKED_RAIN_RE.test(text) && 'rain'].filter(Boolean), elliptical: ASKED_QUESTION_RE.test(text) && isEllipticalInbound(text) };
 }
 
 /**
