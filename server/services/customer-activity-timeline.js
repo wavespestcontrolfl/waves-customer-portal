@@ -21,18 +21,21 @@
  *   customer_page_views   filtered by its recorder (incl. a push:open row: a
  *                         server-verified open of that customer's own notification,
  *                         and the portal tab views)
- *   outbound_link_clicks  bot + staff filtered at /go (same shouldRecord as /l/)
  *   inbound sms replies   non-recruiting
  *
  * Everything else is shown in the feed and NEVER engaged: SendGrid opens AND
  * clicks (a scanner or Apple Mail Privacy Protection fires both with no human),
  * the raw token-page stamps (estimate / prep guide / report / contract /
- * price-change views, written unfiltered) and calls. Provider clicks are
+ * price-change views, written unfiltered), outside-link clicks and calls. An
+ * outside-link click (/go, bot + staff filtered) cannot say WHO clicked: a prep
+ * email can go to the account's service contact and is still attributed to the
+ * customer, and the prep page is shared by token, so it is listed and never
+ * engaged. Provider clicks are
  * labelled as such and the raw stamps "(unfiltered)". The summary reports the
  * newest open (`lastEmailOpenAt`) and newest provider click
  * (`lastProviderClickAt`) as separate informational fields. One tap that
  * produced both a provider click and a short-link click shows once, as the
- * short-link click. A click on a link delivered to a
+ * short-link click (or, for a prep email, as the outside-link click). A click on a link delivered to a
  * third party (a bill-to payer's AP inbox or an operator-named one-off
  * invoice recipient; the code is minted under the homeowner's customer_id)
  * reads "Link clicked by invoice recipient" and is never engaged.
@@ -201,16 +204,23 @@ const payerCodeSql = (alias) => `(COALESCE(${alias}.purpose, '') = 'payer_invoic
 // readily as a person. When the same tap also produced a human short-link click
 // (email links are short-wrapped), that click is the engaged event and the
 // provider click is not listed a second time: a short_code_clicks row for this
-// customer (or their lead) within two minutes of it. It is SQL so the ranking
+// customer (or their lead) within two minutes of it. A prep email's outside
+// links go through /go instead, so an email-surface outbound_link_clicks row in
+// the same window collapses it too (that row is listed, never engaged). The
+// whole predicate is parenthesized: callers negate it. It is SQL so the ranking
 // times below stay exactly the times that become events.
 function nearShortClick(tsExpr, ctx) {
   return {
-    sql: `EXISTS (SELECT 1 FROM short_code_clicks scx JOIN short_codes scy ON scy.id = scx.short_code_id
+    sql: `(EXISTS (SELECT 1 FROM short_code_clicks scx JOIN short_codes scy ON scy.id = scx.short_code_id
       WHERE scx.is_bot = false
         AND (scy.customer_id = ? OR scy.lead_id IN (SELECT ld.id FROM leads ld WHERE ld.customer_id = ?))
         AND NOT ${payerCodeSql('scy')}
-        AND scx.clicked_at BETWEEN ${tsExpr} - INTERVAL '2 minutes' AND ${tsExpr} + INTERVAL '2 minutes')`,
-    bindings: [ctx.customerId, ctx.customerId],
+        AND scx.clicked_at BETWEEN ${tsExpr} - INTERVAL '2 minutes' AND ${tsExpr} + INTERVAL '2 minutes')
+      OR EXISTS (SELECT 1 FROM outbound_link_clicks olx
+      WHERE olx.customer_id = ?
+        AND olx.surface = 'email'
+        AND olx.clicked_at BETWEEN ${tsExpr} - INTERVAL '2 minutes' AND ${tsExpr} + INTERVAL '2 minutes'))`,
+    bindings: [ctx.customerId, ctx.customerId, ctx.customerId],
   };
 }
 // The provider click's ranking time (null once collapsed) and its collapse flag.
@@ -425,16 +435,16 @@ const SOURCES = [
     }, 'newsletter_send_deliveries'),
   },
   {
-    // Outside-link clicks are bot + staff filtered at /go (shouldRecord): engaged.
-    // Rows recorded before that staff filter (the table went live 09-29
-    // evening) may include a staff click; accepted.
+    // Bot + staff filtered at /go (shouldRecord; rows from before that filter,
+    // 09-29 evening on, may include a staff click). Listed, NEVER engaged: the
+    // customer_id is the account the link was rendered for, not who clicked
+    // (a prep email can go to the service contact; the page is shared by token).
     name: 'outside link clicks',
     from: (dbh, ctx) => dbh('outbound_link_clicks as olc')
       .join('outbound_links as ol', 'ol.id', 'olc.outbound_link_id')
       .where('olc.customer_id', ctx.customerId),
     select: ['olc.id', 'olc.clicked_at', 'olc.surface', 'olc.template_key', 'ol.target_url'],
     ts: ['olc.clicked_at'],
-    engaged: { expr: 'olc.clicked_at' },
     toEvents: (r) => {
       // Hostname only: the full URL (path, query, affiliate tags) never reaches the feed.
       const host = outlinkHost(r.target_url);
@@ -442,9 +452,10 @@ const SOURCES = [
       return compact([mk('outlink', r.id, { type: 'outbound_link_click', id: r.id }, {
         at: r.clicked_at,
         channel: r.surface === 'email' ? 'email' : 'page',
-        kind: 'clicked',
-        title: 'Clicked an outside link',
+        kind: 'outlink_clicked',
+        title: 'Outside link clicked (may be a service contact, not counted)',
         detail: [host, template].filter(Boolean).join(' · ') || null,
+        engaged: false,
       })]);
     },
   },

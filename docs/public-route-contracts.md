@@ -2758,8 +2758,9 @@ nothing in the request names or changes the target. The query carries only an
 HMAC-signed attribution context (template key, customer id, visit or project
 id, surface — row ids only, NEVER the bearer prep token, which would land in
 the request log; it is resolved to ids at render time) — an invalid signature is ignored, never trusted. Human clicks log
-to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs still redirect but
-log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
+to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs and staff — the
+`waves_admin` marker cookie or `WAVES_ADMIN_IPS`, the same `shouldRecord`
+filter `/l` uses — still redirect but log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
 is on, but the route stays live regardless of the gate so links already sent
 keep working. Destinations are never tagged or altered.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`

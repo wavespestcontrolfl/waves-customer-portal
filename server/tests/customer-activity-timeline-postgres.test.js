@@ -160,7 +160,7 @@ pg('getCustomerActivity on Postgres', () => {
       { id: olPage, target_url: 'not a url' },
     ]);
     await db('outbound_link_clicks').insert([
-      { id: randomUUID(), outbound_link_id: olEmail, clicked_at: T(53), template_key: 'prep.flea', surface: 'email', customer_id: cust },
+      { id: randomUUID(), outbound_link_id: olEmail, clicked_at: T(57), template_key: 'prep.flea', surface: 'email', customer_id: cust },
       { id: randomUUID(), outbound_link_id: olPage, clicked_at: T(38), template_key: null, surface: 'page', customer_id: cust },
       { id: randomUUID(), outbound_link_id: olEmail, clicked_at: T(93), template_key: 'prep.flea', surface: 'email', customer_id: other },
     ]);
@@ -210,8 +210,8 @@ pg('getCustomerActivity on Postgres', () => {
     // outside-link clicks: hostname (+ prep template) only, channel from the surface, other customers' clicks out
     const outside = r.events.filter((e) => e.source === 'outlink');
     expect(outside.map((e) => [e.title, e.channel, e.detail, e.engaged, e.at])).toEqual([
-      ['Clicked an outside link', 'email', 'chewy.com · prep flea', true, T(53).toISOString()],
-      ['Clicked an outside link', 'page', null, true, T(38).toISOString()],
+      ['Outside link clicked (may be a service contact, not counted)', 'email', 'chewy.com · prep flea', false, T(57).toISOString()],
+      ['Outside link clicked (may be a service contact, not counted)', 'page', null, false, T(38).toISOString()],
     ]);
     expect(JSON.stringify(outside)).not.toMatch(/secret|\/dp\/123/);
     expect(r.events.some((e) => e.source === 'portal')).toBe(false);
@@ -436,10 +436,10 @@ pg('getCustomerActivity on Postgres', () => {
     expect(short.nextCursor).toBe(short.events[1].at);
   });
 
-  test('engagement: only inbound replies, short-link clicks, outside-link clicks and recorded page views set lastEngagedAt', async () => {
+  test('engagement: only inbound replies, short-link clicks and recorded page views set lastEngagedAt', async () => {
     const r = await run({ limit: 200 });
     const engaged = r.events.filter((e) => e.engaged);
-    expect(new Set(engaged.map((e) => e.source))).toEqual(new Set(['sms', 'link', 'outlink', 'pageview']));
+    expect(new Set(engaged.map((e) => e.source))).toEqual(new Set(['sms', 'link', 'pageview']));
     expect(engaged.every((e) => ['replied', 'clicked', 'viewed', 'opened'].includes(e.kind))).toBe(true);
     // the only engaged 'opened' is the verified push open (an email open never is)
     expect(engaged.filter((e) => e.kind === 'opened').map((e) => [e.source, e.channel, e.ref])).toEqual([['pageview', 'push', { type: 'notification', id: PUSH_NOTE }]]);
@@ -478,14 +478,73 @@ pg('getCustomerActivity on Postgres', () => {
     expect(r.summary).toMatchObject({ lastEngagedAt: null, lastEngagedFrom: null, lastEmailOpenAt: T(2).toISOString(), lastProviderClickAt: T(3).toISOString() });
   });
 
-  test('an outside-link click alone is engagement; a never-seen customer has lastSeenAt null', async () => {
+  test('an outside-link click alone is listed but never engagement; a never-seen customer has lastSeenAt null', async () => {
     const solo = randomUUID(); const ol = randomUUID();
     await db('customers').insert({ id: solo, email: 'outside.only@example.test' });
     await db('outbound_links').insert({ id: ol, target_url: 'https://elanco.com/x' });
     await db('outbound_link_clicks').insert({ id: randomUUID(), outbound_link_id: ol, clicked_at: T(9), template_key: 'prep.tick', surface: 'email', customer_id: solo });
     const r = await timeline.getCustomerActivity(solo, {}, db);
-    expect(r.events.map((e) => e.detail)).toEqual(['elanco.com · prep tick']);
-    expect(r.summary).toMatchObject({ lastEngagedAt: T(9).toISOString(), lastEngagedFrom: 'outside link clicks', lastSeenAt: null });
+    expect(r.events.map((e) => [e.kind, e.engaged, e.detail])).toEqual([['outlink_clicked', false, 'elanco.com · prep tick']]);
+    expect(r.summary).toMatchObject({ lastEngagedAt: null, lastEngagedFrom: null, lastSeenAt: null });
+  });
+
+  describe('a provider click is collapsed into a same-tap email-surface outside-link click', () => {
+    const provider = (c, email, clickedAt, subject) => ({ id: randomUUID(), recipient_type: 'customer', recipient_id: c, recipient_email_snapshot: email, status: 'clicked', subject_snapshot: subject, sent_at: T(0), clicked_at: clickedAt });
+    const olClick = (link, c, at, surface) => ({ id: randomUUID(), outbound_link_id: link, clicked_at: at, template_key: 'prep.flea', surface, customer_id: c });
+    const fresh = async (email) => {
+      const c = randomUUID();
+      await db('customers').insert({ id: c, email });
+      const link = randomUUID();
+      await db('outbound_links').insert({ id: link, target_url: 'https://www.chewy.com/dp/1' });
+      return { c, link };
+    };
+    const providerAts = (r) => r.events.filter((e) => e.kind === 'provider_clicked').map((e) => e.at);
+    const outAts = (r) => r.events.filter((e) => e.kind === 'outlink_clicked').map((e) => e.at);
+
+    test('an email-surface click within two minutes collapses the provider click; the outside-link event stays and is not engaged', async () => {
+      const { c, link } = await fresh('collapse.a@example.test');
+      await db('email_messages').insert(provider(c, 'collapse.a@example.test', T(10), 'Prep guide'));
+      await db('outbound_link_clicks').insert(olClick(link, c, T(11, 30), 'email'));
+      const r = await timeline.getCustomerActivity(c, {}, db);
+      expect(providerAts(r)).toEqual([]);
+      expect(outAts(r)).toEqual([T(11, 30).toISOString()]);
+      expect(r.events.every((e) => e.engaged === false)).toBe(true);
+      expect(r.summary.lastEngagedAt).toBeNull();
+    });
+
+    test('a page-surface click, one three minutes away, or another customer\'s click does not collapse it', async () => {
+      const { c, link } = await fresh('collapse.b@example.test');
+      const { c: c2, link: link2 } = await fresh('collapse.b2@example.test');
+      await db('email_messages').insert([
+        provider(c, 'collapse.b@example.test', T(10), 'Page surface'),
+        provider(c, 'collapse.b@example.test', T(20), 'Three minutes away'),
+        provider(c, 'collapse.b@example.test', T(30), 'Other customer'),
+      ]);
+      await db('outbound_link_clicks').insert([
+        olClick(link, c, T(10, 30), 'page'),
+        olClick(link, c, T(23), 'email'),
+        olClick(link2, c2, T(30, 30), 'email'),
+      ]);
+      const r = await timeline.getCustomerActivity(c, {}, db);
+      expect(providerAts(r).sort()).toEqual([T(10), T(20), T(30)].map((d) => d.toISOString()));
+      expect(r.summary.lastProviderClickAt).toBe(T(30).toISOString());
+    });
+
+    test('NOT precedence: a short-link click far away plus an outside-link click near still collapses the provider click', async () => {
+      const { c, link } = await fresh('collapse.c@example.test');
+      const code = randomUUID();
+      await db('short_codes').insert({ id: code, customer_id: c, kind: 'invoice', channel: 'email', purpose: 'invoice' });
+      await db('short_code_clicks').insert({ id: randomUUID(), short_code_id: code, clicked_at: T(40), is_bot: false });
+      await db('email_messages').insert(provider(c, 'collapse.c@example.test', T(10), 'Prep guide'));
+      await db('outbound_link_clicks').insert(olClick(link, c, T(10, 45), 'email'));
+      const r = await timeline.getCustomerActivity(c, {}, db);
+      expect(providerAts(r)).toEqual([]);
+      expect(outAts(r)).toEqual([T(10, 45).toISOString()]);
+      // and the far short-link click alone (no outside link near) leaves a distant provider click listed
+      await db('email_messages').insert(provider(c, 'collapse.c@example.test', T(20), 'Distant provider click'));
+      const r2 = await timeline.getCustomerActivity(c, {}, db);
+      expect(providerAts(r2)).toEqual([T(20).toISOString()]);
+    });
   });
 
   test('summary reads the whole history, not just the visible page', async () => {

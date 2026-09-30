@@ -62,8 +62,9 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
     }
   });
 
-  test('the summary has exactly four engaged sources: inbound texts, short-link clicks, outside-link clicks, recorded page views', () => {
-    expect(SOURCES.filter((s) => s.engaged).map((s) => s.name)).toEqual(['texts', 'link clicks', 'outside link clicks', 'page views']);
+  test('the summary has exactly three engaged sources: inbound texts, short-link clicks, recorded page views (outside-link clicks are listed, never engaged)', () => {
+    expect(SOURCES.filter((s) => s.engaged).map((s) => s.name)).toEqual(['texts', 'link clicks', 'page views']);
+    expect(SOURCES.map((s) => s.name)).toContain('outside link clicks');
     expect(source('texts').engaged.where).toBeTruthy(); // inbound only
     // every other source may only feed the informational open / provider-click fields
     for (const src of SOURCES.filter((s) => !s.engaged)) expect(Object.keys(src)).not.toContain('engaged');
@@ -104,8 +105,6 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
       .toMatchObject({ kind: 'replied', engaged: true, title: 'Replied by text' });
     expect(source('link clicks').toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'sms' })[0])
       .toMatchObject({ kind: 'clicked', engaged: true, title: 'Clicked the invoice link' });
-    expect(source('outside link clicks').toEvents({ id: 'o', clicked_at: t, surface: 'page', target_url: 'https://www.chewy.com/dp/1?tag=x', template_key: 'prep.flea' })[0])
-      .toMatchObject({ kind: 'clicked', engaged: true, title: 'Clicked an outside link', channel: 'page', source: 'outlink', ref: { type: 'outbound_link_click', id: 'o' } });
     expect(source('page views').toEvents({ id: 'p', page: 'portal:billing', viewed_at: t })[0])
       .toMatchObject({ channel: 'portal', kind: 'viewed', engaged: true, detail: 'billing' });
     expect(source('page views').toEvents({ id: 'p', page: 'appointment', viewed_at: t })[0])
@@ -189,11 +188,31 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
       // the ranking time for that stamp is SQL that carries the same rule, so a collapsed click cannot rank the row
       const fn = source(name).ts.find((x) => typeof x === 'function');
       const { sql, bindings } = fn({ customerId: 'c1' });
-      expect(sql).toMatch(/NOT EXISTS/);
+      expect(sql).toMatch(/NOT \(EXISTS/); // the whole collapse predicate is parenthesized: callers negate it
       expect(sql).toMatch(/INTERVAL '2 minutes'/);
       expect(sql).toMatch(/scx\.is_bot = false/);
-      expect(bindings).toEqual(['c1', 'c1']);
+      // a prep email's outside links go through /go: an email-surface click there collapses it too
+      expect(sql).toMatch(/FROM outbound_link_clicks olx/);
+      expect(sql).toMatch(/olx\.surface = 'email'/);
+      expect(bindings).toEqual(['c1', 'c1', 'c1']);
     }
+  });
+
+  test('the collapse predicate is one parenthesized OR, so a negation cannot bind to only its first EXISTS', () => {
+    const { sql } = source('emails').ts.find((x) => typeof x === 'function')({ customerId: 'c1' });
+    const m = sql.match(/NOT (\(EXISTS[\s\S]*\))\s+THEN/);
+    expect(m).toBeTruthy();
+    const body = m[1];
+    // outer parens wrap both EXISTS terms: depth 0 is reached only at the very end
+    let depth = 0;
+    let closedEarly = false;
+    [...body].forEach((ch, i) => {
+      if (ch === '(') depth += 1;
+      if (ch === ')') depth -= 1;
+      if (depth === 0 && i < body.length - 1) closedEarly = true;
+    });
+    expect(closedEarly).toBe(false);
+    expect(body).toMatch(/OR EXISTS \(SELECT 1 FROM outbound_link_clicks/);
   });
 
   test('every email event names the recipient the send row recorded, masked', () => {
@@ -360,17 +379,28 @@ describe('getCustomerActivity guards', () => {
     expect(more.nextCursor).toBe(more.events[1].at);
   });
 
+  test('outside link clicks: listed, never engaged (the account is not proof of who clicked), no summary MAX', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    const olc = source('outside link clicks');
+    expect(olc.toEvents({ id: 'o', clicked_at: t, surface: 'page', target_url: 'https://www.chewy.com/dp/1?tag=x', template_key: 'prep.flea' })[0])
+      .toMatchObject({
+        kind: 'outlink_clicked', engaged: false, title: 'Outside link clicked (may be a service contact, not counted)',
+        channel: 'page', source: 'outlink', ref: { type: 'outbound_link_click', id: 'o' },
+      });
+    expect(isEngagedKind('outlink_clicked')).toBe(false);
+    expect(Object.keys(olc)).not.toContain('engaged');
+  });
+
   test('outside link clicks: hostname-only detail, prep template, email surface maps to the email channel', () => {
     const t = new Date('2026-09-01T12:00:00Z');
     const olc = source('outside link clicks');
     expect(olc.toEvents({ id: 'o', clicked_at: t, surface: 'email', target_url: 'https://www.chewy.com/dp/123?tag=secret&x=1', template_key: 'prep.flea' })[0])
-      .toMatchObject({ channel: 'email', detail: 'chewy.com · prep flea', engaged: true });
+      .toMatchObject({ channel: 'email', detail: 'chewy.com · prep flea', engaged: false });
     const page = olc.toEvents({ id: 'p', clicked_at: t, surface: 'page', target_url: 'https://amazon.com/x?y=1', template_key: null })[0];
     expect(page).toMatchObject({ channel: 'page', detail: 'amazon.com' });
     expect(olc.toEvents({ id: 'q', clicked_at: t, surface: null, target_url: 'not a url' })[0]).toMatchObject({ channel: 'page', detail: null });
     // the full URL, path and query never reach the feed
     expect(JSON.stringify([page])).not.toMatch(/\/x|y=1/);
-    expect(olc.engaged.expr).toBe('olc.clicked_at');
   });
 
   test('summary.lastSeenAt is the customer row last_seen_at (informational), null when never seen, absent on cursor pages', async () => {
