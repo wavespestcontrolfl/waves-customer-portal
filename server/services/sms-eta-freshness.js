@@ -518,8 +518,13 @@ async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson, check
       if (!Number.isFinite(entry.fixAtMs) || entry.technicianId == null) continue;
       const status = await dbh('tech_status').where({ tech_id: entry.technicianId }).first('location_updated_at');
       const latest = status && status.location_updated_at ? new Date(status.location_updated_at).getTime() : NaN;
-      if (!Number.isFinite(latest)) return 'eta_claim_superseded_fix';
-      if (latest > entry.fixAtMs + 1000 && !recomputedStillMatches(entry.minutes, await recomputedLiveEtaMinutes(entry, dbh))) return 'eta_claim_superseded_fix';
+      // Round-27: an ABSENT/unreadable tech_status timestamp is not proof of a
+      // newer fix — when the ETA came from the direct Bouncie fallback (no fresh
+      // tech_status row) the cache write is asynchronous and may never land. It
+      // is treated like a newer ping: RECOMPUTE with the same path and tolerance,
+      // and block only if the recompute is unavailable or differs.
+      const unverifiable = !Number.isFinite(latest);
+      if ((unverifiable || latest > entry.fixAtMs + 1000) && !recomputedStillMatches(entry.minutes, await recomputedLiveEtaMinutes(entry, dbh))) return 'eta_claim_superseded_fix';
     }
   }
   return null;

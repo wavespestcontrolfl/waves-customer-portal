@@ -1932,6 +1932,24 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-27 P2 (PR #5334): the technician subject must be in the SAME clause.
+describe('round 27 P2: long-duration subject is scoped to its clause', () => {
+  test.each([
+    'He completed the service; your next visit is 2 days away.',
+    'The tech finished up, and your next visit is 3 weeks away.',
+    'She treated the yard but your follow-up is 2 weeks away.',
+    'The technician did a great job. Your next visit is 2 days away.',
+  ])('%p is ordinary scheduling copy, not a tech ETA', (reply) => {
+    expect(bodyHasTimedArrivalPhrase(reply, { unnormalizedHoursOnly: true })).toBe(false);
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+  });
+  test.each([
+    'The tech is 2 days away.', 'He will arrive in 3 weeks.', 'Your technician is about 2 days out.',
+  ])('%p is still a technician timed claim', (reply) => {
+    expect(bodyHasTimedArrivalPhrase(reply, { unnormalizedHoursOnly: true })).toBe(true);
+  });
+});
+
 // Codex round-17 P2 (PR #5334): destination coordinates are a PAIR.
 describe('liveEtaDestination — lat/lng are used only as a complete pair (round 17 P2)', () => {
   test('a visit latitude alone never mixes with the customer longitude', () => {

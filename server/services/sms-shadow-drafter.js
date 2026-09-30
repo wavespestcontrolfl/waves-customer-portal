@@ -1043,7 +1043,13 @@ const TECH_SUBJECT_RE = /\b(?:tech(?:nician)?s?|he|she|they|driver|crew|our\s+(?
 const LONG_UNIT_END_RE = /(?:days?|weeks?|months?)$/i;
 function hasTechSubjectBefore(str, spans, index) {
   const [start] = spans.find(([from, to]) => index >= from && index < to) || [0];
-  return TECH_SUBJECT_RE.test(str.slice(start, index));
+  // Only the CURRENT clause governs the duration (Codex round-27 P2): "He
+  // completed the service; your next visit is 2 days away." has its technician
+  // subject in an earlier clause. Same CLAUSE_BREAK_RE the negation checks use.
+  const sentenceBefore = str.slice(start, index);
+  let clauseStart = 0;
+  for (const m of sentenceBefore.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) clauseStart = m.index + m[0].length;
+  return TECH_SUBJECT_RE.test(sentenceBefore.slice(clauseStart));
 }
 // Is the figure at [index, index+length) inside one of the approved follow-up SLA
 // phrases ("within the hour", ...)? Those are ordinary English (sms-followup-sla:

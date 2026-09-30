@@ -1662,12 +1662,23 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
         expect(await etaClaimBlockReason({ liveEtaSnapshot: fSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: dbWithStatus([row()], newer, null) })).toBe('eta_claim_superseded_fix');
         expect(await runF(newer, 'The tech is 9 minutes away.', snap({ fixAtMs: FIX }))).toBe('eta_claim_superseded_fix');
       });
-      test('a missing or unreadable tech_status row blocks without a recompute', async () => {
-        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 9 });
-        expect(await runF(undefined)).toBe('eta_claim_superseded_fix');
-        expect(await runF({ location_updated_at: null })).toBe('eta_claim_superseded_fix');
-        expect(await runF({ location_updated_at: 'not a date' })).toBe('eta_claim_superseded_fix');
-        expect(resolveLiveEtaMinutesUncached).not.toHaveBeenCalled();
+      // Round 27: the direct-Bouncie fallback path leaves no fresh tech_status row
+      // (its cache write is async and may never land) — that is not proof of a
+      // newer fix, so the ETA is recomputed instead of the send being refused.
+      test.each([['no tech_status row', undefined], ['null timestamp', { location_updated_at: null }], ['garbage timestamp', { location_updated_at: 'not a date' }]])('%s + recompute matches (within tolerance): sends', async (_n, status) => {
+        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 10 }); // claim 9: within max(2 min, 20%)
+        expect(await runF(status)).toBeNull();
+        expect(resolveLiveEtaMinutesUncached).toHaveBeenCalledTimes(1);
+      });
+      test.each([['no tech_status row', undefined], ['null timestamp', { location_updated_at: null }]])('%s + recompute differs beyond tolerance: blocked', async (_n, status) => {
+        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 20 });
+        expect(await runF(status)).toBe('eta_claim_superseded_fix');
+      });
+      test.each([['no tech_status row', undefined], ['null timestamp', { location_updated_at: null }]])('%s + recompute unavailable (null / throws): blocked', async (_n, status) => {
+        resolveLiveEtaMinutesUncached.mockResolvedValue(null);
+        expect(await runF(status)).toBe('eta_claim_superseded_fix');
+        resolveLiveEtaMinutesUncached.mockRejectedValue(new Error('provider down'));
+        expect(await runF(status)).toBe('eta_claim_superseded_fix');
       });
       test('a status-only claim (no minutes figure) is not held to the fix and never recomputes', async () => {
         expect(await runF({ location_updated_at: new Date(FIX + 30e3) }, 'Your technician is en-route.')).toBeNull();
