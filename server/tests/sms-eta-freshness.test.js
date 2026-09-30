@@ -1578,6 +1578,30 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
         expect(await runC(cust(), [row({ lat: '27.1', lng: '-82.2' })])).toBe('eta_claim_destination_changed');
       });
     });
+    describe('tracker device identity (round 22)', () => {
+      const { deviceFingerprint } = require('../services/live-eta-destination');
+      const FP = deviceFingerprint('356938035643809');
+      const dSnap = () => snap({ deviceImei: FP });
+      const dbWithTech = (rows, tech) => (table) => (table === 'technicians'
+        ? { where: () => ({ first: async () => tech }) }
+        : { whereIn: () => ({ select: async () => rows }) });
+      const runD = (tech, body = 'The tech is 9 minutes away.', snapshot = dSnap()) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: dbWithTech([row()], tech) });
+      test('same device passes', async () => { expect(await runD({ bouncie_imei: '356938035643809' })).toBeNull(); });
+      test('a re-pointed, cleared or unreadable technician device blocks', async () => {
+        expect(await runD({ bouncie_imei: '999999999999999' })).toBe('eta_claim_device_changed');
+        expect(await runD({ bouncie_imei: null })).toBe('eta_claim_device_changed');
+        expect(await runD(undefined)).toBe('eta_claim_device_changed');
+      });
+      test('also enforced on the recorded-state recheck ("The technician is en-route.")', async () => {
+        expect(await runD({ bouncie_imei: '999999999999999' }, 'Your technician is en-route.')).toBe('eta_claim_device_changed');
+      });
+      test('a link-only share names no vehicle: device is not compared', async () => {
+        expect(await runD({ bouncie_imei: '999999999999999' }, 'Track: portal.wavespestcontrol.com/track/tok-1')).toBeNull();
+      });
+      test('an entry that recorded no device keeps the previous behavior', async () => {
+        expect(await runD({ bouncie_imei: '999999999999999' }, 'The tech is 9 minutes away.', snap())).toBeNull();
+      });
+    });
     test('a recorded destination whose visit row cannot be read blocks', async () => {
       expect(await run('The tech is 9 minutes away.', [row({ id: 'svc-other' })])).toBe('eta_claim_no_longer_en_route');
       const two = snap({ scheduledServiceIds: ['svc-1'], destinations: [dest, { ...dest, id: 'svc-ghost' }] });

@@ -11,4 +11,19 @@ function stripTrackLinks(text) {
   return String(text || '').split(/(\s+)/).map((t) => (t.toLowerCase().includes('/track/') ? ' ' : t)).join('');
 }
 
-module.exports = { stripTrackLinks };
+// Codex round-5 P2: deliberately NOT track-token-expiry.js's isTrackTokenLive
+// — that helper fails OPEN on a missing expiry (a legacy row with no
+// track_token_expires_at at all is treated as still live), which is the
+// right default for a customer who already has the link open on the public
+// tracking page. This send-time gate decides whether Waves is about to HAND
+// OUT a link, so it fails CLOSED instead: any expiry that is missing,
+// unparseable, or in the past blocks the send.
+function sendTimeTrackTokenLive(expiresAt) {
+  if (!expiresAt) return false;
+  const expiresMs = new Date(expiresAt).getTime();
+  return Number.isFinite(expiresMs) && expiresMs > Date.now();
+}
+
+// Shared with the drafter-side context builder (round-22 P2): an expired link is
+// withheld from the facts block by the SAME rule the send-time check applies.
+module.exports = { stripTrackLinks, sendTimeTrackTokenLive };

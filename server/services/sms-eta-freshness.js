@@ -81,7 +81,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { stripTrackLinks } = require('./sms-track-links');
+const { stripTrackLinks, sendTimeTrackTokenLive } = require('./sms-track-links');
 
 // 15 minutes: long enough that an ordinary reviewer accept/edit cycle (a
 // human reading a composer card and clicking Send) never gets blocked by
@@ -190,19 +190,6 @@ function parseDraftedAt(factsGeneratedAt) {
     if (Number.isFinite(parsed.getTime())) return parsed;
   }
   return null;
-}
-
-// Codex round-5 P2: deliberately NOT track-token-expiry.js's isTrackTokenLive
-// — that helper fails OPEN on a missing expiry (a legacy row with no
-// track_token_expires_at at all is treated as still live), which is the
-// right default for a customer who already has the link open on the public
-// tracking page. This send-time gate decides whether Waves is about to HAND
-// OUT a link, so it fails CLOSED instead: any expiry that is missing,
-// unparseable, or in the past blocks the send.
-function sendTimeTrackTokenLive(expiresAt) {
-  if (!expiresAt) return false;
-  const expiresMs = new Date(expiresAt).getTime();
-  return Number.isFinite(expiresMs) && expiresMs > Date.now();
 }
 
 // The send-time decision is three phases (Codex round-10 P2, PR #5334 —
@@ -410,11 +397,6 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
 // checked too, never inferred from the visit's status/track_state alone, so
 // an expired (or unexpectedly missing) token blocks the send even while its
 // row still reads en_route/on_property.
-function technicianChanged(boundEntries, rows) {
-  const techById = new Map(rows.map((row) => [row.id, row.technician_id]));
-  return boundEntries.some((entry) => entry.technicianId != null
-    && entry.scheduledServiceIds.some((id) => String(techById.get(id) ?? '') !== String(entry.technicianId)));
-}
 const foldStr = (v) => (v == null ? '' : String(v).trim().toLowerCase());
 const sameNum = (a, b) => (a == null || b == null ? a == null && b == null : Number(a) === Number(b));
 function stampedDestinationMatches(recorded, row) {
@@ -461,6 +443,32 @@ async function destinationChanged(boundEntries, rows, dbh) {
   }
   return false;
 }
+// ONE per-entry identity comparison (round-22 P2): WHO is coming (technician),
+// in WHICH vehicle (tracker device fingerprint), and WHERE (destination). Each
+// bound entry recorded these at draft time; any change — or an unreadable
+// current value — makes the figure/status about something else. `checkPerson`
+// is off for a link-only share, which names no technician or vehicle (the
+// destination still applies: the link routes to the visit's current address).
+// Returns the block reason or null.
+async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson }) {
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  if (checkPerson) {
+    const techById = new Map(rows.map((row) => [row.id, row.technician_id]));
+    // Round-18: only entries that recorded a technicianId are checked.
+    if (boundEntries.some((entry) => entry.technicianId != null
+      && entry.scheduledServiceIds.some((id) => String(techById.get(id) ?? '') !== String(entry.technicianId)))) return 'eta_claim_tech_changed';
+    // Round-22: an entry that recorded the ETA's tracker device must still map
+    // its technician to that same device (admin-geofence can re-point it).
+    for (const entry of boundEntries) {
+      if (!entry.deviceImei) continue;
+      const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei');
+      const { deviceFingerprint } = require('./live-eta-destination');
+      if (!tech || deviceFingerprint(tech.bouncie_imei) !== entry.deviceImei) return 'eta_claim_device_changed';
+    }
+  }
+  if (await destinationChanged(boundEntries, rows, dbh)) return 'eta_claim_destination_changed';
+  return null;
+}
 async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, recordedState = false, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
@@ -485,15 +493,11 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite 
       ? boundEntries.every((entry) => entry.scheduledServiceIds.some((id) => liveById.get(id)))
       : boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => liveById.get(id)));
     if (!allBoundEntriesLive) return 'eta_claim_no_longer_en_route';
-    // Round-18 P2: a reassignment keeps the visit en route but changes WHO is
-    // coming — a claim about the drafted technician is then false. Only
-    // entries that recorded a technicianId are checked (older snapshots keep
-    // the previous behavior); a link-only share names no technician.
-    if (!allowOnSite && technicianChanged(boundEntries, rows)) return 'eta_claim_tech_changed';
-    // Round-20 P2: the figure/status was about a specific destination; staff
-    // moving the appointment to another property keeps the row en route but
-    // makes the minutes wrong. Unreadable or mismatched → block (every path).
-    if (await destinationChanged(boundEntries, rows, dbh)) return 'eta_claim_destination_changed';
+    // Round-18/20/22: technician, tracker device and destination identity, in
+    // one comparison (see entryIdentityReason). A link-only share names no
+    // technician or vehicle, so only the destination applies there.
+    const identityReason = await entryIdentityReason(boundEntries, rows, dbh, { checkPerson: !allowOnSite });
+    if (identityReason) return identityReason;
     // Recorded-state recheck (no classified claim): each entry's visits must
     // still be in the exact state the draft carried — on site stays on site,
     // en route stays en route.

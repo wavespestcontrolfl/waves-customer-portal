@@ -48,6 +48,7 @@ function baseRow(overrides = {}) {
     id: 'svc-1',
     technician_id: 'tech-1',
     track_view_token: 'abc123token',
+    track_token_expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     tech_bouncie_imei: null,
     service_lat: 27.4,
     service_lng: -82.5,
@@ -1590,7 +1591,7 @@ describe('round 16 P2s: Nm, slash fractions, status-only groups, distinct stops'
 
   describe('buildLiveEtaGroups', () => {
     const today = require('../utils/datetime-et').etDateString();
-    const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, technician_id: 'tech-1', ...extra });
+    const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', ...extra });
     test('an unresolved live stop still gets a minutes-null group (grouped siblings share one); resolved keeps minutes', () => {
       const rows = [svc('a'), svc('b'), svc('c', { technician_id: null })];
       const groups = buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: ['k1', 'k1', null], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', null]]), includeLiveEta: true });
@@ -1668,7 +1669,7 @@ describe('round 18 P2s: decimals, driving, on-site groups, technician identity',
 
   describe('buildLiveEtaGroups — on-site visits and technician identity', () => {
     const today = require('../utils/datetime-et').etDateString();
-    const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, technician_id: 'tech-1', ...extra });
+    const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', ...extra });
     test('an on_property visit becomes a minutes-null status group recorded as on_property; a scheduled one does not', () => {
       const rows = [svc('a', { status: 'on_site', track_state: 'on_property' }), svc('b', { track_state: 'scheduled' })];
       expect(buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: [null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true }).map(({ destinations, ...g }) => g))
@@ -1718,7 +1719,7 @@ describe('round 19 P2s: window minutes, zero, tracking-link digits, on-site sibl
 
   test('on-site grouped siblings sharing a technician + destination form ONE on_property group', () => {
     const today = require('../utils/datetime-et').etDateString();
-    const mk = (id, extra = {}) => ({ id, scheduled_date: today, status: 'on_site', track_state: 'on_property', track_view_token: `tok-${id}`, technician_id: 'tech-1', service_lat: 27.4, service_lng: -82.5, ...extra });
+    const mk = (id, extra = {}) => ({ id, scheduled_date: today, status: 'on_site', track_state: 'on_property', track_view_token: `tok-${id}`, track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', service_lat: 27.4, service_lng: -82.5, ...extra });
     const customer = baseCustomer();
     const rows = [mk('a'), mk('b'), mk('c', { technician_id: 'tech-2' })];
     const groups = buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: [null, null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer });
@@ -1750,7 +1751,7 @@ describe('round 20 P2s: bare-past arrival, en-route hyphen, destination identity
   });
   test('buildLiveEtaGroups records property id + stamped coordinates per member', () => {
     const today = require('../utils/datetime-et').etDateString();
-    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', property_id: 'prop-1', service_lat: '27.4', service_lng: '-82.5', service_address_line1: '1 Test St', service_address_zip: '34285' };
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', property_id: 'prop-1', service_lat: '27.4', service_lng: '-82.5', service_address_line1: '1 Test St', service_address_zip: '34285' };
     const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true });
     expect(g.destinations).toEqual([{ id: 'a', propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285', city: null, resolved: { source: 'visit', lat: 27.4, lng: -82.5 } }]);
   });
@@ -1784,12 +1785,60 @@ describe('round 21 P2s: list markers, subjectless "here", resolved destination',
   test('destination identity records the RESOLVED destination and its source (visit pin vs customer fallback)', () => {
     const today = require('../utils/datetime-et').etDateString();
     const customer = { ...baseCustomer(), id: 'cust-1', latitude: 27.1, longitude: -82.2 };
-    const noPin = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', property_id: 'prop-1', service_lat: null, service_lng: null };
+    const noPin = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), technician_id: 'tech-1', property_id: 'prop-1', service_lat: null, service_lng: null };
     const pinned = { ...noPin, id: 'b', service_lat: 27.4, service_lng: -82.5 };
     const [gA, gB] = buildLiveEtaGroups({ upcomingServices: [noPin, pinned], liveEtaKeys: [null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer });
     expect(gA.destinations[0]).toMatchObject({ id: 'a', lat: null, lng: null, resolved: { source: 'customer', lat: 27.1, lng: -82.2 }, customerId: 'cust-1' });
     expect(gB.destinations[0]).toMatchObject({ id: 'b', lat: 27.4, lng: -82.5, resolved: { source: 'visit', lat: 27.4, lng: -82.5 } });
     expect(gB.destinations[0].customerId).toBeUndefined();
+  });
+});
+
+// Codex round-22 P2s (PR #5334).
+describe('round 22 P2s: service durations, expired links, tracker device', () => {
+  test.each([
+    'The service will be 20 minutes.', 'The treatment is 20 minutes long.', 'The visit runs about an hour.', 'The appointment should take 45 minutes.',
+    'Your service will typically be about 30 minutes.', 'The inspection takes 20 minutes.', 'The application lasts 15 minutes.',
+  ])('%p is a service duration, never an ETA', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' })).toEqual({ ok: true, violations: [] });
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    ['The tech will be 20 minutes.', 20], ['The tech will be 20 minutes away.', 20], ['For your service, the tech will be 20 minutes away.', 20],
+    ['The service will be 20 minutes away.', 20], ['The technician is about 20 minutes out.', 20], ['Our service tech is 20 minutes from you.', 20],
+  ])('%p is still an ETA claim (%p)', (reply, minutes) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(minutes);
+  });
+
+  const expiredRow = (extra = {}) => baseRow({ track_token_expires_at: new Date(Date.now() - 60e3).toISOString(), ...extra });
+  test('an expired (or expiry-less) tracking token is never exposed: no ETA fact, no link, no snapshot token', async () => {
+    process.env[GATE] = 'true';
+    for (const row of [expiredRow(), baseRow({ track_token_expires_at: null })]) {
+      expect(await resolveLiveEtaFact(row, baseCustomer())).toBeNull();
+    }
+    expect(resolveFreshTechPosition).not.toHaveBeenCalled();
+    const today = require('../utils/datetime-et').etDateString();
+    const mk = (id, extra) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, technician_id: 'tech-1', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString(), ...extra });
+    const [g] = buildLiveEtaGroups({ upcomingServices: [mk('a'), mk('b', { track_token_expires_at: new Date(Date.now() - 1000).toISOString() })], liveEtaKeys: ['k', 'k'], uniqueLiveEtaKeys: ['k'], liveEtaResultByKey: new Map([['k', null]]), includeLiveEta: true, customer: baseCustomer() });
+    expect(g.trackTokens).toEqual(['tok-a']);
+    const etas = perVisitLiveEtas([mk('a'), mk('b', { track_token_expires_at: new Date(Date.now() - 1000).toISOString() })], ['k', 'k'], new Map([['k', { minutes: 9, asOf: '2:45 PM ET' }]]));
+    expect(etas[0].trackUrl).toContain('/track/tok-a');
+    expect(etas[1].trackUrl).toBeNull();
+  });
+
+  test('the tracker device is recorded as a non-reversible fingerprint, never the raw IMEI, and survives into the snapshot', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', tech_bouncie_imei: '356938035643809', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer: baseCustomer() });
+    const { deviceFingerprint } = require('../services/live-eta-destination');
+    expect(g.deviceImei).toBe(deviceFingerprint('356938035643809'));
+    expect(JSON.stringify(g)).not.toContain('356938035643809');
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [g] }).entries[0].deviceImei).toBe(g.deviceImei);
+    expect(deviceFingerprint('  ')).toBeNull();
   });
 });
 

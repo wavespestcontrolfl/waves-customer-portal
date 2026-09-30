@@ -13,7 +13,8 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // customer would see on their own tracking link.
 const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
 const { calculateBoundedTrackingEta, finiteNumber, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
-const { resolveLiveEtaDestination } = require('./live-eta-destination');
+const { resolveLiveEtaDestination, deviceFingerprint } = require('./live-eta-destination');
+const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
 
@@ -722,7 +723,7 @@ async function resolveLiveEtaMinutesUncached(row, dest) {
 
 async function resolveLiveEtaFact(row, customer) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
-  if (!row?.technician_id || !row?.track_view_token) return null;
+  if (!row?.technician_id || !liveEtaLiveToken(row)) return null;
   const dest = liveEtaDestination(row, customer);
   if (!dest) return null;
 
@@ -777,10 +778,19 @@ async function resolveLiveEtaFact(row, customer) {
   };
 }
 
+// The visit's tracking token, but only while it is still live by the SAME
+// fail-closed rule the send-time check applies (Codex round-22 P2): an expired
+// (or expiry-less) token is never exposed to the drafter, so it cannot be copied
+// into a suggestion that the send-time guard would then have to reject. The
+// send-time recheck stays for races.
+function liveEtaLiveToken(row) {
+  return row?.track_view_token && sendTimeTrackTokenLive(row.track_token_expires_at) ? row.track_view_token : null;
+}
 // One visit's own customer tracking link — null when that row has no
 // track_view_token (never falls back to another visit's token).
 function liveEtaTrackUrl(row) {
-  return row?.track_view_token ? `${publicPortalUrl()}/track/${row.track_view_token}` : null;
+  const token = liveEtaLiveToken(row);
+  return token ? `${publicPortalUrl()}/track/${token}` : null;
 }
 
 // Per-visit LIVE ETA facts for a customer's upcoming services (Codex round-9
@@ -827,7 +837,7 @@ const UPCOMING_SERVICE_COLUMNS = [
   // tracking page requires for a live vehicle, never raw status alone,
   // or it can advertise "Track live" for a stop the tracking page
   // itself still renders as scheduled. See customerTrackState below.
-  'ss.id', 'ss.technician_id', 'ss.property_id', 'ss.track_view_token', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei',
+  'ss.id', 'ss.technician_id', 'ss.property_id', 'ss.track_view_token', 'ss.track_token_expires_at', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei',
   'ss.lat as service_lat', 'ss.lng as service_lng',
   'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city',
 ];
@@ -900,10 +910,11 @@ function liveEtaDestinationIdentity(row, customer = null) {
 }
 function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
   const technicianId = members.find((s) => s.technician_id != null)?.technician_id;
+  const deviceImei = deviceFingerprint(members.find((s) => s.tech_bouncie_imei)?.tech_bouncie_imei);
   return {
     minutes: result ? result.minutes : null,
     scheduledServiceIds: members.map((s) => s.id),
-    trackTokens: members.map((s) => s.track_view_token).filter(Boolean),
+    trackTokens: members.map(liveEtaLiveToken).filter(Boolean),
     // The tracker state this group was drafted under (Codex round-18 P2): an
     // on-site group lets a completed-arrival claim ("has arrived") be
     // rechecked at send time too.
@@ -911,6 +922,9 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
     // Which technician the ETA/status was about (round-18 P2): send time
     // refuses when a reassignment changed the row's technician_id.
     ...(technicianId != null ? { technicianId } : {}),
+    // Round-22 P2: the tracker device (Bouncie IMEI) the ETA was read from.
+    // Send time refuses when an admin re-pointed the technician at another vehicle.
+    ...(deviceImei ? { deviceImei } : {}),
     // Round-20 P2: WHERE the ETA/status was about — each member's property id +
     // the coordinates/address stamp the destination came from. Send time
     // refuses when staff moved the appointment to another property.
@@ -1227,7 +1241,7 @@ class ContextAggregator {
       // but the representative should never accidentally be the one row
       // missing it (resolveLiveEtaFact would then fail closed for the
       // whole group).
-      const representative = upcomingServices.find((s, i) => liveEtaKeys[i] === key && s.track_view_token)
+      const representative = upcomingServices.find((s, i) => liveEtaKeys[i] === key && liveEtaLiveToken(s))
         || upcomingServices[liveEtaKeys.findIndex((k) => k === key)];
       return resolveLiveEtaFact(representative, customer);
     }));

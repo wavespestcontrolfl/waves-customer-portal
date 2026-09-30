@@ -32,4 +32,13 @@ function resolveLiveEtaDestination(row, customer) {
   return custLat != null && custLng != null ? { lat: custLat, lng: custLng, source: 'customer' } : { lat: null, lng: null, source: null };
 }
 
-module.exports = { resolveLiveEtaDestination };
+// Stable, non-reversible fingerprint of a tracker device id (Bouncie IMEI) for
+// the persisted send-time snapshot (round-22 P2): the raw device id never lands
+// in input_snapshot, yet a re-pointed technician->device mapping still changes
+// the value. null for an empty id.
+function deviceFingerprint(imei) {
+  const v = String(imei ?? '').trim();
+  return v ? require('crypto').createHash('sha256').update(v).digest('hex').slice(0, 16) : null;
+}
+
+module.exports = { resolveLiveEtaDestination, deviceFingerprint };

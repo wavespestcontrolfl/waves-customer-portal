@@ -897,9 +897,27 @@ const HOURS_TO_MINUTES = 60;
 // hour word, or a number-word phrase — in `str`.
 const WINDOW_AFTER_RE = /^\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b/i;
 const WINDOW_BEFORE_RE = /\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?(?:\d+(?:[./]\d+)?\s*(?:[-–—]|to|or)\s*)?(?:\d+(?:[./]\d+)?\s*|(?:(?:a\s+)?(?:half|quarter(?:\s+of)?)\s+)?an?\s+)?$/i;
+// Declarative service/treatment/visit/appointment DURATION (Codex round-22 P2):
+// "The service will be 20 minutes", "The treatment is 20 minutes long", "the
+// visit runs about an hour" describe how long the work takes — never when the
+// tech arrives. Subject noun DIRECTLY followed by the duration verb (so "For
+// your service, the tech will be 20 minutes away" and "the tech will be 20
+// minutes" — a technician subject — stay ETA claims), and an arrival cue right
+// after the figure ("20 minutes away / out / from you / until") keeps the ETA
+// reading even under a service subject.
+const SERVICE_DURATION_BEFORE_RE = /\b(?:service|treatment|visit|appointment|inspection|application|job|spray|session)(?:s|es)?(?:\s+(?:itself|time|duration|length))?(?:\s+(?:usually|typically|normally|generally|only|just|should|would|will|can|may))*\s+(?:is|are|be|takes?|lasts?|runs?)\s+(?:(?:about|only|around|roughly|approximately|approx\.?|just|usually|typically|normally|at\s+most|at\s+least|up\s+to|under|over)\s+)*$/i;
+const ARRIVAL_CUE_AFTER_RE = /^\s*(?:min(?:ute)?s?|hours?|hrs?)?[\s-]*(?:away|out|from|until|early|late|behind|to\s+go)\b/i;
+function isServiceDurationQuantity(str, index, length) {
+  const before = str.slice(Math.max(0, index - 60), index);
+  return SERVICE_DURATION_BEFORE_RE.test(before) && !ARRIVAL_CUE_AFTER_RE.test(str.slice(index + length, index + length + 24));
+}
+// The ONE shared "this figure is a scheduling/duration span, not an arrival
+// time" predicate every token kind consults: a scheduling window or a
+// service/treatment duration.
 function isWindowQuantity(str, index, length) {
   return WINDOW_AFTER_RE.test(str.slice(index + length))
-    || WINDOW_BEFORE_RE.test(str.slice(Math.max(0, index - 60), index));
+    || WINDOW_BEFORE_RE.test(str.slice(Math.max(0, index - 60), index))
+    || isServiceDurationQuantity(str, index, length);
 }
 // String.replace that leaves a window figure exactly as written.
 function replaceQuantity(text, re, convert) {
@@ -1471,6 +1489,7 @@ function buildLiveEtaSnapshot(context) {
       // Which technician the figure/status was about (Codex round-18 P2);
       // sms-eta-freshness refuses at send when a reassignment changed it.
       ...(g.technicianId != null ? { technicianId: g.technicianId } : {}),
+      ...(g.deviceImei ? { deviceImei: g.deviceImei } : {}),
       ...(typeof g.state === 'string' ? { state: g.state } : {}),
       // Round-20 P2: the destination (property + stamped coordinates) the figure
       // was computed for; send time refuses when the appointment moved.
