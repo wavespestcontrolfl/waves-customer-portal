@@ -934,9 +934,15 @@ describe('auto-send fallback publication', () => {
     const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
     const priorFewshot = process.env.SHADOW_FEWSHOT;
     try {
+      // Codex round-16 P2: the opt-in also requires the release gate — gate-off
+      // is byte-identical (no live-row query).
+      const off = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
+      expect(off.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false });
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
       const { getContextForCustomer } = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
       expect(getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true });
     } finally {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
       else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
       if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
@@ -951,6 +957,7 @@ describe('auto-send fallback publication', () => {
     const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
     const priorFewshot = process.env.SHADOW_FEWSHOT;
     try {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
       const { getContextForCustomer } = await runDraft(
         { sent: false, reason: 'provider_uncertain', ambiguous: true },
         { inboundMessage: 'Thank you!', source: 'live_webhook', customer: { id: 'customer-1', first_name: 'Test' } },
@@ -958,6 +965,7 @@ describe('auto-send fallback publication', () => {
       expect(getContextForCustomer).toHaveBeenCalledTimes(1);
       expect(getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'customer-1' }), { includeLiveEta: false });
     } finally {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
       else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
       if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;

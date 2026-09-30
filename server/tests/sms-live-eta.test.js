@@ -33,7 +33,7 @@ const { resolveFreshTechPosition } = require('../services/tracking-vehicle-locat
 const { calculateBoundedTrackingEta, STALE_TECH_STATUS_MS } = require('../services/customer-tracking-eta');
 const {
   resolveLiveEtaFact, liveEtaDestination, liveEtaDedupeKey, liveEtaEligible,
-  _resetLiveEtaMemoForTests, _liveEtaMemoSizeForTests, perVisitLiveEtas, mergeLiveUpcoming,
+  _resetLiveEtaMemoForTests, _liveEtaMemoSizeForTests, perVisitLiveEtas, mergeLiveUpcoming, buildLiveEtaGroups,
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
@@ -1558,6 +1558,63 @@ describe('round 15: negation, coming/headed, qualified ETAs, equal entries', () 
   });
 });
 
+// Codex round-16 P2s (PR #5334).
+describe('round 16 P2s: Nm, slash fractions, status-only groups, distinct stops', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+
+  test.each([['ETA: 20m', 20], ['His ETA is 20 m', 20], ['tech is 20m away', 20]])('%p is an exact %p-minute claim (not just an unclassified signal)', (body, m) => {
+    expect(findEtaMinutesClaims(body).map((c) => c.minutes)).toEqual([m]);
+    expect(validateLiveEtaMinutes({ reply: body, factsBlock: facts(9) }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: body, factsBlock: facts(m) }).ok).toBe(true);
+  });
+  test('"5 m" outside an arrival sentence (metres) is untouched', () => {
+    expect(findEtaMinutesClaims('The hedge is 5 m wide.')).toEqual([]);
+  });
+
+  test.each([['1/2 hour away', 30], ['3/4 hr out', 45], ['1 1/2 hours away', 90]])('%p reads as %p minutes, never "1/120"', (body, m) => {
+    expect(findEtaMinutesClaims(body).map((c) => c.minutes)).toEqual([m]);
+    expect(validateLiveEtaMinutes({ reply: `The tech is ${body}.`, factsBlock: facts(m) }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply: `The tech is ${body}.`, factsBlock: facts(120) }).ok).toBe(false);
+  });
+  test('an appointment window in fractions is left alone', () => {
+    expect(validateLiveEtaMinutes({ reply: 'Your arrival window is 1/2 hour.', factsBlock: facts(12) })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('buildLiveEtaSnapshot keeps a status-only (minutes null) entry', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['t'] }] }))
+      .toEqual({ entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['t'] }] });
+  });
+
+  describe('buildLiveEtaGroups', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, technician_id: 'tech-1', ...extra });
+    test('an unresolved live stop still gets a minutes-null group (grouped siblings share one); resolved keeps minutes', () => {
+      const rows = [svc('a'), svc('b'), svc('c', { technician_id: null })];
+      const groups = buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: ['k1', 'k1', null], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', null]]), includeLiveEta: true });
+      expect(groups).toEqual([
+        { minutes: null, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'] },
+        { minutes: null, scheduledServiceIds: ['c'], trackTokens: ['tok-c'] },
+      ]);
+      const resolved = buildLiveEtaGroups({ upcomingServices: rows.slice(0, 2), liveEtaKeys: ['k1', 'k1'], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', { minutes: 9, fixExpiresAtMs: 5 }]]), includeLiveEta: true });
+      expect(resolved).toEqual([{ minutes: 9, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], fixExpiresAtMs: 5 }]);
+    });
+    test('includeLiveEta false or a non-live row: no groups', () => {
+      expect(buildLiveEtaGroups({ upcomingServices: [svc('a')], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: false })).toEqual([]);
+      expect(buildLiveEtaGroups({ upcomingServices: [svc('a', { track_state: 'scheduled' })], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true })).toEqual([]);
+    });
+  });
+
+  test('grouped siblings render the ETA line twice but are ONE stop: a numeric draft is approved; two real stops are not', () => {
+    const twoLines = `${facts(9)}\n${facts(9)}`;
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away.', factsBlock: twoLines, liveEtaStopCount: 1 }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away.', factsBlock: twoLines, liveEtaStopCount: 2 }).ok).toBe(false);
+    expect(validateLiveEtaMinutes({ reply: 'The tech is 9 minutes away.', factsBlock: twoLines }).ok).toBe(false);
+  });
+});
+
 describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (independent review finding #2, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2)', () => {
   test('no scheduled_service ever backed a LIVE ETA fact: null', () => {
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [] })).toBeNull();
@@ -1598,8 +1655,8 @@ describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (indep
     });
   });
 
-  test('a group with no minutes or no ids is dropped rather than persisted as a bogus entry', () => {
-    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: null, scheduledServiceIds: ['svc-1'] }, { minutes: 12, scheduledServiceIds: [] }] }))
+  test('a group with no ids, or a non-numeric non-null minutes value, is dropped (a minutes-null status-only group is kept — round 16)', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 'soon', scheduledServiceIds: ['svc-1'] }, { minutes: 12, scheduledServiceIds: [] }, { minutes: null, scheduledServiceIds: [] }] }))
       .toBeNull();
   });
 

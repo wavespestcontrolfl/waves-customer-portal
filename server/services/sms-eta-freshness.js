@@ -244,7 +244,7 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries }) {
 // old flat shape (no `entries`), yields no entries and fails closed.
 function usableSnapshotEntries(liveEtaSnapshot) {
   return Array.isArray(liveEtaSnapshot?.entries)
-    ? liveEtaSnapshot.entries.filter((e) => e && Number.isFinite(e.minutes) && Array.isArray(e.scheduledServiceIds) && e.scheduledServiceIds.length)
+    ? liveEtaSnapshot.entries.filter((e) => e && (Number.isFinite(e.minutes) || e.minutes === null) && Array.isArray(e.scheduledServiceIds) && e.scheduledServiceIds.length)
     : [];
 }
 

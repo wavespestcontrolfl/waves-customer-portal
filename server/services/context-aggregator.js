@@ -875,6 +875,30 @@ async function loadUpcomingServices(customer, includeLiveEta) {
   return mergeLiveUpcoming(limited, liveRows);
 }
 
+// The send-time snapshot input: one group per distinct live STOP (Codex
+// round-16 P2, PR #5334). A stop whose LIVE ETA resolved carries its minutes;
+// a live (en-route, today) stop whose GPS / Distance Matrix lookup failed — or
+// that has no technician/destination to resolve at all — still gets a group
+// with `minutes: null`, so status-only copy ("the tech is on the way") is
+// rechecked against the visit's current tracker state at send time. Grouped
+// siblings sharing one physical stop share one group; each keeps its own
+// /track/ token (round-4) and the GPS-fix expiry rides along (round-11).
+function liveEtaGroupFor(members, result) {
+  return {
+    minutes: result ? result.minutes : null,
+    scheduledServiceIds: members.map((s) => s.id),
+    trackTokens: members.map((s) => s.track_view_token).filter(Boolean),
+    ...(result && result.fixExpiresAtMs != null ? { fixExpiresAtMs: result.fixExpiresAtMs } : {}),
+  };
+}
+function buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta }) {
+  if (!includeLiveEta) return [];
+  const keyed = uniqueLiveEtaKeys.map((key) => liveEtaGroupFor(upcomingServices.filter((s, i) => liveEtaKeys[i] === key), liveEtaResultByKey.get(key)));
+  // Live rows with no dedupe key (no technician / destination): singleton groups.
+  const keyless = upcomingServices.filter((s, i) => liveEtaKeys[i] == null && liveEtaEligible(s)).map((s) => liveEtaGroupFor([s], null));
+  return [...keyed, ...keyless];
+}
+
 // Test-only: clears the cross-request memo so unrelated test cases sharing a
 // (technician, destination) key never see a previous test's cached lookup.
 // Never called from production code.
@@ -1181,26 +1205,7 @@ class ContextAggregator {
     // DIFFERENT stop's still-en_route status — grouping preserves which
     // ids each distinct minutes figure actually came from. Threaded through
     // generateGroundedDraft's context param, never persisted here.
-    const liveEtaGroups = uniqueLiveEtaKeys
-      .filter((key) => liveEtaResultByKey.get(key))
-      .map((key) => {
-        const members = upcomingServices.filter((s, i) => liveEtaKeys[i] === key);
-        return {
-          minutes: liveEtaResultByKey.get(key).minutes,
-          scheduledServiceIds: members.map((s) => s.id),
-          // The customer-facing /track/:token link(s) this LIVE ETA covers
-          // (Codex round-4 P2, PR #5334): a grouped stop's siblings each mint
-          // their OWN track_view_token (visit-groups.js fan-out) even though
-          // they share one physical stop, so a reply may legitimately carry
-          // any one of them. sms-eta-freshness.js uses this to revalidate a
-          // reply that shares ONLY the tracking link — the token in the
-          // outgoing body must belong to a snapshot visit, never a
-          // stray/old link.
-          trackTokens: members.map((s) => s.track_view_token).filter(Boolean),
-          // GPS-fix expiry (Codex round-11 P2): see resolveLiveEtaFact.
-          fixExpiresAtMs: liveEtaResultByKey.get(key).fixExpiresAtMs,
-        };
-      });
+    const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta });
 
     return {
       known: true,
@@ -1583,6 +1588,7 @@ module.exports.liveEtaDedupeKey = liveEtaDedupeKey;
 module.exports.liveEtaEligible = liveEtaEligible;
 module.exports._resetLiveEtaMemoForTests = _resetLiveEtaMemoForTests;
 module.exports.perVisitLiveEtas = perVisitLiveEtas;
+module.exports.buildLiveEtaGroups = buildLiveEtaGroups;
 module.exports.mergeLiveUpcoming = mergeLiveUpcoming;
 module.exports.loadUpcomingServices = loadUpcomingServices;
 module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

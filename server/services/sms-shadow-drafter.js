@@ -870,7 +870,7 @@ const HOURS_TO_MINUTES = 60;
 // allowed). `index`/`length` locate the figure — a number+unit span, a lone
 // hour word, or a number-word phrase — in `str`.
 const WINDOW_AFTER_RE = /^\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b/i;
-const WINDOW_BEFORE_RE = /\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?(?:\d+(?:\.\d+)?\s*(?:[-–—]|to|or)\s*)?(?:\d+(?:\.\d+)?\s*|(?:(?:a\s+)?(?:half|quarter(?:\s+of)?)\s+)?an?\s+)?$/i;
+const WINDOW_BEFORE_RE = /\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?(?:\d+(?:[./]\d+)?\s*(?:[-–—]|to|or)\s*)?(?:\d+(?:[./]\d+)?\s*|(?:(?:a\s+)?(?:half|quarter(?:\s+of)?)\s+)?an?\s+)?$/i;
 function isWindowQuantity(str, index, length) {
   return WINDOW_AFTER_RE.test(str.slice(index + length))
     || WINDOW_BEFORE_RE.test(str.slice(Math.max(0, index - 60), index));
@@ -950,10 +950,20 @@ function normalizeTimeQuantities(text) {
     (m, n) => `${hoursToMinutes(n) + 30} minutes`);
   out = replaceQuantity(out, /\b(?:(\d+(?:\.\d+)?)|an?)\s+(?:hours?|hrs?)\s+and\s+a\s+half\b/gi,
     (m, n) => `${hoursToMinutes(n || 1) + 30} minutes`);
+  // Slash fractions BEFORE the plain hour rewrite (Codex round-16 P2): "1/2
+  // hour" is 30 minutes, "3/4 hr" 45, "1 1/2 hours" 90 — never "1/120 minutes".
+  out = replaceQuantity(out, /\b(\d+)\s+(\d+)\/(\d+)[\s-]*(?:hours?|hrs?)\b/gi,
+    (m, w, n, d) => (Number(d) ? `${Math.round((Number(w) + Number(n) / Number(d)) * HOURS_TO_MINUTES)} minutes` : m));
+  out = replaceQuantity(out, /\b(\d+)\/(\d+)[\s-]*(?:hours?|hrs?)\b/gi,
+    (m, n, d) => (Number(d) ? `${Math.round((Number(n) / Number(d)) * HOURS_TO_MINUTES)} minutes` : m));
   out = normalizeHourMinuteCompounds(out);
   // "2 hours", "2h", "1.5 hrs".
-  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h\b)/gi,
+  out = replaceQuantity(out, /(?<!\d\/)\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h\b)/gi,
     (m, n) => `${hoursToMinutes(n)} minutes`);
+  // "20m" / "20 m" as an ETA (Codex round-16 P2): a bare "m" unit is minutes
+  // only inside an arrival/ETA sentence (elsewhere it could be metres).
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)[ ]?m\b(?!\s*(?:\/|²|\^|2))/g,
+    (m, n, ...rest) => (ARRIVAL_TRIGGER_RE.test(sentenceAt(rest[rest.length - 1], sentenceSpans(rest[rest.length - 1]), rest[rest.length - 2])) ? `${n} minutes` : m));
   // "90 seconds" -> "1.5 minutes" (Codex round-13 P2): a seconds ETA is a
   // real, timed arrival claim; as a (usually non-integer) minutes figure it
   // can only bind to a live fact that equals it exactly.
@@ -1377,7 +1387,7 @@ function replyClaimsEtaMinutes(reply) {
 function buildLiveEtaSnapshot(context) {
   const groups = Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups : [];
   const entries = groups
-    .filter((g) => g && Number.isFinite(g.minutes) && Array.isArray(g.scheduledServiceIds))
+    .filter((g) => g && (Number.isFinite(g.minutes) || g.minutes === null) && Array.isArray(g.scheduledServiceIds))
     .map((g) => ({
       minutes: g.minutes,
       scheduledServiceIds: g.scheduledServiceIds.filter((id) => id != null),
@@ -1399,7 +1409,7 @@ function buildLiveEtaSnapshot(context) {
 // mode where no verifier would catch it at all. Any ETA-style minutes claim
 // must equal the LIVE ETA minutes the facts block actually carries, and must
 // not appear at all when the facts carry no LIVE ETA line.
-function validateLiveEtaMinutes({ reply, factsBlock }) {
+function validateLiveEtaMinutes({ reply, factsBlock, liveEtaStopCount = null }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   // Codex round-13 P2: a completed-arrival claim ("has arrived") with an
   // en-route tech and no on-site fact is false — the facts must say the tech
@@ -1410,6 +1420,11 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
   // Every LIVE ETA line, not only the first (audit P1): a customer with two
   // distinct live stops has two figures, and a reply about either is grounded.
   const factsLineMinutes = [...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10));
+  // Distinct live STOPS (Codex round-16 P2): grouped siblings render the shared
+  // ETA once per service line, so rendered lines over-count; when the caller has
+  // the context's liveEtaGroups (the unit the send-time snapshot uses) it passes
+  // their count.
+  const liveStops = Number.isInteger(liveEtaStopCount) ? liveEtaStopCount : factsLineMinutes.length;
   const factsMinutes = new Set(factsLineMinutes);
   // Structural default-deny (Codex round-7 P2): once the facts actually
   // carry a LIVE ETA to check a claim against, stop relying on
@@ -1454,7 +1469,7 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
   // Count LIVE ETA lines, not distinct values (Codex round-15 P2): two stops
   // with the same figure are still two entries, which send-time binding
   // rejects as ambiguous — so the number must never be approved here.
-  if (factsLineMinutes.length > 1) {
+  if (liveStops > 1) {
     return { ok: false, violations: ['more than one tech is en route, so a minutes-away figure cannot be tied to the right visit — say the techs are on the way and share the tracking link instead of stating minutes'] };
   }
   const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => !factsMinutes.has(m)))];
@@ -3163,7 +3178,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
-    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock });
+    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.length : null });
     for (const check of [reserviceCheck, complianceCheck, liveEtaCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
@@ -3336,7 +3351,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // above) is answered with the fixed approved reply, so a LIVE ETA could
     // never affect delivery — skip the GPS + paid Distance Matrix lookup a
     // "thanks" from an en-route customer would otherwise trigger.
-    const includeLiveEta = !gratitudeCandidate;
+    // Codex round-16 P2: gate-off must be byte-identical — the live-row query
+    // changes the upcoming list, so the opt-in also requires the release gate.
+    const includeLiveEta = gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
     const context = customer
       ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta })
       : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta });

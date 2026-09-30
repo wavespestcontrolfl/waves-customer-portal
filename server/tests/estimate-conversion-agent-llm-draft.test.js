@@ -304,7 +304,22 @@ describe('processInboundSms — grounded LLM review draft', () => {
       decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
     });
 
-    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: true });
+    // Codex round-16 P2: the opt-in also requires the release gate (gate-off is byte-identical).
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: false });
+
+    ContextAggregator.getContextForCustomer.mockClear();
+    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      await _test.generateLlmReviewDraft({
+        customer: CUSTOMER,
+        body: 'Hello what happened this morning',
+        decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
+      });
+      expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(CUSTOMER, { includeLiveEta: true });
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    }
   });
 
   test('LLM failure falls back to the deterministic template', async () => {

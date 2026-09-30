@@ -1257,10 +1257,10 @@ describe('round 16 P1: unclassified ETA backstop', () => {
   const STALE = new Date(NOW.getTime() - 30 * 60 * 1000).toISOString();
   const run = (outgoingBody, rows, factsGeneratedAt = FRESH, liveEtaSnapshot = snapshot) => etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, outgoingBody, now: NOW, dbh: fakeDb(rows) });
 
-  // "15m out" reads no claim at all, so the backstop is what holds it; "tech: 15
+  // "15 klicks out" reads no claim at all, so the backstop is what holds it; "tech: 15
   // min" is read as an ordinary minutes claim (blocked by that path instead).
-  test('"ur tech ≈ 15m out 🚚" is held to the status checks: passes fresh+en_route, blocked when terminal, on site, stale, or GPS-expired', async () => {
-    const body = 'ur tech ≈ 15m out 🚚';
+  test('"ur tech ≈ 15 klicks out 🚚" is held to the status checks: passes fresh+en_route, blocked when terminal, on site, stale, or GPS-expired', async () => {
+    const body = 'ur tech ≈ 15 klicks out 🚚';
     expect(await run(body, rowsBy.en_route)).toBeNull();
     expect(await run(body, rowsBy.completed)).toBe('eta_claim_unclassified');
     expect(await run(body, rowsBy.on_site)).toBe('eta_claim_unclassified');
@@ -1288,6 +1288,42 @@ describe('round 16 P1: unclassified ETA backstop', () => {
 
   test('with two live entries and no token to select one it is refused', async () => {
     const two = { entries: [{ minutes: 15, scheduledServiceIds: ['svc-1'] }, { minutes: 9, scheduledServiceIds: ['svc-2'] }] };
-    expect(await run('ur tech ≈ 15m out', [...rowsBy.en_route, { id: 'svc-2', status: 'en_route', track_state: 'en_route' }], FRESH, two)).toBe('eta_claim_unclassified');
+    expect(await run('ur tech ≈ 15 klicks out', [...rowsBy.en_route, { id: 'svc-2', status: 'en_route', track_state: 'en_route' }], FRESH, two)).toBe('eta_claim_unclassified');
+  });
+});
+
+// Codex round-16 P2 (PR #5334): a status-only snapshot entry (minutes null)
+// so status copy is rechecked even when GPS/Distance Matrix failed.
+describe('round 16 P2: minutes-null (status-only) snapshot entries', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+      drafter[name].mockReset().mockImplementation(real[name]);
+    }
+  });
+  const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'] }] };
+  const rowsBy = {
+    en_route: [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE }],
+    completed: [{ id: 'svc-1', status: 'completed', track_state: 'complete', track_view_token: 'tok-1', track_token_expires_at: FUTURE }],
+  };
+  const run = (outgoingBody, rows) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW, dbh: fakeDb(rows) });
+
+  test('status copy binds to it: passes while en route, blocked once the visit is done', async () => {
+    expect(await run('The tech is on the way.', rowsBy.en_route)).toBeNull();
+    expect(await run('The tech is on the way.', rowsBy.completed)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('a numeric or timed claim against a minutes-null entry is unbound', async () => {
+    expect(await run('The tech is 12 minutes away.', rowsBy.en_route)).toBe('eta_claim_unbound');
+    expect(await run('The tech is about half an hour away.', rowsBy.en_route)).toBe('eta_claim_unbound');
+  });
+  test('non-ETA copy stays untouched', async () => {
+    expect(await run('Thanks, see you soon!', rowsBy.completed)).toBeNull();
+  });
+  test('"1/2 hour away" against a live 120 entry is unbound (not "1/120")', async () => {
+    expect(await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 120, scheduledServiceIds: ['svc-1'] }] }, factsGeneratedAt: FRESH,
+      outgoingBody: 'The tech is 1/2 hour away.', now: NOW, dbh: fakeDb(rowsBy.en_route),
+    })).toBe('eta_claim_unbound');
   });
 });
