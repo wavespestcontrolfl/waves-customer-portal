@@ -45,8 +45,8 @@ postgres('same-stop regroup sweep', () => {
       employment_status: 'active', field_dispatchable: true,
     });
     services = await mockPg('services').where({ groupable: true, group_family: 'recurring_property_service' })
-      .orderBy('id').limit(2).select('id', 'name');
-    expect(services).toHaveLength(2);
+      .orderBy('id').limit(3).select('id', 'name');
+    expect(services).toHaveLength(3);
   });
 
   beforeEach(() => { gates.visitGroups = true; });
@@ -192,6 +192,58 @@ postgres('same-stop regroup sweep', () => {
     expect(vids[0]).toBeTruthy();
     expect(vids[0]).toBe(vids[1]);
     expect((await visitIds(stuck.rows)).every((v) => v === null)).toBe(true);
+  });
+
+  test('a transitive window chain is reported as one stop', async () => {
+    const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['10:00', '11:00'], ['11:00', '12:00']] });
+    const all = f.rows.map((r) => String(r.id)).sort();
+    const dry = await regroupUngroupedSameStopRows({ fromDate: f.date, toDate: f.date });
+    expect(dry.groups).toHaveLength(1);
+    expect([...dry.groups[0].rowIds].sort()).toEqual(all);
+    const out = await sweep(f);
+    expect(out.groups).toHaveLength(1);
+    expect([...out.groups[0].rowIds].sort()).toEqual(all);
+    const vids = await visitIds(f.rows);
+    expect(new Set(vids).size).toBe(1);
+    expect(vids[0]).toBe(out.groups[0].visitId);
+    expect(await visitCount(f.customerId)).toBe(1);
+  });
+
+  test('maxCandidates caps the whole run, not a page', async () => {
+    const a = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:30', '10:30']] });
+    const b = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:30', '10:30']] });
+    const out = await regroupUngroupedSameStopRows({
+      fromDate: a.date, toDate: b.date, dryRun: false, limit: 1, maxCandidates: 1,
+    });
+    // Page size 1 would walk on to b's rows; the run budget stops after a.
+    expect(out.capped).toBe(true);
+    expect(out.candidates).toBe(1);
+    expect(out.groups.map((g) => g.date)).toEqual([a.date]);
+    expect((await visitIds(b.rows)).every((v) => v === null)).toBe(true);
+  });
+
+  test('a reminder stamped between the preview and the apply refuses under the lock', async () => {
+    const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:30', '10:30']] });
+    const VisitGroups = require('../services/visit-groups');
+    const original = VisitGroups.maybeGroupRow;
+    const spy = jest.spyOn(VisitGroups, 'maybeGroupRow').mockImplementation(async (id, opts) => {
+      // Land the reminder after every unlocked check, right before the apply.
+      if (opts && opts.lockedGuard) {
+        await mockPg('appointment_reminders').insert({
+          scheduled_service_id: f.rows[0].id, appointment_time: new Date(Date.now() + 86400000 * 30),
+          source: 'test', reminder_72h_sent: true,
+        });
+      }
+      return original(id, opts);
+    });
+    try {
+      const out = await sweep(f);
+      expect(out.groups).toHaveLength(0);
+      expect(out.left.map((l) => l.reason)).toContain('refused');
+      expect((await visitIds(f.rows)).every((v) => v === null)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('gate off is a no-op', async () => {

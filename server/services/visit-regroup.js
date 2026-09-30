@@ -106,6 +106,66 @@ async function findCandidateRows(database, { fromDate, toDate, limit, after = nu
   return q;
 }
 
+// Backfill fences re-checked by createOrJoinVisit under its row locks, in
+// the membership-write transaction: the preview's unlocked reads can go stale
+// if a reminder run or a lifecycle transition lands before the apply. The
+// reminder rows are read FOR SHARE so a concurrent reminder stamp serializes
+// behind the grouping (or is seen, committed, before it).
+function lockedFences(earliest) {
+  return async (fresh, trx) => {
+    const ids = fresh.map((r) => String(r.id));
+    await trx('appointment_reminders').whereIn('scheduled_service_id', ids).forShare().select('id');
+    if (!(await membersStillUntouched(trx, ids, earliest)) || new Set(await reminderStateKey(trx, ids)).size > 1) {
+      const err = new Error('regroup fence changed under lock');
+      err.code = 'REGROUP_FENCE_CHANGED';
+      throw err;
+    }
+  };
+}
+
+// One reported group per stop: a transitive window chain (09-10, 10-11,
+// 11-12) yields overlapping verdicts that share a member, so a verdict that
+// touches an already-reported group widens that group instead of adding one.
+function recordGroup(groups, byRow, group) {
+  const existing = group.rowIds.map((id) => byRow.get(id)).find(Boolean);
+  const target = existing || group;
+  if (existing) {
+    existing.rowIds = [...new Set([...existing.rowIds, ...group.rowIds])];
+    if (!existing.visitId) existing.visitId = group.visitId;
+  } else {
+    groups.push(group);
+  }
+  target.rowIds.forEach((id) => byRow.set(id, target));
+}
+
+async function judgeCandidate(cand, { database, dryRun, earliest, handled }) {
+  const VisitGroups = require('./visit-groups');
+  // Read-only verdict from the real eligibility path.
+  const verdict = await VisitGroups.maybeGroupRow(cand.id, { database, preview: true, createdBy: 'regroup-sweep' });
+  if (!verdict || !verdict.rowIds) {
+    handled.add(String(cand.id));
+    return { left: [{ rowId: cand.id, reason: 'not_eligible' }] };
+  }
+  const rowIds = verdict.rowIds.map(String);
+  rowIds.forEach((id) => handled.add(id));
+  const leave = (reason) => ({ left: rowIds.map((id) => ({ rowId: id, reason })) });
+  if (!(await membersStillUntouched(database, rowIds, earliest))) return leave('already_started');
+  if (new Set(await reminderStateKey(database, rowIds)).size > 1) return leave('reminder_state_differs');
+  const group = {
+    customerId: cand.customer_id, propertyId: cand.property_id, date: dateString(cand.scheduled_date), rowIds, visitId: null,
+  };
+  if (dryRun) return { group };
+  const visit = await VisitGroups.maybeGroupRow(cand.id, {
+    database, createdBy: 'regroup-sweep', lockedGuard: lockedFences(earliest),
+  });
+  // createOrJoinVisit refused under its locks (frozen, artifact, in-flight
+  // completion, a backfill fence that changed since the preview).
+  if (!visit || !visit.id) return leave('refused');
+  // The apply recomputes membership under locks; report what it wrote.
+  const members = await database('scheduled_services').where({ visit_id: visit.id }).select('id');
+  return { group: { ...group, rowIds: members.map((m) => String(m.id)), visitId: visit.id } };
+}
+
 /**
  * @param {object}  [opts]
  * @param {string}  [opts.fromDate]  YYYY-MM-DD; clamped up to tomorrow (ET).
@@ -114,68 +174,44 @@ async function findCandidateRows(database, { fromDate, toDate, limit, after = nu
  * @param {object}  [opts.database]  knex handle (default: shared pool).
  * @param {Date}    [opts.now]       Clock, for tests.
  * @param {number}  [opts.limit]     Candidate rows per page (every page is walked).
+ * @param {number}  [opts.maxCandidates]  Total candidate rows this run may judge
+ *   (operator rollout cap); unset = every candidate.
  * @returns {Promise<{ skipped?: string, dryRun: boolean, fromDate: string,
- *   toDate: string|null, candidates: number, groups: Array, left: Array }>}
- *   groups: [{ customerId, propertyId, date, rowIds, visitId }] (visitId null
- *   on a dry run); left: [{ rowId, reason }] ('not_eligible' |
+ *   toDate: string|null, candidates: number, capped: boolean, groups: Array, left: Array }>}
+ *   groups: one entry per stop [{ customerId, propertyId, date, rowIds, visitId }]
+ *   (visitId null on a dry run); left: [{ rowId, reason }] ('not_eligible' |
  *   'already_started' | 'reminder_state_differs' | 'refused'). Ids only — never a customer name.
  */
 async function regroupUngroupedSameStopRows({
   fromDate, toDate = null, dryRun = true, database = db, now = new Date(), limit = DEFAULT_LIMIT,
+  maxCandidates = null,
 } = {}) {
   const { gates } = require('../config/feature-gates');
   const earliest = earliestRegroupDate(now);
   const effectiveFrom = fromDate && String(fromDate) > earliest ? String(fromDate) : earliest;
-  const base = { dryRun: Boolean(dryRun), fromDate: effectiveFrom, toDate, candidates: 0, groups: [], left: [] };
+  const base = {
+    dryRun: Boolean(dryRun), fromDate: effectiveFrom, toDate, candidates: 0, capped: false, groups: [], left: [],
+  };
   if (!gates.visitGroups) return { ...base, skipped: 'gate_off' };
 
-  const VisitGroups = require('./visit-groups');
   const handled = new Set();
+  const byRow = new Map();
+  const ctx = { database, dryRun, earliest: effectiveFrom, handled };
   let after = null;
   for (;;) {
     const candidates = await findCandidateRows(database, { fromDate: effectiveFrom, toDate, limit, after });
-    base.candidates += candidates.length;
     if (!candidates.length) break;
-    const last = candidates[candidates.length - 1];
-    after = { date: dateString(last.scheduled_date), id: last.id };
+    after = { date: dateString(candidates[candidates.length - 1].scheduled_date), id: candidates[candidates.length - 1].id };
     for (const cand of candidates) {
+      if (maxCandidates && base.candidates >= maxCandidates) {
+        base.capped = true;
+        return base;
+      }
+      base.candidates += 1;
       if (handled.has(String(cand.id))) continue;
-      // Read-only verdict from the real eligibility path.
-      const verdict = await VisitGroups.maybeGroupRow(cand.id, { database, preview: true, createdBy: 'regroup-sweep' });
-      if (!verdict || !verdict.rowIds) {
-        handled.add(String(cand.id));
-        base.left.push({ rowId: cand.id, reason: 'not_eligible' });
-        continue;
-      }
-      const rowIds = verdict.rowIds.map(String);
-      rowIds.forEach((id) => handled.add(id));
-      if (!(await membersStillUntouched(database, rowIds, effectiveFrom))) {
-        rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'already_started' }));
-        continue;
-      }
-      const states = await reminderStateKey(database, rowIds);
-      if (new Set(states).size > 1) {
-        rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'reminder_state_differs' }));
-        continue;
-      }
-      const group = {
-        customerId: cand.customer_id,
-        propertyId: cand.property_id,
-        date: dateString(cand.scheduled_date),
-        rowIds,
-        visitId: null,
-      };
-      if (!dryRun) {
-        const visit = await VisitGroups.maybeGroupRow(cand.id, { database, createdBy: 'regroup-sweep' });
-        if (!visit || !visit.id) {
-          // createOrJoinVisit refused under its locks (frozen, artifact,
-          // in-flight completion) or the row changed since the preview.
-          rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'refused' }));
-          continue;
-        }
-        group.visitId = visit.id;
-      }
-      base.groups.push(group);
+      const outcome = await judgeCandidate(cand, ctx);
+      if (outcome.left) base.left.push(...outcome.left);
+      if (outcome.group) recordGroup(base.groups, byRow, outcome.group);
     }
     if (candidates.length < limit) break;
   }

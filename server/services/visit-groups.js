@@ -456,7 +456,7 @@ const baseKeyFor = (r) => stopBaseKey({
   scheduledDate: r.scheduled_date,
 });
 
-async function createOrJoinVisit({ rows, createdBy, trx = null }) {
+async function createOrJoinVisit({ rows, createdBy, trx = null, lockedGuard = null }) {
   if (!Array.isArray(rows) || rows.length < 2) throw new Error('createOrJoinVisit needs >= 2 rows');
   const ids = rows.map((r) => (r && r.id) || r).filter(Boolean);
   if (ids.length !== rows.length) throw new Error('createOrJoinVisit rows need ids');
@@ -534,6 +534,11 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       err.code = 'VISIT_STOP_MOVED';
       throw err;
     }
+
+    // Caller-specific fences re-checked under the row locks, in the same
+    // transaction as the membership write (regroup sweep: rows untouched,
+    // reminder tiers equal). A throw refuses the whole grouping.
+    if (lockedGuard) await lockedGuard(fresh, t);
 
     const attachedVisitIds = [...new Set(fresh.map((r) => r.visit_id).filter(Boolean).map(String))];
     if (attachedVisitIds.length > 1) {
@@ -1193,7 +1198,7 @@ async function customerExcludedByAutopay(customerId, database = db) {
   }
 }
 
-async function maybeGroupRow(rowId, { createdBy, database = db, preview = false } = {}) {
+async function maybeGroupRow(rowId, { createdBy, database = db, preview = false, lockedGuard = null } = {}) {
   const { gates } = require('../config/feature-gates');
   if (!gates.visitGroups) return null;
   try {
@@ -1207,9 +1212,9 @@ async function maybeGroupRow(rowId, { createdBy, database = db, preview = false 
       // savepoint (codex #3590 r4; widened from createOrJoinVisit alone
       // to the pre-reads + autopay check by the r5 pre-push audit: a
       // failed SELECT there aborted the caller just the same).
-      return await database.transaction((sp) => groupRowOn(sp, rowId, createdBy, { preview }));
+      return await database.transaction((sp) => groupRowOn(sp, rowId, createdBy, { preview, lockedGuard }));
     }
-    return await groupRowOn(database, rowId, createdBy, { preview });
+    return await groupRowOn(database, rowId, createdBy, { preview, lockedGuard });
   } catch (err) {
     const logger = require('./logger');
     logger.warn(`[visit-groups] maybeGroupRow(${rowId}) skipped: ${err.message}`);
@@ -1227,7 +1232,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db, preview = false 
 // would be handed) instead of writing. The locked re-checks inside
 // createOrJoinVisit (child artifacts, freeze, chain, live attempts) cannot be
 // previewed, so a preview may name a set the apply then refuses.
-async function groupRowOn(database, rowId, createdBy, { preview = false } = {}) {
+async function groupRowOn(database, rowId, createdBy, { preview = false, lockedGuard = null } = {}) {
   const row = await database('scheduled_services as ss')
     .leftJoin('services as svc', 'ss.service_id', 'svc.id')
     .where('ss.id', rowId)
@@ -1317,9 +1322,9 @@ async function groupRowOn(database, rowId, createdBy, { preview = false } = {}) 
   const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
   if (preview) return { preview: true, rowIds: rows.map((r) => r.id) };
   if (database && database.isTransaction) {
-    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database });
+    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database, lockedGuard });
   }
-  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch' });
+  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', lockedGuard });
 }
 
 // ---- Live transitions: one tap moves the whole stop (doc §3) ---------------

@@ -7,7 +7,7 @@
  *   node scripts/regroup-same-stop-rows.js                  # DRY RUN (default): writes nothing
  *   node scripts/regroup-same-stop-rows.js --apply          # groups through maybeGroupRow
  *   node scripts/regroup-same-stop-rows.js --from 2026-10-02 --to 2026-10-31
- *   node scripts/regroup-same-stop-rows.js --limit 200      # cap candidate rows
+ *   node scripts/regroup-same-stop-rows.js --limit 200      # judge at most 200 candidate rows this run
  *
  * Needs GATE_VISIT_GROUPS=true in the environment (gate off = no-op, as at
  * every other grouping seam). Tomorrow onward only — today and earlier are
@@ -38,7 +38,7 @@ async function main() {
   }
 
   const before = await countRegroupCandidateRows({ fromDate, toDate });
-  const result = await regroupUngroupedSameStopRows({ fromDate, toDate, dryRun: !apply, ...(limit ? { limit } : {}) });
+  const result = await regroupUngroupedSameStopRows({ fromDate, toDate, dryRun: !apply, ...(limit ? { maxCandidates: limit } : {}) });
   console.log(`mode: ${apply ? 'APPLY' : 'DRY RUN (no writes)'}  window: ${result.fromDate} .. ${toDate || 'open'}`);
   if (result.skipped) {
     console.log(`skipped: ${result.skipped} (set GATE_VISIT_GROUPS=true to run)`);
@@ -53,7 +53,7 @@ async function main() {
     const after = await countRegroupCandidateRows({ fromDate, toDate });
     console.log(`ungrouped rows with a same-stop partner after: ${after}`);
   }
-  console.log(`summary: candidates=${result.candidates} groups=${result.groups.length} left=${result.left.length}`);
+  console.log(`summary: candidates=${result.candidates} groups=${result.groups.length} left=${result.left.length}${result.capped ? ' (stopped at --limit; re-run for the rest)' : ''}`);
 }
 
 main()
