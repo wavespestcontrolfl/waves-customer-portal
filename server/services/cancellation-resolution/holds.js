@@ -361,7 +361,7 @@ async function resumeSameCaseHold({ customerId, caseId, familyKey }) {
   const done = new Set((record.skipped || []).map(String));
   const resume = dateOnlyString(existing.resume_on);
   return {
-    holdId: existing.id, familyKey, startsOn: dateOnlyString(existing.starts_on), resumeOn: resume, resumeDisplay: displayDate(resume),
+    holdId: existing.id, customerId, familyKey, startsOn: dateOnlyString(existing.starts_on), resumeOn: resume, resumeDisplay: displayDate(resume),
     moved: (record.moved || []).length,
     pendingSkips: (record.toSkip || []).filter((v) => !done.has(String(v.id))),
     techNotices: [],
@@ -410,7 +410,7 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   } catch (err) { logger.warn(`[holds] hold note failed for ${customerId}: ${err.message}`); }
 
   return {
-    holdId: written.holdId, familyKey, startsOn: today, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length,
+    holdId: written.holdId, customerId, familyKey, startsOn: today, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length,
     pendingSkips: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })),
     techNotices: moveTechNotices(moved, movedTechIds),
   };
@@ -494,6 +494,14 @@ async function applyHoldSkips(holdResults) {
       try {
         outcome = await db.transaction(async (trx) => {
           const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('*');
+          // Still this customer's visit in this family: one reassigned to
+          // another customer or service since the plan is not the pause's.
+          if (row && hold.customerId && String(row.customer_id) !== String(hold.customerId)) return 'left_pause';
+          if (row && row.service_id) {
+            const { familyOfServiceRow } = require('../cancellation-processor');
+            const svc = await trx('services').where({ id: row.service_id }).first('service_key', 'name');
+            if (familyOfServiceRow({ ...row, service_key: svc?.service_key, service_name: svc?.name }) !== hold.familyKey) return 'left_pause';
+          }
           // Idempotent: a recovery pass re-offers visits a crashed accept
           // may already have skipped.
           if (row && row.status === 'skipped') return 'skipped';
@@ -855,7 +863,7 @@ async function recoverUnfinishedSkips(out) {
       }
       const done = new Set((record.skipped || []).map(String));
       await applyHoldSkips([{
-        holdId: hold.id, familyKey: hold.family_key, resumeOn: dateOnlyString(hold.resume_on), startsOn: dateOnlyString(hold.starts_on),
+        holdId: hold.id, customerId: hold.customer_id, familyKey: hold.family_key, resumeOn: dateOnlyString(hold.resume_on), startsOn: dateOnlyString(hold.starts_on),
         pendingSkips: record.toSkip.filter((v) => !done.has(String(v.id))),
       }]);
       out.skipsRecovered += 1;
@@ -931,8 +939,13 @@ async function resumeDueHolds(out, today) {
         // Re-read under the lock (see cancelHold): the wind-down reprices a
         // held family's saved rate, and the component may have left
         // plan_hold ownership since the obsolete check above.
-        const live = await trx('plan_holds').where({ id: hold.id }).first('status', 'held_monthly_rate');
+        const live = await trx('plan_holds').where({ id: hold.id }).forUpdate().first('status', 'held_monthly_rate', 'moved_visits');
         if (!live || live.status !== 'active') return false;
+        // An accept that has not finished (or is being undone) stays active
+        // for the recovery pass to finish or undo — resuming it would put
+        // it out of that pass's reach.
+        const record = readRecord(live.moved_visits);
+        if (record.acceptCommitted === false || record.compensating) return false;
         if (live.held_monthly_rate != null) {
           const liveComponent = await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key }).first('source');
           if (!liveComponent || liveComponent.source !== 'plan_hold') {

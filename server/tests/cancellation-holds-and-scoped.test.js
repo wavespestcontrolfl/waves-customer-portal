@@ -332,6 +332,12 @@ describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the
     ]);
   });
 
+  test('a skip re-checks the visit is still this customer\'s visit in this family; one reassigned since is left alone', async () => {
+    seedHeld([lawnVisit('l1', daysOut(5), { customer_id: 'c2' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held({ customerId: 'c1' })]);
+    expect(mockTransition.mock.calls.map(([a]) => a.jobId)).toEqual(['l2']);
+  });
+
   test('a visit left bookable inside the pause keeps the plan open, and the daily recovery retries it; an ended visit closes it', async () => {
     seedHeld([lawnVisit('l1', daysOut(5), { track_state: 'en_route' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
     await applyHoldSkips([held()]);
@@ -462,6 +468,13 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockState.tables.plan_holds[0].status).toBe('active');
     expect(Number(mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care').monthly_rate)).toBe(0);
     expect(mockReschedule).not.toHaveBeenCalled();
+  });
+
+  test('the return date never resumes an unfinished accept: it stays active for recovery to finish or undo', async () => {
+    holdSeed({ resume_on: daysOut(0), created_at: new Date(), moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false }) });
+    const out = await runPlanHoldLifecycle({ today: TODAY });
+    expect(out.resumed).toBe(0);
+    expect(mockState.tables.plan_holds[0].status).toBe('active');
   });
 
   test('recovery never undoes a hold its accept marked after the bulk read; a hold being undone refuses a late marking', async () => {
