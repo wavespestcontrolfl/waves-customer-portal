@@ -356,7 +356,7 @@ describe('runPlanHoldLifecycle', () => {
   });
 
   test('an accept interrupted after its hold committed: the daily run carries out the unfinished skips once, and leaves an in-flight accept alone', async () => {
-    const plan = (over = {}) => JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }, { id: 'l2', status: 'confirmed', from: daysOut(9) }], skipped: ['l2'], skipsFinal: false, ...over });
+    const plan = (over = {}) => JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }, { id: 'l2', status: 'confirmed', from: daysOut(9) }], skipped: ['l2'], skipsFinal: false, acceptCommitted: true, ...over });
     holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), moved_visits: plan() },
       [lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(9), { status: 'skipped' }), lawnVisit('back', daysOut(40))]);
     const first = await runPlanHoldLifecycle({ today: TODAY });
@@ -371,6 +371,17 @@ describe('runPlanHoldLifecycle', () => {
     holdSeed({ created_at: new Date(), moved_visits: plan({ skipped: [] }) }, [lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(9))]);
     expect((await runPlanHoldLifecycle({ today: TODAY })).skipsRecovered).toBe(0);
     expect(mockTransition).not.toHaveBeenCalled();
+  });
+
+  test('a hold from an accept that died before it finished is undone by the daily run, never skipped, and the office hears', async () => {
+    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), resume_on: daysOut(30),
+      moved_visits: JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }], skipped: [], skipsFinal: false, acceptCommitted: false }) },
+    [lawnVisit('l1', daysOut(5)), lawnVisit('back', daysOut(40))]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].status).toBe('cancelled');
+    expect(Number(mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care').monthly_rate)).toBe(90);
+    expect(bells('plan_hold_accept_interrupted')).toHaveLength(1);
   });
 
   test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {

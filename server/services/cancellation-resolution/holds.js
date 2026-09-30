@@ -280,7 +280,7 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
         starts_on: today,
         resume_on: resume,
         held_monthly_rate: heldRate,
-        moved_visits: JSON.stringify({ moved, toSkip: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })), skipped: [], skipsFinal: false }),
+        moved_visits: JSON.stringify({ moved, toSkip: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })), skipped: [], skipsFinal: false, acceptCommitted: false }),
         status: 'active',
       }).returning(['id']);
       holdId = hold?.id || hold;
@@ -330,6 +330,28 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
     pendingSkips: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })),
     techNotices,
   };
+}
+
+const readRecord = (raw) => {
+  try { return typeof raw === 'string' ? JSON.parse(raw) : (raw || {}); } catch { return {}; }
+};
+
+/**
+ * Mark every hold of an accept as standing — called once ALL of the
+ * accept's writes (every family, and a paired Away Mode) committed, and
+ * before any skip runs. The lifecycle's recovery pass carries out skips
+ * only for an accept marked here; a hold left unmarked was part of an
+ * accept that died midway and is compensated instead.
+ */
+async function markHoldsAccepted(holdIds) {
+  for (const holdId of holdIds || []) {
+    const row = await db('plan_holds').where({ id: holdId }).first('moved_visits');
+    if (!row) continue;
+    await db('plan_holds').where({ id: holdId }).update({
+      moved_visits: JSON.stringify({ ...readRecord(row.moved_visits), acceptCommitted: true }),
+      updated_at: new Date(),
+    });
+  }
 }
 
 /**
@@ -400,8 +422,7 @@ async function applyHoldSkips(holdResults) {
     // left), so the lifecycle's recovery pass never re-runs it.
     try {
       const row = await db('plan_holds').where({ id: hold.holdId }).first('moved_visits');
-      let record = {};
-      try { record = typeof row?.moved_visits === 'string' ? JSON.parse(row.moved_visits) : (row?.moved_visits || {}); } catch { record = {}; }
+      const record = readRecord(row?.moved_visits);
       await db('plan_holds').where({ id: hold.holdId }).update({
         moved_visits: JSON.stringify({ ...record, skipped: [...new Set([...(record.skipped || []), ...skipped])], skipsFinal: true }),
         updated_at: new Date(),
@@ -589,9 +610,19 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   const unfinished = await db('plan_holds').where({ status: 'active' }).where('created_at', '<', recoverBefore).select('*');
   for (const hold of unfinished) {
     try {
-      let record = {};
-      try { record = typeof hold.moved_visits === 'string' ? JSON.parse(hold.moved_visits) : (hold.moved_visits || {}); } catch { record = {}; }
+      const record = readRecord(hold.moved_visits);
       if (record.skipsFinal !== false || !Array.isArray(record.toSkip)) continue;
+      if (record.acceptCommitted !== true) {
+        // The accept died before all its writes stood: undo this hold
+        // (rate restored, prepaid moves reverted) rather than skip visits
+        // for an accept the customer was never told succeeded.
+        await cancelHold(hold.id, { compensateVisits: true });
+        const { notifyAdmin } = require('../notification-service');
+        await notifyAdmin('service', 'Plan hold undone: the accept did not finish', `Hold ${hold.id} (${hold.family_key}) was written by a cancel-flow accept that stopped before it finished — it has been undone. Check with the customer whether they still want the pause.`, {
+          bell: true, dedupeKey: `plan_hold_accept_interrupted:${hold.id}`, metadata: { kind: 'plan_hold_accept_interrupted', holdId: hold.id, customerId: hold.customer_id },
+        }).catch(() => {});
+        continue;
+      }
       const done = new Set((record.skipped || []).map(String));
       await applyHoldSkips([{
         holdId: hold.id, familyKey: hold.family_key, resumeOn: dateOnlyString(hold.resume_on),
@@ -681,4 +712,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, startHold, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

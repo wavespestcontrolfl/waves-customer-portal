@@ -11,6 +11,7 @@ const mockStartAwayMode = jest.fn();
 const mockEmit = jest.fn();
 const mockSkips = jest.fn().mockResolvedValue(undefined);
 const mockRestartTexts = jest.fn().mockResolvedValue(undefined);
+const mockMarkAccepted = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -21,6 +22,7 @@ jest.mock('../services/cancellation-resolution/holds', () => ({
   emitHoldTechNotices: (...a) => mockEmit(...a),
   applyHoldSkips: (...a) => mockSkips(...a),
   sendDueRestartTexts: (...a) => mockRestartTexts(...a),
+  markHoldsAccepted: (...a) => mockMarkAccepted(...a),
 }));
 
 const { executeAcceptedAction } = require('../services/cancellation-resolution/actions');
@@ -35,6 +37,7 @@ beforeEach(() => {
   mockCancelHold.mockResolvedValue(true);
   mockSkips.mockResolvedValue(undefined);
   mockRestartTexts.mockResolvedValue(undefined);
+  mockMarkAccepted.mockResolvedValue(undefined);
 });
 
 test('multi-family hold: every family\'s notices go out together, after the last hold committed', async () => {
@@ -143,4 +146,22 @@ test('a short pause gets its restart text at accept, after the skips, for exactl
     customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: {}, families: ['lawn_care'],
   })).rejects.toThrow('away write failed');
   expect(mockRestartTexts).not.toHaveBeenCalled();
+});
+
+test('the accept is marked as standing before any skip runs; a marking failure undoes every hold and skips nothing', async () => {
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', [])).mockResolvedValueOnce(hold('mosquito', []));
+  await executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'hold' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care', 'mosquito'],
+  });
+  expect(mockMarkAccepted).toHaveBeenCalledWith(['h-lawn_care', 'h-mosquito']);
+  expect(mockMarkAccepted.mock.invocationCallOrder[0]).toBeLessThan(mockSkips.mock.invocationCallOrder[0]);
+
+  jest.clearAllMocks();
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', []));
+  mockMarkAccepted.mockRejectedValueOnce(new Error('db down'));
+  await expect(executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'hold' }, params: {}, families: ['lawn_care'],
+  })).rejects.toThrow('db down');
+  expect(mockCancelHold).toHaveBeenCalledWith('h-lawn_care', { compensateVisits: true });
+  expect(mockSkips).not.toHaveBeenCalled();
 });

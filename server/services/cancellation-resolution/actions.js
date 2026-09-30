@@ -195,6 +195,23 @@ async function executeAwayMode({ customerId, caseRow, params }) {
   ] };
 }
 
+// The accept stands only once its holds are marked (holds.js
+// markHoldsAccepted): a marking failure undoes the holds and fails the
+// accept, as any other write failure does, before a skip can run.
+async function markAcceptedOrUndo(holdIds) {
+  const { markHoldsAccepted, cancelHold } = require('./holds');
+  try {
+    await markHoldsAccepted(holdIds);
+  } catch (err) {
+    for (const holdId of holdIds || []) {
+      try { await cancelHold(holdId, { compensateVisits: true }); } catch (undoErr) {
+        logger.error(`[cancel-actions] hold compensation failed for ${holdId}: ${undoErr.message}`);
+      }
+    }
+    throw err;
+  }
+}
+
 async function executeHold({ customerId, caseRow, action, params, families, deferTechNotices = false, allowNoHold = false }) {
   const { startHold, cancelHold, applyHoldSkips, sendDueRestartTexts, emitHoldTechNotices } = require('./holds');
   const holdable = families.filter((f) => ['lawn_care', 'mosquito', 'tree_shrub'].includes(f));
@@ -234,6 +251,7 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
   const techNotices = results.flatMap((r) => r.techNotices || []);
   if (!deferTechNotices) {
     emitHoldTechNotices(techNotices);
+    await markAcceptedOrUndo(results.map((r) => r.holdId));
     await applyHoldSkips(results);
     await sendDueRestartTexts(results.map((r) => r.holdId));
   }
@@ -271,6 +289,7 @@ async function executeAwayPairing(ctx) {
   // the visits inside the pause are skipped.
   const holds = require('./holds');
   holds.emitHoldTechNotices(techNotices);
+  await markAcceptedOrUndo(hold.holds);
   await holds.applyHoldSkips(holdResults);
   await holds.sendDueRestartTexts(hold.holds);
   return { ...away, ...hold, effects: [...away.effects, ...hold.effects] };
