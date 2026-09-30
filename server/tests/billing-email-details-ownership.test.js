@@ -23,7 +23,13 @@ function mockTables(tables) {
       }
       return q;
     });
-    ['whereIn', 'whereRaw', 'orderBy', 'join', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+    // whereRaw understands the one predicate that matters here: a packet member
+    // whose packet visit differs from its own visit is filtered out.
+    q.whereRaw = jest.fn((sql) => {
+      if (String(sql).includes('p.visit_id = s.visit_id')) rows = rows.filter((r) => r.p_visit_id === r.s_visit_id);
+      return q;
+    });
+    ['whereIn', 'orderBy', 'join', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.first = jest.fn(async () => rows[0]);
     q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
     return q;
@@ -43,20 +49,33 @@ describe('invoice property: the visit must belong to the invoice customer', () =
       .toBe('55 Rental Court, Sarasota, FL 34236');
   });
 
-  test('a scheduled_service_id naming ANOTHER customer\'s visit is ignored: falls back to the customer\'s address', async () => {
+  // RULE A (round 5): a link that is present but foreign OMITS the row; the
+  // primary address is for an invoice with no link at all.
+  test('a scheduled_service_id naming ANOTHER customer\'s visit omits the row (never the primary address)', async () => {
     mockTables({ scheduled_services: [stamped('someone-else', '9 Foreign Road')] });
     const out = await Details.invoicePropertyAddress({ id: 'i', customer_id: 'c', scheduled_service_id: 'ss-1' }, HOME);
-    expect(out).toBe('100 Home Lane, Bradenton, FL 34205');
-    expect(out).not.toContain('Foreign');
+    expect(out).toBe('');
   });
 
-  test('a service record naming another customer\'s visit is ignored too', async () => {
+  test('an invoice with NO visit or record link falls back to the customer\'s primary address', async () => {
+    mockTables({});
+    expect(await Details.invoicePropertyAddress({ id: 'i', customer_id: 'c' }, { id: 'c', ...HOME }))
+      .toBe('100 Home Lane, Bradenton, FL 34205');
+  });
+
+  test('a customer object that is not the invoice customer is never used for the fallback', async () => {
+    mockTables({ customers: [{ id: 'c', ...HOME }] });
+    expect(await Details.invoicePropertyAddress({ id: 'i', customer_id: 'c' }, { id: 'other', ...HOME, address_line1: '9 Foreign Road' }))
+      .toBe('100 Home Lane, Bradenton, FL 34205');
+  });
+
+  test('a service record naming another customer\'s visit omits the row too', async () => {
     mockTables({
       service_records: [{ id: 'sr-1', customer_id: 'c', scheduled_service_id: 'ss-1' }],
       scheduled_services: [stamped('someone-else', '9 Foreign Road')],
     });
     expect(await Details.invoicePropertyAddress({ id: 'i', customer_id: 'c', service_record_id: 'sr-1' }, HOME))
-      .toBe('100 Home Lane, Bradenton, FL 34205');
+      .toBe('');
   });
 
   test('another customer\'s service record never supplies a visit', async () => {
@@ -65,7 +84,7 @@ describe('invoice property: the visit must belong to the invoice customer', () =
       scheduled_services: [stamped('c', '55 Rental Court')],
     });
     expect(await Details.invoicePropertyAddress({ id: 'i', customer_id: 'c', service_record_id: 'sr-1' }, HOME))
-      .toBe('100 Home Lane, Bradenton, FL 34205');
+      .toBe('');
   });
 
   test('a FAILED lookup still omits the Property row (not the primary address)', async () => {
@@ -128,18 +147,142 @@ describe('estimate follow-up property: the saved property must belong to the est
     expect(await Details.customerPropertyAddress('c', 'p-1')).toBe('77 Saved Street, Parrish, FL 34219');
   });
 
-  test('another customer\'s property_id falls back to the estimate customer\'s own address', async () => {
+  test('another customer\'s property_id omits the row (never the estimate customer\'s primary address)', async () => {
     mockTables({
       customer_properties: [{ id: 'p-1', customer_id: 'someone-else', address_line1: '9 Foreign Road', city: 'Tampa', state: 'FL', zip: '33601' }],
       customers: [{ id: 'c', ...HOME }],
     });
-    const out = await Details.customerPropertyAddress('c', 'p-1');
-    expect(out).toBe('100 Home Lane, Bradenton, FL 34205');
-    expect(out).not.toContain('Foreign');
+    expect(await Details.customerPropertyAddress('c', 'p-1')).toBe('');
+  });
+
+  test('an owned property with NO street line omits the row (never the primary address)', async () => {
+    mockTables({
+      customer_properties: [{ id: 'p-1', customer_id: 'c', address_line1: '', city: 'Parrish', state: 'FL', zip: '34219' }],
+      customers: [{ id: 'c', ...HOME }],
+    });
+    expect(await Details.customerPropertyAddress('c', 'p-1')).toBe('');
+  });
+
+  test('no property_id at all falls back to the customer\'s primary address', async () => {
+    mockTables({ customers: [{ id: 'c', ...HOME }] });
+    expect(await Details.customerPropertyAddress('c', null)).toBe('100 Home Lane, Bradenton, FL 34205');
   });
 
   test('a property with no customer to check it against is never read', async () => {
     mockTables({ customer_properties: [{ id: 'p-1', customer_id: 'someone-else', address_line1: '9 Foreign Road', city: 'Tampa', state: 'FL', zip: '33601' }] });
     expect(await Details.customerPropertyAddress(null, 'p-1')).toBe('');
+  });
+});
+
+describe('round 5: invoice with BOTH a completion record and a scheduled visit', () => {
+  const rec = (sid) => ({ id: 'sr-1', customer_id: 'c', service_type: 'Rodent Trapping', service_date: '2026-09-11', scheduled_service_id: sid });
+  const inv = { id: 'i', customer_id: 'c', scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: null, service_date: null, title: 'Visit — August 2026' };
+
+  test('a record that points at a DIFFERENT visit omits service, date and property (no mixing)', async () => {
+    mockTables({
+      service_records: [rec('ss-other')],
+      scheduled_services: [stamped('c', '55 Rental Court'), { ...stamped('c', '1 Other Place'), id: 'ss-other' }],
+    });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+    expect(await Details.invoiceServiceDetails(inv)).toEqual({ label: 'Visit', date: '' });
+  });
+
+  test('a record that points at the SAME visit still supplies everything', async () => {
+    mockTables({ service_records: [rec('ss-1')], scheduled_services: [stamped('c', '55 Rental Court')] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('55 Rental Court, Sarasota, FL 34236');
+    expect(await Details.invoiceServiceDetails(inv)).toEqual({ label: 'Quarterly Pest Control', date: 'September 11, 2026' });
+  });
+});
+
+describe('round 5: an unstamped visit resolves through property_id, then source_estimate_id (Rule A)', () => {
+  const unstamped = (extra) => ({ ...stamped('c', null), service_address_city: null, service_address_zip: null, service_address_state: null, ...extra });
+  const inv = { id: 'i', customer_id: 'c', scheduled_service_id: 'ss-1' };
+  const PROP = { id: 'p-2', customer_id: 'c', address_line1: '55 Rental Court', city: 'Sarasota', state: 'FL', zip: '34236' };
+
+  test('property_id: the visit\'s OWN saved property, not the primary address', async () => {
+    mockTables({ scheduled_services: [unstamped({ property_id: 'p-2' })], customer_properties: [PROP] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('55 Rental Court, Sarasota, FL 34236');
+  });
+
+  test('property_id naming another customer\'s property omits the row', async () => {
+    mockTables({ scheduled_services: [unstamped({ property_id: 'p-2' })], customer_properties: [{ ...PROP, customer_id: 'someone-else' }] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+  });
+
+  test('property_id naming a property with no street line omits the row', async () => {
+    mockTables({ scheduled_services: [unstamped({ property_id: 'p-2' })], customer_properties: [{ ...PROP, address_line1: '' }] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+  });
+
+  test('source_estimate_id: the estimate\'s street address, not the primary address', async () => {
+    mockTables({
+      scheduled_services: [unstamped({ source_estimate_id: 'e-1' })],
+      estimates: [{ id: 'e-1', customer_id: 'c', address: '88 Estimate Way, Venice, FL 34285', property_id: null }],
+    });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('88 Estimate Way, Venice, FL 34285');
+  });
+
+  test('source_estimate_id: the estimate\'s owned property wins over its free text', async () => {
+    mockTables({
+      scheduled_services: [unstamped({ source_estimate_id: 'e-1' })],
+      estimates: [{ id: 'e-1', customer_id: 'c', address: 'Rental 2', property_id: 'p-2' }],
+      customer_properties: [PROP],
+    });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('55 Rental Court, Sarasota, FL 34236');
+  });
+
+  test('source_estimate_id naming another customer\'s estimate, or a nickname-only estimate, omits the row', async () => {
+    mockTables({
+      scheduled_services: [unstamped({ source_estimate_id: 'e-1' })],
+      estimates: [{ id: 'e-1', customer_id: 'someone-else', address: '9 Foreign Road, Tampa, FL 33601', property_id: null }],
+    });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+    mockTables({
+      scheduled_services: [unstamped({ source_estimate_id: 'e-1' })],
+      estimates: [{ id: 'e-1', customer_id: 'c', address: 'Rental 2', property_id: null }],
+    });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+  });
+
+  test('the stamp still wins over property_id and source_estimate_id', async () => {
+    mockTables({ scheduled_services: [stamped('c', '10 Stamp Street')].map((v) => ({ ...v, property_id: 'p-2' })), customer_properties: [PROP] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('10 Stamp Street, Sarasota, FL 34236');
+  });
+});
+
+describe('round 5: combined-packet labels are verified against customer, invoice and packet visit', () => {
+  const member = (over) => ({
+    'i.invoice_id': 'i', 'i.packet_id': 'pk-1', 's.customer_id': 'c', p_visit_id: 'v-1', s_visit_id: 'v-1', service_type: 'Lawn Care', ...over,
+  });
+  const inv = { id: 'i', customer_id: 'c', visit_completion_packet_id: 'pk-1', service_type: null, service_date: '2026-09-02', title: 'Combined visit' };
+
+  test('own members supply the labels', async () => {
+    mockTables({ 'visit_completion_packet_items as i': [member(), member({ service_type: 'Pest Control' })] });
+    expect((await Details.invoiceServiceDetails(inv)).label).toBe('Lawn Care, Pest Control');
+  });
+
+  test('a member visit owned by ANOTHER customer is never named', async () => {
+    mockTables({ 'visit_completion_packet_items as i': [member({ 's.customer_id': 'someone-else', service_type: 'Foreign Service' })] });
+    expect((await Details.invoiceServiceDetails(inv)).label).toBe('Combined visit');
+  });
+
+  test('a member whose visit is not the packet\'s own visit is never named', async () => {
+    mockTables({ 'visit_completion_packet_items as i': [member({ s_visit_id: 'v-elsewhere', service_type: 'Foreign Service' })] });
+    expect((await Details.invoiceServiceDetails(inv)).label).toBe('Combined visit');
+  });
+
+  test('a packet item for another invoice is never named', async () => {
+    mockTables({ 'visit_completion_packet_items as i': [member({ 'i.invoice_id': 'another-invoice' })] });
+    expect((await Details.invoiceServiceDetails(inv)).label).toBe('Combined visit');
+  });
+
+  test('the Property row of a packet-only invoice needs every verified member on the SAME address', async () => {
+    const m = (line1, over) => member({ ...stamped('c', line1), ...over });
+    mockTables({ 'visit_completion_packet_items as i': [m('55 Rental Court'), m('55 Rental Court')] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('55 Rental Court, Sarasota, FL 34236');
+    mockTables({ 'visit_completion_packet_items as i': [m('55 Rental Court'), m('9 Other Street')] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
+    mockTables({ 'visit_completion_packet_items as i': [m('55 Rental Court', { 's.customer_id': 'someone-else' })] });
+    expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
   });
 });

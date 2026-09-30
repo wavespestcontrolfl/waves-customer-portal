@@ -146,11 +146,23 @@ function receiptTenderLabel({ payment = null, invoice = {} } = {}) {
 
 // ── Property (full street address) ──────────────────────────────────────
 
-// The visit's own stamped service address (a call booking for a secondary or
-// rental property) wins; otherwise the address frozen on the invoice; otherwise
-// the customer's. Only ever a STREET address: the nickname in profile_label
-// ("Primary", "Rental") is never a fallback here, so a customer with no street
-// line simply gets no Property row.
+// RULE A. The Property row resolves through the canonical visit → property
+// precedence (service-report/visit-property-scope.js): the visit's own
+// IMMUTABLE stamp, else its property_id's customer_properties row, else its
+// source_estimate_id's estimate. Each link is read with the OWNING customer id
+// in the query, so a pointer to another customer's row reads as unresolvable.
+// The customer's primary address is a fallback ONLY when the invoice / estimate
+// carries no link at all. Any link that is present but foreign, disagreeing,
+// unresolvable, without a street line, or whose lookup throws OMITS the row
+// (''): a wrong property in a customer email is worse than a blank row. Only
+// ever a STREET address: the nickname in profile_label ("Primary", "Rental") is
+// never a fallback here.
+
+const ADDRESS_COLS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+const VISIT_COLS = [
+  'service_type', 'scheduled_date', 'property_id', 'source_estimate_id',
+  'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
+];
 
 // THE one path to a visit / completion record for an invoice. A stamped
 // scheduled_service_id or service_record_id is only a pointer: it can name
@@ -158,52 +170,114 @@ function receiptTenderLabel({ payment = null, invoice = {} } = {}) {
 // through it (service address, service type, date) would then describe someone
 // else's visit. So both rows are read with the OWNING customer id in the query;
 // a pointer that does not resolve to that customer's own row reads as "no
-// visit / no record linked". Throws when a lookup itself fails: callers decide
-// what a failure means (the Property row is omitted, the service falls back).
+// visit / no record linked" (and `unresolved` says a pointer was present).
+// When the invoice and its completion record point at DIFFERENT visits the two
+// disagree about what was billed: `conflict` is set and NOTHING derived from
+// either is returned. Throws when a lookup itself fails: callers decide what a
+// failure means (the Property row is omitted, the service falls back).
 async function ownedVisitContext(invoice) {
   const customerId = invoice?.customer_id;
-  if (!customerId) return { visit: null, record: null };
+  if (!customerId) return { visit: null, record: null, linked: false, unresolved: false, conflict: false };
+  const linked = !!(invoice.scheduled_service_id || invoice.service_record_id);
   const record = invoice.service_record_id
     ? (await db('service_records').where({ id: invoice.service_record_id, customer_id: customerId })
       .first('service_type', 'service_date', 'scheduled_service_id')) || null
     : null;
+  if (record?.scheduled_service_id && invoice.scheduled_service_id
+    && String(record.scheduled_service_id) !== String(invoice.scheduled_service_id)) {
+    return { visit: null, record: null, linked, unresolved: true, conflict: true };
+  }
   const scheduledId = invoice.scheduled_service_id || record?.scheduled_service_id || null;
   const visit = scheduledId
-    ? (await db('scheduled_services').where({ id: scheduledId, customer_id: customerId }).first(
-      'service_type', 'scheduled_date',
-      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
-    )) || null
+    ? (await db('scheduled_services').where({ id: scheduledId, customer_id: customerId }).first(...VISIT_COLS)) || null
     : null;
-  return { visit, record };
+  const unresolved = linked && ((invoice.service_record_id && !record) || (scheduledId && !visit) || (!scheduledId && !!record));
+  return { visit, record, linked, unresolved: !!unresolved, conflict: false };
 }
 
-// The street address stamped on the visit; '' when it carries none.
-function stampedVisitAddress(visit) {
-  if (!visit) return '';
-  return propertyStreetAddress({
-    address_line1: visit.service_address_line1,
-    address_line2: visit.service_address_line2,
-    city: visit.service_address_city,
-    state: visit.service_address_state,
-    zip: visit.service_address_zip,
-  }) || '';
+// The members of a combined-visit packet that belong to THIS invoice AND this
+// customer. Mirrors invoice-email.js's packet receipt lookup: the packet item's
+// invoice_id, the member visit's customer_id, and p.visit_id = s.visit_id (the
+// visit really belongs to that packet's group), so a mislinked packet_id or
+// invoice_id can never name another customer's visits.
+async function ownedPacketVisits(invoice, columns) {
+  if (!invoice?.id || !invoice.customer_id || !invoice.visit_completion_packet_id) return [];
+  return db('visit_completion_packet_items as i')
+    .join('visit_completion_packets as p', 'p.id', 'i.packet_id')
+    .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+    .where({
+      'i.invoice_id': invoice.id,
+      'i.packet_id': invoice.visit_completion_packet_id,
+      's.customer_id': invoice.customer_id,
+    })
+    .whereRaw('p.visit_id = s.visit_id')
+    .orderBy('s.id')
+    .select(columns);
+}
+
+// A street address from an OWNED saved property; '' when it is not this
+// customer's, is gone, or has no street line.
+async function ownedPropertyAddress(propertyId, customerId) {
+  if (!propertyId || !customerId) return '';
+  const property = await db('customer_properties').where({ id: propertyId, customer_id: customerId })
+    .first(...ADDRESS_COLS);
+  return (property && propertyStreetAddress(property)) || '';
+}
+
+// Rule A on ONE visit row: stamp → property_id → source_estimate_id, each link
+// customer-checked. The first link present decides; a present link that yields
+// no street address is '' — never a different link's address, never primary.
+async function visitPropertyAddress(visit, customerId) {
+  if (!visit || !customerId) return '';
+  if (clean(visit.service_address_line1)) {
+    return propertyStreetAddress({
+      address_line1: visit.service_address_line1,
+      address_line2: visit.service_address_line2,
+      city: visit.service_address_city,
+      state: visit.service_address_state,
+      zip: visit.service_address_zip,
+    }) || '';
+  }
+  if (visit.property_id) return ownedPropertyAddress(visit.property_id, customerId);
+  if (visit.source_estimate_id) {
+    const estimate = await db('estimates').where({ id: visit.source_estimate_id, customer_id: customerId })
+      .first('address', 'property_id');
+    if (!estimate) return '';
+    if (estimate.property_id) return ownedPropertyAddress(estimate.property_id, customerId);
+    return isStreetShapedAddress(estimate.address) ? clean(estimate.address) : '';
+  }
+  return '';
 }
 
 async function invoicePropertyAddress(invoice, customer) {
   try {
-    // A failed visit lookup throws into the catch below and omits the Property
-    // row rather than guessing: falling back to the primary address would name
-    // the wrong property on a secondary-property visit.
-    const { visit } = await ownedVisitContext(invoice);
-    const stamped = stampedVisitAddress(visit);
-    if (stamped) return stamped;
-    let source = customer;
+    const customerId = invoice?.customer_id;
+    if (!customerId) return '';
+    const { visit, linked, unresolved, conflict } = await ownedVisitContext(invoice);
+    if (conflict) return '';
+    if (linked) {
+      // A visit / record pointer is present: only the visit it resolves to may
+      // name the property. Foreign or unresolvable → omit, never primary.
+      if (unresolved || !visit) return '';
+      return await visitPropertyAddress(visit, customerId);
+    }
+    if (invoice.visit_completion_packet_id) {
+      // A combined-visit invoice: every verified member must name the SAME
+      // street address; a member that cannot be resolved omits the row.
+      const members = await ownedPacketVisits(invoice, VISIT_COLS.map((c) => `s.${c}`));
+      if (!members.length) return '';
+      const addresses = await Promise.all(members.map((m) => visitPropertyAddress(m, customerId)));
+      const first = addresses[0];
+      return first && addresses.every((a) => a === first) ? first : '';
+    }
+    // NO link at all: the address frozen on the invoice, else the customer's.
+    // The passed customer is used only when it IS the invoice's customer.
+    let source = customer && (customer.id == null || String(customer.id) === String(customerId)) ? customer : null;
     // A caller's projection may omit the unit line (address_line2) or the whole
     // address; reload the customer's address columns whenever it is incomplete.
-    const complete = source && ['address_line1', 'address_line2', 'city', 'state', 'zip'].every((k) => Object.hasOwn(source, k));
-    if (!complete && invoice?.customer_id) {
-      source = await db('customers').where({ id: invoice.customer_id })
-        .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+    const complete = source && ADDRESS_COLS.every((k) => Object.hasOwn(source, k));
+    if (!complete) {
+      source = await db('customers').where({ id: customerId }).first(...ADDRESS_COLS);
     }
     return propertyStreetAddress(invoiceCustomerAddress(invoice, source || {})) || '';
   } catch (err) {
@@ -213,19 +287,15 @@ async function invoicePropertyAddress(invoice, customer) {
 }
 
 // A customer (no invoice) — estimate follow-ups whose estimate carries no
-// address text of its own. A saved property is used only when it belongs to
-// THIS customer; another customer's (or an unverifiable one, with no customer
-// id) falls back to the customer's own address.
+// address text of its own. With a property_id the ONLY answer is that saved
+// property when it belongs to THIS customer and has a street line; foreign,
+// gone or street-less omits the row. Only an estimate with no property_id at
+// all falls back to the customer's own primary address.
 async function customerPropertyAddress(customerId, propertyId = null) {
   if (!customerId) return '';
   try {
-    if (propertyId) {
-      const property = await db('customer_properties').where({ id: propertyId, customer_id: customerId })
-        .first('address_line1', 'address_line2', 'city', 'state', 'zip');
-      const fromProperty = property ? propertyStreetAddress(property) : null;
-      if (fromProperty) return fromProperty;
-    }
-    const customer = await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'state', 'zip');
+    if (propertyId) return await ownedPropertyAddress(propertyId, customerId);
+    const customer = await db('customers').where({ id: customerId }).first(...ADDRESS_COLS);
     return (customer && propertyStreetAddress(customer)) || '';
   } catch (err) {
     logger.warn(`[billing-email-details] customer property lookup failed: ${err.message}`);
@@ -250,10 +320,9 @@ async function invoiceServiceDetails(invoice) {
   let date = invoiceDate;
   try {
     if (invoice?.visit_completion_packet_id && !label) {
-      const members = await db('visit_completion_packet_items as i')
-        .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
-        .where({ 'i.invoice_id': invoice.id, 'i.packet_id': invoice.visit_completion_packet_id })
-        .orderBy('s.id').select('s.service_type');
+      // Verified against the customer, the invoice and the packet's own visit
+      // (ownedPacketVisits), never trusting packet_id / invoice_id alone.
+      const members = await ownedPacketVisits(invoice, ['s.service_type']);
       const names = [...new Set(members.map((m) => clean(m.service_type)).filter(Boolean))];
       if (names.length) label = names.join(', ');
     }
@@ -320,5 +389,5 @@ module.exports = {
   invoiceServiceDetails,
   paidPaymentForInvoice,
   isStreetShapedAddress,
-  _private: { ownedVisitContext, stampedVisitAddress, savedMethodRow, MANUAL_TENDERS },
+  _private: { ownedVisitContext, visitPropertyAddress, savedMethodRow, MANUAL_TENDERS },
 };

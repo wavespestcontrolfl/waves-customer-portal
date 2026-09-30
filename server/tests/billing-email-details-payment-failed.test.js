@@ -193,4 +193,40 @@ describe('failure with a payments row', () => {
     expect(payload.payment_method_label).toBe('');
     expect(payload.failed_payment_date).toBe('September 28, 2026');
   });
+
+  test('round 5: the saved-method lookup carries the payment\'s customer id', async () => {
+    mockDetailsLive = true;
+    const pmChain = chain({ first: { id: 'pm-1', method_type: 'card', card_brand: 'Mastercard', last_four: '4444' } });
+    mockQueues(lifecycle({
+      invoices: [chain({ first: INVOICE })],
+      payments: [chain({ first: row({ next_retry_at: null }) })],
+      payment_methods: [pmChain],
+    }));
+    await sendFailed({ failedAt: FAILED_AT });
+    expect(pmChain.where).toHaveBeenCalledWith({ id: 'pm-1', customer_id: 'cust-1' });
+  });
+
+  test('round 5: a payment that belongs to ANOTHER customer never names its saved method', async () => {
+    mockDetailsLive = true;
+    const pmChain = chain({ first: { id: 'pm-1', method_type: 'card', card_brand: 'Mastercard', last_four: '4444' } });
+    mockQueues(lifecycle({
+      invoices: [chain({ first: INVOICE })],
+      payments: [chain({ first: row({ customer_id: 'someone-else', next_retry_at: null }) })],
+      payment_methods: [pmChain],
+    }));
+    const payload = await sendFailed({ failedAt: FAILED_AT });
+    expect(pmChain.first).not.toHaveBeenCalled();
+    expect(payload.payment_method_label).toBe('');
+  });
+
+  test('round 5: a method the database says is not this customer\'s (no row back) leaves the label blank', async () => {
+    mockDetailsLive = true;
+    mockQueues(lifecycle({
+      invoices: [chain({ first: INVOICE })],
+      payments: [chain({ first: row({ next_retry_at: null }) })],
+      payment_methods: [chain({ first: undefined })],
+    }));
+    const payload = await sendFailed({ failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('');
+  });
 });

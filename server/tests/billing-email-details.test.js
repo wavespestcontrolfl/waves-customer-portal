@@ -258,9 +258,13 @@ describe('property address (full street address, never a nickname)', () => {
       customer_address_snapshot: { address_line1: '9 Old Road', city: 'Palmetto', state: 'FL', zip: '34221' },
     };
     expect(await Details.invoicePropertyAddress(invoice, customer)).toBe('');
-    // A missing stamp (lookup fine, no address) still falls back as before.
+    // RULE A (round 5): a visit the invoice points at that carries no stamp,
+    // property_id or source estimate names no property at all, so the row is
+    // omitted; the primary/frozen address is for an invoice with NO link only.
     mockTables({ scheduled_services: [{ service_address_line1: null }] });
-    expect(await Details.invoicePropertyAddress(invoice, customer)).toBe('9 Old Road Unit 4, Palmetto, FL 34221');
+    expect(await Details.invoicePropertyAddress(invoice, customer)).toBe('');
+    expect(await Details.invoicePropertyAddress({ ...invoice, scheduled_service_id: null }, customer))
+      .toBe('9 Old Road Unit 4, Palmetto, FL 34221');
   });
 
   test('an unreadable lookup is blank, never a throw', async () => {
@@ -292,7 +296,7 @@ describe('service and service date', () => {
 
   test('a combined visit names every service on the packet once', async () => {
     mockTables({ 'visit_completion_packet_items as i': [{ service_type: 'Pest Control' }, { service_type: 'Lawn Care' }, { service_type: 'Pest Control' }] });
-    const out = await Details.invoiceServiceDetails({ id: 'i', visit_completion_packet_id: 'p-1', service_type: null, service_date: '2026-09-02' });
+    const out = await Details.invoiceServiceDetails({ id: 'i', customer_id: 'c', visit_completion_packet_id: 'p-1', service_type: null, service_date: '2026-09-02' });
     expect(out.label).toBe('Pest Control, Lawn Care');
     expect(out.date).toBe('September 2, 2026');
   });

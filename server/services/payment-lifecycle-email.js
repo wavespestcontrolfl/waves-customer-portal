@@ -132,9 +132,13 @@ async function loadCustomer(customerId) {
     .first();
 }
 
-async function loadPaymentMethod(paymentMethodId) {
+async function loadPaymentMethod(paymentMethodId, ownerCustomerId = null) {
   if (!paymentMethodId) return null;
-  return db('payment_methods').where({ id: paymentMethodId }).first();
+  // With an owner the lookup carries the customer id: a method that belongs to
+  // someone else reads as absent.
+  return db('payment_methods')
+    .where(ownerCustomerId ? { id: paymentMethodId, customer_id: ownerCustomerId } : { id: paymentMethodId })
+    .first();
 }
 
 async function loadPrefs(customerId) {
@@ -669,14 +673,23 @@ async function sendPaymentFailed({
     // at, then the failed intent itself.
     if (!payload.payment_method_label) {
       // A lookup blip must never throw out of the webhook: blank row instead.
-      const saved = payment?.payment_method_id
-        ? await loadPaymentMethod(payment.payment_method_id).catch(() => null)
+      // The method is read with the payment's own customer id (and must be the
+      // customer this email goes to): another customer's saved card is never
+      // named, the row just stays blank.
+      const owner = payment?.customer_id || null;
+      const saved = owner && payment?.payment_method_id && (!customerId || String(owner) === String(customerId))
+        ? await loadPaymentMethod(payment.payment_method_id, owner).catch(() => null)
         : null;
       const savedParts = saved ? methodParts(saved) : null;
       payload.payment_method_label = savedParts?.last4 ? savedParts.label : failedIntentCardLabel(paymentIntent);
     }
     if (!payload.failed_payment_date) payload.failed_payment_date = displayDate(failedAt);
-    if (!payload.retry_date) payload.retry_date = displayDate(await armedRetryDate({ payment, invoice }));
+    // The armed retry is read off the invoice's own customer (armedRetryDate
+    // filters by it); an invoice that is not the customer this email goes to
+    // supplies no retry date.
+    if (!payload.retry_date && !(customerId && invoice?.customer_id && String(invoice.customer_id) !== String(customerId))) {
+      payload.retry_date = displayDate(await armedRetryDate({ payment, invoice }));
+    }
   }
   const effectiveCustomerId = customerId || invoice?.customer_id || payment?.customer_id;
   if (!effectiveCustomerId) return { ok: false, skipped: true, reason: 'customer_not_resolved' };
