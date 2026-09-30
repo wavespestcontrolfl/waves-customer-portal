@@ -5647,6 +5647,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${planTermsNeutral ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Cancel anytime &mdash; no contract</span>
         <span class="plan-terms-detail">No long-term commitment. Stop after any visit, with no cancellation fee.</span>
+      </li>
+      <li class="plan-terms-item">
+        <span class="plan-terms-term">Rate reviewed once a year</span>
+        <span class="plan-terms-detail">Rates are reviewed once a year after your first 12 months, with at least 30 days&rsquo; written notice before any change.</span>
       </li>`}
       ${showMembershipFee && !membershipSetupWaivedForExistingCustomer ? `<li class="plan-terms-item">
         <span class="plan-terms-term">Your ${fmtMoney(membershipFee)} setup is refundable</span>
@@ -5662,6 +5666,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       </li>`}
     </ul>
   </section>` : '';
+
+  // The "Rate reviewed once a year" item (owner ruling 2026-09-30, annual
+  // rate review disclosed up front) rides the same plan-terms gate as the
+  // no-contract item: it is a residential recurring plan term, so a
+  // terms-neutral card (termite, rodent, commercial or unclassifiable work
+  // anywhere) keeps only the factual refund details.
 
   // Palm-care bullet (owner 2026-09-24 routine palm-care reserve; Codex
   // round 4 P0 on #4789 "Add the palm disclosure to legacy estimate cards"):

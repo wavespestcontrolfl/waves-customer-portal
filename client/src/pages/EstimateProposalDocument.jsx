@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
-import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
+import { RATE_REVIEW_TERMS_LINE, copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
 import {
   glassCtaMicroForKeys,
   glassRowInclusions,
@@ -293,6 +293,22 @@ export default function EstimateProposalDocument({ data, token }) {
       : recurringLineDescriptions.length === 0
         ? NEUTRAL_TERMS
         : glassCtaMicroForKeys(recurringLineDescriptions);
+
+  // Annual rate review disclosure (owner ruling 2026-09-30): appended to the
+  // terms line under the SAME scope rule the money-back guarantee keys on —
+  // every printed line carries the recurring residential plan terms (scope
+  // 'all': pest, lawn, mosquito, tree & shrub), no authored, program or
+  // commercial terms, and at least one recurring line whose service the
+  // document can classify. A termite-only ('none'), rodent or commercial
+  // ('satisfaction') or one-time-only document never prints it (no rate to
+  // review). Parity: estimate-pdf.js termsBlock / proposalRateReviewTermsEligible.
+  const rateReviewEligible = scope === 'all'
+    && !isCommercial
+    && !authoredTermsPresent
+    && programList.length === 0
+    && recurringLineDescriptions.length > 0
+    && recurringLineDescriptions.every((description) => glassServiceSlug(description) !== null);
+  const termsLineText = rateReviewEligible ? `${termsLine} · ${RATE_REVIEW_TERMS_LINE}` : termsLine;
 
   // Combined plan totals ("$X/mo" / "$X/yr") are prohibited on customer-facing
   // estimate surfaces (AGENTS.md "Per application price copy"); commercial
@@ -631,7 +647,7 @@ export default function EstimateProposalDocument({ data, token }) {
               <div style={{ fontSize: 11, color: INK, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{proposal.terms}</div>
             </div>
           ) : null}
-          <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{termsLine}</p>
+          <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{termsLineText}</p>
         </div>
 
         <div className="doc-keep">

@@ -23,7 +23,8 @@ const {
 const { formatDisplayDate } = require('../../utils/date-only');
 const { normalizeProposal, computeProposalTotals, annualizedAmount } = require('../estimate-proposal');
 const { formatUnitPrice, formatQuantity } = require('../../../shared/proposal-bid.cjs');
-const { proposalCallbackTermsEligible, proposalMakesNoGuaranteeClaim, resolveProposalBillingContext } = require('../estimate-proposal-billing');
+const { proposalCallbackTermsEligible, proposalMakesNoGuaranteeClaim, proposalRateReviewTermsEligible, resolveProposalBillingContext } = require('../estimate-proposal-billing');
+const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims.cjs');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -489,8 +490,18 @@ function termsBlock(ctx, proposal, totals, y) {
   const structuredTermLines = commercialTermLines(proposal.commercialTerms);
   // The canned sentence is a recurring residential pest term: an all-pest
   // residential proposal only (proposalCallbackTermsEligible).
-  if (ctx.callbackTermsEligible && !proposal.terms && structuredTermLines.length === 0 && !(proposal.programs || []).length) {
+  const cannedTermsAllowed = !proposal.terms && structuredTermLines.length === 0 && !(proposal.programs || []).length;
+  if (ctx.callbackTermsEligible && cannedTermsAllowed) {
     lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
+  }
+  // Annual rate review disclosure (owner ruling 2026-09-30) — parity with
+  // the browser document's terms line: every row carries the recurring
+  // residential plan terms (pest, lawn, mosquito, tree & shrub — the scope
+  // the money-back guarantee keys on) and at least one line recurs; never
+  // beside authored, structured or program terms, and never on a
+  // termite-only, rodent, commercial or one-time-only document.
+  if (ctx.rateReviewTermsEligible && cannedTermsAllowed) {
+    lines.push(`${RATE_REVIEW_TERMS_LINE}.`);
   }
   lines.push(...structuredTermLines);
   if (proposal.terms) lines.push(proposal.terms);
@@ -594,6 +605,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
     suppressPlanTotals: proposal.enabled !== true && quotesPerApplication(proposal),
     noGuaranteeClaims: proposalMakesNoGuaranteeClaim(proposal, estimate?.id),
     callbackTermsEligible: proposalCallbackTermsEligible(proposal, estimate?.id),
+    rateReviewTermsEligible: proposalRateReviewTermsEligible(proposal, estimate?.id),
     tagline: 'Thank you for considering Waves Pest Control',
   };
 

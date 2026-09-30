@@ -2873,6 +2873,14 @@ their guarantee wording when it is set; per-service CTA lines follow their
 own services (`glassCtaMicroForKeys`: termite work or an unclassifiable
 service makes no guarantee). Derived read-only; no write. The legacy
 server-rendered page applies the same rule to its plan-terms card.
+The annual rate review disclosure (owner ruling 2026-09-30; shared
+`RATE_REVIEW_TERMS_LINE`, "Rate reviewed yearly after 12 months, 30 days’
+notice") follows the plan-terms scope the same way: the proposal document's
+terms line (browser and pdfkit renderers, `proposalRateReviewTermsEligible`)
+and the legacy plan-terms card ("Rate reviewed once a year") print it only
+when every row carries the recurring residential plan terms ('all') and at
+least one line recurs — never on a termite-only, rodent, commercial,
+authored-terms, programs or one-time-only estimate.
 When `/data` includes a `proposal` for document rendering or an enabled
 public proposal, its explicit boolean `proposal.noGuaranteeClaims` classifies
 the normalized rows that the document actually prints. React document mode

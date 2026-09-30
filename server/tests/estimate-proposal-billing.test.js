@@ -35,6 +35,7 @@ const {
   proposalCallbackTermsEligible,
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
+  proposalRateReviewTermsEligible,
   proposalRowTermsScope,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
@@ -167,6 +168,37 @@ describe('proposalCallbackTermsEligible', () => {
   it('never allows it where the proposal makes no guarantee claim', () => {
     mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
     expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(false);
+  });
+});
+
+describe('proposalRateReviewTermsEligible (annual rate review disclosure, owner ruling 2026-09-30)', () => {
+  const building = (...lines) => ({ name: 'Home', lineItems: lines.map(([description, frequency]) => ({ description, amount: 55, frequency })) });
+
+  it('prints on every recurring residential plan-terms document — pest, lawn, and a pest + lawn mix — not only all-pest', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] }, 'e1')).toBe(true);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Lawn Care', 'monthly'])] }, 'e1')).toBe(true);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Mosquito Control', 'monthly'])] }, 'e1')).toBe(true);
+    const pestLawn = { enabled: false, buildings: [building(['Pest Control', 'quarterly'], ['Lawn Care', 'monthly'])] };
+    expect(proposalCallbackTermsEligible(pestLawn, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible(pestLawn, 'e1')).toBe(true);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  it('never prints on rodent, commercial (authored), empty or one-time-only documents', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Rodent Bait Stations', 'monthly'])] }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'], ['Rodent Bait Stations', 'monthly'])] }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ enabled: true, buildings: [building(['Quarterly Pest Control', 'quarterly'])] }, 'e1')).toBe(false);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [] }, 'e1')).toBe(false);
+    // A one-time-only document has no rate to review.
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Pest Control', 'one_time'])] }, 'e1')).toBe(false);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  it('never prints where the proposal makes no guarantee claim (termite / unclassifiable work)', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
+    expect(proposalRateReviewTermsEligible({ enabled: false, buildings: [building(['Quarterly Pest Control', 'quarterly'])] }, 'e1')).toBe(false);
   });
 });
 

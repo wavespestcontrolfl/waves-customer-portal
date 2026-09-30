@@ -4578,6 +4578,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('setup is refundable');
     expect(html).toContain('Annual prepay is prorated');
     expect(html).not.toContain('our guarantee');
+    expect(html).not.toContain('Rate reviewed once a year');
     expect(html).not.toContain('Money-back guarantee');
   });
 
@@ -4679,6 +4680,7 @@ describe('public estimate one-time breakdown', () => {
     // Rodent is terms-neutral: no generic contract or cancellation promise either.
     expect(html).not.toContain('No contracts and no lock-in');
     expect(html).not.toContain('Cancel anytime &mdash; no contract');
+    expect(html).not.toContain('Rate reviewed once a year');
   });
 
   test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {
@@ -4702,6 +4704,10 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('class="card plan-terms-card"');
     expect(html).toContain('Cancel, refunds &amp; our guarantee');
     expect(html).toContain('Cancel anytime &mdash; no contract');
+    // Annual rate review disclosure (owner ruling 2026-09-30) rides the
+    // same plan-terms gate as the no-contract item.
+    expect(html).toContain('Rate reviewed once a year');
+    expect(html).toContain('Rates are reviewed once a year after your first 12 months, with at least 30 days&rsquo; written notice before any change.');
     expect(html).toContain('setup is refundable');
     expect(html).toContain('Annual prepay is prorated');
     expect(html).toContain('we refund your most recent service payment');

@@ -108,16 +108,31 @@ function proposalRowTermsScope(proposal, row, noGuaranteeClaims = false) {
 // Whether the PDF may print its canned IPM/callback sentence, a recurring
 // residential PEST term: the proposal carries the plan terms, every row is
 // pest work, and at least one line is a scheduled recurring visit.
+function proposalHasRecurringVisit(proposal) {
+  return (Array.isArray(proposal?.buildings) ? proposal.buildings : [])
+    .flatMap((building) => (Array.isArray(building?.lineItems) ? building.lineItems : []))
+    .some((item) => item?.frequency && item.frequency !== 'one_time');
+}
+
 function proposalCallbackTermsEligible(proposal, estimateId = null) {
   if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
   const rows = proposalRows(proposal);
-  const recurringVisit = (Array.isArray(proposal.buildings) ? proposal.buildings : [])
-    .flatMap((building) => (Array.isArray(building?.lineItems) ? building.lineItems : []))
-    .some((item) => item?.frequency && item.frequency !== 'one_time');
-  return recurringVisit && rows.every((row) => {
+  return proposalHasRecurringVisit(proposal) && rows.every((row) => {
     const lanes = proposalRowLanes(row);
     return lanes.length === 1 && lanes[0] === 'pest';
   });
+}
+
+// Whether the annual rate review disclosure prints beside the pdfkit
+// document's terms (owner ruling 2026-09-30): the SAME plan-terms scope the
+// money-back guarantee keys on — every row residential pest, lawn, mosquito
+// or tree & shrub (proposalCarriesPlanTerms: never termite, rodent,
+// commercial or an authored proposal) — plus at least one recurring line,
+// because a one-time-only document has no rate to review. Parity with
+// EstimateProposalDocument.jsx rateReviewEligible.
+function proposalRateReviewTermsEligible(proposal, estimateId = null) {
+  if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
+  return proposalHasRecurringVisit(proposal);
 }
 
 // An estimate with no customer_id still links at accept through the SAME
@@ -315,6 +330,7 @@ module.exports = {
   proposalCallbackTermsEligible,
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
+  proposalRateReviewTermsEligible,
   proposalRowTermsScope,
   resolveLivePricing,
   resolveProposalBillingContext,

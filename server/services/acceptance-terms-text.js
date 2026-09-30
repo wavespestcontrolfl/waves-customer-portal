@@ -23,16 +23,22 @@
  * The client has NO copy of this text: the estimate page renders what the
  * public /data endpoint serves and attests the served version on accept.
  * Pinned by server/tests/estimate-acceptance-terms.test.js.
+ *
+ * v2026-10 (owner ruling 2026-09-30, annual rate review disclosed up front):
+ * the Services drawer line gains one sentence — rates are reviewed once a
+ * year after the first 12 months, with at least 30 days' written notice
+ * before any change. The one-liner above Accept is byte-identical to
+ * v2026-09 (owner ruling 2026-08-28: same steps, least words).
  */
 
-const ACCEPTANCE_TERMS_VERSION = 'v2026-09';
+const ACCEPTANCE_TERMS_VERSION = 'v2026-10';
 
 // Rendered as one line above the Accept CTA. 17 words.
 const ACCEPTANCE_LINE = 'Accepting authorizes these services at the price shown. Cancel anytime — completed visits are still due.';
 
 // Rendered inside the inline "View terms" drawer. Five short lines.
 const ACCEPTANCE_TERMS = [
-  { label: 'Services', text: 'at the price and frequency shown, until you cancel. No contract.' },
+  { label: 'Services', text: 'at the price and frequency shown, until you cancel. No contract. Rates are reviewed once a year after your first 12 months, with at least 30 days’ written notice before any change.' },
   { label: 'Payment', text: 'due when each service is completed. Auto Pay is a separate authorization you can change in your portal.' },
   { label: 'Unpaid balances', text: 'stay due; we’ll remind you, and service may pause until you’re current.' },
   { label: 'Canceling', text: 'anytime. Completed visits are still due. Termite/WDO has its own agreement.' },

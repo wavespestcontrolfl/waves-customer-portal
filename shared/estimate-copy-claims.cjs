@@ -32,6 +32,17 @@ function serviceGuaranteeScope(estimateScope, termsScope) {
   return estimateScope;
 }
 
+// The annual rate review disclosure printed beside a recurring residential
+// document's terms line (owner ruling 2026-09-30, verbatim owner copy). It
+// is a disclosure, not a plan-terms CLAIM (no guarantee/contract wording,
+// so PLAN_TERMS_COPY never matches it) — callers gate it explicitly on the
+// plan-terms scope: every line residential pest, lawn, mosquito or tree &
+// shrub, at least one recurring line, no authored/structured/program terms.
+// Shared by the browser document (EstimateProposalDocument.jsx) and the
+// pdfkit fallback (server/services/pdf/estimate-pdf.js) so the two
+// renderers cannot drift.
+const RATE_REVIEW_TERMS_LINE = 'Rate reviewed yearly after 12 months, 30 days’ notice';
+
 const SATISFACTION_CLAIM = /\bsatisfaction guaranteed\b/i;
 const SATISFACTION_CLAIMS = /\bsatisfaction guaranteed\b/gi;
 
@@ -75,6 +86,7 @@ module.exports = {
   GUARANTEE_COPY,
   RECURRING_TERMS_COPY,
   PLAN_TERMS_COPY,
+  RATE_REVIEW_TERMS_LINE,
   copyAllowedInScope,
   guaranteeScope,
   serviceGuaranteeScope,

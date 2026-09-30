@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { render } from '@testing-library/react';
 import EstimateProposalDocument from './EstimateProposalDocument';
 import { GLASS_COPY } from '../lib/estimate-glass-copy';
+import { RATE_REVIEW_TERMS_LINE } from '@estimate-copy-claims';
 
 afterEach(() => {
   delete window.__WAVES_PDF_IMAGE_FAILURES;
@@ -78,6 +79,8 @@ describe('EstimateProposalDocument', () => {
     // Commercial terms only — no residential guarantee claims anywhere.
     expect(text).toContain('No long-term contract · Licensed & insured · Satisfaction guaranteed');
     expect(text).not.toMatch(/Auto Pay|cancel your plan in the app/i);
+    // The residential rate-review disclosure never prints on a commercial document.
+    expect(text).not.toContain(RATE_REVIEW_TERMS_LINE);
     expect(text).not.toMatch(/90-day/i);
     expect(text).not.toMatch(/money-back/i);
     // Account-manager next step, not self-checkout.
@@ -180,8 +183,10 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).toContain('Service Estimate');
     expect(text).toContain('Quarterly Pest Control');
-    // Residential recurring terms line (the shipped CTA micro claims).
-    expect(text).toContain(GLASS_COPY.ctaMicro);
+    // Residential recurring terms line (the shipped CTA micro claims) plus
+    // the annual rate review disclosure (owner ruling 2026-09-30), appended
+    // under the same plan-terms scope.
+    expect(text).toContain(`${GLASS_COPY.ctaMicro} · ${RATE_REVIEW_TERMS_LINE}`);
     // Residential pest inclusions stack rides along.
     expect(text).toContain('Protected 4× a year — full perimeter, entry points, eaves & harborage zones, every visit');
     expect(text).toContain('approve online');
@@ -269,6 +274,8 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).not.toContain('Unlimited free callbacks');
     expect(text).toContain('Free between-visit service calls');
+    // Lawn is a recurring residential plan: the rate-review disclosure prints.
+    expect(text).toContain(`Money-back guarantee · ${RATE_REVIEW_TERMS_LINE}`);
   });
 
   it.each(['Termite Trenching', 'WDO Inspection', 'Unclassified Specialty Work'])('a neutral estimate with %s filters recurring terms while retaining scope and prices', (oneTimeLabel) => {
@@ -297,6 +304,8 @@ describe('EstimateProposalDocument', () => {
     expect(container.textContent).not.toMatch(/Satisfaction guaranteed/);
     expect(container.textContent).toContain('Licensed & insured');
     expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
+    // No guarantee scope ⇒ no rate-review disclosure either (termite work).
+    expect(container.textContent).not.toContain(RATE_REVIEW_TERMS_LINE);
     expect(container.textContent).toContain('Premium non-repellent + repellent solutions');
     expect(container.textContent).toContain('Pest Control');
     expect(container.textContent).toContain('$55.00');
@@ -306,7 +315,7 @@ describe('EstimateProposalDocument', () => {
     // Without the flag the same recurring plan keeps its normal terms and
     // inclusion guarantees.
     const { container: flagless } = render(<EstimateProposalDocument data={{ ...termite, estimate: { ...termite.estimate, noGuaranteeClaims: undefined } }} token="tok-123" />);
-    expect(flagless.textContent).toContain(PEST_TERMS);
+    expect(flagless.textContent).toContain(`${PEST_TERMS} · ${RATE_REVIEW_TERMS_LINE}`);
     expect(flagless.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
   });
 
@@ -586,6 +595,8 @@ describe('EstimateProposalDocument', () => {
     // A single real charge keeps its total — labeled Total, never First-year.
     expect(text).toContain('Total');
     expect(text).not.toContain('First-year total');
+    // No recurring line ⇒ no rate to review ⇒ no rate-review disclosure.
+    expect(text).not.toContain(RATE_REVIEW_TERMS_LINE);
   });
 
   it('identifies taxable lines like the pdfkit document — marker, rate, disclosure (codex #3281 r3)', () => {

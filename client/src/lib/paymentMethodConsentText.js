@@ -2,12 +2,18 @@
 // Keep in sync — when the server version bumps, update this too.
 import { WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 
-export const CONSENT_VERSION = 'v11_2026-08-25';
+export const CONSENT_VERSION = 'v12_2026-09-30';
+
+// v12: the rate sentence shared by every variant — mirror of the server's
+// RATE_IN_EFFECT_SENTENCE.
+export const RATE_IN_EFFECT_SENTENCE = 'Each invoice is billed at the rate then in effect, including rates changed on at least 30 days’ written notice.';
 
 export const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
   'this card and charge it for future service visits and invoices as',
-  'agreed, until I revoke authorization. I can revoke anytime — email',
+  'agreed, until I revoke authorization.',
+  RATE_IN_EFFECT_SENTENCE,
+  'I can revoke anytime — email',
   `billing@wavespestcontrol.com, call ${WAVES_SUPPORT_PHONE_DISPLAY}, or remove the`,
   'card in the Waves app or my customer portal. A credit card surcharge',
   'of up to 2.9% may apply; the exact surcharge and total will be shown',
@@ -20,7 +26,9 @@ export const ACH_CONSENT_TEXT = [
   'initiate electronic ACH debits from the bank account identified',
   'above for each invoice in the amount of that invoice, on or after',
   'its due date (or on the Auto Pay billing day I have selected),',
-  'until I revoke this authorization. I may revoke by writing to',
+  'until I revoke this authorization.',
+  RATE_IN_EFFECT_SENTENCE,
+  'I may revoke by writing to',
   `billing@wavespestcontrol.com or calling ${WAVES_SUPPORT_PHONE_DISPLAY} at least`,
   '3 business days before the next scheduled debit. I may request a',
   'copy of this authorization at any time by contacting Waves at the',
@@ -35,8 +43,9 @@ export const PREPAY_CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
   'this card, charge it now for my 12-month annual prepay invoice at the',
   'exact total shown before I confirm, and charge it for future invoices',
-  'as agreed (including plan renewals), until I revoke authorization. I',
-  'can revoke anytime — email billing@wavespestcontrol.com, call',
+  'as agreed (including plan renewals), until I revoke authorization.',
+  RATE_IN_EFFECT_SENTENCE,
+  'I can revoke anytime — email billing@wavespestcontrol.com, call',
   `${WAVES_SUPPORT_PHONE_DISPLAY}, or remove the card in the Waves app or my customer`,
   'portal. A credit card surcharge of up to 2.9% may apply; the exact',
   'surcharge and total will be shown before payment. Debit cards, prepaid',
@@ -51,8 +60,9 @@ export const PREPAY_ACH_CONSENT_TEXT = [
   'my 12-month annual prepay invoice at the exact total shown before I',
   'confirm, and to initiate electronic ACH debits from that account for',
   'future invoices as agreed (including plan renewals), each in the',
-  'amount of that invoice, until I revoke this authorization. I may',
-  `revoke by writing to billing@wavespestcontrol.com or calling ${WAVES_SUPPORT_PHONE_DISPLAY}`,
+  'amount of that invoice, until I revoke this authorization.',
+  RATE_IN_EFFECT_SENTENCE,
+  `I may revoke by writing to billing@wavespestcontrol.com or calling ${WAVES_SUPPORT_PHONE_DISPLAY}`,
   'at least 3 business days before the next scheduled debit. I may',
   'request a copy of this authorization at any time by contacting Waves',
   'at the email or phone above. I can manage or remove saved payment',
