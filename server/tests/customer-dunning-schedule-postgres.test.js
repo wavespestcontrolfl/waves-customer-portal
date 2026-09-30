@@ -714,9 +714,61 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
 
     test('the run\'s OWN claim never blocks its own close; another run\'s stamp does', async () => {
       const { s, claim } = await inFlight();
-      expect((await Schedule.close(claim.schedule, 'balance_cleared', NOW, { database: app, claimStamp: new Date(NOW.getTime() - 1) })).reason).toBe('in_flight');
+      expect((await Schedule.close(claim.schedule, 'balance_cleared', NOW, { database: app, claimStamp: new Date(NOW.getTime() - 1) })).reason).toBe('claim_lost');
       expect((await Schedule.close(claim.schedule, 'balance_cleared', NOW, { database: app, claimStamp: claim.claimStamp })).closed).toBe(true);
       expect((await fresh(s.id)).status).toBe('completed');
+    });
+
+    describe('a runner-internal close is held to the claim it acted on', () => {
+      const later = new Date(NOW.getTime() + 11 * 60 * 1000); // the slow worker's claim has expired by now
+      const membersAreUntouched = async (m) => {
+        const row = await seqRow(m.seq.id);
+        expect(row.step_index).toBe(2);
+        expect(row.status).toBe('active');
+      };
+
+      test('an admin pause during a slow run: the runner\'s close is refused, the schedule stays paused, members are untouched', async () => {
+        const { s, m, claim } = await inFlight();
+        expect(await Admin.pause(s.id, { now: later, database: app })).toEqual({ ok: true }); // the claim had expired
+        const out = await Schedule.close(claim.schedule, 'balance_cleared', later, { database: app, claimStamp: claim.claimStamp });
+        expect(out).toMatchObject({ closed: false, reason: 'claim_lost' });
+        expect(await fresh(s.id)).toMatchObject({ status: 'paused', closed_reason: null });
+        await membersAreUntouched(m);
+      });
+
+      test('pause then resume clears the stamp: the stale worker\'s close is refused and the schedule stays active', async () => {
+        const { s, m, claim } = await inFlight();
+        await Admin.pause(s.id, { now: later, database: app });
+        await Admin.resume(s.id, { now: later, database: app });
+        expect((await fresh(s.id)).touch_claimed_at).toBeNull();
+        const out = await Schedule.close(claim.schedule, 'no_active_member', later, { database: app, claimStamp: claim.claimStamp });
+        expect(out).toMatchObject({ closed: false, reason: 'claim_lost' });
+        expect(await fresh(s.id)).toMatchObject({ status: 'active' });
+        await membersAreUntouched(m);
+      });
+
+      test('the step moved on under another run: refused (the judgement was about a different step)', async () => {
+        const { s, m, claim } = await inFlight();
+        await app('customer_dunning_schedules').where({ id: s.id }).update({ step_index: 5 });
+        const out = await Schedule.close(claim.schedule, 'balance_cleared', NOW, { database: app, claimStamp: claim.claimStamp });
+        expect(out).toMatchObject({ closed: false, reason: 'claim_lost' });
+        expect((await fresh(s.id)).status).toBe('active');
+        await membersAreUntouched(m);
+      });
+
+      test('the runner under its OWN claim still closes, active or held, even after the claim has aged past the TTL', async () => {
+        const { s, claim } = await inFlight();
+        await app('customer_dunning_schedules').where({ id: s.id }).update({ status: 'held', held_reason: 'x', held_since: NOW });
+        const out = await Schedule.close(claim.schedule, 'balance_cleared', later, { database: app, claimStamp: claim.claimStamp });
+        expect(out.closed).toBe(true);
+        expect((await fresh(s.id)).status).toBe('completed');
+      });
+
+      test('the admin release path is unchanged: a fresh foreign claim is in_flight, an expired one goes through', async () => {
+        const { s } = await inFlight();
+        expect(await Admin.release(s.id, { now: NOW, database: app })).toMatchObject({ ok: false, reason: 'in_flight' });
+        expect(await Admin.release(s.id, { now: later, database: app })).toMatchObject({ ok: true });
+      });
     });
 
     test('C2: resume clears the claim, so a worker from before the pause cannot regain authority', async () => {

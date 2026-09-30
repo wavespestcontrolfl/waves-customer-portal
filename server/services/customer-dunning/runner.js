@@ -292,7 +292,12 @@ async function applyDecision(run, d) {
     case 'settle': return finishDelivered(run, d.facts);
     default: { // close
       if (d.reason === 'no_step') logger.error(`[customer-dunning] schedule ${run.schedule.id} has no step at index ${run.schedule.step_index}; releasing`);
-      await Schedule.close(run.schedule, d.closeReason, run.now, { database: run.database, claimStamp: run.claimStamp });
+      const closed = await Schedule.close(run.schedule, d.closeReason, run.now, {
+        database: run.database, claimStamp: run.claimStamp, expectedStepIndex: run.schedule.step_index,
+      });
+      // A close refused because the claim was lost (a pause, a resume, another run)
+      // changed nothing: report it, alert nobody.
+      if (closed && closed.closed === false) return outcome('stale');
       if (d.alertMissingCustomer) {
         await Schedule.alertStaff({
           title: 'Customer reminders stopped',

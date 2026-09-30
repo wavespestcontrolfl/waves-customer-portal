@@ -356,18 +356,31 @@ async function alertPastFinal(schedule, landed) {
  * Close a schedule (guarded on it still being open) and release surviving
  * members in ONE transaction. Returns { closed, landed }.
  */
-async function close(schedule, reason, now = new Date(), { database = db, extra = {}, claimStamp = null } = {}) {
+async function close(schedule, reason, now = new Date(), {
+  database = db, extra = {}, claimStamp = null, expectedStepIndex = schedule.step_index,
+} = {}) {
   const out = await database.transaction(async (trx) => {
     await takeLock(trx, schedule.customer_id);
     // Re-read under the lock: the landings below start from the row AS IT IS
     // NOW (a step that advanced since the caller read it), and a FRESH claim
     // that is not the caller's is a send in flight — closing under it would
     // hand its members back to the per-invoice ladder, which repeats the step
-    // it is delivering. Runner-internal closes pass their own claimStamp;
-    // control writes (admin release) pass none and are refused.
+    // it is delivering. Control writes (admin release) pass no claimStamp and are
+    // refused while a fresh foreign claim stands. A runner-internal close passes
+    // ITS claimStamp and is held to the whole claim it acted on: the stamp must
+    // still be the row's (an admin pause / resume clears it, another run replaces
+    // it), the schedule must still be active or held (never an admin's pause),
+    // and still at the step the runner judged. Anything else is `claim_lost` and
+    // closes nothing — a slow worker never overrides a control action.
     const row = await trx(TABLE).where({ id: schedule.id }).whereIn('status', OPEN_STATUSES).forUpdate().first();
     if (!row) return { closed: false, landed: [] };
-    if (claimIsFresh(row, now) && !sameStamp(row.touch_claimed_at, claimStamp)) return { closed: false, landed: [], reason: 'in_flight' };
+    if (claimStamp) {
+      const ownsClaim = sameStamp(row.touch_claimed_at, claimStamp)
+        && ['active', 'held'].includes(row.status) && Number(row.step_index) === Number(expectedStepIndex);
+      if (!ownsClaim) return { closed: false, landed: [], reason: 'claim_lost' };
+    } else if (claimIsFresh(row, now)) {
+      return { closed: false, landed: [], reason: 'in_flight' };
+    }
     await trx(TABLE).where({ id: row.id }).update({
       status: terminalStatusFor(reason), closed_reason: reason, closed_at: now,
       next_touch_at: null, updated_at: trx.fn.now(), ...extra,

@@ -643,6 +643,24 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
     });
   });
 
+  describe('a close refused for a lost claim changes nothing and alerts nobody', () => {
+    test('runner closes pass the step they judged; a refused close is a stale outcome, with no missing-customer alert', async () => {
+      Schedule.close.mockResolvedValue({ closed: false, landed: [], reason: 'claim_lost' });
+      customer = undefined;
+      expect((await run()).outcome).toBe('stale');
+      expect(Schedule.close).toHaveBeenLastCalledWith(expect.anything(), 'customer_missing', NOW, expect.objectContaining({ claimStamp: NOW, expectedStepIndex: 4 }));
+      expect(Schedule.alertStaff).not.toHaveBeenCalled();
+      setup();
+      Schedule.close.mockResolvedValue({ closed: false, landed: [], reason: 'claim_lost' });
+      live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
+      expect((await run()).outcome).toBe('stale');
+      setup();
+      Schedule.close.mockResolvedValue({ closed: true, landed: [] });
+      live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
+      expect(await run()).toMatchObject({ outcome: 'closed', reason: 'balance_cleared' });
+    });
+  });
+
   describe('F3: runner-internal closes carry the run\'s own claim', () => {
     test('a set that empties, and a missing customer, close under OUR claimStamp (so an in-flight guard never refuses the run itself)', async () => {
       live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
