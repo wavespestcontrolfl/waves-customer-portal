@@ -2315,7 +2315,8 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
 // alias, or the "Invoice <n> —" description): every settling row must carry the claimed tender, and a tender that
 // cannot be read, rows that cannot be found, or an ambiguous tender wording are all ungrounded.
 function invoiceTenderUngrounded(claim, text, env) {
-  if (claim.family !== 'paid' || !claim.matchedInvoice) return false;
+  // the rows that back the invoice's CLAIMED status: settling rows for paid, in-flight rows for processing (Codex round-34)
+  if (!claim.matchedInvoice || !['paid', 'pending', 'refunded'].includes(claim.family)) return false;
   // judge the sub-clause(s) asserting the paid status (the whole clause for a receipt-shaped invoice claim); a how-to /
   // offer sub-clause ("pay by card next time") names no past payment
   const ranges = subclauseRanges(text);
@@ -2330,13 +2331,13 @@ function invoiceTenderUngrounded(claim, text, env) {
   const inv = claim.matchedInvoice;
   const num = String(inv.invoiceNumber || '').toUpperCase();
   const settling = paymentRowsForBinding(env.context).filter((p) => {
-    if (!p || statusFamilyOfRow(p) !== 'paid') return false;
+    if (!p || statusFamilyOfRow(p) !== claim.family) return false;
     const linked = invoiceIdOf(p) || aliasInvoiceIdOf(p);
     if (linked && String(linked) === String(inv.id)) return true;
     const dn = descriptionInvoiceNumberOf(p);
     return !!(num && dn && String(dn).toUpperCase() === num);
   });
-  if (!settling.length) return true; // nothing settles it on record => the tender is unverifiable
+  if (!settling.length) return true; // no row on record backs the status => the tender is unverifiable
   return settling.some((p) => paymentTenderLabel(p) !== claimed);
 }
 // Does this clause need the payment validation at all? EXACTLY the two ways clauseUngrounded can reject it:

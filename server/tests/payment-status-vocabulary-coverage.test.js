@@ -1385,3 +1385,59 @@ describe('round-33: "Invoice #0123 is paid with your card" validates the tender 
     expect(ungrounded('Invoice #0123 is paid, and you can pay by card next time.', [cash])).toBe(false);
   });
 });
+
+// Codex round-34 P1: a tender word after a tender preposition is NEVER a subject, for every tender — "Invoice #0123 is
+// processing via ACH" is an INVOICE claim plus a TENDER claim bound to that invoice's own rows.
+describe('round-34: tender-after-preposition keeps the invoice subject and binds the tender to the invoice rows', () => {
+  const V = require('../services/payment-receipt-vocabulary');
+  const mk = (status, rows) => ({ customer: { id: 'c1' }, billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [{ id: 'inv-1', invoiceNumber: 'WPC-2026-0123', status, total: 120, amountDue: status === 'processing' ? 120 : 0 }] } });
+  const row = (st, extra) => ({ id: `r-${st}-${Math.random()}`, amount: 120, status: st, payment_date: '2026-09-12', metadata: { invoice_id: 'inv-1' }, ...extra });
+  const TENDERS = {
+    ach: { payment_method_type: 'us_bank_account' },
+    card: { payment_method_type: 'card' },
+    zelle: { payment_method_type: null, metadata: { invoice_id: 'inv-1', method: 'zelle' } },
+    check: { payment_method_type: null, metadata: { invoice_id: 'inv-1', method: 'check' } },
+    cash: { payment_method_type: null, metadata: { invoice_id: 'inv-1', method: 'cash' } },
+  };
+  const WORDING = { ach: 'via ACH', card: 'with your card', zelle: 'through Zelle', check: 'by check', cash: 'in cash' };
+  const ungrounded = (reply, ctx, inbound) => replyQuotesUngroundedAmount(reply, ctx, { byMeaning: true, inboundMessage: inbound });
+
+  test('the subject stays the invoice for every tender wording', () => {
+    for (const w of ['via ACH', 'by check', 'through Zelle', 'with your card', 'using your bank account', 'by Zelle', 'via your checking account']) {
+      expect({ w, invoice: V.invoiceSubjectClause(`Invoice #0123 is processing ${w}.`) }).toEqual({ w, invoice: true });
+    }
+    // a tender that is the SUBJECT (or a payment noun) is still a payment clause
+    for (const t of ['Your ACH payment is processing.', 'The Zelle transfer is processing.', 'Your check is processing.', 'Invoice #0123 is processing via your ACH payment.']) {
+      expect({ t, invoice: V.invoiceSubjectClause(t) }).toEqual({ t, invoice: false });
+    }
+  });
+  test.each(Object.keys(TENDERS))('processing %s: only a processing row of the SAME tender on THAT invoice grounds it', (tender) => {
+    const reply = `Invoice #0123 is processing ${WORDING[tender]}.`;
+    const inbound = 'Is invoice 0123 processing?';
+    for (const other of Object.keys(TENDERS)) {
+      expect({ tender, other, ungrounded: ungrounded(reply, mk('processing', [row('processing', TENDERS[other])]), inbound) })
+        .toEqual({ tender, other, ungrounded: tender !== other });
+    }
+    // a processing row of that tender on a DIFFERENT invoice, a paid row, or no row at all cannot back it
+    expect(ungrounded(reply, mk('processing', [row('processing', { ...TENDERS[tender], metadata: { ...(TENDERS[tender].metadata || {}), invoice_id: 'other' } })]), inbound)).toBe(true);
+    expect(ungrounded(reply, mk('processing', [row('paid', TENDERS[tender])]), inbound)).toBe(true);
+    expect(ungrounded(reply, mk('processing', []), inbound)).toBe(true);
+  });
+  test.each(Object.keys(TENDERS))('paid %s: bound to the settling row of that invoice', (tender) => {
+    const reply = `Invoice #0123 is paid ${WORDING[tender]}.`;
+    const inbound = 'Is invoice 0123 paid?';
+    for (const other of Object.keys(TENDERS)) {
+      expect({ tender, other, ungrounded: ungrounded(reply, mk('paid', [row('paid', TENDERS[other])]), inbound) })
+        .toEqual({ tender, other, ungrounded: tender !== other });
+    }
+  });
+  test('the invoice STATUS itself is still judged: a processing claim against a paid invoice is ungrounded whatever the tender rows say', () => {
+    expect(ungrounded('Invoice #0123 is processing via ACH.', mk('paid', [row('processing', TENDERS.ach)]), 'Is invoice 0123 processing?')).toBe(true);
+  });
+  test('"Your ACH payment is processing." (payment subject) is unchanged: bound to the payments rows, not invoice statuses', () => {
+    const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } });
+    const inbound = 'Is my ACH payment processing?';
+    expect(ungrounded('Your ACH payment is processing.', ctx([row('processing', TENDERS.ach)]), inbound)).toBe(false);
+    expect(ungrounded('Your ACH payment is processing.', ctx([row('paid', TENDERS.ach)]), inbound)).toBe(true);
+  });
+});

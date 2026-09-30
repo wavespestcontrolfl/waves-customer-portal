@@ -225,7 +225,16 @@ const REFUND_COMPLETION_RE = new RegExp(
 // request" and "invoice processing takes two days" assert nothing.
 const INVOICE_SUBJECT_RE = /\b(?:invoices?|bills?)\b(?:\s+[#\w-]+){0,2}?\s+(?:is|was|has|have|are|were|got|still|isn['\u2019]t|wasn['\u2019]t|hasn['\u2019]t|failed|declined)\b|\b(?:invoices?|bills?)['\u2019]s\s+(?:been\s+)?(?:paid|failed)\b/i;
 const PAYMENT_OBJECT_RE = /\b(?:payments?|transfers?|deposits?|charges?|checks?|refunds?|zelle|ach)\b/i;
-const invoiceSubjectClause = (text) => INVOICE_SUBJECT_RE.test(String(text || '')) && !PAYMENT_OBJECT_RE.test(String(text || ''));
+// Codex round-34 P1 (structural): a tender word introduced by a TENDER PREPOSITION ("via ACH", "by check", "with your card",
+// "through Zelle", "using your bank account", "paid by Zelle") names HOW, never a payment SUBJECT. It is stripped before the
+// subject test and judged as a tender claim bound to the invoice's own rows (sms-shadow-drafter invoiceTenderUngrounded) —
+// uniformly for every tender word (card, cash, check, ACH, Zelle, wallets, bank).
+const TENDER_AFTER_PREPOSITION_RE = new RegExp(
+  `\\b(?:via|by|with|through|thru|using|on|from)\\s+(?:(?:your|the|our|my|a|an)\\s+)?(?:(?:bank|debit|credit|wire)\\s+)?(?:${TENDER_SUBJECT_ALT}|checks?|cash|ach|zelle|bank(?:\\s+transfer)?)\\b`,
+  'gi',
+);
+const withoutTenderPhrases = (text) => String(text || '').replace(TENDER_AFTER_PREPOSITION_RE, ' ');
+const invoiceSubjectClause = (text) => INVOICE_SUBJECT_RE.test(String(text || '')) && !PAYMENT_OBJECT_RE.test(withoutTenderPhrases(text));
 const STATUS_PHRASE_RES = Object.freeze([
   ['refunded', REFUND_COMPLETION_RE],
   ['not_found', familyRe('not_found')],
