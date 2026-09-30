@@ -268,6 +268,7 @@ function compareSameDayVisits(a, b) {
 }
 const { toE164 } = require("../utils/phone");
 const { runExclusive, wasLockSkipped } = require("../utils/cron-lock");
+const ClickGuard = require("./review-click-guard");
 
 // GBP review links per location — derived from the canonical office map
 // (config/locations.js) so a GBP link change lands everywhere at once instead
@@ -2029,6 +2030,14 @@ const ReviewService = {
       );
       return;
     }
+    // Send-time guard (services/review-click-guard.js): the customer already
+    // tapped a tracked review link since this ask's visit (or since it was
+    // queued). Every caller holds the review-send lock.
+    if (await ClickGuard.askSuppressedByClick(request)) {
+      await db("review_requests").where({ id: requestId }).update({ status: "suppressed" });
+      logger.info(`[review] Suppressed request (customerId=${request.customer_id} requestId=${requestId} reason=review_link_clicked)`);
+      return;
+    }
     // A pending automatic ask whose combined-visit summary is parked as
     // uncertain is removed, exactly as the parking operation does; the
     // coordinator re-creates it when the summary settles. A manual ask
@@ -3019,6 +3028,8 @@ const ReviewService = {
     try {
       request = await db("review_requests").where({ id: requestId }).first();
       if (!request) return { sent: false, reason: "no_request" };
+      // Send-time guard: the customer already tapped a tracked review link.
+      if (await ClickGuard.askSuppressedByClick(request)) return { sent: false, reason: "review_link_clicked" };
       const who = await this._inlineEmailRecipient(request);
       if (who.reason) return { sent: false, reason: who.reason };
       const { customer, contact } = who;
@@ -4188,6 +4199,13 @@ const ReviewService = {
             suppressed++;
             return;
           }
+          // Send-time guard: a tracked click since the visit ends the follow-up.
+          if (await ClickGuard.askSuppressedByClick(request, { followup: true })) {
+            await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
+            logger.info(`[review] Follow-up suppressed (requestId=${request.id} reason=review_link_clicked)`);
+            suppressed++;
+            return;
+          }
           const contact = getServiceContactSmsRecipient(customer);
           if (!contact.phone) {
             // No consented SMS recipient — mark handled so this row can't sit
@@ -4400,6 +4418,14 @@ const ReviewService = {
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
     if (customer.has_left_google_review) {
       return { ok: false, reason: "already_reviewed", terminal: true };
+    }
+    // Send-time guard (services/review-click-guard.js): the customer already
+    // tapped a tracked review link since this ask's visit. Runs inside the
+    // review-send lock (the sequence runner / sendGatedAsk hold it) so it
+    // cannot race the click's own stop; terminal, so the cadence stops.
+    if (await ClickGuard.touchSuppressedByClick(customer.id, { serviceRecordId, scheduledServiceId })) {
+      logger.info(`[review] Touch suppressed (customerId=${customer.id} reason=review_link_clicked)`);
+      return { ok: false, reason: "review_link_clicked", terminal: true };
     }
 
     // Cadence steps carry only serviceRecordId — recover the visit context the
@@ -6831,6 +6857,7 @@ const ReviewService = {
     if (outcome.terminal || outcome.blocked) {
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");
+      if (outcome.reason === "review_link_clicked") return stop("clicked");
       return stop("opted_out");
     }
 

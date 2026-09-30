@@ -334,6 +334,7 @@ describe('review request follow-up flow', () => {
       // dispatchReviewAsk's manual-ask lookup. An empty history lets the
       // spacing gate through; a throw here would (correctly) hold instead.
       if (table === 'sms_log') return resolvesTo([]);
+      if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ service_date: '2026-05-29' }) });
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -404,6 +405,7 @@ describe('review request follow-up flow', () => {
         service_record_id: 'sr-1',
       }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }), // send-time click guard: no tracked click since the visit
       chain(), // durable pre-provider reservation
       chain({ update: failingUpdate }), // stampWithRetry's first attempt — throws
       chain({ update: retriedUpdate }), // stampWithRetry's retry — succeeds
@@ -423,6 +425,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'customers') return customerQuery;
       if (table === 'sms_log') return resolvesTo([]);
+      if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ service_date: '2026-05-29' }) });
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -471,6 +474,7 @@ describe('review request follow-up flow', () => {
         service_record_id: 'sr-2',
       }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }), // send-time click guard: no tracked click since the visit
       chain(),
       chain({ update: firstAttempt }),
       chain({ update: secondAttempt }),
@@ -490,6 +494,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'customers') return customerQuery;
       if (table === 'sms_log') return resolvesTo([]);
+      if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ service_date: '2026-05-29' }) });
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550199', name: 'Robin' });
@@ -552,6 +557,7 @@ describe('review request follow-up flow', () => {
       // dispatchReviewAsk's manual-ask lookup — an empty history lets the
       // spacing gate through (a throw here would correctly HOLD instead).
       if (table === 'sms_log') return resolvesTo([]);
+      if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ service_date: '2026-05-29' }) });
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });

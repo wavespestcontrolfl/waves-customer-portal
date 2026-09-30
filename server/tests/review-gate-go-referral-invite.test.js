@@ -113,35 +113,29 @@ describe.each([true, false])('GATE_REVIEW_DIRECT_LINK=%s (review sequences ON) â
     if (_n !== 'an expired link') expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
   });
 
-  test('if stopping the later asks fails, the customer stays on the rate page: no Google redirect, no invite', async () => {
-    stopFutureAsks.mockRejectedValueOnce(new Error('db down'));
-    const res = await go();
-    expect(res.status).toBe(302);
-    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
-    await flush();
-    expect(sendReferralInviteEmail).not.toHaveBeenCalled();
-  });
-
-  test('outstanding asks that could not be stopped (lock timeout / reserved send): stays on /rate, no invite; the next tap after the send lands succeeds', async () => {
-    stopFutureAsks.mockResolvedValueOnce({ stopped: false, outstanding: ['lock_timeout'] });
+  test('the click is RECORDED before the stop runs (the send-time guard reads redirected_at); the stop is best-effort: a rejected, incomplete or timed-out stop still 302s to Google and the invite goes out once', async () => {
+    const seenAtStop = [];
+    stopFutureAsks.mockImplementationOnce(async () => { seenAtStop.push(db.state.request.redirected_at); return { stopped: true, outstanding: [] }; });
     let res = await go();
-    expect(res.status).toBe(302);
-    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
-    await flush();
-    expect(sendReferralInviteEmail).not.toHaveBeenCalled();
-    expect(db.state.request.redirected_at).toBeNull(); // the first-click claim was NOT consumed
-
-    stopFutureAsks.mockResolvedValueOnce({ stopped: false, outstanding: ['reserved_send'] });
-    res = await go();
-    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
-
-    // The send has landed; the follow-ups are stopped: the same link now goes to Google, invite once.
-    res = await go();
-    expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe(loc.googleReviewUrl);
-    await flush();
-    expect(stopFutureAsks).toHaveBeenCalledTimes(3);
-    expect(sendReferralInviteEmail).toHaveBeenCalledTimes(1);
+    expect(seenAtStop[0]).toBeInstanceOf(Date);
+
+    for (const behave of [
+      () => Promise.reject(new Error('db down')),
+      () => Promise.resolve({ stopped: false, outstanding: ['lock_timeout'] }),
+      () => Promise.resolve({ stopped: false, outstanding: ['reserved_send'] }),
+    ]) {
+      jest.clearAllMocks();
+      db.state.request.redirected_at = null;
+      stopFutureAsks.mockImplementationOnce(behave);
+      res = await go();
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe(loc.googleReviewUrl);
+      await flush();
+      expect(stopFutureAsks).toHaveBeenCalledTimes(1);
+      expect(sendReferralInviteEmail).toHaveBeenCalledTimes(1);
+      expect(sendReferralInviteEmail).toHaveBeenCalledWith({ customerId: 'cust-1', trigger: 'google_review_click' });
+    }
   });
 
   test('a link-scanner / bot fetch records nothing and sends no invite', async () => {

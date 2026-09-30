@@ -155,16 +155,13 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     }
 
     // The route contract: a customer only reaches Google AFTER the click is
-    // recorded and their cadence is stopped. If any required write fails
-    // (transient Postgres outage), fall back to the rate page instead of
-    // proceeding — otherwise the still-active sequence would keep chasing a
-    // customer who already reached the review form (Codex P2, r3).
-    // Ordering (Codex P2, r4): the base stamp (SQL-side counter, no stale
-    // read) and the cadence stop both land BEFORE the first-click claim, and
-    // the claim itself is a conditional UPDATE ... WHERE redirected_at IS
-    // NULL — so overlapping requests can't double-notify or lose an
-    // open_count increment, and a stamp-ok/stop-failed request leaves the
-    // claim unconsumed for the retry to notify on.
+    // recorded. If the stamp or the first-click claim fails (transient
+    // Postgres outage), fall back to the rate page instead of proceeding.
+    // Ordering: the base stamp (SQL-side counter, no stale read) lands first,
+    // then the first-click claim (a conditional UPDATE ... WHERE redirected_at
+    // IS NULL, so overlapping requests can't double-notify or lose an
+    // open_count increment) — redirected_at is what every review sender's
+    // send-time guard reads — and only then the best-effort stop below.
     try {
       const updates = {
         open_count: db.raw('COALESCE(open_count, 0) + 1'),
@@ -186,27 +183,6 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       return res.redirect(302, ratePageFallback);
     }
 
-    // They acted on the ask — stop EVERY path that could still ask them again
-    // (ReviewService.futureAskState lists them, and the portal card relies on
-    // this): the clicked request's cadence and any other active / deferred
-    // cadence of the customer, a cadence parked for summary recovery, queued
-    // asks, and due Day-3 follow-ups. Any failure keeps them on the rate page
-    // instead of Google, so nothing keeps chasing a customer who already
-    // reached the review form (Codex P2, r1).
-    try {
-      const stop = await require('../services/review-request').stopFutureAsks(request.customer_id, {
-        sequenceId: request.sequence_id || null,
-        reason: 'clicked',
-      });
-      // Something outstanding could not be stopped (the send lock never freed,
-      // or an ask is still reserved / mid-send): fail closed. The customer's
-      // next tap on the rate page's button retries once the send has landed.
-      if (!stop || stop.stopped !== true) throw new Error(`outstanding: ${(stop?.outstanding || ['unknown']).join(',')}`);
-    } catch (err) {
-      logger.warn(`[review-gate] stopping later asks on click failed — rate-page fallback: ${err.message}`);
-      return res.redirect(302, ratePageFallback);
-    }
-
     // Atomic first-click claim: only the request that flips redirected_at
     // from NULL owns the owner notification.
     let firstClick = false;
@@ -222,6 +198,30 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     } catch (err) {
       logger.warn(`[review-gate] first-click claim failed — rate-page fallback: ${err.message}`);
       return res.redirect(302, ratePageFallback);
+    }
+
+    // They acted on the ask — stop what we can find that would ask them again
+    // (ReviewService.stopFutureAsks: the clicked request's cadence and any other
+    // active / deferred cadence, a cadence parked for summary recovery, queued
+    // asks, due Day-3 follow-ups), under the send lock with a bounded wait.
+    // BEST-EFFORT: the click is already recorded above (the first-click claim
+    // stamps redirected_at), and every sender re-checks that at SEND time
+    // (services/review-click-guard.js, inside the per-customer review-send
+    // lock) — so a state this stop cannot see or reach (a redeeming cadence, a
+    // stranded 'sending' row, an uncertain summary that enrolls later) is
+    // suppressed when its ask is about to leave. The customer is NEVER kept
+    // from Google over it. Accepted race: a send already past its guard when
+    // the click lands can still deliver that one in-flight text.
+    try {
+      const stop = await require('../services/review-request').stopFutureAsks(request.customer_id, {
+        sequenceId: request.sequence_id || null,
+        reason: 'clicked',
+      });
+      if (!stop || stop.stopped !== true) {
+        logger.info(`[review-gate] click stop incomplete (requestId=${request.id} outstanding=${(stop?.outstanding || ['unknown']).join(',')}) — send-time guard covers it`);
+      }
+    } catch (err) {
+      logger.warn(`[review-gate] stopping later asks on click failed (send-time guard covers it): ${err.message}`);
     }
 
     // Owner bell (first click only): Google won't tell us who reviewed, so

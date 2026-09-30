@@ -6914,3 +6914,119 @@ test('a queued SMS retry renews its expired unsent review link before provider h
   expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   expect(mock.__state.rows.review_requests[0].sms_sent_at).toBeTruthy();
 });
+
+// Send-time suppression (owner ruling 2026-09-29): once a customer taps a
+// tracked review link (review_requests.redirected_at) every sender re-checks
+// it at the moment its ask would leave — inside the review-send lock — so a
+// state the /go stop cannot see or reach (a redeeming cadence that later
+// starts, a stranded 'sending' row released to the scheduler, an uncertain
+// summary that enrolls after recovery) still sends nothing.
+describe('send-time click guard (services/review-click-guard.js)', () => {
+  const VISIT = new Date(Date.now() - 4 * 86400000);
+  const CLICKED = new Date(Date.now() - 2 * 86400000);
+  const customer = { id: 'clk-1', first_name: 'Pat', last_name: 'Lee', phone: '+19410000901', nearest_location_id: 'venice' };
+  const record = { id: 'rec-clk', customer_id: 'clk-1', service_date: VISIT.toISOString().slice(0, 10) };
+  // A tracked click on ANOTHER row of the customer (no sequence linkage), after the visit.
+  const click = (over = {}) => ({ id: 'rr-clicked', customer_id: 'clk-1', channel: 'sms', status: 'opened', sms_sent_at: VISIT, token: 'tclk', redirected_at: CLICKED, followup_sent: true, ...over });
+  const plan = JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]);
+  const dueSequence = (over = {}) => ({
+    id: 'seq-clk', customer_id: 'clk-1', status: 'active', current_step: 0, touches_sent: 0, plan,
+    service_record_id: 'rec-clk', started_at: VISIT, next_run_at: new Date(Date.now() - 60000), ...over,
+  });
+  const queuedAsk = (over = {}) => ({
+    id: 'rr-queued', customer_id: 'clk-1', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tq', location_id: 'venice',
+    scheduled_for: new Date(Date.now() - 60000), created_at: new Date(Date.now() - 3 * 86400000), triggered_by: 'auto',
+    service_record_id: 'rec-clk', ...over,
+  });
+
+  test('a cadence step after the click is suppressed at send time: nothing reaches the provider, the cadence stops as clicked', async () => {
+    const mock = makeMock({ customers: [customer], service_records: [record], review_sequences: [dueSequence({ current_step: 1, touches_sent: 1 })], review_requests: [click({ sms_sent_at: null })] });
+    db.mockImplementation(mock);
+    const out = await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+  });
+
+  test('a cadence that only STARTS after the click (a redeeming lease redeemed later) is suppressed at its very first touch', async () => {
+    const mock = makeMock({ customers: [customer], service_records: [record], review_sequences: [dueSequence()], review_requests: [click({ sms_sent_at: null })] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+    expect(mock.__state.rows.review_requests).toHaveLength(1); // no new touch row was minted
+  });
+
+  test('a REDEEMING lease that the sweep really redeems later starts a cadence whose first touch is suppressed (nothing sent, no touch minted)', async () => {
+    const mock = makeMock({
+      customers: [customer], service_records: [record], review_requests: [click({ sms_sent_at: null })],
+      review_sequences: [{
+        id: 'seq-lease', customer_id: 'clk-1', status: 'redeeming', plan, current_step: 0, service_record_id: 'rec-clk',
+        started_at: new Date(Date.now() - 3600000), completed_at: new Date(Date.now() - 3600000), updated_at: new Date(Date.now() - 20 * 60000), next_run_at: null,
+      }],
+    });
+    db.mockImplementation(mock);
+    const out = await ReviewService.processReviewSequences(); // the sweep redeems the lease, then the due step runs
+    expect(out.redeemed).toBe(1);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_requests).toHaveLength(1);
+    expect(mock.__state.rows.review_sequences.map((r) => [r.id !== 'seq-lease', r.status, r.stop_reason])).toEqual([[true, 'stopped', 'clicked']]);
+  });
+
+  test('a queued ask released back to the scheduler (a stranded send, an uncertain summary that enrolled later) is suppressed by processScheduled', async () => {
+    const mock = makeMock({ customers: [customer], service_records: [record], review_requests: [click(), queuedAsk()] });
+    db.mockImplementation(mock);
+    const out = await ReviewService.processScheduled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.sent).toBe(0);
+    expect(mock.__state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('suppressed');
+  });
+
+  test('the Day-3 text follow-up is suppressed and marked handled', async () => {
+    const delivered = { id: 'rr-fu', customer_id: 'clk-1', status: 'sent', channel: 'sms', followup_sent: false, sms_sent_at: new Date(Date.now() - 80 * 3600000), service_record_id: 'rec-clk', score: null, rated_at: null, token: 'tfu' };
+    const mock = makeMock({ customers: [customer], service_records: [record], review_requests: [click({ id: 'rr-other', redirected_at: new Date(Date.now() - 3600000) }), delivered] });
+    db.mockImplementation(mock);
+    await ReviewService.processFollowups();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_requests.find((r) => r.id === 'rr-fu')).toMatchObject({ followup_sent: true });
+  });
+
+  test('the composer inline email leg is suppressed too', async () => {
+    const row = { id: 'rr-inline', customer_id: 'clk-1', status: 'sent', channel: 'sms', sms_sent_at: new Date(Date.now() - 3600000), triggered_by: 'admin', token: 'tin', email_leg_owed_at: new Date(), created_at: new Date(Date.now() - 7200000) };
+    const mock = makeMock({ customers: [customer], review_requests: [row, click({ redirected_at: new Date(Date.now() - 600000) })] });
+    db.mockImplementation(mock);
+    expect(await ReviewService.sendInlineEmailCopy('rr-inline')).toEqual({ sent: false, reason: 'review_link_clicked' });
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('anchoring: a click for an EARLIER visit suppresses nothing for a newer visit, and an operator one-off is only suppressed by a click after it was queued', async () => {
+    // Newer visit (today): the old click (2 days ago) predates its date.
+    const newer = { id: 'rec-new', customer_id: 'clk-1', service_date: new Date().toISOString().slice(0, 10) };
+    let mock = makeMock({ customers: [customer], service_records: [record, newer], review_requests: [click(), queuedAsk({ id: 'rr-new', service_record_id: 'rec-new', created_at: new Date() })] });
+    db.mockImplementation(mock);
+    expect((await ReviewService.processScheduled()).sent).toBe(1);
+
+    // Operator one-off queued AFTER the click: not suppressed; queued BEFORE it: suppressed.
+    mockSendCustomerMessage.mockClear();
+    mock = makeMock({ customers: [customer], review_requests: [click(), queuedAsk({ id: 'rr-op-after', triggered_by: 'admin', service_record_id: null, created_at: new Date() })] });
+    db.mockImplementation(mock);
+    expect((await ReviewService.processScheduled()).sent).toBe(1);
+    mockSendCustomerMessage.mockClear();
+    mock = makeMock({ customers: [customer], review_requests: [click(), queuedAsk({ id: 'rr-op-before', triggered_by: 'admin', service_record_id: null, created_at: new Date(Date.now() - 3 * 86400000) })] });
+    db.mockImplementation(mock);
+    expect((await ReviewService.processScheduled()).sent).toBe(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('control: with NO click the same queued ask and cadence step really send', async () => {
+    let mock = makeMock({ customers: [customer], service_records: [record], review_requests: [queuedAsk()] });
+    db.mockImplementation(mock);
+    expect((await ReviewService.processScheduled()).sent).toBe(1);
+    mockSendCustomerMessage.mockClear();
+    mock = makeMock({ customers: [customer], service_records: [record], review_sequences: [dueSequence()] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+});
