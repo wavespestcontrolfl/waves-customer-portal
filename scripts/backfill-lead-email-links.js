@@ -27,7 +27,7 @@
  *                whose token belongs to exactly one estimate
  *   lead      1. recipient_id when it is a leads.id
  *             2. the lead that owns the resolved estimate (leads.estimate_id,
- *                newest not-deleted)
+ *                exactly one not-deleted lead; two or more is ambiguous -> none)
  *             3. a UUID in trigger_event_id that is a leads.id
  *
  * Only lead_id / estimate_id are written. recipient_type, recipient_id and
@@ -135,8 +135,11 @@ async function loadRefs(dbh, rows) {
   const leadByEstimate = new Map();
   if (estimateIds.size) {
     const owners = await dbh('leads').whereIn('estimate_id', [...estimateIds]).whereNull('deleted_at')
-      .orderBy('created_at', 'asc').select('id', 'estimate_id');
-    for (const l of owners) leadByEstimate.set(l.estimate_id, l.id); // newest wins (asc, last set)
+      .select('id', 'estimate_id');
+    const byEstimate = new Map();
+    for (const l of owners) byEstimate.set(l.estimate_id, [...(byEstimate.get(l.estimate_id) || []), l.id]);
+    // Two or more live leads on one estimate is ambiguous: no lead (the estimate link stands).
+    for (const [est, leads] of byEstimate) if (leads.length === 1) leadByEstimate.set(est, leads[0]);
   }
   return { estimatesById, leadsById, runEstimate, estimateByToken, leadByEstimate };
 }

@@ -11,7 +11,8 @@
  *   lead_id      the lead the mail went to: recipient_id when the send is lead-typed AND that id is a
  *                real leads row (the executor's estimate events name the
  *                CUSTOMER id in a lead-typed row, which is not a lead), else
- *                the lead that owns the estimate (leads.estimate_id).
+ *                the one live lead that owns the estimate (leads.estimate_id;
+ *                two or more is ambiguous and records none).
  *
  * Purely additive and fail-open: recipient_type / recipient_id are never
  * changed, a lookup error is logged (no address, no SQL) and yields whatever
@@ -73,9 +74,12 @@ async function resolveEmailLinks({
       if (lead) out.lead_id = lead.id;
     }
     if (!out.lead_id && out.estimate_id) {
-      const lead = await dbh('leads').where({ estimate_id: out.estimate_id }).whereNull('deleted_at')
-        .orderBy('created_at', 'desc').first('id');
-      if (lead) out.lead_id = lead.id;
+      // Two or more live leads pointing at one estimate is ambiguous (same rule
+      // as estimate-consultation-offer.js linkedLeadIdFor): record no lead and
+      // keep the estimate link, rather than tie the mail to the wrong person.
+      const owners = await dbh('leads').where({ estimate_id: out.estimate_id }).whereNull('deleted_at')
+        .limit(2).pluck('id');
+      if (owners.length === 1) out.lead_id = owners[0];
     }
   } catch (err) {
     logger.warn(`[email-lead-links] lead lookup failed (code ${err?.code || 'n/a'}); recording the estimate link only`);

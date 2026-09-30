@@ -41,7 +41,7 @@ pg('backfill-lead-email-links on Postgres', () => {
     ]);
     await db('leads').insert([
       { id: ids.leadA, estimate_id: ids.estA, customer_id: ids.cust, created_at: '2026-01-01' },
-      { id: ids.leadA2, estimate_id: ids.estA, customer_id: null, created_at: '2026-02-01' }, // newer lead on the same estimate wins
+      { id: ids.leadA2, estimate_id: ids.estA, customer_id: null, created_at: '2026-02-01' }, // second live lead on estA: ambiguous, no lead
       { id: ids.leadB, estimate_id: ids.estB, customer_id: null, deleted_at: '2026-03-01' }, // deleted: never linked
     ]);
     await db('email_template_automation_runs').insert({ id: ids.run, entity_type: 'estimate', entity_id: ids.estB });
@@ -90,8 +90,8 @@ pg('backfill-lead-email-links on Postgres', () => {
     const out = await backfill.run({ execute: true, dbh: db, log });
     expect(out.totals).toMatchObject({ candidates: 6, linked: 4, unresolved: 2, written: 4 });
 
-    // newest not-deleted lead on the estimate
-    expect(await linkOf(ids.byTrigger)).toMatchObject({ estimate_id: ids.estA, lead_id: ids.leadA2, recipient_type: 'lead', recipient_id: null });
+    // estA has two live leads: ambiguous, so the estimate link stands and no lead is recorded
+    expect(await linkOf(ids.byTrigger)).toMatchObject({ estimate_id: ids.estA, lead_id: null, recipient_type: 'lead', recipient_id: null });
     expect((await linkOf(ids.byTrigger)).updated_at).toEqual(before.updated_at);
     // run evidence -> estimate B; its only lead is deleted, so no lead
     expect(await linkOf(ids.byRun)).toMatchObject({ estimate_id: ids.estB, lead_id: null });
@@ -104,6 +104,18 @@ pg('backfill-lead-email-links on Postgres', () => {
     expect(await linkOf(ids.ambiguous)).toMatchObject({ lead_id: null, estimate_id: null });
     expect(await linkOf(ids.customerTyped)).toMatchObject({ lead_id: null, estimate_id: null });
     expect(await linkOf(ids.already)).toMatchObject({ estimate_id: ids.estB });
+  });
+
+  test('exactly one live lead on the estimate is linked; a deleted second lead does not make it ambiguous', async () => {
+    const estD = randomUUID(); const leadD = randomUUID(); const leadDGone = randomUUID(); const mail = randomUUID();
+    await db('estimates').insert({ id: estD, token: 'tokenDDDD4444', customer_id: null });
+    await db('leads').insert([
+      { id: leadD, estimate_id: estD, created_at: '2026-01-01' },
+      { id: leadDGone, estimate_id: estD, deleted_at: '2026-03-01', created_at: '2026-02-01' },
+    ]);
+    await insertMail({ id: mail, template_key: 'estimate.delivery', trigger_event_id: `estimate_delivery:${estD}` });
+    await backfill.run({ execute: true, dbh: db, log });
+    expect(await linkOf(mail)).toMatchObject({ estimate_id: estD, lead_id: leadD });
   });
 
   test('non-UUID text in any evidence field never reaches a uuid column and never aborts the run', async () => {

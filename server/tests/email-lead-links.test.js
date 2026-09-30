@@ -16,7 +16,13 @@ function fakeDb({ byId = {}, byEstimate = {}, fail = false } = {}) {
     const q = { filters: {}, nullCols: [] };
     q.where = (f) => { Object.assign(q.filters, f); return q; };
     q.whereNull = (c) => { q.nullCols.push(c); return q; };
-    q.orderBy = () => q;
+    q.limit = () => q;
+    q.pluck = async () => {
+      calls.push({ ...q.filters, nullCols: q.nullCols });
+      if (fail) throw Object.assign(new Error('boom with a@b.example'), { code: 'XX000' });
+      const v = byEstimate[q.filters.estimate_id];
+      return Array.isArray(v) ? v : (v ? [v] : []);
+    };
     q.first = async () => {
       calls.push({ ...q.filters, nullCols: q.nullCols });
       if (fail) throw Object.assign(new Error('boom with a@b.example'), { code: 'XX000' });
@@ -57,6 +63,12 @@ describe('resolveEmailLinks', () => {
     await expect(resolveEmailLinks({ recipientType: 'lead', recipientId: CUST, estimateId: EST }, dbh))
       .resolves.toEqual({ lead_id: LEAD, estimate_id: EST });
     expect(dbh.calls[1].nullCols).toEqual(['deleted_at']);
+  });
+
+  test('two live leads on one estimate is ambiguous: no lead, the estimate link stands', async () => {
+    const dbh = fakeDb({ byEstimate: { [EST]: [LEAD, '55555555-5555-4555-8555-555555555555'] } });
+    await expect(resolveEmailLinks({ recipientType: 'lead', estimateId: EST }, dbh))
+      .resolves.toEqual({ lead_id: null, estimate_id: EST });
   });
 
   test('no recipient id: estimate from estimateIds[0], then linkEstimateId, then payload.estimate_id', async () => {

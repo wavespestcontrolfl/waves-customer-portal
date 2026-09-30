@@ -331,6 +331,17 @@ describe('email template library rendering', () => {
     const LEAD = '22222222-2222-4222-8222-222222222222';
     const CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
 
+    // The estimate-owner lookup: `.limit(2).pluck('id')`.
+    const ownerChain = (ids) => { const q = chain(); q.limit = jest.fn(() => q); q.pluck = jest.fn(async () => ids); return q; };
+
+    test('two live leads on the estimate records no lead (ambiguous) but keeps the estimate', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: null, estimateId: EST },
+        [ownerChain([LEAD, '55555555-5555-4555-8555-555555555555'])],
+      );
+      expect(row).toEqual(expect.objectContaining({ estimate_id: EST, lead_id: null }));
+    });
+
     async function sendLeadMail(args, leadsQueue) {
       const queuedMessage = { id: 'msg-1', status: 'queued', subject_snapshot: 'Your estimate expires June 12' };
       const queueInsert = chain({ returning: [queuedMessage] });
@@ -354,7 +365,7 @@ describe('email template library rendering', () => {
     test('a lead-typed send with no recipient_id records the estimate and the lead that owns it', async () => {
       const row = await sendLeadMail(
         { recipientType: 'lead', recipientId: null, estimateId: EST },
-        [chain({ first: { id: LEAD } })],
+        [ownerChain([LEAD])],
       );
       expect(row).toEqual(expect.objectContaining({ recipient_type: 'lead', recipient_id: null, estimate_id: EST, lead_id: LEAD }));
     });
@@ -370,7 +381,7 @@ describe('email template library rendering', () => {
     test('a lead-typed row that names a CUSTOMER id is not a lead id (falls back to the estimate owner)', async () => {
       const row = await sendLeadMail(
         { recipientType: 'lead', recipientId: CUSTOMER_ID, estimateId: EST },
-        [chain({ first: undefined }), chain({ first: { id: LEAD } })],
+        [chain({ first: undefined }), ownerChain([LEAD])],
       );
       expect(row).toEqual(expect.objectContaining({ recipient_id: CUSTOMER_ID, lead_id: LEAD, estimate_id: EST }));
     });
