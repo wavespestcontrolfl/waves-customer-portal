@@ -173,6 +173,9 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
       read_at: nowDate,
       title: resolvedTitle,
       body: 'This visit is no longer awaiting placement for the recorded due date.',
+      // The alert's original instruction was stored as the full text; a
+      // resolved row must not keep it behind "Show full text".
+      detail: null,
     });
   const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
   const rows = await db('scheduled_services as s')
