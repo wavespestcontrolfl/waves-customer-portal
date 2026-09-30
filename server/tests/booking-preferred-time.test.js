@@ -481,7 +481,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1' };
     mockCustomer = { phone: '+19415550100' };
     mockOpenLeads = [{ id: 'lead-1' }];
-    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null, phone: '+19415550100' };
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
     expect(mockMarkConverted).toHaveBeenCalledTimes(1);
@@ -515,7 +515,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     mockWonLeads = [{ id: 'quote-lead-9' }];
     mockCustomer = { phone: '+19415550100' };
     mockOpenLeads = [{ id: 'lead-1' }];
-    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null, phone: '+19415550100' };
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
     expect(mockMarkConverted).not.toHaveBeenCalled();
@@ -529,7 +529,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     mockWonLeads = [];
     mockCustomer = { phone: '+19415550100' };
     mockOpenLeads = [{ id: 'lead-1' }];
-    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null, phone: '+19415550100' };
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
     expect(r.status).toBe(200);
     expect(mockMarkConverted).toHaveBeenCalledTimes(1);
@@ -771,7 +771,7 @@ describe('request recency is the customer\'s own latest submit, not lead edits',
 
 describe('a completed booking converts the customer\'s open preferred-time lead through the existing lifecycle', () => {
   const { convertPreferredTimeLeadsOnBooking } = require('../services/booking-preferred-time');
-  const openLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+  const openLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null, phone: '+19415550100' };
 
   test('hands the lead to convertLeadFromEvent -> markConverted (funnel settle) with the customer; no raw status write', async () => {
     mockCustomer = { phone: '+1 (941) 555-0100' };
@@ -836,7 +836,7 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
   });
 
   describe('one booking = at most one won lead (codex #5399 r8 P1)', () => {
-    const openLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+    const openLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null, phone: '+19415550100' };
     const bookedAt = new Date('2026-09-29T15:00:00Z');
     const noteInserts = () => mockOps.filter((o) => o.table === 'lead_activities' && o.op === 'insert');
     beforeEach(() => {

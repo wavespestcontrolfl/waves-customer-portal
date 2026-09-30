@@ -1010,6 +1010,32 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     }));
   });
 
+  test('an explicit lead re-assigned between the caller\'s phone match and this read is NOT converted (pre-push audit: identity from the phone-matched lookup)', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    // staff changed the phone after the booker's phone matched it
+    let out = await convertLeadFromEvent({
+      source: 'preferred_time_booked', customerId: 'c1', leadId: 'Lx', explicitPhone: '9415550100',
+      database: makeConvertDb({ leadsById: { Lx: { id: 'Lx', status: 'new', converted_at: null, customer_id: null, phone: '+19415550199' } } }),
+      leadAttributionService: { markConverted },
+    });
+    expect(out.converted).toBe(false);
+    // staff linked it to a different customer
+    out = await convertLeadFromEvent({
+      source: 'preferred_time_booked', customerId: 'c1', leadId: 'Lx', explicitPhone: '9415550100',
+      database: makeConvertDb({ leadsById: { Lx: { id: 'Lx', status: 'new', converted_at: null, customer_id: 'c2', phone: '+19415550100' } } }),
+      leadAttributionService: { markConverted },
+    });
+    expect(out.converted).toBe(false);
+    expect(markConverted).not.toHaveBeenCalled();
+    // unchanged phone, unlinked -> converts
+    out = await convertLeadFromEvent({
+      source: 'preferred_time_booked', customerId: 'c1', leadId: 'Lx', explicitPhone: '9415550100',
+      database: makeConvertDb({ leadsById: { Lx: { id: 'Lx', status: 'new', converted_at: null, customer_id: null, phone: '+1 (941) 555-0100' } } }),
+      leadAttributionService: { markConverted },
+    });
+    expect(out.converted).toBe(true);
+  });
+
   test('matches the unconverted originating lead by contact, preserves values', async () => {
     const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({

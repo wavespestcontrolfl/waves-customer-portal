@@ -632,6 +632,7 @@ async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = nu
       source: 'preferred_time_booked',
       customerId,
       leadId: open[0].id,
+      explicitPhone: ten,
       booking,
       database: db,
     });

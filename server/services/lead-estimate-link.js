@@ -1550,6 +1550,12 @@ async function convertLeadFromEvent({
   // resolution: only that one lead, and only while it is still open, converts
   // — through the same markConverted + funnel settlement as every other win.
   leadId = null,
+  // With leadId: the identity the caller matched the lead on (its 10-digit
+  // phone). The explicit lead is taken only while it still carries that phone
+  // and is unlinked or linked to this customer, so a staff re-assignment
+  // between the caller's lookup and this read never credits this event
+  // (the onlyIfIdentity claim below then pins that same, validated snapshot).
+  explicitPhone = null,
   database = db,
   leadAttributionService = leadAttribution,
 }) {
@@ -1634,7 +1640,10 @@ async function convertLeadFromEvent({
     let resolution = null; // 'estimate' | 'customer_link' | 'contact' | 'explicit'
     if (leadId) {
       const explicit = await database('leads').where({ id: leadId }).first();
-      candidates = explicit && OPEN_LEAD_STATUSES.includes(explicit.status) && !explicit.converted_at ? [explicit] : [];
+      const stillOurs = !explicit ? false
+        : (!explicitPhone || normalizePhone(explicit.phone) === normalizePhone(explicitPhone))
+          && (!explicit.customer_id || !resolvedCustomerId || explicit.customer_id === resolvedCustomerId);
+      candidates = stillOurs && OPEN_LEAD_STATUSES.includes(explicit.status) && !explicit.converted_at ? [explicit] : [];
       resolution = 'explicit';
     } else if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
