@@ -1625,42 +1625,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY AGENT GAP DIGEST — Monday 8:15am ET — owner ACT email ONLY when the
-  // Intelligence Bar recorded a gap report (missing capability, tool failure,
-  // or blocked action) in the last 7 days; a clean week sends nothing.
-  // =========================================================================
-  cron.schedule('15 8 * * 1', async () => {
-    const tickStartedAt = Date.now();
-    try {
-      const lockRes = await runExclusive('agent-gap-digest', async () => {
-        const { runAgentGapDigest } = require('./agent-gap-digest');
-        const result = await runAgentGapDigest();
-        logger.info(`[agent-gap-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count ?? null })}`);
-        // A delivery-blocking skip (mailer unconfigured / non-internal
-        // recipient) or a failed send must still read as a FAILED run in
-        // job_health, mirroring the turf-variance digest block above.
-        if (result?.skipped === 'query_failed' || result?.error
-            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
-          throw new Error(`agent gap digest did not complete (${result.skipped || 'send_failed'})`);
-        }
-      });
-      // A tick that got no DB connection returns { skipped } without running
-      // the job, and on the connection-acquire path without any job_health
-      // write: record the missed weekly run. recordMissedTick only writes when
-      // no start or success for this occurrence is already recorded within its
-      // 60 s tick window, so the slot-timeout path (which already recorded
-      // it) is not counted twice. lease_held means another instance ran this
-      // tick, which is not a miss.
-      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
-        await recordMissedTick('agent-gap-digest', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
-        throw new Error(`agent gap digest tick skipped: ${lockRes.reason || 'no_connection'}`);
-      }
-    } catch (err) {
-      logger.error(`Weekly agent gap digest failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
   // Each is exception-based (a quiet day sends nothing), carries its own
   // env kill switch, and dedupes via ops_email_send_state. Cron minutes are
@@ -1775,6 +1739,33 @@ function initScheduledJobs() {
       }
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Email intake and its own (simpler, non-watermarked) follow-up loop, same
+  // five-minute cadence as the SMS lane above (comms-promises-plan-20260928.md
+  // PR 1; coordinator correction #5, 2026-09-29).
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS')) return;
+    try {
+      const { runEmailOperationalActions } = require('./email-operational-actions');
+      await runEmailOperationalActions();
+    } catch {
+      logger.error('[email-operations] intake did not complete');
+    }
+    try {
+      const { refreshEmailCommitments } = require('./email-operational-actions');
+      const lockRes = await runExclusive('email-commitment-fulfillment', () => refreshEmailCommitments());
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Email fulfillment tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('email-commitment-fulfillment').catch(() => {});
+        await recordJobEnd('email-commitment-fulfillment', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch {
+      logger.error('[email-operations] commitment watcher did not complete');
     }
   }, { timezone: 'America/New_York' });
 

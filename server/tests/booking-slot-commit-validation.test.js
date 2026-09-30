@@ -466,7 +466,8 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // PR #4623) — the SLOT_TAKEN shape still sits directly after it.
     // 1000: grew again by the travel probe's expected-minutes credit
     // (#4664, offer/commit parity).
-    const probeBlock = src.slice(probeIdx, probeIdx + 1000);
+    // 1200: grew by the tech-aware scope option (GATE_MULTI_TECH_CONFIRM).
+    const probeBlock = src.slice(probeIdx, probeIdx + 1200);
     expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
     expect(probeBlock).toMatch(/statusCode: 409/);
     // Shared module import rides the same lazy require as the lock helper.

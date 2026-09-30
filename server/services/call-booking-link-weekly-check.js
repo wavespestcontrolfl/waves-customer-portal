@@ -253,7 +253,7 @@ function dedupeKeyFor(now = new Date()) {
   return `${OPS_KEY}:${reportWeekKey(now)}`;
 }
 
-// Durable weekly-send guard, like agent-gap-digest's: runExclusive only
+// Durable weekly-send guard (the pattern the retired weekly agent-gap digest used): runExclusive only
 // serializes CONCURRENT ticks, and the email fallback skips the bell's
 // dedupeKey, so a deploy-overlap instance entering after the first released
 // the lock would email again. Stamped only after a delivery succeeded; a

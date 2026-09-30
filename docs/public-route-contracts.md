@@ -815,6 +815,32 @@ A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
 
+Tech-aware confirm conflict checks for a second field technician
+(`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; needs
+`GATE_SCHEDULING_CAPACITY` live too). The offer side (`buildBookingAvailability`'s
+occupancy mirror) already keeps an occupied row only when it is unassigned or on
+the offered slot's own technician; the confirm side used to be tech-blind (built
+for one active technician), so a slot offered on technician B's day could be
+refused at confirm because technician A had an overlapping or nearby stop. With
+both gates on, `createSelfBooking` (`/api/booking/confirm`, the re-service commit
+and the consultation-page commit) scopes its whole conflict check to the booked
+technician: the zone/city/hold fast-path legs are AND-ed with "technician_id is
+NULL or equals the booked technician", and the global backstop
+(`findConflictingVisits`, which takes an opt-in `technicianId`) counts only the
+same technician's rows plus unassigned ones. Unassigned rows still block every
+technician, so the offer/commit predicates stay identical. The public reschedule
+commit (`SmartRebooker.reschedule` with `capacityPlacement: true`, the same
+offer builder) opts into the same scope for its kept technician. Either gate
+off, or a booking with no technician, is byte-for-byte the tech-blind check
+above. Every other caller — admin schedule/leads, rebooker series and
+rain-out/SMS moves, the phone agent, the zone-engine confirm, estimate slot
+reserve (which already verifies per technician in capacity mode), auto-dispatch
+and follow-up seeders — never passes `technicianId` and is unchanged. The
+date-wide occupancy advisory lock (rung 1) that every one of these writers takes
+still serializes concurrent confirms per calendar day regardless of technician,
+so two technicians' bookings and an unassigned insert cannot race past each
+other's probe.
+
 Public-confirm location freshness applies with either capacity gate on or
 off. After the scheduling and customer-communications fences, the customer
 row is held `FOR SHARE` through the insert. A complete live pin in another
