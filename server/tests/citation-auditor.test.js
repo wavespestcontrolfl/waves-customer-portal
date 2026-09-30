@@ -414,9 +414,21 @@ describe('classifyListing', () => {
     test('a branded soft-404 served as 200 is fetch-blocked even around stale listing JSON-LD', () => {
       const stale = classifyListing(page(`<h1>Page Not Found</h1><p>We can't find that page.</p>${wavesName}<p>${BRAND.phone}</p>${ld(ENT({}))}`, { html: `<html><head><title>Page not found | Directory</title></head><body><h1>Page Not Found</h1>${wavesName}<p>${BRAND.phone}</p>${ld(ENT({}))}${filler}</body></html>` }), candidatesFor({}));
       expect(stale).toMatchObject({ status: 'fetch-blocked', detail: { reason: 'soft_404' } });
-      expect(classifyListing(page(`${wavesName}<p>${BRAND.phone}</p><p>This page doesn't exist anymore.</p>`), candidatesFor({})).detail.reason).toBe('soft_404');
+      expect(classifyListing(page(`<h1>This page doesn't exist anymore.</h1>${wavesName}<p>${BRAND.phone}</p>`), candidatesFor({})).detail.reason).toBe('soft_404');
+      expect(classifyListing(page(`<h1>404</h1>${wavesName}<p>${BRAND.phone}</p>`), candidatesFor({})).detail.reason).toBe('soft_404');
       // a healthy listing is unaffected
       expect(text('').status).toBe('verified');
+    });
+
+    test('not-found wording outside the title and h1 is not a soft-404', () => {
+      // "404 reviews", a 404-area-code phone and not-found body copy on a healthy listing
+      expect(text('<p>404 reviews</p><p>Also nearby: (404) 555-0199, 404-555-0100</p>').status).toBe('verified');
+      expect(text("<p>We can't find that page? Try the search.</p>").status).toBe('verified');
+      const titled = (title) => classifyListing(page(`${wavesName}<p>${BRAND.phone}</p>`, { html: `<html><head><title>${title}</title></head><body>${wavesName}<p>${BRAND.phone}</p>${filler}</body></html>` }), candidatesFor({}));
+      expect(titled('Waves Pest Control - 404 Reviews - Sarasota').status).toBe('verified');
+      expect(titled('404-555-0100 | Directory').status).toBe('verified');
+      expect(titled('404 - Page Not Found').detail.reason).toBe('soft_404');
+      expect(titled('Error 404 | Directory').detail.reason).toBe('soft_404');
     });
   });
 

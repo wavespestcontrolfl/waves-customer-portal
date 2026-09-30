@@ -66,8 +66,9 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { _internals: contactFinder } = require('./contact-finder');
+const { classifyPageBody } = require('./page-body-classifier');
 const { decodeHTML } = require('entities');
-const { visibleText, computeBodySignals } = require('../content/content-registry-live-status');
+const { visibleText } = require('../content/content-registry-live-status');
 
 const STATES = ['unverified', 'verified', 'mismatched', 'fetch-blocked', 'missing'];
 const BRAND_NAME = 'Waves Pest Control'; // locations.js carries office names only, not the brand name
@@ -377,17 +378,25 @@ function observedNap(nap, who, address) {
   return { nap_name: (entity && entity.name) || (nap.text.match(BRAND_RE) || [null])[0], nap_phone: phone, nap_address: address.observed };
 }
 
+// A branded soft-404 ("Page not found" served as 200, often around stale listing JSON-LD) says
+// so in its <title> or <h1>. Body text never counts: "404 reviews" or a 404-area-code phone on
+// a healthy listing is not a not-found page.
+const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\bcan.?t find (?:that|this|the) page\b/i;
+function notFoundHeading(html) {
+  return [...String(html).matchAll(/<(title|h1)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi)]
+    .some((m) => NOT_FOUND_HEADING_RE.test(decodeHTML(visibleText(m[2]))));
+}
+
 // Why a fetched page cannot be judged at all (null = readable): a non-2xx, a bot challenge, a
-// non-HTML body, or a branded soft-404 ("Page not found" served as 200, often around stale
-// listing JSON-LD). None of these is ever "missing".
+// non-HTML body, or a branded soft-404. None of these is ever "missing".
 function unreadableReason(page) {
   if (page.blocked) return 'blocked_host';
   if (page.error) return page.error;
   if (page.status < 200 || page.status >= 300) return `http_${page.status}`;
-  const signals = computeBodySignals(page.html || '', page.contentType);
-  if (signals.challenge) return 'challenge';
-  if (signals.nonHtml) return 'non_html';
-  return signals.softNotFound ? 'soft_404' : null;
+  const kind = classifyPageBody(page.html || '', page.contentType, { strictChallenge: true });
+  if (kind === 'challenge') return 'challenge';
+  if (kind === 'non_html') return 'non_html';
+  return notFoundHeading(page.html || '') ? 'soft_404' : null;
 }
 
 /**
