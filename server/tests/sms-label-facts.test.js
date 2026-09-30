@@ -261,7 +261,7 @@ describe('label row selection (mock knex)', () => {
         resolve() {
           if (table === 'scheduled_services') return scheduledToday;
           if (table === 'service_products as sp') return rows;
-          if (this.ops.some((o) => o[0] === 'where' && o[1] && typeof o[1] === 'object' && 'service_date' in o[1])) return recordsToday;
+          if (this.ops.some((o) => o[0] === 'where' && ((o[1] && typeof o[1] === 'object' && 'service_date' in o[1]) || o[1] === 'service_date'))) return recordsToday;
           return visits;
         },
       };
@@ -1020,7 +1020,7 @@ describe('r12: asked kinds over the thread, framing around a copy, and ordinal v
     expect(asked(['Is it okay now?', 'Can the dogs go out?'])).toEqual(['reentry']);
     expect(asked(['What about now?', 'Will rain wash it off?'])).toEqual(['rain']);
     expect(asked(['And the kids?', 'Will rain wash it off?'])).toEqual(['reentry', 'rain']);
-    for (const q of ['Is it okay now?', 'What about now?', 'now?', 'and outside?', 'Is it ok now?']) expect([q, asked([q])]).toEqual([q, ['reentry', 'rain']]);
+    for (const q of ['Is it okay now?', 'What about now?', 'now?', 'Is it ok now?']) expect([q, asked([q])]).toEqual([q, ['reentry', 'rain']]);
     expect(asked(['Is it okay now?', 'What time are you coming Thursday?'])).toEqual(['reentry', 'rain']);
     expect(asked(['How about the kids'])).toEqual(['reentry']);
     // a plain non-label question, or one about the business, is not elliptical
@@ -1592,6 +1592,121 @@ describe('r24: a Spanish / Portuguese / French inbound takes the fail-closed pat
   });
 });
 
+describe('r25: rendered-thread visit references, structural re-entry topic, kind-specific copies, unrecorded later visits', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [rain, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, section, asked(inbound));
+
+  test('2. a re-entry question is recognized structurally: someone + somewhere outdoors, or an outdoor activity', () => {
+    for (const text of [
+      'Can we use the backyard now?', 'Is the lanai ok?', 'can we use the pool deck', 'can we grill outside tonight', 'ok to mow?', 'is it safe on the patio', 'can my kids play in the front yard',
+      'we want to sit on the porch', 'when can I walk on the grass', 'is the driveway usable', 'can the dogs use the playset', 'ok to swim in the pool',
+    ]) expect([text, asked(text)]).toEqual([text, expect.arrayContaining(['reentry'])]);
+    for (const text of ['What time are you coming Thursday?', 'Please send my invoice', 'Can I pay online?', 'Thanks so much', 'the gate to the yard is unlocked']) expect([text, asked(text).includes('reentry')]).toEqual([text, false]);
+    expect(guard("Yes, you're good.", 'Can we use the backyard now?')).toBe(true);
+    expect(guard('Sure, go ahead!', 'can we grill outside tonight')).toBe(true);
+  });
+
+  test('3. a copy answers only its own kind', () => {
+    // a pet question answered with the RAINFAST copy only: held
+    expect(guard(rain, 'Can the dogs go out now?')).toBe(true);
+    expect(guard(reentry, 'Can the dogs go out now?')).toBe(false);
+    expect(guard(rain, 'Will rain wash it off?')).toBe(false);
+    expect(guard(reentry, 'Will rain wash it off?')).toBe(true);
+    // both kinds asked: one copy is held unless the reply also hands off; both copies pass
+    const both = 'Can the dogs go out and will rain wash it off?';
+    expect(guard(reentry, both)).toBe(true);
+    expect(guard(rain, both)).toBe(true);
+    expect(guard(`${rain} ${reentry}`, both)).toBe(false);
+    expect(guard(`${reentry} I'll have the office confirm the timing.`, both)).toBe(false);
+    expect(guard(`${rain} Your technician will confirm the timing.`, 'Can the dogs go out now?')).toBe(false); // hand-off: the other kind's copy may stand
+    // no copy at all: unchanged (a greeting alone is fine)
+    expect(guard('Hi Jane, thanks for reaching out!', both)).toBe(false);
+    // send time: the snapshot's sentences carry their kind
+    const boom = () => { throw new Error('must not read'); };
+    const snap = { customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [rain, reentry], asked: ['reentry'] };
+    return expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: { ...snap, sentences: [rain], asked: ['reentry'] }, body: rain, conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+  });
+
+  test('4. a later visit the record chain has not caught up with means none on file (no date = today limit)', async () => {
+    const TODAY = '2026-06-10';
+    const frozen = { productType: 'pesticide', name: 'Some Product', category: 'insecticide', rainfastMinutes: 180, reentryHours: 0, reentrySummary: 'Keep people and pets off treated areas until dry.', labelVerifiedAt: '2026-05-28' };
+    // a small date-aware fake: scheduled_services rows are filtered by the query's own date / status conditions
+    const run = async ({ scheduled = [], records = [] }) => {
+      const conn = (table) => {
+        const q = { ops: [] };
+        for (const m of ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'max']) q[m] = (...a) => { q.ops.push([m, ...a]); return q; };
+        const cond = () => q.ops.filter((o) => o[0] === 'where');
+        const dateBounds = (col) => Object.fromEntries(cond().filter((o) => o[1] === col).map((o) => [o[2], o[3]]));
+        const eqDate = (col) => cond().map((o) => o[1]).filter((o) => o && typeof o === 'object' && col in o).map((o) => o[col])[0];
+        q.first = () => Promise.resolve({ service_date: '2026-06-05' });
+        q.select = () => {
+          if (table === 'scheduled_services') {
+            const skip = (q.ops.find((o) => o[0] === 'whereNotIn') || [])[2] || [];
+            const b = dateBounds('scheduled_date');
+            const eq = eqDate('scheduled_date');
+            return Promise.resolve(scheduled.filter((r) => !skip.includes(r.status) && (eq ? r.scheduled_date === eq : (r.scheduled_date >= b['>='] && r.scheduled_date <= b['<=']))));
+          }
+          if (table === 'service_products as sp') return Promise.resolve([{ id: 1, service_record_id: 'r2', product_id: 'p1', product_name: 'Some Product', active_ingredient: 'bifenthrin', product_category: 'insecticide' }]);
+          const eq = eqDate('service_date');
+          if (eq) return Promise.resolve(records.filter((r) => r.service_date === eq));
+          if (cond().some((o) => o[1] === 'service_date')) return Promise.resolve(records.filter((r) => r.status === 'completed' && r.service_date >= dateBounds('service_date')['>=']));
+          return Promise.resolve([{ id: 'r2', structured_notes: null, service_data: { reportIdentitySnapshot: { version: 1, productFacts: { p1: frozen } } } }]);
+        };
+        return q;
+      };
+      return labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, conn });
+    };
+    const older = { status: 'completed', service_date: '2026-06-05', scheduled_service_id: 'ss1' };
+    // baseline: the facts' own visit, fully recorded
+    expect(await run({ scheduled: [{ id: 'ss1', status: 'completed', scheduled_date: '2026-06-05' }], records: [older] })).not.toBeNull();
+    // a completed visit YESTERDAY with no linked record, an older record exists: none on file
+    expect(await run({ scheduled: [{ id: 'ss1', status: 'completed', scheduled_date: '2026-06-05' }, { id: 'ss9', status: 'completed', scheduled_date: '2026-06-09' }], records: [older] })).toBeNull();
+    // the same visit with its record landed: fine
+    expect(await run({ scheduled: [{ id: 'ss1', status: 'completed', scheduled_date: '2026-06-05' }, { id: 'ss9', status: 'completed', scheduled_date: '2026-06-09' }], records: [older, { status: 'completed', service_date: '2026-06-09', scheduled_service_id: 'ss9' }] })).not.toBeNull();
+    // a visit left open past midnight (en route / on site / in progress / confirmed) on a date up to today: none on file
+    for (const status of ['en_route', 'on_site', 'in_progress', 'confirmed']) {
+      expect([status, await run({ scheduled: [{ id: 'ss1', status: 'completed', scheduled_date: '2026-06-05' }, { id: 'ss8', status, scheduled_date: '2026-06-08' }], records: [older] })]).toEqual([status, null]);
+    }
+    // cancelled / skipped rows, and a FUTURE visit, never block; a completed row on the facts' own date with no link does (fail closed)
+    expect(await run({ scheduled: [{ id: 'ss1', status: 'completed', scheduled_date: '2026-06-05' }, { id: 'ss7', status: 'cancelled', scheduled_date: '2026-06-08' }, { id: 'ss6', status: 'confirmed', scheduled_date: '2026-06-20' }], records: [older] })).not.toBeNull();
+    expect(await run({ scheduled: [{ id: 'ssx', status: 'completed', scheduled_date: '2026-06-05' }], records: [{ status: 'completed', service_date: '2026-06-05', scheduled_service_id: null }] })).toBeNull();
+  });
+});
+
+describe('r25 item 1: every same-sender row the model is shown is read for a visit reference, whatever its age', () => {
+  const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
+  const RE = 'For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas until dry.';
+  const PHONE = '+19415550100';
+  const makeClient = (scripted) => {
+    const queue = [...scripted];
+    return { messages: { create: () => Promise.resolve({ content: [{ text: JSON.stringify(queue.shift()) }] }) } };
+  };
+  const draft = (reply) => ({ reply, intended_actions: [], missing_info: null, offered_times: [] });
+  const run = (inboundMessage, smsHistory) => generateGroundedDraft({
+    client: makeClient([draft(RE), draft(RE), draft(RE), { supported: true, violations: [] }]),
+    context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], smsHistory },
+    inboundMessage, inboundPhone: PHONE, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+  });
+  beforeEach(() => {
+    process.env[GATE] = 'true';
+    mockFetchLabelFacts.mockReset();
+    mockFetchLabelFacts.mockResolvedValue({ ...labelFacts([product()]), customerId: 'cust-1', recordIds: ['r2'] });
+  });
+  const days = (n) => new Date(Date.now() - n * 86400000).toISOString();
+  const NONE = 'LABEL FACTS (none on file for the last visit):';
+  test('a 3-day-old "the May treatment" row (past the 24 h inheritance window) still voids the facts, for an elliptical or a self-contained message', async () => {
+    const may = { direction: 'inbound', body: 'What about the May treatment?', date: days(3), fromPhone: PHONE };
+    expect((await run('Is it okay now?', [may])).factsBlock).toContain(NONE);
+    expect((await run('Can the dogs go out now?', [may])).factsBlock).toContain(NONE);
+    // ...while an old same-sender row with no visit reference keeps them
+    const benign = { direction: 'inbound', body: 'Thanks, see you soon', date: days(3), fromPhone: PHONE };
+    expect((await run('Can the dogs go out now?', [benign])).factsBlock).toContain(`- ${RE}`);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
@@ -2096,9 +2211,10 @@ describe('C: the section is for the latest visit only - a text about another vis
       const r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], thread);
       expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
       expect(r.converged).toBe(false);
-      const own = await run('Can the dogs go out now?', [draft(RE)], thread);
-      expect(own.factsBlock).toContain(`- ${RE}`);
-      expect(own.converged).toBe(true);
+      // (r25: the model is shown that May row too, so even a self-contained current message gets none on file)
+      const own = await run('Can the dogs go out now?', [draft(RE), draft(RE), draft(RE)], thread);
+      expect(own.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
+      expect(own.converged).toBe(false);
     });
 
     test('r12: a follow-up like "is it okay now?" inherits the label kind of the recent thread; a bare "Yes." is held', async () => {

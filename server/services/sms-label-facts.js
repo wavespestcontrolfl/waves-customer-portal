@@ -91,6 +91,28 @@ async function hasVisitToday(conn, customerId, today) {
   return liveToday.some((r) => r.id == null || !recorded.has(String(r.id).toLowerCase()));
 }
 
+// A visit AFTER (or on the same date as) the facts' own visit that the record chain has not caught up with: a scheduled visit
+// marked completed with no completed service record linked to it (scheduled_service_id), or one left open (confirmed / en route /
+// on site / in progress) on a date up to today. Either can be a newer application whose label the last performed record does
+// not describe, so the facts' visit is not "the last visit": none on file. (The visit-today case above stays as it was.)
+async function hasUnrecordedVisitSince(conn, customerId, serviceDate, today) {
+  const scheduled = await conn('scheduled_services')
+    .where('customer_id', customerId)
+    .where('scheduled_date', '>=', serviceDate)
+    .where('scheduled_date', '<=', today)
+    .whereNotIn('status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
+    .select('id', 'status', 'scheduled_date');
+  if (!scheduled.length) return false;
+  if (scheduled.some((r) => r.status !== 'completed')) return true;
+  const records = await conn('service_records')
+    .where('customer_id', customerId)
+    .where('status', 'completed')
+    .where('service_date', '>=', serviceDate)
+    .select('scheduled_service_id');
+  const recorded = new Set(records.filter((r) => r.scheduled_service_id != null).map((r) => String(r.scheduled_service_id).toLowerCase()));
+  return scheduled.some((r) => r.id == null || !recorded.has(String(r.id).toLowerCase()));
+}
+
 // The applied product's report facts FROZEN at completion
 // (service_data.reportIdentitySnapshot.productFacts, keyed by canonical
 // product id; complete-scheduled-service.js + pest-recap.js write it from
@@ -201,6 +223,7 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   const newest = await performed().max('service_records.service_date as service_date').first();
   const serviceDate = dateOnlyString(newest && newest.service_date);
   if (!serviceDate) return null;
+  if (await hasUnrecordedVisitSince(conn, customerId, serviceDate, today)) return null;
   const visits = await performed()
     .where('service_records.service_date', serviceDate)
     .select('service_records.id', 'service_records.structured_notes', 'service_records.service_data');
@@ -425,7 +448,7 @@ const copyEndsCleanly = (rest) => rest === '' || (/^\s+(?![a-z])/.test(rest) && 
 // and the two sentences on each side carry no meta or negation vocabulary ("Ignore this.", "Just kidding.",
 // "That is outdated.", "Not anymore."). Draft, snapshot and send time all use this one matcher.
 const META_FRAME_RE = /\b(?:false|untrue|not\s+(?:true|correct|accurate|right|apply|valid)|isn'?t\s+(?:true|correct|accurate|right)|ignore|disregard|do(?:n'?t|\s+not)\s+follow|does(?:n'?t|\s+not)\s+apply|outdated|out\s+of\s+date|old\s+info|wrong|incorrect|kidding|joking|not\s+anymore|no\s+longer|actually|scratch\s+that|correction|used\s+to|mistake|never\s*mind|forget\s+(?:that|this|it)|however|but|although|except|unless)\b/i;
-const OWN_SENTENCE_START_RE = /(?:^|[.!?]|(?:labelsentence|companysentence)\s*;)\s*$|(?:^|[.!?]\s*)(?:hi|hello|hey|thanks|thank\s+you)\b[^.!?:;]{0,30},\s*$/i;
+const OWN_SENTENCE_START_RE = /(?:^|[.!?]|(?:labelsentence\w*|companysentence)\s*;)\s*$|(?:^|[.!?]\s*)(?:hi|hello|hey|thanks|thank\s+you)\b[^.!?:;]{0,30},\s*$/i;
 const SENTENCE_GAP_RE = /(?<=[.!?])\s+/;
 function standsAlone(before, after) {
   if (!OWN_SENTENCE_START_RE.test(before)) return false;
@@ -456,7 +479,9 @@ function labelSentencesCopiedIn(reply, sectionText) {
 function stripLabelSentences(text, sectionText) {
   let out = canonText(text);
   for (const s of labelSentencesIn(sectionText)) {
-    for (const { start, end } of completeCopies(out, s.text).reverse()) out = `${out.slice(0, start)} ; labelsentence ; ${out.slice(end)}`;
+    // the marker keeps the copy's KIND (labelsentencereentry / labelsentencerainfast) so a rainfast copy never answers a pet question
+    const marker = s.kind === 'reentry' ? 'labelsentencereentry' : 'labelsentencerainfast';
+    for (const { start, end } of completeCopies(out, s.text).reverse()) out = `${out.slice(0, start)} ; ${marker} ; ${out.slice(end)}`;
   }
   return out;
 }
@@ -869,6 +894,13 @@ function sanctionSafeOnceDry(text) {
 // sentence, "safe once dry" + the technician confirming, the COMPANY FACTS rain line, or a hand-off.
 const ASKED_QUESTION_RE = /\?|(?:^|[.!\n]\s*)(?:can|could|will|would|should|may|is|are|do|does|when|how|what|which|ok|okay)\b|\b(?:wondering|want\s+to\s+know|need\s+to\s+know|curious)\b/;
 const ASKED_REENTRY_RE = new RegExp([BEING_RE.source, ACTIVITY_RE.source, REENTRY_TOPIC_RE.source, DRY_RE.source, /\bsafe\b|\bgo\s+(?:out|outside|back)\b|\blet\s+\w+\s+out\b/.source].join('|'));
+// Structural re-entry topic: someone (people / pets / kids, or "we / I / you / my / our") plus somewhere outdoors, or an outdoor
+// activity beside either ("can we use the backyard now?", "ok to mow?", "can we grill outside tonight", "the lanai / pool deck").
+const OUTDOOR_PLACE_RE = /\b(?:yard|backyard|front\s+yard|lawn|grass|patio|pool(?:\s+deck)?|deck|porch|lanai|garden|driveway|outside|outdoors?|treated\s+areas?|play\s+area|playset|sod|turf)\b/;
+const OUTDOOR_ACTIVITY_RE = /\b(?:use|using|go|going|play|playing|sit|sitting|walk|walking|let\s+\w+\s+out|mow|mowing|water|watering|garden|gardening|grill|grilling|swim|swimming|barbecue|bbq)\b/;
+const ASKER_RE = new RegExp(BEING_RE.source + "|\\b(?:we|i|you|us|our|my|me|they|them|he|she|kids?|family)\\b");
+const asksReentryStructurally = (text) => (ASKER_RE.test(text) && OUTDOOR_PLACE_RE.test(text)) || (OUTDOOR_ACTIVITY_RE.test(text) && (OUTDOOR_PLACE_RE.test(text) || BEING_RE.test(text)))
+  || (OUTDOOR_PLACE_RE.test(text) && (ASKED_QUESTION_RE.test(text) || /\b(?:safe|ok|okay|fine|ready|usable|clear)\b/.test(text)));
 // Weather-only wording ("will this weather affect the treatment?", "the wet grass ok?", "humid today, will it still work?")
 // asks the rain kind when it has a question shape or a treatment / spray / application / work / effect context.
 const WEATHER_WORD_RE = /\b(?:weather|wet|storm\w*|forecast\w*|humid\w*|humidity|drizzl\w*|pour(?:s|ed|ing)?|downpour\w*|sprinkl\w*|damp|soaked|soaking|showers?|rain\w*)\b/;
@@ -893,7 +925,7 @@ function askedKindsOf(inboundText) {
   const text = canonText(inboundText).toLowerCase();
   if (!text) return { kinds: [], elliptical: false };
   if (ASKED_ACCESS_RE.test(text) && !POST_TREATMENT_SIGNAL_RE.test(text)) return { kinds: [], elliptical: false };
-  return { kinds: [ASKED_REENTRY_RE.test(text) && 'reentry', (ASKED_RAIN_RE.test(text) || asksWeather(text)) && 'rain'].filter(Boolean), elliptical: ASKED_QUESTION_RE.test(text) && isEllipticalInbound(text) };
+  return { kinds: [(ASKED_REENTRY_RE.test(text) || asksReentryStructurally(text)) && 'reentry', (ASKED_RAIN_RE.test(text) || asksWeather(text)) && 'rain'].filter(Boolean), elliptical: ASKED_QUESTION_RE.test(text) && isEllipticalInbound(text) };
 }
 
 /**
@@ -932,7 +964,7 @@ const wordsOf = (text) => text.match(/[a-z]+/g) || [];
 const allIn = (words, set) => words.every((w) => set.has(w));
 const wordSet = (list) => new Set(list.split(/\s+/));
 // (a) an authorized copy (stripLabelSentences left its marker)
-const isCopyMarker = (sentence) => sentence === 'labelsentence';
+const isCopyMarker = (sentence) => /^labelsentence(?:reentry|rainfast)$/.test(sentence);
 // (b) the sanctioned "safe once dry" (sanctionSafeOnceDry left its token), optionally with the technician confirming timing
 const SANCTIONED_SENTENCE_RE = /^(?:(?:(?:it|that|this|they|everything)(?:'s|'re|\s+(?:is|are|will\s+be))|(?:pets|people|kids|dogs)(?:\s+and\s+(?:pets|people|kids|dogs))?\s+(?:are|will\s+be))\s+)?sanctioned_idiom\s*[,;-]?\s*(?:and\s+)?(?:(?:(?:your|the|our)\s+(?:technician|tech|office|team)|we)\s+(?:will\s+)?confirms?\s+(?:the\s+|your\s+)?timing(?:\s+(?:at|during|for|on)\s+(?:the|your)\s+(?:visit|appointment|yard|next\s+visit|service))?)?$/;
 const isSanctionedSentence = (sentence) => SANCTIONED_SENTENCE_RE.test(sentence);
@@ -1056,7 +1088,19 @@ function answersAskedLabelQuestion(strippedText, asked) {
     return replySentences(strippedText, ['rain']).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !CONTENT_SENTENCE_TYPES.slice(0, 5).some((allowed) => allowed(peelFriendlyEnds(sentence))));
   }
   if (!Array.isArray(asked) || !asked.length) return false;
-  return replySentences(strippedText, asked).some((sentence) => !isAllowedSentence(sentence));
+  const sentences = replySentences(strippedText, asked);
+  if (sentences.some((sentence) => !isAllowedSentence(sentence))) return true;
+  return copiesDoNotAnswerAskedKinds(sentences, asked);
+}
+
+// A copy answers only the kind it is: with any copy in the reply, every ASKED kind (reentry / rain) needs a copy of that kind,
+// or the reply must contain an approved hand-off (other kinds' copies may then stand, but never as the answer).
+const COPY_KIND_MARKERS = { reentry: 'labelsentencereentry', rain: 'labelsentencerainfast' };
+function copiesDoNotAnswerAskedKinds(sentences, asked) {
+  const present = new Set(sentences.filter(isCopyMarker));
+  if (!present.size) return false;
+  const missing = asked.filter((kind) => COPY_KIND_MARKERS[kind] && !present.has(COPY_KIND_MARKERS[kind]));
+  return missing.length > 0 && !sentences.some((sentence) => isDeferral(peelFriendlyEnds(sentence)));
 }
 
 /** True when `body` claims label timing beyond the sentences of `sectionText` (its own copies, verbatim, are fine), or answers a label question in `asked` without one. */
@@ -1222,11 +1266,12 @@ const VISIT_REFERENCES = [
  * The facts a draft may render for `inboundText`: null (none on file) when the
  * text points at another visit or is not in English (the sentences are English).
  */
-function labelFactsForInbound(labelFacts, inbound, today = etDateString()) {
+function labelFactsForInbound(labelFacts, inbound, today = etDateString(), renderedTexts = []) {
   if (!labelFacts) return null;
   const texts = Array.isArray(inbound) ? inbound : [inbound];
-  // a short follow-up ("is it okay now?") is about whatever the thread was, so the thread's visit references count too
-  const refs = inboundIsElliptical(texts) ? texts : texts.slice(0, 1);
+  // a short follow-up ("is it okay now?") is about whatever the thread was, so the thread's visit references count too;
+  // and every earlier message the model is SHOWN (`renderedTexts`, any age) is read for a visit reference as well
+  const refs = [...(inboundIsElliptical(texts) ? texts : texts.slice(0, 1)), ...renderedTexts];
   const otherVisit = refs.some((text) => inboundRefersToOtherVisit(text, labelFacts.serviceDate, today));
   return otherVisit || looksNonEnglish(texts[0]) || !isVerifiablyEnglish(texts[0]) || isUnverifiedLanguageInbound(texts) ? null : labelFacts;
 }
