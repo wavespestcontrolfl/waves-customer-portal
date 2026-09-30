@@ -545,11 +545,33 @@ async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson, check
   }
   return null;
 }
-async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, recordedState = false, checkFix = false, dbh, trackTokensToVerify = [] }) {
+async function checkEntriesStillLive({ boundEntries: entriesIn, allowOnSite, requireOnSite = false, recordedState = false, checkFix = false, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
+    let boundEntries = entriesIn;
+    let linkScoped = false;
     const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
-    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip', 'service_address_city', 'scheduled_date');
+    let rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip', 'service_address_city', 'scheduled_date');
+    // Codex round-36 P2: a link-only share names ONE visit — the row that owns the
+    // token — not the whole grouped entry. Scope the rows (and the entry's ids and
+    // recorded destinations) to the token owner(s) before the date / liveness /
+    // identity checks, so an unrelated sibling that was rescheduled or moved cannot
+    // reject a valid link for the live owner. A token no row owns is left unscoped
+    // and fails below as eta_claim_link_expired.
+    if (allowOnSite && trackTokensToVerify.length) {
+      const owners = new Set(rows.filter((row) => row.track_view_token && trackTokensToVerify.includes(row.track_view_token)).map((row) => row.id));
+      if (owners.size) {
+        linkScoped = true;
+        rows = rows.filter((row) => owners.has(row.id));
+        boundEntries = boundEntries
+          .map((e) => ({
+            ...e,
+            scheduledServiceIds: e.scheduledServiceIds.filter((id) => owners.has(id)),
+            ...(Array.isArray(e.destinations) ? { destinations: e.destinations.filter((d) => d && owners.has(d.id)) } : {}),
+          }))
+          .filter((e) => e.scheduledServiceIds.length);
+      }
+    }
     // Auditor P1: every claim kind (status-only, minutes, link, recorded-state)
     // is about a visit happening TODAY (America/New_York). Status-only claims skip
     // the draft-freshness window, so without this a queued "The tech is on the
@@ -577,7 +599,8 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite 
     const allBoundEntriesLive = allowOnSite
       ? boundEntries.every((entry) => entry.scheduledServiceIds.some((id) => liveById.get(id)))
       : boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => liveById.get(id)));
-    if (!allBoundEntriesLive) return 'eta_claim_no_longer_en_route';
+    // A scoped link-only share's owner no longer live is an expired LINK (unchanged reason).
+    if (!allBoundEntriesLive) return linkScoped ? 'eta_claim_link_expired' : 'eta_claim_no_longer_en_route';
     // Round-18/20/22: technician, tracker device and destination identity, in
     // one comparison (see entryIdentityReason). A link-only share names no
     // technician or vehicle, so only the destination applies there.

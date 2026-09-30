@@ -1950,3 +1950,39 @@ describe('coordinated predicates and route history at send time', () => {
     expect(await run(body, { status: 'on_site', track_state: 'on_property' })).toBeNull();
   });
 });
+
+// Codex round-37 P2 (PR #5334): a link-only share names ONE visit — the token owner —
+// so an unrelated grouped sibling that moved or was rescheduled cannot reject it.
+describe('link-only rechecks are scoped to the token-owning visit', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const dest = (id) => ({ id, propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285', resolved: { source: 'visit', lat: 27.4, lng: -82.5 } });
+  const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: ['tok-1', 'tok-2'], state: 'en_route', destinations: [dest('svc-1'), dest('svc-2')] }] };
+  const row = (id, tok, extra) => ({ id, status: 'en_route', track_state: 'en_route', track_view_token: tok, track_token_expires_at: FUTURE, property_id: 'prop-1', lat: '27.4', lng: '-82.5', service_address_line1: '1 Test St', service_address_zip: '34285', ...extra });
+  const link = 'Track: portal.wavespestcontrol.com/track/tok-1';
+  const run = (rows, body = link) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows) });
+  const yesterday = (() => { const [y, m, d] = etDateString().split('-').map(Number); return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10); })();
+
+  test('both live: passes', async () => { expect(await run([row('svc-1', 'tok-1'), row('svc-2', 'tok-2')])).toBeNull(); });
+  test('an unrelated sibling rescheduled to another day does not reject the live token owner\'s link', async () => {
+    expect(await run([row('svc-1', 'tok-1'), row('svc-2', 'tok-2', { scheduled_date: yesterday })])).toBeNull();
+  });
+  test('an unrelated sibling moved to another property does not reject it either', async () => {
+    expect(await run([row('svc-1', 'tok-1'), row('svc-2', 'tok-2', { property_id: 'prop-9', lat: '28.1' })])).toBeNull();
+  });
+  test('an unrelated sibling that went terminal still does not reject the owner (some() semantics, unchanged)', async () => {
+    expect(await run([row('svc-1', 'tok-1'), row('svc-2', 'tok-2', { status: 'completed', track_state: 'completed' })])).toBeNull();
+  });
+  test('the OWNER rescheduled / moved / terminal still blocks', async () => {
+    expect(await run([row('svc-1', 'tok-1', { scheduled_date: yesterday }), row('svc-2', 'tok-2')])).toBe('eta_claim_visit_not_today');
+    expect(await run([row('svc-1', 'tok-1', { property_id: 'prop-9' }), row('svc-2', 'tok-2')])).toBe('eta_claim_destination_changed');
+    expect(await run([row('svc-1', 'tok-1', { status: 'completed', track_state: 'completed' }), row('svc-2', 'tok-2')])).toBe('eta_claim_link_expired');
+  });
+  test('a claim WITH a link is still about the whole entry: a moved sibling blocks it', async () => {
+    const snap1 = { entries: [{ ...snapshot.entries[0], minutes: null }] };
+    const reason = await etaClaimBlockReason({ liveEtaSnapshot: snap1, factsGeneratedAt: FRESH, outgoingBody: `Your techs are on the way: portal.wavespestcontrol.com/track/tok-1`, now: NOW, dbh: fakeDb([row('svc-1', 'tok-1'), row('svc-2', 'tok-2', { scheduled_date: yesterday })]) });
+    expect(reason).toBe('eta_claim_visit_not_today');
+  });
+});

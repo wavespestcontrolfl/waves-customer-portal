@@ -1131,7 +1131,7 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // payment has arrived at our office" is not a visit claim. Up to two words may
 // sit between the subject and the verb ("the tech, Sam, has arrived" / "your tech
 // Sam just arrived").
-const COMPLETED_ARRIVAL_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?arrived|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+const COMPLETED_ARRIVAL_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address)))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
 // way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
@@ -1395,6 +1395,9 @@ function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
   // at your door / almost there) count ONLY with a technician-type subject
   // (round-21 P2): "We are here to help" / "we're here" are not a claim.
   + `|${SUBJ}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
+  // Completed-arrival "got there/here" (round-36 P2): part of the same default-deny
+  // vocabulary as the completed-arrival classifier.
+  + `|${PREFIX}(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))`
   // Movement forms (left for / pulled up / showed up) also need a technician-type
   // subject (round-26 P2): "I pulled up your invoice" is not an arrival.
   + `|${SUBJ}\\s+(?:has\\s+|have\\s+|just\\s+|already\\s+)*(?:left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up(?!\\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\\b)|show(?:ed|ing)?\\s+up))\\b`, 'gi');
@@ -1758,7 +1761,9 @@ function replyClaimsEtaMinutes(reply) {
 function liveEtaExpiredByPublication({ reply, context, factsAt = null, now = new Date() }) {
   const entries = (buildLiveEtaSnapshot(context)?.entries || []).filter((e) => Number.isFinite(e.minutes));
   if (!entries.length) return false;
-  const text = String(reply || '');
+  // Parse the reply without its tracking links (same shared step as the draft and
+  // send validators): a token's trailing digits are not a minutes figure.
+  const text = stripTrackLinks(reply);
   if (!findEtaMinutesClaims(text).length && !findGroundedMinutesFigures(text).length) return false;
   const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness'); // lazy: that module requires this one lazily too
   const t = now.getTime();

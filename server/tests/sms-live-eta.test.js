@@ -1943,6 +1943,45 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-37 P2s (PR #5334): "got there" arrivals; publication expiry ignores link digits.
+describe('round 37 P2s: got-there completed arrivals; expiry parsing without tracking links', () => {
+  const { bodyMentionsVisitStatus, liveEtaExpiredByPublication } = require('../services/sms-shadow-drafter');
+  test.each([
+    'The technician just got there.', 'He got here.', 'Your tech has gotten to your house.', 'Our crew got to your property.', 'The tech finally got there.',
+  ])('%p is a completed-arrival claim and visit-status vocabulary', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('a recorded tech name works: "Sam just got there" only with Sam recorded', () => {
+    expect(bodyClaimsCompletedArrival('Sam just got there.', { techNames: ['Sam'] })).toBe(true);
+    expect(bodyMentionsVisitStatus('Sam just got there.', { techNames: ['Sam'] })).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam just got there.')).toBe(false);
+    expect(bodyClaimsCompletedArrival('Sam just got there.', { techNames: ['Dana'] })).toBe(false);
+  });
+  test.each([
+    "The technician hasn't got there yet.", 'Did the tech get there?', 'Has the technician got there yet?', 'Your order got there yesterday.', 'We got there.',
+    'Once he gets there I will text you.',
+  ])('%p is not a completed-arrival claim (negation / question / conditional / not a technician subject)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('"got there" against an en-route fact is rejected by the draft-time validator (like "has arrived")', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      const facts = 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+      expect(validateLiveEtaMinutes({ reply: 'The technician just got there.', factsBlock: facts }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test('liveEtaExpiredByPublication strips tracking links first: token-ending digits are not a minutes figure', () => {
+    const NOW_D = new Date('2026-09-30T15:00:00.000Z');
+    const context = { liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['a'], fixExpiresAtMs: NOW_D.getTime() - 1 }] };
+    const reply = 'Your tech is on the way. Track: portal.wavespestcontrol.com/track/abcdef9';
+    expect(liveEtaExpiredByPublication({ reply, context, now: NOW_D })).toBe(false);
+    // ...while a real minutes claim beside the same link is still aged out
+    expect(liveEtaExpiredByPublication({ reply: `Your tech is about 12 minutes away. Track: portal.wavespestcontrol.com/track/abcdef9`, context, now: NOW_D })).toBe(true);
+  });
+});
+
 // Codex round-36 P2s (PR #5334): coordinated predicates and past-tense route history.
 describe('round 36 P2s: subject carried across coordinated predicates; past-tense route history', () => {
   const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
