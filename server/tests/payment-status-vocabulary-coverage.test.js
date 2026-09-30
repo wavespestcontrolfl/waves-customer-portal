@@ -473,7 +473,8 @@ describe('round-16: a partially refunded row is not a plain paid payment', () =>
   test('a REFUNDED claim IS grounded by it (by the payment amount, or the refunded amount)', () => {
     expect(rq('Your $120 payment from Sep 12 was partially refunded.', ctx([partial]))).toBe(false);
     expect(rq('Your $120 payment from Sep 12 was partially refunded.', ctx([base]))).toBe(true);
-    expect(rq('Your $30 refund from Sep 12 was refunded.', ctx([partial]))).toBe(false);
+    expect(rq('$30 of your $120 payment from Sep 12 was refunded.', ctx([partial]))).toBe(false);
+    expect(rq('$50 of your $120 payment from Sep 12 was refunded.', ctx([partial]))).toBe(true); // not the actual refund amount
     expect(rq('Your $120 payment from Sep 12 was partially refunded.', ctx([{ ...partial, payment_date: '2026-09-01' }]))).toBe(true);
   });
 
@@ -486,5 +487,110 @@ describe('round-16: a partially refunded row is not a plain paid payment', () =>
     const full = { ...base, status: 'refunded', refund_status: 'full', refund_amount: 120 };
     expect(rq('Your $120 payment from Sep 12 was refunded.', ctx([full]))).toBe(false);
     expect(rq('We received your $120 payment from Sep 12.', ctx([full]))).toBe(true);
+  });
+});
+
+// Codex round-17 P1 #1: partial vs full refund wording binds the matching row kind only.
+describe('round-17: unqualified "refunded" binds fully refunded rows only; partial wording binds partial rows only', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c) => replyQuotesUngroundedAmount(r, c, { byMeaning: true });
+  const base = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const partial = { ...base, refund_status: 'partial', refund_amount: 30 };
+  const full = { ...base, status: 'refunded', refund_status: 'full', refund_amount: 120 };
+  test('unqualified "was refunded"', () => {
+    expect(rq('Your $120 payment from Sep 12 was refunded.', ctx([full]))).toBe(false);
+    expect(rq('Your $120 payment from Sep 12 was refunded.', ctx([partial]))).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 has been refunded.', ctx([partial]))).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 was reversed.', ctx([partial]))).toBe(true);
+  });
+  test('explicitly partial wording (with the actual refund amount)', () => {
+    for (const r of ['Your $120 payment from Sep 12 was partially refunded.', 'Part of your $120 payment from Sep 12 was refunded.', '$30 of your $120 payment from Sep 12 was refunded.']) {
+      expect({ r, partialRow: rq(r, ctx([partial])) }).toEqual({ r, partialRow: false });
+      expect({ r, fullRow: rq(r, ctx([full])) }).toEqual({ r, fullRow: true });
+      expect({ r, plainRow: rq(r, ctx([base])) }).toEqual({ r, plainRow: true });
+    }
+    expect(rq('$50 of your $120 payment from Sep 12 was refunded.', ctx([partial]))).toBe(true); // wrong refund amount
+  });
+});
+
+// Codex round-17 P1 #2: bare "bank" and other tenders the customer names must not let a card row bind.
+describe('round-17: the customer\'s named tender decides the row, including bare bank / bill pay / non-card tenders', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const card = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const bank = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'us_bank_account' };
+  const REPLY = 'We received your $120 payment from Sep 12.';
+  const ask = (how) => `Did you get my $120 payment? I paid ${how}.`;
+
+  test.each(['through my bank', 'with my bank', 'using online banking', 'by bill pay', 'via online bill pay', 'by bank'])('bank-like "%s" binds bank/ACH rows, never a card row', (how) => {
+    expect(rq(REPLY, ctx([card]), ask(how))).toBe(true);
+    expect(rq(REPLY, ctx([bank]), ask(how))).toBe(false);
+    expect(rq(REPLY, ctx([card, bank]), ask(how))).toBe(false); // the bank row is the one that binds
+  });
+  test.each(['with Apple Pay', 'with Google Pay', 'by wire transfer', 'by money order', 'with a gift card', 'via Western Union', 'in bitcoin'])('non-card tender "%s" can never bind a card or bank row', (how) => {
+    expect(rq(REPLY, ctx([card]), ask(how))).toBe(true);
+    expect(rq(REPLY, ctx([bank]), ask(how))).toBe(true);
+  });
+  test('card brands and kinds still read as a card', () => {
+    for (const how of ['with my Visa', 'on my debit card', 'with a credit card', 'with my Mastercard', 'with Amex']) {
+      expect({ how, card: rq(REPLY, ctx([card]), ask(how)) }).toEqual({ how, card: false });
+      expect({ how, bank: rq(REPLY, ctx([bank]), ask(how)) }).toEqual({ how, bank: true });
+    }
+  });
+  test('an absence claim about the named tender is not contradicted by a row of another tender', () => {
+    expect(rq("We don't see a $120 payment from Sep 12 through your bank.", ctx([card]), ask('through my bank'))).toBe(false);
+    expect(rq("We don't see a $120 payment from Sep 12 through your bank.", ctx([bank]), ask('through my bank'))).toBe(true);
+  });
+});
+
+// Codex round-17 P1 #3: an anaphoric continuation inherits the row the previous payment clause bound.
+describe('round-17: "...but it was refunded" — continuations bind to the SAME row (shared by draft and send)', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c) => replyQuotesUngroundedAmount(r, c, { byMeaning: true });
+  const base = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const partial = { ...base, refund_status: 'partial', refund_amount: 30 };
+  const unrelatedRefunded = { amount: 45, status: 'refunded', payment_date: '2026-08-01', payment_method_type: 'card' };
+  const unrelatedFailed = { amount: 45, status: 'failed', payment_date: '2026-08-01', payment_method_type: 'card' };
+  const unrelatedProcessing = { amount: 45, status: 'processing', payment_date: '2026-08-01', payment_method_type: 'card' };
+  const R = 'We received your $120 payment from Sep 12';
+
+  test('the auditor case: paid row + an UNRELATED refunded row is ungrounded (was: grounded)', () => {
+    for (const joiner of [', but it was refunded.', ' but it was refunded.', ', however it was refunded.', ', and it was refunded.', '. However, that was refunded.', '. That was refunded.', ', but that was refunded.']) {
+      expect({ joiner, r: rq(`${R}${joiner}`, ctx([base, unrelatedRefunded])) }).toEqual({ joiner, r: true });
+    }
+  });
+  test('one row that is BOTH received and (partially) refunded grounds it — with the partial wording', () => {
+    for (const joiner of [', but it was partially refunded.', ', however it was partially refunded.', ', and part of it was refunded.', ', but $30 of it was refunded.']) {
+      expect({ joiner, r: rq(`${R}${joiner}`, ctx([partial])) }).toEqual({ joiner, r: false });
+      expect({ joiner, plain: rq(`${R}${joiner}`, ctx([base, unrelatedRefunded])) }).toEqual({ joiner, plain: true });
+    }
+    // unqualified "it was refunded" about a partially refunded row stays ungrounded (round-17 #1)
+    expect(rq(`${R}, but it was refunded.`, ctx([partial]))).toBe(true);
+  });
+  test('other continuation families bind to the antecedent row too', () => {
+    expect(rq('Your $120 payment from Sep 12 is still processing, but it failed.', ctx([{ ...base, status: 'processing' }, { ...base, status: 'failed' }]))).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 is processing, and it is processing.', ctx([{ ...base, status: 'processing' }]))).toBe(false);
+    expect(rq('Your $120 payment from Sep 12 failed, however it was refunded.', ctx([{ ...base, status: 'failed' }, unrelatedRefunded]))).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 is processing, but it failed.', ctx([{ ...base, status: 'processing' }, unrelatedFailed]))).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 failed, and it is still processing.', ctx([{ ...base, status: 'failed' }, unrelatedProcessing]))).toBe(true);
+  });
+  test('an anaphoric clause with NO antecedent is ungrounded', () => {
+    expect(rq('It was refunded.', ctx([unrelatedRefunded]))).toBe(true);
+    expect(rq('The payment was refunded.', ctx([unrelatedRefunded]))).toBe(true);
+    // a bare pronoun clause is read as a payment claim when the customer's message is about a payment
+    const asked = 'Did my payment go through?';
+    const rqAsked = (r, c) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage: asked });
+    expect(rqAsked('That failed.', ctx([unrelatedFailed]))).toBe(true);
+    expect(rqAsked('Thanks for your patience, it is still processing.', ctx([unrelatedProcessing]))).toBe(true);
+  });
+  test('non-anaphoric clauses (own figure / date / "your payment") are unchanged', () => {
+    expect(rq('Your payment was refunded.', ctx([unrelatedRefunded]))).toBe(false);
+    expect(rq('Your $45 payment from Aug 1 was refunded.', ctx([unrelatedRefunded]))).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12, but your $45 payment from Aug 1 was refunded.', ctx([base, unrelatedRefunded]))).toBe(false);
+  });
+  test('send time uses the same enumerator: "it failed" after a payment claim counts as a payment claim', () => {
+    const { enumeratePaymentClaims } = require('../services/sms-shadow-drafter');
+    expect(enumeratePaymentClaims('it failed', { paymentContext: true }).claims.map((c) => c.kind)).toEqual(['status']);
+    expect(enumeratePaymentClaims('it failed', {}).claims).toEqual([]);
   });
 });

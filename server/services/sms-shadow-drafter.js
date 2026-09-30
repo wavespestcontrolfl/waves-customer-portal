@@ -1395,12 +1395,42 @@ const TENDER_VOCABULARY = [
   // labelled this, so a Cash App claim can never bind (Codex round-10 P2).
   { word: 'cash app', label: 'Cash App', manual: false },
   { word: 'cash', label: 'Cash', manual: true },
+  // Codex round-17 P1: tenders a customer names that are NOT a card must never let a card row bind. Words
+  // with no paid-row equivalent get their OWN labels here (like Cash App): a claim naming one can never
+  // bind, and — because they resolve to a non-card label — a card row conflicts with them. Multi-word
+  // entries come first so the alternation never reads "gift card" as card or "wire transfer" as bank.
+  { word: 'gift card', label: 'Gift card', manual: false },
+  { word: 'apple pay', label: 'Apple Pay', manual: false },
+  { word: 'google pay', label: 'Google Pay', manual: false },
+  { word: 'samsung pay', label: 'Samsung Pay', manual: false },
+  { word: 'wire transfer', label: 'Wire', manual: false },
+  { word: 'wire', label: 'Wire', manual: false },
+  { word: 'money order', label: 'Money order', manual: false },
+  { word: 'western union', label: 'Western Union', manual: false },
+  { word: 'moneygram', label: 'MoneyGram', manual: false },
+  { word: 'bitcoin', label: 'Crypto', manual: false },
+  { word: 'crypto', label: 'Crypto', manual: false },
+  // card brands / card kinds all read as a card
+  { word: 'credit card', label: 'card', manual: false },
+  { word: 'debit card', label: 'card', manual: false },
+  { word: 'american express', label: 'card', manual: false },
+  { word: 'mastercard', label: 'card', manual: false },
+  { word: 'master card', label: 'card', manual: false },
+  { word: 'visa', label: 'card', manual: false },
+  { word: 'amex', label: 'card', manual: false },
   { word: 'card', label: 'card', manual: false },
   { word: 'ach', label: 'bank/ACH', manual: false },
   { word: 'bank transfer', label: 'bank/ACH', manual: false },
   { word: 'bank account', label: 'bank/ACH', manual: false },
   { word: 'bank payment', label: 'bank/ACH', manual: false },
   { word: 'bank draft', label: 'bank/ACH', manual: false },
+  // Codex round-17 P1: bare "bank" ("paid through my bank"), online banking and bill pay are the customer's
+  // bank sending money — bank/ACH. (After the multi-word bank entries so "bank transfer" wins.)
+  { word: 'online banking', label: 'bank/ACH', manual: false },
+  { word: 'online bill pay', label: 'bank/ACH', manual: false },
+  { word: 'bill pay', label: 'bank/ACH', manual: false },
+  { word: 'billpay', label: 'bank/ACH', manual: false },
+  { word: 'bank', label: 'bank/ACH', manual: false },
 ];
 const tenderLabelForWord = (word) => (
   TENDER_VOCABULARY.find((t) => t.word === String(word || '').toLowerCase().replace(/\s+/g, ' '))?.label || null
@@ -1591,7 +1621,11 @@ const isPartiallyRefunded = (p) => partialRefundCents(p) !== 0;
 // Round-16 P1: a partially-refunded paid row grounds a REFUNDED (partial) claim — by the payment's
 // amount or the refunded amount — and never a plain PAID claim ("your payment is paid" is conservative-false).
 const ABSENCE_FAMILIES = new Set(['not_found', 'not_received', 'unpaid']);
-function paymentRowCandidates({ family, amountCents, claimedDate, rows }) {
+// Round-17 P1: wording that explicitly says the refund was PARTIAL ("partially refunded", "part of your
+// payment was refunded", "$30 of your $120 payment was refunded").
+const PARTIAL_REFUND_WORDING_RE = /\b(?:partial(?:ly)?|part\s+of|portion\s+of|some\s+of)\b|\$\s?\d[\d,]*(?:\.\d+)?\s+of\s+(?:your|the|this|it|that)\b/i;
+const partialRefundWording = (text) => PARTIAL_REFUND_WORDING_RE.test(String(text || ''));
+function paymentRowCandidates({ family, amountCents, claimedDate, rows, partialWording = false, allowPartialPaid = false }) {
   const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
   const anyStatus = wanted.has(ANY_STATUS);
   const unknownCounts = ABSENCE_FAMILIES.has(family);
@@ -1599,9 +1633,12 @@ function paymentRowCandidates({ family, amountCents, claimedDate, rows }) {
   return rows.filter((p) => {
     if (!p) return false;
     const partial = isPartiallyRefunded(p);
+    // Round-17 P1: an unqualified "was refunded" binds only FULLY refunded rows; explicitly partial wording
+    // binds only a partially refunded row (with the actual refund amount) — never the other way round.
     const statusOk = (anyStatus || wanted.has(String(p.status || '').toLowerCase()) || (unknownCounts && !String(p.status || '').trim()))
-      && !(family === 'paid' && partial);
-    const partialOk = partial && reversalFamily;
+      && !(family === 'paid' && partial && !allowPartialPaid)
+      && !(reversalFamily && partialWording);
+    const partialOk = partial && reversalFamily && partialWording;
     if (!statusOk && !partialOk) return false;
     const amountOk = rowAmountMatches(p, amountCents)
       || (partialOk && amountCents != null && partialRefundCents(p) === amountCents);
@@ -1610,11 +1647,11 @@ function paymentRowCandidates({ family, amountCents, claimedDate, rows }) {
 }
 function bindPaymentRow({
   family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
-  inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null,
+  inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null, partialWording = false, allowPartialPaid = false,
 }) {
   if (requireDate && !claimedDate) return null;
   const candidates = paymentRowCandidates({
-    family, amountCents, claimedDate, rows: rows || context?.billing?.recentPayments || [],
+    family, amountCents, claimedDate, rows: rows || context?.billing?.recentPayments || [], partialWording, allowPartialPaid,
   });
   // Codex round-6 pre-push audit P1 (reverse direction): the customer's message
   // is about a payment but NO tender could be extracted from it or the reply,
@@ -1702,6 +1739,14 @@ function buildGroundingEnv(reply, context, opts) {
     // identity, never used to relax what the clause itself states.
     inboundText: String(opts.inboundMessage || ''),
     trustOwedAmounts: !!opts.trustOwedAmounts,
+    // Cross-clause payment identity (Codex round-17 P1): the row bound by the previous payment clause of
+    // THIS reply (the antecedent of "...but it was refunded"), and whether an earlier clause already
+    // made a payment claim (so a bare "it failed" is read as a payment claim, not ignored).
+    antecedent: null,
+    paymentContext: false,
+    // the reply itself says (in some clause) that a refund was PARTIAL — the only case where "received"
+    // may bind a partially refunded row (that clause is validated on its own, against the same row)
+    partialRefundDisclosed: text.split(CLAUSE_SPLIT_RE).some((clause) => partialRefundWording(clause) && /refund/i.test(clause)),
     replyAmounts: amountCentsIn(text),
     // A zero-balance claim ("Your balance is zero.") reads as price grammar but states no price — the gate is
     // evaluated with ONLY that span blanked (anything else in the clause still trips it; Codex round-17 P1).
@@ -1737,7 +1782,7 @@ function detectPaymentClaims(masked, hasAmounts, env) {
   const settle = howTo ? [] : spansOf(SETTLEMENT_PHRASE_RE, text).filter((sp) => !insideQuestion(text, sp.start));
   if (settle.length) { claims.push({ kind: 'settlement' }); spans.push(...settle); settlementSpans = settle; }
   // 2. STATUS families / absence / unpaid — every phrase, every family.
-  const { negated, matches } = paymentStatusPhraseMatches(text, hasAmounts || inboundNamesPayment(env.inboundText));
+  const { negated, matches } = paymentStatusPhraseMatches(text, hasAmounts || inboundNamesPayment(env.inboundText) || !!env.paymentContext);
   if (negated) claims.unshift({ kind: 'negated' });
   for (const family of [...new Set(matches.map((m) => m.family))]) {
     claims.push({ kind: familyClaimKind(family), family });
@@ -1837,7 +1882,20 @@ function validateAck(c, env) {
   if (c.amounts.some((a) => !env.paidCents.has(a))) return true;
   const binding = claimBinding(c, env);
   if (!binding) return true;
-  return c.amounts.some((a) => !bindPaymentRow({ family: 'paid', amountCents: a, context: env.context, ...binding }));
+  // a partially refunded row may back "received" ONLY when the same reply itself discloses the partial refund
+  return bindAllTargets(c.amounts, env, (a) => bindPaymentRow({ family: 'paid', amountCents: a, context: env.context, ...binding, allowPartialPaid: env.partialRefundDisclosed }));
+}
+// Every target must bind; the FIRST bound row becomes the clause's payment identity for a later
+// anaphoric clause ("...but it was refunded") — Codex round-17 P1. true = ungrounded.
+function bindAllTargets(targets, env, bind) {
+  let first = null;
+  for (const a of targets) {
+    const row = bind(a);
+    if (!row) return true;
+    first = first || row;
+  }
+  env.antecedent = first;
+  return false;
 }
 // Processing / failed / refunded / disputed / reversed: each needs a CURRENT
 // row of the family's status matching the same identity rules as a receipt.
@@ -1845,8 +1903,10 @@ function validateStatusClaim(c, env) {
   if (env.billingUnavailable) return true;
   const binding = claimBinding(c, env);
   if (!binding) return true;
-  return claimTargets(c.amounts, env)
-    .some((a) => !bindPaymentRow({ family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false }));
+  const partialWording = partialRefundWording(c.text);
+  return bindAllTargets(claimTargets(c.amounts, env), env, (a) => bindPaymentRow({
+    family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false, partialWording,
+  }));
 }
 // Absence ("isn't showing", "haven't received"): judged against the
 // AUTHORITATIVE history (billing.paymentHistory — every own payment, any
@@ -1910,6 +1970,30 @@ const KIND_VALIDATORS = {
   none: () => false,
 };
 
+// Codex round-17 P1: a clause whose payment SUBJECT is a pronoun / anaphor ("it was refunded", "that
+// failed", "the payment was refunded") carries no payment identity of its own — no figure, date, tender
+// or possessive payment noun. It INHERITS the row the previous payment clause of the reply bound to, and
+// must be true of THAT row; with no antecedent it is ungrounded. (So "We received your $120 payment from
+// Sep 12, but it was refunded" needs ONE row that is both — never any unrelated refunded row.)
+const ANAPHOR_SUBJECT_RE = /\b(?:it|they)\b|\b(?:that|this)(?:\s+one)?\s+(?:was|is|has|had|failed|went|got|did|still|isn't|wasn't|hasn't|didn't)\b|\bthe\s+(?:payment|charge|transfer|deposit)\b/i;
+const OWN_PAYMENT_NOUN_RE = /\b(?:your|our|my)\s+(?:[\w$.,']+\s+){0,2}(?:payments?|charges?|transfers?|deposits?|checks?|refunds?)\b/i;
+const ANAPHORIC_KINDS = new Set(['status', 'ack', 'absence', 'unpaid', 'negated_ack']);
+function isAnaphoricPaymentClause(text, amounts) {
+  if (amounts.length) return false;
+  if (parseClaimedPaymentDate(text)) return false;
+  if (tenderLabelsIn(text).size) return false;
+  if (OWN_PAYMENT_NOUN_RE.test(text)) return false;
+  return ANAPHOR_SUBJECT_RE.test(text);
+}
+function validateAnaphoricClaim(claim, text, env) {
+  const row = env.antecedent;
+  if (!row) return true;
+  if (claim.kind === 'status') {
+    return paymentRowCandidates({ family: claim.family, amountCents: null, claimedDate: null, rows: [row], partialWording: partialRefundWording(text) }).length === 0;
+  }
+  if (claim.kind === 'ack') return paymentRowCandidates({ family: 'paid', amountCents: null, claimedDate: null, rows: [row] }).length === 0;
+  return true; // absence / unpaid / negated ack cannot be asserted about an inherited row
+}
 function clauseUngrounded(clause, env) {
   const { claims, spans, negated, amounts, masked, text } = enumeratePaymentClaims(clause, env);
   // Price grammar left once readable figures (and any zero-balance span) are masked is a price the
@@ -1918,8 +2002,13 @@ function clauseUngrounded(clause, env) {
   if (!claims.length) return false;
   // Every claim validates on its own binder; ANY ungrounded claim fails the clause.
   const presence = [];
+  const anaphoric = isAnaphoricPaymentClause(text, amounts);
   for (const claim of claims) {
     if (claim.kind === 'negated') return true;
+    if (anaphoric && ANAPHORIC_KINDS.has(claim.kind)) {
+      if (validateAnaphoricClaim(claim, text, env)) return true;
+      continue;
+    }
     const figures = claim.kind === 'owed_figures' ? owedFigureCents(masked, amounts) : null;
     if (KIND_VALIDATORS[claim.kind]({ ...claim, text, amounts: claim.zero ? [] : (figures || amounts) }, env)) return true;
     if (claim.kind === 'status' && PRESENCE_FAMILIES.has(claim.family)) presence.push(claim.family);
@@ -1930,6 +2019,7 @@ function clauseUngrounded(clause, env) {
     const sets = presence.map((f) => new Set(PAYMENT_STATUS_VOCABULARY[f].rowStatuses));
     if (![...sets[0]].some((st) => sets.every((set) => set.has(st)))) return true;
   }
+  env.paymentContext = true;
   // Blank every validated span: the remainder must assert nothing more, else fail closed.
   if (negated) return true;
   let remainder = masked;
@@ -1943,7 +2033,11 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   if (env.priceGrammarFires && env.replyAmounts.length === 0) return true;
   // Gate OFF: the original pooled allowlist — any authoritative figure passes.
   if (!env.realAnswers) return env.replyAmounts.some((a) => !env.owedCents.has(a) && !env.paidCents.has(a));
-  return env.text.split(CLAUSE_SPLIT_RE).some((clause) => clauseUngrounded(clause, env));
+  // In order, one shared env: earlier clauses set the payment identity later (anaphoric) clauses inherit.
+  for (const clause of env.text.split(CLAUSE_SPLIT_RE)) {
+    if (clauseUngrounded(clause, env)) return true;
+  }
+  return false;
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
