@@ -82,6 +82,16 @@ async function createScratchDb() {
     user_agent text,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);
+  // B10: the collections dispute hold the automatic (sweep) charge honors.
+  await db.raw(`CREATE TABLE collections_flags (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid NOT NULL,
+    flag varchar(40) NOT NULL,
+    reason text,
+    created_by varchar(80),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    released_at timestamptz
+  )`);
   await require('../models/migrations/20260925000005_termite_annual_signature_charge').up(db);
   return { db, schema, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
@@ -448,6 +458,39 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     expect(await run()).toMatchObject({ status: 'deferred', deliverPayLink: false });
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     expect(await chargeState(db)).toBeNull();
+  });
+
+  test('B10: the daily SWEEP honors an active collections dispute hold — nothing charged, no link, claim released; charges once the hold is released', async () => {
+    const { run, chargeInvoiceWithSavedCard, notifyAdmin, db } = load();
+    await db('collections_flags').insert({ customer_id: ids.customerId, flag: 'collection_hold', reason: 'dispute on call' });
+
+    expect(await run({ trigger: 'sweep' })).toMatchObject({ status: 'deferred', reason: 'collection_hold', deliverPayLink: false });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalled();
+    expect(await chargeState(db)).toBeNull();
+
+    // Releasing the hold re-enables the very same claim on the next sweep.
+    await db('collections_flags').where({ customer_id: ids.customerId }).update({ released_at: db.fn.now() });
+    expect(await run({ trigger: 'sweep' })).toMatchObject({ status: 'paid', deliverPayLink: false });
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ refuseWhenCollectionHold: true });
+  });
+
+  test('B10: the sweep fails closed when the hold lookup fails — nothing charged, claim released', async () => {
+    const { run, chargeInvoiceWithSavedCard, db } = load();
+    await db.raw('DROP TABLE collections_flags');
+
+    expect(await run({ trigger: 'sweep' })).toMatchObject({ status: 'deferred', reason: 'collection_hold', deliverPayLink: false });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(await chargeState(db)).toBeNull();
+  });
+
+  test('B10: the signature-time charge answers the customer\'s own signing and is NOT held back (no hold flag on the call)', async () => {
+    const { run, chargeInvoiceWithSavedCard, db } = load();
+    await db('collections_flags').insert({ customer_id: ids.customerId, flag: 'collection_hold', reason: 'dispute on call' });
+
+    expect(await run({ trigger: 'signature' })).toMatchObject({ status: 'paid' });
+    expect(chargeInvoiceWithSavedCard.mock.calls[0][2].refuseWhenCollectionHold).toBeUndefined();
   });
 
   test('a fresh claim held by another executor is left alone — no charge, no link, no false-alarm bell', async () => {

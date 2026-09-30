@@ -28,7 +28,9 @@ function makeFakeDb(tables, { failTable = null } = {}) {
     q.first = async () => { if (failTable === name) throw new Error('db down'); return rows()[0]; };
     return q;
   };
-  return jest.fn((name) => build(name));
+  const fake = jest.fn((name) => build(name));
+  fake.raw = jest.fn(async () => ({}));
+  return fake;
 }
 
 const HOLD = { id: 'f1', customer_id: 'cust-1', flag: 'collection_hold', released_at: null };
@@ -189,6 +191,7 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
   // are real-shaped; collections_flags is the state under test.
   function setup({ holdRows, holdThrows = false }) {
     jest.resetModules();
+    const events = [];
     // doMock registrations outlive resetModules — drop the sweep block's fake.
     jest.dontMock('../services/stripe');
     let chargeAttempt = null;
@@ -205,6 +208,7 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
         if (table === 'payment_methods') return card;
         if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
         if (table === 'collections_flags') {
+          events.push('flags-read');
           if (holdThrows) throw new Error('flags table unreadable');
           return holdRows[0];
         }
@@ -225,14 +229,14 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
     });
     db.transaction = jest.fn(async (callback) => callback(db));
     db.fn = { now: jest.fn(() => 'NOW') };
-    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.raw = jest.fn((sql, bindings) => { events.push(`raw:${sql}`); return { sql, bindings }; });
     const stripeClient = { paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn(async () => { throw new Error('REACHED_STRIPE'); }) } };
     jest.doMock('../models/db', () => db);
     jest.doMock('stripe', () => jest.fn(() => stripeClient));
     jest.doMock('../config', () => ({}));
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
     jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
-    return { StripeService: require('../services/stripe'), stripeClient };
+    return { StripeService: require('../services/stripe'), stripeClient, events, db };
   }
 
   test('an active dispute hold refuses the charge before Stripe (INVOICE_COLLECTION_STOPPED)', async () => {
@@ -254,6 +258,30 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
     await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenDunningStopped: true }))
       .rejects.toThrow('flags table unreadable');
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('refuseWhenCollectionHold alone (completion lanes) refuses on a hold and never reads the follow-up sequence', async () => {
+    const { StripeService, stripeClient, db } = setup({ holdRows: [{ ...HOLD }] });
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenCollectionHold: true }))
+      .rejects.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED', message: expect.stringContaining('billing dispute') });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(db.mock.calls.map((c) => c[0])).not.toContain('invoice_followup_sequences');
+  });
+
+  test('refuseWhenCollectionHold alone lets a clean customer through to Stripe', async () => {
+    const { StripeService, stripeClient } = setup({ holdRows: [] });
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenCollectionHold: true }))
+      .rejects.not.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED' });
+    expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+  });
+
+  test('P0 ordering: the customer hold lock is taken BEFORE the hold is read, and before Stripe', async () => {
+    const { StripeService, events } = setup({ holdRows: [] });
+    await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenCollectionHold: true }).catch(() => {});
+    const lockAt = events.findIndex((e) => e.startsWith('raw:SELECT pg_advisory_xact_lock_shared'));
+    const readAt = events.indexOf('flags-read');
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(readAt).toBeGreaterThan(lockAt);
   });
 
   test('callers that did not opt in (admin charge-card) are unchanged by a hold', async () => {
@@ -293,5 +321,48 @@ describe('applyAccountCreditToInvoice (refuseWhenDunningStopped) honors the hold
     let outcome;
     try { outcome = await credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenDunningStopped: true }, trx); } catch (e) { outcome = { threw: e.message }; }
     expect(outcome).not.toEqual({ applied: 0, skipped: 'dunning_stopped' });
+  });
+});
+
+describe('applyAccountCreditToInvoice refuseWhenCollectionHold (hold only)', () => {
+  test('refuses on a hold without reading the follow-up sequence, and takes the shared lock first', async () => {
+    jest.resetModules();
+    const tables = { invoices: [{ id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '50.00', credit_applied: '0' }], invoice_followup_sequences: [], collections_flags: [{ ...HOLD }] };
+    jest.doMock('../models/db', () => makeFakeDb(tables));
+    const trx = makeFakeDb(tables);
+    const credit = require('../services/customer-credit');
+    await expect(credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenCollectionHold: true }, trx))
+      .resolves.toEqual({ applied: 0, skipped: 'dunning_stopped' });
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock_shared'), ['collections_hold:cust-1']);
+    expect(trx.mock.calls.map((c) => c[0])).not.toContain('invoice_followup_sequences');
+  });
+});
+
+describe('completion route wiring (complete-scheduled-service.js)', () => {
+  // The completion handler is too large to drive in a unit test; pin the two
+  // automatic money calls it makes to the hold guard, on EVERY lane.
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+
+  test('the automatic account-credit apply asks for the hold guard on every lane', () => {
+    const i = src.indexOf('const creditResult = await applyAccountCreditToInvoice({');
+    expect(i).toBeGreaterThan(0);
+    const end = src.indexOf('if (creditResult?.applied > 0)', i);
+    const call = src.slice(i, end);
+    // Top level of the options object (after the lane spreads), not inside one.
+    expect(call).toMatch(/\} : \{\}\),\s*(\/\/[^\n]*\n\s*)*refuseWhenCollectionHold: true,\s*\}\);/);
+  });
+
+  test('the automatic completion charge asks for the hold guard on every lane; the stopped-sequence guard stays extended-lane only', () => {
+    const i = src.indexOf('await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {');
+    expect(i).toBeGreaterThan(0);
+    const call = src.slice(i, i + 9000);
+    const holdAt = call.indexOf('refuseWhenCollectionHold: true');
+    const stoppedAt = call.indexOf('refuseWhenDunningStopped: true');
+    expect(holdAt).toBeGreaterThan(0);
+    expect(holdAt).toBeLessThan(call.indexOf('maxAuthorizedSubtotal: capCeiling'));
+    // still inside the extendedAutopayCharge spread
+    expect(call.slice(0, stoppedAt)).toMatch(/\.\.\.\(extendedAutopayCharge \? \{[^}]*$/s);
   });
 });

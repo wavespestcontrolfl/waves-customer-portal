@@ -916,6 +916,10 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
       // (pre-push r13 P0; creation-time counterpart lives in
       // appointment-card-request.js).
       requireNoAppointmentCardLane: true,
+      // Automatic completion charge: an active collections dispute hold
+      // (B10) refuses it under the charge locks; the generic pre-charge
+      // failure path below leaves the hold 'held' for the office.
+      refuseWhenCollectionHold: true,
     });
     // Account credit fully covered the invoice inside the charge call — no card
     // was charged; release the hold cleanly rather than claim a phantom charge.

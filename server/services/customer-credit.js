@@ -11,7 +11,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { customerHasActiveCollectionHold } = require('./collections/collection-hold');
+const { customerHasActiveCollectionHoldLocked } = require('./collections/collection-hold');
 
 const VALID_SOURCES = Object.freeze([
   'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
@@ -247,7 +247,7 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
   return row?.auto_apply_account_credit === true;
 }
 
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -286,12 +286,16 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
       if (seq && String(seq.status || '').toLowerCase() === 'stopped') {
         return { applied: 0, skipped: 'dunning_stopped' };
       }
-      // Active collections collection_hold (dispute raised on a collections
-      // call, B10) stops credit consumption too. A lookup failure throws
-      // (fail closed — nothing consumed).
-      if (await customerHasActiveCollectionHold(invoice.customer_id, t)) {
-        return { applied: 0, skipped: 'dunning_stopped' };
-      }
+    }
+    // Active collections collection_hold (dispute raised on a collections
+    // call, B10) stops credit consumption too — implied by
+    // refuseWhenDunningStopped, or asked for alone via
+    // refuseWhenCollectionHold. Shared hold lock first, then the read (see
+    // collections/collection-hold.js); a lookup failure throws (fail closed
+    // — nothing consumed).
+    if ((refuseWhenDunningStopped || refuseWhenCollectionHold)
+      && await customerHasActiveCollectionHoldLocked(t, invoice.customer_id)) {
+      return { applied: 0, skipped: 'dunning_stopped' };
     }
     // Live payer SERIALIZED with the credit apply (Codex #3153 r21 P1):
     // payer assignment updates scheduled_services while a reused invoice

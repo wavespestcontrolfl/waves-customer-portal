@@ -2128,6 +2128,25 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     await stampSweepDeferred(successor, conn);
     return { status: 'deferred', reason: 'saved_method_unavailable' };
   }
+  // An active collections dispute hold (collection_hold, B10) stops this
+  // automatic charge. Nothing has been attempted, so it defers exactly like
+  // an unavailable saved method (bell + sweep-deferred stamp) and the sweep
+  // retries after the office releases the hold. A lookup failure reads as
+  // held (fail closed). The binding recheck under the charge's own locks is
+  // refuseWhenCollectionHold in submitCharge.
+  {
+    let held = true;
+    try {
+      held = await require('./collections/collection-hold').customerHasActiveCollectionHold(successor.customer_id, conn);
+    } catch (err) {
+      logger.warn(`[termite-annual-renewal] collection-hold lookup failed for term ${successor.id} — deferring: ${err.message}`);
+    }
+    if (held) {
+      await ringRenewalBell(successor, 'ineligible', 'the customer has an active collections billing hold (or it could not be checked); the charge will be retried after the office releases it');
+      await stampSweepDeferred(successor, conn);
+      return { status: 'deferred', reason: 'collection_hold' };
+    }
+  }
   if (!method) {
     await deliverInvoiceAndStampSkip(successor, 'no_method', 'No consented, chargeable saved payment method was found on file.', conn);
     return { status: 'no_method' };
@@ -2171,6 +2190,10 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     ...ceiling.options,
     requireAutopayForCustomerId: successor.customer_id,
     requireSelfPayCustomerId: successor.customer_id,
+    // Automatic renewal charge: an active collections dispute hold (B10)
+    // refuses it under the charge locks (decideAndCharge also defers ahead
+    // of the fence claim, so this is the binding race backstop).
+    refuseWhenCollectionHold: true,
     // Codex #4971 r29 P1: the gate's liveness is re-asserted INSIDE the
     // saved-card flow too — before its credit apply and before its Stripe
     // submission — not only at this closure's entry.

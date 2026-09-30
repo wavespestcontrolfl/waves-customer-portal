@@ -52,7 +52,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], paymentPlans = [], completionAttempts = [], estimates = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], collectionFlags = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], paymentPlans = [], completionAttempts = [], estimates = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [], cardHolds: [] };
   // the payment-pending hold query (getPaymentPendingCustomerIds) is the
   // only annual_prepay_terms query that JOINs invoices — route it to its
@@ -73,6 +73,8 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'payment_methods') return chain(paymentMethods, []);
     if (table === 'appointment_card_requests') return chain(apptCardRequests, []);
     if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
+    // B10: collections_flags collection_hold (extended-lane preflight)
+    if (table === 'collections_flags') return chain(collectionFlags, []);
     if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
     // the cap verdict reads the linked estimate's frozen setup fee
     if (table === 'estimates') return chain(estimates, []);
@@ -415,6 +417,16 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       dunningSequences: [{ status: 'stopped' }],
     });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('B10: an active collections dispute hold means the extended lane will not charge → stays exempt; other lanes keep the (conservative) warning', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }],
+      collectionFlags: [{ id: 'f1', flag: 'collection_hold' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
   test("a dying or missing Auto Pay method never proves its own warning unnecessary — the visit stays chargeable", async () => {

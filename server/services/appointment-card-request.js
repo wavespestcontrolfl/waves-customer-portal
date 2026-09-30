@@ -3520,6 +3520,9 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
         requireAutopayForCustomerId: svc.customer_id,
         requireSelfPayScheduledServiceId: scheduledServiceId,
         requireOneTimeLane: true,
+        // Automatic charge: an active collections dispute hold (B10)
+        // refuses it under the charge locks -> charge_failed office review.
+        refuseWhenCollectionHold: true,
       });
     } catch (err) {
       logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);

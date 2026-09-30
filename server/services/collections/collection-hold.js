@@ -18,6 +18,16 @@
  * next attempt. Rows written before this change are honored as-is — no
  * backfill, no migration.
  *
+ * SERIALIZATION with the hold writer: a plain read cannot order a charge
+ * against a hold committing a moment later (the flag is an INSERT, so there
+ * is no row to FOR UPDATE). Both sides therefore take a per-customer
+ * transaction-scoped advisory lock: the charge / credit paths take it SHARED
+ * (concurrent charges do not queue behind each other) and hold it through
+ * their whole transaction, Stripe call included; outbound-voice/flags.js
+ * writeFlag takes it EXCLUSIVE around the collection_hold insert. A hold
+ * that commits before the charge locks is seen by the check that follows the
+ * lock; one that arrives later waits until the charge transaction ends.
+ *
  * Every function here THROWS on a read failure and never swallows it: callers
  * treat a thrown lookup as "cannot prove there is no hold" and refuse.
  */
@@ -33,6 +43,22 @@ async function customerHasActiveCollectionHold(customerId, database = db) {
     .whereNull('released_at')
     .first('id');
   return !!row;
+}
+
+const lockKey = (customerId) => `collections_hold:${customerId}`;
+
+// Writer side (flags.writeFlag, collection_hold only). Blocks while any
+// charge transaction for the customer is in flight.
+async function lockCustomerHoldExclusive(trx, customerId) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [lockKey(customerId)]);
+}
+
+// Charge / credit side: take the shared lock FIRST, then read. Held until
+// the surrounding transaction ends. Returns true when a hold is active.
+async function customerHasActiveCollectionHoldLocked(trx, customerId) {
+  if (!customerId) return false;
+  await trx.raw('SELECT pg_advisory_xact_lock_shared(hashtextextended(?, 0))', [lockKey(customerId)]);
+  return customerHasActiveCollectionHold(customerId, trx);
 }
 
 // Set of (stringified) invoice ids whose customer has an active hold.
@@ -52,4 +78,10 @@ async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
   return new Set(invoices.filter((r) => r.customer_id && held.has(String(r.customer_id))).map((r) => String(r.id)));
 }
 
-module.exports = { HOLD_FLAG, customerHasActiveCollectionHold, collectionHoldInvoiceIds };
+module.exports = {
+  HOLD_FLAG,
+  customerHasActiveCollectionHold,
+  customerHasActiveCollectionHoldLocked,
+  lockCustomerHoldExclusive,
+  collectionHoldInvoiceIds,
+};

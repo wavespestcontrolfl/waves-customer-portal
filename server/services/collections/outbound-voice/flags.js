@@ -16,16 +16,32 @@
 
 const db = require('../../../models/db');
 const logger = require('../../logger');
+const { HOLD_FLAG, lockCustomerHoldExclusive } = require('../collection-hold');
 
 async function writeFlag({ customerId, flag, reason, createdBy = 'system:collections_voice' }) {
   if (!customerId || !flag) return { ok: false, reason: 'missing_args' };
+  const row = {
+    customer_id: customerId,
+    flag,
+    reason: reason ? String(reason).slice(0, 500) : null,
+    created_by: createdBy,
+  };
   try {
-    await db('collections_flags').insert({
-      customer_id: customerId,
-      flag,
-      reason: reason ? String(reason).slice(0, 500) : null,
-      created_by: createdBy,
-    });
+    if (flag === HOLD_FLAG) {
+      // The hold stops off-session charges (B10). Serialize the insert with
+      // in-flight charges: the charge paths hold a shared per-customer
+      // advisory lock through their transaction, so this waits for any
+      // charge already past its hold check and is seen by every later one.
+      // A wait longer than the timeout fails the write (write_failed), the
+      // same signal callers already handle as "hold not durable".
+      await db.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '20s'");
+        await lockCustomerHoldExclusive(trx, customerId);
+        await trx('collections_flags').insert(row);
+      });
+    } else {
+      await db('collections_flags').insert(row);
+    }
     return { ok: true, created: true };
   } catch (err) {
     // Unique-violation = the flag is already active — success by intent.

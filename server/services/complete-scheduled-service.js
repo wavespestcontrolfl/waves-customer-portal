@@ -11114,6 +11114,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // flip, or coverage stamp racing this window consumes nothing.
             requireExtendedCompletionAnchor: true,
           } : {}),
+          // An active collections dispute hold (collection_hold, B10) stops
+          // automatic credit on EVERY completion lane, not just the extended
+          // one. Hold ONLY: a stopped follow-up sequence keeps its existing
+          // lane-scoped semantics (refuseWhenDunningStopped, extended lane).
+          refuseWhenCollectionHold: true,
         });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })
@@ -11256,6 +11261,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // crash/block anywhere before the combined text delivers leaves
           // the job to send the classic receipt when it comes due.
           await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {
+            // An active collections dispute hold (collection_hold, B10) stops
+            // the automatic charge on EVERY completion lane (per-application,
+            // appointment-card, extended). Hold ONLY — the stopped-sequence
+            // check stays extended-lane-only below. Refusal throws
+            // INVOICE_COLLECTION_STOPPED (no decline facts, so no payment-
+            // failed text) and the pay-link fallback is unchanged.
+            refuseWhenCollectionHold: true,
             // Atomic re-enforcement of the SAME ceiling the preflight above
             // validated (Codex #3153 r7 P0): the charge service re-checks it
             // against the LOCKED invoice, so an invoice edit racing this

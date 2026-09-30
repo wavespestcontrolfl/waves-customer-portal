@@ -3,7 +3,7 @@ const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
-const { customerHasActiveCollectionHold } = require('./collections/collection-hold');
+const { customerHasActiveCollectionHoldLocked } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
@@ -2060,7 +2060,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2222,16 +2222,22 @@ const StripeService = {
               code: 'INVOICE_COLLECTION_STOPPED',
             });
           }
-          // A dispute raised on a collections call (collections_flags
-          // collection_hold, customer-level) is the same instruction: the
-          // customer was told all billing follow-up is on hold (B10). Read
-          // inside this transaction; a lookup failure throws and rolls the
-          // charge back (fail closed).
-          if (await customerHasActiveCollectionHold(lockedInvoice.customer_id, trx)) {
-            throw Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), {
-              code: 'INVOICE_COLLECTION_STOPPED',
-            });
-          }
+        }
+        // A dispute raised on a collections call (collections_flags
+        // collection_hold, customer-level) is the same instruction: the
+        // customer was told all billing follow-up is on hold (B10). Implied
+        // by refuseWhenDunningStopped; refuseWhenCollectionHold asks for the
+        // hold alone (automatic lanes that do not honor a stopped sequence).
+        // The customer's shared hold lock is taken BEFORE the read and kept
+        // to the end of this transaction (Stripe call included), so a hold
+        // cannot commit between check and charge — see
+        // collections/collection-hold.js. A lookup failure throws and rolls
+        // the charge back (fail closed).
+        if ((refuseWhenDunningStopped || refuseWhenCollectionHold)
+          && await customerHasActiveCollectionHoldLocked(trx, lockedInvoice.customer_id)) {
+          throw Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), {
+            code: 'INVOICE_COLLECTION_STOPPED',
+          });
         }
         // Auto Pay SERIALIZED with the charge (Codex #3153 r13 P1): the
         // callers' boundary snapshots leave an interval a pause/opt-out

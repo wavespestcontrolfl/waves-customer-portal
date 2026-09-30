@@ -232,6 +232,8 @@ function classifyChargeError(err) {
   // A payer assigned after the mint: the homeowner's card must not pay it,
   // and neither may the homeowner's pay link — staff route it.
   if (err?.code === 'PAYER_BILLED_GUARD') return { status: 'deferred', reason: 'payer_billed_guard' };
+  // Collections dispute hold (B10): held for staff, never a decline and never a pay link.
+  if (err?.code === 'INVOICE_COLLECTION_STOPPED') return { status: 'deferred', reason: 'collection_hold' };
   // A 3DS step-up leaves the off-session intent alive in requires_action —
   // a pay link beside it would be a second collection rail.
   if (err?.wavesCardDecline?.declineCode === 'authentication_required') return { status: 'ambiguous', reason: 'authentication_required' };
@@ -260,6 +262,25 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
   if (!invoice) return { status: 'skipped', reason: 'invoice_missing' };
   if (invoice.payer_statement_id) return { status: 'payer_routed', reason: 'payer_statement' };
   if (invoice.payer_id) return { status: 'skipped', reason: 'payer_billed' };
+
+  // Automatic (sweep) charges honor an active collections dispute hold
+  // (B10); the signature-time charge answers the customer's own signing and
+  // does not. Nothing has been attempted, so the claim is released and the
+  // daily sweep retries once the office releases the hold. A lookup failure
+  // reads as held (fail closed). The binding recheck under the charge's own
+  // locks is refuseWhenCollectionHold below.
+  if (trigger !== 'signature') {
+    let held = true;
+    try {
+      held = await require('./collections/collection-hold').customerHasActiveCollectionHold(invoice.customer_id, conn);
+    } catch (err) {
+      logger.warn(`[termite-annual-charge] collection-hold lookup failed for estimate ${ctx.estimateId} — not charging: ${err.message}`);
+    }
+    if (held) {
+      await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold (or it could not be checked); the daily sweep will retry once the office releases it' });
+      return { release: true, reason: 'collection_hold' };
+    }
+  }
 
   let frozen;
   try {
@@ -343,6 +364,10 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
       // Serialize against an Auto Pay pause/opt-out committing mid-charge.
       requireAutopayForCustomerId: invoice.customer_id,
       requireSelfPayCustomerId: invoice.customer_id,
+      // The daily sweep is machine-initiated: an active collections dispute
+      // hold (B10) refuses it. The signature-time charge answers the
+      // customer's own signing and is left alone.
+      ...(trigger === 'signature' ? {} : { refuseWhenCollectionHold: true }),
     });
   } catch (err) {
     return classifyChargeError(err);
@@ -392,7 +417,7 @@ async function chargeAnnualInvoiceAtSignature({
     const outcome = await runClaimedCharge({ conn, ctx, trigger });
     if (outcome.release) {
       await releaseClaim(conn, estimateId, claimToken);
-      return { status: 'deferred', reason: 'consent_record_failed', deliverPayLink: false };
+      return { status: 'deferred', reason: outcome.reason || 'consent_record_failed', deliverPayLink: false };
     }
     const { belled, ...recorded } = outcome;
     await resolveClaim(conn, estimateId, claimToken, recorded);

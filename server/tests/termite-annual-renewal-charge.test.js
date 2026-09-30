@@ -33,6 +33,8 @@ describe('termite annual renewal charge', () => {
     // re-resolves the payer first. Default: self-pay (no payer assigned);
     // the payer tests override this.
     jest.doMock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
+    // B10: no collections dispute hold by default; the hold tests override.
+    jest.doMock('../services/collections/collection-hold', () => ({ customerHasActiveCollectionHold: jest.fn(async () => false) }));
     jest.doMock('../models/db', () => {
       const dbFn = jest.fn();
       dbFn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -1527,6 +1529,48 @@ describe('termite annual renewal charge', () => {
 
       expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
       expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'no_consent' }));
+    });
+
+    test('B10: an active collections dispute hold defers the renewal charge — no quote, no fence, no Stripe call, sweep-deferred stamp', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail: jest.fn(async () => ({ ok: true })) }));
+      jest.doMock('../services/recurring-card-on-file', () => ({
+        resolvePrepayChargeMethod: jest.fn(async () => ({ paymentMethodRowId: 'pm-row-1', methodType: 'card' })),
+      }));
+      const chargeInvoiceWithSavedCard = jest.fn();
+      const quoteInvoiceSavedCardCharge = jest.fn();
+      jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      jest.doMock('../services/collections/collection-hold', () => ({ customerHasActiveCollectionHold: jest.fn(async () => true) }));
+      const { conn, deferredUpdate } = makeClaimConn();
+      const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
+
+      expect(outcome).toEqual({ status: 'deferred', reason: 'collection_hold' });
+      expect(quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(deferredUpdate).toHaveBeenCalled();
+    });
+
+    test('B10: a collection-hold lookup failure fails closed — deferred, never charged', async () => {
+      mockCommon();
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail: jest.fn(async () => ({ ok: true })) }));
+      jest.doMock('../services/recurring-card-on-file', () => ({
+        resolvePrepayChargeMethod: jest.fn(async () => ({ paymentMethodRowId: 'pm-row-1', methodType: 'card' })),
+      }));
+      const chargeInvoiceWithSavedCard = jest.fn();
+      jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge: jest.fn() }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      jest.doMock('../services/collections/collection-hold', () => ({ customerHasActiveCollectionHold: jest.fn(async () => { throw new Error('flags unreadable'); }) }));
+      const { conn } = makeClaimConn();
+      const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
+
+      expect(outcome).toEqual({ status: 'deferred', reason: 'collection_hold' });
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     });
 
     test('consent present but no chargeable saved method -> invoice + bell, no Stripe call', async () => {

@@ -44,3 +44,22 @@ test('activeFlags lists unreleased rows oldest first', async () => {
   expect(q.orderBy).toHaveBeenCalledWith('created_at', 'asc');
   expect(await activeFlags(null)).toEqual([]);
 });
+
+test('B10: a collection_hold write takes the per-customer exclusive lock inside a transaction BEFORE the insert; other flags stay a plain insert', async () => {
+  const order = [];
+  const trxInsert = jest.fn(async () => { order.push('insert'); return [1]; });
+  const trx = jest.fn(() => ({ insert: trxInsert }));
+  trx.raw = jest.fn(async (sql) => { order.push(`raw:${sql}`); });
+  db.transaction = jest.fn(async (cb) => cb(trx));
+  expect(await writeFlag({ customerId: 'c-1', flag: 'collection_hold', reason: 'r' })).toEqual({ ok: true, created: true });
+  expect(db.transaction).toHaveBeenCalledTimes(1);
+  expect(order[0]).toMatch(/lock_timeout/);
+  expect(order[1]).toMatch(/^raw:SELECT pg_advisory_xact_lock\(/);
+  expect(order[2]).toBe('insert');
+  expect(trx.raw.mock.calls[1][1]).toEqual(['collections_hold:c-1']);
+
+  db.transaction.mockClear();
+  db.mockImplementation(() => chain());
+  await writeFlag({ customerId: 'c-1', flag: 'pays_by_check' });
+  expect(db.transaction).not.toHaveBeenCalled();
+});
