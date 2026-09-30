@@ -200,6 +200,8 @@ describe('round-8: reversed rows, absence claims, tender label, inbound identity
     const { PAYMENT_STATUS_VOCABULARY, paymentStatusPromptLine } = require('../services/payment-receipt-vocabulary');
     expect(PAYMENT_STATUS_VOCABULARY.failed.rowStatuses).not.toContain('refunded');
     expect(PAYMENT_STATUS_VOCABULARY.failed.rowStatuses).not.toContain('disputed');
+    expect(PAYMENT_STATUS_VOCABULARY.refunded.rowStatuses).toEqual(['refunded']);
+    expect(PAYMENT_STATUS_VOCABULARY.disputed.rowStatuses).toEqual(['disputed']);
     expect(PAYMENT_STATUS_VOCABULARY.reversed.rowStatuses).toEqual(['refunded', 'disputed']);
     const line = paymentStatusPromptLine();
     expect(line).toMatch(/refunded or disputed payment WAS received and then reversed/);
@@ -259,5 +261,26 @@ describe('round-8: reversed rows, absence claims, tender label, inbound identity
     expect(rq(reply, ctx([cardPending]), { byMeaning: true, inboundMessage })).toBe(true);
     expect(rq(reply, ctx([zellePending]), { byMeaning: true, inboundMessage })).toBe(false);
     expect(rq(reply, ctx([cardPending]), { byMeaning: true, inboundMessage: 'Did my check clear?' })).toBe(true);
+  });
+});
+
+describe('round-9: refunded vs disputed are distinct reversals', () => {
+  const ctx = (payments) => ({ billing: { outstandingBalance: 0, recentPayments: payments } });
+  const row = (status) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card' });
+  test('"refunded" phrases bind only to refunded rows; "disputed/charged back" only to disputed rows; "was reversed" to either', () => {
+    expect(check('Your $120.00 payment was refunded.', ctx([row('refunded')]))).toBe(false);
+    expect(check('Your $120.00 payment was refunded.', ctx([row('disputed')]))).toBe(true);
+    expect(check('Your $120.00 payment is disputed.', ctx([row('disputed')]))).toBe(false);
+    expect(check('Your $120.00 payment is disputed.', ctx([row('refunded')]))).toBe(true);
+    expect(check('Your $120.00 payment was charged back.', ctx([row('disputed')]))).toBe(false);
+    expect(check('Your $120.00 payment was charged back.', ctx([row('refunded')]))).toBe(true);
+    expect(check('Your $120.00 payment was reversed.', ctx([row('refunded')]))).toBe(false);
+    expect(check('Your $120.00 payment was reversed.', ctx([row('disputed')]))).toBe(false);
+    expect(check('Your $120.00 payment was reversed.', ctx([row('paid')]))).toBe(true);
+  });
+  test('the prompt built from the table states each reversal on its own row status', () => {
+    const { paymentStatusPromptLine } = require('../services/payment-receipt-vocabulary');
+    const line = paymentStatusPromptLine();
+    expect(line).toMatch(/"was refunded".*ONLY for a line marked refunded, "was disputed".*ONLY for a line marked disputed, and "was reversed" for either/);
   });
 });

@@ -528,6 +528,10 @@ async function maybeAutoSend(params = {}) {
       intent: params.intent,
       reply: gratitudeLane ? claim.reply : params.reply,
       customerId: gratitudeLane ? claim.customerId : ready.customerId,
+      // Codex round-9 P1: the customer's original inbound (amount/tender/date
+      // identity for the status recheck). A gratitude reply is never a payment
+      // claim and carries none.
+      inboundMessage: gratitudeLane ? null : (params.inboundMessage || null),
     });
   } catch (err) {
     logger.error(`[sms-auto-send] unexpected failure (draft ${params.draftId}): ${err.message}`);
@@ -780,7 +784,9 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
  * answered autonomously — they resolve as ignored (drafts return to the
  * judge), exactly like the manual send's post-send sweep.
  */
-async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draftId, intent, reply, customerId }) {
+async function dispatchClaimedSend({
+  claim, gratitudeLane, eligibilityPin, draftId, intent, reply, customerId, inboundMessage = null,
+}) {
   const suggest = require('./sms-suggest-mode');
   const parkedIds = claim.parkedIds || [];
   const reopenParked = async (reason) => {
@@ -871,7 +877,7 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
     // regardless of prompt version. Same supersede-via-failClaim mechanism
     // as the other two rechecks above.
     const { amountFreeStatusClaimStale } = require('./sms-amount-recheck');
-    const statusClaimCheck = await amountFreeStatusClaimStale({ customerId, body: reply, strict: true });
+    const statusClaimCheck = await amountFreeStatusClaimStale({ customerId, body: reply, strict: true, inboundMessage });
     if (statusClaimCheck.stale) {
       logger.warn(`[sms-auto-send] amount-free status claim stale (decision ${claim.decisionId}): ${statusClaimCheck.reason}`);
       const outcome = await notSent(statusClaimCheck.reason);

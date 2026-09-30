@@ -69,7 +69,8 @@ function paymentAckPatternSource() {
 //   paid      -> a row marked paid                     (received/applied/cleared/…)
 //   pending   -> a row marked pending/processing       ("still processing", …)
 //   failed    -> a row marked failed/declined/…        ("didn't go through", …)
-//   reversed  -> a row marked refunded/disputed        ("was refunded", "is disputed", …)
+//   refunded / disputed -> a row marked exactly that   ("was refunded" / "is disputed", "charged back"); generic
+//   reversed  -> either                                ("was reversed")
 //                (settled THEN reversed — never a "failed" payment; Codex round-8 P1)
 //   not_received -> NO PAID row exists ("haven't received", "hasn't come through", …)
 //   not_found -> NO paid/pending row exists for the named payment
@@ -89,9 +90,20 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
     rowStatuses: Object.freeze(['failed', 'declined', 'canceled', 'cancelled', 'void', 'voided']),
     phrases: Object.freeze(['failed', 'declined', "didn't go through", 'did not go through', 'was returned', 'bounced', 'unsuccessful']),
   }),
+  // Codex round-9 P1: a refund and a dispute are DIFFERENT reversals — each
+  // phrase binds only to its own row status; only the generic "was reversed"
+  // may bind to either.
+  refunded: Object.freeze({
+    rowStatuses: Object.freeze(['refunded']),
+    phrases: Object.freeze(['was refunded', 'has been refunded', 'is refunded', 'refunded']),
+  }),
+  disputed: Object.freeze({
+    rowStatuses: Object.freeze(['disputed']),
+    phrases: Object.freeze(['was disputed', 'is disputed', 'disputed', 'charged back']),
+  }),
   reversed: Object.freeze({
     rowStatuses: Object.freeze(['refunded', 'disputed']),
-    phrases: Object.freeze(['was refunded', 'has been refunded', 'is refunded', 'refunded', 'was disputed', 'is disputed', 'disputed', 'charged back', 'was reversed']),
+    phrases: Object.freeze(['was reversed']),
   }),
   not_found: Object.freeze({
     rowStatuses: Object.freeze(['paid', 'pending', 'processing', 'requires_action']),
@@ -121,6 +133,8 @@ const familyRe = (family) => new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VO
 const STATUS_PHRASE_RES = Object.freeze([
   ['not_found', familyRe('not_found')],
   ['not_received', familyRe('not_received')],
+  ['refunded', familyRe('refunded')],
+  ['disputed', familyRe('disputed')],
   ['reversed', familyRe('reversed')],
   ['failed', familyRe('failed')],
   ['pending', familyRe('pending')],
@@ -143,7 +157,7 @@ function paymentStatusPhraseClaim(clause, namesPayment = false) {
 function paymentStatusPromptLine() {
   const q = (list) => list.map((p) => `"${p}"`).join(', ');
   const V = PAYMENT_STATUS_VOCABULARY;
-  return `Payment-status wording and the Recent payments status each requires: say a payment was ${q(V.paid.phrases)} ONLY for a line marked ${V.paid.rowStatuses.join('/')}; say it is ${q(V.pending.phrases)} ONLY for a line marked ${V.pending.rowStatuses.join(' or ')}; say it ${q(V.failed.phrases)} ONLY for a line marked ${V.failed.rowStatuses.slice(0, 3).join(', ')}; say it ${q(V.reversed.phrases)} ONLY for a line marked ${V.reversed.rowStatuses.join(' or ')} (a refunded or disputed payment WAS received and then reversed — never say it failed, and never say it is still paid); say ${q(V.not_found.phrases)} ONLY when NO line marked ${V.not_found.rowStatuses.join('/')} matches the payment the customer asked about; say ${q(V.not_received.phrases)} ONLY when NO line marked ${V.not_received.rowStatuses.join('/')} matches it (a processing line is not received yet). Any other wording about a payment's status is not allowed.`;
+  return `Payment-status wording and the Recent payments status each requires: say a payment was ${q(V.paid.phrases)} ONLY for a line marked ${V.paid.rowStatuses.join('/')}; say it is ${q(V.pending.phrases)} ONLY for a line marked ${V.pending.rowStatuses.join(' or ')}; say it ${q(V.failed.phrases)} ONLY for a line marked ${V.failed.rowStatuses.slice(0, 3).join(', ')}; say it ${q(V.refunded.phrases)} ONLY for a line marked ${V.refunded.rowStatuses.join('/')}, ${q(V.disputed.phrases)} ONLY for a line marked ${V.disputed.rowStatuses.join('/')}, and ${q(V.reversed.phrases)} for either (a refunded or disputed payment WAS received and then reversed — never say it failed, and never say it is still paid); say ${q(V.not_found.phrases)} ONLY when NO line marked ${V.not_found.rowStatuses.join('/')} matches the payment the customer asked about; say ${q(V.not_received.phrases)} ONLY when NO line marked ${V.not_received.rowStatuses.join('/')} matches it (a processing line is not received yet). Any other wording about a payment's status is not allowed.`;
 }
 
 // Cheap, drafter-free PRE-SCREEN for "could this body assert a payment
@@ -161,7 +175,15 @@ function paymentStatusPromptLine() {
 // MUST stay a strict SUPERSET of those two drafter predicates — if either
 // gains a status phrase that avoids all three words, add its anchor here
 // (payment-receipt-vocabulary.test.js pins the current claim examples).
-const PAYMENT_STATUS_PRESCREEN_RE = /\b(?:payments?|paid|account|transfers?|deposits?|charges?|zelle|ach|processing|pending|showing|refund(?:ed|s)?|disputed?|chargeback)\b/i;
+// Built FROM the full table (every phrase of every family) plus the base
+// payment words, so it is a guaranteed superset of paymentStatusPhraseClaim —
+// a phrase added to the table is automatically screened in (Codex round-9 P1).
+const PAYMENT_STATUS_PRESCREEN_RE = new RegExp(
+  `\\b(?:payments?|paid|account|transfers?|deposits?|charges?|zelle|ach|refund(?:ed|s)?|disputed?|chargeback|${
+    phrasePattern(Object.values(PAYMENT_STATUS_VOCABULARY).flatMap((f) => [...f.phrases]))
+  })\\b`,
+  'i',
+);
 function mayAssertPaymentStatus(text) {
   return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || ''));
 }

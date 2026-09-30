@@ -30,3 +30,25 @@ describe('payment-receipt-vocabulary', () => {
     expect(new RegExp(paymentAckPatternSource(), 'i').test('the payment cleared')).toBe(true);
   });
 });
+
+describe('Codex round-9 P1: the prescreen is built from the full status table', () => {
+  const { PAYMENT_STATUS_VOCABULARY, paymentStatusPhraseClaim } = require('../services/payment-receipt-vocabulary');
+  test('EVERY phrase of EVERY family passes the prescreen (guaranteed superset)', () => {
+    for (const [family, { phrases }] of Object.entries(PAYMENT_STATUS_VOCABULARY)) {
+      for (const phrase of phrases) {
+        expect({ family, phrase, screened: mayAssertPaymentStatus(`It ${phrase}.`) }).toEqual({ family, phrase, screened: true });
+        expect({ family, phrase, screened: mayAssertPaymentStatus(phrase) }).toEqual({ family, phrase, screened: true });
+      }
+    }
+  });
+  test('bare replies the classifier recognizes with a payment inbound are screened in', () => {
+    for (const c of ['It failed.', "We haven't received it yet.", "It isn't reflected yet.", "It hasn't posted.", 'It was refunded.']) {
+      expect(paymentStatusPhraseClaim(c, true)).not.toBeNull();
+      expect(mayAssertPaymentStatus(c)).toBe(true);
+    }
+  });
+  test('copy that asserts nothing about payments is still skipped', () => {
+    expect(mayAssertPaymentStatus("You're welcome, Dana! Glad we could help.")).toBe(false);
+    expect(mayAssertPaymentStatus('See you Tuesday at 9!')).toBe(false);
+  });
+});

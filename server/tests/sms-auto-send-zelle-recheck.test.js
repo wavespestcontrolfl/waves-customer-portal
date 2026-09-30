@@ -187,7 +187,7 @@ describe('amount-free payment-status recheck (round 5, finding 1)', () => {
   test('a clean amount-free reply sends normally', async () => {
     await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: true });
     expect(amountRecheck.amountFreeStatusClaimStale).toHaveBeenCalledWith({
-      customerId: '00000000-0000-4000-8000-000000000002', body: "You're paid up!", strict: true,
+      customerId: '00000000-0000-4000-8000-000000000002', body: "You're paid up!", strict: true, inboundMessage: 'How do I pay?',
     });
     expect(sendCustomerMessage).toHaveBeenCalled();
   });
@@ -207,4 +207,12 @@ describe('amount-free payment-status recheck (round 5, finding 1)', () => {
     await expect(attempt({ zelleInvoiceId: 'inv-1' })).resolves.toMatchObject({ sent: true });
     expect(amountRecheck.amountFreeStatusClaimStale).toHaveBeenCalled();
   });
+});
+
+// Codex round-9 P1: the auto-send status recheck receives the customer's original inbound.
+test('the amount-free status recheck is passed the original inbound message', async () => {
+  await expect(attempt({ reply: "It isn't showing on our end yet.", inboundMessage: 'Did you get my $120 Zelle payment?' })).resolves.toMatchObject({ sent: true });
+  expect(amountRecheck.amountFreeStatusClaimStale).toHaveBeenCalledWith(expect.objectContaining({
+    strict: true, inboundMessage: 'Did you get my $120 Zelle payment?',
+  }));
 });
