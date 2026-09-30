@@ -111,7 +111,7 @@ const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
 // held-coverage flow (Codex #2507 round-7 P1) a required-save invoice stays
 // collectible until capture completes, so GET/capture-setup can no longer
 // key the capture state off status === 'prepaid' alone. Lives here (moved
-// from routes/pay-v2.js, which re-exports it unchanged) so the dunning
+// from routes/pay-v2.js; import it from this module only) so the dunning
 // set authority can mirror the pay page's own preview predicate; `database`
 // lets a caller holding a transaction read through it.
 async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
