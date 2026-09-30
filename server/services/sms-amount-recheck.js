@@ -15,7 +15,7 @@ const drafter = require('./sms-shadow-drafter');
 // amount syntax hasPriceQuote recognizes, and payment-history amounts only
 // on a body that reads as an ack, so a stale "your balance is $X" can never
 // re-authorize via the payment row.
-const { AMOUNT_MASK_RE: AMOUNT_FORMS_RE, PAYMENT_ACK_RE } = drafter;
+const { AMOUNT_MASK_RE: AMOUNT_FORMS_RE } = drafter;
 
 const cents = (v) => Math.round(Number(v) * 100);
 
@@ -405,7 +405,8 @@ async function outgoingAmountsStale({
     // reads as an acknowledgement (masked first, audit P1 — the ack grammar
     // stops at a period, and "$95.50" must not end the clause).
     const { owed, paid } = drafter.billingAmountCents(ctx);
-    const ack = PAYMENT_ACK_RE.test(text.replace(AMOUNT_FORMS_RE, ' AMT '));
+    // Polarity-aware (round-10 P1): a negated ack ("wasn't processed") never widens the pooled paid allowance.
+    const ack = drafter.hasAffirmativePaymentAck(text.replace(AMOUNT_FORMS_RE, ' AMT '));
     // The pooled rule (pre-v12 prompts) has no per-clause owed/receipt
     // split to excuse only the owed half — trustOwedAmounts here matches
     // the ORIGINAL scope of the 2026-07-30 exemption exactly (skip the

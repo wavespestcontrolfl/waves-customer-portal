@@ -1081,9 +1081,19 @@ const PAYMENT_NEGATION_RE = /\b(?:haven't|have not|hasn't|has not|didn't|did not
 // ("$50, $60, and $70", "Got it, thanks") is followed by something other than
 // a bare 4-digit token and still splits exactly as before.
 const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:and|but)\s|\s[—–-]\s/;
+// Codex round-10 P1 (PR #5331): the ONE polarity-aware ack test. 'positive' =
+// an affirmative receipt/ack phrase; 'negated' = the same phrase under a
+// negator in the SAME clause ("wasn't processed", "didn't get"); null = no ack
+// phrase. Every ack/status DECISION goes through this (never a raw
+// PAYMENT_ACK_RE.test) so a negated ack can never bind as a positive one.
+function paymentAckPolarity(clause) {
+  const c = String(clause || '');
+  if (!PAYMENT_ACK_RE.test(c)) return null;
+  return PAYMENT_NEGATION_RE.test(c) ? 'negated' : 'positive';
+}
 function hasAffirmativePaymentAck(text) {
   const clauses = String(text || '').split(CLAUSE_SPLIT_RE);
-  return clauses.some((clause) => PAYMENT_ACK_RE.test(clause) && !PAYMENT_NEGATION_RE.test(clause));
+  return clauses.some((clause) => paymentAckPolarity(clause) === 'positive');
 }
 
 // Independent-review P1 (round 4, PR #5331, finding 4): a phrase list keyed
@@ -1175,6 +1185,10 @@ const TENDER_VOCABULARY = [
   { word: 'venmo', label: 'Venmo', manual: true },
   { word: 'paypal', label: 'PayPal', manual: true },
   { word: 'check', label: 'Check', manual: true },
+  // Cash App is NOT physical cash: its own (unsupported) tender, listed BEFORE
+  // 'cash' so the alternation never reads "Cash App" as Cash. No paid row is ever
+  // labelled this, so a Cash App claim can never bind (Codex round-10 P2).
+  { word: 'cash app', label: 'Cash App', manual: false },
   { word: 'cash', label: 'Cash', manual: true },
   { word: 'card', label: 'card', manual: false },
   { word: 'ach', label: 'bank/ACH', manual: false },
@@ -1184,9 +1198,9 @@ const TENDER_VOCABULARY = [
   { word: 'bank draft', label: 'bank/ACH', manual: false },
 ];
 const tenderLabelForWord = (word) => (
-  TENDER_VOCABULARY.find((t) => t.word === String(word || '').toLowerCase())?.label || null
+  TENDER_VOCABULARY.find((t) => t.word === String(word || '').toLowerCase().replace(/\s+/g, ' '))?.label || null
 );
-const tenderVocabPattern = (filter) => TENDER_VOCABULARY.filter(filter).map((t) => t.word).join('|');
+const tenderVocabPattern = (filter) => TENDER_VOCABULARY.filter(filter).map((t) => t.word.replace(/ /g, '\\s+')).join('|');
 
 // The tender a text (a REPLY clause or the customer's INBOUND message) claims,
 // canonicalized through the SAME vocabulary paymentTenderLabel (below) derives
@@ -1347,19 +1361,26 @@ function paymentDateMatchesClaim(p, claimed) {
 // unresolvable tender ambiguity returns (null by default = "nothing bound",
 // fail closed for a claim that needs a row; the NOT-FOUND family passes a
 // truthy sentinel so an ambiguity reads as "a row may exist" = contradicted).
-function bindPaymentRow({
-  family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
-  inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null,
-}) {
-  if (requireDate && !claimedDate) return null;
+// null amountCents = an amount-free claim (any row); else the row's amount in cents must equal it.
+const rowAmountMatches = (p, amountCents) => amountCents == null
+  || (Number.isFinite(Number(p.amount)) && Math.round(Number(p.amount) * 100) === amountCents);
+// Rows of the family's status(es) that agree on amount (and date when claimed).
+function paymentRowCandidates({ family, amountCents, claimedDate, rows }) {
   const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
   const anyStatus = wanted.has(ANY_STATUS);
-  let candidates = (context?.billing?.recentPayments || []).filter((p) => (
-    p && (anyStatus || wanted.has(String(p.status || '').toLowerCase()))
-      && (amountCents == null
-        || (Number.isFinite(Number(p.amount)) && Math.round(Number(p.amount) * 100) === amountCents))
+  return rows.filter((p) => (
+    p && (anyStatus || wanted.has(String(p.status || '').toLowerCase())) && rowAmountMatches(p, amountCents)
+      && (!claimedDate || paymentDateMatchesClaim(p, claimedDate))
   ));
-  if (claimedDate) candidates = candidates.filter((p) => paymentDateMatchesClaim(p, claimedDate));
+}
+function bindPaymentRow({
+  family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
+  inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null,
+}) {
+  if (requireDate && !claimedDate) return null;
+  const candidates = paymentRowCandidates({
+    family, amountCents, claimedDate, rows: rows || context?.billing?.recentPayments || [],
+  });
   // Codex round-6 pre-push audit P1 (reverse direction): the customer's message
   // is about a payment but NO tender could be extracted from it or the reply,
   // and the rows for this amount/date span more than one tender (an
@@ -1389,205 +1410,159 @@ function paymentClaimBinding(clauseText, inboundText) {
 // `opts.byMeaning` pins the strict clause/status-aware rule regardless of
 // the live gate (Codex #5194 r2 P1): a v12 review card that outlives a gate
 // rollback is still a v12 draft and is rechecked as one.
-function replyQuotesUngroundedAmount(reply, context, opts = {}) {
-  const suggestMode = require('./sms-suggest-mode');
-  const centsOf = (v) => Math.round(Number(v) * 100);
+//
+// Codex round-10 (PR #5331) STRUCTURE: every clause goes through ONE
+// classifier (classifyPaymentClause -> a kind) and each kind has exactly ONE
+// validator (KIND_VALIDATORS). There is no second path a clause can take
+// around the polarity/identity rules — the class of bug where a negated or
+// amount-bearing variant slipped past a branch. A validator returns true when
+// the clause is UNGROUNDED. Behavior history (rounds 2-9) is preserved in each
+// validator's comment.
+const amountCentsIn = (t) => (String(t || '').match(AMOUNT_MASK_RE) || []).map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
+
+function buildGroundingEnv(reply, context, opts) {
   const text = String(reply || '');
   // Gate on: only payments that actually went through back an acknowledgement.
   const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
-  // Codex round-6 pre-push audit P1 (PR #5331): "is anything owed right now"
-  // (the SETTLEMENT-claim test) is decided from authoritative OUTSTANDING
-  // obligations only — an open invoice or a positive balance — never from
-  // owedCents, which also carries a monthly member's published dues (prices a
-  // reply may QUOTE, present even when the account is fully settled). Same
-  // predicate serves the send-time recheck, which calls this function.
-  const hasOutstandingObligation = billingHasOutstandingObligation(context);
-  // Independent-review P1 (round 6, PR #5331): billing.unavailable means the
-  // account's whole money picture is UNKNOWABLE (context-aggregator.js: the
-  // invoice-grounding read itself failed) — owedCents/paidCents above come
-  // back EMPTY in that case, same shape as a customer who genuinely owes and
-  // has paid nothing. Never read that emptiness as "nothing is owed" — a
-  // settlement claim ("you're paid up") is fabricated confidence about a
-  // fact the draft literally could not check, structurally as dangerous as
-  // stating a wrong balance.
-  // Codex round-6 pre-push audit P1 (PR #5331): a MISSING billing object ({}
-  // context, no billing key, an unknown customer) is exactly as unknowable as
-  // billing.unavailable — never a successfully loaded account with zero
-  // obligations. Settlement claims require billing present and available.
-  const billingUnavailable = !context?.billing || typeof context.billing !== 'object' || !!context.billing.unavailable;
-  // Independent-review P1 (round 6, PR #5331): the customer's own inbound
-  // wording, threaded through by every caller that has it (draft time:
-  // generateGroundedDraft; send time: outgoingAmountsStale, from the
-  // decision's inbound_message / sms_log body). Used only as a FALLBACK
-  // source of a claimed tender/date below — never to relax anything the
-  // outgoing clause itself states.
-  const inboundText = String(opts.inboundMessage || '');
-  const amountsIn = (t) => (t.match(AMOUNT_MASK_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
-  // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
-  // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
-  // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
-  // we cannot positively match EVERY numeric to an authorized value, the
-  // draft stays shadow. An authorized "$120.00" reply extracts and passes;
-  // "fifty dollars" stays unverifiable and withholds. Cadence follows the
-  // same rule as any other amount now that dues are authorized: "$98.50/mo"
-  // extracts $98.50 and passes for a monthly member, while a bare "45/mo"
-  // carries no currency marker, extracts nothing, and still withholds.
-  const priceGrammarFires = suggestMode.hasPriceQuote(text);
-  const replyAmounts = amountsIn(text);
-  if (priceGrammarFires && replyAmounts.length === 0) return true;
+  const { owed, paid } = billingAmountCents(context, { settledOnly: realAnswers });
+  return {
+    text,
+    context,
+    realAnswers,
+    owedCents: owed,
+    paidCents: paid,
+    // "is anything owed" (settlement claims) = an open invoice or positive
+    // balance — never the quotable-price set (round-6 audit P1).
+    hasOutstandingObligation: billingHasOutstandingObligation(context),
+    // billing missing/unavailable is UNKNOWABLE, never an empty account
+    // (round-6 P1 + missing-context sweep).
+    billingUnavailable: !context?.billing || typeof context.billing !== 'object' || !!context.billing.unavailable,
+    // The customer's own inbound: a FALLBACK source of tender/date/amount
+    // identity, never used to relax what the clause itself states.
+    inboundText: String(opts.inboundMessage || ''),
+    trustOwedAmounts: !!opts.trustOwedAmounts,
+    replyAmounts: amountCentsIn(text),
+    priceGrammarFires: require('./sms-suggest-mode').hasPriceQuote(text),
+  };
+}
 
-  // Gate OFF: the original pooled allowlist — any authoritative figure
-  // passes — so live behavior is unchanged by PR #5119.
-  if (!realAnswers) {
-    return replyAmounts.some((a) => !owedCents.has(a) && !paidCents.has(a));
-  }
+// Classify ONE (already amount-masked) clause. Kinds: negated | status | absence
+// | ack | settlement | negated_ack | owed | trusted_owed | ambiguous | none.
+function classifyPaymentClause(masked, hasAmounts, env) {
+  const phrase = paymentStatusPhraseClaim(masked, hasAmounts || inboundNamesPayment(env.inboundText));
+  if (phrase === 'negated') return { kind: 'negated' };
+  if (phrase === 'not_found' || phrase === 'not_received') return { kind: 'absence', family: phrase };
+  if (phrase) return { kind: 'status', family: phrase };
+  const ackPol = paymentAckPolarity(masked);
+  const statusKind = paymentStatusClaimKind(masked);
+  return hasAmounts ? classifyAmountClause(masked, ackPol, statusKind, env) : classifyAmountFreeClause(ackPol, statusKind);
+}
+function classifyAmountFreeClause(ackPol, statusKind) {
+  if (ackPol === 'positive' || statusKind === 'event') return { kind: 'ack' };
+  if (statusKind === 'settlement') return { kind: 'settlement' };
+  if (ackPol === 'negated') return { kind: 'negated_ack' };
+  return { kind: 'none' };
+}
+function classifyAmountClause(masked, ackPol, statusKind, env) {
+  if (ackPol === 'negated') return { kind: 'negated_ack' };
+  const owed = AMOUNT_OWED_RE.test(masked);
+  // trustOwedAmounts (scheduler's "a human reviewed this figure") excuses only a
+  // genuinely OWED clause — never a receipt/status assertion (round-4/6 P1:
+  // "invoice payment" reads as owed and must not skip the binder).
+  const receiptShaped = ackPol === 'positive' || statusKind === 'event';
+  if (owed && env.trustOwedAmounts && !receiptShaped) return { kind: 'trusted_owed' };
+  const ack = ackPol === 'positive' || (!owed && statusKind === 'event');
+  if (owed === ack) return { kind: 'ambiguous' };
+  return { kind: ack ? 'ack' : 'owed' };
+}
 
-  // Gate ON: each amount is authorized by the MEANING of its own clause
-  // (Codex r5/r6). An owed figure backs a statement about what is owed; a
-  // payment figure backs a payment acknowledgement. Judging the language
-  // reply-wide let "We received your $120.50 payment; your remaining
-  // balance is $95" pass with the two figures swapped. A clause that reads
-  // as both, or as neither, cannot be bound and fails closed. The language
-  // tests run on the clause with its amounts masked — the ack grammar stops
-  // at a period, and "$95.50" must not end it.
-  //
-  // Independent-review P1 (round 2, PR #5331): an affirmative receipt claim
-  // must NAME the specific payment, structurally — never accepted on
-  // language alone. An ack clause with NO amount in it is always rejected
-  // (below, replacing the old whole-reply "any settled row on file passes
-  // it" special case, which let an old, unrelated paid row "confirm" a
-  // payment that's actually new, pending, or not on file at all): the model
-  // has to say "we received your $120.00 payment from Sep 12", never a bare
-  // "you're all set"/"we got your payment". An amount IN the clause is what
-  // lets the allowed-cents check below prove it's a genuine PAID row.
-  //
-  // Independent-review P1 (round 3, PR #5331, finding 2): an amount alone is
-  // not enough to bind to ONE row — a refunded $120 and a genuinely paid,
-  // different-day $120 are indistinguishable by cents alone. The clause must
-  // ALSO state the date that row was paid (bindPaidPaymentRow above), and,
-  // when it also names a tender ("I Zelled you", "paid by check"), that SAME
-  // row must carry that "via <tender>" tag — otherwise an old card payment
-  // could "confirm" a Zelle the customer is still waiting on, or vice versa.
-  // No stated date, or a date/amount/tender combination matching no
-  // currently-settled row, is a fabricated confirmation.
-  const clauses = text.split(CLAUSE_SPLIT_RE);
-  for (const clause of clauses) {
-    const text = String(clause || '');
-    const masked = text.replace(AMOUNT_MASK_RE, ' AMT ');
-    // Price grammar left once the readable figures are masked is a price the
-    // extractor cannot verify ("fifty dollars", "the fee is 45"): it fails
-    // closed even beside a grounded figure, in another clause (Codex #5194
-    // r4 P1) or the same one (r8 P1: "$95 plus a fee of fifty dollars").
-    if (suggestMode.hasPriceQuote(masked)) return true;
-    const amounts = amountsIn(text);
-    // Codex round-7 P1 (PR #5331): every payment-status phrase the prompt
-    // permits (PAYMENT_STATUS_VOCABULARY — the SAME table the prompt line is
-    // built from) is bound to a CURRENT row with the status it requires. The
-    // paid family is the ack/receipt path below; the processing/pending and
-    // failed/declined families bind here, before the ack rules (so "is being
-    // processed" is a PENDING claim, never a paid "processed" ack). Rechecked
-    // at send time: outgoingAmountsStale / amountFreeStatusClaimStale call this
-    // function with FRESH context, so a row that has since settled or failed no
-    // longer backs "still processing".
-    const phraseClaim = paymentStatusPhraseClaim(masked, amounts.length > 0 || inboundNamesPayment(inboundText));
-    if (phraseClaim) {
-      if (billingUnavailable) return true;
-      // Codex round-9 P1: a NEGATED presence claim ("is not pending", "wasn't
-      // refunded") is not judgeable by the family binder — fail closed.
-      if (phraseClaim === 'negated') return true;
-      const binding = paymentClaimBinding(text, inboundText);
-      if (!binding) return true;
-      // Identity of an amount-free claim: the amount(s) the CUSTOMER named.
-      const targets = amounts.length ? amounts : (amountsIn(inboundText).length ? amountsIn(inboundText) : [null]);
-      const isAbsenceClaim = phraseClaim === 'not_found' || phraseClaim === 'not_received';
-      const bind = (a) => bindPaymentRow({
-        family: phraseClaim,
-        amountCents: a,
-        context,
-        ...binding,
-        requireDate: false,
-        onAmbiguous: isAbsenceClaim ? { ambiguous: true } : null,
-      });
-      // NOT-FOUND ("isn't showing", "haven't received"): valid only when NO
-      // matching paid/pending row exists NOW for the named identity (Codex
-      // round-8 P1). Every other family needs a matching row of its status.
-      if (isAbsenceClaim ? targets.some((a) => bind(a)) : targets.some((a) => !bind(a))) return true;
-      continue;
-    }
-    if (!amounts.length) {
-      // An affirmative payment-received claim with no amount in THIS clause
-      // names no specific payment — reject, not converged (see comment
-      // above). hasAffirmativePaymentAck already excludes a negated clause
-      // ("we haven't received your payment yet"), so a truthful denial still
-      // passes through untouched.
-      if (hasAffirmativePaymentAck(masked)) return true;
-      // Independent-review P1 (round 4, finding 4): the same amount-free
-      // rule extended to the broader, verb-agnostic status claim — "Your
-      // payment cleared."/"We have your payment." names no specific payment
-      // (EVENT) and is always rejected here, same as any other amount-free
-      // ack; "You're paid up."/"Your account is current." (SETTLEMENT) is
-      // grounded only when nothing is actually owed right now.
-      const kind = paymentStatusClaimKind(masked);
-      if (kind === 'event') return true;
-      // billingUnavailable: never let an empty owedCents set (unknowable,
-      // not zero) ground a "nothing is owed" claim.
-      if (kind === 'settlement' && (hasOutstandingObligation || billingUnavailable)) return true;
-      continue;
-    }
-    const owed = AMOUNT_OWED_RE.test(masked);
-    // Independent-review P1 (round 4, finding 3): `trustOwedAmounts` is the
-    // scheduler's own "a human already reviewed this exact figure" trust
-    // (owner ruling 2026-07-30, "the former price-quote fire-time block is
-    // RETIRED") — it excuses only an OWED clause (a price/balance the
-    // operator approved), never a RECEIPT/status claim, which asserts a
-    // fact about what already happened and can go stale (a refund, a
-    // settled invoice) exactly like a Zelle recipient can.
-    //
-    // Codex round-6 (PR #5331): classify the clause as a receipt/status
-    // assertion FIRST. AMOUNT_OWED_RE matches bare nouns like "invoice",
-    // "amount", "bill", "charge", so "We received your $120 invoice payment
-    // from Sep 12" reads as `owed` — and must NOT ride the human-review
-    // exemption past the paid-row/date/tender binder (a payment refunded
-    // after scheduling would still authorize the false confirmation at fire
-    // time). The exemption applies only to a clause that is genuinely owed
-    // language and makes no receipt/status claim; a receipt-shaped clause
-    // falls through to the `owed === ack` ambiguity rejection below.
-    const receiptShaped = PAYMENT_ACK_RE.test(masked) || paymentStatusClaimKind(masked) === 'event';
-    if (owed && opts.trustOwedAmounts && !receiptShaped) continue;
-    // Independent-review P1 (round 4, finding 4): an amount-bearing EVENT
-    // status claim ("Your $120.00 payment cleared") is exactly as specific
-    // as a PAYMENT_ACK_RE claim and binds the same way — but never when the
-    // clause already reads as OWED language (`owed` wins; "your balance is
-    // $120.00" is a grounded-owed statement, not a receipt claim).
-    const ack = PAYMENT_ACK_RE.test(masked) || (!owed && paymentStatusClaimKind(masked) === 'event');
-    if (owed === ack) return true;
-    const allowed = owed ? owedCents : paidCents;
-    if (amounts.some((a) => !allowed.has(a))) return true;
-    if (ack) {
-      // Independent-review P1 (round 6, PR #5331): bind to the tender/date
-      // the CUSTOMER named, not only what the outgoing clause happens to
-      // restate. A generic "Yes, we received your $120.00 payment" answering
-      // "did you get my $120 ZELLE payment?" must bind to the Zelle row —
-      // never to an unrelated $120 CARD payment that merely shares the
-      // amount and date — so a confirmation can never tell the customer
-      // their asked-about payment went through when a totally different one
-      // did. The outgoing clause's own claim wins when it states one (the
-      // business may confirm a DIFFERENT tender/date than what was asked,
-      // e.g. correcting the customer); the inbound message is the fallback
-      // ONLY when the outgoing clause is silent on that point — a generic
-      // confirmation that omits the tender the customer asked about must
-      // still bind against that tender, not slip through unchecked.
-      // Codex round-6 pre-push audit P1: an AMBIGUOUS tender (several distinct
-      // tenders named in one text) is unknown, never a guess — fail closed.
-      // The inbound is consulted only when the outgoing clause names none, so
-      // an ambiguous inbound cannot authorize a generic confirmation.
-      const binding = paymentClaimBinding(text, inboundText);
-      if (!binding) return true;
-      if (amounts.some((a) => !bindPaymentRow({ family: 'paid', amountCents: a, context, ...binding }))) return true;
-    }
-  }
-  return false;
+// Identity (amount) of a claim: the amounts in the clause, else the amounts the
+// CUSTOMER named, else none.
+function claimTargets(amounts, env) {
+  if (amounts.length) return amounts;
+  const fromInbound = amountCentsIn(env.inboundText);
+  return fromInbound.length ? fromInbound : [null];
+}
+
+// PAID receipt: amount-free never names a payment (round-2); with amounts each
+// figure must be a settled payment AND bind to one row by date/tender/inbound.
+function validateAck(c, env) {
+  if (!c.amounts.length) return true;
+  if (c.amounts.some((a) => !env.paidCents.has(a))) return true;
+  const binding = paymentClaimBinding(c.text, env.inboundText);
+  if (!binding) return true;
+  return c.amounts.some((a) => !bindPaymentRow({ family: 'paid', amountCents: a, context: env.context, ...binding }));
+}
+// Processing / failed / refunded / disputed / reversed: each needs a CURRENT
+// row of the family's status matching the same identity rules as a receipt.
+function validateStatusClaim(c, env) {
+  if (env.billingUnavailable) return true;
+  const binding = paymentClaimBinding(c.text, env.inboundText);
+  if (!binding) return true;
+  return claimTargets(c.amounts, env)
+    .some((a) => !bindPaymentRow({ family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false }));
+}
+// Absence ("isn't showing", "haven't received"): judged against the
+// AUTHORITATIVE history (billing.paymentHistory — every own payment, any
+// status), not the 3-row window (round-10 P1). Unknown completeness fails closed.
+function absenceHistoryUnknown(env, vague) {
+  const shown = env.context?.billing?.recentPayments || [];
+  const hist = env.context?.billing?.paymentHistory;
+  if (hist === null) return true;
+  if (!hist) return false; // legacy/mocked context: the shown rows ARE the history
+  return vague && (hist.complete === false || hist.rows.length > shown.length);
+}
+function validateAbsenceClaim(c, env) {
+  if (env.billingUnavailable) return true;
+  const binding = paymentClaimBinding(c.text, env.inboundText);
+  if (!binding) return true;
+  const targets = claimTargets(c.amounts, env);
+  const vague = targets.every((a) => a == null) && !binding.claimedTender && !binding.claimedDate;
+  if (absenceHistoryUnknown(env, vague)) return true;
+  const hist = env.context?.billing?.paymentHistory;
+  const rows = !vague && hist ? hist.rows : null;
+  const contradicted = targets.some((a) => bindPaymentRow({
+    family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false, onAmbiguous: { ambiguous: true }, rows,
+  }));
+  // An identified absence with the read bound hit and nothing found in what WAS
+  // read: completeness unknown => reject rather than deny.
+  return contradicted || (!vague && !!hist && hist.complete === false);
+}
+
+// Each kind's ONE validator: true = ungrounded.
+const KIND_VALIDATORS = {
+  negated: () => true, // a negated presence claim is not judgeable (round-9)
+  ambiguous: () => true, // reads as both or neither of owed/receipt (round-5/6)
+  status: validateStatusClaim,
+  absence: validateAbsenceClaim,
+  ack: validateAck,
+  // a negated ack ("wasn't processed") with a figure is never a binding claim;
+  // amount-free it is a truthful denial and untouched (round-10 P1 polarity).
+  negated_ack: (c) => c.amounts.length > 0,
+  settlement: (c, env) => env.hasOutstandingObligation || env.billingUnavailable,
+  owed: (c, env) => c.amounts.some((a) => !env.owedCents.has(a)),
+  trusted_owed: () => false,
+  none: () => false,
+};
+
+function clauseUngrounded(clause, env) {
+  const text = String(clause || '');
+  const masked = text.replace(AMOUNT_MASK_RE, ' AMT ');
+  // Price grammar left once readable figures are masked is a price the
+  // extractor cannot verify ("fifty dollars"): fail closed (#5194 r4/r8).
+  if (require('./sms-suggest-mode').hasPriceQuote(masked)) return true;
+  const amounts = amountCentsIn(text);
+  const cls = classifyPaymentClause(masked, amounts.length > 0, env);
+  return KIND_VALIDATORS[cls.kind]({ ...cls, text, amounts }, env);
+}
+
+function replyQuotesUngroundedAmount(reply, context, opts = {}) {
+  const env = buildGroundingEnv(reply, context, opts);
+  // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8).
+  if (env.priceGrammarFires && env.replyAmounts.length === 0) return true;
+  // Gate OFF: the original pooled allowlist — any authoritative figure passes.
+  if (!env.realAnswers) return env.replyAmounts.some((a) => !env.owedCents.has(a) && !env.paidCents.has(a));
+  return env.text.split(CLAUSE_SPLIT_RE).some((clause) => clauseUngrounded(clause, env));
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
@@ -3222,6 +3197,7 @@ module.exports = {
   fetchZelleEligibility,
   billingAmountCents,
   hasAffirmativePaymentAck,
+  paymentAckPolarity,
   paymentStatusClaimKind,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,

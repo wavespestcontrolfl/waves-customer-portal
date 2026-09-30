@@ -427,7 +427,14 @@ async function payPageZelleVisibility({
   // no customer to resolve for -> 'payer_unverifiable' (fail closed).
   const ownership = await zellePayerOwnership(inv, dbh);
   if (ownership) return { visible: false, reason: ownership };
-  const eligible = await isZelleTransferEligible(inv, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive });
+  // Codex round-10 P1 (PR #5331): a credit lookup that ERRORS is unknown, not
+  // zero — never offer Zelle on an unverifiable credit state (an unseen credit
+  // could fully cover the invoice or change the amount). Fail closed.
+  let coverage = creditWillCoverAnchor;
+  if (coverage == null) {
+    try { coverage = await invoiceCreditWouldFullyCover(inv); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
+  }
+  const eligible = await isZelleTransferEligible(inv, { creditWillCoverAnchor: coverage, hasPreviousBalance, saveRequired, payerOwnedLive });
   if (!eligible) return { visible: false, reason: 'not_eligible' };
   // Finding 4: any positive projected account credit (invoiceProjectedCreditApplied
   // — partial coverage only; a credit that would fully cover already denied
@@ -435,7 +442,8 @@ async function payPageZelleVisibility({
   // `creditPending && !stripeSetup` rule at the one instant this function can
   // answer for (before any /setup call exists to resolve the post-credit
   // amount).
-  const projectedCredit = await invoiceProjectedCreditApplied(inv).catch(() => 0);
+  let projectedCredit;
+  try { projectedCredit = await invoiceProjectedCreditApplied(inv); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
   if (projectedCredit > 0) return { visible: false, reason: 'credit_pending' };
   return { visible: true, reason: null };
 }
@@ -521,7 +529,11 @@ router.get('/:token', async (req, res, next) => {
     let creditWillCoverAnchor = false;
     try {
       creditWillCoverAnchor = await invoiceCreditWouldFullyCover(data);
-    } catch { creditWillCoverAnchor = false; }
+    } catch {
+      // Unknown, not false: null makes payPageZelleVisibility re-probe and fail
+      // closed (credit_unverifiable) instead of offering Zelle on an unseen credit.
+      creditWillCoverAnchor = null;
+    }
     if (isInvoiceCollectibleStatus(data.status) && !data.payer_id && !creditWillCoverAnchor) {
       const PayCombined = require('../services/pay-combined');
       const siblings = await PayCombined.combinedEligibleSiblings(data, {
@@ -594,15 +606,21 @@ router.get('/:token', async (req, res, next) => {
       // credit WILL apply at /setup, flag it: the client withholds the
       // transfer links until /setup answers with the post-credit amount, and
       // never pre-fills either the gross or a projected figure meanwhile.
-      const projectedCredit = await invoiceProjectedCreditApplied(data).catch(() => 0);
-      manualPayOptions = {
-        ...manualPayOptions,
-        amountDue: invoiceAmountDue(data),
-        ...(projectedCredit > 0 ? { creditPending: true } : {}),
-      };
-      // The same row the amount came from, so the client can fence a
-      // pre-filled transfer against a later admin edit (codex r3 P1).
-      manualPayOptions.version = data.updated_at ? new Date(data.updated_at).getTime() : null;
+      let projectedCredit = null;
+      try { projectedCredit = await invoiceProjectedCreditApplied(data); } catch { projectedCredit = null; }
+      if (projectedCredit == null) {
+        // Codex round-10 P1: an unverifiable credit is never read as zero.
+        manualPayOptions = null;
+      } else {
+        manualPayOptions = {
+          ...manualPayOptions,
+          amountDue: invoiceAmountDue(data),
+          ...(projectedCredit > 0 ? { creditPending: true } : {}),
+        };
+        // The same row the amount came from, so the client can fence a
+        // pre-filled transfer against a later admin edit (codex r3 P1).
+        manualPayOptions.version = data.updated_at ? new Date(data.updated_at).getTime() : null;
+      }
     }
 
     const getCaptureNeeded = getSaveRequired

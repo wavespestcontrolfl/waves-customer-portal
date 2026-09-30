@@ -328,3 +328,90 @@ describe('round-9: negated status phrases fail closed; "isn\'t showing" is contr
     return /NO line of ANY status \(paid, pending, failed, refunded, …\) matches/.test(require('../services/payment-receipt-vocabulary').paymentStatusPromptLine());
   }
 });
+
+// Codex round-10 P1: absence claims read the AUTHORITATIVE history, not the 3-row window.
+describe('round-10: absence claims use the full payment history', () => {
+  const shown = [1, 2, 3].map((n) => ({ amount: 50 + n, status: 'paid', payment_date: `2026-09-0${n}`, payment_method_type: 'card' }));
+  const fourth = { amount: 120, status: 'paid', payment_date: '2026-08-20', description: 'Invoice INV-4 — zelle' };
+  const ctx = (rows, complete = true, hist = { rows, complete }) => ({ billing: { outstandingBalance: 0, recentPayments: shown, paymentHistory: hist } });
+  const rq = (reply, c, inboundMessage) => replyQuotesUngroundedAmount(reply, c, { byMeaning: true, inboundMessage });
+  const reply = "Your $120 Zelle payment isn't showing on our end yet.";
+
+  test('a real 4th payment (outside the 3-row window) contradicts "isn\'t showing"', () => {
+    expect(check(reply, ctx([...shown, fourth]))).toBe(true);
+    expect(check("We haven't received your $120 Zelle payment yet.", ctx([...shown, fourth]))).toBe(true);
+  });
+
+  test('no match anywhere in a COMPLETE history: the denial passes', () => {
+    expect(check(reply, ctx(shown))).toBe(false);
+    expect(check(reply, ctx([...shown, { ...fourth, amount: 95 }]))).toBe(false);
+  });
+
+  test('history read failed (null) ⇒ reject; bound hit with no match ⇒ reject; bound hit WITH a match ⇒ reject anyway', () => {
+    expect(check(reply, ctx(shown, true, null))).toBe(true);
+    expect(check(reply, ctx(shown, false))).toBe(true);
+    expect(check(reply, ctx([...shown, fourth], false))).toBe(true);
+  });
+
+  test('bare "isn\'t showing" (no identity anywhere): more history than was shown ⇒ reject; same rows ⇒ unchanged', () => {
+    const bare = "Your payment isn't showing on our end yet.";
+    const failedOnly = { amount: 40, status: 'failed', payment_date: '2026-01-01', payment_method_type: 'card' };
+    expect(check(bare, { billing: { outstandingBalance: 0, recentPayments: [], paymentHistory: { rows: [failedOnly], complete: true } } })).toBe(true);
+    expect(check(bare, { billing: { outstandingBalance: 0, recentPayments: [], paymentHistory: { rows: [], complete: true } } })).toBe(false);
+    // the customer's message names an identity ⇒ the history is queried by it instead
+    expect(rq(bare, { billing: { outstandingBalance: 0, recentPayments: [], paymentHistory: { rows: [failedOnly], complete: true } } }, 'Did my $95 payment arrive?')).toBe(false);
+    expect(rq(bare, ctx([...shown, fourth]), 'Did my $120 Zelle payment arrive?')).toBe(true);
+  });
+
+  test('a context without a history field reads the shown rows as the whole history (legacy shape)', () => {
+    expect(check(reply, { billing: { outstandingBalance: 0, recentPayments: [fourth] } })).toBe(true);
+    expect(check(reply, { billing: { outstandingBalance: 0, recentPayments: [] } })).toBe(false);
+  });
+});
+
+// Codex round-10 (PR #5331): polarity on amount-bearing acks, Cash App, one classifier.
+describe('round-10: negated amount-bearing acks, Cash App', () => {
+  const ctx = (payments) => ({ billing: { outstandingBalance: 0, recentPayments: payments } });
+  const paidCard = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const cashRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-1 — cash' };
+  const { replyClaimedTender, paymentAckPolarity, hasAffirmativePaymentAck } = require('../services/sms-shadow-drafter');
+
+  test('a NEGATED ack with a figure never binds to a paid row', () => {
+    for (const r of ['Your $120 payment was not received from Sep 12.', "Your $120 payment wasn't processed from Sep 12.",
+      "We didn't get your $120 payment from Sep 12.", "Your $120 payment hasn't been applied from Sep 12."]) {
+      expect({ r, ungrounded: check(r, ctx([paidCard])) }).toEqual({ r, ungrounded: true });
+    }
+    // the positive form still binds
+    expect(check('We received your $120 payment from Sep 12.', ctx([paidCard]))).toBe(false);
+  });
+
+  test('amount-free truthful denials with a non-family verb are untouched (unchanged behavior)', () => {
+    expect(check("We didn't get your payment yet.", ctx([]))).toBe(false);
+  });
+
+  test('polarity helper: positive / negated / null; hasAffirmativePaymentAck uses it', () => {
+    expect(paymentAckPolarity('we received your payment')).toBe('positive');
+    expect(paymentAckPolarity("we haven't received your payment")).toBe('negated');
+    expect(paymentAckPolarity('see you Tuesday')).toBeNull();
+    expect(hasAffirmativePaymentAck("we haven't received your payment")).toBe(false);
+  });
+
+  test('Cash App is its own tender, never physical Cash; "cash" alone still is Cash', () => {
+    expect(replyClaimedTender('I paid with Cash App')).toBe('Cash App');
+    expect(replyClaimedTender('my Cash  App payment')).toBe('Cash App');
+    expect(replyClaimedTender('I paid cash')).toBe('Cash');
+    // the quoted inbound against a manual CASH row is rejected; against nothing it can never bind
+    const generic = 'Yes, we received your $120.00 payment from Sep 12.';
+    expect(replyQuotesUngroundedAmount(generic, ctx([cashRow]), { byMeaning: true, inboundMessage: 'I sent $120 on Cash App on Sep 12, did you get it?' })).toBe(true);
+    expect(replyQuotesUngroundedAmount(generic, ctx([cashRow]), { byMeaning: true, inboundMessage: 'I paid $120 cash on Sep 12, did you get it?' })).toBe(false);
+  });
+
+  test('no raw PAYMENT_ACK_RE decision remains outside the polarity helper (structural guard)', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/sms-shadow-drafter'), 'utf8').split('\n');
+    const uses = src.map((l, i) => [i + 1, l]).filter(([, l]) => /PAYMENT_ACK_RE\.test\(/.test(l) && !/^\s*\/\//.test(l));
+    expect(uses).toHaveLength(1); // paymentAckPolarity itself
+    const recheck = fs.readFileSync(require.resolve('../services/sms-amount-recheck'), 'utf8');
+    expect(recheck).not.toMatch(/PAYMENT_ACK_RE\.test\(/);
+  });
+});

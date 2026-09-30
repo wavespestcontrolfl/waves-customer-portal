@@ -88,14 +88,14 @@ function invoiceData(overrides = {}) {
   };
 }
 
-async function getPayPage(data, { customerRow, refreshedData = data } = {}) {
+async function getPayPage(data, { customerRow, refreshedData = data, dbImpl = null } = {}) {
   InvoiceService.getByToken.mockReset()
     .mockResolvedValueOnce(data)
     .mockResolvedValueOnce(refreshedData);
-  db.mockImplementation((table) => {
+  db.mockImplementation(dbImpl || ((table) => {
     if (table === 'customers') return chain({ first: customerRow || { billing_mode: null, monthly_rate: null } });
     return chain({ first: null });
-  });
+  }));
   const layer = payRouter.stack.find((l) => l.route?.path === '/:token' && l.route.methods.get);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const req = { params: { token: data.token } };
@@ -467,6 +467,63 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
       PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: null });
       await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: true, reason: null });
     });
+  });
+});
+
+// Codex round-10 P1: a credit lookup that ERRORS is unknown, never zero.
+describe('payPageZelleVisibility + GET: an erroring credit lookup fails closed', () => {
+  const { payPageZelleVisibility } = payRouter;
+  const PayerService = require('../services/payer');
+  const gates = require('../config/feature-gates').gates;
+  beforeEach(() => {
+    PayerService.resolveForInvoice.mockReset();
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    gates.autoApplyAccountCredit = true;
+  });
+  afterEach(() => { gates.autoApplyAccountCredit = false; delete process.env.ZELLE_RECIPIENT; });
+  const failingCustomers = () => db.mockImplementation((table) => {
+    if (table === 'customers') { const q = chain(); q.first = jest.fn(async () => { throw new Error('db down'); }); return q; }
+    return chain({ first: null });
+  });
+
+  test('visibility: credit lookup error ⇒ { visible: false, reason: "credit_unverifiable" }', async () => {
+    failingCustomers();
+    await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) })).resolves.toEqual({ visible: false, reason: 'credit_unverifiable' });
+  });
+
+  test('visibility: credit lookup error in the PROJECTED-credit probe alone also fails closed', async () => {
+    let n = 0;
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        n += 1;
+        const q = chain();
+        q.first = jest.fn(async () => {
+          if (n >= 2) throw new Error('db down');
+          return { billing_mode: null, monthly_rate: null, account_credits: 5, auto_apply_account_credit: true };
+        });
+        return q;
+      }
+      return chain({ first: null });
+    });
+    await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), creditWillCoverAnchor: false })).resolves.toEqual({ visible: false, reason: 'credit_unverifiable' });
+  });
+
+  test('GET /:token withholds manualPayOptions (key absent, page still served) when the credit lookup errors', async () => {
+    const dbImpl = (table) => {
+      if (table === 'customers') {
+        const q = chain({ first: { billing_mode: null, monthly_rate: null } });
+        q.first = jest.fn(async (...cols) => {
+          if (cols.includes('account_credits')) throw new Error('db down');
+          return { billing_mode: null, monthly_rate: null };
+        });
+        return q;
+      }
+      return chain({ first: null });
+    };
+    const { body, status } = await getPayPage(invoiceData(), { dbImpl });
+    expect(status).toBe(200);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
   });
 });
 

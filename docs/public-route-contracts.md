@@ -566,7 +566,7 @@ the combined-siblings lookup withholds Zelle exactly as an already-stamped
 `payer_id` would, so a Bill-To resolved mid-request can never leave a
 Zelle transfer offered to the wrong party) — has no saved-card charge
 reconciliation pending, and any stamped PaymentIntent is still cancelable
-(inspect-only, fail-closed — unverifiable ⇒ key withheld). Partial account
+(inspect-only, fail-closed — unverifiable ⇒ key withheld). An account-credit lookup that ERRORS is likewise unverifiable, never zero: the key is withheld (`credit_unverifiable`) — key absent, rest of the payload unchanged. Partial account
 credit is NOT a withholding condition on this route: when a positive PARTIAL
 projected account credit applies (one that would not itself fully cover the
 invoice — a credit that WOULD fully cover it is already excluded above), the
