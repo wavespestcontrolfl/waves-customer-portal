@@ -138,14 +138,15 @@ function emailHandoff(ctx, to, templateKey, state) {
  * frequency windows; the flag is cleared again at the start of every attempt
  * so a retried, delivered leg counts as the contact it is.
  */
-async function stampNeverContacted(ledger, on) {
+async function stampNeverContacted(ledger, on, database = db) {
   try {
     if (on) {
       await ContactLedger.markSendFailed(ledger, { never_contacted: true });
     } else {
-      await db('collections_contact_ledger').where({ id: ledger.id })
-        .whereRaw("metadata ? 'never_contacted'")
-        .update({ metadata: db.raw("metadata - 'never_contacted'") });
+      // jsonb_exists, not the `?` operator: knex reads a bare `?` as a binding.
+      await database('collections_contact_ledger').where({ id: ledger.id })
+        .whereRaw("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'never_contacted')")
+        .update({ metadata: database.raw("metadata - 'never_contacted'") });
     }
   } catch (err) {
     logger.warn(`[customer-dunning] never_contacted stamp failed for ledger ${ledger.id}: ${err.message}`);
@@ -201,4 +202,4 @@ function makeSender(ctx) {
   return (channel, ledger) => (channel === 'email' ? sendEmailLeg(ctx, ledger) : sendTextLeg(ctx, channel, ledger));
 }
 
-module.exports = { makeSender, ensureLink, sendTextLeg, sendEmailLeg, boundaryOnlyHandoff, SOURCE };
+module.exports = { stampNeverContacted, makeSender, ensureLink, sendTextLeg, sendEmailLeg, boundaryOnlyHandoff, SOURCE };

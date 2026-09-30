@@ -25,6 +25,7 @@ const Followups = require('../services/invoice-followups');
 const Schedule = require('../services/customer-dunning/schedule');
 const Boundary = require('../services/customer-dunning/boundary');
 const Runner = require('../services/customer-dunning/runner');
+const Send = require('../services/customer-dunning/send');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -74,6 +75,10 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       t.text('paused_reason');
       t.timestamp('created_at').defaultTo(app.fn.now());
       t.timestamp('updated_at').defaultTo(app.fn.now());
+    });
+    await app.schema.createTable('collections_contact_ledger', (t) => {
+      t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()'));
+      t.jsonb('metadata');
     });
     await migration.up(app);
   });
@@ -579,6 +584,19 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       } finally {
         await tight.destroy();
       }
+    });
+  });
+
+  // ── A-11: the never_contacted stamp clears with SQL Postgres accepts ────
+  describe('A-11: clearing a stale never_contacted stamp (real SQL)', () => {
+    test('removes only that key, leaves other metadata, and is a no-op on a row without it', async () => {
+      const [withFlag] = await app('collections_contact_ledger').insert({ metadata: JSON.stringify({ never_contacted: true, send_failed: true, keep: 'x' }) }).returning('id');
+      const [plain] = await app('collections_contact_ledger').insert({ metadata: JSON.stringify({ keep: 'y' }) }).returning('id');
+      const [nulled] = await app('collections_contact_ledger').insert({ metadata: null }).returning('id');
+      for (const row of [withFlag, plain, nulled]) await Send.stampNeverContacted({ id: row.id }, false, app);
+      expect((await app('collections_contact_ledger').where({ id: withFlag.id }).first()).metadata).toEqual({ send_failed: true, keep: 'x' });
+      expect((await app('collections_contact_ledger').where({ id: plain.id }).first()).metadata).toEqual({ keep: 'y' });
+      expect((await app('collections_contact_ledger').where({ id: nulled.id }).first()).metadata).toBeNull();
     });
   });
 
