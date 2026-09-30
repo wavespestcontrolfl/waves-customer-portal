@@ -1707,6 +1707,74 @@ describe('r25 item 1: every same-sender row the model is shown is read for a vis
   });
 });
 
+describe('r26: the follow-up deadline the real-answers prompt requires may trail a hand-off (the exact SLA_PHRASES of sms-followup-sla)', () => {
+  const { SLA_PHRASES } = require('../services/sms-followup-sla');
+  const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');
+  const both = labelFactsLib.askedLabelKinds('Can the dogs go out and will rain wash it off?');
+  const guard = (reply, kinds = asked) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', kinds);
+  const HANDOFFS = [
+    'Your technician will confirm the timing', 'Our office will confirm the timing', "I'll have the office confirm", 'Let me check with your technician and get back to you',
+    'Someone will get back to you', "I'll check on that and follow up", 'A manager will reach out', 'The office will follow up', "We'll have an answer",
+    'So sorry about that \u2014 a manager will reach out', "I'm sorry about that, someone will follow up", 'Thanks for reaching out \u2014 a manager will follow up', 'Hi Jane, our office will confirm the timing',
+  ];
+  test('every SLA phrase the prompt can emit, appended to each hand-off form, passes at draft time, for either kind and for both', () => {
+    expect(SLA_PHRASES.length).toBeGreaterThanOrEqual(3);
+    for (const form of HANDOFFS) {
+      for (const phrase of SLA_PHRASES) {
+        const reply = `${form} ${phrase}.`;
+        expect([reply, guard(reply)]).toEqual([reply, false]);
+        expect([reply, guard(reply, both)]).toEqual([reply, false]);
+        expect([`${reply} Thank you!`, guard(`${reply} Thank you!`)]).toEqual([`${reply} Thank you!`, false]);
+      }
+    }
+    for (const phrase of SLA_PHRASES) {
+      const sanctioned = `It is safe once dry, and your technician will confirm the timing ${phrase}.`;
+      expect([sanctioned, guard(sanctioned)]).toEqual([sanctioned, false]);
+    }
+  });
+  test('and at send time (no snapshot with a stored inbound, a snapshot asked list, and no inbound at all)', async () => {
+    const boom = () => { throw new Error('must not read'); };
+    for (const form of HANDOFFS.slice(0, 6)) {
+      for (const phrase of SLA_PHRASES) {
+        const body = `${form} ${phrase}.`;
+        await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body, inbound: 'Can the dogs go out now?', conn: boom })).resolves.toBeNull();
+        await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: { sentences: [], asked }, body, conn: boom })).resolves.toBeNull();
+        await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body, conn: boom })).resolves.toBeNull();
+      }
+    }
+  });
+  test('the deadline is only a trailing modifier of a hand-off: it never lets another sentence pass, and its clock / duration is not a label time', async () => {
+    for (const reply of [
+      'Go ahead within the hour.', 'They can go out by 9 AM.', 'They can go out by 9 AM tomorrow morning.', 'Yes within the hour.', 'Yes, I\'ll have the office confirm within the hour.', 'Hi, go ahead by 9 AM this morning.',
+      'The dogs are fine by 9 AM this morning.', 'It will be dry within the hour.', 'You\'re good by 9 AM tomorrow morning.', 'Keep the dogs in within the hour.',
+    ]) {
+      expect([reply, guard(reply)]).toEqual([reply, true]);
+      await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body: reply, inbound: 'Can the dogs go out now?', conn: () => { throw new Error('must not read'); } })).resolves.toBe('label_facts_unauthorized_claim');
+    }
+    // a hand-off with an ordinary label time still holds; the deadline strip never hides it
+    expect(guard('Your technician will confirm the timing within the hour. Keep pets off for 4 hours.')).toBe(true);
+    expect(labelFactsLib.stripHandoffDeadlines('Go ahead within the hour.')).toBe('Go ahead within the hour.');
+    expect(labelFactsLib.stripHandoffDeadlines("I'll have the office confirm within the hour.").toLowerCase()).not.toContain('within the hour');
+  });
+  test('through the drafter\'s publication check (validateComplianceCopy) as well', () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    process.env[GATE] = 'true';
+    const facts = buildFactsBlock(context, { now: NOW });
+    for (const phrase of SLA_PHRASES) {
+      for (const reply of [`Your technician will confirm the timing ${phrase}.`, `Our office will confirm the timing ${phrase}.`, `It is safe once dry, and your technician will confirm the timing ${phrase}.`]) {
+        expect([reply, drafter.validateComplianceCopy({ reply, factsBlock: facts, inboundMessage: 'Can the dogs go out now?' }).ok]).toEqual([reply, true]);
+      }
+      expect(drafter.validateComplianceCopy({ reply: `They can go out ${phrase}.`, factsBlock: facts, inboundMessage: 'Can the dogs go out now?' }).ok).toBe(false);
+    }
+  });
+  test('an apology opener is peeled; an apology that carries an answer or a label word is not', () => {
+    expect(guard('I am sorry the spiders are back.')).toBe(false);
+    expect(guard('Sorry about that, go ahead.')).toBe(true);
+    expect(guard("I'm sorry the dogs can't go out yet.")).toBe(true);
+    expect(guard('So sorry about that \u2014 you can go out now.')).toBe(true);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {

@@ -877,7 +877,8 @@ const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| i
 // visit" / "for your yard". A negated or hedged form ("cannot confirm timing",
 // "may not", "unsure") is not the idiom, and neither is any negation or hedge
 // in the sentence that carries the idiom or the clause.
-const CONFIRM_TIMING_RE = /(?<![\w'-])(?:(?:your|the|our)\s+(?:technician|tech|office|team)|we)\s+(?:will\s+)?confirms?\s+(?:the\s+|your\s+)?timing(?:\s+(?:at|during|for|on)\s+(?:the|your)\s+(?:visit|appointment|yard|next\s+visit|service))?\s*(?:[.!]|$)/i;
+// (the real-answers prompt's follow-up deadline - the exact SLA_PHRASES of sms-followup-sla - may trail the confirmation)
+const CONFIRM_TIMING_RE = new RegExp(`(?<![\\w'-])(?:(?:your|the|our)\\s+(?:technician|tech|office|team)|we)\\s+(?:will\\s+)?confirms?\\s+(?:the\\s+|your\\s+)?timing(?:\\s+(?:at|during|for|on)\\s+(?:the|your)\\s+(?:visit|appointment|yard|next\\s+visit|service))?(?:\\s+(?:${require('./sms-followup-sla').SLA_PHRASES.map((p) => escapeRegex(p).replace(/ /g, '\\s+')).join('|')}))?\\s*(?:[.!]|$)`, 'i');
 const NEGATION_HEDGE_RE = /\b(?:not|no|never|nothing|nobody|cannot|without|unable|unsure|uncertain|unclear|unknown|may|might|maybe|perhaps|possibly|probably|hopefully|depends?|depending|but|however|unless|although|though|except|neither|nor|hardly|barely)\b|\bcan\s+not\b|n't\b/i;
 function sanctionSafeOnceDry(text) {
   const t = String(text || '');
@@ -1005,8 +1006,8 @@ function markCompanySentences(canon) {
 // first and never counts toward the neutral words)
 const DEFERRAL_LEAD_RE = /^(?:sure|ok|okay|absolutely|of\s+course|happy\s+to\s+help)(?:[,!]|\s[-–—])?\s+/;
 const DEFERRAL_SUBJECT_RE = /^(?:i'll|we'll|i\s+will|we\s+will|i\s+can|we\s+can|i|we|let\s+me|let\s+us|the\s+office|our\s+office|your\s+technician|the\s+technician|our\s+technician|a\s+teammate|someone|our\s+team|the\s+team|a\s+manager|the\s+owner)\b/;
-const DEFERRAL_VERB_RE = /\b(?:confirm|confirms|check|follow\s+up|get\s+back|look\s+into|find\s+out|reach\s+out|verify|ask|text\s+you|call\s+you|let\s+you\s+know)\b/;
-const DEFERRAL_WORDS = wordSet('i ll we let me us to the our your a an office technician tech team teammate someone manager owner dispatch will would can have has be confirm confirms check follow up get back look into find out reach verify ask text call you know with on about that this it timing time details shortly soon today later as possible right away and more info information then just quickly at visit appointment next for');
+const DEFERRAL_VERB_RE = /\b(?:confirm|confirms|check|follow\s+up|get\s+back|look\s+into|find\s+out|reach\s+out|verify|ask|text\s+you|call\s+you|let\s+you\s+know|have\s+an?\s+(?:answer|update))\b/;
+const DEFERRAL_WORDS = wordSet('i ll we let me us to the our your a an office technician tech team teammate someone manager owner dispatch will would can have has be confirm confirms check follow up get back look into find out reach verify ask text call you know with on about that this it timing time details shortly soon today later as possible right away and more info information then just quickly at visit appointment next for what happened morning issue concern an answer update');
 const isDeferral = (sentence) => {
   const body = sentence.replace(DEFERRAL_LEAD_RE, '');
   return DEFERRAL_SUBJECT_RE.test(body) && DEFERRAL_VERB_RE.test(body) && !hasAnswerForce(body.replace(DEFERRAL_SUBJECT_RE, ' ')) && allIn(wordsOf(body), DEFERRAL_WORDS);
@@ -1025,7 +1026,9 @@ const isSignoffSentence = (sentence) => SIGNOFF_SENTENCE_RE.test(sentence);
 const NAME_SEP_SRC = '\\s*[,!\\u2013\\u2014-]+\\s*';
 const LEADERS_RE = new RegExp('^(?:'
   + `(?:(?:hi|hello|hey|hiya|greetings)(?:\\s+there)?(?:\\s+[a-z]+)?|good\\s+(?:morning|afternoon|evening)(?:\\s+[a-z]+)?)${NAME_SEP_SRC}`
-  + `|(?:thanks|thank\\s+you)(?:\\s+(?:so|very)\\s+much)?${NAME_SEP_SRC}`
+  + `|(?:thanks|thank\\s+you)(?:\\s+(?:so|very)\\s+much)?(?:\\s+for\\s+(?:reaching\\s+out|contacting\\s+us|your\\s+message|letting\\s+us\\s+know))?${NAME_SEP_SRC}`
+  // an apology opener ("So sorry about that -", "I am sorry for the trouble,") is peeled like a greeting
+  + `|(?:(?:i\\s+am|i'm|we\\s+are|we're)\\s+)?(?:(?:so|very|really|truly)\\s+)*sorry(?:\\s+(?:about|for)\\s+(?:that|this|the\\s+(?:trouble|inconvenience|wait|delay|confusion)|any\\s+(?:trouble|inconvenience)))?${NAME_SEP_SRC}|(?:our\\s+)?apologies${NAME_SEP_SRC}`
   + `|(?:good|great)\\s+question${NAME_SEP_SRC})`);
 const GREETING_ONLY_RE = /^(?:(?:hi|hello|hey|hiya|greetings)(?:\s+there)?(?:\s+[a-z]+)?|good\s+(?:morning|afternoon|evening)(?:\s+[a-z]+)?)$/;
 const TRAILERS_RE = /(?:\s*[,;–—-]+\s*|\s+)(?:thanks|thank\s+you(?:\s+(?:so|very)\s+much)?|have\s+a\s+(?:great|good|wonderful|nice|lovely)\s+(?:day|evening|weekend|one)|take\s+care|talk\s+soon)\s*$/;
@@ -1044,8 +1047,11 @@ const isOffTopicScheduling = (sentence) => {
   return clauses.length > 0 && clauses.every((c) => !hasAnswerForce(c.clause)
     && isSchedulingClause(c.clause, { staffCarry: c.staffCarry, clock: hasClockTime(c.clause), sentence: c.sentence }));
 };
+// (h) an apology sentence with no answer force, label word, duration or clock ("I am sorry the spiders are back.")
+const isApologySentence = (sentence) => /^(?:(?:i\s+am|i'm|we\s+are|we're)\s+)?(?:(?:so|very|really|truly)\s+)*sorry\b|^(?:our\s+)?apologies\b/.test(sentence)
+  && !hasAnswerForce(sentence) && !LABEL_CONTEXT_RE.test(sentence) && !hasDuration(sentence) && !hasClockTime(sentence);
 // The content types, the first five being the ones the unknown-question path also trusts.
-const CONTENT_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isCompanySentence, isDeferral, isSignoffSentence, isOffTopicScheduling];
+const CONTENT_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isCompanySentence, isDeferral, isSignoffSentence, isApologySentence, isOffTopicScheduling];
 const isAllowedSentence = (sentence) => {
   if (GREETING_ONLY_RE.test(sentence.trim())) return true;
   const rest = peelFriendlyEnds(sentence);
@@ -1104,8 +1110,25 @@ function copiesDoNotAnswerAskedKinds(sentences, asked) {
 }
 
 /** True when `body` claims label timing beyond the sentences of `sectionText` (its own copies, verbatim, are fine), or answers a label question in `asked` without one. */
+// A hand-off carries the follow-up deadline the real-answers prompt requires ("... within the hour", "... by 9 AM this
+// morning", "... by 9 AM tomorrow morning" - the exact SLA_PHRASES sms-followup-sla owns). The phrase is a trailing modifier
+// of a hand-off / confirm clause ONLY: it is peeled off that sentence before the guards read it (so its duration or clock is
+// never read as a label time), and never makes any other sentence pass ("Go ahead within the hour." keeps the phrase and is held).
+function stripHandoffDeadlines(text) {
+  const { SLA_PHRASES } = require('./sms-followup-sla');
+  return String(text || '').split(/([.!?\n]+)/).map((piece, i) => {
+    if (i % 2) return piece;
+    const lower = piece.trim().toLowerCase();
+    const phrase = SLA_PHRASES.find((p) => lower.endsWith(p.toLowerCase()));
+    if (!phrase) return piece;
+    const base = canonText(piece).toLowerCase().replace(new RegExp(`[\\s,;-]*(?:and\\s+)?${escapeRegex(phrase.toLowerCase())}$`), '').trim();
+    return isHandoffBase(base) ? ` ${base}` : piece;
+  }).join('');
+}
+const isHandoffBase = (base) => isDeferral(peelFriendlyEnds(base)) || /^(?:.*\s)?sanctioned_idiom\b[^.]*\bconfirms?\s+(?:the\s+|your\s+)?timing$/.test(base);
+
 function replyClaimsUngroundedLabelTiming(body, sectionText, asked = []) {
-  const stripped = stripLabelSentences(sanctionSafeOnceDry(body), sectionText);
+  const stripped = stripLabelSentences(stripHandoffDeadlines(sanctionSafeOnceDry(body)), sectionText);
   return hasUngroundedLabelClaim(stripped) || answersAskedLabelQuestion(stripped, asked);
 }
 
@@ -1318,6 +1341,7 @@ module.exports = {
   inboundRefersToOtherVisit,
   sanctionSafeOnceDry,
   replyClaimsUngroundedLabelTiming,
+  stripHandoffDeadlines,
   askedLabelKinds,
   inboundIsElliptical,
   answersAskedLabelQuestion,

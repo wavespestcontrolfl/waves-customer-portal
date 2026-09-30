@@ -697,7 +697,7 @@ function hasBannedCustomerCopy(text, opts = {}) {
   if (!bannedCopyGuard) return true;
   let t = labelFactsLib.sanctionSafeOnceDry(text);
   if (opts && opts.rainTimeGuard) {
-    t = labelFactsLib.stripLabelSentences(t, opts.labelFactsText || '');
+    t = labelFactsLib.stripLabelSentences(labelFactsLib.stripHandoffDeadlines(t), opts.labelFactsText || '');
     // ...and a bare yes / ok / "you can" answering a re-entry or rain question the customer asked (opts.asked)
     if (labelFactsLib.hasUngroundedLabelClaim(t) || labelFactsLib.answersAskedLabelQuestion(t, opts.asked)) return true;
   }
