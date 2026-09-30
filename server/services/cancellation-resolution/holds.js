@@ -580,24 +580,38 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   }
   const nextOn = dateOnlyString(next.scheduled_date);
   if (next.status === 'completed' || nextOn < today || nextOn > addDays(today, 7)) return 'not_due';
-  const sent = await db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`plan-hold-reminder:${hold.id}`]);
+  if (!customer.phone) return unsentRestartText(hold, next, nextOn, today);
+  // Claim in a SHORT transaction, send outside it: the renderer and the
+  // sender query the pool themselves, and a transaction held across the
+  // send would pin a second connection (DB_POOL_MAX can be 2). The claim
+  // is the stamp itself (a CAS on reminder_sent_at), so two callers can
+  // never both send; a send that does not go through gives it back.
+  const claimAt = new Date();
+  const claim = await db.transaction(async (trx) => {
     // Row-locked against cancelHold / the resume CAS: only a standing hold
     // of a finished accept is texted (a record without the marker predates
     // it and counts as finished).
     const live = await trx('plan_holds').where({ id: hold.id }).forUpdate().first('reminder_sent_at', 'status', 'moved_visits');
-    if (!live || live.reminder_sent_at) return null;
-    if (!['active', 'resumed'].includes(live.status) || readRecord(live.moved_visits).acceptCommitted === false) return 'stale';
-    // The first visit back is read again, and its row held FOR SHARE for
-    // the send: a reschedule or cancel that landed since the read above
-    // means the date is stale (the next run names the real one), and one
-    // arriving now waits until this text is out, so its own notice lands
-    // after it.
+    if (!live || live.reminder_sent_at) return 'already';
+    const record = readRecord(live.moved_visits);
+    if (!['active', 'resumed'].includes(live.status) || record.acceptCommitted === false) return 'stale';
+    // The first visit back is read again under the lock: a reschedule or
+    // cancel since the read above means the date is stale (the next run
+    // names the real one).
     const again = await firstVisitBack(hold, trx);
     if (!again || String(again.id) !== String(next.id) || again.status !== next.status || dateOnlyString(again.scheduled_date) !== nextOn) return 'stale';
-    const pinned = await trx('scheduled_services').where({ id: next.id }).forShare().first('status', 'scheduled_date');
-    if (!pinned || pinned.status !== next.status || dateOnlyString(pinned.scheduled_date) !== nextOn) return 'stale';
-    if (!customer.phone) return false;
+    await trx('plan_holds').where({ id: hold.id }).whereNull('reminder_sent_at').update({
+      reminder_sent_at: claimAt,
+      moved_visits: JSON.stringify({ ...record, reminderClaim: { at: claimAt.toISOString(), visitId: next.id, delivered: false } }),
+      updated_at: new Date(),
+    });
+    return 'claimed';
+  });
+  if (claim === 'already') return 'already_sent';
+  if (claim === 'stale') return 'not_due';
+
+  let sent = false;
+  try {
     const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
     const { gsmSafeName } = require('../messaging/gsm-normalize');
@@ -606,23 +620,41 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
     const body = await renderRequiredSmsTemplate('plan_hold_resume_reminder', {
       first_name: gsmSafeName(customer.first_name),
       service: familyLabel(hold.family_key) || hold.family_key,
-      visit_date: visitDate,
-      // The pre-20260930 body names {resume_date}; the date it now
-      // promises is the first visit back either way.
+      // The date the text promises is the first visit back; the body's
+      // token is {resume_date} (20260930020000), visit_date for any body
+      // still carrying 20260930010000's token.
       resume_date: visitDate,
+      visit_date: visitDate,
     }, { workflow: 'plan_hold_resume_reminder', entity_type: 'plan_hold', entity_id: hold.id });
     const smsResult = await sendCustomerMessage({
       to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'support_resolution',
       customerId: hold.customer_id, identityTrustLevel: 'system', entryPoint: 'plan_hold_reminder',
       metadata: { original_message_type: 'plan_hold_resume_reminder', plan_hold_id: hold.id, visit_id: next.id },
     });
-    if (!smsResult.sent) return false;
-    await trx('plan_holds').where({ id: hold.id }).whereNull('reminder_sent_at').update({ reminder_sent_at: new Date(), updated_at: new Date() });
-    return true;
+    sent = !!smsResult.sent;
+  } catch (err) {
+    logger.error(`[holds] restart text send threw for hold ${hold.id}: ${err.message}`);
+  }
+  const row = await db('plan_holds').where({ id: hold.id }).first('moved_visits');
+  const record = readRecord(row?.moved_visits);
+  if (sent) {
+    await db('plan_holds').where({ id: hold.id }).update({
+      moved_visits: JSON.stringify({ ...record, reminderClaim: { ...(record.reminderClaim || {}), delivered: true } }),
+      updated_at: new Date(),
+    });
+    return 'sent';
+  }
+  // Give the claim back so tomorrow's run retries.
+  const { reminderClaim: _released, ...rest } = record;
+  await db('plan_holds').where({ id: hold.id, reminder_sent_at: claimAt }).update({
+    reminder_sent_at: null, moved_visits: JSON.stringify(rest), updated_at: new Date(),
   });
-  if (sent === null) return 'already_sent';
-  if (sent === 'stale') return 'not_due';
-  if (sent) return 'sent';
+  return unsentRestartText(hold, next, nextOn, today);
+}
+
+// A restart text that did not go out: retried tomorrow; when the visit is
+// about to run with no notice, the office calls.
+async function unsentRestartText(hold, next, nextOn, today) {
   logger.error(`[holds] restart text not delivered for hold ${hold.id} — will retry tomorrow`);
   // The visit is about to run with no notice: the office calls.
   if (nextOn <= addDays(today, 1)) {
@@ -696,6 +728,29 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
     } catch (err) {
       out.errors.push(`skips:${hold.id}`);
       logger.error(`[holds] skip recovery failed for hold ${hold.id}: ${err.message}`);
+    }
+  }
+
+  // A claim whose send never confirmed (the process stopped mid-send) is
+  // ambiguous — the text may or may not have gone out, and re-sending
+  // could double it. The office checks the thread instead; once.
+  const stuck = await db('plan_holds').whereIn('status', ['active', 'resumed'])
+    .where('reminder_sent_at', '<', new Date(Date.now() - 60 * 60 * 1000)).select('id', 'customer_id', 'family_key', 'moved_visits');
+  for (const hold of stuck) {
+    const record = readRecord(hold.moved_visits);
+    if (record.reminderClaim?.delivered !== false) continue;
+    try {
+      const { notifyAdmin } = require('../notification-service');
+      await notifyAdmin('service', 'Plan hold: restart text may not have gone out', `Hold ${hold.id} (${hold.family_key}): the restart text was being sent when the process stopped. Check the customer's messages and text them the first visit back if it is missing.`, {
+        bell: true, dedupeKey: `plan_hold_restart_text_unconfirmed:${hold.id}`, metadata: { kind: 'plan_hold_restart_text_unconfirmed', holdId: hold.id, customerId: hold.customer_id },
+      });
+      await db('plan_holds').where({ id: hold.id }).update({
+        moved_visits: JSON.stringify({ ...record, reminderClaim: { ...record.reminderClaim, delivered: 'unconfirmed' } }),
+        updated_at: new Date(),
+      });
+    } catch (err) {
+      out.errors.push(`remind_claim:${hold.id}`);
+      logger.error(`[holds] unconfirmed restart text check failed for hold ${hold.id}: ${err.message}`);
     }
   }
 

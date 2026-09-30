@@ -408,6 +408,24 @@ describe('runPlanHoldLifecycle', () => {
     expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(5)) }), expect.anything());
   });
 
+  test('a send that does not go through gives its claim back for tomorrow; a claim whose send never confirmed rings the office once', async () => {
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    mockSms.mockResolvedValueOnce({ sent: false });
+    await sendDueRestartTexts(['h1']);
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).reminderClaim).toBeUndefined();
+
+    const claimed = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    holdSeed({ resume_on: daysOut(2), reminder_sent_at: claimed,
+      moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: true, acceptCommitted: true, reminderClaim: { at: claimed.toISOString(), visitId: 'back', delivered: false } }) },
+    [lawnVisit('back', daysOut(3))]);
+    mockSms.mockClear();
+    await runPlanHoldLifecycle({ today: TODAY });
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(bells('plan_hold_restart_text_unconfirmed')).toHaveLength(1);
+  });
+
   test('no restart text for a hold whose accept has not finished, or one undone just before the send', async () => {
     holdSeed({ resume_on: daysOut(2), moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false }) }, [lawnVisit('back', daysOut(3))]);
     await runPlanHoldLifecycle({ today: TODAY });
@@ -455,12 +473,16 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockSms.mock.calls[0][0].metadata).toMatchObject({ visit_id: 'back' });
   });
 
-  test('accept-time send: a hold whose first visit back is inside the week is texted at once under its own lock, and never twice', async () => {
-    const db = require('../models/db');
+  test('accept-time send: a hold whose first visit back is inside the week is texted at once, claimed before the send, and never twice', async () => {
     holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    mockSms.mockImplementationOnce(async () => {
+      // The claim (the stamp) is committed before the provider is asked.
+      expect(mockState.tables.plan_holds[0].reminder_sent_at).toBeTruthy();
+      return { sent: true };
+    });
     await sendDueRestartTexts(['h1']);
     expect(mockSms).toHaveBeenCalledTimes(1);
-    expect(db.raw.mock.calls.some(([sql, b]) => /pg_advisory_xact_lock/.test(sql) && String(b).includes('plan-hold-reminder:h1'))).toBe(true);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).reminderClaim).toMatchObject({ visitId: 'back', delivered: true });
     await sendDueRestartTexts(['h1']);
     expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(0);
     expect(mockSms).toHaveBeenCalledTimes(1);
