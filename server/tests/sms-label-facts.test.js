@@ -1318,6 +1318,23 @@ describe('C: the section is for the latest visit only - a text about another vis
     ]) expect(other(text)).toBe(true);
   });
 
+  test('r9: same-day references resolve to today (ET) and must land on the visit date', () => {
+    const TODAY = '2026-09-30';
+    const YEST = '2026-09-29';
+    const texts = [
+      'You sprayed today, when can the dogs go out?', 'you treated this morning - can the kids play?', 'this afternoon you sprayed, rain?', 'You came this evening, are the pets ok?',
+      'Earlier today you sprayed - how long before the dogs go out?', 'you just sprayed just now, can the dog go out', 'you sprayed a few hours ago, is it dry?', 'you were here 2 hours ago - pets?',
+      'an hour ago you treated, will rain wash it off', 'about 30 minutes ago you sprayed, kids ok?', "today's treatment - is it safe for pets?",
+    ];
+    for (const text of texts) {
+      expect([text, other(text, YEST, TODAY)]).toEqual([text, true]); // facts are from yesterday: none on file
+      expect([text, other(text, TODAY, TODAY)]).toEqual([text, false]); // the visit is today: facts apply
+    }
+    expect(other('You sprayed tonight, when can the dogs go out?', TODAY, TODAY)).toBe(true); // tonight stays a coming time
+    expect(other('How long until the dogs can go out?', YEST, TODAY)).toBe(false); // no day named: the latest visit
+    expect(other('an earlier visit, pets ok?', TODAY, TODAY)).toBe(true); // "earlier" alone still names an older visit
+  });
+
   describe('through the drafter', () => {
     const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
     const makeClient = (scripted) => {

@@ -833,7 +833,7 @@ const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'frida
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
-const OLDER_VISIT_RE = /\b(?:previous|prior|earlier|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|two\s+visits?\s+ago|second\s+to\s+last)\b/;
+const OLDER_VISIT_RE = /\b(?:previous|prior|earlier(?!\s+(?:today|this\s+(?:morning|afternoon|evening))\b)|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|two\s+visits?\s+ago|second\s+to\s+last)\b/;
 
 function isoAddDays(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);
@@ -841,6 +841,8 @@ function isoAddDays(iso, days) {
 }
 
 const YESTERDAY_RE = /\byesterday\b/g;
+// Same-day references ("today", "this morning", "earlier today", "just now", "a few hours ago") mean the ET date `today`.
+const SAME_DAY_RE = /\btoday(?:'s)?\b|\bthis\s+(?:morning|afternoon|evening)\b|\bjust\s+now\b|\b(?:an?|one|two|three|four|five|six|\d{1,2}|a\s+few|a\s+couple(?:\s+of)?|several|some)\s+(?:hours?|hrs?|minutes?|mins?)\s+ago\b/g;
 const DAYS_AGO_RE = /\b(\d{1,3}|a|one|two|three|four|five|six|seven)\s+days?\s+ago\b/g;
 const DAYS_AGO_WORDS = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
 const MONTH_SRC = MONTH_NAMES.map((n) => n.slice(0, 3)).join('|');
@@ -869,6 +871,7 @@ const VISIT_REFERENCES = [
   { re: FUTURE_OR_OLDER_RE, differs: () => true },
   // "yesterday" / "N days ago" resolve against today and must land on the visit date
   { re: YESTERDAY_RE, differs: (m, v) => isoAddDays(v.today, -1) !== v.date },
+  { re: SAME_DAY_RE, differs: (m, v) => v.today !== v.date },
   { re: DAYS_AGO_RE, differs: (m, v) => isoAddDays(v.today, -(DAYS_AGO_WORDS[m[1]] ?? Number(m[1]))) !== v.date },
   // a weekday name: only the visit's own weekday, and only when the visit was within the last 6 days
   {
