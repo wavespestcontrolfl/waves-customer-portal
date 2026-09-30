@@ -436,7 +436,8 @@ async function combinedSignupEmailCoversWelcome(customer, row) {
     const rows = await query.select('id', 'status', 'text_snapshot', 'html_snapshot', ...RETRY_COLUMNS).limit(25);
     return (rows || []).some((message) => acceptedForSending(message) && messageCarriesAll({ message }, APP_SECTION_VALUES));
   } catch (err) {
-    logger.warn(`[new-recurring-welcome] signup-email check failed for customer ${customer?.id}; sending the welcome email as usual: ${err.message}`);
+    const { redactEmailAddresses } = require('./email-template-library');
+    logger.warn(`[new-recurring-welcome] signup-email check failed for customer ${customer?.id}; sending the welcome email as usual: ${redactEmailAddresses(err.message)}`);
     return false;
   }
 }
