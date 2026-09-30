@@ -22,7 +22,7 @@ const { deliverOpsDigest } = require('./ops-digest');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etWeekStart } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
-const { GATE, METADATA_KEY } = require('./call-booking-link-text');
+const { GATE, METADATA_KEY, activationBoundary } = require('./call-booking-link-text');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 const JOB_NAME = 'call-booking-link-text';
@@ -39,8 +39,13 @@ const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcon
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 
 // Worker outcomes that mean the lane misbehaved, not that a call was
-// (correctly) ineligible.
-const ERROR_REASONS = new Set(['worker_error', 'call_not_ready_timeout', 'never_send_recheck_failed']);
+// (correctly) ineligible. A failed delivery is also marked `failed` by the
+// sweep, whatever the provider code (see recordSendOutcome).
+const ERROR_REASONS = new Set(['worker_error', 'call_not_ready_timeout', 'never_send_recheck_failed', 'send_retry_timeout']);
+// A valid call the sweep has not stamped this long after it went quiet was
+// never checked: stage() threw on it (it catches per call, so the job still
+// reads as healthy) or it fell out of the staging lookback.
+const UNCHECKED_AFTER_MS = 60 * 60 * 1000;
 
 // Plain words for the skip reasons the owner will actually see. Anything
 // else falls back to the reason with underscores as spaces.
@@ -74,9 +79,10 @@ function reasonLabel(reason) {
   return r.replace(/_/g, ' ');
 }
 
-// A send can land up to a day or so after its call (2h delay, next-morning
-// window, retries), so the query reaches back further than the week and
-// compose sorts the rows: calls checked by call time, sends by send time.
+// A send or a failure can land a day or more after its call (2h delay,
+// next-morning window, 24h of retries), so the query reaches back further
+// than the week and compose sorts the rows: calls checked by call time,
+// outcomes by the time they happened.
 const LOOKBACK_EXTRA_MS = 3 * 24 * 60 * 60 * 1000;
 
 function windowStart(now) {
@@ -94,9 +100,22 @@ async function loadWeek(now = new Date()) {
       db.raw('metadata->?->>? AS reason', [METADATA_KEY, 'reason']),
       db.raw('metadata->?->>? AS send_at', [METADATA_KEY, 'send_at']),
       db.raw('metadata->?->>? AS sent_at', [METADATA_KEY, 'sent_at']),
+      db.raw('metadata->?->>? AS decided_at', [METADATA_KEY, 'decided_at']),
+      db.raw('metadata->?->>? AS failed', [METADATA_KEY, 'failed']),
     );
   const job = await db('job_health').where({ job_name: JOB_NAME }).first('last_success_at', 'consecutive_failures');
-  return { rows, job };
+  const boundary = await activationBoundary(db);
+  const since = new Date(Math.max(windowStart(now).getTime(), boundary.getTime()));
+  const unstamped = await db('call_log')
+    .modify((q) => whereNotSandboxCall(q)) // stage() never sees a sandbox call
+    .where('v2_extraction_status', 'valid')
+    .where('created_at', '>=', since)
+    .whereNull('processing_token')
+    .where('updated_at', '<=', new Date(now.getTime() - UNCHECKED_AFTER_MS))
+    .whereRaw('metadata->? IS NULL', [METADATA_KEY])
+    .count('* as n')
+    .first();
+  return { rows, job, unchecked: Number(unstamped?.n || 0) };
 }
 
 function hoursAgo(then, now) {
@@ -112,21 +131,30 @@ function clampSummary(s) {
 }
 
 const isWaiting = (r) => r.status === 'pending' || r.status === 'claimed';
-const isError = (r) => r.status === 'ambiguous' || (r.status === 'skipped' && ERROR_REASONS.has(r.reason));
+const isFailed = (r) => r.failed === true || r.failed === 'true';
+const isError = (r) => r.status === 'ambiguous'
+  || (r.status === 'skipped' && (isFailed(r) || ERROR_REASONS.has(r.reason)));
+// When the call reached its outcome: sent_at for a text, decided_at for any
+// other final decision, the call itself for a stage-time skip (and for rows
+// written before decided_at existed).
+const outcomeAt = (r) => r.sent_at || r.decided_at || r.created_at;
 
-function tally(live, now) {
-  const stuck = live.filter((r) => isWaiting(r) && r.send_at && now.getTime() - new Date(r.send_at).getTime() > STUCK_MS).length;
+// `checked` = calls made this week; `outcomes` = decisions reached this week,
+// whatever week the call was in; `waiting` = everything still open, so a
+// stuck row is reported until it resolves.
+function tally({ outcomes, waiting }, now) {
+  const stuck = waiting.filter((r) => r.send_at && now.getTime() - new Date(r.send_at).getTime() > STUCK_MS).length;
   const skipCounts = new Map();
-  for (const r of live) {
+  for (const r of outcomes) {
     if (r.status !== 'skipped' || isError(r)) continue;
     const label = reasonLabel(r.reason);
     skipCounts.set(label, (skipCounts.get(label) || 0) + 1);
   }
   return {
-    sent: live.filter((r) => r.status === 'sent').length,
-    errors: live.filter(isError).length,
+    sent: outcomes.filter((r) => r.status === 'sent').length,
+    errors: outcomes.filter(isError).length,
     stuck,
-    waiting: live.filter(isWaiting).length - stuck,
+    waiting: waiting.length - stuck,
     topSkips: [...skipCounts.entries()].sort((a, b) => b[1] - a[1]),
   };
 }
@@ -144,6 +172,7 @@ function problemsFor(t, sweep, now) {
   const problems = [];
   if (t.stuck) problems.push(`${t.stuck} stuck`);
   if (t.errors) problems.push(`${t.errors} error${t.errors === 1 ? '' : 's'}`);
+  if (t.unchecked) problems.push(`${t.unchecked} not checked`);
   if (sweep.stale) problems.push(sweep.lastSuccess ? `last run ${hoursAgo(sweep.lastSuccess, now)}` : 'never ran');
   else if (sweep.failing) problems.push('last run failed');
   return problems;
@@ -157,17 +186,19 @@ function healthySummary(checkedCount, topSkips) {
 }
 
 // Pure: the week's numbers → bell headline/summary + detail text.
-function composeWeeklyCheck({ rows = [], job = null }, now = new Date()) {
+function composeWeeklyCheck({ rows = [], job = null, unchecked = 0 }, now = new Date()) {
   const since = windowStart(now);
-  const inWindow = (at) => at && new Date(at).getTime() >= since.getTime() && new Date(at).getTime() <= now.getTime();
-  // A call that predates the gate going live is not this week's news. Rows
-  // without created_at (callers passing their own rows) count as this week.
+  // Rows without a time (callers passing their own rows) count as this week.
+  const inWindow = (at) => !at || (new Date(at).getTime() >= since.getTime() && new Date(at).getTime() <= now.getTime());
+  // A call that predates the gate going live is not this week's news.
   const notPre = rows.filter((r) => r.reason !== 'pre_activation');
-  const live = notPre.filter((r) => !r.created_at || inWindow(r.created_at));
-  const t = tally(live, now);
-  // Sends are counted by when they went out, so a text sent after the
-  // previous check for a call made before it is never missed.
-  t.sent = notPre.filter((r) => r.status === 'sent' && (r.sent_at ? inWindow(r.sent_at) : live.includes(r))).length;
+  const live = notPre.filter((r) => inWindow(r.created_at));
+  const waiting = notPre.filter(isWaiting);
+  // An outcome counts in the week it happened, so a text sent, or a send
+  // that failed, after the previous check for an earlier call is never missed.
+  const outcomes = notPre.filter((r) => !isWaiting(r) && inWindow(outcomeAt(r)));
+  const t = tally({ outcomes, waiting }, now);
+  t.unchecked = Number(unchecked) || 0;
   const sweep = sweepState(job, now);
   const problems = problemsFor(t, sweep, now);
 
@@ -178,7 +209,7 @@ function composeWeeklyCheck({ rows = [], job = null }, now = new Date()) {
 
   const detail = [
     `Last ${WINDOW_DAYS} days: ${live.length} calls checked, ${t.sent} sent, ${t.waiting} waiting to send.`,
-    `Problems: ${t.stuck} stuck, ${t.errors} errors; sweep last succeeded ${sweep.lastSuccess ? hoursAgo(sweep.lastSuccess, now) : 'never'}${sweep.failing ? ', last run failed' : ''}.`,
+    `Problems: ${t.stuck} stuck, ${t.errors} errors, ${t.unchecked} not checked; sweep last succeeded ${sweep.lastSuccess ? hoursAgo(sweep.lastSuccess, now) : 'never'}${sweep.failing ? ', last run failed' : ''}.`,
     'Skipped:',
     ...(t.topSkips.length ? t.topSkips.map(([label, n]) => `  ${label}: ${n}`) : ['  none']),
   ].join('\n');
@@ -190,9 +221,39 @@ function dedupeKeyFor(now = new Date()) {
   return `${OPS_KEY}:${etWeekStart(now)}`;
 }
 
+// Durable weekly-send guard, same as agent-gap-digest: runExclusive only
+// serializes CONCURRENT ticks, and the email fallback skips the bell's
+// dedupeKey, so a deploy-overlap instance entering after the first released
+// the lock would email again. Stamped only after a delivery succeeded; a
+// read failure sends anyway (a rare double beats a silently skipped week).
+const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
+
+async function sentRecently() {
+  try {
+    const row = await db('ops_email_send_state').where({ email_key: OPS_KEY }).first('last_sent_at');
+    return Boolean(row?.last_sent_at && (Date.now() - new Date(row.last_sent_at).getTime()) < SIX_DAYS_MS);
+  } catch (err) {
+    logger.warn(`[call-booking-link-weekly] send-marker read failed (${err.code || err.name || 'error'}) — proceeding without the guard`);
+    return false;
+  }
+}
+
+async function stampSendMarker() {
+  try {
+    const now = new Date();
+    await db('ops_email_send_state')
+      .insert({ email_key: OPS_KEY, last_sent_at: now, updated_at: now })
+      .onConflict('email_key')
+      .merge({ last_sent_at: now, updated_at: now });
+  } catch (err) {
+    logger.warn(`[call-booking-link-weekly] send-marker write failed (${err.code || err.name || 'error'}) — next tick may re-send`);
+  }
+}
+
 async function runCallBookingLinkWeeklyCheck(opts = {}) {
   const now = opts.now || new Date();
   if (!(opts.gateEnabled ?? isEnabled(GATE))) return { skipped: 'disabled' };
+  if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
   let data;
   try {
     data = await (opts.loadWeek || loadWeek)(now);
@@ -249,6 +310,7 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
     logger.error('[call-booking-link-weekly] delivery reported not ok');
     return { sent: false, error: true, ...composed };
   }
+  await (opts.stampSendMarker || stampSendMarker)();
   logger.info(`[call-booking-link-weekly] posted via ${delivered?.channel || 'unknown'}: ${composed.headline}`);
   return { sent: true, ...composed };
 }

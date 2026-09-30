@@ -2625,7 +2625,7 @@ describe('dispatchClaimedCall', () => {
 
     const outcome = await _private.recordRetryableDecision(db, call, entry, 'lead-1', now, result, skip);
 
-    expect(skip).toHaveBeenCalledWith('PROVIDER_FAILURE');
+    expect(skip).toHaveBeenCalledWith('PROVIDER_FAILURE', { failed: true }); // a delivery that never happened (codex #5358 r1 P1)
     expect(del).toHaveBeenCalledTimes(2);
     expect(deletedTables).toEqual([HANDOFF_MARKER_TABLE, CONSULTATION_ATTEMPT_TABLE]);
     expect(outcome).toEqual({ sent: false, skipped: 'PROVIDER_FAILURE' });

@@ -104,6 +104,44 @@ describe('composeWeeklyCheck', () => {
     expect(out.summary.length).toBeLessThanOrEqual(SUMMARY_MAX);
   });
 
+  // codex #5358 r1 P1: a delivery failure is recorded as a skip with a
+  // provider code, so the check reads the sweep's `failed` mark, not a list.
+  test('a failed delivery is an error, whatever its provider code', () => {
+    const rows = [
+      { status: 'skipped', reason: '21610', failed: 'true' },
+      { status: 'skipped', reason: 'send_retry_timeout' },
+      { status: 'skipped', reason: 'sms_opted_out' },
+    ];
+    const out = composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW);
+    expect(out.headline).toBe('Booking-link texts need a look');
+    expect(out.summary).toBe('2 errors');
+  });
+
+  // codex #5358 r1 P1: a call stage() threw on is never stamped, so it only
+  // shows up as a valid call with no mark.
+  test('calls the sweep never checked make it a problem', () => {
+    const out = composeWeeklyCheck({ rows: [], job: FRESH_JOB, unchecked: 4 }, NOW);
+    expect(out.headline).toBe('Booking-link texts need a look');
+    expect(out.summary).toBe('4 not checked');
+  });
+
+  // codex #5358 r1 P2: a failure decided this week for last week's call is
+  // this week's news; one decided last week is not.
+  test('an outcome counts in the week it was decided, not the week of its call', () => {
+    const lastWeekCall = new Date(NOW.getTime() - 8 * 24 * 3600 * 1000).toISOString();
+    const rows = [
+      { status: 'skipped', reason: 'worker_error', created_at: lastWeekCall, decided_at: new Date(NOW.getTime() - 5 * 24 * 3600 * 1000).toISOString() },
+      { status: 'skipped', reason: 'worker_error', created_at: lastWeekCall, decided_at: new Date(NOW.getTime() - 8 * 24 * 3600 * 1000).toISOString() },
+    ];
+    const out = composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW);
+    expect(out.summary).toBe('1 error');
+  });
+
+  test('a send still stuck from an earlier week is still reported', () => {
+    const rows = [{ status: 'pending', reason: null, created_at: new Date(NOW.getTime() - 9 * 24 * 3600 * 1000).toISOString(), send_at: new Date(NOW.getTime() - 8 * 24 * 3600 * 1000).toISOString() }];
+    expect(composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW).summary).toBe('1 stuck');
+  });
+
   test('wording carries no emoji, column names or gate names', () => {
     const out = composeWeeklyCheck({ rows: [...skipped('no_lead_linkage', 2)], job: FRESH_JOB }, NOW);
     expect(`${out.headline} ${out.summary}`).not.toMatch(/GATE_|_|[\u{1F300}-\u{1FAFF}]/u);
@@ -146,6 +184,29 @@ describe('runCallBookingLinkWeeklyCheck', () => {
     expect(args.itemKeys).toHaveLength(1);
     expect(args.ringOnFirstIdentity).toBe(true);
     expect(typeof args.sendEmail).toBe('function');
+  });
+
+  // codex #5358 r1 P2: the email fallback skips the bell's dedupeKey, so a
+  // durable weekly marker keeps a deploy-overlap rerun from emailing twice.
+  test('a week already sent is not sent again, and a send stamps the marker', async () => {
+    const deliver = jest.fn(async () => ({ ok: true, channel: 'email' }));
+    const stampSendMarker = jest.fn(async () => {});
+    const loadWeek = async () => ({ rows: [], job: FRESH_JOB });
+    const again = await runCallBookingLinkWeeklyCheck({ now: NOW, gateEnabled: true, deliver, loadWeek, stampSendMarker, sentRecently: async () => true });
+    expect(again).toEqual({ skipped: 'recent_send' });
+    expect(deliver).not.toHaveBeenCalled();
+    await runCallBookingLinkWeeklyCheck({ now: NOW, gateEnabled: true, deliver, loadWeek, stampSendMarker, sentRecently: async () => false });
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(stampSendMarker).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failed delivery does not stamp the marker', async () => {
+    const stampSendMarker = jest.fn(async () => {});
+    await runCallBookingLinkWeeklyCheck({
+      now: NOW, gateEnabled: true, deliver: async () => ({ ok: false }), stampSendMarker, sentRecently: async () => false,
+      loadWeek: async () => ({ rows: [], job: FRESH_JOB }),
+    });
+    expect(stampSendMarker).not.toHaveBeenCalled();
   });
 
   test('a failed query is reported, not posted', async () => {

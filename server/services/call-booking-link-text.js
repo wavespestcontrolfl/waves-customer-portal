@@ -54,7 +54,8 @@
  *     later retry deferral, which only ever advances send_at itself — the
  *     fixed anchor a retry's own 24h give-up measures against)
  *   { status: 'sent', lead_id, send_at, sent_at, ... }        — texted
- *   { status: 'skipped', reason, send_at, dispatched_at }     — was pending, blocked at send time
+ *   { status: 'skipped', reason, send_at, decided_at, failed? } — was pending, blocked at send time
+ *     (failed: true when delivery itself failed, not a policy block)
  * A cron tick (scheduler.js, every 5 min, mirroring reschedule-link-promises)
  * calls sweep(): stage() evaluates newly-extracted calls once, dispatch()
  * claims and sends whatever is due. Every terminal send-time decision (sent
@@ -1004,7 +1005,10 @@ async function claimForDispatch(conn, callId) {
 }
 
 async function recordDecision(conn, call, entry, { logActivity = true } = {}) {
-  await conn('call_log').where({ id: call.id }).update({ metadata: metadataPatch(conn, entry), updated_at: new Date() });
+  // decided_at: when a call reached its final outcome, so the weekly check
+  // reports it in that week rather than the week of the call.
+  const stamped = entry.status === 'pending' ? entry : { ...entry, decided_at: new Date().toISOString() };
+  await conn('call_log').where({ id: call.id }).update({ metadata: metadataPatch(conn, stamped), updated_at: new Date() });
   if (!logActivity) return;
   const sent = entry.status === 'sent';
   await conn('activity_log').insert({
@@ -1641,8 +1645,8 @@ async function deleteConsultationLinkAttempt(attemptId) {
 async function dispatchClaimedCall(conn, call, now) {
   const entry = parseMetadata(call)[METADATA_KEY] || {};
   const leadId = entry.lead_id;
-  const skip = async (reason) => {
-    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
+  const skip = async (reason, extra = {}) => {
+    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at, ...extra });
     return { sent: false, skipped: reason };
   };
   // The processor's own ownership fence, re-checked at send time (codex
@@ -1696,7 +1700,7 @@ async function dispatchClaimedCall(conn, call, now) {
   // dispatch time. Judging the deadline only after a send attempt means a
   // provider that happens to succeed on that overdue attempt would still
   // text a stale follow-up and record it as a normal send.
-  if (pastRetryDeadline(entry, now)) return skip('send_retry_timeout');
+  if (pastRetryDeadline(entry, now)) return skip('send_retry_timeout', { failed: true });
   const lead = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first();
   const reason = await dispatchIneligibleReason({ conn, call, lead, leadId, now });
   if (reason) return skip(reason);
@@ -2055,7 +2059,7 @@ async function recordRetryableDecision(conn, call, entry, leadId, now, result, s
   // terminal skip, not a reason to leave the marker rows as if it sent.
   if (pastRetryDeadline(entry, now)) {
     await clearDispatchMarkers(call);
-    return skip(result.code || result.reason || 'send_retry_timeout');
+    return skip(result.code || result.reason || 'send_retry_timeout', { failed: true });
   }
   await clearDispatchMarkers(call);
   const rawNextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
@@ -2074,8 +2078,8 @@ function blockedOutcomeReason(result) {
 }
 
 async function recordSendOutcome(conn, call, entry, leadId, now, result) {
-  const skip = async (reason) => {
-    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
+  const skip = async (reason, extra = {}) => {
+    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at, ...extra });
     return { sent: false, skipped: reason };
   };
   const kind = classifySendOutcomeKind(result);
@@ -2088,7 +2092,10 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
   // Twilio terminal rejection, not merely a pre-dispatch policy refusal) —
   // see clearDispatchMarkers' own doc comment for why this is unconditional.
   await clearDispatchMarkers(call);
-  return skip(blockedOutcomeReason(result));
+  // A policy block (opt-out, suppression) is a correct skip; anything else
+  // is a delivery that failed. `failed` lets the weekly check tell the two
+  // apart without knowing every provider code.
+  return skip(blockedOutcomeReason(result), result.blocked ? {} : { failed: true });
 }
 
 // A 'claimed' row a whole sweep tick failed to bring to a terminal status
