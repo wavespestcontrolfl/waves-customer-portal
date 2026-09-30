@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { COLORS as B } from '../theme-brand';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
 // Bait station map (station-map-v1) — numbered station pins over the live
 // satellite image. Extracted verbatim from ReportViewPage so the customer
@@ -324,7 +325,7 @@ const TRAP_PIN_STYLES = `
   }
 `;
 
-export function StationMapCard({ stationMap, sectionId = 'station-map', variant = 'report', hideTitle = false, trapPins = false, animate = false, stationPins = false }) {
+export function StationMapCard({ stationMap, sectionId = 'station-map', variant = 'report', hideTitle = false, trapPins = false, animate = false, stationPins = false, onImageError = undefined }) {
   const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
   const useTrapPins = trapPins && stationMap?.program === 'trapping' && variant !== 'plan';
   // Animated circle pins are scoped to the TERMITE bait-station program on the
@@ -394,7 +395,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
           aria-label={programMeta.ariaLabel}
           style={{ display: 'block', width: '100%' }}
         >
-          <image href={stationMap.image.url} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
+          <image onError={onImageError} href={resolveApiAssetUrl(stationMap.image.url)} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
           {useTrapPins && <style>{TRAP_PIN_STYLES}</style>}
           {useStationPinAnim && <style>{STATION_PIN_STYLES}</style>}
           {stations.map((station, index) => {
