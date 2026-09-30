@@ -118,6 +118,33 @@ describe('outgoingZelleStale / zelleBodyContacts — a Zelle contact must still 
     expect(outgoingZelleStale(body)).toEqual({ stale: false });
   });
 
+  // Codex round-16 P1: Zelle context carries across clauses — the instruction clause that names
+  // the contact never says "Zelle" itself.
+  test('Zelle context carries to a following transfer-instruction clause that has no Zelle word', () => {
+    process.env.ZELLE_RECIPIENT = 'new-recipient@wavespestcontrol.com';
+    const stale = { stale: true, reason: 'zelle_recipient_stale' };
+    // the auditor's split (clause 1 is already an offer) and the receipt-then-instruction split
+    expect(outgoingZelleStale('Send it via Zelle. Use old-recipient@wavespestcontrol.com for $120.')).toEqual(stale);
+    expect(hasAffirmativeZelleMention('We received your Zelle payment. Use old-recipient@wavespestcontrol.com for the rest.')).toBe(true);
+    expect(zelleBodyContacts('We received your Zelle payment. Use old-recipient@wavespestcontrol.com for the rest.')).toHaveLength(1);
+    expect(outgoingZelleStale('We received your Zelle payment. Use old-recipient@wavespestcontrol.com for the rest.')).toEqual(stale);
+    expect(outgoingZelleStale('We received your Zelle payment. Send the rest to (941) 555-1234.')).toEqual(stale);
+    // the current recipient still passes; and with no recipient configured the instruction is stale
+    expect(outgoingZelleStale('We received your Zelle payment. Use new-recipient@wavespestcontrol.com for the rest.')).toEqual({ stale: false });
+    delete process.env.ZELLE_RECIPIENT;
+    expect(outgoingZelleStale('We received your Zelle payment. Use pay@example.com for the rest.')).toEqual(stale);
+  });
+
+  test('no over-trigger: receipt-only, a portal instruction, or negated Zelle stay clean', () => {
+    process.env.ZELLE_RECIPIENT = 'new-recipient@wavespestcontrol.com';
+    for (const body of [
+      'We received your $120 Zelle payment from Sep 12.',
+      'We received your Zelle payment. You can pay the rest at the portal link.',
+      "We don't take Zelle. Pay online at the portal.",
+      'Thanks! Send the rest through the invoice page.',
+    ]) expect({ body, mention: hasAffirmativeZelleMention(body) }).toEqual({ body, mention: false });
+  });
+
   test('recipient reconfigured since draft ⇒ stale', () => {
     process.env.ZELLE_RECIPIENT = 'new-recipient@wavespestcontrol.com';
     const body = 'You can Zelle to old-recipient@wavespestcontrol.com, just add your name.';

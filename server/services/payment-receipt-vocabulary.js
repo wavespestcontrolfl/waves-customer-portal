@@ -253,8 +253,22 @@ const SETTLEMENT_PHRASES = Object.freeze([
 ]);
 const SETTLEMENT_PHRASE_RE = new RegExp(`\\b(?:${phrasePattern(SETTLEMENT_PHRASES)})\\b`, 'i');
 // "$0 balance" / "balance is $0" / "owe $0" — checked on the RAW text (masking a
-// figure loses its value).
-const ZERO_BALANCE_RE = /(?:\$\s?0(?:\.00?)?|\bzero)\s+(?:balance|due|owed|owing)\b|\bbalance\s+(?:is|of)\s+(?:\$\s?0(?:\.00?)?|zero)\b|\bowe\s+(?:us\s+)?\$\s?0(?:\.00?)?\b/i;
+// figure loses its value). Codex round-16 P1: the WHOLE amount must be zero — "$0.99",
+// "$0.50" and "$0.01" are real balances whose "$0" prefix must not read as zero, so the
+// zero figure may not be followed by more digits ([.,]\d). "$0", "$0.00", "0.00", "zero".
+const ZERO_AMT = '(?:\\$\\s?0(?:\\.0{1,2})?|\\b0\\.0{1,2}|\\bzero)(?![.,]?\\d)';
+const ZERO_DOLLARS = '\\$\\s?0(?:\\.0{1,2})?(?![.,]?\\d)';
+const ZERO_BALANCE_RE = new RegExp(
+  `${ZERO_AMT}\\s+(?:balance|due|owed|owing)\\b|\\bbalance\\s+(?:is|of)\\s+${ZERO_AMT}|\\bowe\\s+(?:us\\s+)?${ZERO_DOLLARS}`,
+  'i',
+);
+// ONE detector for a zero-balance claim, shared by the draft validator AND the send-time
+// recheck (a question — "is your balance zero?" — asserts nothing).
+function zeroBalanceClaim(text) {
+  const raw = String(text || '');
+  const m = ZERO_BALANCE_RE.exec(raw);
+  return !!m && !insideQuestion(raw, m.index);
+}
 
 // The prompt sentence derived from the table above.
 function paymentStatusPromptLine() {
@@ -296,6 +310,7 @@ module.exports = {
   SETTLEMENT_PHRASES,
   SETTLEMENT_PHRASE_RE,
   ZERO_BALANCE_RE,
+  zeroBalanceClaim,
   PAYMENT_SUBJECT,
   PAYMENT_EVENT_SUBJECT,
   insideQuestion,

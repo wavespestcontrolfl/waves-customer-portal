@@ -52,3 +52,16 @@ describe('Codex round-9 P1: the prescreen is built from the full status table', 
     expect(mayAssertPaymentStatus('See you Tuesday at 9!')).toBe(false);
   });
 });
+
+// Codex round-16 P1: a zero-balance claim needs the COMPLETE amount to be zero.
+describe('zeroBalanceClaim / ZERO_BALANCE_RE', () => {
+  const { zeroBalanceClaim } = require('../services/payment-receipt-vocabulary');
+  test.each([
+    'Your balance is $0.', 'Your balance is $0.00.', 'Your balance is $0', 'Your balance is 0.00.', 'Your balance is zero.',
+    'You have a $0 balance.', 'You have a $0.00 balance', 'You have a zero balance', 'You owe $0.', 'You owe us $0.00.',
+  ])('zero: %s', (t) => { expect(zeroBalanceClaim(t)).toBe(true); });
+  test.each([
+    'Your balance is $0.99.', 'Your balance is $0.50.', 'Your balance is $0.01.', 'You have a $0.99 balance', 'You owe $0.99.',
+    'You owe us $0.05', 'Your balance is $0,50.', 'Your balance is $10.00.', 'Is your balance zero?',
+  ])('not zero: %s', (t) => { expect(zeroBalanceClaim(t)).toBe(false); });
+});

@@ -81,3 +81,24 @@ describe('a queued denial of receipt is rechecked at send time (paid-after-draft
       .resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   });
 });
+
+// Codex round-16 P1: a queued ZERO-balance claim is rechecked at send time with the drafter's own detector.
+describe('a queued zero-balance reply is rechecked when a balance posts after the draft', () => {
+  const { amountFreeStatusClaimStale } = require('../services/sms-amount-recheck');
+  const check = (body, extra) => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], extra));
+    return amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh });
+  };
+  test.each(['Your balance is zero.', 'You have a zero balance.', 'Your balance is $0.00.'])('%s', async (body) => {
+    await expect(check(body, { outstandingBalance: 0 })).resolves.toEqual({ stale: false }); // zero at draft time
+    await expect(check(body, { outstandingBalance: 40 })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' }); // a balance posted
+    await expect(check(body, { outstandingBalance: 0, openInvoice: { amountDue: 40 } })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+  test('"$0.99" is a real balance, not a settlement claim, at draft and send time', async () => {
+    const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], { outstandingBalance: 0.99 }));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $0.99.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], { outstandingBalance: 0 }));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $0.99.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+});

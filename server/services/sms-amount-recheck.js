@@ -126,7 +126,7 @@ const ZELLE_OFFER_RE = /\b(?:can|could|may|feel free to|please)\b[^.\n]{0,30}\bz
 // "Thanks for processing my Zelle payment!" / "Thank you, the Zelle payment
 // cleared" read as a historical RECEIPT exactly like a bare verb does.
 const {
-  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim, inboundNamesPayment,
+  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim, inboundNamesPayment, zeroBalanceClaim,
 } = require('./payment-receipt-vocabulary');
 const ZELLE_INSTRUCTION_MARKER_RE = /\b(?:use|send|pay|can|please)\b/i;
 // null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
@@ -167,9 +167,24 @@ function classifyZelleClause(clause) {
   // fails closed as an OFFER (the stricter path).
   return 'offer';
 }
+// Codex round-16 P1: Zelle context carries across clauses. A reply that affirms Zelle in one
+// clause (an offer, or a receipt) and then gives the TRANSFER INSTRUCTION in another that never
+// says "Zelle" ("We got your Zelle payment. Use pay@example.com for the rest.") used to skip the
+// recheck: the contact-bearing clause has no Zelle word of its own. Fail closed — any transfer
+// instruction (a contact, or a send/pay/use ... to/via/through <destination>) in a reply that
+// mentions Zelle non-negatedly anywhere runs the Zelle recipient + visibility recheck.
+const TRANSFER_INSTRUCTION_RE = /\b(?:send|transfer|pay|use)\b[^.\n]{0,30}\b(?:to|via|through)\b/i;
+const NON_ZELLE_DESTINATION_RE = /\b(?:link|portal|online|website|app|card|invoice\s+page)\b/i;
+function isTransferInstructionClause(clause) {
+  const text = String(clause || '');
+  if (zelleBodyContacts(`zelle ${text}`).length) return true;
+  return TRANSFER_INSTRUCTION_RE.test(text) && !NON_ZELLE_DESTINATION_RE.test(text);
+}
 function hasAffirmativeZelleMention(body) {
   const clauses = String(body || '').split(CLAUSE_SPLIT_RE);
-  return clauses.some((clause) => classifyZelleClause(clause) === 'offer');
+  if (clauses.some((clause) => classifyZelleClause(clause) === 'offer')) return true;
+  const zelleAffirmed = clauses.some((clause) => ZELLE_WORD_RE.test(clause) && !ZELLE_NEGATION_RE.test(clause));
+  return zelleAffirmed && clauses.some((clause) => !ZELLE_WORD_RE.test(clause) && isTransferInstructionClause(clause));
 }
 
 /**
@@ -308,6 +323,9 @@ async function amountFreeStatusClaimStale({
       // Codex round-15 P1: an amount-free NEGATED ack ("Your payment wasn't processed") is a denial
       // of receipt — a paid row since the draft makes it false, so it is rechecked too.
       || (typeof drafter.paymentAckPolarity === 'function' && drafter.paymentAckPolarity(clause) === 'negated')
+      // Codex round-16 P1: a zero-balance claim ("Your balance is zero.") is a settlement claim the
+      // draft validator judges with this SAME detector — a balance that posted since the draft makes it false.
+      || zeroBalanceClaim(clause)
       || paymentStatusPhraseClaim(clause, inboundNamesPayment(inboundMessage)) != null);
   if (!hasStatusClaim) return { stale: false };
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
