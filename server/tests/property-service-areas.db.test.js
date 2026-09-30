@@ -49,7 +49,8 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     [visit] = await knex('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, property_id: primary.id, technician_id: tech.technicianId, scheduled_date: etDateString(), service_type: 'Tree & Shrub Care' }).returning('*');
   });
   afterEach(() => { delete process.env.GATE_PROPERTY_SERVICE_AREAS; });
-  const read = (scope, actor = admin, options = {}) => areas.readAreaMeasurements(scope, actor, { knex, ...options });
+  // The shared refresh cooldown has its own Postgres suite; here every refresh is granted.
+  const read = (scope, actor = admin, options = {}) => areas.readAreaMeasurements(scope, actor, { knex, claimRefresh: async () => true, ...options });
   const save = (scope, version, changes, actor = admin) => areas.saveAreaMeasurements(scope, actor, { version, areas: changes }, { knex });
   const scope = () => ({ customerId, propertyId: primary.id });
 
