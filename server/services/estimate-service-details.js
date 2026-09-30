@@ -84,7 +84,7 @@ const COMPLIANCE_SECTION = {
     'Waves Pest Control, LLC operates under Florida pest-control business license JB351547 — a business license issued under Chapter 482, Florida Statutes, the law governing pest control operations in Florida — and is insured.',
     'Every pesticide we apply is EPA-registered and used in accordance with its label. The label is legally enforceable: it dictates the sites, rates, methods, precautions, and re-entry conditions for every application, and using a product inconsistent with its labeling violates federal law.',
     '"EPA-registered" is the accurate term — the EPA does not "approve" or endorse pesticides, and registration does not mean risk-free. You will never hear us describe a pesticide as 100% safe.',
-    'Your service report documents the exact products applied at each visit — the standing record you can check all of this against, any time.',
+    'Your service report documents the exact products applied — the standing record you can check all of this against, any time.',
   ],
 };
 
@@ -428,6 +428,7 @@ const SERVICE_DETAILS_COPY = {
   // Optional markers (stripped before rendering):
   //   requires: 'bermuda_suppression' on a section — kept only when the estimate
   //     carries the Bermuda-suppression add-on AND GATE_BERMUDA_SUPPRESSION is on.
+  //   oneTimeHeading: string on a section — its heading in the one-time guide.
   //   scope: 'recurring' | 'one_time' on a section, a FAQ entry, or a
   //     { scope, text } entry inside paragraphs/steps/bullets — kept only for
   //     that lawn scope (see `oneTime` below); unmarked entries always render.
@@ -438,7 +439,7 @@ const SERVICE_DETAILS_COPY = {
     systemBox: {
       heading: 'Your program at a glance',
       rows: [
-        ['Visits', '9–12 per year (your estimate states your count), timed to turf growth, pest season, weather, and local fertilizer rules — not a fixed monthly date'],
+        ['Visits', 'The count on your estimate, timed to turf growth, pest season, weather, and local fertilizer rules — not a fixed monthly date'],
         ['Built for your grass', 'St. Augustine, Bermuda, Zoysia, and Bahia each run their own product track. We confirm the grass before anything goes down, because a product that helps one grass can injure another'],
         ['Every visit', 'Inspect first. Then turf-specific fertilization, weed and sedge control, and insect or disease treatment when the evidence supports it'],
         ['Covered insects', 'Chinch bugs, sod webworms, armyworms, white grubs, mole crickets — checked every visit, treated on evidence. Fire ants only when your proposal includes them'],
@@ -451,10 +452,12 @@ const SERVICE_DETAILS_COPY = {
     sections: [
       {
         heading: 'Before your first visit',
+        oneTimeHeading: 'What we need from you',
         paragraphs: ['Five things we need from you. Each one changes what we apply.'],
         steps: [
           'Who mows, and what day. We schedule around your mow so product isn’t stripped off the blade the next morning. Why: most liquid applications need a day or two on the leaf to work.',
-          'Your irrigation days and run times per zone. If you don’t know them, tell us the controller brand and we’ll read it on the first visit. Why: watering-in and dry-time instructions are written against your real schedule, and overwatering is the single biggest cause of dollarweed, sedge, and fungus in our area.',
+          { scope: 'recurring', text: 'Your irrigation days and run times per zone. If you don’t know them, tell us the controller brand and we’ll read it on the first visit. Why: watering-in and dry-time instructions are written against your real schedule, and overwatering is the single biggest cause of dollarweed, sedge, and fungus in our area.' },
+          { scope: 'one_time', text: 'Your irrigation days and run times per zone. If you don’t know them, tell us the controller brand and we’ll read it when we arrive. Why: watering-in and dry-time instructions are written against your real schedule, and overwatering is the single biggest cause of dollarweed, sedge, and fungus in our area.' },
           'Grass type if you know it, and the sod invoice if you have one. Why: the herbicide list is different for every grass, and for Bermuda removal the St. Augustine cultivar decides whether that treatment is allowed at all.',
           'Anything applied in the last 60 days by anyone. Store-bought weed-and-feed, a previous company, a landscaper. Send a photo of the bag or bottle. Why: stacking products injures turf and voids label intervals.',
           'Edible gardens, ponds, beehives, chickens, an invisible-fence wire, and shallow irrigation lines. Why: product placement is planned around them.',
@@ -462,6 +465,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         heading: 'Before every visit',
+        oneTimeHeading: 'Before your service',
         bullets: [
           'Mow at least 24 hours before if mowing is due. Don’t mow the day of. Why: we need leaf surface to treat, and fresh cuts bleed product.',
           'Sprinklers off the night before a treatment visit. Why: we treat a dry lawn; wet grass dilutes liquids and granules stick to the blade instead of reaching the soil. Plugging and top dressing are the exceptions: follow their own watering steps below.',
@@ -474,7 +478,11 @@ const SERVICE_DETAILS_COPY = {
       { slot: 'process' },
       {
         heading: 'After every visit',
-        paragraphs: ['Your service report tells you which of these applies. They change with the product, so we will not print one rule for every visit.'],
+        oneTimeHeading: 'After your service',
+        paragraphs: [
+          { scope: 'recurring', text: 'Your service report tells you which of these applies. They change with the product, so we will not print one rule for every visit.' },
+          { scope: 'one_time', text: 'Your service report tells you which of these applies. They change with the product, so we will not print one rule for every job.' },
+        ],
         bullets: [
           'Watering. The report says one of: water in today (granular fertilizer, most insect granules), keep dry for the stated hours (liquid weed control, fungicide), or resume your normal schedule. Don’t run the sprinklers after a visit unless the report says to.',
           'Mowing. Wait 1–2 days after liquid applications, longer if the report says so. Never mow a wet application.',
@@ -623,6 +631,7 @@ const SERVICE_DETAILS_COPY = {
     // walkthrough (included + process) and every scope:'recurring' entry, so
     // a one-time customer is never promised visits, re-service, or a program.
     oneTime: {
+      tagline: 'Your grass type, your property’s conditions, and the actual problem determine the work. This guide tells you what to do before and after your service, what we do while we’re there, and why.',
       // The recurring program walkthrough does not apply to one-time work.
       included: [],
       process: [],
@@ -699,7 +708,7 @@ const SERVICE_DETAILS_COPY = {
       heading: 'Pets, kids, and your family',
       paragraphs: [
         'Every pesticide we apply is EPA-registered, and every product is used by its label, which is legally binding on where it goes, at what rate, and when people and pets may return. Registration is not a promise of zero risk, and no honest company calls a pesticide risk-free.',
-        'There is no single re-entry time for every visit: liquids need to dry, some granules need watering in, and weather moves both. Your report states the guidance for the products actually used. Tell us about edible gardens, beehives, ponds, chickens, play areas, and sensitive occupants before treatment.',
+        'There is no single re-entry time for every application: liquids need to dry, some granules need watering in, and weather moves both. Your report states the guidance for the products actually used. Tell us about edible gardens, beehives, ponds, chickens, play areas, and sensitive occupants before treatment.',
         'Waves Pest Control, LLC operates under Florida license JB351547 and is insured. Florida law requires a posted treatment notice at every qualifying lawn visit; your report carries the details behind the sign.',
       ],
     },
@@ -1007,7 +1016,8 @@ function resolveSections(sections, { lawnScope, bermuda }) {
   return (sections || []).reduce((acc, section) => {
     if (!section || !scopeOk(section.scope)) return acc;
     if (section.requires === 'bermuda_suppression' && !bermuda) return acc;
-    const { requires: _requires, scope: _scope, ...rest } = section;
+    const { requires: _requires, scope: _scope, oneTimeHeading, ...rest } = section;
+    if (lawnScope === 'one_time' && oneTimeHeading) rest.heading = oneTimeHeading;
     for (const field of ['paragraphs', 'steps', 'bullets']) {
       if (rest[field]) rest[field] = list(rest[field]);
     }

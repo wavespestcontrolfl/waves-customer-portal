@@ -12,8 +12,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const base = require('../models/migrations/20260930120000_prep_lawn_guide_revision');
 const r1 = require('../models/migrations/20260930120001_prep_lawn_guide_revision_codex_r1');
-// 000002 supersedes 000001 supersedes 000000; its TEMPLATES are what customers receive.
-const migration = require('../models/migrations/20260930120002_prep_lawn_guide_revision_r2');
+const r2 = require('../models/migrations/20260930120002_prep_lawn_guide_revision_r2');
+// 000003 → 000002 → 000001 → 000000; 000003's TEMPLATES are what customers receive.
+const migration = require('../models/migrations/20260930120003_prep_lawn_guide_revision_r6');
 const { normalizeBlocks } = require('../services/email-template-library');
 
 const { TEMPLATES } = migration;
@@ -68,6 +69,8 @@ describe('prep.lawn revision content', () => {
     expect(faqBlocks[0].rows).toHaveLength(4);
     const bermuda = faqBlocks[0].rows.find((r) => /bermuda/i.test(r.label)).value;
     expect(bermuda).toMatch(/only when your lawn needs it/i);
+    // prep.lawn also serves one-time lawn treatments: no program/plan framing (Codex r6 P1).
+    expect(bermuda).not.toMatch(/lawn program|your plan/i);
     // CitraBlue is a test-area cultivar (protocol 20260808000001), never eligible outright.
     expect(bermuda).toMatch(/CitraBlue and any unknown cultivar get a test patch first/);
     expect(bermuda).not.toMatch(/CitraBlue qualif/i);
@@ -90,8 +93,17 @@ describe('prep.lawn revision content', () => {
 });
 
 describe('supersession', () => {
-  test('000002: no re-service or next-visit promise (prep.lawn also goes to one-time lawn treatments)', () => {
-    expect(migration.SUPERSEDES).toBe('migration:20260930120001');
+  test('000003 supersedes 000002 and patches only the Bermuda answer', () => {
+    expect(migration.SUPERSEDES).toBe('migration:20260930120002');
+    const before = r2.TEMPLATES[0].blocks;
+    const after = TEMPLATES[0].blocks;
+    const changed = after.filter((b, i) => JSON.stringify(b) !== JSON.stringify(before[i]));
+    expect(changed).toHaveLength(1);
+    expect(changed[0].variant).toBe('faq');
+  });
+
+  test('no re-service or next-visit promise (prep.lawn also goes to one-time lawn treatments)', () => {
+    expect(r2.SUPERSEDES).toBe('migration:20260930120001');
     const text = JSON.stringify(TEMPLATES);
     expect(text).not.toMatch(/re-service/i);
     expect(text).not.toMatch(/next visit/i);
@@ -114,7 +126,8 @@ describe('supersession', () => {
 describe.each([
   ['000000', base, 'migration:20260930120000'],
   ['000001', r1, 'migration:20260930120001'],
-  ['000002', migration, 'migration:20260930120002'],
+  ['000002', r2, 'migration:20260930120002'],
+  ['000003', migration, 'migration:20260930120003'],
 ])('publish mechanics (%s)', (_name, migration, marker) => {
   const { TEMPLATES } = migration;
   function makeKnex() {

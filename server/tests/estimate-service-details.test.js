@@ -172,6 +172,8 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     expect(tables[0].table.columns).toEqual(['When', 'What’s happening', 'What you see']);
     expect(tables[0].table.rows.every((r) => r.length === 3)).toBe(true);
     expect(lawn.systemBox.rows).toHaveLength(7);
+    // No fixed visit range: Basic/Standard tiers sell 4 and 6 visits (Codex r6 P1).
+    expect(JSON.stringify(lawn.systemBox)).not.toMatch(/9–12/);
     expect(lawn.faq).toHaveLength(7);
     expect(lawn.responsibilities.heading).toBe('Not part of this service');
     expect(lawn.documentation.bullets).toHaveLength(3);
@@ -235,7 +237,7 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     };
     walk(rendered, 'content');
     // Promise language only — neutral "before every visit" prep wording is fine.
-    const RECURRING = /9–12|per year|re-service|no charge|comprehensive|your plan|plan is active|lawn program|built into the program|turf-specific program|next visit|summer visits|repeat treatments|lawn-health|frequency|guarantee|callback|Bermuda removal from/i;
+    const RECURRING = /9–12|per year|re-service|no charge|comprehensive|your plan|plan is active|lawn program|built into the program|turf-specific program|every visit|each visit|first visit|next visit|summer visits|repeat treatments|lawn-health|frequency|guarantee|callback|Bermuda removal from/i;
     const hits = strings.filter(([path, text]) => path !== 'content.estimateUrl' && RECURRING.test(text));
     expect(hits).toEqual([]);
   });
@@ -262,7 +264,9 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     const leftover = await withBermudaGate('true', () => buildServiceDetailsContent('lawn_care', BERMUDA_ESTIMATE, { lawnScope: 'one_time' }));
     expect(leftover.sections.map((sec) => sec.heading).some(isBermudaHeading)).toBe(false);
     // The one-time aftercare line replaces the recurring one.
-    const after = lawn.sections.find((sec) => sec.heading === 'After every visit');
+    // One-time headings are singular (Codex r6 P0).
+    expect(lawn.sections.filter((sec) => !sec.slot).slice(0, 3).map((sec) => sec.heading)).toEqual(['What we need from you', 'Before your service', 'After your service']);
+    const after = lawn.sections.find((sec) => sec.heading === 'After your service');
     expect(after.bullets.filter((b) => /^Call us right away/.test(b))).toHaveLength(1);
     // Special-situation prep for the one-time jobs themselves stays.
     const headings = lawn.sections.map((sec) => sec.heading);
