@@ -168,6 +168,13 @@ describe('writerRulesRejection', () => {
     ['Your retreatment is covered.', 'price'],
     ['Activity fell by five percent.', 'percent'],
     ['We treated two acres of the back lot.', 'footage'],
+    ['The home is now termite-proof.', 'owner_phrase'],
+    ['We made the garage roachproof.', 'owner_phrase'],
+    ['We will arrive between 8 and 10 AM.', 'time'],
+    ['Your arrival window is 8 to 10 AM.', 'time'],
+    ['We mixed 2 gals for the perimeter.', 'amount'],
+    ['We used 2 qt in the backpack.', 'amount'],
+    ['We used 3 ozs of bait.', 'amount'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -189,6 +196,8 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
     expect(writerRulesRejection('Web removal was included in today\'s visit.')).toBeNull();
+    expect(writerRulesRejection('Mosquito activity was strongest after 8 PM.')).toBeNull();
+    expect(writerRulesRejection('We arrived at 10 AM and started at the back fence.')).toBeNull();
   });
 
   test('a dry cabinet or a note about rain is not re-entry wording', () => {

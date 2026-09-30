@@ -229,6 +229,32 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.promptHint).toContain('rodent');
   });
 
+  test('customerWordsOnly email text: quoted history stripped, snippet-only digits masked', async () => {
+    const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
+    const ctx = await buildCompletionCommsContext({
+      customerId: 'c1',
+      scheduledServiceId: 'svc-1',
+      customerWordsOnly: true,
+      knex: stubKnex({
+        scheduled_services: [
+          { id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Service', created_at: mk(20) },
+        ],
+        service_completion_profiles: [],
+        call_log: [],
+        sms_log: [],
+        emails: [
+          // A reply whose quoted history holds Waves' own words.
+          { received_at: mk(1), subject: 'Re: Your visit', body_text: 'Sounds good, see you then.\n\nOn Mon, Sep 28, 2026 at 9:00 AM Waves Pest Control <contact@wavespestcontrol.com> wrote:\n> We will retreat the kitchen for free next week.', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+          // A three-digit PIN in a snippet with no body.
+          { received_at: mk(2), subject: 'PIN', snippet: 'The pin is 123 if you need it', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+        ],
+      }),
+    });
+    expect(ctx.text).toContain('Sounds good, see you then.');
+    expect(ctx.text).not.toContain('retreat the kitchen');
+    expect(ctx.text).not.toMatch(/\b123\b/);
+  });
+
   test('no customerId returns an empty context', async () => {
     const ctx = await buildCompletionCommsContext({ customerId: null, knex: stubKnex({}) });
     expect(ctx.text).toBe('');
@@ -288,6 +314,7 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toContain('4821');
     expect(ctx.text).not.toContain('5173');
     expect(ctx.text).not.toContain('6620');
+
     expect(ctx.text).toMatch(/Customer text .*: \[redacted\] and the side yard is muddy/);
     expect(whereArgs['emails:raw'].map(([sql]) => sql).join(' ')).toMatch(/SENT.*wavespestcontrol\.com/s);
     const lines = ctx.text.split('\n')

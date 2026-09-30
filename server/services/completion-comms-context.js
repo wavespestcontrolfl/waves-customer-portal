@@ -34,6 +34,7 @@ const logger = require('./logger');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { stripQuotedAndSignature } = require('./email/email-strip');
 const ContextAggregator = require('./context-aggregator');
 
 const { redactAccessCodes } = ContextAggregator;
@@ -277,6 +278,16 @@ async function buildCompletionCommsContext({
   // BEFORE compaction; a code whose anchor sits past the cut ("4821 … is the
   // gate code") would otherwise survive as an unlabelled number.
   const source = (text) => (customerWordsOnly ? redactAccessCodes(String(text || '')) : text);
+  // customerWordsOnly email text: only what the customer wrote (quoted
+  // history and signature stripped, so a quoted Waves promise is never read
+  // as theirs), redacted over the whole body before the preview is cut. A
+  // snippet with no body has lost the anchor context: any run of three or
+  // more digits in it (the redactor's credential length) is masked outright.
+  const customerEmailText = (email) => {
+    const body = String(email.body_text || '').trim();
+    if (body) return compactText(source(stripQuotedAndSignature(body)), 260);
+    return compactText(source(stripQuotedAndSignature(String(email.snippet || ''))).replace(/\d{3,}/g, '[redacted]'), 260);
+  };
   const callRows = customerWordsOnly
     ? calls.filter((call) => !ContextAggregator.isExcludedCall(call)).slice(0, 6)
     : calls;
@@ -312,14 +323,8 @@ async function buildCompletionCommsContext({
   }
   for (const email of emails) {
     if (customerWordsOnly && wavesSentEmail(email)) continue;
-    // customerWordsOnly: the full body is redacted first and the preview
-    // cut from it, so a code whose anchor sits past Gmail's pre-cut snippet
-    // is still masked. A snippet with no body has lost that context: any
-    // run of four or more digits in it is masked outright.
     const summary = customerWordsOnly
-      ? compactText(String(email.body_text || '').trim()
-        ? source(email.body_text)
-        : source(email.snippet).replace(/\d{4,}/g, '[redacted]'), 260)
+      ? customerEmailText(email)
       : compactText(email.snippet || email.body_text, 260);
     const subject = compactText(source(email.subject), 120);
     if (summary || subject) {

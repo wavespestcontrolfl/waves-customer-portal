@@ -199,7 +199,7 @@ function activeIngredientNames(values) {
     .filter((part) => part.length >= 3);
 }
 
-const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gal|gallons?|lbs?|pounds?|grams?|kilograms?|kg)\b|\b\d+(?:[.,]\d+)?\s*cc\b/i;
+const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gal|gallons?|lbs?|pounds?|grams?|kilograms?|kg)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
 const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\bacres?\b|\bacreage\b/i;
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
@@ -231,20 +231,24 @@ const PRICE_RE = /\$\s?\d|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?service
 const MONTH_DAY_RE = /\b(?:[Jj]an(?:uary)?|[Ff]eb(?:ruary)?|[Mm]ar(?:ch)?|[Aa]pr(?:il)?|May|[Jj]une?|[Jj]uly?|[Aa]ug(?:ust)?|[Ss]ept?(?:ember)?|[Oo]ct(?:ober)?|[Nn]ov(?:ember)?|[Dd]ec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/g;
 const FUTURE_CUE_BEFORE_RE = /\b(?:next|upcoming|scheduled|appointment|return(?:ing)?|back|see\s+you|will|until|by|coming)\b/i;
 const FUTURE_CUE_AFTER_RE = /^[^.!?]{0,30}\b(?:next|upcoming)\s+(?:visit|appointment|service|check)\b/i;
-function futureDateMention(copy) {
-  for (const match of copy.matchAll(MONTH_DAY_RE)) {
+// A clock time is refused on the same terms, plus an arrival cue ("we'll
+// arrive between 8 and 10 AM", "your window is 10 AM"); an observation
+// ("strongest after 8 PM") or a past arrival ("we arrived at 10 AM") passes.
+const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])/gi;
+const ARRIVAL_CUE_RE = /\b(?:arriv(?:e|al|ing)|window)\b/i;
+function forwardMention(copy, pattern, extraCue = null) {
+  for (const match of copy.matchAll(pattern)) {
     const before = copy.slice(Math.max(0, match.index - 40), match.index).split(/[.!?]/).pop();
     const after = copy.slice(match.index + match[0].length);
-    if (FUTURE_CUE_BEFORE_RE.test(before) || FUTURE_CUE_AFTER_RE.test(after)) return true;
+    if (FUTURE_CUE_BEFORE_RE.test(before) || extraCue?.test(before) || FUTURE_CUE_AFTER_RE.test(after)) return true;
   }
   return false;
 }
 // Forward words only: "you texted us on Monday" is a past fact.
 const WEEKDAY_RE = /\b(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b/i;
-const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])/i;
 // Phrases the owner rules name that no older screen covers (rules 4, 9,
 // 13, 14).
-const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmaps?\b|\bbond(?:ed|s)?\b/i;
+const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmaps?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
 // Re-entry and aftercare wording without a number ("stay off until dry").
 const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\bstay\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
@@ -264,8 +268,8 @@ function writerRulesRejection(text, { activeIngredients = [] } = {}) {
   if (REENTRY_RE.test(copy)) return 'reentry';
   if (TIMEFRAME_RE.test(copy)) return 'timeframe';
   if (PRICE_RE.test(copy) || ENTITLEMENT_RE.test(copy)) return 'price';
-  if (futureDateMention(copy) || WEEKDAY_RE.test(copy)) return 'date';
-  if (CLOCK_RE.test(copy)) return 'time';
+  if (forwardMention(copy, MONTH_DAY_RE) || WEEKDAY_RE.test(copy)) return 'date';
+  if (forwardMention(copy, CLOCK_RE, ARRIVAL_CUE_RE)) return 'time';
   const patterns = [...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
     .map(activeIngredientPattern)
     .filter(Boolean);
