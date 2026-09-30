@@ -108,4 +108,17 @@ describe('flagWrongNumber writes the canonical messaging_suppression row (B14)',
     expect(res.suppression.ok).toBe(true);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
+
+  test('BOTH writes failing still files the manual-action card, without claiming collections is blocked', async () => {
+    db.mockImplementation(() => chain({ insertThrows: new Error('pg down') }));
+    recordSuppression.mockResolvedValue({ ok: false, error: 'db down' });
+    const res = await flagWrongNumber('c-1', args);
+    expect(res.ok).toBe(false);
+    expect(res.suppression.ok).toBe(false);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const detail = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(detail).toContain('could NOT be written');
+    expect(detail).toContain('could not be saved either');
+    expect(detail).not.toContain('Collections calls and texts to this customer are blocked');
+  });
 });

@@ -259,15 +259,27 @@ test('number_unknown wrong party writes the wrong_number flag', async () => {
 });
 
 test('number_unknown wrong party hands the flag writer the DIALED phone, call id and caller words for the canonical suppression (B14)', async () => {
+  // Dialed number differs from customers.phone: the dialed one reached the stranger.
+  setDb({ callRow: { ...CALL_ROW, to_phone: '+19415550000' } });
   const { convo } = makeConvo();
   mockScriptedMessages.push(toolUse('confirm_right_party', { result: 'wrong_party', number_unknown: true }));
   await turn(convo, 'There is no Pat at this number.');
   expect(flags.flagWrongNumber).toHaveBeenCalledWith('cust-1', expect.objectContaining({
-    phone: convo._ctx.dialedPhone || convo._ctx.customer.phone,
+    phone: '+19415550000',
     callLogId: convo._ctx.callLogId,
     capturedBody: 'There is no Pat at this number.',
   }));
   expect(convo._ctx.callLogId).toBeTruthy();
+});
+
+test('number_unknown wrong party falls back to customers.phone only when the call row has no dialed number (B14)', async () => {
+  setDb({ callRow: { ...CALL_ROW, to_phone: null } });
+  const { convo } = makeConvo();
+  mockScriptedMessages.push(toolUse('confirm_right_party', { result: 'wrong_party', number_unknown: true }));
+  await turn(convo, 'There is no Pat at this number.');
+  expect(flags.flagWrongNumber).toHaveBeenCalledWith('cust-1', expect.objectContaining({
+    phone: CUSTOMER.phone,
+  }));
 });
 
 test('verification: match on customer-supplied ZIP unlocks DISCLOSE; expected values never leak', async () => {

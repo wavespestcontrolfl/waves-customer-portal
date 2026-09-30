@@ -149,14 +149,21 @@ async function flagWrongNumber(customerId, { detail, createdBy, phone, callLogId
   if (!suppression.ok) {
     logger.error(`[collections-flags] WRONG-NUMBER SUPPRESSION NOT WRITTEN customer=${customerId} callLog=${callLogId || 'n/a'}: ${suppression.reason} — other SMS rails may still text this number`);
   }
-  if (res.ok) {
+  // The suppression-failure card is filed whatever happened to the flag
+  // row: it is the only staff signal that other rails can still text this
+  // number (the caller's collection_hold fallback files a card only when the
+  // hold ALSO fails). Its copy states only what landed.
+  if (res.ok || !suppression.ok) {
     const last4 = suppression.phone ? suppression.phone.slice(-4) : null;
+    const collectionsBlocked = res.ok
+      ? 'Collections calls and texts to this customer are blocked'
+      : 'The collections wrong-number flag could not be saved either (a billing hold may have been placed instead)';
     const filed = await fileFlagCard({
       customerId,
       flag: 'wrong_number',
       detail: suppression.ok
         ? `An outbound billing follow-up call reached someone who says this number does not belong to the customer. The number${last4 ? ` ending ${last4}` : ''} is now on the do-not-text list for every text and App notice, and collections calls and texts to this customer are blocked pending a number review; payment emails still go to the email on file. The old number stays suppressed after you correct the customer's phone.`
-        : 'An outbound billing follow-up call reached someone who says this number does not belong to the customer. Collections calls and texts to this customer are blocked, BUT the do-not-text record for this number could NOT be written: appointment reminders, review requests and other texts may still go to it. Add the number to the do-not-contact list or correct the customer\'s phone by hand now.',
+        : `An outbound billing follow-up call reached someone who says this number does not belong to the customer. ${collectionsBlocked}, BUT the do-not-text record for this number could NOT be written: appointment reminders, review requests and other texts may still go to it. Add the number to the do-not-contact list or correct the customer's phone by hand now.`,
     });
     if (!filed && !suppression.ok) {
       logger.error(`[collections-flags] wrong-number card ALSO failed customer=${customerId} — canonical suppression missing and no admin card`);
