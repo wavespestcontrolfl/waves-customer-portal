@@ -28,6 +28,7 @@ const {
 } = require('../services/product-costing');
 const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
+const { validateRule } = require('../services/service-report/lawn-watering-rule');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: technicians keep DAY-TO-DAY stock operations —
@@ -709,6 +710,7 @@ function mapProduct(product, vendorPricing = []) {
     useConditions: product.use_conditions || null,
     heatRestrictions: product.heat_restrictions || null,
     irrigationNotes: product.irrigation_notes || null,
+    postApplicationWatering: product.post_application_watering || null,
     localRuleSensitivity: product.local_rule_sensitivity === true,
   };
 }
@@ -1077,6 +1079,12 @@ router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
     for (const [camel, snake] of Object.entries(allowed)) {
       if (req.body[camel] !== undefined) update[snake] = req.body[camel] === '' ? null : req.body[camel];
     }
+    const wateringPatch = postApplicationWateringPatch(
+      req.body,
+      req.adminUser?.email || req.adminUser?.name || req.adminUser?.id || null,
+    );
+    if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
+    if (!wateringPatch.skip) update.post_application_watering = wateringPatch.value;
     if (!update.product_type) update.product_type = inferProductType({ ...product, ...update });
 
     const candidate = { ...product, ...update };
@@ -3313,6 +3321,33 @@ async function recalcBestPriceLocked(productId, dbc) {
   await dbc('vendor_pricing').where({ id: best.row.id }).update({ is_best_price: true });
 }
 
+// products_catalog.post_application_watering — validated on every admin save.
+// null / '' clears the rule (falls back to the derived default). An object (or
+// JSON string) must pass validateRule; a rule sent without source / verified_*
+// is stamped as an owner edit by the acting admin. Returns { skip } when the
+// body does not mention the field, { error } for a 400, else { value } (the
+// JSON text to store, or null).
+function postApplicationWateringPatch(body, actor) {
+  const raw = body?.postApplicationWatering;
+  if (raw === undefined) return { skip: true };
+  if (raw === null || raw === '') return { value: null };
+  let candidate = raw;
+  if (typeof candidate === 'string') {
+    try { candidate = JSON.parse(candidate); } catch { return { error: 'postApplicationWatering must be valid JSON' }; }
+  }
+  if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+    candidate = {
+      ...candidate,
+      source: candidate.source == null ? 'owner' : candidate.source,
+      verified_at: candidate.verified_at == null ? new Date().toISOString() : candidate.verified_at,
+      verified_by: candidate.verified_by == null ? (actor || null) : candidate.verified_by,
+    };
+  }
+  const checked = validateRule(candidate);
+  if (!checked.valid) return { error: `Invalid postApplicationWatering: ${checked.errors.join('; ')}` };
+  return { value: JSON.stringify(checked.rule) };
+}
+
 // POST / — create a new product
 router.post('/', async (req, res, next) => {
   try {
@@ -3458,6 +3493,12 @@ router.put('/:id', async (req, res, next) => {
     for (const [camel, snake] of Object.entries(allowed)) {
       if (req.body[camel] !== undefined) upd[snake] = req.body[camel];
     }
+    const wateringPatch = postApplicationWateringPatch(
+      req.body,
+      req.adminUser?.email || req.adminUser?.name || req.adminUser?.id || null,
+    );
+    if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
+    if (!wateringPatch.skip) upd.post_application_watering = wateringPatch.value;
     // The inline editor sends containerSize alone, and scoreVendorRows treats
     // a positive unit_size_oz as authoritative (Codex #3974 r3 P1): a
     // container edit without an explicit unitSizeOz re-derives it from the
