@@ -21,7 +21,7 @@ const TEMP_TABLES = `
   CREATE TEMP TABLE short_codes (id uuid PRIMARY KEY, customer_id uuid, lead_id uuid, kind text, channel text, purpose text, entity_type text, entity_id uuid);
   CREATE TEMP TABLE invoices (id uuid PRIMARY KEY, payer_id int);
   CREATE TEMP TABLE short_code_clicks (id uuid PRIMARY KEY, short_code_id uuid, clicked_at timestamp, is_bot boolean NOT NULL DEFAULT false);
-  CREATE TEMP TABLE email_messages (id uuid PRIMARY KEY, recipient_type text, recipient_id text, recipient_email_snapshot text, status text, template_key text, subject_snapshot text, queued_at timestamp, updated_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
+  CREATE TEMP TABLE email_messages (id uuid PRIMARY KEY, recipient_type text, recipient_id text, recipient_email_snapshot text, status text, template_key text, subject_snapshot text, queued_at timestamp, updated_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp, lead_id uuid, estimate_id uuid);
   CREATE TEMP TABLE automation_templates (key text PRIMARY KEY, name text);
   CREATE TEMP TABLE automation_enrollments (id uuid PRIMARY KEY, template_key text, customer_id uuid);
   CREATE TEMP TABLE automation_step_sends (id uuid PRIMARY KEY, enrollment_id uuid, step_order int, status text, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, updated_at timestamp);
@@ -242,6 +242,57 @@ pg('getCustomerActivity on Postgres', () => {
     const r = await timeline.getCustomerActivity(owner, { limit: 50 }, db);
     const subjects = r.events.filter((e) => e.source === 'email').map((e) => e.detail.split(' · ')[0]).sort();
     expect(subjects).toEqual(['lead-typed, customer id', 'lead-typed, linked lead', 'unowned lead mail']);
+  });
+
+  describe('GATE_LEAD_EMAIL_LINKS: mail sent to the customer\'s lead / estimate before they converted', () => {
+    const saved = process.env.GATE_LEAD_EMAIL_LINKS;
+    afterEach(() => { if (saved === undefined) delete process.env.GATE_LEAD_EMAIL_LINKS; else process.env.GATE_LEAD_EMAIL_LINKS = saved; });
+
+    async function seed() {
+      const conv = randomUUID(); const stranger = randomUUID();
+      const convLead = randomUUID(); const otherLead = randomUUID();
+      const convEst = randomUUID(); const otherEst = randomUUID();
+      await db('customers').insert([{ id: conv, email: 'new.address@example.test' }, { id: stranger, email: 'stranger@example.test' }]);
+      await db('leads').insert([{ id: convLead, customer_id: conv }, { id: otherLead, customer_id: null }]);
+      await db('estimates').insert([{ id: convEst, customer_id: conv }, { id: otherEst, customer_id: null }]);
+      await db('email_messages').insert([
+        // sent to the prospect under an address the customer no longer uses; only the link ties it to them
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'prospect.old@example.test', status: 'sent', subject_snapshot: 'linked by lead', sent_at: T(1), lead_id: convLead },
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'prospect.old@example.test', status: 'sent', subject_snapshot: 'linked by estimate', sent_at: T(2), estimate_id: convEst },
+        // linked to somebody else's lead / estimate
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'prospect.old@example.test', status: 'sent', subject_snapshot: 'other prospect lead', sent_at: T(3), lead_id: otherLead },
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: null, recipient_email_snapshot: 'prospect.old@example.test', status: 'sent', subject_snapshot: 'other prospect estimate', sent_at: T(4), estimate_id: otherEst },
+        // the estimate is theirs, but the row names another customer: ownership by id wins
+        { id: randomUUID(), recipient_type: 'lead', recipient_id: stranger, recipient_email_snapshot: 'stranger@example.test', status: 'sent', subject_snapshot: 'names another customer', sent_at: T(5), estimate_id: convEst },
+        // customer-typed rows are owned by recipient_id, never by a link
+        { id: randomUUID(), recipient_type: 'customer', recipient_id: stranger, recipient_email_snapshot: 'stranger@example.test', status: 'sent', subject_snapshot: 'customer-typed, other customer', sent_at: T(6), estimate_id: convEst },
+        // test / admin mail never rides a link
+        { id: randomUUID(), recipient_type: 'test', recipient_id: null, recipient_email_snapshot: 'x@example.test', status: 'sent', subject_snapshot: 'test mail', sent_at: T(7), lead_id: convLead },
+      ]);
+      return conv;
+    }
+    const subjectsOf = async (id) => (await timeline.getCustomerActivity(id, { limit: 50 }, db))
+      .events.filter((e) => e.source === 'email').map((e) => e.detail.split(' · ')[0]).sort();
+
+    test('dark (default): the timeline lists exactly what it did before', async () => {
+      delete process.env.GATE_LEAD_EMAIL_LINKS;
+      const conv = await seed();
+      expect(await subjectsOf(conv)).toEqual([]);
+    });
+
+    test('on: mail linked to their lead or estimate appears; other people\'s mail and owned rows do not', async () => {
+      process.env.GATE_LEAD_EMAIL_LINKS = 'true';
+      const conv = await seed();
+      expect(await subjectsOf(conv)).toEqual(['linked by estimate', 'linked by lead']);
+    });
+
+    test('on: the feed and the summary agree (summary is built from the same predicate)', async () => {
+      process.env.GATE_LEAD_EMAIL_LINKS = 'true';
+      const conv = await seed();
+      const r = await timeline.getCustomerActivity(conv, { limit: 50 }, db);
+      expect(r.unavailableSources).toEqual([]);
+      expect(r.events.filter((e) => e.kind === 'sent')).toHaveLength(2);
+    });
   });
 
   test('a failed email is dated at its failure time, after the queue time; automation bounces and complaints show', async () => {
