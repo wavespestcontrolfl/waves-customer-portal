@@ -25,6 +25,13 @@ jest.mock('../services/email-template-library', () => ({
   preflightTemplateSend: jest.fn(async () => ({ ok: true })),
 }));
 
+// Pass-through spy so one test can make the provider-boundary recheck's
+// eligibility read throw (every other call runs the real read).
+jest.mock('../services/email-division/eligibility', () => {
+  const actual = jest.requireActual('../services/email-division/eligibility');
+  return { ...actual, eligibleForEmail: jest.fn(actual.eligibleForEmail) };
+});
+
 const SKIP = !process.env.DATABASE_URL;
 if (!SKIP) {
   // Writes synthetic rows: only ever against a local QA database or CI's.
@@ -57,12 +64,20 @@ function libraryLike({ beforeHandoff = null } = {}) {
     if (verdict?.ok !== true || vetoed) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
     if (!dispatched) throw new Error('handoff returned without dispatching');
     if (args.onQueued) args.onQueued();
-    // A real delivery-authority row (the run and ledger rows FK to it).
+    // A real delivery-authority row (the run and ledger rows FK to it). A row an
+    // earlier definitely-unsent attempt left under the key is reused, as the
+    // library reuses it.
     const db = require('../models/db');
-    const [message] = await db('email_messages').insert({
-      recipient_email_snapshot: args.to, template_key: args.templateKey, idempotency_key: args.idempotencyKey,
-      status: 'sent', sent_at: new Date(), provider_message_id: 'sg-synthetic', automation_run_id: args.automationRunId || null,
-    }).returning('*');
+    const accepted = {
+      status: 'sent', sent_at: new Date(), provider_message_id: 'sg-synthetic', provider_handoff_phase: null,
+    };
+    const existing = await db('email_messages').where({ idempotency_key: args.idempotencyKey }).first('id');
+    const [message] = existing
+      ? await db('email_messages').where({ id: existing.id }).update(accepted).returning('*')
+      : await db('email_messages').insert({
+        recipient_email_snapshot: args.to, template_key: args.templateKey, idempotency_key: args.idempotencyKey,
+        automation_run_id: args.automationRunId || null, ...accepted,
+      }).returning('*');
     return { sent: true, providerAccepted: true, message };
   };
 }
@@ -72,6 +87,7 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
   let db;
   let Executor;
   let Ledger;
+  let eligibleForEmail;
   let sendTemplate;
   let preflightTemplateSend;
   let customerEmails = [];
@@ -83,12 +99,14 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
     db = require('../models/db');
     Executor = require('../services/email-template-automation-executor');
     Ledger = require('../services/email-division/ledger');
+    ({ eligibleForEmail } = require('../services/email-division/eligibility'));
     ({ sendTemplate, preflightTemplateSend } = require('../services/email-template-library'));
   });
 
   afterEach(async () => {
     delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
     sendTemplate.mockReset();
+    eligibleForEmail.mockClear();
     preflightTemplateSend.mockReset();
     preflightTemplateSend.mockImplementation(async () => ({ ok: true }));
     const {
@@ -295,6 +313,72 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       expect(ledger[0].status).toBe('failed');
     });
 
+    // The recheck at the provider boundary cannot read (infrastructure). sendOne runs
+    // that check BEFORE building the provider request, so nothing was sent — the
+    // library settles the message definitely-unsent (phase 'rejected', never left
+    // 'started') and reports the abort; the ledger frees the slot; the run retries.
+    const boundaryCheckUnavailable = () => async (args) => {
+      const db = require('../models/db');
+      const [message] = await db('email_messages').insert({
+        recipient_email_snapshot: args.to, template_key: args.templateKey, idempotency_key: args.idempotencyKey,
+        status: 'queued', provider_handoff_phase: 'pending', automation_run_id: args.automationRunId || null,
+      }).returning('*');
+      let caught = null;
+      await args.withProviderHandoff(async (database, boundaryCheck) => {
+        // The library stamps 'started' inside the handoff, right before sendOne (which
+        // runs the boundary check first): the window this test covers.
+        await db('email_messages').where({ id: message.id }).update({ provider_handoff_phase: 'started' });
+        try { await boundaryCheck({ database }); } catch (err) { caught = err; }
+      });
+      if (!caught?.providerBoundaryCheckFailed) throw caught || new Error('the boundary check was expected to fail');
+      await db('email_messages').where({ id: message.id }).update({
+        status: 'failed', provider_handoff_phase: 'rejected', error_message: 'provider_boundary_check_failed',
+      });
+      return { sent: false, aborted: true, boundaryCheckFailed: true, reason: 'provider_boundary_check_failed' };
+    };
+
+    test.each([
+      ['RETURNS LOOKUP_FAILED (the real helper\'s failure shape)', () => ({ ok: false, reason: 'LOOKUP_FAILED', checks: { error: 'read unavailable' } })],
+      ['THROWS', () => { throw new Error('eligibility read unavailable'); }],
+    ])('the boundary recheck\'s eligibility read %s: definitely UNSENT — ledger failed (never an uncertain sent or a skip, cap not charged), message not left started, the run retries and sends ONCE', async (_label, failure) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const automation = await nurture();
+      const { eligibleForEmail: realEligibility } = jest.requireActual('../services/email-division/eligibility');
+      // Call 1 is the reservation's own read; call 2 is the provider-boundary recheck.
+      let calls = 0;
+      eligibleForEmail.mockImplementation((...args) => {
+        calls += 1;
+        if (calls === 2) return failure();
+        return realEligibility(...args);
+      });
+      sendTemplate.mockImplementation(boundaryCheckUnavailable());
+
+      const run = (await fire(automation, customer)).results[0].run;
+
+      expect(run.status).toBe('retry_scheduled');
+      const first = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(first).toHaveLength(1);
+      expect(first[0].status).toBe('failed');
+      expect(first[0].reason).toBe('provider_boundary_check_failed');
+      expect(await db('marketing_email_ledger').where({ customer_id: customer.id, status: 'sent' })).toHaveLength(0);
+      const message = await db('email_messages').where({ idempotency_key: run.idempotency_key }).first();
+      expect(message.provider_handoff_phase).not.toBe('started');
+      expect(message.sent_at).toBeNull();
+
+      // The retry reopens the failed row, passes the (now healthy) recheck and sends once.
+      eligibleForEmail.mockImplementation(realEligibility);
+      sendTemplate.mockImplementation(libraryLike());
+      await db('email_template_automation_runs').where({ id: run.id }).update({ run_after: new Date(Date.now() - 1000) });
+      const retried = await Executor.executeRun(run.id);
+      expect(retried.status).toBe('sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(2);
+      const settled = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(settled).toHaveLength(1);
+      expect(settled[0].status).toBe('sent');
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key, status: 'sent' })).toHaveLength(1);
+    });
+
     test('a lifecycle key rides the ledger lifecycle stream as relationship mail', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
@@ -346,6 +430,30 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       const rows = await db('marketing_email_ledger').whereIn('customer_id', [customer.id, other.id]);
       expect(rows.find((r) => r.customer_id === customer.id).marketing_class).toBe('marketing');
       expect(rows.find((r) => r.customer_id === other.id).marketing_class).toBe('relationship');
+    });
+
+    test('send_stream service_operational + suppression group marketing_nurture is marketing (either field, like the library): an opted-out customer is refused, an opted-in one is ledgered as marketing', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const key = `lc.qa_probe_${randomUUID().slice(0, 8)}`;
+      await db('email_templates').insert({
+        template_key: key, name: key, status: 'draft', send_stream: 'service_operational', suppression_group_key: 'marketing_nurture', mode: 'service',
+      });
+      created.templates.push(key);
+      const automation = await makeAutomation(key, 'service_operational');
+      const optedOut = await makeCustomer();
+      await db('notification_prefs').where({ customer_id: optedOut.id }).update({ marketing_offers: false });
+
+      const refused = (await fire(automation, optedOut)).results[0].run;
+      expect(refused.status).toBe('skipped');
+      expect(refused.exit_reason).toContain('STREAM_FLAG_OFF');
+      expect(sendTemplate).not.toHaveBeenCalled();
+
+      const customer = await makeCustomer();
+      sendTemplate.mockImplementation(libraryLike());
+      const run = (await fire(automation, customer)).results[0].run;
+      expect(run.status).toBe('sent');
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger[0]).toEqual(expect.objectContaining({ stream: 'lifecycle', marketing_class: 'marketing' }));
     });
 
     test('the class follows the run\'s PINNED template: swapping the automation to a service template while a marketing run is queued does not make it relationship mail', async () => {
@@ -511,6 +619,56 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       const again = await Executor.executeRun(run.id);
       expect(again.status).toBe('sent');
       expect(again.email_message_id).toBe(ledger.email_message_id);
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a confirmed delivery whose ledger row is still RESERVED (markSent failed / worker died) finalizes the run sent AND reconciles the ledger row to sent from the message', async () => {
+      const { customer, run } = await firstAttempt(libraryLike());
+      const message = await db('email_messages').where({ idempotency_key: run.idempotency_key }).first();
+      await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).update({
+        status: 'reserved', reserved_at: new Date(), sent_at: null, email_message_id: null, reason: null,
+      });
+      await reclaim(run);
+
+      const again = await Executor.executeRun(run.id);
+
+      expect(again.status).toBe('sent');
+      expect(again.email_message_id).toBe(message.id);
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0]).toEqual(expect.objectContaining({
+        status: 'sent', email_message_id: message.id, reason: 'reconciled_from_email_messages',
+      }));
+      expect(new Date(ledger[0].sent_at).getTime()).toBe(new Date(message.sent_at).getTime());
+    });
+
+    test('delivered, then the customer changed email before the crashed run was retried: finalized SENT (the confirmed delivery is reconciled before the address refusal), never skipped', async () => {
+      const { customer, run } = await firstAttempt(libraryLike());
+      await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).update({
+        status: 'reserved', reserved_at: new Date(), sent_at: null, email_message_id: null, reason: null,
+      });
+      await db('customers').where({ id: customer.id }).update({ email: 'changed.after.delivery@example.invalid' });
+      await reclaim(run);
+
+      const again = await Executor.executeRun(run.id);
+
+      expect(again.status).toBe('sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      expect((await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).first()).status).toBe('sent');
+    });
+
+    test('with NO confirmed delivery, a changed address is still refused (the reorder only lets a real delivery through)', async () => {
+      const { customer, run } = await firstAttempt(async () => { throw Object.assign(new Error('provider down'), { status: 503 }); });
+      await db('email_messages').where({ idempotency_key: run.idempotency_key }).del();
+      await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).update({ status: 'failed', reason: 'dispatch_error' });
+      await db('customers').where({ id: customer.id }).update({ email: 'changed.before.send@example.invalid' });
+      await reclaim(run);
+
+      const again = await Executor.executeRun(run.id);
+
+      expect(again.status).toBe('skipped');
+      expect(again.exit_reason).toContain('own email address');
       expect(sendTemplate).toHaveBeenCalledTimes(1);
     });
 
