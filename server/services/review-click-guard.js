@@ -24,18 +24,30 @@
  * An untracked click (the bare office URL) is invisible here by nature.
  */
 const db = require('../models/db');
+const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
 
 const AUTOMATIC_TRIGGERS = ['auto', 'auto_inline', 'sequence'];
+
+// A date-only visit column is that ET calendar day, so the anchor is ET
+// midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
+// 4–5 hours early, and a 9 p.m. ET click the evening before the visit would
+// then suppress that visit's ask.
+function etMidnight(value) {
+  const ymd = dateOnlyString(value);
+  return /^\d{4}-\d{2}-\d{2}$/.test(ymd || '') ? parseETDateTime(`${ymd}T00:00`) : null;
+}
 
 // The visit date a review ask belongs to, or null.
 async function visitAnchor({ serviceRecordId = null, scheduledServiceId = null } = {}, database = db) {
   if (serviceRecordId) {
     const row = await database('service_records').where({ id: serviceRecordId }).first('service_date');
-    if (row?.service_date) return new Date(row.service_date);
+    const anchor = etMidnight(row?.service_date);
+    if (anchor) return anchor;
   }
   if (scheduledServiceId) {
     const row = await database('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
-    if (row?.scheduled_date) return new Date(row.scheduled_date);
+    const anchor = etMidnight(row?.scheduled_date);
+    if (anchor) return anchor;
   }
   return null;
 }
