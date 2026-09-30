@@ -11,7 +11,9 @@ const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 // Light at load (the readers behind each builder are required lazily); the
 // key set below decides WHICH runs ever touch the email division.
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
-const { hasPayloadBuilder, buildEmailDivisionPayload } = require('./email-division/payload-builders');
+const {
+  hasPayloadBuilder, buildEmailDivisionPayload, onceGuardFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
+} = require('./email-division/payload-builders');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
 // appointment in any of these states is no longer an upcoming visit.
@@ -1739,6 +1741,9 @@ async function dispatchThroughLedger(run, executionPayload, stream, onQueued) {
     // the reservation and again at the provider handoff and refuses on a
     // mismatch — an email change after the build must never retarget it.
     expectedRecipientEmail: run.recipient_email,
+    // Once per customer / estimate, decided inside the reservation under the
+    // customer's advisory lock (null for a template with no such rule).
+    guard: onceGuardFor(run),
     template: {
       templateKey: run.template_key,
       versionId: run.template_version_id || undefined,
@@ -1758,6 +1763,15 @@ async function dispatchThroughLedger(run, executionPayload, stream, onQueued) {
       throw Object.assign(new Error('email division eligibility lookup failed'), { code: 'LEDGER_LOOKUP_FAILED' });
     }
     if (out.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
+    if (out.reason === ONCE_ALREADY_DELIVERED) {
+      return { skipReason: 'this customer (or estimate) already has a sent email of this kind; not sent again', skipGuard: 'already_delivered' };
+    }
+    if (out.reason === ONCE_IN_FLIGHT) {
+      // A qualifying sibling holds a live reservation: this run waits for its
+      // outcome through the bounded retry (sent -> skipped next time; failed or
+      // abandoned -> this run sends). Never a terminal skip.
+      throw Object.assign(new Error('another email of this kind is in flight for this customer (or estimate)'), { code: 'LEDGER_SIBLING_IN_FLIGHT' });
+    }
     return { skipReason: `email division ledger refused the send: ${out.reason}`, skipGuard: 'ledger_refused' };
   }
   // A reservation existed: its settled status says what happened. The ledger

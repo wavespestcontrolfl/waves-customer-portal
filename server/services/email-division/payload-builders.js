@@ -337,26 +337,66 @@ async function planPattern(conn, deps, record) {
   return parent && deps.detectServiceLine(parent.service_type) === 'pest' ? clean(parent.recurring_pattern).toLowerCase() : '';
 }
 
-// Once-per-customer / once-per-estimate is enforced HERE, at send time, not by
-// the automation's idempotency key (which is per event): a run other than this
-// one that already SENT this template, or is live in flight, for the same
-// customer (or estimate) means this run must not send a second copy. Skipped,
-// failed and shadow runs never count — only a delivery or a live attempt.
-const IN_FLIGHT_RUN_STATUSES = ['queued', 'scheduled', 'retry_scheduled', 'running'];
-async function alreadyDelivered({ conn, run, customerId = null, estimateId = null }) {
-  const runs = conn('email_template_automation_runs')
-    .where({ template_key: run.template_key })
-    .whereNot({ id: run.id })
-    .whereIn('status', ['sent', ...IN_FLIGHT_RUN_STATUSES]);
-  if (estimateId) runs.where({ entity_type: 'estimate', entity_id: String(estimateId) });
-  else runs.where({ recipient_id: String(customerId) });
-  if (await runs.first('id')) return true;
-  if (!customerId || estimateId) return false;
-  const ledger = await conn('marketing_email_ledger')
-    .where({ customer_id: customerId, email_key: run.template_key })
-    .whereIn('status', ['sent', 'reserved'])
-    .first('id');
-  return Boolean(ledger);
+// Once-per-customer (B5) / once-per-estimate (C1) is a SEND-TIME rule, not the
+// automation's idempotency key (which is per event). Two layers share ONE
+// reader, `priorSends`:
+//   - the builder skips terminally only on a DELIVERED send by ANOTHER
+//     operation (before building anything or minting a link);
+//   - the ATOMIC decision is `onceGuardFor`, run by the ledger inside
+//     reserveWithCap under the customer's advisory lock, so two concurrent
+//     eligible runs serialize and exactly one reserves: a sibling that is
+//     delivered is a terminal skip (ONCE_ALREADY_DELIVERED), a sibling whose
+//     reservation is live is IN FLIGHT (ONCE_IN_FLIGHT — the executor defers
+//     the run through its bounded retry, never a terminal skip).
+// What counts: only a delivery or a live RESERVATION of another operation. A
+// queued / scheduled / running sibling run that has not reserved anything never
+// blocks (it may never qualify: the first visit's report is skipped by the
+// builder), and THIS run's own run row and ledger row (same idempotency key)
+// never count — a reclaimed crashed run must reach the ledger so its own
+// abandoned reservation is settled or its accepted delivery recovered.
+const ONCE_ALREADY_DELIVERED = 'ONCE_ALREADY_DELIVERED';
+const ONCE_IN_FLIGHT = 'ONCE_IN_FLIGHT';
+
+async function priorSends({
+  conn, run, customerId = null, estimateId = null,
+}) {
+  const others = (query, column) => (run.idempotency_key ? query.whereNot(column, run.idempotency_key) : query);
+  const sentRuns = conn('email_template_automation_runs').where({ template_key: run.template_key, status: 'sent' });
+  if (run.id) sentRuns.whereNot({ id: run.id });
+  if (estimateId) sentRuns.where({ entity_type: 'estimate', entity_id: String(estimateId) });
+  else sentRuns.where({ recipient_id: String(customerId) });
+  if (await sentRuns.first('id')) return 'sent';
+
+  // The ledger, by the other operation's own reservation key.
+  const ledger = others(conn('marketing_email_ledger as l')
+    .where('l.email_key', run.template_key)
+    .whereIn('l.status', ['sent', 'reserved']), 'l.idempotency_key');
+  if (estimateId) {
+    ledger.join('email_template_automation_runs as r', 'r.idempotency_key', 'l.idempotency_key')
+      .where({ 'r.entity_type': 'estimate', 'r.entity_id': String(estimateId) });
+  } else {
+    ledger.where('l.customer_id', customerId);
+  }
+  const rows = await ledger.select('l.status');
+  if (rows.some((row) => row.status === 'sent')) return 'sent';
+  return rows.length ? 'in_flight' : null;
+}
+
+// The ledger's `guard` for a run: null when the template has no once-rule.
+// Receives the reservation's transaction (already under the customer lock).
+function onceGuardFor(run) {
+  const scope = { 'lc.why_91_days': 'customer', 'nurture.expired_1': 'estimate' }[run.template_key];
+  if (!scope) return null;
+  return async (trx) => {
+    const state = await priorSends({
+      conn: trx,
+      run,
+      customerId: scope === 'customer' ? run.recipient_id : null,
+      estimateId: scope === 'estimate' ? run.entity_id : null,
+    });
+    if (state === 'sent') return { reason: ONCE_ALREADY_DELIVERED };
+    return state ? { reason: ONCE_IN_FLIGHT } : null;
+  };
 }
 
 // The visit, customer and plan this email may be sent for: a skip, or
@@ -408,8 +448,8 @@ async function buildWhy91Days({
   const gate = await whyPlanGate({ run, conn, deps });
   if (gate.skip) return gate;
   const { record, customer, planName } = gate;
-  if (await alreadyDelivered({ conn, run, customerId: customer.id })) {
-    return skip('this customer already has a sent or in-flight lc.why_91_days email', 'already_delivered');
+  if ((await priorSends({ conn, run, customerId: customer.id })) === 'sent') {
+    return skip('this customer already has a sent lc.why_91_days email', 'already_delivered');
   }
   const plan = await whyPlanProducts({ record, conn, deps });
   if (plan.skip) return plan;
@@ -482,8 +522,8 @@ async function buildExpiredNurture({
   const estimate = await conn('estimates').where({ id: run.entity_id }).first();
   if (!estimate) return skip('linked estimate no longer exists', 'estimate_missing');
   if (estimate.status !== 'expired') return skip(`linked estimate is no longer expired (status is ${estimate.status})`, 'estimate_not_expired');
-  if (await alreadyDelivered({ conn, run, estimateId: estimate.id })) {
-    return skip('this estimate already has a sent or in-flight expired-estimate touch', 'already_delivered');
+  if ((await priorSends({ conn, run, estimateId: estimate.id })) === 'sent') {
+    return skip('this estimate already has a sent expired-estimate touch', 'already_delivered');
   }
   if (!estimate.token) return skip('the estimate has no page token to link to', 'no_estimate_token');
   if (!run.recipient_id) return skip('no customer record on the estimate (the ledger needs one)', 'no_customer');
@@ -552,6 +592,9 @@ module.exports = {
   hasPayloadBuilder: (templateKey) => Object.prototype.hasOwnProperty.call(BUILDERS, templateKey),
   BUILDER_TEMPLATE_KEYS: Object.freeze(Object.keys(BUILDERS)),
   REQUIRED,
+  onceGuardFor,
+  ONCE_ALREADY_DELIVERED,
+  ONCE_IN_FLIGHT,
   buildFirstVisitPest,
   buildWhy91Days,
   buildExpiredNurture,

@@ -291,7 +291,7 @@ async function markFailed(id, reason, { conn } = {}) {
  *     COMMITTED and store an address that was never actually checked).
  */
 async function reserveWithCap({
-  customerId, stream, marketingClass: requestedClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), expectedRecipientEmail = null,
+  customerId, stream, marketingClass: requestedClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), expectedRecipientEmail = null, guard = null,
 } = {}) {
   // The class the caps, the human-contact check and the outstanding guard
   // key off is the RESOLVED one (eligibility.js resolveMarketingClass), and
@@ -335,6 +335,8 @@ async function reserveWithCap({
         if (!recipientMatchesExpected(expectedRecipientEmail, retryVerdict.checks.customerEmail)) {
           return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row: null, duplicate: false };
         }
+        const retryGuard = guard ? await guard(trx) : null;
+        if (retryGuard) return { ok: false, reason: retryGuard.reason, row: null, duplicate: false };
         const otherOutstanding = marketingClass === 'marketing' ? await outstandingReservation(trx, customerId, idempotencyKey) : null;
         if (otherOutstanding) return { ok: false, reason: capReasonFor(stream, otherOutstanding.stream), row: null, duplicate: false };
         await trx('marketing_email_ledger').where({ id: existingByKey.id, status: 'failed' }).update({
@@ -353,6 +355,11 @@ async function reserveWithCap({
     if (!recipientMatchesExpected(expectedRecipientEmail, verdict.checks.customerEmail)) {
       return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row: null, duplicate: false };
     }
+    // A caller's own uniqueness rule (e.g. once per customer / estimate),
+    // judged on this same transaction under the customer's advisory lock, so
+    // two concurrent attempts serialize and exactly one can pass.
+    const callerGuard = guard ? await guard(trx) : null;
+    if (callerGuard) return { ok: false, reason: callerGuard.reason, row: null, duplicate: false };
 
     if (marketingClass === 'marketing') {
       const outstanding = await outstandingReservation(trx, customerId, idempotencyKey);
@@ -524,13 +531,13 @@ function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmai
  * settles it as failed and frees the customer's slot at once.
  */
 async function sendWithLedger({
-  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {}, expectedRecipientEmail = null,
+  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {}, expectedRecipientEmail = null, guard = null,
 } = {}) {
   if (template.templateKey != null && template.templateKey !== emailKey) {
     return { ok: false, sent: false, reason: REASONS.TEMPLATE_KEY_MISMATCH, row: null, duplicate: false };
   }
   const reservation = await reserveWithCap({
-    customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey, now, expectedRecipientEmail,
+    customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey, now, expectedRecipientEmail, guard,
   });
   if (!reservation.ok) {
     return { ok: false, sent: false, reason: reservation.reason, row: null, duplicate: false };

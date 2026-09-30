@@ -45,8 +45,9 @@ const describeOrSkip = SKIP ? describe.skip : describe;
 
 // The library's locked handoff, as the stand-in sendTemplate runs it: the
 // boundary check is awaited inside `dispatch`; its veto is a definite non-send.
-function libraryLike({ result } = {}) {
+function libraryLike({ result, beforeHandoff = null } = {}) {
   return async (args) => {
+    if (beforeHandoff) await beforeHandoff(args);
     let dispatched = false;
     let vetoed = false;
     const verdict = await args.withProviderHandoff(async (database, boundaryCheck) => {
@@ -417,6 +418,142 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(args.payload.nonrepellent_band_note).toContain('non-repellent insecticide');
       const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
       expect(ledger[0]).toEqual(expect.objectContaining({ stream: 'lifecycle', marketing_class: 'relationship', status: 'sent' }));
+    });
+  });
+
+  // ---- once per customer / estimate: the atomic send-time rule ------------
+
+  describe('once-per-customer (B5) and once-per-estimate (C1) are decided atomically at the ledger reservation', () => {
+    const reclaim = (run) => db('email_template_automation_runs').where({ id: run.id }).update({
+      status: 'queued', attempts: 0, run_after: new Date(Date.now() - 1000), completed_at: null, email_message_id: null, last_error: null,
+    });
+    const latch = () => {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      return { gate, release };
+    };
+    const waitFor = async (read) => {
+      for (let i = 0; i < 100; i += 1) {
+        const value = await read();
+        if (value) return value;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error('waitFor timed out');
+    };
+
+    // Customer with visit 1, two visit-2 records (two eligible reports) on a quarterly pest plan.
+    async function whyScenario() {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const scheduledId = await makeNextVisit(customer.id);
+      const visit1 = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
+      const visit2 = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-20', products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
+      const visit2b = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-21', products: ['taurus', 'talak'], scheduledServiceId: scheduledId, createdAt: new Date('2026-09-21T15:00:00Z') });
+      const automation = await makeAutomation({
+        trigger_event_key: 'service_report.ready', template_key: 'lc.why_91_days', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      const report = (recordId, { immediately = true } = {}) => Executor.processTrigger({
+        triggerEventKey: 'service_report.ready',
+        triggerEventId: `service_report_ready:${recordId}:customer`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: immediately,
+      }).then((out) => out.results[0].run);
+      return {
+        customer, visit1, visit2, visit2b, report,
+      };
+    }
+
+    test('a reclaimed crashed run (REAL lc.why_91_days builder) is not skipped by its own reservation: an accepted delivery is recovered as sent, an abandoned reservation is settled and sent', async () => {
+      const { customer, visit2, report } = await whyScenario();
+      sendTemplate.mockImplementation(libraryLike());
+      const first = await report(visit2);
+      expect(first.status).toBe('sent');
+      const key = first.idempotency_key;
+
+      // Crash after provider acceptance, before the ledger settled: row reserved, message accepted.
+      await db('marketing_email_ledger').where({ idempotency_key: key }).update({ status: 'reserved', sent_at: null, email_message_id: null, reason: null });
+      await reclaim(first);
+      const recovered = await Executor.executeRun(first.id);
+      expect(recovered.status).toBe('sent'); // not skipped as "already delivered"
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+
+      // Crash before the provider was reached: an expired, abandoned reservation and no message.
+      await db('email_messages').where({ idempotency_key: key }).del();
+      await db('marketing_email_ledger').where({ idempotency_key: key }).update({
+        status: 'reserved', sent_at: null, email_message_id: null, reserved_at: new Date(Date.now() - 31 * 60 * 1000),
+      });
+      await db('email_template_automation_runs').where({ id: first.id }).update({ email_message_id: null });
+      await reclaim(first);
+      const resent = await Executor.executeRun(first.id);
+      expect(resent.status).toBe('sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(2);
+      expect(await db('marketing_email_ledger').where({ customer_id: customer.id, status: 'sent' })).toHaveLength(1);
+    });
+
+    test('two concurrent ELIGIBLE reports produce exactly one send: the live reservation makes the second IN FLIGHT (deferred through the bounded retry, never a terminal skip); once the first is sent the retry is skipped', async () => {
+      const { customer, visit2, visit2b, report } = await whyScenario();
+      const hold = latch();
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => hold.gate }));
+
+      const firstPromise = report(visit2);
+      await waitFor(() => db('marketing_email_ledger').where({ customer_id: customer.id, email_key: 'lc.why_91_days', status: 'reserved' }).first());
+      const second = await report(visit2b);
+      expect(second.status).toBe('retry_scheduled');
+      expect(second.last_error).toContain('in flight');
+
+      hold.release();
+      const first = await firstPromise;
+      expect(first.status).toBe('sent');
+      await reclaim(second);
+      const retried = await Executor.executeRun(second.id);
+      expect(retried.status).toBe('skipped');
+      expect(retried.exit_reason).toContain('already has a sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      expect(await db('marketing_email_ledger').where({ customer_id: customer.id, email_key: 'lc.why_91_days', status: 'sent' })).toHaveLength(1);
+    });
+
+    test('a queued first-visit report that will never qualify does not block the second-visit send', async () => {
+      const { visit1, visit2, report } = await whyScenario();
+      sendTemplate.mockImplementation(libraryLike());
+      const queuedFirst = await report(visit1, { immediately: false });
+      expect(queuedFirst.status).toBe('queued');
+
+      const second = await report(visit2);
+      expect(second.status).toBe('sent');
+      // The queued sibling, when it runs, is skipped on its own merits.
+      const later = await Executor.executeRun(queuedFirst.id);
+      expect(later.status).toBe('skipped');
+      expect(later.exit_reason).toContain('second pest visit');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    test('nurture.expired_1, same rule per estimate: a concurrent second expiry defers while the first is in flight, then is skipped as already delivered', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+      const hold = latch();
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => hold.gate }));
+
+      const firstPromise = fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-09-20' });
+      await waitFor(() => db('marketing_email_ledger').where({ customer_id: customer.id, email_key: 'nurture.expired_1', status: 'reserved' }).first());
+      const second = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-10-20' })).results[0].run;
+      expect(second.status).toBe('retry_scheduled');
+      expect(second.last_error).toContain('in flight');
+
+      hold.release();
+      expect((await firstPromise).results[0].run.status).toBe('sent');
+      await reclaim(second);
+      const retried = await Executor.executeRun(second.id);
+      expect(retried.status).toBe('skipped');
+      expect(retried.exit_reason).toContain('already has a sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
     });
   });
 
