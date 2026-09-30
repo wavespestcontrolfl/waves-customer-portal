@@ -1549,6 +1549,49 @@ describe('Codex round-6 (PR #5331): inbound-bound confirmations, unavailable bil
     expect(replyQuotesUngroundedAmount('We received your $120.00 Zelle payment, not a check, from Sep 12.', ctxWith([zelleRow]), { byMeaning: true })).toBe(true);
   });
 
+  // Codex round-6 pre-push audit P1: adjectival and verb tender forms are
+  // recognized (a null tender would drop the binder's tender restriction).
+  test('replyClaimedTender: adjectival and verb forms name the tender; the check VERB still does not', () => {
+    const { replyClaimedTender } = require('../services/sms-shadow-drafter');
+    expect(replyClaimedTender('We received your $120 check payment from Sep 12')).toBe('Check');
+    expect(replyClaimedTender('your check arrived')).toBe('Check');
+    expect(replyClaimedTender('I Zelled you $120 on Sep 12.')).toBe('Zelle');
+    expect(replyClaimedTender("I Zelle'd you")).toBe('Zelle');
+    expect(replyClaimedTender('zelling it now')).toBe('Zelle');
+    expect(replyClaimedTender("I Venmo'd you")).toBe('Venmo');
+    expect(replyClaimedTender('I sent it through Zelle')).toBe('Zelle');
+    expect(replyClaimedTender('a cash payment')).toBe('Cash');
+    expect(replyClaimedTender('your card payment')).toBe('card');
+    expect(replyClaimedTender('an ACH payment')).toBe('bank/ACH');
+    expect(replyClaimedTender('a bank payment')).toBe('bank/ACH');
+    expect(replyClaimedTender('can you check whether it arrived')).toBeNull();
+    expect(replyClaimedTender('Can you check on my payment?')).toBeNull();
+    expect(replyClaimedTender('check payment status?')).toBeNull();
+  });
+
+  test('"your $120 check payment" and "I Zelled you" reproductions are rejected against card-only history; matching rows accepted', () => {
+    const checkRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-2 — check (#1043)' };
+    // outgoing clause names the tender
+    expect(replyQuotesUngroundedAmount('We received your $120 check payment from Sep 12.', ctxWith([cardRow]), { byMeaning: true })).toBe(true);
+    expect(replyQuotesUngroundedAmount('We received your $120 check payment from Sep 12.', ctxWith([checkRow]), { byMeaning: true })).toBe(false);
+    // inbound names the tender, reply generic
+    const generic = 'Yes, we received your $120.00 payment from Sep 12.';
+    expect(replyQuotesUngroundedAmount(generic, ctxWith([cardRow]), { byMeaning: true, inboundMessage: 'I Zelled you $120 on Sep 12.' })).toBe(true);
+    expect(replyQuotesUngroundedAmount(generic, ctxWith([zelleRow]), { byMeaning: true, inboundMessage: 'I Zelled you $120 on Sep 12.' })).toBe(false);
+  });
+
+  test('reverse direction: a payment-related inbound with NO extractable tender fails closed when the amount/date spans several tenders', () => {
+    const generic = 'Yes, we received your $120.00 payment from Sep 12.';
+    const inboundMessage = 'Did my $120 payment from Sep 12 go through?';
+    expect(replyQuotesUngroundedAmount(generic, ctxWith([cardRow, zelleRow]), { byMeaning: true, inboundMessage })).toBe(true);
+    // a single tender for that amount/date still binds
+    expect(replyQuotesUngroundedAmount(generic, ctxWith([cardRow]), { byMeaning: true, inboundMessage })).toBe(false);
+    // an inbound that is not about a payment does not trigger it
+    expect(replyQuotesUngroundedAmount(generic, ctxWith([cardRow, zelleRow]), { byMeaning: true, inboundMessage: 'Thanks!' })).toBe(false);
+    // ...and no inbound at all is unchanged
+    expect(replyQuotesUngroundedAmount(generic, ctxWith([cardRow, zelleRow]), { byMeaning: true })).toBe(false);
+  });
+
   test('manual-row tender parsing stays token-exact ("check" needs no context there)', () => {
     const { paymentTenderLabel } = require('../services/sms-shadow-drafter');
     expect(paymentTenderLabel({ description: 'Invoice INV-2 — check (mailed)' })).toBe('Check');

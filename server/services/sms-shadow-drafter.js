@@ -1180,6 +1180,8 @@ const TENDER_VOCABULARY = [
   { word: 'ach', label: 'bank/ACH', manual: false },
   { word: 'bank transfer', label: 'bank/ACH', manual: false },
   { word: 'bank account', label: 'bank/ACH', manual: false },
+  { word: 'bank payment', label: 'bank/ACH', manual: false },
+  { word: 'bank draft', label: 'bank/ACH', manual: false },
 ];
 const tenderLabelForWord = (word) => (
   TENDER_VOCABULARY.find((t) => t.word === String(word || '').toLowerCase())?.label || null
@@ -1203,12 +1205,32 @@ const tenderVocabPattern = (filter) => TENDER_VOCABULARY.filter(filter).map((t) 
 // paymentTenderLabel's manual-row parsing is a different job (one fixed
 // token, no free text) and deliberately does NOT use this context rule.
 const TENDER_AMBIGUOUS = 'ambiguous';
-const NON_CHECK_TENDER_RE = new RegExp(`\\b(${tenderVocabPattern((t) => t.word !== 'check')})\\b`, 'gi');
+// Codex round-6 pre-push audit P1: verb forms of the peer-to-peer tenders
+// ("I Zelled you", "Zelle'd", "zelling", "Venmo'd", "PayPal'd") name the
+// tender exactly as the noun does, so they are matched too and canonicalize to
+// the same label. Adjectival use ("Zelle payment", "card payment", "cash
+// payment", "ACH payment") is already covered by the bare-word match.
+const TENDER_VERB_FORMS = [
+  { pattern: "zell(?:e'?d|ing)", word: 'zelle' },
+  { pattern: "venmo(?:'?d|ed|ing)", word: 'venmo' },
+  { pattern: "paypal(?:'?d|ed|ing)", word: 'paypal' },
+];
+const NON_CHECK_TENDER_RE = new RegExp(
+  `\\b(${tenderVocabPattern((t) => t.word !== 'check')}|${TENDER_VERB_FORMS.map((f) => f.pattern).join('|')})\\b`,
+  'gi',
+);
+const tenderWordFor = (matched) => {
+  const w = String(matched || '').toLowerCase();
+  const verb = TENDER_VERB_FORMS.find((f) => new RegExp(`^(?:${f.pattern})$`, 'i').test(w));
+  return verb ? verb.word : w;
+};
 const CHECK_TENDER_CONTEXT_RE = new RegExp([
   // by/with/via/using/in/as [a|my|the] check
   "\\b(?:by|with|via|using|in|as)\\s+(?:(?:a|my|the|paper|personal|business|cashier'?s?|certified)\\s+)*check\\b",
-  // a/my/the/paper/... check
-  "\\b(?:a|my|the|paper|personal|business|cashier'?s?|certified)\\s+check\\b",
+  // a/my/your/the/paper/... [$120] check  ("your $120 check payment")
+  "\\b(?:a|my|your|our|the|paper|personal|business|cashier'?s?|certified)\\s+(?:\\$\\s?\\d[\\d,]*(?:\\.\\d+)?\\s+)?check\\b",
+  // "<amount> check payment/deposit" — an amount directly before "check" plus a payment noun
+  '\\$\\s?\\d[\\d,]*(?:\\.\\d+)?\\s+check\\s+(?:payment|deposit|transfer)\\b',
   // check #1043 / check no. 1043 / check number 1043 / check 1043
   '\\bcheck\\s*(?:#|no\\.?\\s*|number\\s*)\\d+',
   '\\bcheck\\s+\\d{3,}\\b',
@@ -1218,7 +1240,7 @@ const CHECK_TENDER_CONTEXT_RE = new RegExp([
 function replyClaimedTender(text) {
   const str = String(text || '');
   const labels = new Set();
-  for (const m of str.matchAll(NON_CHECK_TENDER_RE)) labels.add(tenderLabelForWord(m[1]));
+  for (const m of str.matchAll(NON_CHECK_TENDER_RE)) labels.add(tenderLabelForWord(tenderWordFor(m[1])));
   if (CHECK_TENDER_CONTEXT_RE.test(str)) labels.add('Check');
   if (labels.size > 1) return TENDER_AMBIGUOUS;
   return labels.size ? [...labels][0] : null;
@@ -1311,9 +1333,18 @@ function paymentDateMatchesClaim(p, claimed) {
 // explicit param, resolved by the caller from EITHER the outgoing clause or
 // the inbound message, rather than re-derived here from `text` alone — the
 // caller is the one place that knows which of the two named a date/tender.
-function bindPaidPaymentRow({ amountCents, context, claimedTender = null, claimedDate = null }) {
+function bindPaidPaymentRow({
+  amountCents, context, claimedTender = null, claimedDate = null, inboundNamedPayment = false,
+}) {
   if (!claimedDate) return null;
   const candidates = paidRowsForCents(context, amountCents).filter((p) => paymentDateMatchesClaim(p, claimedDate));
+  // Codex round-6 pre-push audit P1 (reverse direction): the customer's message
+  // is about a payment but NO tender could be extracted from it or the reply,
+  // and the settled rows for this amount/date span more than one tender (an
+  // unreadable tender counts as its own) — a generic confirmation cannot say
+  // WHICH one it confirms, so fail closed rather than bind to any of them.
+  if (!claimedTender && inboundNamedPayment
+      && new Set(candidates.map((p) => paymentTenderLabel(p) || 'unknown')).size > 1) return null;
   const matched = claimedTender ? candidates.filter((p) => paymentTenderLabel(p) === claimedTender) : candidates;
   return matched[0] || null;
 }
@@ -1484,7 +1515,10 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
       if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
       if (claimedTender === TENDER_AMBIGUOUS) return true;
       const claimedDate = parseClaimedPaymentDate(text) || (inboundText && parseClaimedPaymentDate(inboundText)) || null;
-      if (amounts.some((a) => !bindPaidPaymentRow({ amountCents: a, context, claimedTender, claimedDate }))) return true;
+      const inboundNamedPayment = !!inboundText && /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?)\b/i.test(inboundText);
+      if (amounts.some((a) => !bindPaidPaymentRow({
+        amountCents: a, context, claimedTender, claimedDate, inboundNamedPayment,
+      }))) return true;
     }
   }
   return false;
