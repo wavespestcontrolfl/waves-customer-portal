@@ -1424,6 +1424,52 @@ describe('r21: only POSITIVE evidence of an unsupported language holds a reply; 
   });
 });
 
+describe('r22: lowercase "may" as a month; an unverified inbound language', () => {
+  const other = (text) => labelFactsLib.inboundRefersToOtherVisit(text, '2026-09-29', '2026-09-30');
+  test('lowercase may next to a visit noun or after a preposition is a May reference; verb uses are not', () => {
+    for (const text of ['the may treatment', 'may spray', 'may visit', 'in may', 'back in may', 'since may you sprayed', 'during may', 'last may', 'the may treatment - dogs ok?', 'in may we sprayed', 'that may service', 'may application']) {
+      expect([text, other(text)]).toEqual([text, true]);
+    }
+    for (const text of ['you may', 'may i', 'it may rain', 'may be', 'that may be fine', 'the may not', 'you may spray, right? when can dogs go out', 'may the dogs go out now', 'How long until the pets may go out?', 'you may want to know: is it dry?', 'May I ask when the dogs can go out?']) {
+      expect([text, other(text)]).toEqual([text, false]);
+    }
+    expect(labelFactsLib.inboundRefersToOtherVisit('the may treatment', '2026-05-12', '2026-05-20')).toBe(false); // the visit IS in May
+  });
+
+  test('an inbound whose words or letters cannot be tied to en / es / pt / fr is unverified; terse English, Spanish and French are not', () => {
+    const un = labelFactsLib.isUnverifiedLanguageInbound;
+    for (const text of ['Kiedy psy mog\u0105 wyj\u015b\u0107?', 'Poczekaj dwie godziny', 'Ne zaman k\u00f6pekler \u00e7\u0131kabilir', 'Mikor mehetnek ki a kuty\u00e1k', 'Kdy m\u016f\u017eou psi ven', 'Wann d\u00fcrfen die Hunde raus', 'Dlaczego nie']) {
+      expect([text, un(text)]).toEqual([text, true]);
+    }
+    for (const text of [
+      'dogs out?', 'pets ok now', 'lawn safe yet', 'when can the kids play', 'Is it okay now?', 'rain?', 'Tuesday works', 'kids on lawn now?', 'thanks!', 'ok', 'wash off?',
+      '\u00bfCu\u00e1nto tiempo hasta que los perros puedan salir?', 'Quand les chiens peuvent-ils sortir ?', 'Quanto tempo at\u00e9 os c\u00e3es sa\u00edrem?', 'Hola, tengo una pregunta sobre mi cita',
+    ]) expect([text, un(text)]).toEqual([text, false]);
+  });
+  test('the Polish inbound: none on file, both kinds plus unverified_language asked, and only allowlisted sentence types answer', async () => {
+    const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
+    const inbound = 'Kiedy psy mog\u0105 wyj\u015b\u0107?';
+    expect(labelFactsLib.labelFactsForInbound(facts, [inbound], '2026-09-30')).toBeNull();
+    const asked = labelFactsLib.askedLabelKinds(inbound);
+    expect(asked).toEqual(['reentry', 'rain', 'unverified_language']);
+    const guard = (reply) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', asked);
+    for (const reply of ['Poczekaj dwie godziny.', 'Psy moga wyjsc teraz.', 'Yes, they can.', 'Sure, go ahead!', 'Wait two hours please.']) expect([reply, guard(reply)]).toEqual([reply, true]);
+    for (const reply of ["I'll have the office confirm and get back to you.", 'Hi Jane, thanks for reaching out!', 'A treatment needs to dry and bond to surfaces; after that it holds up to weather.']) expect([reply, guard(reply)]).toEqual([reply, false]);
+    // send time: the snapshot's asked list (which carries unverified_language) is what the recheck reads
+    const boom = () => { throw new Error('must not read'); };
+    const snap = { customer_id: 'c1', visit_date: '2026-09-29', record_ids: ['r2'], sentences: [], asked };
+    await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body: 'Poczekaj dwie godziny.', conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+    await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body: "I'll have the office confirm.", conn: boom })).resolves.toBeNull();
+    // and without a snapshot the stored inbound gives the same answer
+    await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body: 'Poczekaj dwie godziny.', inbound, conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+  });
+  test('Spanish and French inbounds keep their existing handling (none on file, es / fr vocabulary held)', () => {
+    const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
+    expect(labelFactsLib.labelFactsForInbound(facts, ['Hola, tengo una pregunta sobre mi cita'], '2026-09-30')).toBeNull();
+    expect(labelFactsLib.askedLabelKinds('Quand les chiens peuvent-ils sortir ?')).not.toContain('unverified_language');
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {

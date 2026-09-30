@@ -801,6 +801,25 @@ function hasUnsupportedLanguage(text) {
 }
 /** False only on positive evidence of an unsupported language: terse English stays English (used for the inbound). */
 const isVerifiablyEnglish = (text) => !hasUnsupportedLanguage(text);
+
+// ---- Unverified inbound language ------------------------------------------
+// The drafter answers in the customer's language, and the guards read only en / es / pt / fr. An inbound of two or
+// more words whose letters or words cannot be tied to those four - a letter outside ASCII and the es / pt / fr
+// diacritics (Polish ą ę ł ś ..., Czech, Turkish, Hungarian), or no function word / common SMS word of any of them at
+// all ("Kiedy psy mogą wyjść?") - is UNVERIFIED: LABEL FACTS none on file, both label kinds asked (so only allowlisted
+// sentence types answer), and 'unverified_language' recorded in the snapshot's asked list. The REPLY check stays
+// evidence-based so terse English is never held.
+const ALLOWED_DIACRITICS = 'áàâãçéèêëíîïñóôõœæùúûüÿ';
+const SMS_CORE_WORDS = wordList('when can is are ok okay thanks thank yes no dog dogs cat cats pet pets kid kids child children baby lawn yard grass rain rains outside inside out in spray sprayed spraying treatment treated visit service technician tech now today tomorrow tonight yesterday safe dry wet wash washed water watering mow mowing sprinkler sprinklers walk play swim hours hour minutes minute days day week home appointment schedule reschedule pest bugs ants roaches termites weeds fertilizer wait yet still again back go going please hi hello hey good morning afternoon evening price cost pay paid invoice bill estimate quote question help need want know tell time late early soon sure done finished complete works work fine great perfect sounds see then monday tuesday wednesday thursday friday saturday sunday okay yep yeah nope pool patio deck garage gate fence bee bees wasp wasps mice rats rat mouse any update updates pls plz thx ty call text email send sent whats hows wheres coming come came leave left open closed confirm confirmed cancel free busy available options option name address phone number');
+function isUnverifiedLanguageInbound(inbound) {
+  const text = canonText(Array.isArray(inbound) ? inbound[0] : inbound).toLowerCase();
+  const words = wordsOf(stripMarks(text));
+  if (words.length < 2) return false;
+  if ([...text.matchAll(/\p{L}/gu)].some(([ch]) => !/[a-z]/.test(ch) && !ALLOWED_DIACRITICS.includes(ch))) return true;
+  // (a one-letter word - "a", "o", "e", "y" - is a function word of several languages and proves nothing)
+  return !words.some((w) => w.length > 1 && (SMS_CORE_WORDS.has(w) || Object.values(SUPPORTED_PROFILES).some((set) => set.has(w))));
+}
+
 // The greeting "buenos dias" says no timing; everything else in the table is held.
 const NON_ENGLISH_GREETING_RE = /(?<![\p{L}])buen(?:os|as)\s+(?:dias|noches)(?![\p{L}])/giu;
 function nonEnglishTimingWords(text) {
@@ -864,6 +883,7 @@ function askedKindsOf(inboundText) {
  * message with nothing classifiable anywhere in the thread asks both.
  */
 function askedLabelKinds(inbound) {
+  if (isUnverifiedLanguageInbound(inbound)) return ['reentry', 'rain', 'unverified_language'];
   const reads = (Array.isArray(inbound) ? inbound : [inbound]).map(askedKindsOf);
   const sources = reads[0]?.elliptical ? reads : reads.slice(0, 1);
   const kinds = ['reentry', 'rain'].filter((k) => sources.some((r) => r.kinds.includes(k)));
@@ -1119,6 +1139,9 @@ const ISO_DATE_RE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
 // preposition/determiner before it. A season is ambiguous, so it always names another visit.
 const MONTH_ALONE_RE = /\b(jan(?:uary)?|feb(?:ruary)?|march|apr(?:il)?|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/g;
 const MAY_ALONE_RE = /\b(?:(?:in|back\s+in|since|during|last|that|the|this|from|early|late|mid)\s+May\b|May\s+(?:treatment|visit|service|spray|spraying|application|appointment)\b)/g;
+// lowercase "may": a month only right before a visit noun, or after a preposition / determiner and NOT followed by a verb
+// or pronoun ("that may be", "in may rain ...", "you may", "may i", "it may rain" stay verbs)
+const MAY_LOWER_RE = /\b(?:(?:in|back\s+in|since|during|last|that|the|this|from|early|late|mid)\s+may\b(?!\s+(?:be|not|have|has|had|need|want|take|help|cause|affect|rain|also|still|just|even|include|require|depend|vary|change|make|get|go|come|see|use|apply|wash|hold|i|it|they|he|she|the|a|an|your|my|our)\b)|(?<!\b(?:you|we|i|they|he|she|it|who|that|which)\s+)may\s+(?:treatment|visit|service|spray|spraying|application|appointment)\b)/g;
 const SEASON_RE = /\b(?:last|this|the|in|during|early|late|next|every|that|past|previous)\s+(?:spring|summer|fall|autumn|winter)(?:time)?\b/g;
 // A year named on its own ("my 2025 treatment", "back in 2024", "the 2025 spray"): only with a preposition or
 // determiner before it, or a visit word after it, so prices, house numbers, phone / zip fragments and "2025 hours"
@@ -1158,6 +1181,7 @@ const VISIT_REFERENCES = [
   // an explicit date ("Sep 29", "September 29th", "9/29", "9/29/26") must be the visit's date
   { re: MONTH_ALONE_RE, differs: (m, v) => monthNumber(m[1]) !== v.month },
   { re: MAY_ALONE_RE, raw: true, differs: (m, v) => v.month !== 5 },
+  { re: MAY_LOWER_RE, differs: (m, v) => v.month !== 5 },
   { re: SEASON_RE, differs: () => true },
   { re: YEAR_AFTER_WORD_RE, differs: (m, v) => Number(m[1]) !== v.year },
   { re: YEAR_BEFORE_VISIT_RE, differs: (m, v) => Number(m[1]) !== v.year },
@@ -1179,7 +1203,7 @@ function labelFactsForInbound(labelFacts, inbound, today = etDateString()) {
   // a short follow-up ("is it okay now?") is about whatever the thread was, so the thread's visit references count too
   const refs = inboundIsElliptical(texts) ? texts : texts.slice(0, 1);
   const otherVisit = refs.some((text) => inboundRefersToOtherVisit(text, labelFacts.serviceDate, today));
-  return otherVisit || looksNonEnglish(texts[0]) || !isVerifiablyEnglish(texts[0]) ? null : labelFacts;
+  return otherVisit || looksNonEnglish(texts[0]) || !isVerifiablyEnglish(texts[0]) || isUnverifiedLanguageInbound(texts) ? null : labelFacts;
 }
 
 /**
@@ -1230,6 +1254,7 @@ module.exports = {
   looksNonEnglish,
   hasUnsupportedLanguage,
   isVerifiablyEnglish,
+  isUnverifiedLanguageInbound,
   nonEnglishTimingWords,
   labelFactsForInbound,
 };
