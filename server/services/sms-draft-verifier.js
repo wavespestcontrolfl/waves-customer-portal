@@ -18,16 +18,7 @@
  */
 const MODELS = require('../config/models');
 
-// `opts.generalPestKnowledge` (GATE_SMS_REAL_ANSWERS only — the drafter passes
-// its realAnswersApplied): the drafter may then answer GENERAL pest questions
-// from general knowledge, so the verifier must not strip that as ungrounded.
-// Narrow on purpose: anything about THIS home, treatments, timing, prices or
-// company policy stays strictly grounded. Omitted/false → the prompt is
-// byte-identical to before (every gate-off caller and pinned exam).
-const GENERAL_PEST_KNOWLEDGE_RULE = `
-- GENERAL PEST KNOWLEDGE EXCEPTION: general pest biology or prevention advice that is NOT about this customer's home (what a pest is, why earwigs show up after rain, generic prevention tips like sealing gaps or reducing moisture) may be ungrounded — do NOT flag it. Everything about THIS customer's home, treatments applied or planned, timing, prices, appointments, or company policy stays strictly grounded and is flagged as usual (the COMPANY FACTS section of the FACTS counts as grounded). This exception NEVER covers health, illness, symptoms, the effects of stings or bites on people or pets, exposure, or safety (whether something is dangerous, toxic or harmful): any such claim stays strictly grounded and is flagged unless the FACTS state it. A product brand name is always a VIOLATION.`;
-function buildVerifierSystemPrompt(opts = {}) {
-  const generalPestRule = opts && opts.generalPestKnowledge === true ? GENERAL_PEST_KNOWLEDGE_RULE : '';
+function buildVerifierSystemPrompt() {
   return `You are a STRICT, skeptical fact-checker for Waves Pest Control SMS draft replies. Your default stance: a draft is UNSAFE unless every specific detail in it is explicitly grounded. Most drafts you see DO contain a fabrication — your job is to find it, not to give the draft the benefit of the doubt.
 
 You receive the FACTS available to the drafter, the customer's CURRENT MESSAGE, and a DRAFT reply.
@@ -48,7 +39,7 @@ A detail is GROUNDED only if it appears in the FACTS, or in what the customer LI
 - Warm acknowledgments, generic brand voice, and offers to confirm/follow up are fine. But a SPECIFIC commitment, date, place, or job detail is a violation unless grounded.
 - VALUE MATCHING — match the exact value, not just the category. A date, day, or time is grounded ONLY if that EXACT value is in the FACTS. A date that DIFFERS from the facts — even by one day — is a VIOLATION, never "close enough". Example: FACTS say next service 6/15, draft says "Tuesday June 16" → VIOLATION (wrong date, not the 6/15 on file). Seeing "there is a date in the facts" is NOT enough; the value must match.
 - BILLING is high-stakes — any statement about billing status or resolution ("paid in full", "you're all set", "your payment went through", "that charge was an error", "it appears to be a mistake") is a VIOLATION unless that exact status is in BALANCE/FACTS. A reassurance the facts don't confirm is unsafe.
-- For every specific date, time, technician name, or commitment in the draft, you must be able to QUOTE the exact FACTS or customer text that supports it. If you can't quote a source, it is a violation.${generalPestRule}
+- For every specific date, time, technician name, or commitment in the draft, you must be able to QUOTE the exact FACTS or customer text that supports it. If you can't quote a source, it is a violation.
 
 Respond with ONLY a JSON object, no prose, no code fences. Either:
 {"supported": true, "violations": []}

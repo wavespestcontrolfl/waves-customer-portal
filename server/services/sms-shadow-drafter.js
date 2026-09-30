@@ -370,28 +370,45 @@ async function fetchReserviceLanes({ customerId } = {}) {
 }
 
 // fetchReserviceLanes plus whether the customer has a reservice_token on
-// file (the app-booking page cannot open without one). Same gates, same
+// file (the app-booking page cannot open without one) and which eligible
+// lanes are still bookable (no open callback on the lane). Same gates, same
 // fail-closed behavior; null when the gates are off.
 async function fetchReserviceState({ customerId } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return null;
-  if (!customerId) return { lanes: [], hasToken: false };
+  if (!customerId) return { lanes: [], hasToken: false, bookableLanes: [] };
   let timer = null;
   try {
-    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('./reservice-scheduler');
-    if (!reserviceSelfServeEnabled()) return { lanes: [], hasToken: false };
+    const { reserviceSelfServeEnabled, reserviceLanesForCustomer, openReserviceCallbacks } = require('./reservice-scheduler');
+    if (!reserviceSelfServeEnabled()) return { lanes: [], hasToken: false, bookableLanes: [] };
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
     const lookup = (async () => {
       const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-      if (!row || row.active === false) return { lanes: [], hasToken: false };
-      return { lanes: await reserviceLanesForCustomer(row), hasToken: Boolean(row.reservice_token) };
+      if (!row || row.active === false) return { lanes: [], hasToken: false, bookableLanes: [] };
+      const eligible = await reserviceLanesForCustomer(row);
+      const lanes = Array.isArray(eligible) ? eligible.filter((l) => l === 'pest' || l === 'lawn') : [];
+      const hasToken = Boolean(row.reservice_token);
+      // Lanes the booking page would still let them book: the SAME open-
+      // callback lookup reservice-public.js resolveLaneState uses
+      // (reservice-scheduler.openReserviceCallbacks) — a lane that already
+      // has an open free visit is not bookable. Its own failure only drops
+      // the app-booking line (bookableLanes []), never the eligibility fact.
+      let bookableLanes = [];
+      if (hasToken && lanes.length) {
+        try {
+          const open = await openReserviceCallbacks(row.id);
+          bookableLanes = lanes.filter((lane) => !open[lane]);
+        } catch (err) {
+          logger.warn(`[sms-shadow] open re-service callback lookup failed (${err.message}); omitting app-booking line`);
+        }
+      }
+      return { lanes, hasToken, bookableLanes };
     })();
-    const { lanes, hasToken } = await Promise.race([lookup, timeout]);
-    return { lanes: Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [], hasToken };
+    return await Promise.race([lookup, timeout]);
   } catch (err) {
     logger.warn(`[sms-shadow] free re-service eligibility lookup failed (${err.message}); treating as not eligible`);
-    return { lanes: [], hasToken: false };
+    return { lanes: [], hasToken: false, bookableLanes: [] };
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -1188,15 +1205,13 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const noAppointmentRule = realAnswersOn
     ? "If the customer asks when we're coming and no confirmed appointment is shown, do NOT invent a time — offer 2–3 SPECIFIC times from OPEN TIMES (declared in offered_times) so they can pick one; only if OPEN TIMES is absent or empty, say you'll confirm it and get right back to them."
     : "If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.";
-  // COMPANY FACTS (owner rulings 2026-09-29/30), gate-on only: general pest
-  // knowledge is allowed for general questions, and the per-draft COMPANY
-  // FACTS section is authoritative. '' when the gate is off, so the v11
-  // prompt is byte-identical. The section's content is per-draft data
+  // COMPANY FACTS (owner rulings 2026-09-29/30), gate-on only: the per-draft
+  // COMPANY FACTS section is authoritative. '' when the gate is off, so the
+  // v11 prompt is byte-identical. The section's content is per-draft data
   // (buildFactsBlock), never interpolated here.
   const companyFactsRules = realAnswersOn
     ? `
-GENERAL PEST KNOWLEDGE & COMPANY FACTS:
-- For general pest questions (what a pest is, why you're seeing earwigs, prevention tips) you MAY answer from general pest knowledge, briefly and in plain words — that is not a claim about this customer's home. Treatment decisions for THIS customer's home (what was or will be applied, what a re-treatment needs, timing) still follow the facts or go to a person. This NEVER covers health, illness, symptoms, the effects of stings or bites on people or pets, exposure, or safety (whether something is dangerous, toxic or harmful): those are not general pest knowledge, so follow the facts and the hand-off rules below only. Never name a product brand.
+COMPANY FACTS:
 - The COMPANY FACTS section in the context block is owner-approved and authoritative. When the customer asks about anything it covers, state that fact directly and plainly instead of deferring, hedging, or saying you'll confirm. It is the one place besides the sections above that you may draw company policy from.
 `
     : '';
@@ -1952,7 +1967,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceState = presetFactsBlock ? null : await fetchReserviceState({ customerId: context?.customer?.id || null });
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
-  const reserviceAppBookable = reserviceState ? reserviceState.hasToken === true : false;
+  const reserviceAppBookable = reserviceState ? reserviceState.hasToken === true && reserviceState.bookableLanes.length > 0 : false;
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -2088,7 +2103,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
           model: verifier.VERIFIER_MODEL,
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
           effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
-          system: verifier.buildVerifierSystemPrompt({ generalPestKnowledge: realAnswersApplied === true }),
+          system: verifier.buildVerifierSystemPrompt(),
           messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply, parsed.offered_times) }],
         });
         // createDeepMessage can transparently cross providers. Preserve the

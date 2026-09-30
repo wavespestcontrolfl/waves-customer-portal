@@ -55,26 +55,8 @@ describe('gate off — byte-identical to before COMPANY FACTS', () => {
     expect(currentPromptVersion()).toBe(PROMPT_VERSION);
   });
 
-  test('verifier system prompt is byte-identical without the opt-in', () => {
-    const orig = '362e4cac5fd3f73afa1208eb6bfe550ae7de823281731cefb1bcf89c1a2384e8';
-    expect(sha(buildVerifierSystemPrompt())).toBe(orig);
-    expect(sha(buildVerifierSystemPrompt({}))).toBe(orig);
-    expect(sha(buildVerifierSystemPrompt({ generalPestKnowledge: false }))).toBe(orig);
-    expect(buildVerifierSystemPrompt()).not.toContain('GENERAL PEST KNOWLEDGE');
-  });
-});
-
-describe('verifier — general pest knowledge exception (gate-on opt-in)', () => {
-  test('opt-in adds a narrow exception and leaves strict grounding in place', () => {
-    const off = buildVerifierSystemPrompt();
-    const on = buildVerifierSystemPrompt({ generalPestKnowledge: true });
-    expect(on).not.toBe(off);
-    expect(on.startsWith(off.slice(0, 200))).toBe(true);
-    expect(on).toContain('GENERAL PEST KNOWLEDGE EXCEPTION');
-    expect(on).toContain('NOT about this customer');
-    expect(on).toMatch(/treatments applied or planned, timing, prices, appointments, or company policy stays strictly grounded/);
-    expect(on).toContain('DEFAULT TO FLAGGING'); // the strict default is untouched
-    expect(on).toContain('A product brand name is always a VIOLATION');
+  test('verifier system prompt is untouched (byte-identical to main)', () => {
+    expect(sha(buildVerifierSystemPrompt())).toBe('362e4cac5fd3f73afa1208eb6bfe550ae7de823281731cefb1bcf89c1a2384e8');
   });
 });
 
@@ -99,12 +81,11 @@ describe('gate on', () => {
     ]) expect(all).toContain(needle);
   });
 
-  test('system prompt allows general pest knowledge and makes COMPANY FACTS authoritative', () => {
+  test('system prompt makes COMPANY FACTS authoritative and grants no general-knowledge permission', () => {
     const { system, realAnswersApplied } = buildSystemPromptWithProfile();
     expect(realAnswersApplied).toBe(true);
-    expect(system).toContain('GENERAL PEST KNOWLEDGE & COMPANY FACTS:');
-    expect(system).toContain('you MAY answer from general pest knowledge');
-    expect(system).toContain('Never name a product brand');
+    expect(system).toContain('COMPANY FACTS:\n- The COMPANY FACTS section');
+    expect(system).not.toMatch(/general pest knowledge/i);
     expect(system).toContain('COMPANY FACTS section in the context block is owner-approved and authoritative');
     expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, the thread');
   });
@@ -195,20 +176,6 @@ describe('re-service app booking line', () => {
       expect(b).not.toContain('Waves app');
       expect(b).not.toContain('RE-SERVICE BOOKING:');
     }
-  });
-});
-
-describe('general pest knowledge never covers health or safety', () => {
-  test('drafter rule and verifier exception both carve out health, stings/bites, exposure, safety', () => {
-    process.env[GATE] = 'true';
-    const rule = buildSystemPromptWithProfile().system;
-    expect(rule).toMatch(/NEVER covers health, illness, symptoms, the effects of stings or bites on people or pets, exposure, or safety/);
-    const v = buildVerifierSystemPrompt({ generalPestKnowledge: true });
-    expect(v).toMatch(/NEVER covers health, illness, symptoms, the effects of stings or bites on people or pets, exposure, or safety/);
-    expect(v).toMatch(/stays strictly grounded and is flagged unless the FACTS state it/);
-    // a "can bee stings make my child sick?"-style question is not covered by either rule
-    expect(rule).toContain('hand-off rules below');
-    delete process.env[GATE];
   });
 });
 
@@ -358,5 +325,6 @@ describe('judge facts sanitizer keeps the thread when COMPANY FACTS is present',
 describe('gratitude qualification pins the company facts source', () => {
   test('sms-company-facts.js is in the pinned source list', () => {
     expect(pinnedSourceFiles()).toContain('server/services/sms-company-facts.js');
+    expect(pinnedSourceFiles()).toContain('server/constants/business.js'); // the address/brand constants the facts render
   });
 });
