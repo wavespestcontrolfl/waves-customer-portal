@@ -8,8 +8,8 @@
  * fleet_sites row (not just the typed domain string), EXACT matching only
  * (pre-push audit #5275 — no substring, no SQL wildcard widening, refuse on
  * ambiguity), the live Search Console property resolution (codex r3 P1 on
- * #5275 — a synthesized siteUrl is never trusted), and the commit path's
- * refusal.
+ * #5275 — a synthesized siteUrl is never trusted), and the confirmed commit
+ * (pinned property + sitemap, write-scoped client, permission mapping).
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -59,7 +59,7 @@ function load(rows) {
   return dbMock;
 }
 
-describe('submit_gsc_sitemap (preview only)', () => {
+describe('submit_gsc_sitemap (preview)', () => {
   test('unconfigured state is benign — no error field, no DB call', async () => {
     const dbMock = load([]);
     const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'bradentonflpestcontrol.com' });
@@ -249,14 +249,189 @@ describe('submit_gsc_sitemap (preview only)', () => {
     expect(dbMock).not.toHaveBeenCalled();
     expect(mockResolveAccessibleProperty).not.toHaveBeenCalled();
   });
+});
 
-  test('confirmed:true refuses — the commit path is not built in this PR', async () => {
+describe('submit_gsc_sitemap (confirmed commit)', () => {
+  const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
+  const mockSubmitSitemap = jest.fn();
+
+  function loadWithSubmit(rows = []) {
+    const dbMock = makeDbMock(rows);
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/seo/search-console-v2', () => ({
+      resolveAccessibleProperty: (...args) => mockResolveAccessibleProperty(...args),
+      submitSitemap: (...args) => mockSubmitSitemap(...args),
+    }));
+    ({ executeSeoTool } = require('../services/intelligence-bar/seo-tools'));
+    return dbMock;
+  }
+
+  beforeEach(() => {
+    mockSubmitSitemap.mockReset().mockResolvedValue({ ok: true });
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
-    const dbMock = load([]);
+  });
 
+  test('confirm submits the PINNED property + sitemap URL through the write client, whatever the raw input says', async () => {
+    loadWithSubmit();
+    mockResolveAccessibleProperty.mockResolvedValue({ siteUrl: 'sc-domain:wavespestcontrol.com', permissionLevel: 'siteFullUser' });
+    const preview = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com' });
+    const pins = outsideWritePins('submit_gsc_sitemap', preview);
+    expect(pins).toEqual({
+      _verified_gsc_property: 'sc-domain:wavespestcontrol.com',
+      _verified_gsc_sitemap_url: 'https://wavespestcontrol.com/sitemap-index.xml',
+    });
+
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'bradentonflpestcontrol.com', sitemap_path: '/evil.xml', ...pins, confirmed: true });
+    expect(result).toEqual({
+      success: true, tool: 'submit_gsc_sitemap',
+      property: 'sc-domain:wavespestcontrol.com', sitemap_url: 'https://wavespestcontrol.com/sitemap-index.xml',
+    });
+    expect(mockSubmitSitemap).toHaveBeenCalledTimes(1);
+    expect(mockSubmitSitemap).toHaveBeenCalledWith('sc-domain:wavespestcontrol.com', 'https://wavespestcontrol.com/sitemap-index.xml');
+  });
+
+  test('a preview whose property/sitemap changes has a different fingerprint (target-changed at /confirm-action)', async () => {
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    loadWithSubmit();
+    mockResolveAccessibleProperty.mockResolvedValueOnce({ siteUrl: 'https://wavespestcontrol.com/', permissionLevel: 'siteOwner' });
+    const before = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com' });
+    mockResolveAccessibleProperty.mockResolvedValueOnce({ siteUrl: 'sc-domain:wavespestcontrol.com', permissionLevel: 'siteOwner' });
+    const after = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com' });
+    expect(previewFingerprint(before)).not.toBe(previewFingerprint(after));
+  });
+
+  test('a sitemap that is not under the pinned URL-prefix property is refused as target-changed, nothing submitted', async () => {
+    loadWithSubmit();
+    const result = await executeSeoTool('submit_gsc_sitemap', {
+      domain: 'wavespestcontrol.com',
+      _verified_gsc_property: 'https://wavespestcontrol.com/',
+      _verified_gsc_sitemap_url: 'https://other-site.com/sitemap-index.xml',
+      confirmed: true,
+    });
+    expect(result.code).toBe('target_changed');
+    expect(result.preview_changed).toBe(true);
+    expect(mockSubmitSitemap).not.toHaveBeenCalled();
+  });
+
+  test('confirmed without a verified pin refuses and never submits', async () => {
+    const dbMock = loadWithSubmit();
     const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com', confirmed: true });
-    expect(result.error).toMatch(/not enabled yet/);
-    expect(result.code).toBe('not_yet_implemented');
+    expect(result.code).toBe('missing_verified_pin');
+    expect(mockSubmitSitemap).not.toHaveBeenCalled();
     expect(dbMock).not.toHaveBeenCalled();
+  });
+
+  test('a read-only service account returns a clear write-access result, reports no success', async () => {
+    loadWithSubmit();
+    mockSubmitSitemap.mockResolvedValue({ error: 'The Search Console service account has read access only — it must be a Full user (or owner) of this property to submit sitemaps.', writeAccessRequired: true, status: 403 });
+    const result = await executeSeoTool('submit_gsc_sitemap', {
+      domain: 'wavespestcontrol.com',
+      _verified_gsc_property: 'sc-domain:wavespestcontrol.com',
+      _verified_gsc_sitemap_url: 'https://wavespestcontrol.com/sitemap-index.xml',
+      confirmed: true,
+    });
+    expect(result.code).toBe('write_access_required');
+    expect(result.error).toMatch(/Full user/);
+    expect(result.success).toBeUndefined();
+  });
+
+  test('any other submit failure is a plain error (no write-access claim)', async () => {
+    loadWithSubmit();
+    mockSubmitSitemap.mockResolvedValue({ error: 'Search Console sitemap submit failed (HTTP 500).', status: 500 });
+    const result = await executeSeoTool('submit_gsc_sitemap', {
+      domain: 'wavespestcontrol.com',
+      _verified_gsc_property: 'sc-domain:wavespestcontrol.com',
+      _verified_gsc_sitemap_url: 'https://wavespestcontrol.com/sitemap-index.xml',
+      confirmed: true,
+    });
+    expect(result.error).toMatch(/HTTP 500/);
+    expect(result.code).toBeUndefined();
+  });
+});
+
+// The scope split lives in OUR code (search-console-v2.js), not in the
+// service account: reads keep the read-only client, only submitSitemap gets
+// its own write-scoped one.
+describe('SearchConsoleV2 scope split (read-only reads, write-scoped sitemap submit)', () => {
+  let authScopes;
+  let mockSubmit;
+  let mockSitesList;
+
+  function loadV2() {
+    authScopes = [];
+    mockSubmit = jest.fn().mockResolvedValue({ data: {} });
+    mockSitesList = jest.fn().mockResolvedValue({ data: { siteEntry: [{ siteUrl: 'sc-domain:wavespestcontrol.com', permissionLevel: 'siteOwner' }] } });
+    jest.doMock('googleapis', () => ({
+      google: {
+        auth: { GoogleAuth: jest.fn().mockImplementation((opts) => ({ opts })) },
+        searchconsole: jest.fn().mockImplementation(({ auth }) => {
+          authScopes.push(auth.opts.scopes);
+          return { sites: { list: mockSitesList }, sitemaps: { submit: mockSubmit } };
+        }),
+      },
+    }));
+    jest.doMock('../models/db', () => jest.fn());
+    // The describes above doMock this module for seo-tools; here the REAL one is under test.
+    jest.dontMock('../services/seo/search-console-v2');
+    return require('../services/seo/search-console-v2');
+  }
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+  });
+
+  test('reads use ONLY the webmasters.readonly scope; submitSitemap uses its own webmasters (write) client', async () => {
+    const gsc = loadV2();
+    await gsc.resolveAccessibleProperty('wavespestcontrol.com');
+    expect(authScopes).toEqual([['https://www.googleapis.com/auth/webmasters.readonly']]);
+
+    const res = await gsc.submitSitemap('sc-domain:wavespestcontrol.com', 'https://wavespestcontrol.com/sitemap-index.xml');
+    expect(res).toEqual({ ok: true });
+    expect(authScopes).toEqual([
+      ['https://www.googleapis.com/auth/webmasters.readonly'],
+      ['https://www.googleapis.com/auth/webmasters'],
+    ]);
+    expect(mockSubmit).toHaveBeenCalledWith(
+      { siteUrl: 'sc-domain:wavespestcontrol.com', feedpath: 'https://wavespestcontrol.com/sitemap-index.xml' },
+      expect.any(Object),
+    );
+    // The submit never touched the read-only client's surface.
+    expect(mockSitesList).toHaveBeenCalledTimes(1);
+  });
+
+  test('the write client is created lazily and reused, never at read time', async () => {
+    const gsc = loadV2();
+    await gsc.resolveAccessibleProperty('wavespestcontrol.com');
+    expect(authScopes).toHaveLength(1);
+    await gsc.submitSitemap('sc-domain:wavespestcontrol.com', 'https://wavespestcontrol.com/s.xml');
+    await gsc.submitSitemap('sc-domain:wavespestcontrol.com', 'https://wavespestcontrol.com/s.xml');
+    expect(authScopes).toHaveLength(2);
+  });
+
+  test.each([401, 403])('HTTP %i from sitemaps.submit maps to writeAccessRequired (read-only service account)', async (code) => {
+    const gsc = loadV2();
+    mockSubmit.mockRejectedValue(Object.assign(new Error('The caller does not have permission'), { code }));
+    const res = await gsc.submitSitemap('sc-domain:wavespestcontrol.com', 'https://wavespestcontrol.com/s.xml');
+    expect(res.writeAccessRequired).toBe(true);
+    expect(res.error).toMatch(/Full user/);
+    expect(res.ok).toBeUndefined();
+  });
+
+  test('a non-permission failure is a plain error carrying the status but not the provider message', async () => {
+    const gsc = loadV2();
+    mockSubmit.mockRejectedValue(Object.assign(new Error('internal detail with https://x.example/secret'), { code: 500 }));
+    const res = await gsc.submitSitemap('sc-domain:wavespestcontrol.com', 'https://wavespestcontrol.com/s.xml');
+    expect(res.writeAccessRequired).toBeUndefined();
+    expect(res.error).toMatch(/HTTP 500/);
+    expect(res.error).not.toContain('secret');
+  });
+
+  test('submitSitemap without GOOGLE_SERVICE_ACCOUNT_JSON refuses and creates no client', async () => {
+    const gsc = loadV2();
+    delete process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    const res = await gsc.submitSitemap('sc-domain:x.com', 'https://x.com/s.xml');
+    expect(res.error).toMatch(/GOOGLE_SERVICE_ACCOUNT_JSON/);
+    expect(authScopes).toEqual([]);
   });
 });
