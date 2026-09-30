@@ -58,6 +58,10 @@ jest.mock('../routes/estimate-public', () => ({
   // The /data pricing bundle (offerableEstimateSlots derives the page's default
   // selection from it); no priced frequencies unless a case sets one.
   buildPricingBundle: jest.fn(async () => ({})),
+  estimateRendersMonthlyBilling: jest.fn(async () => false),
+  // The page's acceptance contract (/data): the slot picker renders only for
+  // standard_slot_pick, so the texting AI offers times only then.
+  resolveEstimateAcceptance: jest.fn(async () => ({ acceptance: { mode: 'standard_slot_pick' } })),
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
   estimateTrenchingReviewRequired: jest.fn(() => false),
@@ -111,6 +115,8 @@ beforeEach(() => {
   getAvailableSlots.mockReset();
   require('../routes/estimate-public').buildPricingBundle.mockReset();
   require('../routes/estimate-public').buildPricingBundle.mockResolvedValue({});
+  require('../routes/estimate-public').resolveEstimateAcceptance.mockReset();
+  require('../routes/estimate-public').resolveEstimateAcceptance.mockResolvedValue({ acceptance: { mode: 'standard_slot_pick' } });
   findEstimateSlots.mockReset();
   slotReservation.reserveSlot.mockReset();
   lastFirstArgs = null;
@@ -511,12 +517,11 @@ describe('offerableEstimateSlots — the page\'s default selection axes', () => 
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
-  test('a saved customerSelection is left exactly as before: no derived axes, the pricing bundle is not even read', async () => {
+  test('a saved customerSelection is left exactly as before: no derived axes', async () => {
     currentEstimate = { ...OWN, estimate_data: JSON.stringify({ customerSelection: { frequency: 'monthly' } }) };
     buildPricingBundle.mockResolvedValue({ frequencies: [freq('quarterly')] });
     await offerableEstimateSlots('est-1', 'cust-1');
     expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'recurring' });
-    expect(buildPricingBundle).not.toHaveBeenCalled();
   });
 
   test('a one-time-only estimate sends neither axis (the page sends none in one-time mode)', async () => {
@@ -524,6 +529,55 @@ describe('offerableEstimateSlots — the page\'s default selection axes', () => 
     buildPricingBundle.mockResolvedValue({ frequencies: [freq('quarterly')] });
     await offerableEstimateSlots('est-1', 'cust-1');
     expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'one_time' });
-    expect(buildPricingBundle).not.toHaveBeenCalled();
+  });
+});
+
+// The page renders the slot picker only for acceptance.mode standard_slot_pick
+// (EstimateViewPage.jsx canShowSlotPicker); every other contract has no time
+// the customer could pick, so the texting AI must offer none.
+describe('offerableEstimateSlots — the page\'s acceptance contract', () => {
+  const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+  const { buildPricingBundle, resolveEstimateAcceptance, isStructuralOneTimeOnlyEstimate } = require('../routes/estimate-public');
+  const OWN = { id: 'est-1', customer_id: 'cust-1', status: 'sent', expires_at: null, archived_at: null };
+
+  beforeEach(() => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockResolvedValue({ primary: [{ date: '2027-05-20', windowStart: '09:00' }], expander: [] });
+  });
+
+  test.each(['quote_required', 'existing_appointment', 'invoice_only', 'contact_office', 'commercial_site_confirmation'])(
+    '%s → no picker on the page → no times, draft or fresh recheck',
+    async (mode) => {
+      resolveEstimateAcceptance.mockResolvedValue({ acceptance: { mode } });
+      await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+      await expect(offerableEstimateSlots('est-1', 'cust-1', { fresh: true })).resolves.toBeNull();
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+    },
+  );
+
+  test('a one-time estimate is held to the contract too', async () => {
+    isStructuralOneTimeOnlyEstimate.mockReturnValue(true);
+    resolveEstimateAcceptance.mockResolvedValue({ acceptance: { mode: 'existing_appointment' } });
+    try {
+      await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+    } finally {
+      isStructuralOneTimeOnlyEstimate.mockReturnValue(false);
+    }
+  });
+
+  test('the contract is judged on the same pricing bundle /data builds (monthlyBilled resolved)', async () => {
+    const pricing = { frequencies: [{ key: 'quarterly' }] };
+    buildPricingBundle.mockResolvedValue(pricing);
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(buildPricingBundle.mock.calls[0][1]).toEqual({ monthlyBilled: false });
+    expect(resolveEstimateAcceptance.mock.calls[0][2]).toBe(pricing);
+    expect(getAvailableSlots).toHaveBeenCalledTimes(1);
+  });
+
+  test('the contract failing to resolve withholds (never guesses)', async () => {
+    resolveEstimateAcceptance.mockRejectedValue(new Error('appointments down'));
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 });

@@ -62,6 +62,8 @@ const {
   resolveAcceptOneTimeTotal,
   resolveEstimateInvoiceMode,
   resolveEstimateQuoteRequirement,
+  resolveEstimateAcceptance,
+  estimateRendersMonthlyBilling,
   verifyEstimateAskToken,
 } = require('./estimate-public');
 
@@ -235,7 +237,11 @@ const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'est
 async function slotBrowseRefusal(estimate) {
   let refusal = null;
   const sink = { status(status) { return { json(body) { refusal = { status, body }; return refusal; } }; } };
-  if (await rejectCallSideBlockedEstimate(sink, estimate) || rejectIneligibleEstimate(sink, estimate)) return refusal;
+  // Fail closed: a helper that refuses without the status().json() chain the
+  // sink captures still refuses (generic 404, never a browsable estimate).
+  if (await rejectCallSideBlockedEstimate(sink, estimate) || rejectIneligibleEstimate(sink, estimate)) {
+    return refusal || { status: 404, body: { error: 'Not found' } };
+  }
   if (isCommercialAutoEstimate(estimate)) {
     return {
       status: 200,
@@ -1126,6 +1132,22 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
   const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS, 'customer_id');
   if (!estimate || !customerId || String(estimate.customer_id) !== String(customerId)) return null;
   if (await slotBrowseRefusal(estimate)) return null;
+  // The page's /data resolution for this estimate: its acceptance contract
+  // decides whether the slot picker renders at all (quote-required, linked
+  // existing appointment, invoice-only, commercial site-confirmation → no
+  // picker, so no time the customer could pick), and its pricing bundle is
+  // what the picker's first fetch derives the default selection from.
+  let pricing;
+  try {
+    const full = await db('estimates').where({ id: estimate.id }).first();
+    if (!full) return null;
+    pricing = await buildPricingBundle(full, { monthlyBilled: await estimateRendersMonthlyBilling(full) });
+    const { acceptance } = await resolveEstimateAcceptance(full, parseEstimateData(full), pricing);
+    if (acceptance?.mode !== 'standard_slot_pick') return null;
+  } catch (err) {
+    logger.warn(`[estimate-slots-public:offerable] page contract lookup failed (${err.message}); estimate times withheld`);
+    return null;
+  }
   const serviceMode = resolveSlotServiceMode(estimate, '');
   // The page's own first fetch (SlotPicker.jsx) always carries the default
   // selectedFrequency / serviceCadences of a recurring estimate — without them
@@ -1133,14 +1155,7 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
   // rows, a different duration / service mix than the customer's default.
   let selection = {};
   if (serviceMode !== 'one_time' && !hasSavedCustomerSelection(estimate)) {
-    let derived = null;
-    try {
-      const full = await db('estimates').where({ id: estimate.id }).first();
-      derived = full ? pageDefaultSlotSelection(await buildPricingBundle(full)) : null;
-    } catch (err) {
-      logger.warn(`[estimate-slots-public:offerable] default selection lookup failed (${err.message}); estimate times withheld`);
-      return null;
-    }
+    const derived = pageDefaultSlotSelection(pricing);
     if (!derived) return null;
     selection = {
       ...(derived.selectedFrequency ? { selectedFrequency: derived.selectedFrequency } : {}),
