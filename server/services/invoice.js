@@ -6631,6 +6631,11 @@ const InvoiceService = {
       // link was never delivered, so return the credit rather than leave it
       // consumed + the invoice edit-locked.
       if (restored) await reverseSmsCreditOnFailure();
+      // A collections dispute-hold refusal always leaves the invoice SCHEDULED (never
+      // stranded as a draft): the sender holds it during the dispute and sends it after.
+      if (restored && !allowClaimed && err.code === "COLLECTION_HOLD_DEFER") {
+        await require("./collections/collection-hold").requeueHeldInvoice(invoiceId, { customerId: invoice.customer_id });
+      }
       logger.error(
         `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
       );
@@ -7351,6 +7356,11 @@ const InvoiceService = {
           logger.warn(`[invoice] credit reversal after failed send skipped for ${invoiceId}: ${e.message}`);
         }
       }
+      // A collections dispute-hold refusal always leaves the invoice SCHEDULED, never a
+      // draft nothing sends after the release (the sender holds it, then sends it).
+      if (restored && !allowClaimed && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {
+        await require("./collections/collection-hold").requeueHeldInvoice(invoiceId, { customerId: claim.invoice.customer_id });
+      }
     }
     // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark
     // behind GATE_INVOICE_ISSUED_CLOSES_VISIT): a delivered invoice closes
@@ -7374,8 +7384,18 @@ const InvoiceService = {
         invoiceId, issuedCloseout, delayMinutes: effectiveReviewDelayMinutes,
       });
     }
+    // Nothing delivered and a leg was refused by the collections dispute hold: the AGGREGATE
+    // result is that same retryable deferral (callers read result.code, not the legs).
+    const holdLegs = [sms, email].filter((leg) => leg?.code === "COLLECTION_HOLD_DEFER");
+    const holdOnly = !ok && holdLegs.length > 0 && !sms.ok && !email.ok
+      && !terminalVisitObserved && !deliveryOutcomeUncertain && !adoptedQueueUnrestored;
     return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
+      ...(holdOnly ? {
+        code: "COLLECTION_HOLD_DEFER", retryable: true, deferred: true, deliveryOutcome: "not_sent",
+        error: holdLegs[0].error || "Customer has an active collections dispute hold; delivery deferred until it is released",
+        ...(holdLegs.find((leg) => leg.nextAllowedAt) ? { nextAllowedAt: holdLegs.find((leg) => leg.nextAllowedAt).nextAllowedAt } : {}),
+      } : {}),
       ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
       ...(terminalVisitRefused
         ? (terminalVisitVoided

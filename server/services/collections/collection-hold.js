@@ -235,12 +235,18 @@ function holdDeferOutcome(held = { reason: 'hold' }) {
 
 // Queue a self-pay draft invoice onto the scheduled-invoice sender - the same
 // idiom the packet closeout uses (status 'scheduled', scheduled_send_at now).
-// Idempotent and race-safe: ONE guarded UPDATE moves a still-draft, unpaid,
-// unsent, self-pay invoice with no other send stamp (a `payer_billed:` /
-// renewal / park stamp carries its own meaning and is never overwritten).
-// Returns { queued } - true only when THIS call moved it; false when it was
-// already on the queue, already sent/paid, or not queueable. Errors propagate:
-// every caller owes the invoice a retry or an office alert.
+// ONE guarded UPDATE moves a still-draft, unpaid, unsent, self-pay invoice with
+// no other send stamp. Returns { queued: true } when THIS call moved it.
+//
+// A zero-row result is success ONLY when the invoice is VERIFIABLY handled: it
+// is already scheduled (the sender owns it), already delivered, paid, void,
+// refunded or otherwise finished, or owned by a payer / another send lane's own
+// stamp. Anything else - above all a TRANSIENT 'sending' (a concurrent sender
+// holds the claim and may still restore the invoice to draft) - THROWS a coded
+// retryable error (QUEUE_INVOICE_NOT_SETTLED): every caller owes the invoice a
+// retry, a durable alert or a deferral, never a finalized hand-off.
+const QUEUE_NOT_SETTLED_CODE = 'QUEUE_INVOICE_NOT_SETTLED';
+const HANDLED_INVOICE_STATUSES = new Set(['scheduled', 'sent', 'viewed', 'overdue', 'paid', 'prepaid', 'void', 'voided', 'refunded', 'canceled', 'cancelled', 'processing']);
 async function queueHeldInvoiceForSender(invoiceId, database = db) {
   if (!invoiceId) return { queued: false };
   const n = await database('invoices')
@@ -252,7 +258,48 @@ async function queueHeldInvoiceForSender(invoiceId, database = db) {
       status: 'scheduled', scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
       scheduled_send_error: null, updated_at: database.fn.now(),
     });
-  return { queued: Number(n) > 0 };
+  if (Number(n) > 0) return { queued: true };
+  const row = await database('invoices').where({ id: invoiceId })
+    .first('status', 'payer_id', 'payer_statement_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at', 'scheduled_send_error');
+  const status = String(row?.status || '').toLowerCase();
+  const handled = !row
+    || HANDLED_INVOICE_STATUSES.has(status)
+    || row.payer_id || row.payer_statement_id
+    || row.paid_at || row.sent_at || row.sms_sent_at || row.email_sent_at
+    // a draft carrying another lane's own stamp (payer_billed:, renewal withheld, park) is that lane's
+    || (status === 'draft' && String(row.scheduled_send_error || '') !== '');
+  if (handled) return { queued: false, settled: true };
+  throw Object.assign(new Error(`Invoice ${invoiceId} could not be queued behind the dispute hold (status ${status || 'unknown'}) - retry`), {
+    code: QUEUE_NOT_SETTLED_CODE, retryable: true,
+  });
+}
+
+// A direct sender that refused on the hold and restored the invoice to draft must
+// leave it SCHEDULED: a hold deferral always leaves the invoice on the sender's
+// queue, so it goes out after the release. Best-effort here (the caller already
+// returns the retryable refusal): a queue failure raises the durable office alert.
+async function requeueHeldInvoice(invoiceId, { customerId = null } = {}) {
+  try {
+    await queueHeldInvoiceForSender(invoiceId);
+    return true;
+  } catch (err) {
+    require('../logger').error(`[collection-hold] held invoice ${invoiceId} could not be re-queued after a hold refusal: ${err.message}`);
+    try {
+      await require('../dispatch-alerts').createAlert({
+        type: 'collection_hold_invoice_queue_failed',
+        severity: 'warn',
+        payload: {
+          invoiceId: String(invoiceId),
+          customerId: customerId ? String(customerId) : null,
+          error: String(err.message || err).slice(0, 300),
+          action: 'A dispute hold withheld this invoice\'s pay link but the invoice could not be queued to send once the hold ends. Send it from the invoice page after the hold is released.',
+        },
+      });
+    } catch (alertErr) {
+      require('../logger').error(`[collection-hold] office alert for the un-queued held invoice ${invoiceId} also failed: ${alertErr.message}`);
+    }
+    return false;
+  }
 }
 
 // ── Never-attempted hold deferrals ──────────────────────────────────────
@@ -295,6 +342,8 @@ module.exports = {
   holdDeferOutcome,
   HOLD_DEFER_CODE,
   queueHeldInvoiceForSender,
+  requeueHeldInvoice,
+  QUEUE_NOT_SETTLED_CODE,
   HOLD_DEFER_MS,
   isNeverAttemptedHoldDeferral,
   excludeNeverAttemptedHoldDeferrals,

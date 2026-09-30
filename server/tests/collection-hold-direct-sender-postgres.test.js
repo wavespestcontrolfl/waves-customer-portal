@@ -203,6 +203,9 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
       const row = await invoice(inv);
       expect(row.send_claim_token).toBeNull();
       expect(row.sent_at).toBeNull();
+      // a hold deferral always leaves the invoice SCHEDULED (never a draft nothing sends after the release)
+      expect(row.status).toBe('scheduled');
+      expect(row.scheduled_send_at).not.toBeNull();
     });
 
     test('sendViaSMSAndEmail: same - no provider contact, claim released, retryable', async () => {
@@ -212,9 +215,11 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
       let out;
       try { out = await Invoices.sendViaSMSAndEmail(inv).catch((err) => ({ threw: err })); } finally { spy.mockRestore(); }
       expect(providerReached).not.toHaveBeenCalled();
-      expect(out.threw || out).toMatchObject({ ok: false });
-      expect(JSON.stringify(out.threw ? { code: out.threw.code } : out)).toContain('COLLECTION_HOLD_DEFER');
-      expect((await invoice(inv)).send_claim_token).toBeNull();
+      // the AGGREGATE result carries the hold (callers read result.code, not the legs)
+      expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+      const row = await invoice(inv);
+      expect(row.send_claim_token).toBeNull();
+      expect(row.status).toBe('scheduled');
     });
 
     test('the scheduled worker path (allowClaimed): the boundary defers it without spending an attempt', async () => {

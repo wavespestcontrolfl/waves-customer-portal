@@ -118,7 +118,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const payerStamped = await newInvoice(c, { scheduled_send_error: 'payer_billed:7' });
       const renewal = await newInvoice(c, { scheduled_send_error: 'renewal_send_withheld: test' });
       expect(await Hold.queueHeldInvoiceForSender(draft)).toEqual({ queued: true });
-      for (const id of [paid, sent, deliveredElsewhere, payerStamped, renewal]) expect(await Hold.queueHeldInvoiceForSender(id)).toEqual({ queued: false });
+      for (const id of [paid, sent, deliveredElsewhere, payerStamped, renewal]) expect(await Hold.queueHeldInvoiceForSender(id)).toMatchObject({ queued: false, settled: true });
       expect(await invoice(draft)).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, scheduled_send_error: null });
       expect((await invoice(draft)).scheduled_send_at).not.toBeNull();
       expect((await invoice(paid)).status).toBe('paid');
@@ -126,6 +126,20 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(await invoice(deliveredElsewhere)).toMatchObject({ status: 'draft', scheduled_send_at: null });
       expect((await invoice(payerStamped)).scheduled_send_error).toBe('payer_billed:7');
       expect((await invoice(renewal)).scheduled_send_error).toBe('renewal_send_withheld: test');
+    });
+
+    test('a zero-row result is success ONLY when verifiably handled; a transient sending (or anything else) is a retryable refusal', async () => {
+      const c = await newCustomer();
+      const scheduled = await newInvoice(c, { status: 'scheduled', scheduled_send_at: new Date() });
+      const voided = await newInvoice(c, { status: 'void' });
+      expect(await Hold.queueHeldInvoiceForSender(scheduled)).toMatchObject({ queued: false, settled: true });
+      expect(await Hold.queueHeldInvoiceForSender(voided)).toMatchObject({ queued: false, settled: true });
+      // a concurrent sender holds the claim: it may still restore the invoice to draft -> NOT settled
+      const sending = await newInvoice(c, { status: 'sending', send_claim_token: randomUUID() });
+      await expect(Hold.queueHeldInvoiceForSender(sending)).rejects.toMatchObject({ code: 'QUEUE_INVOICE_NOT_SETTLED', retryable: true });
+      // once the sender gives the claim back as a draft, the very same call queues it
+      await db('invoices').where({ id: sending }).update({ status: 'draft', send_claim_token: null });
+      expect(await Hold.queueHeldInvoiceForSender(sending)).toEqual({ queued: true });
     });
 
     test('idempotent and race-safe: however many callers, the invoice is queued once', async () => {

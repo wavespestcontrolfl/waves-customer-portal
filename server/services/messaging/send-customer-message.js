@@ -341,6 +341,24 @@ async function sendCustomerMessageCore(input) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
   }
 
+  // 1.5 Collections DISPUTE hold (owner ruling 2026-09-30): a payment-failure notice carries
+  // a pay / update-card link and is billing follow-up the customer was told is on hold. The
+  // billing-cron attempts, the Stripe webhook notices and every other live payment_failure
+  // sender reach the provider through here, so the live hold check sits at this one boundary
+  // (the accepted millisecond window of collection-hold.js: no cross-writer locking). Suppress
+  // - never queue: dunning after the release covers it; the retry row stays as it is. Fail
+  // closed on an unverifiable hold. A notice for a payment the customer just made themselves
+  // (customerInitiated) is not follow-up and is exempt.
+  if (input.audience === 'customer' && input.purpose === 'payment_failure' && input.customerId
+    && input.customerInitiated !== true) {
+    const held = await require('../collections/collection-hold').dueInvoiceHeldByDisputeHold(input.customerId);
+    if (held.held) {
+      logger.info(`[send_customer_message] payment-failure notice suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+      return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+        reason: 'Customer has an active collections dispute hold; the payment-failure notice was suppressed' };
+    }
+  }
+
   // 2. Resolve policy
   let policy;
   try {

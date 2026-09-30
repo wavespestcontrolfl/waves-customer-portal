@@ -189,6 +189,9 @@ async function logPaymentLifecycleEmailAttempt({
   }
 }
 
+// Lifecycle notices whose body carries a pay / update-card link.
+const HOLD_GATED_TEMPLATES = new Set(['payment.failed', 'payment.retry_notice', 'payment.method_expiring']);
+
 async function sendLifecycleTemplate({
   customerId,
   templateKey,
@@ -208,6 +211,19 @@ async function sendLifecycleTemplate({
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found',
     ...(billingDeliveryCategory ? { deliveryOutcome: 'not_sent' } : {}),
   };
+  // Collections DISPUTE hold (owner ruling 2026-09-30): the notices that carry a pay or
+  // update-card link (payment failed, retry notice, method-expiring) are billing follow-up the
+  // customer was told is on hold. Suppress - never queue: dunning after the release covers it.
+  // One live check at the shared send boundary (every caller - billing-cron, the retry
+  // obligation, the Stripe webhook, the expiry workflows - passes through here); fail closed.
+  // Confirmations and receipts carry no such link and are untouched.
+  if (HOLD_GATED_TEMPLATES.has(templateKey)) {
+    const held = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id);
+    if (held.held) {
+      logger.info(`[payment-lifecycle-email] ${templateKey} suppressed for customer ${customer.id}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+      return { ok: false, skipped: true, reason: 'collection_hold', code: 'COLLECTION_HOLD_SUPPRESSED', deliveryOutcome: 'not_sent' };
+    }
+  }
 
   const prefs = await loadPrefs(customer.id);
   if (billingDeliveryCategory) {
@@ -274,6 +290,11 @@ async function sendLifecycleTemplate({
                 handoffGuardFailed = ownership.retryable === true || ownership.code === 'INVOICE_UNREADABLE';
                 return ownership;
               }
+            }
+            // Dispute hold re-read at the provider boundary (see the up-front check above).
+            if (HOLD_GATED_TEMPLATES.has(templateKey)
+              && (await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id)).held) {
+              return { ok: false };
             }
             const [freshCustomer, freshPrefs] = await Promise.all([
               loadCustomer(customer.id),

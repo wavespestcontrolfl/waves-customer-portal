@@ -159,6 +159,16 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
 // the enrollment, and the step is re-rendered for them on the next tick.
 async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId, dispatch }) {
   const { loadBillingEmailContext, dispatchUnderBillingEmailAuthority, blocked } = require('./billing-channel-email-authority');
+  // Collections DISPUTE hold (owner ruling 2026-09-30): the payment-failed email carries an
+  // update-card / pay CTA. Checked here and again under the authority's locks right before the
+  // provider request (fail closed); a hold leaves the step due (retryable) - it goes out after
+  // the release, never during the dispute.
+  const holdCollections = require('./collections/collection-hold');
+  const holdBlock = (held) => blocked('COLLECTION_HOLD_DEFER', held.reason === 'lookup_failed'
+    ? 'The collections dispute-hold lookup failed; payment-failed email deferred'
+    : 'Customer has an active collections dispute hold; payment-failed email deferred', { retryable: true });
+  const upFront = await holdCollections.dueInvoiceHeldByDisputeHold(enrollment.customer_id);
+  if (upFront.held) return settlePaymentFailedRefusal({ enrollment, sendId, block: holdBlock(upFront) });
   const input = {
     customerId: enrollment.customer_id, channel: 'email',
     metadata: { billingDeliveryCategory: 'payment_issue' },
@@ -181,6 +191,8 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
     input,
     recipientEmail: context.recipientEmail,
     emailSuppression: async (trx, email) => {
+      const heldNow = await holdCollections.dueInvoiceHeldByDisputeHold(enrollment.customer_id, trx);
+      if (heldNow.held) return holdBlock(heldNow);
       const suppression = await activeAutomationSuppressionFor(template, email, trx);
       return suppression ? blocked('EMAIL_SUPPRESSED', automationSuppressionReason(suppression)) : null;
     },
