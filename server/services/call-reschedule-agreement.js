@@ -852,4 +852,181 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 
-module.exports = { groundRescheduleAgreement };
+// ---------------------------------------------------------------------------
+// NEW-BOOKING grounding (owner ruling 2026-09-30, commercial dictated booking:
+// services/call-commercial-dictated-booking.js). A SEPARATE function beside
+// groundRescheduleAgreement, which is not changed: it reuses the same turn
+// parser, quote grounding, plainness screens, slot-word checks and language
+// judgements, and differs only where a NEW booking differs from a move:
+//   - no existing visit is named (a moved appointment fails closed);
+//   - a short caller acceptance ("Sure.", "Sure, that works.", "That works.")
+//     counts only as the caller's reply directly after the turn that holds
+//     staff's commitment; any longer acceptance must restate the agreed hour;
+//   - the day may be omitted from the final time turn when the CLOSEST earlier
+//     turn that names a day names exactly the agreed date, plainly (the
+//     extraction records agreed_slot_words.day null then, prompt v18);
+//   - staff's commitment may be a bare, unhedged "Sure, that works." when it
+//     directly answers a CALLER turn that states the exact day and on-the-hour
+//     time (the caller's own proposal is then the agreed-slot quote and the
+//     acceptance). The proposal must be exact (one hour, no alternatives, no
+//     other hour in the turn) and the reply turn carries no hedge, negation,
+//     condition, day or number.
+// Everything else fails closed as it does for a move.
+// ---------------------------------------------------------------------------
+
+// A caller's bare or short acceptance: leading affirmations and/or a plain
+// "that works" form, and nothing else. The extraction pins it as the caller's
+// acceptance; the code accepts it only right after staff's commitment turn.
+const AFFIRM_LEADS = '(?:sure|yes|yeah|yep|okay|ok|alright|absolutely|definitely|perfect|great|good)';
+const ACCEPT_CORE = '(?:that works|that will work|that works for us|that works for me|that works great|that s fine|that sounds good|sounds good|sounds great|works for us|works for me|we can do that|i can do that)';
+const THANKS_TAIL = '(?:thank you|thanks|thanks so much)';
+const SHORT_ACCEPTANCE = new RegExp(`^(?:${AFFIRM_LEADS}(?: ${AFFIRM_LEADS})*(?: ${ACCEPT_CORE})?|${ACCEPT_CORE})(?: ${THANKS_TAIL})?$`);
+const isShortAcceptance = (quote) => {
+  const ns = normalize(quote);
+  return ns !== '' && SHORT_ACCEPTANCE.test(ns);
+};
+// Staff's bare reply to a caller's proposal: an affirmation plus a plain
+// commitment form ("Sure, that works."). A lone "Sure." from staff is not
+// enough: it needs the commitment form.
+const REPLY_CORE = '(?:that works|that will work|that works for us|that works great|that s fine|sounds good|sounds great|works for us|will do|we can do that|we can do it|we can make that work|we ll do that|we ll see you then|see you then|no problem|of course)';
+const STAFF_REPLY = new RegExp(`^(?:${AFFIRM_LEADS} )*${REPLY_CORE}(?: ${THANKS_TAIL})?$`);
+const isStaffReply = (quote) => STAFF_REPLY.test(normalize(quote));
+
+const RELATIVE_WORDS_IN = /(?:^| )(?:days|week|weeks|weekend|next|following|yesterday|later|after|before)(?= |$)/;
+
+// The ONE date a turn's stated days name, by the shared reschedule date
+// grammar (statedDateComponents on every 1-4 word span): the set of dates the
+// spans name. { dates: Set, unresolved } — unresolved when a span parses but
+// names no date.
+function datesNamedIn(text, started) {
+  const toks = normalize(text).split(' ').filter(Boolean);
+  const dates = new Set();
+  let unresolved = false;
+  for (let i = 0; i < toks.length; i += 1) {
+    for (let n = 1; n <= 4 && i + n <= toks.length; n += 1) {
+      const span = toks.slice(i, i + n).join(' ');
+      const said = statedDateComponents(TODAY_WORDS.test(span) ? 'today' : span, started);
+      if (!said) continue;
+      const date = nearestDate(said, started);
+      if (date) dates.add(date); else unresolved = true;
+    }
+  }
+  return { dates, unresolved };
+}
+
+// A new booking's final time turn omits the day: bound it by the CLOSEST
+// earlier turn (either speaker) that names any day. That turn must be plain,
+// use no relative day words, and name exactly the slot's date.
+function earlierDayNames(turns, beforeIdx, slotDate, started) {
+  for (let i = beforeIdx - 1; i >= 0; i -= 1) {
+    const turn = turns[i];
+    if (!namesAnyDay(turn.raw)) continue;
+    if (RELATIVE_WORDS_IN.test(` ${turn.ns} `) || turnHasNegationOrHedge(turn.ns) || turnHasUnresolvedConditional(turn.ns)) return false;
+    const { dates, unresolved } = datesNamedIn(turn.raw, started);
+    return !unresolved && dates.size === 1 && dates.has(slotDate);
+  }
+  return false;
+}
+
+// The caller's proposal turn states exactly one day and on-the-hour time:
+// the slot words, one hour with an exact lead and tail, no alternative and no
+// other number or hour word (hourExactIn, with the period words attached to
+// the hour when they were said).
+function proposalIsExact(turn, words) {
+  const hour = typeof words.period === 'string' ? `${words.hour} ${words.period}` : words.hour;
+  return hourExactIn(turn.raw, { day: words.day, hour }, true, false);
+}
+
+function groundNewBookingAgreement({ v2, transcript, callStartedAt } = {}) {
+  const fail = (reason) => ({ ok: false, reason, mode: null });
+  const scheduling = v2?.scheduling || {};
+  if (scheduling.moved_appointment_date || scheduling.moved_appointment_relative_date_used === true) return fail('moves_existing_visit');
+  if (scheduling.caller_accepted_slot !== true) return fail('caller_did_not_accept');
+  if (scheduling.agent_committed_booking !== true) return fail('agent_did_not_commit');
+  const unjudged = languageJudgementFailure(scheduling);
+  if (unjudged) return fail(unjudged);
+  const relative = scheduling.relative_date_used;
+  const wall = etWallClockOfConfirmedStart(scheduling.confirmed_start_at);
+  const started = new Date(String(callStartedAt || ''));
+  if (!wall || Number.isNaN(started.getTime())) return fail('unparseable_slot');
+  const slot = { date: wall.slice(0, 10), hour24: Number(wall.slice(11, 13)) };
+  const turns = parseTurns(transcript);
+  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return fail('unparseable_transcript');
+  const words = scheduling.agreed_slot_words;
+  if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
+  const relativeQuotes = [];
+  const evidence = Array.isArray(v2.evidence) ? v2.evidence : [];
+  const pinned = (fieldPath, speaker) => evidence.filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && e.speaker === speaker);
+  // Quotes pinned to a field that appear word for word in a turn of their
+  // stated speaker, plainly said wherever they appear (as for a move).
+  const grounded = (fieldPath, speaker = null) => evidence
+    .filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker)
+      && isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath))
+    .map((e) => e.quote);
+
+  const commitments = grounded('/scheduling/agent_committed_booking', 'agent');
+  if (!commitments.length) return fail('agent_commitment_ungrounded');
+  if (!pinned('/scheduling/caller_accepted_slot', 'caller').length) return fail('caller_acceptance_ungrounded');
+  if (relative) {
+    relativeQuotes.push(...grounded('/scheduling/relative_date_used'));
+    if (!relativeQuotes.length) return fail('relative_date_ungrounded');
+  }
+  const acceptPinned = pinned('/scheduling/caller_accepted_slot', 'caller');
+
+  // Mode A: staff's own commitment states the slot (the reschedule shape).
+  const commitsSlot = commitments.filter((q) => commitsToSlot(q, words, slot.hour24, turns, relative));
+  if (commitsSlot.length) {
+    const slotQuotes = grounded('/scheduling/confirmed_start_at');
+    const acceptQuotes = acceptPinned.map((e) => e.quote).filter((q) => isPlain(turnsHolding(turns, q, 'caller'), q, '/scheduling/caller_accepted_slot'));
+    if (!acceptQuotes.length) return fail('caller_acceptance_ungrounded');
+    // The acceptance: a short "Sure, that works." right after staff's
+    // commitment turn, or any plain quote restating the agreed hour.
+    const commitTurns = new Set(commitsSlot.flatMap((q) => turnsHolding(turns, q, 'agent')));
+    const accepted = acceptQuotes.some((q) => {
+      const holding = turnsHolding(turns, q, 'caller');
+      if (holds(q, words.hour)) return true;
+      return isShortAcceptance(q) && holding.length > 0
+        && holding.every((t) => commitTurns.has(turns[turns.indexOf(t) - 1]));
+    });
+    if (!accepted) return fail('caller_acceptance_not_of_the_slot');
+    // The day: spoken in the slot words, or bound by the closest earlier day.
+    const slotTurns = slotQuotes.flatMap((q) => turnsHolding(turns, q, 'agent').concat(turnsHolding(turns, q, 'caller')));
+    if (words.day) {
+      if (!wordsStateSlot(words, slot, started, null, relative, relativeQuotes)) return fail('agreed_slot_words_mismatch');
+    } else {
+      if (relative || !slotTurns.length) return fail('agreed_slot_words_mismatch');
+      if (statedHour(words.hour, words.period) !== slot.hour24) return fail('agreed_slot_words_mismatch');
+      if (!slotTurns.every((t) => earlierDayNames(turns, turns.indexOf(t), slot.date, started))) return fail('day_not_bound');
+    }
+    const agreementQuotes = [...commitsSlot, ...acceptQuotes];
+    if (!slotQuotes.some((q) => statesSlotWords(q, words, turns, agreementQuotes, relative))) return fail('agreed_slot_ungrounded');
+    return { ok: true, reason: 'agreement_grounded', mode: 'staff_stated' };
+  }
+
+  // Mode B: staff's bare "Sure, that works." directly answers the caller's
+  // own exact proposal.
+  if (!words.day || relative) return fail('agent_commitment_not_the_slot');
+  if (!wordsStateSlot(words, slot, started, null, false)) return fail('agreed_slot_words_mismatch');
+  const proposals = pinned('/scheduling/confirmed_start_at', 'caller');
+  for (const reply of commitments.filter(isStaffReply)) {
+    for (const replyTurn of turnsHolding(turns, reply, 'agent')) {
+      const at = turns.indexOf(replyTurn);
+      const proposalTurn = turns[at - 1];
+      if (at < 1 || !proposalTurn || proposalTurn.agent) continue;
+      // The reply turn as a whole: no hedge, negation, condition, day or number.
+      if (turnHasNegationOrHedge(replyTurn.ns) || turnHasUnresolvedConditional(replyTurn.ns)
+        || namesAnyDay(replyTurn.raw) || replyTurn.ns.split(' ').some(isHourToken)) continue;
+      const proposal = proposals.find((e) => turnsHolding(turns, e.quote, 'caller').includes(proposalTurn));
+      if (!proposal) continue;
+      if (!isPlain(turnsHolding(turns, proposal.quote, 'caller'), proposal.quote, '/scheduling/caller_acceptance_of_proposal')) continue;
+      // The proposal is also the caller's pinned acceptance of the slot.
+      if (!acceptPinned.some((e) => turnsHolding(turns, e.quote, 'caller').includes(proposalTurn))) continue;
+      if (!statesSlotWords(proposal.quote, words, turns, [reply, proposal.quote], false)) continue;
+      if (!proposalIsExact(proposalTurn, words)) continue;
+      return { ok: true, reason: 'agreement_grounded', mode: 'caller_proposed' };
+    }
+  }
+  return fail('agent_commitment_not_the_slot');
+}
+
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, plainlySaid, normalize } };

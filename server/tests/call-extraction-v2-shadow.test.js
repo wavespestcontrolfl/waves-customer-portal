@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v19');
-    expect(PROMPT_HASH).toMatch(/^v19-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v20');
+    expect(PROMPT_HASH).toMatch(/^v20-[a-f0-9]{12}$/);
   });
 
   test('includes the family_member relationship instructions (schema 1.18.0)', () => {

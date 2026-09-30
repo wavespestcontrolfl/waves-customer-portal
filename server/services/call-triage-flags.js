@@ -2046,11 +2046,13 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // Commercial dictated booking (opts.commercialDictatedBooking ←
   // GATE_CALL_COMMERCIAL_DICTATED_BOOKING, owner ruling 2026-09-30): a SECOND
   // path beside the agent-commitment block above — that block and
-  // hasAgentCommittedEvidence are untouched. Direction-independent. Clears
-  // ONLY commercial_requires_quote, and only when the staff commitment quote
-  // AND the caller's acceptance quote each ground word for word in a turn of
-  // their own speaker (the reschedule grounding, reused unchanged) with a price
-  // agreed on the call — see services/call-commercial-dictated-booking.js. A
+  // hasAgentCommittedEvidence are untouched. The PROCESSOR decides where it
+  // may run: inbound calls only (outbound speaker labels have swapped) and
+  // only with GATE_CALL_AGENT_COMMIT_BOOKING on. Clears ONLY
+  // commercial_requires_quote, and only when the staff commitment quote AND the
+  // caller's acceptance quote each ground word for word in a turn of their own
+  // speaker (the reschedule module's grounding) with a price agreed and
+  // grounded on the call — see services/call-commercial-dictated-booking.js. A
   // missing/swapped speaker label fails closed there. Like the block above it
   // needs trusted labels, a confirmed start and an on-the-hour start; the
   // address, unit, capacity and every other hold below still apply. The flag

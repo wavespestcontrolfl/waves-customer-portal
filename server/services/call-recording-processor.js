@@ -9992,11 +9992,16 @@ const CallRecordingProcessor = {
             transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
             // Commercial dictated booking (GATE_CALL_COMMERCIAL_DICTATED_BOOKING,
             // owner ruling 2026-09-30): staff dictated + caller accepted, both
-            // quotes grounded in the right speaker's turn. BOTH directions —
-            // the grounding fails closed on missing/swapped labels, which is
-            // why it can lift the inbound-only limit above. Read at call time
+            // quotes grounded in the right speaker's turn. INBOUND ONLY for
+            // now (owner ruling, same day; codex #5377 r1 P1): it trusts the
+            // same "Agent:" labels the demotion above does, and outbound
+            // diarization has swapped them — outbound waits until staff
+            // identity on an outbound recording is established independently
+            // of the labels. Also needs GATE_CALL_AGENT_COMMIT_BOOKING, the
+            // kill switch of the commercial exception. Read at call time
             // (like the GATE_CALL_PROPERTY_ROLE reads); off = false.
-            commercialDictatedBooking: require('../config/feature-gates').callCommercialDictatedBookingLive?.() === true,
+            commercialDictatedBooking: isEnabled('callAgentCommitBooking') && !isOutboundCall(call)
+              && require('../config/feature-gates').callCommercialDictatedBookingLive?.() === true,
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: call.created_at,
@@ -19402,8 +19407,10 @@ const CallRecordingProcessor = {
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
-          // Mirrors the enforce lane (owner ruling 2026-09-30).
-          commercialDictatedBooking: require('../config/feature-gates').callCommercialDictatedBookingLive?.() === true,
+          // Inbound-only and behind the agent-commit gate, mirroring the
+          // enforce lane (owner ruling 2026-09-30; codex #5377 r1 P1).
+          commercialDictatedBooking: isEnabled('callAgentCommitBooking') && !isOutboundCall(call)
+            && require('../config/feature-gates').callCommercialDictatedBookingLive?.() === true,
           callStartedAt: call.created_at,
         });
         // Same on-file satisfaction the live merge point applies to its card set.

@@ -129,7 +129,7 @@
  *   GATE_VISIT_PREP_PLANT_READ=true (sibling of GATE_VISIT_PREP_PEST_READ — automatic lawn / tree & shrub read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPlantReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS live, same as the pest read. Triggered from the SAME single place, services/visit-prep.js's createVisitPrepSubmission, as its own independent fire-and-forget call — never disturbs the pest-read or tech-alert hooks there. A submission whose stop is a strict lawn-only or tree & shrub-only service (visit-prep-plant-applicability.js isLawnOnlyServiceType/isTreeShrubOnlyServiceType — never WDO, termite, or a Waves Assessment) AND is NOT also a pest stop ("pest wins" on a mixed stop — the pest read owns it instead) runs the merged photo-id-v2 lawn/plant engine (identifyPlantV2, photo-id-v2/plant-engine.js — L3, no customer route yet) and stores the workup on the submission's own `read_result` jsonb column (no second table; the pest read's `read_ref` is untouched). Anything else resolves straight to read_status='unsupported', no engine call. Shares the pest read's SAME VISIT_PREP_READ_DAILY_CAP (default 40) and the same advisory lock key — deliberately ONE cap across both engines, not a second one; a capped or failed read never blocks the submission. See docs in services/visit-prep-plant-read.js.)
  *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires a live read engine (visitPrepPestReadLive() or visitPrepPlantReadLive()). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same dispatchVisitPrepRead (services/visit-prep-read-dispatch.js, which runs only live engines) for at most 10 submissions from the last 14 ET days on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), 'unsupported' where a live engine now reads the stop, and a 'done' or 'failed' read made by the wrong engine or subject for the stop as it is now (released to 'none', then re-read; a row checked and needing nothing is skipped for an hour). Pending rows, and failed rows on the line they failed on, are never retried. One retry per row per case, per settled attempt for a stale read (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP on the ET day it runs, like a first read. A batch with failed retries fails the job run (job_health).)
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
- *   GATE_CALL_COMMERCIAL_DICTATED_BOOKING=true (owner ruling 2026-09-30: a commercial job staff dictate on the call and the caller accepts, with a price agreed, auto-books on inbound AND outbound calls instead of always going to the office. The staff commitment quote AND the caller's acceptance quote must each appear word for word in a turn of their own speaker (call-reschedule-agreement.js groundRescheduleAgreement, reused unchanged); a missing/unlabeled transcript or a quote only in the other speaker's turn fails closed. Also needs GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote — capacity, address validation, unit checks and the on-the-hour rule still apply, and no price agreed still goes to the office. Strict opt-in, read at call time via callCommercialDictatedBookingLive(). Off = byte-identical. hasAgentCommittedEvidence is untouched. See services/call-commercial-dictated-booking.js.)
+ *   GATE_CALL_COMMERCIAL_DICTATED_BOOKING=true (owner ruling 2026-09-30: a commercial job staff dictate on the call and the caller accepts, with a price agreed, auto-books on INBOUND calls (outbound waits for staff identity independent of the speaker labels) instead of always going to the office. The staff commitment quote AND the caller's acceptance quote must each appear word for word in a turn of their own speaker (call-reschedule-agreement.js groundRescheduleAgreement, reused unchanged); a missing/unlabeled transcript or a quote only in the other speaker's turn fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote — capacity, address validation, unit checks and the on-the-hour rule still apply, and no price agreed still goes to the office. Strict opt-in, read at call time via callCommercialDictatedBookingLive(). Off = byte-identical. hasAgentCommittedEvidence is untouched. See services/call-commercial-dictated-booking.js.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -1588,16 +1588,19 @@ const gates = {
   callAgentCommitTrustedLabels: process.env.GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS === 'true',
   // Commercial dictated booking (owner ruling 2026-09-30, call-booker gates
   // review item 8): a commercial job that Waves staff dictate on the call AND
-  // the caller accepts, with a price agreed, books without the office — on
-  // inbound AND outbound calls. Safety: BOTH the staff commitment quote and the
-  // caller's acceptance quote must be found word for word in a turn of their
-  // own speaker (the reschedule grounding, call-reschedule-agreement.js), so a
-  // missing or swapped speaker label fails closed. Also needs
-  // GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote;
-  // a job with no price agreed on the call still goes to the office. Ships
-  // DARK: off unless exactly 'true'. This entry is for logGateStatus only —
-  // the canonical CALL-TIME reader is callCommercialDictatedBookingLive()
-  // below. Creates real appointments — owner-flip only.
+  // the caller accepts, with a price agreed and grounded, books without the
+  // office. INBOUND calls only for now (outbound speaker labels have swapped;
+  // it waits for staff identity that does not depend on the labels). Safety:
+  // BOTH the staff commitment quote and the caller's acceptance quote must be
+  // found word for word in a turn of their own speaker (the reschedule
+  // grounding, call-reschedule-agreement.js), so a missing or swapped speaker
+  // label fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill
+  // switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears
+  // commercial_requires_quote; a job with no price agreed on the call still
+  // goes to the office. Ships DARK: off unless exactly 'true'. This entry is
+  // for logGateStatus only — the canonical CALL-TIME reader is
+  // callCommercialDictatedBookingLive() below. Creates real appointments —
+  // owner-flip only.
   callCommercialDictatedBooking: process.env.GATE_CALL_COMMERCIAL_DICTATED_BOOKING === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
@@ -3939,7 +3942,7 @@ function promiseContactCheckLive() {
 // lane and the audit reconstruction): on, a commercial_requires_quote hold
 // clears when staff dictated the booking and the caller accepted it, both
 // grounded word for word in a turn of the right speaker, with a price agreed
-// (see services/call-commercial-dictated-booking.js). Direction-independent.
+// and grounded (see services/call-commercial-dictated-booking.js). Inbound only, and only with GATE_CALL_AGENT_COMMIT_BOOKING on (processor).
 // Off, byte-identical to before — the hold stays. The
 // `callCommercialDictatedBooking` gates-map entry above is for logGateStatus only.
 function callCommercialDictatedBookingLive() {
