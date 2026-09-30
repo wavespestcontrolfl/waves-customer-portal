@@ -30,6 +30,7 @@
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
+ *   GATE_SIGNUP_SINGLE_EMAIL=true (ONE email at recurring signup: the accepted-onboarding email also carries the property and the plan (no payment section: the "Auto Pay is set up" email stays its own email, owner 2026-09-30), and the separate membership.started / welcome emails are skipped ONLY when that combined email was accepted for sending — each still sends if it was not; same-day later acceptances get a short per-property email; the welcome TEXT is unchanged; strict === 'true', read at call time; dark in dev AND prod)
  *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
  *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
  *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the
@@ -4025,6 +4026,19 @@ function promiseContactCheckLive() {
   return !['off', 'false', '0'].includes(String(process.env.PROMISE_CONTACT_CHECK || '').trim().toLowerCase());
 }
 
+// GATE_SIGNUP_SINGLE_EMAIL read at CALL time — strict `=== 'true'`, dark by
+// default in every environment (owner-approved 2026-09-29; the owner flips it
+// after previewing the template). The canonical reader for the one-signup-email
+// lane: server/services/estimate-accepted-email.js (the combined email),
+// routes/estimate-public.js PUT /:token/accept (holds the separate
+// membership.started and sends it only when the combined email was not
+// accepted for sending; the Auto Pay confirmation is not held) and
+// services/new-recurring-welcome-sms.js (skips ONLY the welcome email at queue
+// delivery — the welcome text is unchanged). Off = byte-identical to before.
+function signupSingleEmailLive() {
+  return process.env.GATE_SIGNUP_SINGLE_EMAIL === 'true';
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -4064,6 +4078,7 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
+module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.zoneRouteDaysLive = zoneRouteDaysLive;
