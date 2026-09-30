@@ -1940,6 +1940,44 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-34 P2s (PR #5334): first-person plural route claims; a tech named Will.
+describe('round 34 P2s: "we" route claims and technician names that are auxiliaries', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    "We're on our way.", 'We will be there shortly.', "We're en route.", "We'll be there in 15 minutes.", "We're almost there.", 'We are running late.',
+    "We'll be there soon.", 'We are now pulling up.',
+  ])('%p is a first-person route claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    "We're here to help.", 'We will be there Tuesday.', 'We will be there tomorrow.', 'We are on our way tomorrow.', "We're here for you.",
+    "When we're on our way I will text.", 'Are we on our way?', "We're not on our way yet.", "We're running late on emails today.".replace(' today', ''), 'We are looking into it.',
+  ])('%p is not a live route claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(t.includes('running late on emails'));
+    if (!t.includes('running late on emails')) expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    ['Will is on the way.', 'Will'], ['Will is running late.', 'Will'], ['Mark is on the way.', 'Mark'], ["Mark's en route.", 'Mark'],
+  ])('%p: declarative with tech name %p is a claim (never an interrogative opener)', (t, name) => {
+    expect(bodyMentionsArrival(t, { techNames: [name] })).toBe(true);
+    expect(bodyMentionsVisitStatus(t, { techNames: [name] })).toBe(true);
+  });
+  test.each([['Will has arrived.', 'Will'], ['Mark has arrived.', 'Mark'], ['Will just arrived at your home.', 'Will']])('%p completed-arrival claim with tech name %p', (t, name) => {
+    expect(bodyClaimsCompletedArrival(t, { techNames: [name] })).toBe(true);
+  });
+  test.each([
+    ['Will is on the way?', 'Will'], ['Is Will on the way?', 'Will'], ['Has Mark arrived yet?', 'Mark'], ['Will Mark be there soon', 'Mark'],
+    ['Will your technician be there', 'Will'], ['Has your technician arrived yet', 'Will'],
+  ])('%p is a real question (ends with ? or aux + subject inversion): not a claim', (t, name) => {
+    expect(bodyMentionsArrival(t, { techNames: [name] })).toBe(false);
+    expect(bodyClaimsCompletedArrival(t, { techNames: [name] })).toBe(false);
+  });
+  test('without a recorded name, "Will is on the way." is not a technician claim either way', () => {
+    expect(bodyMentionsArrival('Will is on the way.')).toBe(false);
+  });
+});
+
 // Codex round-33 (PR #5334): the prompt lets the model NAME the technician, so this
 // draft's recorded tech first name(s) are extra status subjects (synthetic names).
 describe('round 33: recorded technician names as status subjects', () => {

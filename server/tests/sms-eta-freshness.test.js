@@ -1855,3 +1855,33 @@ describe('recorded technician names are status subjects at send time', () => {
     expect(await run('Dana is on the way to the store.', named, done)).toBeNull();
   });
 });
+
+// Codex round-34 P2s (PR #5334): send-time recheck for first-person route claims and
+// for technicians whose first name is an auxiliary (synthetic: Will, Mark).
+describe('"we" route claims and auxiliary-named technicians at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const snap = (technicianNames) => ({ entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', ...(technicianNames ? { technicianNames } : {}) }] });
+  const rows = (extra) => [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra }];
+  const done = { status: 'completed', track_state: 'completed' };
+  const run = (body, snapshot, extra) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows(extra)) });
+  test.each(["We're on our way.", "We're en route.", 'We are running late.'])('%p: passes en route, blocked once the visit is done', async (body) => {
+    expect(await run(body, snap())).toBeNull();
+    expect(await run(body, snap(), done)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('"We will be there shortly." is a vague timed claim as well: it needs an exact figure to bind (unbound), never waved through', async () => {
+    expect(await run('We will be there shortly.', snap())).toBe('eta_claim_unbound');
+  });
+  test.each(["We're here to help.", 'We will be there Tuesday.', 'We will be there tomorrow.'])('%p is untouched even on a done visit', async (body) => {
+    expect(await run(body, snap(), done)).toBeNull();
+  });
+  test.each([['Will', 'Will is on the way.'], ['Mark', 'Mark is running late.'], ['Will', 'Will has arrived.']])('tech %p: %p is rechecked', async (name, body) => {
+    expect(await run(body, snap([name]), done)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('a genuine question is still not a claim for a tech named Will', async () => {
+    expect(await run('Will your technician be there?', snap(['Will']), done)).toBeNull();
+    expect(await run('Has Mark arrived yet?', snap(['Mark']), done)).toBeNull();
+  });
+});

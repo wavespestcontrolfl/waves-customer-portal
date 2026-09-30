@@ -1188,7 +1188,7 @@ const COMPLETED_ARRIVAL_SUBJECT_GROUPS = [
 function bodyClaimsCompletedArrival(text, { techNames = [] } = {}) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(statusRegexFor('completed', techNames).source, 'gi'))) {
-    if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length)) return true;
+    if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length, techNames)) return true;
   }
   return false;
 }
@@ -1241,9 +1241,22 @@ const EN_ROUTE_PREDICATES = [
   'get(?:ting)?\\s+(?:there|to\\s+you)',
   'reach(?:ing)?\\s+you',
 ];
+// First-person plural route claims (Codex round-33 P2): "We're on our way", "We
+// will be there shortly", "We're en route". "we" is NOT a general status subject —
+// only these unambiguous route predicates, so "we're here to help" and scheduling
+// copy ("we will be there Tuesday": no shortly/soon/in-N, plus the future-day rule)
+// stay excluded.
+const WE_ROUTE_PREDICATES = [
+  ROUTE_IDIOM,
+  'pulling\\s+up',
+  'almost\\s+(?:there|here)',
+  EN_ROUTE_PREDICATES.find((p) => p.startsWith('running')),
+  '(?:there|here)\\s+(?:shortly|soon|momentarily|in\\s+\\d+(?:\\s*(?:min(?:ute)?s?|hrs?|hours?))?)',
+];
+const WE_ROUTE_ALT = `we(?:'re|\\s+are|'ll|\\s+will|\\s+should)(?:\\s+(?:now|just|already|almost|soon))*\\s+(?:be\\s+)?(?:${WE_ROUTE_PREDICATES.join('|')})`;
 const EN_ROUTE_STATUS_RE = buildEnRouteRe();
 function buildEnRouteRe(subj = VISIT_STATUS_SUBJECT) {
-  return new RegExp(`\\b${techStatusPrefix(subj)}(?:${EN_ROUTE_PREDICATES.join('|')})\\b`, 'gi');
+  return new RegExp(`\\b(?:${techStatusPrefix(subj)}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT})\\b`, 'gi');
 }
 const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
 // Does a conditional word GOVERN the status clause (Codex round-29 P2)? Only the
@@ -1263,12 +1276,23 @@ function isConditionalBefore(before) {
 // will/can/could/would/do/does + ...). A statement clause earlier in the same
 // sentence ("He is en route, is that ok?") is unaffected: its own boundary is
 // the comma.
-const INTERROGATIVE_OPENER_RE = /^\s*(?:has|have|had|is|are|was|were|did|do|does|will|can|could|would|should)\b/i;
-function isInterrogativeAt(str, index, length = 0) {
+// An auxiliary opens a QUESTION only in real subject-auxiliary inversion: the next
+// token is a subject ("Has your technician arrived", "Will Sam be there", "Is he
+// here"). "Will is on the way" (technician Will) or "Mark has arrived" is a
+// declarative — the next token is a verb, and a recorded technician name is a
+// subject, never an auxiliary (Codex round-33 P2). A clause ending in "?" is a
+// question either way.
+const INTERROGATIVE_AUX = '(?:has|have|had|is|are|was|were|did|do|does|will|can|could|would|should)';
+const INTERROGATIVE_SUBJECT = "(?:you|he|she|they|it|we|i|the|your|our|my|his|her|their|this|that|there|any\\w+|every\\w+|someone|somebody|tech(?:nician)?s?|drivers?|crews?|teams?)";
+const interrogativeOpenerRe = (names) => {
+  const alt = nameAlt(names);
+  return new RegExp(`^\\s*${INTERROGATIVE_AUX}\\s+(?:${INTERROGATIVE_SUBJECT}${alt ? `|${alt}` : ''})\\b`, 'i');
+};
+function isInterrogativeAt(str, index, length = 0, names = []) {
   const before = str.slice(0, index);
   let start = 0;
   for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) start = m.index + m[0].length;
-  if (INTERROGATIVE_OPENER_RE.test(str.slice(start, index + length))) return true;
+  if (interrogativeOpenerRe(names).test(str.slice(start, index + length))) return true;
   const end = /[.,;:!?\n\u2014\u2013]/.exec(str.slice(index + length));
   return Boolean(end) && end[0] === '?';
 }
@@ -1312,7 +1336,7 @@ function bodyMentionsArrival(text, { techNames = [] } = {}) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (isConditionalBefore(before)) continue;
     if (isNegatedInClause(str, m.index)) continue;
-    if (isInterrogativeAt(str, m.index, m[0].length)) continue;
+    if (isInterrogativeAt(str, m.index, m[0].length, techNames)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
     if (isFutureDayStatus(str, m.index, m[0].length)) continue;
     return true;
@@ -1340,7 +1364,7 @@ function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
   '\\b(?:'
   // Superset of every en-route predicate bodyMentionsArrival classifies, so the
   // default-deny vocabulary can never be narrower than the specific classifier.
-  + `${PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})`
+  + `${PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT}`
   + `|${SUBJ}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
   // Positional status forms (here / there / outside / nearby / close / on site /
   // at your door / almost there) count ONLY with a technician-type subject
@@ -1357,7 +1381,7 @@ function bodyMentionsVisitStatus(text, { techNames = [] } = {}) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (isConditionalBefore(before)) continue;
     if (isNegatedInClause(str, m.index)) continue;
-    if (isInterrogativeAt(str, m.index, m[0].length)) continue;
+    if (isInterrogativeAt(str, m.index, m[0].length, techNames)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
     if (isFutureDayStatus(str, m.index, m[0].length)) continue;
     return true;
