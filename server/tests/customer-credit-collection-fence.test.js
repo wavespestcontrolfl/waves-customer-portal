@@ -185,6 +185,13 @@ describe('dunningDraw re-decides eligibility under the locks (the resolver\'s pr
     expect(trx.calls).not.toContain('payment_plans');
   });
 
+  test('an attached PaymentIntent on the LOCKED row refuses (the apply\'s own guard, so the resolver\'s microdeposit pre-read is only an early skip)', async () => {
+    rows.invoice = { stripe_payment_intent_id: 'pi_live' };
+    const trx = fakeTrx();
+    expect(await draw(trx)).toMatchObject({ applied: 0, skipped: 'has_payment_intent' });
+    expect(trx.calls).not.toContain('payment_plans');
+  });
+
   test('WITHOUT dunningDraw none of this runs (sequence, visit, payer)', async () => {
     rows.seq = { status: 'paused' };
     mockResolvePayer.mockResolvedValue({ payerId: 'payer-9' });

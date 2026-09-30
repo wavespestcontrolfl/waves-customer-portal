@@ -259,6 +259,13 @@ postgres('applyAccountCreditToInvoice dunningDraw (PostgreSQL)', () => {
       expect(await apply(f, { dunningDraw: true })).toMatchObject({ applied: 40 });
     });
 
+    test('a PaymentIntent attached AFTER the read (a live pay session): no credit consumed', async () => {
+      const f = await candidate();
+      await app('invoices').where({ id: f.invoiceId }).update({ stripe_payment_intent_id: 'pi_synthetic_live' });
+      expect(await apply(f, { dunningDraw: true })).toMatchObject({ applied: 0, skipped: 'has_payment_intent' });
+      expect(Number((await state(f)).cust.account_credits)).toBe(40);
+    });
+
     test('a withdrawal stamp on the locked row: no credit consumed', async () => {
       const f = await candidate();
       await app('invoices').where({ id: f.invoiceId }).update({ scheduled_send_error: 'payer_billed:payer-1' });

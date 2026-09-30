@@ -343,8 +343,11 @@ async function resolveDunnableSet(customerId, { database = db, now = new Date() 
  *
  * The reads below only choose CANDIDATES. Every eligibility decision that
  * matters is re-made inside each draw's own locked transaction (`dunningDraw`
- * in customer-credit.js): collection fence, sequence active/none, live payer,
- * and — subsuming the microdeposit pre-check — no attached PaymentIntent.
+ * in customer-credit.js): collection fence, sequence active/none and live payer.
+ * The apply's own unconditional locked guard 'has_payment_intent' (any
+ * attached PaymentIntent, checked on the locked invoice row for EVERY caller)
+ * also covers what the microdeposit pre-check below looks for: a microdeposit
+ * wait needs an attached PI, so the unlocked Stripe read is only an early skip.
  */
 async function applyCreditBeforeResolve(customerId) {
   const { autoApplyAccountCreditIfEnabled } = require('../customer-credit');
