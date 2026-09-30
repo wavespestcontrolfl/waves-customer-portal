@@ -117,3 +117,53 @@ describe('bank payment inbound never binds to a card-only history', () => {
     expect(replyQuotesUngroundedAmount(generic, ctx([bankRow]), { byMeaning: true, inboundMessage })).toBe(false);
   });
 });
+
+// Codex round-8 P1 (PR #5331): paid, pending and failed claims share ONE binder
+// with identical amount/date/tender/inbound/ambiguity rules.
+describe('pending/failed claims bind to the SPECIFIC payment (one binder for every family)', () => {
+  const ctx = (payments) => ({ billing: { outstandingBalance: 0, recentPayments: payments } });
+  const augFailedCard = { amount: 120, status: 'failed', payment_date: '2026-08-05', payment_method_type: 'card' };
+  const sepFailedZelle = { amount: 120, status: 'failed', payment_date: '2026-09-12', description: 'Invoice INV-9 — zelle' };
+  const sepPaidZelle = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-9 — zelle' };
+  const sepProcessingZelle = { amount: 120, status: 'processing', payment_date: '2026-09-12', description: 'Invoice INV-9 — zelle' };
+  const sepProcessingCard = { amount: 120, status: 'processing', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const inbound = (inboundMessage) => (reply, c) => replyQuotesUngroundedAmount(reply, c, { byMeaning: true, inboundMessage });
+
+  test('an August failed CARD payment never authorizes "Your $120 Zelle payment from Sep 12 failed" (even when the Sep Zelle payment is paid)', () => {
+    const reply = 'Your $120 Zelle payment from Sep 12 failed.';
+    expect(check(reply, ctx([augFailedCard, sepPaidZelle]))).toBe(true);
+    expect(check(reply, ctx([augFailedCard]))).toBe(true);
+    expect(check(reply, ctx([augFailedCard, sepFailedZelle]))).toBe(false);
+  });
+
+  test('the same tender/date rules hold for "still processing"', () => {
+    const reply = 'Your $120 Zelle payment from Sep 12 is still processing.';
+    expect(check(reply, ctx([sepProcessingCard]))).toBe(true);
+    expect(check(reply, ctx([{ ...sepProcessingZelle, payment_date: '2026-08-05' }]))).toBe(true);
+    expect(check(reply, ctx([sepPaidZelle]))).toBe(true);
+    expect(check(reply, ctx([sepProcessingZelle]))).toBe(false);
+  });
+
+  test('reverse cases: a date-less status report still binds by amount/tender; a stated date must match', () => {
+    expect(check('Your $120 payment is still processing.', ctx([sepProcessingZelle]))).toBe(false);
+    expect(check('Your $120 card payment is still processing.', ctx([sepProcessingZelle]))).toBe(true);
+    expect(check('Your $120 card payment is still processing.', ctx([sepProcessingCard]))).toBe(false);
+    expect(check('Your payment is still processing.', ctx([sepProcessingZelle]))).toBe(false);
+    expect(check('Your Zelle payment is still processing.', ctx([sepProcessingCard]))).toBe(true);
+  });
+
+  test('inbound tender/date/ambiguity apply to status claims exactly as to receipts', () => {
+    const reply = 'Your $120 payment from Sep 12 is still processing.';
+    expect(inbound('Did my $120 Zelle payment go through?')(reply, ctx([sepProcessingCard]))).toBe(true);
+    expect(inbound('Did my $120 Zelle payment go through?')(reply, ctx([sepProcessingZelle]))).toBe(false);
+    // ambiguous inbound tender fails closed
+    expect(inbound('I sent Zelle, not a check - did it arrive?')(reply, ctx([sepProcessingZelle]))).toBe(true);
+    // payment-related inbound, no tender, several tenders for that amount/date
+    expect(inbound('Did my $120 payment go through?')(reply, ctx([sepProcessingZelle, sepProcessingCard]))).toBe(true);
+  });
+
+  test('paid claims still bind identically (regression)', () => {
+    expect(check('We received your $120.00 Zelle payment from Sep 12.', ctx([sepPaidZelle]))).toBe(false);
+    expect(check('We received your $120.00 Zelle payment from Sep 12.', ctx([augFailedCard]))).toBe(true);
+  });
+});

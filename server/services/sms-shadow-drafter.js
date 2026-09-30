@@ -1333,20 +1333,53 @@ function paymentDateMatchesClaim(p, claimed) {
 // explicit param, resolved by the caller from EITHER the outgoing clause or
 // the inbound message, rather than re-derived here from `text` alone — the
 // caller is the one place that knows which of the two named a date/tender.
-function bindPaidPaymentRow({
-  amountCents, context, claimedTender = null, claimedDate = null, inboundNamedPayment = false,
+// Codex round-8 P1 (PR #5331): paid, pending and failed claims ALL bind through
+// this ONE function — `family` selects the row statuses from
+// PAYMENT_STATUS_VOCABULARY, and the amount / date / tender / inbound /
+// ambiguity rules are identical for every family (no separate status-only
+// path: an August failed card payment must never authorize "your Sep 12 Zelle
+// payment failed"). The one per-family difference is whether a stated date is
+// REQUIRED: a paid receipt must always name its date; a processing/failed
+// status report need not (the prompt does not demand one) but, when a date is
+// stated by the reply or the customer, the row must match it. `amountCents`
+// null = an amount-free status claim (any row of the family that also agrees
+// on tender/date). Returns the bound row or null.
+function bindPaymentRow({
+  family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
+  inboundNamedPayment = false, requireDate = family === 'paid',
 }) {
-  if (!claimedDate) return null;
-  const candidates = paidRowsForCents(context, amountCents).filter((p) => paymentDateMatchesClaim(p, claimedDate));
+  if (requireDate && !claimedDate) return null;
+  const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
+  let candidates = (context?.billing?.recentPayments || []).filter((p) => (
+    p && wanted.has(String(p.status || '').toLowerCase())
+      && (amountCents == null
+        || (Number.isFinite(Number(p.amount)) && Math.round(Number(p.amount) * 100) === amountCents))
+  ));
+  if (claimedDate) candidates = candidates.filter((p) => paymentDateMatchesClaim(p, claimedDate));
   // Codex round-6 pre-push audit P1 (reverse direction): the customer's message
   // is about a payment but NO tender could be extracted from it or the reply,
-  // and the settled rows for this amount/date span more than one tender (an
-  // unreadable tender counts as its own) — a generic confirmation cannot say
-  // WHICH one it confirms, so fail closed rather than bind to any of them.
+  // and the rows for this amount/date span more than one tender (an
+  // unreadable tender counts as its own) — a generic claim cannot say WHICH
+  // one it is about, so fail closed rather than bind to any of them.
   if (!claimedTender && inboundNamedPayment
       && new Set(candidates.map((p) => paymentTenderLabel(p) || 'unknown')).size > 1) return null;
   const matched = claimedTender ? candidates.filter((p) => paymentTenderLabel(p) === claimedTender) : candidates;
   return matched[0] || null;
+}
+const bindPaidPaymentRow = (args) => bindPaymentRow({ ...args, family: 'paid' });
+
+// The tender/date/inbound context every payment claim binds with — resolved
+// ONCE for all families. The outgoing clause's own claim wins; the customer's
+// inbound message is the fallback ONLY when the clause is silent on that point.
+// null = an AMBIGUOUS tender (several distinct tenders in one text): unknown,
+// never a guess — the caller fails closed.
+function paymentClaimBinding(clauseText, inboundText) {
+  let claimedTender = replyClaimedTender(clauseText);
+  if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
+  if (claimedTender === TENDER_AMBIGUOUS) return null;
+  const claimedDate = parseClaimedPaymentDate(clauseText) || (inboundText && parseClaimedPaymentDate(inboundText)) || null;
+  const inboundNamedPayment = !!inboundText && /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?)\b/i.test(inboundText);
+  return { claimedTender, claimedDate, inboundNamedPayment };
 }
 
 // `opts.byMeaning` pins the strict clause/status-aware rule regardless of
@@ -1456,13 +1489,10 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     const phraseClaim = paymentStatusPhraseClaim(masked, amounts.length > 0);
     if (phraseClaim) {
       if (billingUnavailable) return true;
-      const wanted = new Set(PAYMENT_STATUS_VOCABULARY[phraseClaim].rowStatuses);
-      const rows = (context?.billing?.recentPayments || []).filter((p) => p && wanted.has(String(p.status || '').toLowerCase()));
-      if (amounts.length) {
-        if (amounts.some((a) => !rows.some((p) => Math.round(Number(p.amount) * 100) === a))) return true;
-      } else if (!rows.length) {
-        return true;
-      }
+      const binding = paymentClaimBinding(text, inboundText);
+      if (!binding) return true;
+      const targets = amounts.length ? amounts : [null];
+      if (targets.some((a) => !bindPaymentRow({ family: phraseClaim, amountCents: a, context, ...binding }))) return true;
       continue;
     }
     if (!amounts.length) {
@@ -1532,14 +1562,9 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
       // tenders named in one text) is unknown, never a guess — fail closed.
       // The inbound is consulted only when the outgoing clause names none, so
       // an ambiguous inbound cannot authorize a generic confirmation.
-      let claimedTender = replyClaimedTender(text);
-      if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
-      if (claimedTender === TENDER_AMBIGUOUS) return true;
-      const claimedDate = parseClaimedPaymentDate(text) || (inboundText && parseClaimedPaymentDate(inboundText)) || null;
-      const inboundNamedPayment = !!inboundText && /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?)\b/i.test(inboundText);
-      if (amounts.some((a) => !bindPaidPaymentRow({
-        amountCents: a, context, claimedTender, claimedDate, inboundNamedPayment,
-      }))) return true;
+      const binding = paymentClaimBinding(text, inboundText);
+      if (!binding) return true;
+      if (amounts.some((a) => !bindPaymentRow({ family: 'paid', amountCents: a, context, ...binding }))) return true;
     }
   }
   return false;
@@ -3168,6 +3193,7 @@ module.exports = {
   replyClaimedTender,
   TENDER_AMBIGUOUS,
   bindPaidPaymentRow,
+  bindPaymentRow,
   parseClaimedPaymentDate,
   TENDER_VOCABULARY,
   replyBindsDeclaredDays,

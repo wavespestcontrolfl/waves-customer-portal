@@ -712,3 +712,35 @@ describe('Codex round-7 P1 #3: receipt wording must identify an actual past paym
     expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
   });
 });
+
+describe('Codex round-8 P1 #2: a Zelle payment STATUS report is not a new transfer offer', () => {
+  test('"still processing" / "failed" / "didn\'t go through" about a past Zelle payment classify as status (not offer)', () => {
+    for (const c of [
+      'Your Zelle payment is still processing.', 'Your Zelle payment failed.', "Your $120 Zelle payment didn't go through.",
+      'Your Zelle payment from Sep 12 is being processed.',
+    ]) {
+      expect(classifyZelleClause(c)).toBe('receipt');
+      expect(hasAffirmativeZelleMention(c)).toBe(false);
+    }
+  });
+
+  test('send-time: with Zelle disabled and no eligible invoice a truthful status report is NOT rejected by the Zelle checks', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    expect(outgoingZelleStale('Your Zelle payment is still processing.')).toEqual({ stale: false });
+    realAnswersGateOn.mockReturnValue(true);
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
+    const out = await outgoingAmountsStale({ customerId: 'c1', body: 'Your Zelle payment failed.', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }) });
+    expect(out.reason).not.toBe('zelle_invoice_unresolved');
+    expect(out.reason).not.toBe('zelle_recipient_stale');
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalled(); // status grounding, not offer checks
+  });
+
+  test('reverse cases: a contact or an instruction keeps it an OFFER', () => {
+    expect(classifyZelleClause('Your Zelle payment failed - please send it again to old@example.com.')).toBe('offer');
+    expect(classifyZelleClause('Your Zelle payment failed, use old@example.com')).toBe('offer');
+    expect(classifyZelleClause('Your Zelle payment failed, please send it again.')).toBe('offer');
+    expect(classifyZelleClause('Yes, you can use Zelle')).toBe('offer');
+    expect(classifyZelleClause("Yes, we've got Zelle")).toBe('offer');
+  });
+});

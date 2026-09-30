@@ -137,6 +137,21 @@ function classifyZelleClause(clause) {
   if (zelleBodyContacts(text).length) return 'offer';
   if (ZELLE_NEGATION_RE.test(text)) return null;
   if (ZELLE_OFFER_RE.test(text)) return 'offer';
+  // Codex round-7 P1 (PR #5331): receipt wording must identify an actual PAST
+  // PAYMENT — a receipt verb PLUS a payment noun / an amount / "your" / a date.
+  // A bare verb ("Yes, we've got Zelle", "we have Zelle") is an OFFER and gets
+  // the recipient + invoice recheck.
+  const namesPastPayment = /\b(?:payments?|transfers?|deposits?|your)\b/i.test(text)
+    || bodyAmountCents(text).length > 0
+    || /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\b\d{1,2}\/\d{1,2}\b/i.test(text);
+  // Codex round-8 P1 (PR #5331): a payment-STATUS report about a past payment
+  // ("Your Zelle payment is still processing", "...failed") with no instruction
+  // and no contact is a status claim, not a new transfer offer — it routes to
+  // the status grounding in replyQuotesUngroundedAmount (bindPaymentRow), never
+  // the recipient/invoice-eligibility recheck. A contact was handled above
+  // (always an offer); an instruction marker keeps it an offer.
+  if (namesPastPayment && !ZELLE_INSTRUCTION_MARKER_RE.test(text)
+      && paymentStatusPhraseClaim(text, bodyAmountCents(text).length > 0)) return 'receipt';
   // A clause naming a specific contact (email/phone) is ALWAYS live payment
   // instructions, whatever verb it does or doesn't carry (finding 2):
   // "For your Zelle payment, use old@example.com" names no offer VERB, but
@@ -146,9 +161,6 @@ function classifyZelleClause(clause) {
   // PAYMENT — a receipt verb PLUS a payment noun / an amount / "your" / a date.
   // A bare verb ("Yes, we've got Zelle", "we have Zelle") is an OFFER and gets
   // the recipient + invoice recheck.
-  const namesPastPayment = /\b(?:payments?|transfers?|deposits?|your)\b/i.test(text)
-    || bodyAmountCents(text).length > 0
-    || /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\b\d{1,2}\/\d{1,2}\b/i.test(text);
   if (((RECEIPT_VERB_RE.test(text) && namesPastPayment) || THANKS_FOR_PAYMENT_RE.test(text)) && !ZELLE_INSTRUCTION_MARKER_RE.test(text)) return 'receipt';
   // Ambiguous — mentions Zelle affirmatively but matches neither pattern —
   // fails closed as an OFFER (the stricter path).
