@@ -141,14 +141,15 @@ describe('buildBookingAvailability — the travel-gap mirror under grace', () =>
     expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bookArrivalGrace: false }));
   });
 
-  test('grace env 0: strict (dropped) — but the offer carries the grace POLICY tag with no grace segment', async () => {
+  test('grace env 0: strict (dropped), and the build is plain insertion mode — old policy tag, no grace segment (Codex r3 P1)', async () => {
     process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
     expect(offered(await build())).toEqual([]);
     listOccupiedWindows.mockResolvedValue([occupied('prev', 7 * 60, 8 * 60)]);
     const sig = sigOf(await build());
     expect(sig.split('.')).toHaveLength(2);
     expect(slotOfferFieldGrace(sig)).toBe(0);
-    expect(verifySlotOfferField({ ...OFFER, policy: BOOK_ARRIVAL_GRACE_OFFER_POLICY }, sig)).toBe(true);
+    expect(verifySlotOfferField({ ...OFFER, policy: BOOK_INSERTION_OFFER_POLICY }, sig)).toBe(true);
+    expect(verifySlotOfferField({ ...OFFER, policy: BOOK_ARRIVAL_GRACE_OFFER_POLICY }, sig)).toBe(false);
   });
 
   test('a delay past the grace is never offered — even where nothing crowds a neighbour (the commit enforces the same bound)', async () => {
@@ -175,5 +176,71 @@ describe('buildBookingAvailability — the travel-gap mirror under grace', () =>
   test('another technician\'s stop is not on this route: it neither blocks nor waives (existing tech-scoped mirror)', async () => {
     listOccupiedWindows.mockResolvedValue([occupied('prev', 9 * 60, 10 * 60, { technician_id: 'other-tech' })]);
     expect(offered(await build())).toEqual(['10:00']);
+  });
+});
+
+// Codex r3 P1 (#5402): grace mode applies only where the applicable grace is
+// positive. Gate on + grace 0 must be indistinguishable from gate off.
+describe('zero grace is byte-identical to the gate being off', () => {
+  const both = async (extra = {}) => {
+    const on = await build(extra);
+    const onCall = findAvailableSlots.mock.calls.at(-1)[0];
+    process.env.GATE_BOOK_ARRIVAL_GRACE = 'false';
+    const off = await build(extra);
+    const offCall = findAvailableSlots.mock.calls.at(-1)[0];
+    process.env.GATE_BOOK_ARRIVAL_GRACE = 'true';
+    return { on, off, onCall, offCall };
+  };
+  const shape = (a) => JSON.stringify(a.days.map((d) => d.slots.map(({ slot_sig, ...rest }) => rest)));
+
+  test('gate on + SELF_SERVE_ARRIVAL_GRACE_MINUTES=0: same slots, same packing flag, same policy tag and wire shape as gate off', async () => {
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+    listOccupiedWindows.mockResolvedValue([occupied('prev', 7 * 60, 8 * 60)]);
+    const { on, off, onCall, offCall } = await both();
+    expect(shape(on)).toBe(shape(off));
+    expect(onCall.bookArrivalGrace).toBe(false);
+    expect(offCall.bookArrivalGrace).toBe(false);
+    for (const a of [on, off]) {
+      const sig = sigOf(a);
+      expect(sig.split('.')).toHaveLength(2);
+      expect(verifySlotOfferField({ ...OFFER, policy: BOOK_INSERTION_OFFER_POLICY }, sig)).toBe(true);
+      expect(verifySlotOfferField({ ...OFFER, policy: BOOK_ARRIVAL_GRACE_OFFER_POLICY }, sig)).toBe(false);
+    }
+    // and a buffer-crowding slot is dropped under both
+    listOccupiedWindows.mockResolvedValue([PREV()]);
+    const crowded = await both();
+    expect(offered(crowded.on)).toEqual([]);
+    expect(offered(crowded.off)).toEqual([]);
+  });
+
+  test('a same-day slot under gate on keeps the insertion policy tag, the v2 field and strict mirror', async () => {
+    const today = etDateString(new Date());
+    const same = (extra = {}) => ({ ...slot('10:00', extra), date: today });
+    findAvailableSlots.mockResolvedValue({ slots: [same()], total_feasible: 1 });
+    listOccupiedWindows.mockResolvedValue([occupied('far', 7 * 60, 8 * 60, { date: today })]);
+    const availability = await build({ rangeFrom: today, rangeTo: today });
+    expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ bookArrivalGrace: false }));
+    const sig = availability.days[0].slots[0].slot_sig;
+    expect(sig.split('.')).toHaveLength(2);
+    expect(verifySlotOfferField({ ...OFFER, date: today, policy: BOOK_INSERTION_OFFER_POLICY }, sig)).toBe(true);
+    // strict: a buffer-crowding same-day slot is dropped even at env grace 120
+    listOccupiedWindows.mockResolvedValue([occupied('prev', 9 * 60, 10 * 60, { date: today })]);
+    expect((await build({ rangeFrom: today, rangeTo: today })).days).toEqual([]);
+  });
+
+  test('a range spanning today and a later date: the later date is graced (grace tag + field), today stays plain, per slot', async () => {
+    const today = etDateString(new Date());
+    findAvailableSlots.mockResolvedValue({
+      slots: [{ ...slot('10:00'), date: today }, slot('10:00')], total_feasible: 2,
+    });
+    listOccupiedWindows.mockResolvedValue([
+      occupied('a', 7 * 60, 8 * 60, { date: today }), occupied('b', 7 * 60, 8 * 60),
+    ]);
+    const availability = await build({ rangeFrom: today, rangeTo: D });
+    const byDate = Object.fromEntries(availability.days.map((d) => [d.date, d.slots[0].slot_sig]));
+    expect(byDate[today].split('.')).toHaveLength(2);
+    expect(verifySlotOfferField({ ...OFFER, date: today, policy: BOOK_INSERTION_OFFER_POLICY }, byDate[today])).toBe(true);
+    expect(slotOfferFieldGrace(byDate[D])).toBe(120);
+    expect(verifySlotOfferField({ ...OFFER, policy: BOOK_ARRIVAL_GRACE_OFFER_POLICY }, byDate[D])).toBe(true);
   });
 });

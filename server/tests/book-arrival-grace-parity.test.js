@@ -189,8 +189,8 @@ describe('the 4-stop day: find-time vs /book agree (packCapacityEnds checks BOTH
     expect(packed.every((s) => offerMirrorAdmits(s, rows, bookArrivalGraceMinutes({ date: DATE })))).toBe(true);
   });
 
-  test('every candidate the both-neighbour pass keeps is one the mirror admits, for grace 0 / 30 / 120 (find-time and /book cannot disagree)', () => {
-    for (const graceMinutes of ['0', '30', '120']) {
+  test('every candidate the both-neighbour pass keeps is one the mirror admits, for grace 30 / 120 (find-time and /book cannot disagree)', () => {
+    for (const graceMinutes of ['30', '120']) {
       process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = graceMinutes;
       const rows = FOUR_STOP_DAY();
       const packed = packCapacityEnds(enumerateSlots(contextFor(rows)), { ...CALLER, bookArrivalGrace: true });
@@ -198,12 +198,13 @@ describe('the 4-stop day: find-time vs /book agree (packCapacityEnds checks BOTH
     }
   });
 
-  test('grace 0 (env unset / same-day / gate off) is exactly the strict rule: nothing on this tight day, matching the strict mirror', () => {
+  test('grace 0 (env unset / same-day): /book mode is the OLD packing byte for byte, and the strict mirror still admits nothing on this tight day (Codex r3 P1)', () => {
     process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
     const rows = FOUR_STOP_DAY();
-    const packed = packCapacityEnds(enumerateSlots(contextFor(rows)), { ...CALLER, bookArrivalGrace: true });
-    expect(packed).toEqual([]);
-    expect(enumerateSlots(contextFor(rows)).filter((s) => strictMirrorAdmits(s, rows))).toEqual([]);
+    const slots = enumerateSlots(contextFor(rows));
+    const packed = packCapacityEnds(slots, { ...CALLER, bookArrivalGrace: true });
+    expect(starts(packed)).toEqual(starts(packCapacityEnds(slots, CALLER)));
+    expect(packed.filter((s) => strictMirrorAdmits(s, rows))).toEqual([]);
   });
 
   test('opt-in required: a caller without bookArrivalGrace still gets the unchanged default pick, whatever the env says', () => {
@@ -235,7 +236,10 @@ describe('offer/commit parity on the 4-stop day (gate on)', () => {
       process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = String(graceMinutes);
       const rows = FOUR_STOP_DAY();
       const all = enumerateSlots(contextFor(rows));
-      const offered = packCapacityEnds(all, { ...CALLER, bookArrivalGrace: true });
+      // What /book actually offers: find-time's pick, then the builder's mirror
+      // (strict at grace 0 — old packing — the graced rule otherwise).
+      const offered = packCapacityEnds(all, { ...CALLER, bookArrivalGrace: true })
+        .filter((s) => (graceMinutes > 0 ? offerMirrorAdmits(s, rows, graceMinutes) : strictMirrorAdmits(s, rows)));
       for (const slot of all) {
         const commit = await commitVerdict(rows, slot, graceMinutes);
         const isOffered = offered.includes(slot);
@@ -400,6 +404,28 @@ describe('packCapacityEnds book mode — both-neighbour pick (synthetic gap)', (
   test('an empty day (no real neighbours) keeps every admitted hour', () => {
     const open = (h) => ({ ...slot(h), _gap: { prevId: null, nextId: null, prevRow: null, nextRow: null, holdRows: [], dayRows: [] } });
     expect(starts(packCapacityEnds([9, 10, 11].map(open), { ...CALLER, bookArrivalGrace: true }))).toEqual(['09:00', '10:00', '11:00']);
+  });
+});
+
+describe('packCapacityEnds book mode is per date (Codex r3 P1 on #5402)', () => {
+  test('a same-day (zero-grace) date keeps the OLD packing byte for byte while a later date packs under the /book rule', () => {
+    const rows = FOUR_STOP_DAY();
+    const later = enumerateSlots(contextFor(rows));
+    const today = etDateString(new Date());
+    const sameDay = later.map((s) => ({ ...s, date: today }));
+    const mixed = [...sameDay, ...later];
+    const kept = packCapacityEnds(mixed, { ...CALLER, bookArrivalGrace: true });
+    const keptToday = kept.filter((s) => s.date === today);
+    const keptLater = kept.filter((s) => s.date === DATE);
+    expect(starts(keptToday)).toEqual(starts(packCapacityEnds(sameDay, CALLER)));
+    expect(starts(keptToday)).toEqual(['09:00', '11:00', '14:00', '15:00']);
+    expect(starts(keptLater)).toEqual(['14:00']);
+  });
+
+  test('env grace 0: bookArrivalGrace mode packs exactly like the default', () => {
+    process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+    const slots = enumerateSlots(contextFor(FOUR_STOP_DAY()));
+    expect(starts(packCapacityEnds(slots, { ...CALLER, bookArrivalGrace: true }))).toEqual(starts(packCapacityEnds(slots, CALLER)));
   });
 });
 

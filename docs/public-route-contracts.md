@@ -800,6 +800,32 @@ A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
 
+Tech-aware confirm conflict checks for a second field technician
+(`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; needs
+`GATE_SCHEDULING_CAPACITY` live too). The offer side (`buildBookingAvailability`'s
+occupancy mirror) already keeps an occupied row only when it is unassigned or on
+the offered slot's own technician; the confirm side used to be tech-blind (built
+for one active technician), so a slot offered on technician B's day could be
+refused at confirm because technician A had an overlapping or nearby stop. With
+both gates on, `createSelfBooking` (`/api/booking/confirm`, the re-service commit
+and the consultation-page commit) scopes its whole conflict check to the booked
+technician: the zone/city/hold fast-path legs are AND-ed with "technician_id is
+NULL or equals the booked technician", and the global backstop
+(`findConflictingVisits`, which takes an opt-in `technicianId`) counts only the
+same technician's rows plus unassigned ones. Unassigned rows still block every
+technician, so the offer/commit predicates stay identical. The public reschedule
+commit (`SmartRebooker.reschedule` with `capacityPlacement: true`, the same
+offer builder) opts into the same scope for its kept technician. Either gate
+off, or a booking with no technician, is byte-for-byte the tech-blind check
+above. Every other caller — admin schedule/leads, rebooker series and
+rain-out/SMS moves, the phone agent, the zone-engine confirm, estimate slot
+reserve (which already verifies per technician in capacity mode), auto-dispatch
+and follow-up seeders — never passes `technicianId` and is unchanged. The
+date-wide occupancy advisory lock (rung 1) that every one of these writers takes
+still serializes concurrent confirms per calendar day regardless of technician,
+so two technicians' bookings and an unassigned insert cannot race past each
+other's probe.
+
 Public-confirm location freshness applies with either capacity gate on or
 off. After the scheduling and customer-communications fences, the customer
 row is held `FOR SHARE` through the insert. A complete live pin in another
@@ -1064,10 +1090,16 @@ offer keeps the exact `<exp>.<sig>` shape), never a live re-read; an internal
 callback booking (re-service, inspection — no signed field, offer proof is a
 same-request rebuild) reads the live grace for its date.
 
-*Flip safety.* Every `/book` offer minted by a graced build carries
+*Zero grace is the gate off.* Grace mode applies only where the applicable
+grace is positive: a build whose range has no positive-grace date (env unset/0)
+is plain insertion mode, and per slot a zero-grace date (a same-day pick)
+keeps the old one-neighbour packing, the strict mirror, the
+`BOOK_INSERTION_OFFER_POLICY` tag and the `<exp>.<sig>` field.
+
+*Flip safety.* Every `/book` offer for a positive-grace date carries
 `BOOK_ARRIVAL_GRACE_OFFER_POLICY` (`utils/slot-offer-token.js`) instead of
 `BOOK_INSERTION_OFFER_POLICY`, and `/confirm` verifies with
-`bookOfferPolicyLive()`, so a gate flip in either direction between mint and
+`bookOfferPolicyLive(date)`, so a gate flip in either direction between mint and
 confirm fails the signature into the standard "pick your time again" 409
 (same mechanism as `GATE_BOOK_CAPACITY_COMMIT`, #5231). Tests:
 `book-arrival-grace-parity.test.js` (real whole-route simulation +

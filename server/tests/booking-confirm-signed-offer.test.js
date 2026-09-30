@@ -1230,6 +1230,29 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(verifySpy.mock.calls[0][1].arrivalGraceMinutes).toBeUndefined();
     });
 
+    test('GATE_MULTI_TECH_CONFIRM + GATE_BOOK_ARRIVAL_GRACE together: the probe is tech-scoped AND a graced offer still waives its previous-side buffer', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      try {
+        conflictSpy.mockResolvedValue([clash()]);
+        await expect(confirmGraced(gracedSig(90))).rejects.toThrow(SENTINEL);
+        expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ technicianId: TECH_ID }));
+        expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+        // and the non-waivable clashes still refuse under the scoped probe
+        capturedScheduledInsert = undefined; verifySpy.mockClear();
+        conflictSpy.mockResolvedValue([clash({ window_start: '10:00:00' })]);
+        await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+        expect(verifySpy).not.toHaveBeenCalled();
+      } finally { delete process.env.GATE_MULTI_TECH_CONFIRM; }
+    });
+
+    test('a same-day slot (grace 0 for its date) is signed and verified under the plain insertion policy even with the gate on', async () => {
+      const today = etDateString(new Date());
+      const sig = mintSlotOfferField(offerPayload({ date: today, policy: BOOK_INSERTION_OFFER_POLICY }));
+      const result = await createSelfBooking(confirmPayload(sig, { slot_date: today }));
+      // clears the signature gate (any later refusal is not the 409 signature miss)
+      expect(result.error || '').not.toMatch(/pick your time again/i);
+    });
+
     test('an internal callback booking (re-service / inspection: no signed field) reads the live grace for its date', async () => {
       conflictSpy.mockResolvedValue([clash()]);
       await expect(createSelfBooking(callbackPayload())).rejects.toThrow(SENTINEL);

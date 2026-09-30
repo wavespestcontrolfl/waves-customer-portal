@@ -575,7 +575,17 @@ function packCapacityEndsForBook(slots, caller) {
 }
 
 function packCapacityEnds(slots, caller = {}) {
-  if (caller.bookArrivalGrace === true) return packCapacityEndsForBook(slots, caller);
+  if (caller.bookArrivalGrace === true) {
+    // /book mode applies only to a date whose grace is positive: a zero-grace
+    // date (same-day pick, env 0) keeps the OLD packing byte for byte — the
+    // same per-date rule routes/booking.js signs its policy tag under.
+    // Groups key on date, so packing the two subsets separately is exact.
+    const graced = slots.filter((s) => selfServeArrivalGraceMinutes({ date: s.date }) > 0);
+    if (graced.length === slots.length) return packCapacityEndsForBook(slots, caller);
+    const plain = packCapacityEnds(slots.filter((s) => !graced.includes(s)), { ...caller, bookArrivalGrace: false });
+    const kept = new Set([...packCapacityEndsForBook(graced, caller), ...plain]);
+    return slots.filter((s) => kept.has(s));
+  }
   const arrivalGraceOptIn = caller.arrivalGrace === true;
   const groups = new Map();
   for (const slot of slots) {

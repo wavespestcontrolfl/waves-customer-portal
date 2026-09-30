@@ -184,6 +184,15 @@ async function probeMoveConflicts({
     excludeServiceIds,
     excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
     ...(travel !== undefined ? { travel } : {}),
+    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark): the
+    // PUBLIC self-serve reschedule alone opts into capacityPlacement (see
+    // reschedule-public.js), and its picker offers slots with the same
+    // tech-aware occupancy mirror /book uses — so its commit probe counts only
+    // the kept technician's rows plus unassigned ones. Every other caller
+    // (admin, rain-out, SMS, auto-dispatch) omits capacityPlacement and stays
+    // tech-blind; the occupancy probe ignores the option while the gate is off.
+    ...(options.capacityPlacement === true && target.technicianId
+      ? { technicianId: target.technicianId } : {}),
     ...(useArrivalWindows ? { arrivalWindow: {
       serviceId: target.id,
       technicianId: target.technicianId || null,

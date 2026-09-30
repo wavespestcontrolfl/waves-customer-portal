@@ -156,6 +156,7 @@ const {
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
+const { multiTechConfirmLive } = require('../config/feature-gates');
 const {
   bookArrivalGraceMinutes, delayWithinGrace, bookGapAdmits, bookClashesWaivable,
 } = require('../services/scheduling/book-arrival-grace');
@@ -210,8 +211,12 @@ function bookArrivalGraceOffersLive() {
 // the mirror of buildBookingAvailability's per-build offerPolicy. Both read
 // bookOfferPolicy so a gate flip between mint and confirm, in either
 // direction, fails the HMAC.
-function bookOfferPolicyLive() {
-  return bookOfferPolicy({ insertion: bookInsertionOffersLive(), graceLive: bookArrivalGraceOffersLive() });
+function bookOfferPolicyLive(date) {
+  // Grace mode applies to a slot only when ITS date's grace is positive — the
+  // exact per-slot rule the offer mints under (bookSlotGrace), so a zero-grace
+  // date (same-day pick, env 0) keeps the plain insertion tag and wire shape.
+  const graceLive = bookArrivalGraceOffersLive() && bookArrivalGraceMinutes({ date }) > 0;
+  return bookOfferPolicy({ insertion: bookInsertionOffersLive(), graceLive });
 }
 
 function cleanBookingServiceLabel(value) {
@@ -1528,7 +1533,10 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
 // slot whose simulated arrival delay is past the grace it would be signed
 // under, since verifyArrivalCapacity would refuse it at confirm.
 function bookSlotGrace(graceBuild, slot) {
-  if (!graceBuild || slot.route_mode !== 'arrival_windows') return 0;
+  // Capacity mode (a graced build requires it) only ever produces
+  // arrival-window slots, so this depends on the DATE alone — the same input
+  // /confirm's bookOfferPolicyLive(date) reads, keeping mint and verify equal.
+  if (!graceBuild) return 0;
   const grace = bookArrivalGraceMinutes({ date: slot.date });
   return delayWithinGrace(slot.arrival_delay_minutes, grace) ? grace : -1;
 }
@@ -1538,7 +1546,7 @@ function bookSlotGrace(graceBuild, slot) {
 // same rule the commit applies via bookClashesWaivable — everything else is
 // the unchanged strict violatesTravelGap.
 function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, dayOccupied }) {
-  if (!graceBuild) return violatesTravelGap(candidateEntity, dayOccupied);
+  if (!graceBuild || !(slotGrace > 0)) return violatesTravelGap(candidateEntity, dayOccupied);
   return !bookGapAdmits(candidateEntity, dayOccupied, {
     technicianId: slot.technician.id, grace: slotGrace, arrivalDelayMinutes: slot.arrival_delay_minutes,
   });
@@ -1583,8 +1591,16 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // insertion (capacityPlacement) AND the gate live. A graced build signs the
   // BOOK_ARRIVAL_GRACE_OFFER_POLICY tag instead of the insertion tag, and
   // each slot carries the exact grace that justified it (see addCandidate).
-  const graceBuild = bookArrivalGrace === true && capacityPlacement === true && bookArrivalGraceOffersLive();
-  const offerPolicy = bookOfferPolicy({ insertion: capacityPlacement, graceLive: graceBuild });
+  // Grace mode only when SOME date in the range has a positive grace (grace
+  // 0 everywhere — env unset/0 — is byte-identical to the gate being off:
+  // same packing, same policy tag, same token). Per-date zero grace (a
+  // same-day pick) is handled per slot below via slotGrace.
+  const graceBuild = bookArrivalGrace === true && capacityPlacement === true && bookArrivalGraceOffersLive()
+    && (bookArrivalGraceMinutes({ date: rangeFrom }) > 0 || bookArrivalGraceMinutes({ date: rangeTo }) > 0);
+  // Per-slot policy tag (see addCandidate): grace tag only where the slot's
+  // own grace is positive, else the insertion tag /confirm computes for a
+  // zero-grace date.
+  const offerPolicyFor = (slotGrace) => bookOfferPolicy({ insertion: capacityPlacement, graceLive: slotGrace > 0 });
   // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
   // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
   // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
@@ -1902,7 +1918,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // a live HMAC — see utils/slot-offer-token.js. The client passes it
       // through as-is; serviceKey + locationKey bind the request context the
       // slots were computed FOR, so an offer fetched for one address/service
-      // can't confirm another. `policy` (offerPolicy, computed once above)
+      // can't confirm another. `policy` (offerPolicyFor, per slot grace)
       // additionally binds THIS build's insertion policy into the HMAC —
       // Codex round 2 P1 on PR #5231.
       slot_sig: mintSlotOfferField({
@@ -1914,7 +1930,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         startMinutes: startMin,
         technicianId: slot.technician.id || null,
         durationMinutes: duration,
-        policy: offerPolicy,
+        policy: offerPolicyFor(slotGrace),
         // The exact grace that justified this offer (0 → the unchanged
         // `<exp>.<sig>` field; > 0 → `<exp>.<grace>.<sig>`, HMAC-bound) so the
         // commit enforces the value the offer used, never a live re-read.
@@ -2987,7 +3003,7 @@ async function createSelfBooking(payload = {}) {
       startMinutes: timeToMin(slot_start),
       technicianId: technician_id || null,
       durationMinutes: duration,
-      policy: bookOfferPolicyLive(),
+      policy: bookOfferPolicyLive(slotDateStr),
     }, slot_sig))) {
       return { ok: false, status: 409, error: 'That time slot is no longer available — please pick your time again.' };
     }
@@ -4101,6 +4117,21 @@ async function createSelfBooking(payload = {}) {
             .whereRaw('scheduled_services.reservation_expires_at > NOW()');
         });
       });
+      // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark):
+      // the legs above are OR'd and tech-blind past the tech's own route — a
+      // zone/city leg matches ANOTHER technician's overlapping row, and a
+      // hold leg matches a hold stamped for another technician — even though
+      // the offer (buildBookingAvailability's occupancy mirror) only counts
+      // rows that are unassigned or on the slot's own technician. AND the
+      // same predicate onto the whole probe so a slot offered on technician
+      // B's day is not refused for technician A's stop. Unassigned rows still
+      // block everyone. Off (or no technician, or capacity off): untouched.
+      if (technician_id && multiTechConfirmLive() && capacityEnabled()) {
+        conflictQuery.where((q) => {
+          q.whereNull('scheduled_services.technician_id')
+            .orWhere('scheduled_services.technician_id', technician_id);
+        });
+      }
       const conflict = await conflictQuery.first('scheduled_services.id');
       if (conflict) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
@@ -4137,6 +4168,7 @@ async function createSelfBooking(payload = {}) {
         date: slotDateStr,
         windowStart: slot_start,
         windowEnd: endTime,
+        technicianId: technician_id || null, // tech-aware scope, gate-dark (occupancy.js header)
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the booking's own pin, resolved
         // for the offer location key above; NaN → null → buffer-only.
         travel: {
