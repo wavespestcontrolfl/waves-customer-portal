@@ -65,10 +65,7 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // (GATE_LAWN_WATERING_RULE) and drops the duplicate hero task for hold /
 // water-in visits. Cached p11 objects carry the old list, so they re-render on
 // next open. Supersedes p11, whose bust it subsumes.
-// p13: the lawn watering banner moved up to sit under the visit status card
-// (P3). Cached p12 objects carry it inside the lawn section, so they re-render
-// on next open. Supersedes p12, whose bust it subsumes.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p13-lawn-banner-under-status-20260930';
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p12-lawn-watering-line-20260929';
 
 const s3 = new S3Client({
   region: config.s3?.region,

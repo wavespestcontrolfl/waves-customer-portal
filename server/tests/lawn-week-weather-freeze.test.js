@@ -239,7 +239,7 @@ describe('freeze contract in the render path', () => {
     );
     // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
     // -lap2… / -lap3… — none can match the structured-evidence render.
-    expect(signature.startsWith('-lap8-banner-under-status-20260930')).toBe(true);
+    expect(signature.startsWith('-lap7-watering-instruction-20260929')).toBe(true);
     expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature.startsWith('-lap1')).toBe(false);
   });

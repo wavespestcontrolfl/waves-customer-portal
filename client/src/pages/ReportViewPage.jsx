@@ -9039,7 +9039,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             reads; the lawn section below no longer repeats it. */}
         {isLawnReport && data.reportV2?.banner && (
           <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
-            <LawnWateringBanner banner={data.reportV2.banner} />
+            {/* The report's 16px section rhythm (.sr-section margin-top). */}
+            <LawnWateringBanner banner={data.reportV2.banner} style={{ marginTop: 16 }} />
           </LawnPrintContext.Provider>
         )}
 

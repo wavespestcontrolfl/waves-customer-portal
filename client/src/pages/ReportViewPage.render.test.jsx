@@ -130,6 +130,8 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     const status = container.querySelector('#service-status');
     const card = screen.getByTestId('lawn-watering-banner').closest('[data-glass="card"]');
     expect(status.nextElementSibling).toBe(card);
+    // Same 16px rhythm as the report sections, never flush against the status card.
+    expect(card.style.marginTop).toBe('16px');
   });
 });
 

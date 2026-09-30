@@ -609,7 +609,7 @@ function InsightLine({ label, value, strong }) {
 // Print / PDF always keeps the lines — a printed record is read later and its
 // clock times stay true. No animation anywhere in this block.
 const BANNER_HOLD_STATES = ['hold', 'hold_then_water_in'];
-export function LawnWateringBanner({ banner }) {
+export function LawnWateringBanner({ banner, style = null }) {
   const print = usePrint();
   const printing = usePrintRequested();
   const expiresMs = banner?.expiresAt ? Date.parse(banner.expiresAt) : NaN;
@@ -628,7 +628,7 @@ export function LawnWateringBanner({ banner }) {
   const ended = !(print || printing) && Number.isFinite(expiresMs) && Date.now() > expiresMs;
   const hold = BANNER_HOLD_STATES.includes(banner.state);
   return (
-    <Card style={hold ? { background: COLORS.sand } : undefined}>
+    <Card style={{ ...(hold ? { background: COLORS.sand } : {}), ...(style || {}) }}>
       <div data-testid="lawn-watering-banner" data-state={banner.state} data-ended={ended ? 'true' : 'false'}>
         <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
           Watering after today’s visit
