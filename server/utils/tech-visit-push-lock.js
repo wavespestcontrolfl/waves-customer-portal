@@ -101,12 +101,18 @@ function errorTag(err) {
  * @param {string} visitId  scheduled_services.id — the key every tech push
  *   for the stop shares (the tag is `visit-<id>` / `visit-prep-<id>`).
  * @param {object} args
- * @param {(trx) => Promise<boolean>} [args.isCurrent]  runs under the lock on
- *   the lock's own connection; resolve false for a clean "stale" verdict.
- * @param {(trx, { deadlineAt: number }) => Promise<*>} args.send  the provider
- *   handoff. Run every query on `trx` (one connection per holder) and start
- *   no device leg after `deadlineAt` (epoch ms). On the fail-open path `trx`
- *   is null (use the pool) and there is no lock to bound, so no deadline.
+ * @param {(conn) => Promise<boolean>} [args.isCurrent]  the recheck; resolve
+ *   false for a clean "stale" verdict. It runs as the sender's
+ *   beforeDispatch — AFTER the subscription lookup, immediately before the
+ *   first provider handoff — so no status write can slip in between the
+ *   check and the handoff while the lookup runs (codex #5421 r2). It gets a
+ *   savepoint on the lock's connection.
+ * @param {(trx, { deadlineAt: number, beforeDispatch: Function }) => Promise<*>} args.send
+ *   the provider handoff. Pass `beforeDispatch` through to the sender, run
+ *   every query on `trx` (one connection per holder) and start no device leg
+ *   after `deadlineAt` (epoch ms). On the fail-open path `trx` is null (use
+ *   the pool), there is no lock to bound (no deadline), and beforeDispatch
+ *   always answers true.
  * @returns {Promise<{ sent: boolean, stale?: boolean, locked: boolean, result?: * }>}
  *   `send`'s own rejection propagates (after the lock is released).
  */
@@ -123,24 +129,22 @@ async function sendUnderVisitPushLock(visitId, { isCurrent = null, send } = {}) 
         // After the grant: bounds the holder, never the wait.
         await trx.raw(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
         const deadlineAt = Date.now() + SEND_BUDGET_MS;
-        phase = 'check';
-        let current = true;
-        if (isCurrent) {
+        let stale = false;
+        const beforeDispatch = async () => {
+          if (!isCurrent) return true;
           try {
             // In a savepoint: a failed recheck query would otherwise abort
             // the lock's transaction and take the fail-open send down with it.
-            current = (await trx.transaction((sp) => isCurrent(sp))) !== false;
+            stale = (await trx.transaction((sp) => isCurrent(sp))) === false;
           } catch (err) {
             logger.warn(`[tech-visit-push-lock] recheck failed for visit ${visitId} (${errorTag(err)}); sending`);
           }
-        }
-        if (!current) {
-          outcome = { sent: false, stale: true, locked: true };
-          return;
-        }
+          return !stale;
+        };
         phase = 'send';
         try {
-          outcome = { sent: true, locked: true, result: await send(trx, { deadlineAt }) };
+          const result = await send(trx, { deadlineAt, beforeDispatch });
+          outcome = stale ? { sent: false, stale: true, locked: true } : { sent: true, locked: true, result };
         } catch (err) {
           sendError = err;
         }
@@ -151,7 +155,7 @@ async function sendUnderVisitPushLock(visitId, { isCurrent = null, send } = {}) 
       if (phase !== 'send' && !outcome) {
         logger.warn(`[tech-visit-push-lock] lock failed for visit ${visitId} (${errorTag(err)}); sending unordered`);
         try {
-          outcome = { sent: true, locked: false, result: await send(null, { deadlineAt: null }) };
+          outcome = { sent: true, locked: false, result: await send(null, { deadlineAt: null, beforeDispatch: async () => true }) };
         } catch (sendErr) {
           sendError = sendErr;
         }

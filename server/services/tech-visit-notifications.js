@@ -386,47 +386,61 @@ async function writeCard(notice) {
   });
 }
 
-// Is the push still the tech's current news, read UNDER the visit's push
-// lock? Two questions: (1) the visit row still satisfies cardStands for this
-// notice (the same rules that admitted the card — reused, not forked); (2) no
-// NEWER card exists for this tech and visit than the one this notice wrote
-// (a later change's card means its push is the one to land). Read plainly,
-// never FOR SHARE: a push in flight must not block a schedule write. The
-// newer-card test compares against the row's own created_at in SQL — a JS
-// Date would truncate its microseconds and mistake an older neighbour for a
-// newer one. Rejects on a DB error (the lock helper then sends anyway).
+// Does the visit row still satisfy cardStands for this visit_* notice (the
+// same rules that admitted the card — reused, not forked)? Read plainly,
+// never FOR SHARE: it runs under the visit's push lock, and a push in flight
+// must not block a schedule write. Rejects on a DB error (the lock helper
+// then sends anyway).
 async function pushStillCurrent(notice, conn) {
   const row = await loadVisit(notice.visitId, conn);
-  if (!row || !cardStands(notice, row)) return false;
-  if (!notice.cardId) return true;
+  return !!row && !!cardStands(notice, row);
+}
+
+// Every card type whose push shares the `visit-<id>` collapse tag: a newer
+// one of ANY of them — a visit_* change or a follow-through tracking alert —
+// owns the tech's lock screen for this visit (codex #5421 r2).
+const VISIT_TAG_CARD_TYPES = [...Object.values(TYPE_BY_KIND), 'follow_through_tracking'];
+
+// Has a NEWER card for this tech and visit been written than the one this
+// notice wrote? Then that card's own push is the one to land. Compared
+// against the row's own (created_at, id) in SQL — a JS Date would truncate
+// the microseconds and mistake an older neighbour for a newer one. A revived
+// tracking row refreshes created_at (recordTrackingNotice), so it counts as
+// the new occurrence it is.
+async function newerCardExists(notice, conn) {
   const newer = await conn('tech_notifications as n')
     .where('n.technician_id', notice.technicianId)
-    .whereIn('n.type', Object.values(TYPE_BY_KIND))
+    .whereIn('n.type', VISIT_TAG_CARD_TYPES)
     .whereRaw("n.payload->>'visit_id' = ?", [String(notice.visitId)])
     .whereNot('n.id', notice.cardId)
     .whereRaw('(n.created_at, n.id) > (SELECT o.created_at, o.id FROM tech_notifications o WHERE o.id = ?)', [notice.cardId])
     .first('n.id');
-  return !newer;
+  return !!newer;
 }
 
 // Best-effort push; the card is already durable when this runs. Delivered
-// under the visit's cross-instance push lock; `checkCurrent(conn)` is the
-// recheck under it (a visit_* card passes pushStillCurrent; a tracking
-// notice passes its detector's own still-overdue read). The send runs on the
-// lock's connection and stops starting device legs at its deadline — see
+// under the visit's cross-instance push lock and re-checked there, right
+// before the provider handoff (the sender's beforeDispatch): the notice's
+// own rule — `checkCurrent(conn)`, pushStillCurrent for a visit_* card, the
+// detector's still-overdue read for a tracking notice — and, for either, no
+// newer card for this tech and visit. The send runs on the lock's connection
+// and stops starting device legs at its deadline — see
 // utils/tech-visit-push-lock.js.
 async function pushCard(notice, { checkCurrent = null } = {}) {
   try {
     const PushService = require('./push-notifications');
     const out = await sendUnderVisitPushLock(notice.visitId, {
-      isCurrent: checkCurrent,
-      send: (conn, { deadlineAt }) => PushService.sendToAdminUser(notice.technicianId, {
+      isCurrent: async (conn) => {
+        if (checkCurrent && (await checkCurrent(conn)) === false) return false;
+        return !(notice.cardId && await newerCardExists(notice, conn));
+      },
+      send: (conn, { deadlineAt, beforeDispatch }) => PushService.sendToAdminUser(notice.technicianId, {
         title: notice.pushTitle,
         body: '',
         url: '/tech',
         tag: `visit-${notice.visitId}`,
         priority: 'high',
-      }, { connection: conn, deadlineAt }),
+      }, { connection: conn, deadlineAt, beforeDispatch }),
     });
     if (out.stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
@@ -621,7 +635,8 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
   // soon as they are authenticated (codex P1 round 5, correcting the round-1
   // fix that put the name in the push title).
   const pushTitle = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
-  return row ? { technicianId, visitId, pushTitle } : null;
+  // cardId: the push recheck's newer-card comparison (newerCardExists).
+  return row ? { technicianId, visitId, pushTitle, cardId: (row && typeof row === 'object' ? row.id : row) || null } : null;
 }
 
 module.exports = {
@@ -648,5 +663,5 @@ module.exports = {
   notifyAssignmentChange,
   notifyVisitRescheduled,
   notifyVisitCancelled,
-  _test: { formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent },
+  _test: { formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };

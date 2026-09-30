@@ -137,9 +137,10 @@ describe('notifyTechVisitPrepPhotos', () => {
       }));
       // Delivered through the visit's shared queue, keyed by the service id.
       expect(mockEnqueue).toHaveBeenCalledWith('svc-1', expect.any(Function));
-      // Two transactions: the card's (visit row read FOR SHARE inside it),
-      // then the push's, which only holds the visit's advisory lock.
-      expect(db.transaction).toHaveBeenCalledTimes(2);
+      // The card's transaction (visit row read FOR SHARE inside it), the
+      // push's (only the visit's advisory lock), and the recheck's savepoint
+      // inside it (the stub routes a nested transaction through the same fn).
+      expect(db.transaction).toHaveBeenCalledTimes(3);
       // Same lock key as a visit notice's push for this stop, so a photo
       // alert and a move/cancel push never interleave across instances.
       expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', ['tech-visit-push:svc-1']);

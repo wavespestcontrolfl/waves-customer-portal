@@ -13,7 +13,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/push-notifications', () => ({
   // Options (the lock's connection + deadline) are recorded apart, so the
   // copy assertions below stay about the notification itself.
-  sendToAdminUser: (id, notification, opts) => { mockSendOpts.push(opts); return mockSendToAdminUser(id, notification); },
+  // Like the real sender, beforeDispatch runs after the lookup and right
+  // before the provider handoff; false sends nothing.
+  sendToAdminUser: async (id, notification, opts) => {
+    mockSendOpts.push(opts);
+    if (opts && typeof opts.beforeDispatch === 'function' && (await opts.beforeDispatch()) === false) return { superseded: true };
+    return mockSendToAdminUser(id, notification);
+  },
 }));
 
 const db = require('../models/db');
@@ -298,6 +304,12 @@ describe('notifyTechVisitChange', () => {
     const opts = mockSendOpts[mockSendOpts.length - 1];
     expect(opts.connection).toBe(db);
     expect(opts.deadlineAt).toEqual(expect.any(Number));
+    // The recheck is the sender's beforeDispatch: after the lookup, right
+    // before the handoff (codex #5421 r2).
+    expect(opts.beforeDispatch).toEqual(expect.any(Function));
+    // Every card type sharing the visit- collapse tag counts as newer,
+    // tracking alerts included (codex #5421 r2).
+    expect(lastNewerChain.whereIn).toHaveBeenCalledWith('n.type', expect.arrayContaining(['visit_assigned', 'follow_through_tracking']));
     // The newer-card check compares against the card this notice wrote.
     expect(lastNewerChain.whereNot).toHaveBeenCalledWith('n.id', 'card-' + cardSeq);
     expect(lastNewerChain.whereRaw).toHaveBeenCalledWith("n.payload->>'visit_id' = ?", ['visit-1']);
@@ -369,6 +381,24 @@ describe('notifyTechVisitChange', () => {
     } finally {
       db.raw.mockImplementation((sql) => sql);
     }
+  });
+
+  test('a tracking push re-runs the detector\'s check under the lock and stands down for a newer card (codex #5421 r1/r2)', async () => {
+    const tracking = { technicianId: 'tech-1', visitId: 'visit-1', pushTitle: 'A visit window is underway', cardId: 'card-t' };
+    // Current: detector says still overdue, no newer card → sent.
+    const checkCurrent = jest.fn(async () => true);
+    await notices.pushTrackingNotice(tracking, { checkCurrent });
+    expect(checkCurrent).toHaveBeenCalledWith(db);
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(lastNewerChain.whereNot).toHaveBeenCalledWith('n.id', 'card-t');
+    // The detector says it is no longer overdue (arrival/completion/reassignment) → not sent.
+    mockSendToAdminUser.mockClear();
+    await notices.pushTrackingNotice(tracking, { checkCurrent: async () => false });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    // A newer visit_* card for the same tech and visit → not sent.
+    newerCard = { id: 'card-newer' };
+    await notices.pushTrackingNotice(tracking, { checkCurrent: async () => true });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
   test('a read failure never throws to the writer', async () => {

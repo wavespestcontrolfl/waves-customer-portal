@@ -161,19 +161,17 @@ async function sendPhotoAlert(scheduledServiceId) {
       // Under the visit's cross-instance push lock (see the header). The
       // liveness check stays in beforeDispatch, so it runs under the lock.
       await sendUnderVisitPushLock(scheduledServiceId, {
-        // One connection per holder: the lookup and the liveness read run on
-        // the lock's own (null on the fail-open path → the pool).
-        send: (conn, { deadlineAt }) => PushService.sendToAdminUsers([technicianId], {
+        // The liveness read is the lock's recheck, run as the sender's
+        // beforeDispatch (after the lookup, right before the handoff). One
+        // connection per holder: lookup and recheck run on the lock's own.
+        isCurrent: (conn) => stillAlertable(scheduledServiceId, technicianId, conn),
+        send: (conn, { deadlineAt, beforeDispatch }) => PushService.sendToAdminUsers([technicianId], {
           title: PUSH_TITLE,
           body: '',
           url: '/tech',
           tag: `visit-prep-${scheduledServiceId}`,
           priority: 'high',
-        }, {
-          beforeDispatch: () => stillAlertable(scheduledServiceId, technicianId, conn || db),
-          connection: conn,
-          deadlineAt,
-        }),
+        }, { beforeDispatch, connection: conn, deadlineAt }),
       });
     } catch (pushErr) {
       // The card is already durable — a push failure never loses it.

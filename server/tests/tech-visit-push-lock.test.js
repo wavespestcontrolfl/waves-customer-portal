@@ -50,22 +50,45 @@ test('a waiter outlasts the longest legitimate hold (it never gives up on a hold
   expect(LOCK_TIMEOUT_MS).toBeGreaterThan(MAX_HOLD_MS);
 });
 
-test('the recheck runs under the lock on its connection; a clean false skips the send', async () => {
+// The real sender: lookup, then beforeDispatch, then the provider handoff.
+function sender(handoff = jest.fn(async () => 'ok'), events = []) {
+  const send = jest.fn(async (conn, { beforeDispatch }) => {
+    events.push('lookup');
+    if ((await beforeDispatch()) === false) return { superseded: true };
+    events.push('handoff');
+    return handoff();
+  });
+  send.handoff = handoff;
+  return send;
+}
+
+test('the recheck runs under the lock, AFTER the lookup and right before the handoff; a clean false sends nothing', async () => {
   const trx = primeDb();
-  const isCurrent = jest.fn(async (conn) => { expect(conn).toBe(trx); expect(trx.raw).toHaveBeenCalledTimes(3); return false; });
-  const send = jest.fn();
+  const events = [];
+  const isCurrent = jest.fn(async (conn) => { expect(conn).toBe(trx); events.push('recheck'); return false; });
+  const send = sender(undefined, events);
   const out = await sendUnderVisitPushLock('visit-1', { isCurrent, send });
+  expect(events).toEqual(['lookup', 'recheck']);
   expect(out).toEqual({ sent: false, stale: true, locked: true });
-  expect(send).not.toHaveBeenCalled();
+  expect(send.handoff).not.toHaveBeenCalled();
+});
+
+test('a current recheck hands off after it', async () => {
+  primeDb();
+  const events = [];
+  const send = sender(undefined, events);
+  const out = await sendUnderVisitPushLock('visit-1', { isCurrent: async () => { events.push('recheck'); return true; }, send });
+  expect(events).toEqual(['lookup', 'recheck', 'handoff']);
+  expect(out).toEqual({ sent: true, locked: true, result: 'ok' });
 });
 
 test('a recheck error sends anyway, and the recheck ran in a savepoint so the lock\'s transaction stays usable', async () => {
   const trx = primeDb();
-  const send = jest.fn(async () => 'ok');
+  const send = sender();
   const out = await sendUnderVisitPushLock('visit-1', { isCurrent: async () => { throw new Error('db'); }, send });
   expect(trx.transaction).toHaveBeenCalledTimes(1);
   expect(out.sent).toBe(true);
-  expect(send).toHaveBeenCalledTimes(1);
+  expect(send.handoff).toHaveBeenCalledTimes(1);
   expect(send.mock.calls[0][0]).toBe(trx);
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
 });
@@ -77,7 +100,7 @@ test('a lock error sends once, unordered; no PII or SQL in the log', async () =>
   expect(out).toEqual({ sent: true, locked: false, result: 'ok' });
   expect(send).toHaveBeenCalledTimes(1);
   // No lock → the pool, and no deadline to honour.
-  expect(send.mock.calls[0]).toEqual([null, { deadlineAt: null }]);
+  expect(send.mock.calls[0]).toEqual([null, { deadlineAt: null, beforeDispatch: expect.any(Function) }]);
   const msg = logger.warn.mock.calls[0][0];
   expect(msg).toContain('55P03');
   expect(msg).not.toContain('secret');
