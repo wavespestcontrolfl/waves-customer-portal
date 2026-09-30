@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Lawn prep guide revision (owner-approved 2026-09-29/30, PR re-cut from #5420).
+ * Lawn prep guide revision (owner-approved 2026-09-29/30; re-cut of #5420 and #5438).
  *
  * The owner-approved revised Lawn Care prep & service guide replaces the
  * prep.lawn email/page copy: a prep guide (what you do, what we do, why)
@@ -10,9 +10,12 @@
  * prep.lawn also serves one-time lawn treatment visits (project-email.js), so
  * the copy makes no re-service, next-visit, or plan promise.
  *
- * ONE template: prep.lawn, published as a NEW active version with the
- * concurrency-safe mechanics of 20260926120100_customer_copy_audit_email.js:
- * the version insert runs in a savepoint (a draft the admin editor numbered
+ * ONE template: prep.lawn, published as a NEW active version. The template
+ * row is locked FIRST (forUpdate, held for the migration transaction), the
+ * same lock order as email-template-library createDraftVersion/publishVersion,
+ * so an admin draft or publish mid-deploy waits instead of deadlocking on the
+ * version-number unique index (#5438 r1 P1). Belt and braces from
+ * 20260926120100_customer_copy_audit_email.js: the version insert runs in a savepoint (a draft the admin editor numbered
  * mid-deploy wins the unique version_number and this migration leaves the
  * template as-is), and the pointer moves by compare-and-swap on the version
  * this one replaces, BEFORE any status change, so a concurrent admin publish
@@ -30,7 +33,7 @@ const json = (v) => JSON.stringify(v);
 // publishes so down() can identify its OWN version exactly — never a later
 // admin publication that happens to carry identical blocks (created_by is a
 // technician-uuid FK, so the marker lives here).
-const MIGRATION_MARKER = 'migration:20260930160000';
+const MIGRATION_MARKER = 'migration:20260930170000';
 
 const p = (content) => ({ type: 'paragraph', content });
 const h = (content) => ({ type: 'heading', content });
@@ -103,7 +106,8 @@ function parseSnapshot(version) {
 }
 
 async function publishVersion(knex, key, blocks) {
-  const template = await knex('email_templates').where({ template_key: key }).first();
+  // Template row lock first — the editor's lock order (see header).
+  const template = await knex('email_templates').where({ template_key: key }).forUpdate().first();
   if (!template?.active_version_id) return 'missing';
   const prior = await knex('email_template_versions').where({ id: template.active_version_id }).first();
   if (!prior) return 'missing';

@@ -267,6 +267,10 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     // No application prep/aftercare, pesticide safety, or pesticide compliance (Codex r8 P2).
     const mechHeadings = mechanical.sections.map((sec) => sec.heading);
     expect(mechHeadings).not.toContain('Before your service');
+    expect(mechHeadings).not.toContain('What we need from you');
+    // No spray/herbicide/pesticide-history talk anywhere in its sections or FAQ (#5438 r1 P2).
+    expect(JSON.stringify({ sections: mechanical.sections, faq: mechanical.faq })).not.toMatch(/liquid|herbicide list|sprayed|applied in the last 60 days|product placement/i);
+    expect(mechanical.faq.map((f) => f.q)).toEqual(['Can you fix thin grass under my trees?']);
     expect(mechHeadings).not.toContain('After your service');
     expect(mechanical.safety).toBeNull();
     expect(mechanical.compliance.bullets).toHaveLength(1);

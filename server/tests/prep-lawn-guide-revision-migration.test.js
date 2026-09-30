@@ -1,5 +1,5 @@
 /**
- * 20260930160000 — prep.lawn guide revision (one migration; PR re-cut from #5420).
+ * 20260930170000 — prep.lawn guide revision (one migration; PR re-cut from #5420).
  *
  * Guards what must never regress in prep copy (same rules as the 2026-07-15
  * refresh test): no "safe"/"safely", no fixed re-entry windows, brand is
@@ -12,7 +12,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const migration = require('../models/migrations/20260930160000_prep_lawn_guide_revision');
+const migration = require('../models/migrations/20260930170000_prep_lawn_guide_revision');
 const { normalizeBlocks } = require('../services/email-template-library');
 
 const { TEMPLATES, MIGRATION_MARKER } = migration;
@@ -126,6 +126,7 @@ describe('publish mechanics', () => {
         const filters = {};
         const q = {
           where: jest.fn((f) => { Object.assign(filters, f); return q; }),
+          forUpdate: jest.fn(() => { state.locked = true; return q; }),
           first: jest.fn(async () => state.template),
           update: jest.fn(async (patch) => {
             if (filters.active_version_id !== undefined) {
@@ -172,6 +173,8 @@ describe('publish mechanics', () => {
   test('up publishes a new active version, flips the pointer by CAS, archives only the replaced version', async () => {
     const { knex, state } = makeKnex();
     await migration.up(knex);
+    // The template row is locked before the version number is read (#5438 r1 P1).
+    expect(state.locked).toBe(true);
     expect(state.inserted).toHaveLength(1);
     expect(state.inserted[0].version_number).toBe(4);
     expect(state.inserted[0].subject).toBe('Subj');

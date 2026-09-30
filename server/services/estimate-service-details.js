@@ -429,8 +429,9 @@ const SERVICE_DETAILS_COPY = {
   //   requires: 'bermuda_suppression' on a section — kept only when the estimate
   //     carries the Bermuda-suppression add-on AND GATE_BERMUDA_SUPPRESSION is on.
   //   oneTimeHeading: string on a section — its heading in the one-time guide.
-  //   treatmentOnly: true on a section — application prep/aftercare, dropped
-  //     from a mechanical-only one-time guide (no product is applied).
+  //   treatmentOnly: true on a section or FAQ entry — application inputs,
+  //     prep, aftercare, or spray talk, dropped from a mechanical-only
+  //     one-time guide (no product is applied).
   //   scope: 'recurring' | 'one_time' on a section, a FAQ entry, or a
   //     { scope, text } entry inside paragraphs/steps/bullets — kept only for
   //     that lawn scope (see `oneTime` below); unmarked entries always render.
@@ -455,6 +456,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'Before your first visit',
         oneTimeHeading: 'What we need from you',
+        treatmentOnly: true,
         paragraphs: ['Five things we need from you. Each one changes what we apply.'],
         steps: [
           'Who mows, and what day. We schedule around your mow so product isn’t stripped off the blade the next morning. Why: most liquid applications need a day or two on the leaf to work.',
@@ -676,6 +678,7 @@ const SERVICE_DETAILS_COPY = {
     },
     faq: [
       {
+        treatmentOnly: true,
         q: 'Will my lawn be weed-free?',
         a: 'No company should promise that. Some weeds are prevented, some are treated after they emerge, and grassy weeds inside another grass may have limited selective options. The durable fix is dense turf; where shade, water, or compaction keep it thin, weeds return no matter what’s sprayed, and your report will say so.',
       },
@@ -704,6 +707,7 @@ const SERVICE_DETAILS_COPY = {
         a: 'It starts with an inspection, not an automatic re-spray. Many treatments need 7–10 days to show their work. We re-treat when it’s the same covered condition and the label allows, and explain the non-treatment fix when that’s what the lawn needs.',
       },
       {
+        treatmentOnly: true,
         q: 'What if you’re not sure what’s wrong?',
         a: 'We say so, and tell you what’s ruled out and the next step: monitoring, an irrigation check, a root or thatch exam, or a UF/IFAS soil or tissue sample. “Not yet confirmed” beats a guess with a product bill.',
       },
@@ -1096,7 +1100,8 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
     faq: (copy.faq || [])
       .filter((entry) => ownershipMatches(entry && entry.ownership))
       .filter((entry) => !(entry && entry.scope) || entry.scope === lawnScope)
-      .map(({ ownership: _ownership, scope: _scope, ...entry }) => entry),
+      .filter((entry) => showProducts || !(entry && entry.treatmentOnly))
+      .map(({ ownership: _ownership, scope: _scope, treatmentOnly: _treatmentOnly, ...entry }) => entry),
     documentation,
     illustrations: copy.illustrations || [],
     // Mechanical-only one-time work applies no pesticide: no pesticide safety
