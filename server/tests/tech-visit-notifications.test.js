@@ -11,13 +11,12 @@ const mockSendOpts = [];
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/push-notifications', () => ({
-  // Options (the lock's connection + deadline) are recorded apart, so the
-  // copy assertions below stay about the notification itself.
-  // Like the real sender, beforeDispatch runs after the lookup and right
-  // before the provider handoff; false sends nothing.
+  // Options are recorded apart, so the copy assertions below stay about the
+  // notification itself. Like the real sender, beforeHandoff runs at the
+  // device's final boundary; false sends nothing.
   sendToAdminUser: async (id, notification, opts) => {
     mockSendOpts.push(opts);
-    if (opts && typeof opts.beforeDispatch === 'function' && (await opts.beforeDispatch()) === false) return { superseded: true };
+    if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) return { superseded: true };
     return mockSendToAdminUser(id, notification);
   },
 }));
@@ -50,10 +49,6 @@ function newerCardsQuery() {
   c.first = jest.fn(async () => newerCard);
   lastNewerChain = c;
   return c;
-}
-// The advisory-lock statements the push ran, in order.
-function lockCalls() {
-  return db.raw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql));
 }
 const logger = require('../services/logger');
 const notices = require('../services/tech-visit-notifications');
@@ -296,23 +291,17 @@ describe('notifyTechVisitChange', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('push failed'));
   });
 
-  test('the push runs under the visit\'s cross-instance advisory lock, and a current push is sent', async () => {
+  test('a current push is re-checked at the provider boundary and sent', async () => {
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
     expect(out).toEqual({ sent: true });
-    expect(lockCalls()).toEqual([['SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', ['tech-visit-push:visit-1']]]);
-    // The send runs on the lock's own connection, under its deadline.
-    const opts = mockSendOpts[mockSendOpts.length - 1];
-    expect(opts.connection).toBe(db);
-    expect(opts.deadlineAt).toEqual(expect.any(Number));
-    // The recheck is the sender's beforeDispatch: after the lookup, right
-    // before the handoff (codex #5421 r2).
-    expect(opts.beforeDispatch).toEqual(expect.any(Function));
-    // Every card type sharing the visit- collapse tag counts as newer,
-    // tracking alerts included (codex #5421 r2).
-    expect(lastNewerChain.whereIn).toHaveBeenCalledWith('n.type', expect.arrayContaining(['visit_assigned', 'follow_through_tracking']));
-    // The newer-card check compares against the card this notice wrote.
+    // The recheck is the sender's beforeHandoff (each device's final
+    // boundary, after FCM's OAuth too) — codex #5421 r2/r3.
+    expect(mockSendOpts[mockSendOpts.length - 1].beforeHandoff).toEqual(expect.any(Function));
+    // The newer-card check compares against the card this notice wrote, and
+    // every card type sharing the visit- collapse tag counts (tracking too).
     expect(lastNewerChain.whereNot).toHaveBeenCalledWith('n.id', 'card-' + cardSeq);
     expect(lastNewerChain.whereRaw).toHaveBeenCalledWith("n.payload->>'visit_id' = ?", ['visit-1']);
+    expect(lastNewerChain.whereIn).toHaveBeenCalledWith('n.type', expect.arrayContaining(['visit_assigned', 'follow_through_tracking']));
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
   });
 
@@ -328,7 +317,7 @@ describe('notifyTechVisitChange', () => {
 
   test('the push is skipped when the visit row no longer satisfies cardStands at send time', async () => {
     // The card's own read (FOR SHARE, in its transaction) sees tech-1; the
-    // plain read under the push lock sees the visit already moved to tech-2.
+    // plain read at the provider boundary sees the visit already moved to tech-2.
     db.mockImplementation((table) => {
       if (table === 'technicians') {
         const c = chain(null);
@@ -347,7 +336,6 @@ describe('notifyTechVisitChange', () => {
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
     expect(out).toEqual({ sent: true });
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
-    expect(lockCalls()).toHaveLength(1);
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
@@ -371,19 +359,7 @@ describe('notifyTechVisitChange', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
   });
 
-  test('a lock ERROR still sends, unordered, and never throws', async () => {
-    db.raw.mockImplementation((sql) => { if (/pg_advisory_xact_lock/.test(sql)) throw new Error('lock timeout'); return sql; });
-    try {
-      const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
-      expect(out).toEqual({ sent: true });
-      expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sending unordered'));
-    } finally {
-      db.raw.mockImplementation((sql) => sql);
-    }
-  });
-
-  test('a tracking push re-runs the detector\'s check under the lock and stands down for a newer card (codex #5421 r1/r2)', async () => {
+  test('a tracking push re-runs the detector\'s check at the provider boundary and stands down for a newer card (codex #5421 r1/r2)', async () => {
     const tracking = { technicianId: 'tech-1', visitId: 'visit-1', pushTitle: 'A visit window is underway', cardId: 'card-t' };
     // Current: detector says still overdue, no newer card → sent.
     const checkCurrent = jest.fn(async () => true);

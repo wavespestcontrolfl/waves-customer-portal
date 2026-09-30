@@ -1373,8 +1373,8 @@ async function reconcileOfficeAlert(trx, { card, visit, live, key, type, recipie
 // them, re-notifying the tech every five minutes (codex P1 round 10).
 // Members are locked in id order, the same order every pass takes them in.
 // `lock: false` — the same evaluation as a plain read (no stop lock, no FOR
-// UPDATE), for the push recheck that runs under the visit's push lock and
-// must never block a schedule write across a provider round trip.
+// UPDATE), for the push recheck at the provider boundary, which must never
+// wait on or block a schedule write mid-send.
 async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = false, promises = null, lock = true } = {}) {
   // The STOP's advisory lock first, the same one visit-groups takes for every
   // create/join/split: its splitChild can lock the higher-id child and then
@@ -1497,9 +1497,8 @@ async function cleanupAfterDisable(conn) {
 // leaves, and the sweep may have been running for minutes (codex P1 round
 // 24). Read-only and outside the transaction: the card already stands either
 // way.
-// `rethrow`: under the push lock the recheck runs in a savepoint, and a
-// swallowed query error would leave that savepoint aborted; the lock helper
-// catches it instead (rolled back cleanly, its fail-open policy applies).
+// `rethrow`: the push-boundary recheck lets tech-visit-notifications apply
+// its own error policy (send anyway) instead of this one (stand down).
 async function stillOverdue(conn, notice, { now = new Date(), lock = true, rethrow = false } = {}) {
   try {
     const { visit, live } = await lockedStop(conn, notice.visitId, { now, ignoreHorizon: true, lock });
@@ -1607,12 +1606,12 @@ async function sweep(conn, { now = new Date() } = {}) {
     // missing-tracking push for a visit that has already arrived or moved on:
     // the next sweep dismisses the durable card, but nothing retracts a push
     // (codex P2 round 24).
-    // Asked again UNDER the visit's push lock (plain read, on the lock's
-    // connection): a reassignment's own push can take and release that lock
-    // between this check and ours, and ours must then stand down (codex P1).
+    // Asked again at each device's provider boundary (plain read): an
+    // arrival, completion or reassignment can commit while this push is under
+    // way, and it must then stand down (codex #5421 P1).
     if (notice && await stillOverdue(conn, notice, { now: new Date() })) {
       await techNotices.pushTrackingNotice(notice, {
-        checkCurrent: (lockConn) => stillOverdue(lockConn, notice, { now: new Date(), lock: false, rethrow: true }),
+        checkCurrent: (recheckConn) => stillOverdue(recheckConn, notice, { now: new Date(), lock: false, rethrow: true }),
       });
     }
   }

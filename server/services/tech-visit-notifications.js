@@ -23,13 +23,17 @@
  *     the caller's outermost commit and swallows its own errors.
  *
  * Ordering: the feed row is written under a FOR SHARE recheck of the visit
- * row (writeCard), so it is safe across app instances. The push is ordered
- * per visit by a Postgres advisory lock (utils/tech-visit-push-lock.js) and
- * re-checked under it (pushStillCurrent): a push the visit row now
- * contradicts, or one a NEWER card for the same tech and visit has
- * overtaken, is skipped — the newer change's own push is the one that lands.
- * The in-process per-visit chain (enqueueForVisit) still orders notices
- * within one instance.
+ * row (writeCard), so it is safe across app instances. The push is re-checked
+ * at every device's final provider boundary (push-notifications.js
+ * beforeHandoff — right before each leg, and after FCM's OAuth fetch): a push
+ * the visit row now contradicts, or one a NEWER card for the same tech and
+ * visit has overtaken, is skipped, and the newer change's own push is the one
+ * that lands. Two app instances overlap during a deploy, so this is what
+ * orders pushes across them; the in-process per-visit chain
+ * (enqueueForVisit) orders them within one. No lock is held across the
+ * provider round trip (owner, #5421 r3): the provider does not guarantee
+ * delivery order past the handoff anyway, and a lock there pinned pool
+ * connections and needed timeouts no bound could size.
  *
  * Not covered here (deliberately): route-order shuffles (whole tech-day
  * rewrites, see route-reorder.js's zero-communication note) and series-scope
@@ -42,7 +46,6 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { isAssignable } = require('./technician-eligibility');
 const { parseETDateTime, TZ, etParts, etDateString } = require('../utils/datetime-et');
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
-const { sendUnderVisitPushLock } = require('../utils/tech-visit-push-lock');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
 
@@ -272,7 +275,7 @@ async function loadVisit(visitId, conn, { lock = false } = {}) {
 // run after B→C committed through the new one. A card the row already
 // contradicts is dropped — the writer of the later change tells the tech
 // the current state, and the newest feed row is never stale. The same rules
-// gate the PUSH again, under the visit's push lock (pushStillCurrent). Returns the
+// gate the PUSH again at the provider boundary (pushStillCurrent). Returns the
 // row's holder (technicians.id or null) when the card stands, else false.
 function cardStands({ kind, technicianId, snapshot, previousStatus }, row) {
   // A voice-agent booking is silent until the office confirms it
@@ -388,9 +391,8 @@ async function writeCard(notice) {
 
 // Does the visit row still satisfy cardStands for this visit_* notice (the
 // same rules that admitted the card — reused, not forked)? Read plainly,
-// never FOR SHARE: it runs under the visit's push lock, and a push in flight
-// must not block a schedule write. Rejects on a DB error (the lock helper
-// then sends anyway).
+// never FOR SHARE: a push in flight must not block a schedule write. Rejects
+// on a DB error (pushCard then sends anyway).
 async function pushStillCurrent(notice, conn) {
   const row = await loadVisit(notice.visitId, conn);
   return !!row && !!cardStands(notice, row);
@@ -418,31 +420,35 @@ async function newerCardExists(notice, conn) {
   return !!newer;
 }
 
-// Best-effort push; the card is already durable when this runs. Delivered
-// under the visit's cross-instance push lock and re-checked there, right
-// before the provider handoff (the sender's beforeDispatch): the notice's
-// own rule — `checkCurrent(conn)`, pushStillCurrent for a visit_* card, the
-// detector's still-overdue read for a tracking notice — and, for either, no
-// newer card for this tech and visit. The send runs on the lock's connection
-// and stops starting device legs at its deadline — see
-// utils/tech-visit-push-lock.js.
+// Best-effort push; the card is already durable when this runs. Re-checked
+// at every device's final provider boundary (the sender's beforeHandoff):
+// the notice's own rule — `checkCurrent(conn)`, pushStillCurrent for a
+// visit_* card, the detector's still-overdue read for a tracking notice —
+// and, for either, no newer card for this tech and visit. A clean "stale"
+// skips the push; a recheck ERROR sends anyway (owner steer: a missed alert
+// is worse than a rare misordered one).
 async function pushCard(notice, { checkCurrent = null } = {}) {
   try {
     const PushService = require('./push-notifications');
-    const out = await sendUnderVisitPushLock(notice.visitId, {
-      isCurrent: async (conn) => {
-        if (checkCurrent && (await checkCurrent(conn)) === false) return false;
-        return !(notice.cardId && await newerCardExists(notice, conn));
-      },
-      send: (conn, { deadlineAt, beforeDispatch }) => PushService.sendToAdminUser(notice.technicianId, {
-        title: notice.pushTitle,
-        body: '',
-        url: '/tech',
-        tag: `visit-${notice.visitId}`,
-        priority: 'high',
-      }, { connection: conn, deadlineAt, beforeDispatch }),
-    });
-    if (out.stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
+    let stale = false;
+    const beforeHandoff = async () => {
+      try {
+        if (checkCurrent && (await checkCurrent(db)) === false) stale = true;
+        else if (notice.cardId && await newerCardExists(notice, db)) stale = true;
+      } catch (err) {
+        logger.warn(`[tech-visit-notifications] push recheck failed for visit ${notice.visitId} (${errorTag(err)}); sending`);
+        return true;
+      }
+      return !stale;
+    };
+    await PushService.sendToAdminUser(notice.technicianId, {
+      title: notice.pushTitle,
+      body: '',
+      url: '/tech',
+      tag: `visit-${notice.visitId}`,
+      priority: 'high',
+    }, { beforeHandoff });
+    if (stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
   }
@@ -512,8 +518,8 @@ async function notifyTechVisitChange(args = {}) {
 // write, then push, before the next batch starts. The chain is IN-PROCESS: it
 // orders notices within one app instance only. Across instances (two overlap
 // during a deploy) the cards are protected by writeCard's FOR SHARE recheck
-// and the pushes by the per-visit advisory lock + recheck in pushCard. Entries
-// clear themselves when the chain drains.
+// and the pushes by pushCard's recheck at each device's provider boundary.
+// Entries clear themselves when the chain drains.
 const visitQueues = new Map();
 function enqueueForVisit(visitId, fn) {
   const key = String(visitId);
@@ -645,9 +651,10 @@ module.exports = {
   // commit order (one queue, not two).
   enqueueForVisit,
   recordTrackingNotice,
-  // `checkCurrent(conn)`: the detector's still-overdue read, run under the
-  // visit's push lock so a reassignment/arrival/completion whose own push
-  // went first is never followed by a stale tracking push.
+  // `checkCurrent(conn)`: the detector's still-overdue read, re-run at each
+  // device's provider boundary so an arrival/completion/reassignment that
+  // commits while the push is under way is never followed by a stale
+  // tracking push.
   pushTrackingNotice: (notice, { checkCurrent = null } = {}) => pushCard(notice, { checkCurrent }),
   // Reused by no-show-detector.js so a tracking notice reads the same "who
   // / when" a visit_* card does, instead of a second date formatter.
