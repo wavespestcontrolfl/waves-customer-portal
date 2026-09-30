@@ -121,7 +121,10 @@ async function verifyPin({
     throw actionError('Confirm the primary service location before verifying it.', 400, 'confirmation_required');
   }
   if (!Number.isFinite(input.latitude) || !Number.isFinite(input.longitude)
-    || !isInServiceAreaBox(input.latitude, input.longitude)) {
+    || !isInServiceAreaBox(input.latitude, input.longitude, {
+      county: input.address?.county || null,
+      zip: (reviewAddressPatch(input.address) || customer).zip,
+    })) {
     throw actionError('Verified coordinates must be inside the service area.', 400, 'invalid_verified_pin');
   }
   if (!REVIEW_SOURCES.has(input.source) || !String(input.evidence || '').trim()) {

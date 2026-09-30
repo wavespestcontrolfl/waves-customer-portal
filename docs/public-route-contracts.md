@@ -3822,8 +3822,12 @@ against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
-`{ error: 'service_area_unavailable' }`, recoverable), else the box test
-`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
+DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
+rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
+is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
+DeSoto ZIP); elsewhere in the box is in. Out of area 422s
 `{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
 address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
 The slot is re-validated against a fresh single-day
