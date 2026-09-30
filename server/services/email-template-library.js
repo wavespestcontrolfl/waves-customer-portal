@@ -18,6 +18,7 @@ const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
 const { withOutlinkTrackingForEmail } = require('./outlink-tracking');
+const { resolveEmailLinks } = require('./email-lead-links');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -1450,6 +1451,12 @@ async function sendTemplate({
   // automation executor's email-division ledger fence; see
   // prepareTemplateSend).
   marketingRequiresLedger = false,
+  // Provenance only (email_messages.lead_id / estimate_id, recorded by
+  // resolveEmailLinks; never affects delivery, guards or dedupe): the lead the
+  // mail is for, and the estimate it concerns when the caller has no
+  // `estimateId` to hand the annual-offer guard (a deposit receipt).
+  leadId = null,
+  linkEstimateId = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   const auditRefusal = (err) => auditSendRefusal(err, {
@@ -1511,6 +1518,10 @@ async function sendTemplate({
   // Fresh per send attempt; echoed in custom_args so the webhook fallback can tell
   // this attempt's events from a prior (retried) attempt's. See webhooks-sendgrid.js.
   const sendAttemptToken = crypto.randomUUID();
+  // The single chokepoint for tying prospect mail to its lead / estimate.
+  const links = await resolveEmailLinks({
+    recipientType, recipientId, leadId, estimateId, estimateIds, linkEstimateId, payload, test,
+  });
   const messageSnapshot = {
     provider: 'sendgrid',
     send_attempt_token: sendAttemptToken,
@@ -1522,6 +1533,8 @@ async function sendTemplate({
     trigger_event_id: triggerEventId || null,
     recipient_type: test ? 'test' : (recipientType || null),
     recipient_id: recipientId || null,
+    lead_id: links.lead_id,
+    estimate_id: links.estimate_id,
     recipient_email_snapshot: to,
     from_name_snapshot: fromName,
     from_email_snapshot: fromEmail,
