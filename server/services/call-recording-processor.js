@@ -1578,6 +1578,10 @@ function formTypedAddressOf(row) {
   const ex = parseJsonObjectSafe(row.extracted_data);
   const addr = parseJsonObjectSafe(ex?.address);
   if (!ex || !FORM_LEAD_STAGES.has(ex.stage) || !addr || !String(addr.line1 || '').trim()) return null;
+  // Unit-bearing addresses are outside the street-level lane entirely: a
+  // street-level match cannot verify a unit, and a form for Apt 4 must never
+  // vouch for an on-file edit to Apt 5.
+  if (String(addr.line2 || '').trim()) return null;
   return { line1: String(addr.line1).trim(), city: addr.city, zip: addr.zip };
 }
 // True when the customer's on-file street is what their own web form typed:
@@ -1587,7 +1591,7 @@ function formTypedAddressOf(row) {
 // fails closed.
 async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
   try {
-    if (!knownCaller?.id) return false;
+    if (!knownCaller?.id || String(knownCaller.addressLine2 || '').trim()) return false;
     const line1 = String(knownCaller.addressLine1 || '').trim();
     const house = houseNumberOf(line1);
     const name = streetNameKey(line1);
@@ -1627,6 +1631,7 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
 function streetLevelMatch(knownCaller, verdict) {
   if (!verdict || verdict.status !== 'missing_component' || verdict.granularity !== 'ROUTE') return null;
   if (verdict.inServiceArea === false) return null;
+  if (String(knownCaller.addressLine2 || '').trim()) return null;   // a unit cannot be verified to the street
   const line1 = String(knownCaller.addressLine1 || '').trim();
   const house = houseNumberOf(line1);
   if (!house) return null;                           // no house number: nothing to read back
@@ -1653,6 +1658,7 @@ function applyStreetLevelFormVerdict(knownCaller, verdict) {
   if (verdict?.inServiceArea !== true || verdict?.streetLevel?.granularity !== 'ROUTE') return knownCaller;
   if (!['google_county', 'google_zip'].includes(verdict.streetLevel.areaBasis)) return knownCaller;
   if (!houseNumberOf(knownCaller.addressLine1)) return knownCaller;
+  if (String(knownCaller.addressLine2 || '').trim()) return knownCaller;
   if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
   knownCaller.addressTrusted = true;
   knownCaller.addressOnly = true;
@@ -1676,6 +1682,32 @@ function buildStreetLevelReadbackItem({ knownCaller, routingResult, callLogId, e
       confirmation_question: 'Google confirmed the street but not the house number (new-build street?). Read the address on file back to the caller before the visit.',
     },
   });
+}
+// Writes the street-level read-back card INSIDE the booking transaction and
+// throws unless a row ends up describing THIS booking. A force-reprocess can
+// find an open address_readback row from an earlier pass: the conflict target
+// is the open-card partial index, and on conflict the open row's payload is
+// refreshed with the current card (booked visit id and the house-number
+// warning included) rather than ignored, so the surviving card is never stale.
+// A card someone already resolved or dismissed is not open, so a fresh one is
+// inserted. Exported for the reprocess tests.
+function buildStreetLevelReadbackWrite(conn, item, scheduledServiceId) {
+  const payload = JSON.stringify({ ...JSON.parse(item.payload), scheduled_service_id: scheduledServiceId });
+  return conn('triage_items')
+    .insert({ ...item, payload })
+    .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+    .merge({
+      payload: conn.raw("COALESCE(triage_items.payload, '{}'::jsonb) || excluded.payload"),
+      updated_at: conn.fn.now(),
+    })
+    .returning('id');
+}
+async function recordStreetLevelReadback(conn, item, scheduledServiceId) {
+  const rows = await buildStreetLevelReadbackWrite(conn, item, scheduledServiceId);
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error('street-level address read-back card was not recorded');
+  }
+  return rows[0];
 }
 function applyOnFileAddressVerdict(knownCaller, verdict) {
   if (!knownCaller) return knownCaller;
@@ -17208,12 +17240,7 @@ const CallRecordingProcessor = {
                   // for review through the approved-but-unbooked fallback), so
                   // the unvalidated house never dispatches without its warning.
                   if (v2StreetLevelReadbackItem && onFileAuthority.useOnFileAddress) {
-                    await trx('triage_items')
-                      .insert({
-                        ...v2StreetLevelReadbackItem,
-                        payload: JSON.stringify({ ...JSON.parse(v2StreetLevelReadbackItem.payload), scheduled_service_id: created.id }),
-                      })
-                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+                    await recordStreetLevelReadback(trx, v2StreetLevelReadbackItem, created.id);
                   }
                   // Visit groups (visit-group-scope.md §2): stamp at
                   // scheduling — a confirmed phone booking never passes
@@ -21054,6 +21081,8 @@ CallRecordingProcessor._test = {
   onFileAddressIsFromWebForm,
   streetLevelMatch,
   buildStreetLevelReadbackItem,
+  buildStreetLevelReadbackWrite,
+  recordStreetLevelReadback,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,

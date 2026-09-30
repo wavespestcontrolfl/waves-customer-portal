@@ -15,6 +15,8 @@ const {
   onFileAddressIsFromWebForm,
   streetLevelMatch,
   buildStreetLevelReadbackItem,
+  buildStreetLevelReadbackWrite,
+  recordStreetLevelReadback,
 } = CallRecordingProcessor._test;
 
 const GATE = 'GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL';
@@ -380,10 +382,75 @@ describe('codex round 1 on #5381', () => {
     // The only writer of the item is inside the scheduled_services transaction, unguarded, after the visit insert.
     const writes = src.split('v2StreetLevelReadbackItem').length - 1;
     expect(src).toMatch(/v2StreetLevelReadbackItem = buildStreetLevelReadbackItem\(/);
-    const insertAt = src.indexOf("await trx('triage_items')\n                      .insert({\n                        ...v2StreetLevelReadbackItem");
+    const insertAt = src.indexOf('await recordStreetLevelReadback(trx, v2StreetLevelReadbackItem');
     const visitInsertAt = src.indexOf(".insert(insertData)");
     expect(insertAt).toBeGreaterThan(visitInsertAt);
     expect(src).not.toMatch(/db\('triage_items'\)\s*\.insert\(streetLevelReadback\)/);
     expect(writes).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('codex round 2 on #5381', () => {
+  test('P1: a unit-bearing address is outside the street-level lane, on either side', async () => {
+    gateOn();
+    const formAddr = { line1: '1234 Sample Newbuild Trl', line2: 'Apt 4', city: 'Parrish', state: 'FL', zip: '34219' };
+    const conn = (rows) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => rows });
+    // A form for Apt 4 never vouches for anything — not Apt 4, and not an on-file edit to Apt 5.
+    expect(await onFileAddressIsFromWebForm(lead(), conn([{ first_contact_channel: 'form', extracted_data: { stage: 'lead_webhook_received', address: formAddr } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line2: 'Apt 5' }), conn([{ first_contact_channel: 'form', extracted_data: { stage: 'lead_webhook_received', address: formAddr } }]))).toBe(false);
+    // An on-file unit alone (form without one) is excluded too, and a unit-free form row still works for a unit-free record.
+    const plain = { first_contact_channel: 'form', extracted_data: { stage: 'lead_webhook_received', address: { ...formAddr, line2: '' } } };
+    expect(await onFileAddressIsFromWebForm(lead({ address_line2: 'Apt 5' }), conn([plain]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead(), conn([plain]))).toBe(true);
+    // Google's street-level answer never books a unit, and the whole path stays untrusted.
+    expect(streetLevelMatch(lead({ address_line2: 'Apt 5' }), routeLevel())).toBeNull();
+    const out = await trustValidatedNewLeadAddress(lead({ address_line2: 'Apt 5' }), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm });
+    expect(out.addressTrusted).toBe(false);
+    expect(yesForm).not.toHaveBeenCalled();
+    // A persisted street-level verdict cannot be replayed onto a record that now carries a unit.
+    const verdict = {
+      status: 'street_level_form_accept', inServiceArea: true,
+      address: { line1: '1234 sample newbuild trl', line2: 'apt 5', city: 'parrish', state: 'fl', zip: '34219' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_zip' },
+    };
+    const customer = { id: 'lead-1', pipeline_stage: 'new_lead', address_line1: '1234 Sample Newbuild Trl', address_line2: 'Apt 5', city: 'Parrish', state: 'FL', zip: '34219' };
+    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: verdict }).options.knownCustomer).toBeNull();
+  });
+
+  describe('P1: the read-back card refreshes an open row on a reprocess', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const item = () => {
+      const routing = { usesOnFileAddress: true };
+      return trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm })
+        .then((k) => buildStreetLevelReadbackItem({ knownCaller: k, routingResult: routing, callLogId: 'call-1', extraction: confirmed() }));
+    };
+
+    test('the write is an upsert on the open-card index that merges the current payload and returns the row', async () => {
+      gateOn();
+      const q = buildStreetLevelReadbackWrite(knex, await item(), 'visit-9').toSQL();
+      const sql = q.sql.replace(/\s+/g, ' ');
+      expect(sql).toMatch(/insert into "triage_items"/);
+      expect(sql).toMatch(/on conflict \(call_log_id, reason_code\) WHERE status IN \('open', 'in_progress'\) do update set/i);
+      expect(sql).toMatch(/"payload" = COALESCE\(triage_items\.payload, '\{\}'::jsonb\) \|\| excluded\.payload/);
+      expect(sql).not.toMatch(/do nothing/i);
+      expect(sql).toMatch(/returning "id"/);
+      const payload = JSON.parse(q.bindings.find((b) => typeof b === 'string' && b.includes('address_source')));
+      expect(payload).toMatchObject({ scheduled_service_id: 'visit-9', address_source: 'web_form_on_file', address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219' });
+      expect(payload.confirmation_question).toMatch(/house number/);
+    });
+
+    test('a landed row is returned; nothing landing throws so the booking rolls back', async () => {
+      gateOn();
+      const conn = (rows) => Object.assign(() => ({ insert: () => ({ onConflict: () => ({ merge: () => ({ returning: async () => rows }) }) }) }), { raw: (x) => x, fn: { now: () => 'now' } });
+      expect(await recordStreetLevelReadback(conn([{ id: 7 }]), await item(), 'visit-9')).toEqual({ id: 7 });   // insert OR update of the open row
+      await expect(recordStreetLevelReadback(conn([]), await item(), 'visit-9')).rejects.toThrow(/not recorded/);
+      await expect(recordStreetLevelReadback(conn(undefined), await item(), 'visit-9')).rejects.toThrow(/not recorded/);
+    });
+
+    test('the booking transaction uses the helper, unguarded', () => {
+      const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+      expect(src).toContain('await recordStreetLevelReadback(trx, v2StreetLevelReadbackItem, created.id);');
+      expect(src).not.toMatch(/\.\.\.v2StreetLevelReadbackItem,[\s\S]{0,200}\.ignore\(\)/);
+    });
   });
 });
