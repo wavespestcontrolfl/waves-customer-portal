@@ -412,6 +412,40 @@ describe('DELETE /admin/communications/scheduled/:id', () => {
     expect(workflowOwnerOf({ entry_point: 'referral_nudge_deferred' })).toBe('referral_nudge_deferred');
   });
 
+  // Fable review on #5364, P2: the inline recruiting reconcile only maps
+  // 'deferred' → 'blocked', so an already-attempted recruiting row (ledger at
+  // 'handoff') must be refused, not exempted.
+  test('workflowOwnerOf: an attempted recruiting row (finalize_only or provider retry) is workflow-owned', () => {
+    const { workflowOwnerOf } = require('../services/scheduled-sms-cancel');
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', finalize_only: true })).toBe('recruiting_comms_deferred');
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', provider_retry_at: '2026-09-30T00:00:00Z' })).toBe('recruiting_comms_deferred');
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', scheduled_sms_recovered_at: '2026-09-30T00:00:00Z' })).toBe('recruiting_comms_deferred');
+    expect(workflowOwnerOf({ entry_point: 'recruiting_comms_deferred', finalize_only: false })).toBeNull();
+  });
+
+  // Fable review on #5364, P2: the AI auto-reply provider retry holds no state
+  // outside its row, and the IB tool refuses it — the inbox stays its cancel path.
+  test('workflowOwnerOf: the stateless AI auto-reply retry stays deletable', () => {
+    const { workflowOwnerOf } = require('../services/scheduled-sms-cancel');
+    expect(workflowOwnerOf({ entry_point: 'twilio_inbound_ai_assistant_retry', provider_retry: true })).toBeNull();
+  });
+
+  test('workflowOwnerOf: a non-empty falsy bundled_review_request_id is owned, matching the SQL twin', () => {
+    const { workflowOwnerOf } = require('../services/scheduled-sms-cancel');
+    expect(workflowOwnerOf({ bundled_review_request_id: 0 })).toBe('review request');
+    expect(workflowOwnerOf({ bundled_review_request_id: '' })).toBeNull();
+  });
+
+  test('an attempted recruiting row is refused from the inbox and left in place', async () => {
+    seedScheduledRow('sms-rec-attempted', {
+      metadata: { entry_point: 'recruiting_comms_deferred', finalize_only: true, job_application_id: 'app-3', ledger_entry_id: 'entry-3' },
+    });
+    const { status } = await withServer((baseUrl) => cancel(baseUrl, 'sms-rec-attempted'));
+    expect(status).toBe(409);
+    expect(mockReconcileLedger).not.toHaveBeenCalled();
+    expect(db.__store.sms_log['sms-rec-attempted']).toBeDefined();
+  });
+
   // Same race shape as the review-ask-reservation race test above, for the
   // new CAS: an entry_point stamped by a concurrent writer between this
   // request's pre-check and its own conditional DELETE must still refuse —

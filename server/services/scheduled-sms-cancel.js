@@ -37,10 +37,11 @@
  * metadata.entry_point (any value, registry-owned or not — several
  * non-registry producers such as estimate_deposit_receipt_requeue and
  * referral_nudge_deferred also park scheduled rows), metadata.replay_purpose,
- * or metadata.bundled_review_request_id. The one exemption is
- * `recruiting_comms_deferred`, which this writer already reconciles inline
- * (reconcileCancelledRecruitingText) to the SAME 'blocked' outcome that
- * entry point's onTerminal would produce. The Intelligence Bar's
+ * or metadata.bundled_review_request_id. Exemptions: a never-attempted
+ * `recruiting_comms_deferred` row, which this writer already reconciles
+ * inline (reconcileCancelledRecruitingText) to the SAME 'blocked' outcome
+ * that entry point's onTerminal would produce, and STATELESS_ENTRY_POINTS,
+ * which hold nothing outside the row. The Intelligence Bar's
  * cancel_queued_message reaches the same refusal via `simpleOnly`.
  * Enforced in the SAME statement that cancels (both the DELETE and the
  * fallback UPDATE), so a row that becomes workflow-owned between read and
@@ -58,19 +59,39 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 
 // The one deferred-replay entry point this writer already reconciles
 // inline (see reconcileCancelledRecruitingText below) — exempt from the
-// refuseWorkflowOwned predicate for that reason.
+// refuseWorkflowOwned predicate, but ONLY while the row was never attempted:
+// the inline reconcile maps just 'deferred' → 'blocked', so a finalize_only
+// or provider-retry row (ledger entry at 'handoff') would strand the ledger.
 const RECRUITING_COMMS_DEFERRED_ENTRY_POINT = 'recruiting_comms_deferred';
+// Entry points that hold no state outside the row itself (no registry hooks,
+// nothing to strand): deleting them is always safe, and refusing them would
+// leave no cancel path at all (the IB tool refuses them as non-simple).
+// twilio-webhook.js queues the AI auto-reply provider retry under this one.
+const STATELESS_ENTRY_POINTS = new Set(['twilio_inbound_ai_assistant_retry']);
+
+function metaText(value) {
+  return value == null ? '' : String(value);
+}
+
+function priorAttemptOf(m) {
+  const finalizeOnly = metaText(m.finalize_only);
+  if (finalizeOnly !== '' && finalizeOnly !== 'false') return true;
+  return Object.keys(m).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k));
+}
 
 // Non-null (a human-readable owner name) only when this row's metadata marks
 // it as owned by an automated workflow this writer does not clean up after.
 // MUST stay in lockstep with workflowOwnedWhere's SQL below.
 function workflowOwnerOf(meta) {
-  const m = meta && typeof meta === 'object' ? meta : {};
-  const entryPoint = m.entry_point == null ? '' : String(m.entry_point);
-  if (entryPoint === RECRUITING_COMMS_DEFERRED_ENTRY_POINT) return null;
+  const m = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const entryPoint = metaText(m.entry_point);
+  if (STATELESS_ENTRY_POINTS.has(entryPoint)) return null;
+  if (entryPoint === RECRUITING_COMMS_DEFERRED_ENTRY_POINT) {
+    return priorAttemptOf(m) ? entryPoint : null;
+  }
   if (entryPoint) return entryPoint;
-  if (m.replay_purpose != null && String(m.replay_purpose) !== '') return String(m.replay_purpose);
-  if (m.bundled_review_request_id) return 'review request';
+  if (metaText(m.replay_purpose) !== '') return metaText(m.replay_purpose);
+  if (metaText(m.bundled_review_request_id) !== '') return 'review request';
   return null;
 }
 
@@ -172,16 +193,20 @@ function pinnedCustomer(query, expectedCustomerId) {
   return expectedCustomerId === undefined ? query : query.where({ customer_id: expectedCustomerId });
 }
 
-// SQL twin of workflowOwnerOf: the row is matchable only when it is the
-// recruiting exemption or carries none of the workflow-ownership markers.
+// SQL twin of workflowOwnerOf: the row is matchable only when it is a
+// stateless entry point, a never-attempted recruiting row, or carries none of
+// the workflow-ownership markers.
 function workflowOwnedWhere(query, refuseWorkflowOwned) {
   if (!refuseWorkflowOwned) return query;
   return query.whereRaw(
-    `(COALESCE(metadata->>'entry_point', '') = ?
+    `(COALESCE(metadata->>'entry_point', '') = ANY(?::text[])
+      OR (COALESCE(metadata->>'entry_point', '') = ?
+          AND COALESCE(metadata->>'finalize_only', '') IN ('', 'false')
+          AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) AS k WHERE k ~ ?))
       OR (COALESCE(metadata->>'entry_point', '') = ''
           AND COALESCE(metadata->>'replay_purpose', '') = ''
           AND COALESCE(metadata->>'bundled_review_request_id', '') = ''))`,
-    [RECRUITING_COMMS_DEFERRED_ENTRY_POINT],
+    [[...STATELESS_ENTRY_POINTS], RECRUITING_COMMS_DEFERRED_ENTRY_POINT, PRIOR_ATTEMPT_KEY_SQL],
   );
 }
 
