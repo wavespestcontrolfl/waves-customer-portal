@@ -284,10 +284,12 @@ describe('processRecording claims are fenced to the expected recording when one 
 // outcome update addresses this recording's row only (codex #3736 gh-r7).
 describe('route decisions are keyed on the recording they were derived from', () => {
   const { body } = processRecordingBody();
-  test('both route_decisions inserts are targetless DO NOTHING (no constraint named — rolling-deploy safe) and pass the recording', () => {
-    const inserts = body.match(/route_decisions'\)[\s\S]{0,120}?\.onConflict\(([^)]*)\)/g) || [];
-    expect(inserts.length).toBe(2);
-    for (const i of inserts) expect(i).toMatch(/\.onConflict\(\)$/);
+  test('both route_decisions writes go through upsertRouteDecision (insert-or-refresh on the recording-keyed index, fenced to the owning pass) and pass the recording', () => {
+    // No bare insert path is left: a bare ON CONFLICT DO NOTHING is what let a
+    // reprocess that decided differently leave the superseded verdict newest.
+    expect(body).not.toMatch(/route_decisions'\)[\s\S]{0,120}?\.onConflict\(/);
+    const writes = body.match(/upsertRouteDecision\(db, \w+, \{ callLogId: call\.id, processingToken: procToken \}\)/g) || [];
+    expect(writes.length).toBe(2);
     expect((body.match(/recordingSid: call\.recording_sid/g) || []).length).toBe(2);
   });
   test('the same-run outcome update is scoped to this recording', () => {
