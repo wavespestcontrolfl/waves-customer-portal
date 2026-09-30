@@ -39,8 +39,8 @@ describe('classifyListing', () => {
     expect(r.detail.address_checked).toBe(false);
   });
 
-  test('mismatched phone names the field and the value seen', () => {
-    const r = classifyListing(page('<h1>Waves Pest Control</h1><p>(941) 555-0142</p>'), expected);
+  test('a stated (JSON-LD) phone that is not ours is mismatched, naming the field and the value seen', () => {
+    const r = classifyListing(page(`<h1>Waves Pest Control</h1>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '(941) 555-0142' })}`), expected);
     expect(r.status).toBe('mismatched');
     expect(r.detail.mismatches).toEqual([{ field: 'phone', expected: WAVES_LOCATIONS.map((l) => l.phone).join(' or '), seen: ['(941) 555-0142'] }]);
     expect(r.nap.nap_phone).toBe('(941) 555-0142');
@@ -198,7 +198,9 @@ describe('classifyListing', () => {
 
     test('nap_name and nap_phone are observed values too', () => {
       const r = classifyListing(page('', { html: `<html><body><h1>WAVES PEST CONTROL</h1><p>(941) 555-0142</p>${filler}</body></html>` }), candidatesFor({}));
-      expect(r.nap).toEqual({ nap_name: 'WAVES PEST CONTROL', nap_phone: '(941) 555-0142', nap_address: null });
+      expect(r.nap).toEqual({ nap_name: 'WAVES PEST CONTROL', nap_phone: null, nap_address: null }); // an unrelated visible phone is not the listing's
+      const stated = classifyListing(page(`<h1>x</h1>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '(941) 555-0142' })}`), candidatesFor({}));
+      expect(stated.nap.nap_phone).toBe('(941) 555-0142');
       const e = classifyListing(page(`<h1>x</h1><p>${BRAND.phone}</p>${ld(LUXE_ENTITY({ streetAddress: '13649 Luxe Ave' }))}`), candidatesFor({}));
       expect(e.nap.nap_name).toBe('Waves Pest Control');
     });
@@ -265,7 +267,7 @@ describe('classifyListing', () => {
       test('entity with no phone: the phone is read from the text', () => {
         expect(listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', address: { streetAddress: '13649 Luxe Avenue' } }, footer).status).toBe('verified');
         const wrong = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control' }, '<p>(941) 555-0142</p>');
-        expect(wrong.detail.mismatches.map((m) => m.field)).toEqual(['phone']);
+        expect(wrong).toMatchObject({ status: 'unverified', detail: { reason: 'phone_unconfirmed', seen: ['(941) 555-0142'] } }); // visible phones cannot prove a mismatch
       });
 
       describe('stated vs parsed: a stated field we cannot read fails, it is never treated as unstated', () => {
@@ -358,8 +360,93 @@ describe('classifyListing', () => {
     const body = `<h1>Waves Pest Control</h1><p>${PARRISH.phone}</p>`;
     expect(classifyListing(page(body), candidatesFor({ location_id: 'parrish' })).status).toBe('verified');
     const other = classifyListing(page(body), candidatesFor({ location_id: 'venice' }));
-    expect(other.status).toBe('mismatched');
-    expect(other.detail.mismatches[0]).toMatchObject({ field: 'phone', expected: WAVES_LOCATIONS.find((l) => l.id === 'venice').phone });
+    expect(other).toMatchObject({ status: 'unverified', detail: { reason: 'phone_unconfirmed' } });
+    const stated = classifyListing(page(`<h1>Waves Pest Control</h1>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: PARRISH.phone })}`), candidatesFor({ location_id: 'venice' }));
+    expect(stated.status).toBe('mismatched');
+    expect(stated.detail.mismatches[0]).toMatchObject({ field: 'phone', expected: WAVES_LOCATIONS.find((l) => l.id === 'venice').phone });
+  });
+
+  describe('visible phones are not listing evidence (Codex P2-1)', () => {
+    const wavesName = '<h1>Waves Pest Control</h1>';
+    test('the Waves name with an unrelated support/ad/sidebar phone and none of ours is unverified/phone_unconfirmed, never mismatched', () => {
+      const r = classifyListing(page(`${wavesName}<p>Support: (813) 555-0100</p><aside>Ad: (941) 555-0199</aside>`), candidatesFor({}));
+      expect(r.status).toBe('unverified');
+      expect(r.detail).toMatchObject({ reason: 'phone_unconfirmed', seen: ['(813) 555-0100', '(941) 555-0199'] });
+      expect(r.nap.nap_phone).toBeNull();
+    });
+    test('our phone among unrelated ones confirms the phone', () => {
+      expect(classifyListing(page(`${wavesName}<p>(813) 555-0100</p><p>${BRAND.phone}</p>`), candidatesFor({})).status).toBe('verified');
+    });
+    test('no phone at all on the page stays fetch-blocked/phone_not_found', () => {
+      expect(classifyListing(page(wavesName), candidatesFor({}))).toMatchObject({ status: 'fetch-blocked', detail: { reason: 'phone_not_found' } });
+    });
+    test('an unrelated phone with neither our name nor our phone is no NAP at all', () => {
+      expect(classifyListing(page('<h1>Acme</h1><p>(813) 555-0100</p>', { html: `<html><body><h1>Acme</h1><p>(813) 555-0100</p>${filler}</body></html>` }), candidatesFor({})).detail.reason).toBe('no_nap_found');
+    });
+  });
+
+  describe('several Waves entities: the one matching the expected office is judged (Codex P2-4)', () => {
+    const VENICE = WAVES_LOCATIONS.find((l) => l.id === 'venice');
+    const parent = { '@type': 'Organization', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '13649 Luxe Ave #110', addressLocality: 'Bradenton', addressRegion: 'FL', postalCode: '34211' } };
+    const branch = { '@type': 'LocalBusiness', name: 'Waves Pest Control Venice', telephone: VENICE.phone, address: { streetAddress: '1978 S Tamiami Trl #10', addressLocality: 'Venice', addressRegion: 'FL', postalCode: '34293' } };
+    const withParent = (candidates) => classifyListing(page(`<h1>Waves Pest Control</h1>${ld({ ...parent, mainEntity: branch })}`), candidates);
+
+    test('a parent Organization (default office) followed by a branch mainEntity matching the assigned office -> verified', () => {
+      expect(withParent(candidatesFor({ location_id: 'venice' }))).toMatchObject({ status: 'verified', detail: { office: 'venice' } });
+    });
+    test('an unassigned brand row picks the node whose phone matches ANY office (here the first, then the branch)', () => {
+      expect(withParent(candidatesFor({})).status).toBe('verified');
+      const reversed = classifyListing(page(`<h1>Waves Pest Control</h1>${ld({ '@graph': [branch, parent] })}`), candidatesFor({ location_id: 'bradenton' }));
+      expect(reversed).toMatchObject({ status: 'verified', detail: { office: 'bradenton' } });
+    });
+    test('phone first, then address/city: a node with the office address but no phone is preferred over a wrong-address one', () => {
+      const noPhone = { '@type': 'LocalBusiness', name: 'Waves Pest Control', address: { streetAddress: '1978 South Tamiami Trail', addressLocality: 'Venice' } };
+      const other = { '@type': 'LocalBusiness', name: 'Waves Pest Control', address: { streetAddress: '99 Old Rd', addressLocality: 'Tampa' } };
+      const r = classifyListing(page(`<h1>Waves Pest Control</h1><p>${VENICE.phone}</p>${ld({ '@graph': [other, noPhone] })}`), candidatesFor({ location_id: 'venice' }));
+      expect(r.status).toBe('verified');
+    });
+    test('no node matches the office: the first address-bearing one is judged as before (stated mismatch)', () => {
+      const r = withParent(candidatesFor({ location_id: 'parrish' }));
+      expect(r.status).toBe('mismatched');
+      expect(r.detail.mismatches.map((m) => m.field)).toContain('address');
+    });
+  });
+
+  describe('a short page with a usable Waves entity is judged on the entity (Codex P2-5)', () => {
+    const shortPage = (body) => ({ status: 200, finalUrl: 'https://dir.example/w', redirectHops: 0, html: `<html><head><title>Waves</title></head><body>${body}</body></html>`, blocked: false, truncated: false, contentType: 'text/html', error: null });
+    test('a complete entity on a tiny page verifies (or mismatches) instead of empty_or_js_only', () => {
+      const good = shortPage(`<div id="root"></div>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '13649 Luxe Ave #110', addressLocality: 'Bradenton', postalCode: '34211' } })}`);
+      expect(classifyListing(good, candidatesFor({})).status).toBe('verified');
+      const bad = shortPage(`<div id="root"></div>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '(941) 555-0142' })}`);
+      expect(classifyListing(bad, candidatesFor({})).status).toBe('mismatched');
+    });
+    test('a short page WITHOUT a usable Waves entity is still empty_or_js_only', () => {
+      expect(classifyListing(shortPage('<div id="root"></div>'), candidatesFor({})).detail.reason).toBe('empty_or_js_only');
+      expect(classifyListing(shortPage(`<p>Acme</p>${ld({ '@type': 'LocalBusiness', name: 'Acme Bug Co', telephone: '(813) 555-0100' })}`), candidatesFor({})).detail.reason).toBe('empty_or_js_only');
+    });
+  });
+
+  describe('unpunctuated structured address strings (Codex P2-3)', () => {
+    const { parseAddress } = auditor._internals;
+    test.each([
+      '13649 Luxe Ave #110 Bradenton FL 34211',
+      '13649 Luxe Ave #110\nBradenton\nFL 34211',
+      '13649 Luxe Avenue Bradenton, FL 34211-5678',
+      '13649 Luxe Ave #110, Bradenton, FL 34211',
+    ])('%j parses to street / city / region / postal', (str) => {
+      expect(parseAddress(str)).toEqual({ street: '13649 luxe avenue', city: 'bradenton', region: 'fl', postal: '34211' });
+    });
+    test('directionals and multi-word cities split at the last suffix', () => {
+      expect(parseAddress('5155 115th Cir E Parrish FL 34219')).toEqual({ street: '5155 115th circle east', city: 'parrish', region: 'fl', postal: '34219' });
+      expect(parseAddress('1978 S Tamiami Trl Unit 10 Venice FL 34293')).toEqual({ street: '1978 south tamiami trail', city: 'venice', region: 'fl', postal: '34293' });
+      expect(parseAddress('13649 Luxe Ave Lakewood Ranch FL 34211')).toMatchObject({ street: '13649 luxe avenue', city: 'lakewood ranch' });
+    });
+    test('an entity address given as unpunctuated free text verifies, and a wrong one is a mismatch on the right fields', () => {
+      const via = (address) => classifyListing(page(`<h1>Waves Pest Control</h1>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address })}`), candidatesFor({}));
+      expect(via('13649 Luxe Ave #110 Bradenton FL 34211').status).toBe('verified');
+      expect(via('13649 Luxe Ave #110\nBradenton\nFL 34211').status).toBe('verified');
+      expect(via('13649 Luxe Ave #110 Tampa FL 33601').detail.mismatches.map((m) => m.field)).toEqual(['city', 'postal_code']);
+    });
   });
 
   test('a truncated prefix of a page whose full version is mismatched is never verified', () => {
@@ -463,7 +550,7 @@ describe('audit()', () => {
     ]);
     const routes = {
       'https://ok.example/l': html(200, `<h1>Waves Pest Control</h1><p>${WAVES_LOCATIONS.find((l) => l.id === 'venice').phone}</p>`),
-      'https://bad.example/l': html(200, '<h1>Waves Pest Control</h1><p>(941) 555-0142</p>'),
+      'https://bad.example/l': html(200, `<h1>Waves Pest Control</h1>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '(941) 555-0142' })}`),
       'https://yelp.example/l': { status: 403, headers: {} },
       'https://redir.example/l': { status: 301, headers: { location: 'http://127.0.0.1/admin' } },
       'https://inner.example/l': new Error('socket hang up'),
@@ -586,6 +673,18 @@ describe('getDashboard() and updateCitation()', () => {
       await auditor.updateCitation('1', { listing_url: 'https://dir.example/waves', location_id: 'parrish' });
       expect(patches[0]).toMatchObject({ listing_url: 'https://dir.example/waves', location_id: 'parrish', status: 'unverified', nap_consistent: null });
       expect(patches[0].updated_at).toBeInstanceOf(Date); // the sweep's conditional write keys on it
+    });
+
+    test('any reset also clears the stale evidence: nap_* and last_checked, status_detail, nap_consistent (Codex P2-2)', async () => {
+      const cleared = { status_detail: null, nap_consistent: null, nap_name: null, nap_phone: null, nap_address: null, last_checked: null };
+      await auditor.updateCitation('1', { listing_url: 'https://new.example/l' });
+      await auditor.updateCitation('1', { listing_url: '' });
+      await auditor.updateCitation('1', { location_id: 'venice' });
+      await auditor.updateCitation('1', { status: 'unverified' });
+      await auditor.updateCitation('1', { status: 'missing' });
+      for (const p of patches) expect(p).toMatchObject(cleared);
+      await auditor.updateCitation('1', { priority: 'low' });
+      expect(patches[5]).not.toHaveProperty('nap_name'); // a priority-only edit resets nothing
     });
 
     test('the fields the editor sends: URL is trimmed, blank clears it, priority is validated', async () => {
