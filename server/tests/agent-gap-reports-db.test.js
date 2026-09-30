@@ -65,6 +65,21 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     expect((await record({ summary: 'Synthetic ring detection gap' })).rang).toBe(false);
   });
 
+  test('a pre-cutover open gap (belled_at NULL) rings on its next sighting, then is quiet; by_design / dismissed never ring; an insert stamps belled_at', async () => {
+    const first = await record({ summary: 'Synthetic legacy belled gap' });
+    expect((await db('agent_gap_reports').where('id', first.id).first('belled_at')).belled_at).not.toBeNull();
+    await db('agent_gap_reports').where('id', first.id).update({ belled_at: null });
+    const legacy = await record({ summary: 'Synthetic legacy belled gap' });
+    expect(legacy).toMatchObject({ rang: true, reopened: false });
+    expect((await db('agent_gap_reports').where('id', first.id).first('belled_at')).belled_at).not.toBeNull();
+    expect((await record({ summary: 'Synthetic legacy belled gap' })).rang).toBe(false);
+    for (const status of ['dismissed', 'by_design']) {
+      await db('agent_gap_reports').where('id', first.id).update({ status, belled_at: null });
+      expect((await record({ summary: 'Synthetic legacy belled gap' })).rang).toBe(false);
+      expect((await db('agent_gap_reports').where('id', first.id).first('belled_at')).belled_at).toBeNull();
+    }
+  });
+
   test('list_gap_reports reports the real matching total and has_more when it caps the rows', async () => {
     for (let i = 0; i < 51; i += 1) await record({ summary: `Synthetic capped gap ${source} ${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))} alpha` });
     const result = await listGapReports({ days: 1 });

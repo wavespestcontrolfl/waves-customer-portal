@@ -202,22 +202,25 @@ async function ringGapBell(event) {
 // The sighting row (one per hit) is what windowed counts read.
 //
 // `rang` reports whether this hit is a bell event: the first sighting, or a
-// `fixed` gap coming back. A repeat of an already-open gap is quiet. Two
-// signals decide it inside the one transaction: the existing row's status is
-// read FOR UPDATE first (so a concurrent triage or recurrence cannot flip it
-// between the read and the merge), and Postgres' `xmax = 0` on the returned
-// row says the statement inserted instead of merging (which also settles
-// two simultaneous first sightings: only the inserter rings). The bell itself
-// fires after the commit, fire-and-forget.
+// `fixed` gap coming back, or an open (new / building) gap that has never
+// rung (`belled_at` NULL: recorded before the per-gap bell existed, so its
+// next sighting rings once). Any other repeat is quiet, and by_design /
+// dismissed never ring. Two signals decide it inside the one transaction: the
+// existing row's status and belled_at are read FOR UPDATE first (so a
+// concurrent triage or recurrence cannot flip them between the read and the
+// merge), and Postgres' `xmax = 0` on the returned row says the statement
+// inserted instead of merging (which also settles two simultaneous first
+// sightings: only the inserter rings). A ring stamps belled_at in the same
+// transaction. The bell itself fires after the commit, fire-and-forget.
 async function upsertGapRow(row) {
   const now = new Date();
   const saved = await db.transaction(async (trx) => {
     const prior = await trx('agent_gap_reports')
       .where({ fingerprint: row.fingerprint })
       .forUpdate()
-      .first('status');
+      .first('status', 'belled_at');
     const rows = await trx('agent_gap_reports')
-      .insert({ ...row, occurrences: 1, status: 'new', first_seen_at: now, last_seen_at: now })
+      .insert({ ...row, occurrences: 1, status: 'new', first_seen_at: now, last_seen_at: now, belled_at: now })
       .onConflict('fingerprint')
       .merge({
         occurrences: trx.raw('agent_gap_reports.occurrences + 1'),
@@ -233,13 +236,18 @@ async function upsertGapRow(row) {
     await trx('agent_gap_report_sightings').insert({ gap_id: result.id, seen_at: now });
     const inserted = String(result.xmax) === '0';
     const reopened = !inserted && prior?.status === 'fixed';
+    const neverRang = !inserted && !reopened && !prior?.belled_at
+      && (prior?.status === 'new' || prior?.status === 'building');
+    const rang = inserted || reopened || neverRang;
+    // An insert already carries belled_at; a merge that rings stamps it here.
+    if (rang && !inserted) await trx('agent_gap_reports').where('id', result.id).update({ belled_at: now });
     // bigint ids come back from pg as strings; "gap #<id>" wants a number.
     return {
       id: Number(result.id),
       occurrences: Number(result.occurrences),
       status: result.status,
       domain: result.domain || null,
-      rang: inserted || reopened,
+      rang,
       reopened,
     };
   });

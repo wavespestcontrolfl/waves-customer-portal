@@ -8,6 +8,7 @@ describe('agent-gap-reports', () => {
   let loggerMock;
   let sightings;
   let priorRow;
+  let belledUpdates;
   let notifyMock;
 
   beforeEach(() => {
@@ -17,6 +18,7 @@ describe('agent-gap-reports', () => {
     mergedCalls = [];
     returningRows = [{ id: '7', occurrences: 1, status: 'new', domain: null, xmax: '0' }];
     priorRow = undefined;
+    belledUpdates = [];
     notifyMock = jest.fn().mockResolvedValue({ id: 'n1' });
     loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
@@ -37,7 +39,10 @@ describe('agent-gap-reports', () => {
           }),
           where: jest.fn(() => ({
             forUpdate: jest.fn(() => ({ first: jest.fn(async () => priorRow) })),
-            update: jest.fn((fields) => ({ returning: jest.fn().mockResolvedValue([{ id: '7', kind: 'missing_capability', occurrences: 1, ...fields }]) })),
+            update: jest.fn((fields) => {
+              if (fields && fields.belled_at) { belledUpdates.push(fields); return Promise.resolve(1); }
+              return { returning: jest.fn().mockResolvedValue([{ id: '7', kind: 'missing_capability', occurrences: 1, ...fields }]) };
+            }),
           })),
         };
       }
@@ -196,7 +201,7 @@ describe('agent-gap-reports', () => {
     test('a repeat of an open gap (new, building, by_design, dismissed) is silent', async () => {
       const { writeGapRows } = load();
       for (const status of ['new', 'building', 'by_design', 'dismissed']) {
-        priorRow = { status };
+        priorRow = { status, belled_at: new Date() };
         returningRows = [{ id: '7', occurrences: 4, status, domain: 'scheduling', xmax: '12345' }];
         const [saved] = await writeGapRows([signal()]);
         expect(saved.rang).toBe(false);
@@ -217,6 +222,47 @@ describe('agent-gap-reports', () => {
       expect(title).toBe('Gap #7 is back: bar (scheduling)');
       expect(body).toBe('A Claude window on the Mac starts building it within 10 min.');
       expect(opts.metadata).toMatchObject({ gapId: 7, reopened: true });
+    });
+
+    test('an open gap recorded before the per-gap bell (belled_at NULL) rings on its next sighting and is stamped', async () => {
+      const { writeGapRows } = load();
+      for (const status of ['new', 'building']) {
+        belledUpdates = [];
+        priorRow = { status, belled_at: null };
+        returningRows = [{ id: '7', occurrences: 3, status, domain: 'scheduling', xmax: '555' }];
+        const [saved] = await writeGapRows([signal()]);
+        expect(saved).toMatchObject({ rang: true, reopened: false });
+        expect(belledUpdates).toHaveLength(1);
+      }
+      await flush();
+      expect(notifyMock).toHaveBeenCalledTimes(2);
+      expect(notifyMock.mock.calls[0][1]).toBe('Gap #7: texting assistant (scheduling)');
+    });
+
+    test('an open gap that already rang stays quiet, and by_design / dismissed with NULL belled_at never ring', async () => {
+      const { writeGapRows } = load();
+      priorRow = { status: 'new', belled_at: new Date() };
+      returningRows = [{ id: '7', occurrences: 3, status: 'new', domain: null, xmax: '555' }];
+      expect((await writeGapRows([signal()]))[0].rang).toBe(false);
+      for (const status of ['by_design', 'dismissed']) {
+        priorRow = { status, belled_at: null };
+        returningRows = [{ id: '7', occurrences: 3, status, domain: null, xmax: '555' }];
+        expect((await writeGapRows([signal()]))[0].rang).toBe(false);
+      }
+      await flush();
+      expect(notifyMock).not.toHaveBeenCalled();
+      expect(belledUpdates).toHaveLength(0);
+    });
+
+    test('an insert stamps belled_at itself, and a reopen stamps it too', async () => {
+      const { writeGapRows } = load();
+      await writeGapRows([signal()]);
+      expect(insertedRows[0].belled_at).toEqual(expect.any(Date));
+      expect(belledUpdates).toHaveLength(0);
+      priorRow = { status: 'fixed', belled_at: new Date() };
+      returningRows = [{ id: '7', occurrences: 2, status: 'new', domain: null, xmax: '9' }];
+      await writeGapRows([signal()]);
+      expect(belledUpdates).toHaveLength(1);
     });
 
     test('a reopen and the first sighting have different dedupe keys', async () => {
